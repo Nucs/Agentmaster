@@ -16,9 +16,12 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 
 // The SDK's headers are written for other warning settings than the app's /W3 /WX: transport.hpp
@@ -139,14 +142,33 @@ namespace
         std::function<SdkJson(const SdkJson&)> _invoker;
     };
 
-    // Wraps the SDK's subprocess transport to report ONE thing the SDK misses: the child's exit.
+    // The answer to one control request of the harness's own (WatchedTransport::Request).
+    struct TapAnswer
+    {
+        bool answered{}; // false: no answer came within the time limit, or the process ended
+        bool ok{}; // the answer's subtype was "success"
+        std::string error; // Claude Code's error text when the answer was not "success"
+        SdkJson response; // the answer's response object; null when it carried none
+    };
+
+    // Wraps the SDK's subprocess transport for two things the SDK client cannot do.
     //
-    // The SDK client's reader loop stops quietly when the transport is no longer running, and
-    // leaves every control request that waits for an answer waiting — `initialize` for 60 s when
-    // Claude Code ends at once (an option it does not know, a broken install), `interrupt` the
-    // same. This wrapper keeps the loop alive until the transport's queue is drained, then THROWS
-    // from read_messages: the client's loop catches that, stops its message queue and fails the
-    // pending requests at once. Everything else is forwarded unchanged.
+    // 1. Report the child's EXIT. The SDK client's reader loop stops quietly when the transport
+    //    is no longer running, and leaves every control request that waits for an answer waiting —
+    //    `initialize` for 60 s when Claude Code ends at once (an option it does not know, a broken
+    //    install), `interrupt` the same. This wrapper keeps the loop alive until the transport's
+    //    queue is drained, then THROWS from read_messages: the client's loop catches that, stops
+    //    its message queue and fails the pending requests at once.
+    //
+    // 2. Send CONTROL REQUESTS of the harness's own (Request): set_max_thinking_tokens,
+    //    apply_flag_settings and get_settings — the thinking policy of AgentHarnessCore.h. The
+    //    client's control protocol is private, and its public calls cover set_permission_mode,
+    //    set_model and interrupt only. A request goes out through the transport's write (which
+    //    takes the transport's write lock, so it never interleaves with the client's own lines),
+    //    and its answer is taken OUT of the stream in read_messages, before the client's reader
+    //    sees it: the client would find no waiting request for the id and drop it.
+    //
+    // Everything else is forwarded unchanged.
     class WatchedTransport final : public claude::Transport
     {
     public:
@@ -161,6 +183,7 @@ namespace
         std::vector<claude::Message> read_messages() override
         {
             auto messages = _inner->read_messages();
+            TakeOwnAnswers(messages);
             if (!messages.empty() || _inner->is_running())
             {
                 _emptyReadsAfterExit = 0;
@@ -173,7 +196,13 @@ namespace
             {
                 return messages;
             }
-            _exitReported.store(true);
+            {
+                // Under the tap's lock, so a Request that is just about to wait cannot miss the
+                // wake-up below: it checks the flag under the same lock.
+                std::lock_guard lock{ _tapMutex };
+                _exitReported.store(true);
+            }
+            _tapAnswered.notify_all(); // a Request that waits for an answer returns at once
             throw claude::CLIConnectionError("The Claude Code process ended.");
         }
 
@@ -186,11 +215,96 @@ namespace
         long get_pid() const override { return _inner->get_pid(); }
         bool is_running() const override { return _inner->is_running() || !_exitReported.load(); }
 
+        // Send one control request of the harness's own and wait for Claude Code's answer.
+        //   request — the request object, e.g. {"subtype": "set_max_thinking_tokens",
+        //             "max_thinking_tokens": 0}. It is sent as the `request` of a control_request
+        //             line, under an id of its own ("am_ctl_<n>").
+        //   timeout — how long to wait for the answer.
+        //   returns — the answer; `answered` false when none came in time or the process ended
+        //             (a late answer is then dropped, as the id no longer waits).
+        //   throws  — what the transport's write throws (the process is gone: claude::ClaudeError
+        //             and its kin); std::bad_alloc.
+        // Call it from one thread at a time per request (the worker does); it may run while the
+        // SDK's reader thread reads, which is where the answer arrives.
+        TapAnswer Request(SdkJson request, std::chrono::milliseconds timeout)
+        {
+            const std::string id = std::string{ kTapPrefix } + std::to_string(_tapCounter.fetch_add(1) + 1);
+            {
+                std::lock_guard lock{ _tapMutex };
+                _tapWaiting.insert(id); // BEFORE the write: an answer can arrive before write returns
+            }
+            const SdkJson message = { { "type", "control_request" }, { "request_id", id }, { "request", std::move(request) } };
+            try
+            {
+                _inner->write(message.dump(-1, ' ', false, SdkJson::error_handler_t::replace) + "\n");
+            }
+            catch (...)
+            {
+                // The id must not wait forever in the set; the caller reports the failure.
+                std::lock_guard lock{ _tapMutex };
+                _tapWaiting.erase(id);
+                throw;
+            }
+            std::unique_lock lock{ _tapMutex };
+            _tapAnswered.wait_for(lock, timeout, [this, &id] { return _tapAnswers.count(id) != 0 || _exitReported.load(); });
+            TapAnswer answer;
+            if (const auto it = _tapAnswers.find(id); it != _tapAnswers.end())
+            {
+                answer = std::move(it->second);
+                _tapAnswers.erase(it);
+            }
+            _tapWaiting.erase(id);
+            return answer;
+        }
+
     private:
+        // The ids of the harness's own requests start with this; the SDK's own are "req_<n>_<hex>".
+        static constexpr std::string_view kTapPrefix{ "am_ctl_" };
+
+        // Take the answers to the harness's own requests out of `messages` and hand each to its
+        // waiting Request. The SDK client's reader thread only (it is the caller of read_messages).
+        //   messages — one read's messages; the answers of ours are erased from it, everything
+        //              else keeps its order.
+        //   throws   — std::bad_alloc (the answer's copy). The client's loop treats a throw like
+        //              the end of the process, so a failure here costs the process, not a hang.
+        void TakeOwnAnswers(std::vector<claude::Message>& messages)
+        {
+            const auto ours = [this](const claude::Message& m) {
+                const auto* control = std::get_if<claude::protocol::ControlResponse>(&m);
+                if (!control || control->response.request_id.rfind(kTapPrefix, 0) != 0)
+                {
+                    return false;
+                }
+                TapAnswer answer;
+                answer.answered = true;
+                answer.ok = control->response.subtype == "success";
+                answer.error = control->response.error;
+                answer.response = control->response.response;
+                {
+                    std::lock_guard lock{ _tapMutex };
+                    // An answer that nobody waits for any more (its Request timed out) is dropped.
+                    if (_tapWaiting.count(control->response.request_id) != 0)
+                    {
+                        _tapAnswers[control->response.request_id] = std::move(answer);
+                    }
+                }
+                _tapAnswered.notify_all();
+                return true; // never passed on: the client has no request with this id
+            };
+            messages.erase(std::remove_if(messages.begin(), messages.end(), ours), messages.end());
+        }
+
         static constexpr int kDrainReads = 5;
         std::unique_ptr<claude::Transport> _inner;
         int _emptyReadsAfterExit{ 0 }; // the client's reader thread only
         std::atomic<bool> _exitReported{ false };
+
+        // ---- the control tap; `_tapMutex` guards the two containers ----
+        std::atomic<uint64_t> _tapCounter{ 0 };
+        std::mutex _tapMutex;
+        std::condition_variable _tapAnswered; // raised when an answer arrived or the process ended
+        std::set<std::string> _tapWaiting; // ids of requests whose Request still waits
+        std::map<std::string, TapAnswer> _tapAnswers; // answers that arrived, until Request takes them
     };
 }
 
@@ -245,6 +359,11 @@ namespace Agentmaster
         // What the newest process reported about itself (Inventory()). Written by the worker:
         // the permission fields when a process answered `initialize`, the lists at its first turn.
         HarnessInventory inventory;
+        // The reasoning the conversation WANTS: HarnessOptions' start values, then whatever
+        // SetThinking set. The worker reads both before every process start (they decide the
+        // command line) and before every message (ApplyThinkingLive).
+        HarnessThinking wantThinking{ HarnessThinking::Disabled };
+        std::wstring wantEffort;
 
         // ---- cross-thread flags ----
         // The permission mode the NEXT start asks for. Bypass, until a start with it was refused
@@ -253,6 +372,20 @@ namespace Agentmaster
         // between two starts; a new app run asks for bypass again). Written by the worker only;
         // atomic because DescribeCommandLine reads it from other threads.
         std::atomic<HarnessPermissionMode> launchPermission{ HarnessPermissionMode::Bypass };
+        // True while a process wanted with thinking OFF or adaptive is started with
+        // `--thinking adaptive` and switched live (the thinking policy). False, for this object's
+        // life, once Claude Code refused or did not answer a live thinking switch: later starts
+        // pass the literal --thinking value, and a later thinking change restarts the process.
+        // Written by the worker only; atomic because DescribeCommandLine reads it from other threads.
+        // A refused or unanswered live change of CLAUDE_CODE_EXTRA_BODY clears it too: the start
+        // then carries the literal thinking AND the matching request body.
+        std::atomic<bool> liveThinking{ true };
+        // True when the model refuses "disabled", so that an "off" level needs the API's
+        // between_tools in the request body (HarnessModelRefusesDisabledThinking, the thinking
+        // policy). Set by the constructor from options.model, then by the worker from the
+        // resolved id each process reports (an alias such as "sonnet" names no version). Atomic
+        // because DescribeCommandLine reads it from other threads.
+        std::atomic<bool> modelRefusesDisabledThinking{ true };
         std::atomic<bool> interruptRequested{ false };
         std::atomic<int> toolCallsInFlight{ 0 }; // > 0: a tool handler runs on the SDK reader thread
         std::atomic<uint64_t> activeTurn{ 0 }; // the turn tool events belong to
@@ -267,6 +400,24 @@ namespace Agentmaster
 
         // ---- worker thread only ----
         std::unique_ptr<claude::ClaudeClient> client;
+        // The client's transport wrapper: owned by `client` (null when no client exists), and the
+        // way the worker sends its own control requests (WatchedTransport::Request).
+        WatchedTransport* tap{ nullptr };
+        // The reasoning of the running process: what it was STARTED with (its --thinking value;
+        // CliDefault = none) and what it runs with NOW, after the harness's live changes. Valid
+        // while `client` exists.
+        HarnessThinking launchedThinking{ HarnessThinking::CliDefault };
+        HarnessThinking appliedThinking{ HarnessThinking::CliDefault };
+        // The request body of the running process carries the API's between_tools (its
+        // CLAUDE_CODE_EXTRA_BODY, from the start's --settings or the last live patch).
+        bool appliedBetweenTools{ false };
+        std::wstring appliedEffort; // the effort word the harness last set; empty = none was passed (Claude Code's default)
+        // False, for this object's life, once Claude Code refused or did not answer a live effort
+        // change (apply_flag_settings): a later effort change then restarts the process.
+        bool liveEffort{ true };
+        // Claude Code's estimate of the running turn's thinking tokens: the deltas of its
+        // system/thinking_tokens lines, summed (OnSystemMessage). Reset at each turn's start.
+        int64_t turnThinkingTokens{ 0 };
         bool processIsFresh{ false }; // the process has not received a user message yet
         bool readyAnnounced{ false }; // the Ready event of this process was sent
         // The mode word of the newest report the permission policy acted on, for this process.
@@ -491,13 +642,58 @@ namespace Agentmaster
             }
         }
 
+        // The --thinking value a start passes for the wanted `thinking` (the thinking policy,
+        // AgentHarnessCore.h). While live switching works, both Disabled and Adaptive start as
+        // Adaptive: an explicit adaptive start config is Claude Code's reset anchor, the one way
+        // back from "off" to adaptive without a restart; ApplyThinkingLive then turns an unwanted
+        // thinking off before the first message. After a refused live switch (liveThinking false)
+        // the literal value is passed, and CliDefault always passes none.
+        HarnessThinking LaunchThinkingFor(HarnessThinking thinking) const noexcept
+        {
+            if (thinking == HarnessThinking::CliDefault)
+            {
+                return HarnessThinking::CliDefault;
+            }
+            return liveThinking.load() ? HarnessThinking::Adaptive : thinking;
+        }
+
+        // Whether a start for the wanted `thinking` carries the API's between_tools in its
+        // request body (CLAUDE_CODE_EXTRA_BODY in the --settings env): only a start whose
+        // --thinking is the literal "disabled" (live switching was refused) on a model that
+        // refuses "disabled". A start that is switched off live gets the body live too
+        // (ApplyThinkingLive), after Claude Code stopped thinking: the API refuses the body next
+        // to Claude Code's adaptive request.
+        bool LaunchBetweenToolsFor(HarnessThinking thinking) const noexcept
+        {
+            return LaunchThinkingFor(thinking) == HarnessThinking::Disabled && modelRefusesDisabledThinking.load();
+        }
+
+        // The --settings spec of this conversation, with the request body for `betweenTools`. One
+        // place for the start (BuildSdkOptions) and the live patch (SendRequestBody), so the env
+        // object a patch writes is the one the start wrote, with one variable changed.
+        //   throws — std::bad_alloc.
+        HarnessSettingsSpec SettingsSpecFor(bool betweenTools) const
+        {
+            HarnessSettingsSpec settings;
+            settings.autoCompactTokens = options.autoCompactTokens;
+            settings.apiMaxRetries = options.apiMaxRetries;
+            settings.disableBypassPermissions = options.permissionProbe.bypassDisabledBySettings; // test seam
+            settings.disableAutoMode = options.permissionProbe.autoDisabledBySettings; // test seam
+            settings.extraRequestBody = betweenTools ? std::wstring{ kHarnessBetweenToolsRequestBody } : std::wstring{};
+            return settings;
+        }
+
         // The SDK options of this conversation.
         //   cliPath    — the narrow claude.exe path (NarrowPathForSdk); only stored, never opened.
         //   permission — the permission mode this start asks for (launchPermission, or the next
         //                lower mode after a refused start).
+        //   thinking   — the thinking the conversation wants now (wantThinking); the --thinking
+        //                value is LaunchThinkingFor(thinking), which may differ (the policy).
+        //   effort     — the effort the conversation wants now (wantEffort); passed as --effort
+        //                when it is one of Claude Code's words, else not at all.
         //   throws     — std::invalid_argument when a tool's inputSchemaJson is not a JSON object;
         //                std::bad_alloc.
-        claude::ClaudeOptions BuildSdkOptions(const std::string& cliPath, HarnessPermissionMode permission)
+        claude::ClaudeOptions BuildSdkOptions(const std::string& cliPath, HarnessPermissionMode permission, HarnessThinking thinking, const std::wstring& effort)
         {
             claude::ClaudeOptions o;
             o.cli_path = cliPath;
@@ -529,23 +725,17 @@ namespace Agentmaster
                 o.extra_args["--restricted"] = ""; // test seam: bypass is then refused with an error at start
             }
             o.setting_sources.clear(); // --setting-sources "": no user / project / local settings, no CLAUDE.md
-            HarnessSettingsSpec settings;
-            settings.autoCompactTokens = options.autoCompactTokens;
-            settings.effort = options.effort;
-            settings.apiMaxRetries = options.apiMaxRetries;
-            settings.disableBypassPermissions = options.permissionProbe.bypassDisabledBySettings; // test seam
-            settings.disableAutoMode = options.permissionProbe.autoDisabledBySettings; // test seam
-            o.settings = HarnessToUtf8(BuildHarnessSettingsJson(settings));
+            o.settings = HarnessToUtf8(BuildHarnessSettingsJson(SettingsSpecFor(LaunchBetweenToolsFor(thinking))));
 
             // The whole parent environment, minus the variables of a parent session or tab.
             o.sanitize_environment = false;
             o.inherit_environment = true;
             o.environment = BuildHarnessEnvironment(options.name);
 
-            switch (options.thinking)
+            switch (LaunchThinkingFor(thinking))
             {
             case HarnessThinking::Disabled:
-                o.thinking = claude::ThinkingConfig{ claude::ThinkingConfigDisabled{} }; // --thinking disabled
+                o.thinking = claude::ThinkingConfig{ claude::ThinkingConfigDisabled{} }; // --thinking disabled (only after a refused live switch)
                 break;
             case HarnessThinking::Adaptive:
                 o.thinking = claude::ThinkingConfig{ claude::ThinkingConfigAdaptive{} }; // --thinking adaptive
@@ -554,9 +744,12 @@ namespace Agentmaster
             default:
                 break;
             }
-            if (!options.effort.empty())
+            // The effort rides this flag alone: no CLAUDE_CODE_EFFORT_LEVEL anywhere in the child
+            // (BuildHarnessSettingsJson, BuildHarnessEnvironment), so nothing overrides it or a
+            // live change of it later.
+            if (IsHarnessEffortWord(effort))
             {
-                o.effort = HarnessToUtf8(options.effort);
+                o.effort = HarnessToUtf8(effort);
             }
             if (options.maxTurnsPerMessage > 0)
             {
@@ -723,6 +916,7 @@ namespace Agentmaster
             {
                 LogSwallowedException(L"HarnessConversation::Disconnect");
             }
+            tap = nullptr; // the transport wrapper dies with the client, just below
             try
             {
                 client.reset();
@@ -771,13 +965,35 @@ namespace Agentmaster
                             stderrTail.clear();
                             stderrLogged = 0;
                         }
-                        const claude::ClaudeOptions sdkOptions = BuildSdkOptions(*cliPath, permission);
+                        // The reasoning wanted NOW: a SetThinking that came while no process was
+                        // up is on this start's command line.
+                        HarnessThinking thinking = HarnessThinking::Disabled;
+                        std::wstring effort;
+                        {
+                            std::lock_guard lock{ mutex };
+                            thinking = wantThinking;
+                            effort = wantEffort;
+                        }
+                        const claude::ClaudeOptions sdkOptions = BuildSdkOptions(*cliPath, permission, thinking, effort);
                         auto watched = std::make_unique<WatchedTransport>(claude::create_subprocess_transport(sdkOptions));
+                        WatchedTransport* const watchedRaw = watched.get();
                         client = std::make_unique<claude::ClaudeClient>(sdkOptions, std::move(watched));
+                        tap = watchedRaw; // owned by the client from here on; Disconnect clears it
                         client->connect(); // starts claude.exe and waits for its `initialize` answer
                         if (!client->is_connected())
                         {
                             failure = L"Claude Code ended while it started.";
+                        }
+                        else
+                        {
+                            // What this process was started with: ApplyThinkingLive compares the
+                            // wanted reasoning with these.
+                            launchedThinking = LaunchThinkingFor(thinking);
+                            appliedThinking = launchedThinking;
+                            // The same read BuildSdkOptions made above: only this worker writes
+                            // the atomic it depends on.
+                            appliedBetweenTools = LaunchBetweenToolsFor(thinking);
+                            appliedEffort = IsHarnessEffortWord(effort) ? effort : std::wstring{};
                         }
                     }
                 }
@@ -916,6 +1132,235 @@ namespace Agentmaster
             return effective;
         }
 
+        // How long the worker waits for Claude Code's answer to one of its own control requests.
+        // Between turns Claude Code answers them at once (milliseconds, measured on 2.1.291); the
+        // limit only guards against a process that stopped reading its input.
+        static constexpr std::chrono::milliseconds kTapTimeout{ 5000 };
+
+        // The word the inventory and hooks.log use for the thinking of a process
+        // (HarnessInventory::thinking).
+        //   thinking     — Claude Code's own thinking config, as the harness last set it.
+        //   betweenTools — the request body carries the API's between_tools (thinking off on a
+        //                  model that refuses "disabled").
+        //   returns      — "adaptive"; "between_tools" or "disabled" for the two ways thinking is
+        //                  off; "default" for a process left to Claude Code's own default.
+        static const wchar_t* ThinkingWord(HarnessThinking thinking, bool betweenTools) noexcept
+        {
+            switch (thinking)
+            {
+            case HarnessThinking::Adaptive:
+                return L"adaptive";
+            case HarnessThinking::Disabled:
+                return betweenTools ? L"between_tools" : L"disabled";
+            case HarnessThinking::CliDefault:
+            default:
+                return L"default";
+            }
+        }
+
+        // Change the request body of the RUNNING process live: apply_flag_settings with the
+        // COMPLETE env object of its --settings (BuildHarnessEnvPatchJson), whose
+        // CLAUDE_CODE_EXTRA_BODY is the API's between_tools or empty. Worker thread only.
+        //   betweenTools — the body wanted.
+        //   where        — "at start" or "before turn N", for the log line of a refusal.
+        //   returns      — true when Claude Code took it (appliedBetweenTools then follows); false
+        //                  when it refused or did not answer: liveThinking is cleared (later starts
+        //                  carry the literal thinking and the matching body) and the caller starts
+        //                  a new process.
+        // Never throws.
+        bool SendRequestBody(bool betweenTools, const std::wstring& where) noexcept
+        {
+            try
+            {
+                if (!tap)
+                {
+                    return false;
+                }
+                // The text is the harness's own (BuildHarnessEnvPatchJson): it parses; a failure
+                // would throw into the catch below and count as a refusal.
+                SdkJson settings = SdkJson::parse(HarnessToUtf8(BuildHarnessEnvPatchJson(SettingsSpecFor(betweenTools))));
+                const TapAnswer answer = tap->Request(SdkJson{ { "subtype", "apply_flag_settings" }, { "settings", std::move(settings) } }, kTapTimeout);
+                if (!answer.answered || !answer.ok)
+                {
+                    liveThinking.store(false);
+                    LogHarness(options.name, std::wstring{ L"thinking: the live change of the request body to " } + (betweenTools ? L"between_tools" : L"none") + L" " + where + L" was " + (answer.answered ? L"REFUSED (" + HarnessFromUtf8(answer.error).substr(0, 200) + L")" : std::wstring{ L"NOT ANSWERED" }) + L"; a new process is started with the wanted values on its command line");
+                    return false;
+                }
+                appliedBetweenTools = betweenTools;
+                return true;
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::SendRequestBody");
+                liveThinking.store(false);
+                return false;
+            }
+        }
+
+        // The effort IN EFFECT, as the running process reports it: get_settings' applied.effort,
+        // which is after Claude Code's own caps and the model's step-down of a level it does not
+        // support. Worker thread only.
+        //   returns — the effort word; empty when Claude Code reports none (a model without
+        //             effort), did not answer, or no transport exists.
+        // Never throws. Only applied.effort is read: the answer also carries the settings and
+        // their sources, which must not reach a log.
+        std::wstring ReadEffortInEffect() noexcept
+        {
+            try
+            {
+                if (!tap)
+                {
+                    return {};
+                }
+                const TapAnswer answer = tap->Request(SdkJson{ { "subtype", "get_settings" } }, kTapTimeout);
+                if (!answer.answered || !answer.ok || !answer.response.is_object())
+                {
+                    return {};
+                }
+                const auto applied = answer.response.find("applied");
+                if (applied == answer.response.end() || !applied->is_object())
+                {
+                    return {};
+                }
+                const auto effort = applied->find("effort");
+                return (effort != applied->end() && effort->is_string()) ? HarnessFromUtf8(effort->get<std::string>()) : std::wstring{};
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::ReadEffortInEffect");
+                return {};
+            }
+        }
+
+        // Bring the RUNNING process to the reasoning the conversation wants (the thinking policy,
+        // AgentHarnessCore.h): set_max_thinking_tokens for Claude Code's thinking, apply_flag_settings
+        // with the env object for the request body (the API's between_tools: "off" on a model that
+        // refuses "disabled"), apply_flag_settings for the effort, then get_settings for the effort
+        // in effect (Inventory().effort). The requests go in the order HarnessThinkingChange
+        // documents, so the pair the API refuses (Claude Code adaptive + between_tools) never
+        // exists between two of them. Worker thread only; `client` is connected.
+        //   where   — "at start" or "before turn N", for the log line. "at start" also reads and
+        //             logs the reasoning when nothing has to change, so hooks.log shows each
+        //             process's reasoning once.
+        //   returns — true when the process now runs as wanted (also when nothing had to change);
+        //             false when it cannot be changed live: the change needs another --thinking
+        //             start value (CliDefault on one side only, or a process that was not started
+        //             adaptive), or Claude Code refused a request or did not answer it. The caller
+        //             then starts a new process, whose command line carries the wanted values.
+        // Never throws.
+        bool ApplyThinkingLive(const std::wstring& where) noexcept
+        {
+            try
+            {
+                HarnessThinking thinking = HarnessThinking::Disabled;
+                std::wstring effort;
+                {
+                    std::lock_guard lock{ mutex };
+                    thinking = wantThinking;
+                    effort = wantEffort;
+                }
+                const bool atStart = where == L"at start";
+                // CliDefault can be neither reached nor left by a control request: only a start
+                // without --thinking gives it.
+                if ((thinking == HarnessThinking::CliDefault) != (appliedThinking == HarnessThinking::CliDefault))
+                {
+                    return false;
+                }
+                // CliDefault on both sides compares as "thinks" on both: no thinking request, only
+                // an effort change can follow.
+                HarnessReasoningState applied;
+                applied.thinks = appliedThinking != HarnessThinking::Disabled;
+                applied.betweenTools = appliedBetweenTools;
+                applied.effort = appliedEffort;
+                HarnessReasoningState wanted;
+                wanted.thinks = thinking != HarnessThinking::Disabled;
+                // "Off" on a model that refuses "disabled" is the API's between_tools (read from
+                // the resolved id OnProcessUp stored; the policy).
+                wanted.betweenTools = !wanted.thinks && modelRefusesDisabledThinking.load();
+                wanted.effort = effort;
+                const HarnessThinkingChange change = PlanHarnessThinkingChange(applied, wanted);
+                if (change.Empty() && !atStart)
+                {
+                    return true; // the common case before a turn: nothing changed since the last one
+                }
+                const bool thinkingMoves = change.thinkingOff || change.thinkingOn || change.betweenToolsOn || change.betweenToolsOff;
+                if (thinkingMoves && (launchedThinking != HarnessThinking::Adaptive || !liveThinking.load()))
+                {
+                    return false; // no adaptive reset anchor in this process: only a new start can change its thinking
+                }
+                if (!change.effort.empty() && !liveEffort)
+                {
+                    return false;
+                }
+                if (!tap && !change.Empty())
+                {
+                    return false;
+                }
+                // Toward "on": the body goes FIRST (the API refuses it next to Claude Code's
+                // adaptive request).
+                if (change.betweenToolsOff && !SendRequestBody(false, where))
+                {
+                    return false;
+                }
+                if (change.thinkingOff || change.thinkingOn)
+                {
+                    SdkJson request{ { "subtype", "set_max_thinking_tokens" } };
+                    // 0 = thinking off; null = back to the START config, which is adaptive here
+                    // (Claude Code's reset anchor for an explicit --thinking adaptive).
+                    request["max_thinking_tokens"] = change.thinkingOff ? SdkJson(0) : SdkJson(nullptr);
+                    const TapAnswer answer = tap->Request(std::move(request), kTapTimeout);
+                    if (!answer.answered || !answer.ok)
+                    {
+                        // A Claude Code that refuses it once (a version without it, a policy) will
+                        // refuse it again: from now on starts pass the literal --thinking value.
+                        liveThinking.store(false);
+                        LogHarness(options.name, std::wstring{ L"thinking: the live switch " } + (change.thinkingOff ? L"off" : L"on") + L" " + where + L" was " + (answer.answered ? L"REFUSED (" + HarnessFromUtf8(answer.error).substr(0, 200) + L")" : std::wstring{ L"NOT ANSWERED" }) + L"; a new process is started with the wanted --thinking value");
+                        return false;
+                    }
+                    appliedThinking = change.thinkingOff ? HarnessThinking::Disabled : HarnessThinking::Adaptive;
+                }
+                // Toward "off": the body goes LAST, once Claude Code believes thinking is off (it
+                // then also leaves out its clear_thinking strategy, which the API refuses next to
+                // between_tools).
+                if (change.betweenToolsOn && !SendRequestBody(true, where))
+                {
+                    return false;
+                }
+                if (!change.effort.empty())
+                {
+                    const TapAnswer answer = tap->Request(SdkJson{ { "subtype", "apply_flag_settings" }, { "settings", SdkJson{ { "effortLevel", HarnessToUtf8(change.effort) } } } }, kTapTimeout);
+                    if (!answer.answered || !answer.ok)
+                    {
+                        liveEffort = false; // as above: later effort changes restart the process
+                        LogHarness(options.name, L"thinking: the live effort change to " + change.effort + L" " + where + L" was " + (answer.answered ? L"REFUSED (" + HarnessFromUtf8(answer.error).substr(0, 200) + L")" : std::wstring{ L"NOT ANSWERED" }) + L"; a new process is started with --effort " + change.effort);
+                        return false;
+                    }
+                    appliedEffort = change.effort;
+                }
+                const std::wstring inEffect = ReadEffortInEffect();
+                {
+                    std::lock_guard lock{ mutex };
+                    inventory.thinking = ThinkingWord(appliedThinking, appliedBetweenTools);
+                    inventory.effort = inEffect;
+                }
+                std::wstring line = std::wstring{ L"thinking " } + ThinkingWord(appliedThinking, appliedBetweenTools) + L", effort " + (inEffect.empty() ? std::wstring{ L"(not reported)" } : inEffect) + L" in effect";
+                if (!appliedEffort.empty() && !inEffect.empty() && inEffect != appliedEffort)
+                {
+                    // Claude Code steps a level the model does not support down (max -> high), and
+                    // a settings cap clamps it: what runs is what it reports.
+                    line += L" (asked for " + appliedEffort + L"; Claude Code lowered it)";
+                }
+                line += change.Empty() ? L" (" + where + L")" : L" (changed live " + where + L")";
+                LogHarness(options.name, line);
+                return true;
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::ApplyThinkingLive");
+                return false;
+            }
+        }
+
         // Make sure a process is up. Worker thread only.
         //   failureOut — receives the reason when the start failed (the text of the Error event).
         //   returns    — true when `client` is connected; false after reporting the failure
@@ -967,14 +1412,7 @@ namespace Agentmaster
                 {
                     failure = std::move(firstFailure);
                 }
-                LogHarness(options.name, L"start FAILED: " + failure);
-                {
-                    std::lock_guard lock{ mutex };
-                    inventory = HarnessInventory{}; // no process answered: nothing is known
-                }
-                SetState(HarnessState::Failed, HarnessEventKind::Error, failure, true);
-                failureOut = std::move(failure); // noexcept move: the caller reports it for a waiting message
-                return false;
+                return ReportStartFailure(std::move(failure), failureOut);
             }
             if (asked != firstAsked)
             {
@@ -983,6 +1421,54 @@ namespace Agentmaster
                 launchPermission.store(asked);
                 LogHarness(options.name, std::wstring{ L"permission mode " } + HarnessPermissionModeWord(firstAsked) + L" is taken as NOT ALLOWED for this conversation; its later starts ask for " + HarnessPermissionModeWord(asked));
             }
+            OnProcessUp(asked, started);
+            // The thinking policy, before Ready (no message may reach a process that thinks when
+            // it should not): a process wanted without thinking was started adaptive, so that it
+            // can think again later without a restart — switch it off now.
+            if (!ApplyThinkingLive(L"at start"))
+            {
+                // Claude Code did not take the switch (liveThinking is false now). One more start,
+                // in the permission mode that just worked: its command line carries the literal
+                // --thinking value, so nothing has to be switched live.
+                Disconnect(true);
+                std::wstring again = StartOnce(asked);
+                if (!again.empty())
+                {
+                    return ReportStartFailure(std::move(again), failureOut);
+                }
+                OnProcessUp(asked, started);
+                ApplyThinkingLive(L"at start"); // nothing to switch now; it reads and logs the reasoning in effect
+            }
+            SetState(HarnessState::Ready);
+            return true;
+        }
+
+        // A start that failed for good: log it, forget the old process's report, and report the
+        // failure (state Failed, an Error event). Worker thread only.
+        //   failure    — why (the text of the Error event).
+        //   failureOut — receives `failure`, for a message that waited for this process.
+        //   returns    — false, always: EnsureProcess returns it.
+        // Never throws.
+        bool ReportStartFailure(std::wstring failure, std::wstring& failureOut) noexcept
+        {
+            LogHarness(options.name, L"start FAILED: " + failure);
+            {
+                std::lock_guard lock{ mutex };
+                inventory = HarnessInventory{}; // no process answered: nothing is known
+            }
+            SetState(HarnessState::Failed, HarnessEventKind::Error, failure, true);
+            failureOut = std::move(failure); // noexcept move: the caller reports it for a waiting message
+            return false;
+        }
+
+        // The steps of every new process, between its `initialize` answer and Ready: fresh
+        // per-process flags, a new inventory, the "process up" line, and the permission policy.
+        // Worker thread only; `client` is connected.
+        //   asked   — the permission mode the start asked for.
+        //   started — when EnsureProcess began (the "in N ms" of the log line).
+        // Never throws.
+        void OnProcessUp(HarnessPermissionMode asked, std::chrono::steady_clock::time_point started) noexcept
+        {
             processIsFresh = true;
             readyAnnounced = false;
             lastSettledReport.clear();
@@ -996,15 +1482,22 @@ namespace Agentmaster
             // Before Ready, so that no message can reach a process that still runs in a mode
             // which can ask. The mode is in the `initialize` answer the SDK kept.
             std::wstring reported;
+            HarnessModelReasoning reasoning;
             try
             {
                 if (const auto info = client->get_server_info(); info && info->is_object())
                 {
-                    // ⚠ Only this one key is read. The answer also holds the user's ACCOUNT
+                    // ⚠ Only these two keys are read. The answer also holds the user's ACCOUNT
                     // object, which must never reach a log or the record.
                     if (const auto mode = info->find("current_permission_mode"); mode != info->end() && mode->is_string())
                     {
                         reported = HarnessFromUtf8(mode->get<std::string>());
+                    }
+                    // What the model can do in reasoning (its effort levels, adaptive thinking):
+                    // the page's thinking toggle offers only the levels the model has.
+                    if (const auto models = info->find("models"); models != info->end() && models->is_array())
+                    {
+                        reasoning = ReadHarnessModelReasoning(SdkJsonText(*models), options.model);
                     }
                 }
             }
@@ -1013,16 +1506,42 @@ namespace Agentmaster
                 LogSwallowedException(L"HarnessConversation::EnsureProcess (initialize answer)");
             }
             SettlePermissionMode(asked, reported, L"at start");
-            SetState(HarnessState::Ready);
-            return true;
+            // Whether "off" needs the API's between_tools is a fact of the RESOLVED model: --model
+            // may be an alias ("sonnet"), and the alias moves with Claude Code's versions. The
+            // at-start ApplyThinkingLive that follows reads it. (An unknown model keeps the
+            // decision made from options.model.)
+            if (reasoning.known && !reasoning.resolvedModel.empty())
+            {
+                modelRefusesDisabledThinking.store(HarnessModelRefusesDisabledThinking(reasoning.resolvedModel));
+            }
+            try
+            {
+                std::lock_guard lock{ mutex };
+                inventory.supportedEfforts = std::move(reasoning.supportedEfforts);
+                inventory.adaptiveThinking = reasoning.adaptiveThinking;
+                inventory.thinking = ThinkingWord(appliedThinking, appliedBetweenTools);
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"HarnessConversation::OnProcessUp (reasoning)");
+            }
         }
 
         // -------------------------------------------------------------------------------
         // a turn
         // -------------------------------------------------------------------------------
 
-        // Report the end of a turn and write the record.
-        void FinishTurn(uint64_t turn, uint64_t turnEpoch, std::wstring text, bool isError, bool interrupted, int64_t durationMs, HarnessState next) noexcept
+        // Report the end of a turn (a TurnCompleted event) and write the record.
+        //   turn / turnEpoch — the turn and the epoch it started in (a stale turn leaves the state alone).
+        //   text             — the turn's final text, or why it failed.
+        //   isError          — the turn failed; `text` then joins the record as an error notice.
+        //   interrupted      — Interrupt, a newer Send or a Reset stopped it.
+        //   durationMs       — from Send to the end, as the harness measured it.
+        //   next             — the state after the turn.
+        //   thinkingBlocks   — how many thinking blocks the model wrote in the turn (0 when unknown).
+        //   thinkingTokens   — Claude Code's estimate of the turn's thinking tokens (0 when none or unknown).
+        // Never throws.
+        void FinishTurn(uint64_t turn, uint64_t turnEpoch, std::wstring text, bool isError, bool interrupted, int64_t durationMs, HarnessState next, int thinkingBlocks = 0, int64_t thinkingTokens = 0) noexcept
         {
             if (isError && !text.empty())
             {
@@ -1051,6 +1570,8 @@ namespace Agentmaster
             e.isError = isError;
             e.interrupted = interrupted;
             e.durationMs = durationMs;
+            e.thinkingBlocks = thinkingBlocks;
+            e.thinkingTokens = thinkingTokens;
             Emit(std::move(e));
             Persist();
         }
@@ -1200,6 +1721,11 @@ namespace Agentmaster
                     LogHarness(options.name, L"a compaction did not succeed");
                 }
                 break;
+            case HarnessSystemKind::ThinkingTokens:
+                // The deltas, summed: estimated_tokens restarts with each model request of the
+                // turn (a tool call makes another), the deltas add up across them.
+                turnThinkingTokens += facts.thinkingTokensDelta;
+                break;
             case HarnessSystemKind::Other:
             default:
                 break;
@@ -1267,6 +1793,8 @@ namespace Agentmaster
                 auto interruptAt = started;
                 auto lastActivity = std::chrono::steady_clock::now();
                 std::wstring lastText; // the newest assistant text, the fallback for an empty result
+                int thinkingBlocks = 0; // the turn's thinking blocks (HarnessEvent::thinkingBlocks)
+                turnThinkingTokens = 0; // this turn's thinking estimate starts here (OnSystemMessage adds to it)
                 std::string lastUsageMessageId;
 
                 for (;;)
@@ -1361,6 +1889,13 @@ namespace Agentmaster
                         }
                         for (const auto& block : assistant->content)
                         {
+                            if (std::holds_alternative<claude::ThinkingBlock>(block))
+                            {
+                                // Counted, not recorded: thinking is not part of the answer, and the
+                                // count is the one direct sign that the turn's reasoning is on.
+                                ++thinkingBlocks;
+                                continue;
+                            }
                             const auto* textBlock = std::get_if<claude::TextBlock>(&block);
                             if (!textBlock || textBlock->text.empty())
                             {
@@ -1437,8 +1972,8 @@ namespace Agentmaster
                         {
                             text = !facts.errors.empty() ? facts.errors.front() : (L"The turn failed (" + facts.subtype + L").");
                         }
-                        LogHarness(options.name, L"turn " + std::to_wstring(job.turn) + (failed ? L" FAILED" : (interruptSent ? L" interrupted" : L" done")) + L": " + std::to_wstring(elapsedMs()) + L" ms, " + std::to_wstring(facts.numTurns) + L" request(s)" + (failed ? L": " + text.substr(0, 300) : std::wstring{}));
-                        FinishTurn(job.turn, turnEpoch, std::move(text), failed, interruptSent, elapsedMs(), HarnessState::Ready);
+                        LogHarness(options.name, L"turn " + std::to_wstring(job.turn) + (failed ? L" FAILED" : (interruptSent ? L" interrupted" : L" done")) + L": " + std::to_wstring(elapsedMs()) + L" ms, " + std::to_wstring(facts.numTurns) + L" request(s), " + std::to_wstring(thinkingBlocks) + L" thinking block(s), ~" + std::to_wstring(turnThinkingTokens) + L" thinking token(s)" + (failed ? L": " + text.substr(0, 300) : std::wstring{}));
+                        FinishTurn(job.turn, turnEpoch, std::move(text), failed, interruptSent, elapsedMs(), HarnessState::Ready, thinkingBlocks, turnThinkingTokens);
                         return;
                     }
                     // A user line (a tool result's echo) or a rate-limit line: nothing to report.
@@ -1543,7 +2078,17 @@ namespace Agentmaster
                     continue; // Reset() set wantProcess when a process was up: the wait above starts one
                 }
                 std::wstring startFailure;
-                if (!EnsureProcess(startFailure))
+                bool ready = EnsureProcess(startFailure);
+                if (ready && job && !ApplyThinkingLive(L"before turn " + std::to_wstring(job->turn)))
+                {
+                    // SetThinking asked for a reasoning the running process cannot take live: a new
+                    // process starts with it on its command line, and the conversation continues
+                    // from its record (the digest), as after a park.
+                    LogHarness(options.name, L"the reasoning cannot be changed live; starting a new process with it (the conversation continues from its record)");
+                    Disconnect(true);
+                    ready = EnsureProcess(startFailure);
+                }
+                if (!ready)
                 {
                     if (job)
                     {
@@ -1611,6 +2156,12 @@ namespace Agentmaster
         Impl& s = *_impl;
         s.options = std::move(options);
         s.sink = std::move(sink);
+        // The start values of the reasoning; SetThinking replaces them later.
+        s.wantThinking = s.options.thinking;
+        s.wantEffort = s.options.effort;
+        // Before any process reported its resolved id: decided from the configured name (an
+        // alias counts as a current model, Claude Code's own default). OnProcessUp refines it.
+        s.modelRefusesDisabledThinking.store(HarnessModelRefusesDisabledThinking(s.options.model));
         s.workDir = !s.options.workDir.empty() ? s.options.workDir : (HarnessStateDir() + L"\\" + s.options.name);
         s.promptPath = s.workDir + L"\\system-prompt.md";
         if (s.options.persistRecord)
@@ -1699,6 +2250,31 @@ namespace Agentmaster
         _impl->interruptRequested.store(true); // the turn loop reads it within 100 ms; without a turn it is cleared at the next one
     }
 
+    void HarnessConversation::SetThinking(HarnessThinking thinking, std::wstring effort) noexcept
+    {
+        try
+        {
+            std::lock_guard lock{ _impl->mutex };
+            if (_impl->stopRequested)
+            {
+                return;
+            }
+            // Only recorded here: the worker applies it before the next message (ApplyThinkingLive),
+            // and a start in between reads it for its command line. No wake-up: an idle process
+            // has nothing to do until a message comes.
+            _impl->wantThinking = thinking;
+            if (IsHarnessEffortWord(effort))
+            {
+                _impl->wantEffort = std::move(effort);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the old reasoning stays (std::lock_guard threw: the mutex is broken).
+            LogSwallowedException(L"HarnessConversation::SetThinking");
+        }
+    }
+
     void HarnessConversation::Reset()
     {
         std::optional<Impl::Pending> dropped;
@@ -1779,8 +2355,16 @@ namespace Agentmaster
 
     std::vector<std::wstring> HarnessConversation::DescribeCommandLine() const
     {
+        // The reasoning wanted now: what the next start puts on its command line.
+        HarnessThinking thinking = HarnessThinking::Disabled;
+        std::wstring effort;
+        {
+            std::lock_guard lock{ _impl->mutex };
+            thinking = _impl->wantThinking;
+            effort = _impl->wantEffort;
+        }
         // A transport that is never connected: build_command only reads the options.
-        const claude::internal::SubprocessTransport transport{ _impl->BuildSdkOptions("claude.exe", _impl->launchPermission.load()) };
+        const claude::internal::SubprocessTransport transport{ _impl->BuildSdkOptions("claude.exe", _impl->launchPermission.load(), thinking, effort) };
         std::vector<std::wstring> out;
         for (const auto& arg : transport.build_command())
         {

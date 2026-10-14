@@ -18,9 +18,12 @@
 //     never shows up among the sessions it searches. What survives a restart is Agentmaster's own
 //     record of it (the harness record) and the last shown list, both in <profile>\harness\.
 //
-// The model, its settings and the tools are fixed here on purpose — the feature is "the fastest
-// useful answer", not a configurable chat: Sonnet 5.5, low effort, thinking off, no built-in
-// tools, two in-process tool servers.
+// The model and the tools are fixed here on purpose — the feature is "the fastest useful
+// answer", not a configurable chat: Sonnet 5.5, no built-in tools, two in-process tool servers.
+// The one thing the user picks is the THINKING LEVEL (the strip's "thinking off" toggle; the
+// user's request of 2026-10-14): off (the default, and the fastest) or adaptive thinking at one of
+// Claude Code's effort levels. A change applies from the next request, to the running process
+// (HarnessConversation::SetThinking), so the conversation keeps its context.
 //
 // Threads: every method may be called from any thread and returns at once. Listeners are called
 // on the conversation's threads (never a UI thread): a page marshals to its own dispatcher.
@@ -58,7 +61,11 @@ namespace Agentmaster
 
         std::wstring name{ L"sessions-search" }; // the conversation key (file names, the child's AM_HARNESS mark)
         std::wstring model{ L"claude-sonnet-5-5" };
-        std::wstring effort{ L"low" };
+        // The thinking level the agent STARTS with (SetThinkingLevel changes it). Off = no
+        // thinking at effort low: the fastest answer, and the agent's only setting before the
+        // levels existed. The app seeds the persisted level right after the agent exists
+        // (AppSettings::sessionsAiThinkingLevel), before its first process starts.
+        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Off };
         int64_t autoCompactTokens{ 500000 };
     };
 
@@ -95,6 +102,13 @@ namespace Agentmaster
         std::wstring model; // the model that answers (known after the first request)
         int compactions{ 0 };
         HarnessUsage usage;
+        // The thinking level the next request runs with (SetThinkingLevel). A page shows it as
+        // "thinking <word>" and rotates it on a click.
+        HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Off };
+        // The model's effort words as its process reported them (HarnessInventory::
+        // supportedEfforts); empty until a process answered. The page's rotation skips a level
+        // that is not in a non-empty list (NextHarnessThinkingLevel).
+        std::vector<std::wstring> supportedEfforts;
     };
 
     // One event, with the state after it.
@@ -162,6 +176,17 @@ namespace Agentmaster
         // Stop the running request. The conversation keeps what was said so far.
         void Interrupt();
 
+        // Set how much the model thinks, from the next request on (a request that runs now keeps
+        // its level). The running process is changed live, so the conversation keeps its context
+        // (HarnessConversation::SetThinking); a process that is not up starts with the level.
+        //   level — Off, or adaptive thinking at one of the effort levels.
+        // Listeners get a StateChanged event whose snapshot carries the new level, so every
+        // window's strip shows it. Setting the level the agent already has does nothing (no event,
+        // no log line). The caller persists the level (AppSettings::sessionsAiThinkingLevel): the
+        // agent keeps it in memory only.
+        // Never throws.
+        void SetThinkingLevel(HarnessThinkingLevel level) noexcept;
+
         // Throw the conversation away: the context, the record, the shown list. A fresh process
         // is started when one was up. Listeners get a Reset event with the new epoch.
         void Reset();
@@ -219,8 +244,9 @@ namespace Agentmaster
 
     // The process's one agent, created on first use and never destroyed (like the engine: the
     // app ends with TerminateProcess, and the child process is ended by its job object). It
-    // takes the open sessions from the shared engine's registry; the claude.exe path is pushed
-    // by the pages (SetClaudeExePath).
+    // takes the open sessions from the shared engine's registry and its start thinking level
+    // from settings.json (AppSettings::sessionsAiThinkingLevel, read once, here); the claude.exe
+    // path is pushed by the pages (SetClaudeExePath).
     //   throws — what the constructor throws, on the first call only.
     // ⚠ Do not call it from the standalone test harness or the CLI: the first call touches
     //   SharedEngine(), which starts the hooks bridge and the observers. Tests construct their

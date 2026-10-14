@@ -281,7 +281,6 @@ void TestAgentHarnessCore()
     {
         HarnessSettingsSpec spec;
         spec.autoCompactTokens = 500000;
-        spec.effort = L"low";
         spec.apiMaxRetries = 2;
         const std::wstring text = BuildHarnessSettingsJson(spec);
         const json::Value settings = J(text);
@@ -296,16 +295,44 @@ void TestAgentHarnessCore()
         CHECK(verbose && verbose->type == json::Value::Type::Bool && !settings.BoolAt(L"verbose"), "settings: verbose is forced off");
         const auto* env = settings.Find(L"env");
         CHECK(env && env->StrAt(L"CLAUDE_CODE_MAX_RETRIES") == L"2" && env->StrAt(L"CLAUDE_CODE_RETRY_WATCHDOG") == L"0", "settings: bounded API retries, no retry watchdog");
-        CHECK(env && env->StrAt(L"CLAUDE_CODE_EFFORT_LEVEL") == L"low", "settings: the effort variable (it beats the --effort flag)");
+        // Measured 2026-10-14: with the variable set, every live effort change answered "success"
+        // and the effort stayed where the variable put it. The --effort flag carries the start value.
+        CHECK(env && env->Find(L"CLAUDE_CODE_EFFORT_LEVEL") == nullptr, "settings: NO effort variable (it would override every live effort change)");
         CHECK(env && env->StrAt(L"DISABLE_AUTOUPDATER") == L"1" && env->StrAt(L"CLAUDE_CODE_DISABLE_CLAUDE_MDS") == L"1" && env->StrAt(L"CLAUDE_CODE_DISABLE_AUTO_MEMORY") == L"1", "settings: a quiet background child");
+        const auto* extraBody = env ? env->Find(L"CLAUDE_CODE_EXTRA_BODY") : nullptr;
+        CHECK(extraBody && extraBody->type == json::Value::Type::Str && extraBody->str.empty(), "settings: CLAUDE_CODE_EXTRA_BODY is written EMPTY when no body is wanted (the harness owns the variable)");
+
+        // "Off" on a model that refuses "disabled": the API's own between_tools rides the
+        // variable (measured 2026-10-14: Claude Code spreads it over every request body).
+        HarnessSettingsSpec off = spec;
+        off.extraRequestBody = std::wstring{ kHarnessBetweenToolsRequestBody };
+        const std::wstring offText = BuildHarnessSettingsJson(off);
+        bool offAscii = true;
+        for (const wchar_t c : offText)
+        {
+            offAscii = offAscii && c >= 0x20 && c < 0x7F;
+        }
+        const json::Value offSettings = J(offText);
+        const auto* offEnv = offSettings.Find(L"env");
+        const std::wstring bodyText = offEnv ? offEnv->StrAt(L"CLAUDE_CODE_EXTRA_BODY") : std::wstring{};
+        const json::Value body = J(bodyText);
+        const auto* bodyThinking = body.Find(L"thinking");
+        CHECK(offAscii && bodyThinking && bodyThinking->StrAt(L"type") == L"between_tools" && body.members.size() == 1, "settings: the between_tools body is the variable's value, a JSON object with the one `thinking` field, still plain ASCII");
+
+        // The live patch carries the COMPLETE env object (apply_flag_settings merges shallow: its
+        // "env" replaces the whole env object of the --settings layer).
+        const json::Value patch = J(BuildHarnessEnvPatchJson(off));
+        const auto* patchEnv = patch.Find(L"env");
+        CHECK(patch.members.size() == 1 && patchEnv && offEnv && json::Dump(*patchEnv) == json::Dump(*offEnv), "env patch: {\"env\": ...} alone, the same env object the start writes (retry bound and quiet switches included)");
+        const json::Value patchBack = J(BuildHarnessEnvPatchJson(spec));
+        const auto* patchBackEnv = patchBack.Find(L"env");
+        CHECK(patchBackEnv && patchBackEnv->Find(L"CLAUDE_CODE_EXTRA_BODY") && patchBackEnv->StrAt(L"CLAUDE_CODE_EXTRA_BODY").empty() && patchBackEnv->StrAt(L"CLAUDE_CODE_MAX_RETRIES") == L"2", "env patch back to 'on': the variable is written empty (it must overwrite between_tools), the rest unchanged");
 
         HarnessSettingsSpec none;
-        none.effort = L"bogus";
         none.apiMaxRetries = 99;
         const json::Value plain = J(BuildHarnessSettingsJson(none));
         CHECK(plain.Find(L"autoCompactEnabled") == nullptr && plain.Find(L"autoCompactWindow") == nullptr, "settings: no window asked, no compaction keys");
         const auto* plainEnv = plain.Find(L"env");
-        CHECK(plainEnv && plainEnv->Find(L"CLAUDE_CODE_EFFORT_LEVEL") == nullptr, "settings: an unknown effort sets none");
         CHECK(plainEnv && plainEnv->StrAt(L"CLAUDE_CODE_MAX_RETRIES") == L"15", "settings: the retry count is clamped");
         HarnessSettingsSpec tiny;
         tiny.autoCompactTokens = 5;
@@ -353,6 +380,110 @@ void TestAgentHarnessCore()
         CHECK(neitherPermissions && neitherPermissions->StrAt(L"disableBypassPermissionsMode") == L"disable" && neitherPermissions->StrAt(L"disableAutoMode") == L"disable", "settings (test seam): both modes disabled");
     }
 
+    // ---- the thinking policy: the levels, the toggle's rotation, the live-change plan, the model's report ----
+    {
+        using TL = HarnessThinkingLevel;
+        const TL all[] = { TL::Off, TL::Low, TL::Medium, TL::High, TL::XHigh, TL::Max };
+        bool roundTrip = true;
+        for (const TL level : all)
+        {
+            const auto back = ParseHarnessThinkingLevel(HarnessThinkingLevelWord(level));
+            roundTrip = roundTrip && back.has_value() && *back == level;
+        }
+        CHECK(roundTrip, "thinking: every level's word reads back as that level (the persisted form)");
+        CHECK(std::wstring{ HarnessThinkingLevelWord(TL::Off) } == L"off" && std::wstring{ HarnessThinkingLevelWord(TL::XHigh) } == L"xhigh" && std::wstring{ HarnessThinkingLevelWord(TL::Max) } == L"max", "thinking: the words are 'off' and Claude Code's effort words");
+        CHECK(ParseHarnessThinkingLevel(L"  HIGH\t") == TL::High && ParseHarnessThinkingLevel(L"Off") == TL::Off, "thinking: a word is read without regard to case and surrounding spaces");
+        CHECK(!ParseHarnessThinkingLevel(L"").has_value() && !ParseHarnessThinkingLevel(L"ultra").has_value() && !ParseHarnessThinkingLevel(L"hi gh").has_value(), "thinking: any other word is no level (the caller reads it as off)");
+        CHECK(!HarnessThinkingLevelThinks(TL::Off) && HarnessThinkingLevelThinks(TL::Low) && HarnessThinkingLevelThinks(TL::Max), "thinking: only Off runs without thinking");
+        CHECK(std::wstring{ HarnessThinkingLevelEffort(TL::Off) } == L"low" && std::wstring{ HarnessThinkingLevelEffort(TL::Medium) } == L"medium" && std::wstring{ HarnessThinkingLevelEffort(TL::Max) } == L"max", "thinking: Off runs at effort low (the fastest), every other level at its own effort");
+
+        // The rotation. An empty list = no process reported yet: every level is offered.
+        const std::vector<std::wstring> unknown;
+        bool rotation = true;
+        TL at = TL::Off;
+        for (const TL expected : { TL::Low, TL::Medium, TL::High, TL::XHigh, TL::Max, TL::Off })
+        {
+            at = NextHarnessThinkingLevel(at, unknown);
+            rotation = rotation && at == expected;
+        }
+        CHECK(rotation, "thinking: the toggle rotates off -> low -> medium -> high -> xhigh -> max -> off");
+        const std::vector<std::wstring> noXHighNoMax{ L"low", L"medium", L"high" };
+        CHECK(NextHarnessThinkingLevel(TL::High, noXHighNoMax) == TL::Off && NextHarnessThinkingLevel(TL::Medium, noXHighNoMax) == TL::High, "thinking: a level whose effort the model lacks is skipped (Claude Code would step it down anyway)");
+        const std::vector<std::wstring> onlyMax{ L"MAX" };
+        CHECK(NextHarnessThinkingLevel(TL::Off, onlyMax) == TL::Max && NextHarnessThinkingLevel(TL::Max, onlyMax) == TL::Off, "thinking: Off is always offered, so the rotation ends; the model's words are compared caselessly");
+        const std::vector<std::wstring> none{ L"auto" };
+        CHECK(NextHarnessThinkingLevel(TL::Off, none) == TL::Off, "thinking: a model with no known effort word leaves only Off");
+
+        // The live-change plan (the process was started --thinking adaptive). St(thinks,
+        // betweenTools, effort) builds one side.
+        const auto St = [](bool thinks, bool betweenTools, const wchar_t* effort) {
+            HarnessReasoningState state;
+            state.thinks = thinks;
+            state.betweenTools = betweenTools;
+            state.effort = effort;
+            return state;
+        };
+        CHECK(PlanHarnessThinkingChange(St(true, false, L"low"), St(true, false, L"low")).Empty(), "plan: nothing differs, nothing is sent (the case before almost every turn)");
+        const HarnessThinkingChange off = PlanHarnessThinkingChange(St(true, false, L"high"), St(false, true, L"low"));
+        CHECK(off.thinkingOff && off.betweenToolsOn && !off.thinkingOn && !off.betweenToolsOff && off.effort == L"low", "plan: high -> off on Sonnet 5.5 sends set_max_thinking_tokens 0, the between_tools body, and the effort back to low");
+        const HarnessThinkingChange on = PlanHarnessThinkingChange(St(false, true, L"low"), St(true, false, L"max"));
+        CHECK(on.betweenToolsOff && on.thinkingOn && !on.thinkingOff && !on.betweenToolsOn && on.effort == L"max", "plan: off -> max clears the body and sends set_max_thinking_tokens null (back to adaptive) and effort max");
+        const HarnessThinkingChange olderOn = PlanHarnessThinkingChange(St(false, false, L"low"), St(true, false, L"max"));
+        CHECK(olderOn.thinkingOn && !olderOn.betweenToolsOff && !olderOn.betweenToolsOn && olderOn.effort == L"max", "plan: on a model that takes 'disabled' (no body), off -> max moves the thinking and the effort only");
+        const HarnessThinkingChange olderOff = PlanHarnessThinkingChange(St(true, false, L"low"), St(false, false, L"low"));
+        CHECK(olderOff.thinkingOff && !olderOff.betweenToolsOn && olderOff.effort.empty(), "plan: on such a model, 'off' is set_max_thinking_tokens 0 alone (Claude Code sends 'disabled' itself)");
+        const HarnessThinkingChange refined = PlanHarnessThinkingChange(St(false, false, L"low"), St(false, true, L"low"));
+        CHECK(refined.betweenToolsOn && !refined.thinkingOff && !refined.thinkingOn && refined.effort.empty(), "plan: off stays off, but the resolved model refuses 'disabled': only the body is added");
+        CHECK(PlanHarnessThinkingChange(St(true, false, L"low"), St(true, true, L"low")).Empty(), "plan: a wanted body with thinking ON is read as no body (the API refuses that pair)");
+        const HarnessThinkingChange deeper = PlanHarnessThinkingChange(St(true, false, L"medium"), St(true, false, L"high"));
+        CHECK(!deeper.thinkingOff && !deeper.thinkingOn && !deeper.betweenToolsOn && !deeper.betweenToolsOff && deeper.effort == L"high", "plan: medium -> high changes the effort only");
+        CHECK(PlanHarnessThinkingChange(St(true, false, L"high"), St(true, false, L"")).Empty() && PlanHarnessThinkingChange(St(true, false, L"high"), St(true, false, L"ultra")).Empty(), "plan: an empty or unknown wanted effort keeps the applied one (never sent)");
+        CHECK(IsHarnessEffortWord(L"xhigh") && !IsHarnessEffortWord(L"High") && !IsHarnessEffortWord(L"off") && !IsHarnessEffortWord(L""), "thinking: only Claude Code's exact effort words go to it");
+
+        // Which models refuse "disabled" — Claude Code 2.1.291's rule (qEe), mirrored.
+        bool refuses = true;
+        for (const wchar_t* model : { L"claude-sonnet-5-5", L"CLAUDE-SONNET-5-5", L"claude-sonnet-5-5[1m]", L"claude-opus-5-5", L"claude-fable-5-1", L"claude-sonnet-6", L"sonnet", L"" })
+        {
+            refuses = refuses && HarnessModelRefusesDisabledThinking(model);
+        }
+        CHECK(refuses, "refuses 'disabled': Sonnet 5.5, Opus 5.5, Fable 5.1, an unlisted future model, an unresolved alias and an empty name (Claude Code's default for what it does not list)");
+        bool takes = true;
+        for (const wchar_t* model : { L"claude-sonnet-4-6", L"claude-sonnet-4-5-20250929", L"claude-opus-4-1-20250805", L"claude-opus-4-20250514", L"claude-sonnet-4-20250514", L"claude-3-7-sonnet-20250219", L"claude-3-5-haiku-latest", L"claude-haiku-4-5", L"claude-haiku-4-5-20251001", L"claude-opus-5", L"claude-sonnet-5", L"claude-opus-4-8", L"us.anthropic.claude-sonnet-4-5-20250929-v1:0", L"claude-sonnet-4-5@20250929", L"claude-opus-4-6[1m]", L" Claude-Sonnet-4-6 " })
+        {
+            takes = takes && !HarnessModelRefusesDisabledThinking(model);
+        }
+        CHECK(takes, "takes 'disabled': every model Claude Code lists, by its dated, Bedrock, Vertex and [1m] names, in any letter case");
+        const json::Value betweenTools = J(std::wstring{ kHarnessBetweenToolsRequestBody });
+        const auto* betweenToolsThinking = betweenTools.Find(L"thinking");
+        CHECK(betweenToolsThinking && betweenToolsThinking->StrAt(L"type") == L"between_tools", "the between_tools body is the API's own off: {\"thinking\": {\"type\": \"between_tools\"}}");
+
+        // The model's report, in the shape Claude Code 2.1.291 answered initialize with (2026-10-14).
+        const std::wstring models = LR"([{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},)"
+                                    LR"({"value":"sonnet","resolvedModel":"claude-sonnet-5-5","displayName":"Sonnet","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"],"supportsAdaptiveThinking":true},)"
+                                    LR"({"value":"haiku","resolvedModel":"claude-haiku-4-5","supportsEffort":false}])";
+        const HarnessModelReasoning sonnet = ReadHarnessModelReasoning(models, L"claude-sonnet-5-5");
+        // The expected lists are named outside CHECK: a braced list's commas would split the macro's argument.
+        const std::vector<std::wstring> fiveLevels{ L"low", L"medium", L"high", L"xhigh", L"max" };
+        CHECK(sonnet.known && sonnet.adaptiveThinking && sonnet.supportedEfforts == fiveLevels, "model report: Sonnet 5.5 is found by its resolved id, with its five effort levels and adaptive thinking");
+        const HarnessModelReasoning alias = ReadHarnessModelReasoning(models, L"SONNET");
+        CHECK(alias.known && alias.resolvedModel == L"claude-sonnet-5-5", "model report: the alias row's own value matches too, without regard to case, and names the wire id it resolves to");
+        CHECK(sonnet.resolvedModel == L"claude-sonnet-5-5" && HarnessModelRefusesDisabledThinking(alias.resolvedModel), "model report: the resolved id is what the 'disabled' rule is asked about (the alias alone names no version)");
+        const HarnessModelReasoning haiku = ReadHarnessModelReasoning(models, L"claude-haiku-4-5");
+        CHECK(haiku.known && haiku.supportedEfforts.empty() && !haiku.adaptiveThinking, "model report: a model without effort levels lists none (the toggle then offers only off)");
+        CHECK(!ReadHarnessModelReasoning(models, L"claude-unknown").known && !ReadHarnessModelReasoning(L"{\"models\":[]}", L"claude-sonnet-5-5").known && !ReadHarnessModelReasoning(L"not json", L"claude-sonnet-5-5").known && !ReadHarnessModelReasoning(models, L"").known, "model report: an unknown model, a text that is not the array, and an empty model name know nothing");
+        const HarnessModelReasoning odd = ReadHarnessModelReasoning(LR"([{"value":"x","supportedEffortLevels":["LOW",7,"ultra","max"]}])", L"x");
+        const std::vector<std::wstring> lowAndMax{ L"low", L"max" };
+        CHECK(odd.supportedEfforts == lowAndMax, "model report: levels are lower-cased; non-strings and unknown words are dropped");
+        CHECK(odd.resolvedModel == L"x", "model report: a row without resolvedModel (an older Claude Code) names its value as the wire id");
+
+        // The stream's own sign that a turn thought (the line Claude Code 2.1.291 wrote while
+        // Sonnet 5.5 thought at effort high, 2026-10-14).
+        const HarnessSystemFacts thought = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"thinking_tokens","estimated_tokens":207,"estimated_tokens_delta":157,"session_id":"2c626760","uuid":"5265d8b7"})");
+        CHECK(thought.kind == HarnessSystemKind::ThinkingTokens && thought.thinkingTokens == 207 && thought.thinkingTokensDelta == 157, "system line: thinking_tokens carries Claude Code's estimate of the thinking so far and since the line before");
+        const HarnessSystemFacts negative = ClassifyHarnessSystemMessage(LR"({"type":"system","subtype":"thinking_tokens","estimated_tokens":-1,"estimated_tokens_delta":-5})");
+        CHECK(negative.kind == HarnessSystemKind::ThinkingTokens && negative.thinkingTokens == 0 && negative.thinkingTokensDelta == 0, "system line: a negative estimate counts as none");
+    }
+
     // ---- the child's environment, and the Fleet Observer's side of the mark ----
     {
         const std::map<std::string, std::string> env = BuildHarnessEnvironment(L"sessions-search");
@@ -367,6 +498,12 @@ void TestAgentHarnessCore()
             removals = removals && get(name) && get(name)->empty();
         }
         CHECK(removals, "environment: a parent session's and tab's variables are REMOVED (an empty value)");
+        bool thinkingRemovals = true;
+        for (const char* name : { "CLAUDE_CODE_EXTRA_BODY", "CLAUDE_CODE_DISABLE_THINKING", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "DISABLE_INTERLEAVED_THINKING", "MAX_THINKING_TOKENS" })
+        {
+            thinkingRemovals = thinkingRemovals && get(name) && get(name)->empty();
+        }
+        CHECK(thinkingRemovals, "environment: the variables that would change the thinking level are REMOVED too (the request body is set by the harness's own settings)");
         CHECK(get("CLAUDE_CODE_ENTRYPOINT") == nullptr && get("PATH") == nullptr && get("USERPROFILE") == nullptr, "environment: nothing else is touched");
 
         std::unordered_map<std::wstring, std::wstring> childEnv;

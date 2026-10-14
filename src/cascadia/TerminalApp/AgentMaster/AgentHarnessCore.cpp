@@ -144,12 +144,39 @@ namespace
         return true;
     }
 
-    // The effort levels Claude Code accepts. Anything else is not written to the settings (a
-    // wrong value there would be passed to the API).
-    bool IsKnownEffort(std::wstring_view effort) noexcept
+    // `c` in lower case, for ASCII letters only (the words compared here are ASCII).
+    constexpr wchar_t AsciiLower(wchar_t c) noexcept
     {
-        return effort == L"low" || effort == L"medium" || effort == L"high" || effort == L"xhigh" || effort == L"max";
+        return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c + (L'a' - L'A')) : c;
     }
+
+    // True when `a` and `b` hold the same text without regard to ASCII case.
+    bool EqualsAsciiNoCase(std::wstring_view a, std::wstring_view b) noexcept
+    {
+        if (a.size() != b.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (AsciiLower(a[i]) != AsciiLower(b[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The levels in rotation order: index == the enum's value. One table, so that the word, the
+    // parse and the rotation can never disagree.
+    constexpr Agentmaster::HarnessThinkingLevel kThinkingLevels[] = {
+        Agentmaster::HarnessThinkingLevel::Off,
+        Agentmaster::HarnessThinkingLevel::Low,
+        Agentmaster::HarnessThinkingLevel::Medium,
+        Agentmaster::HarnessThinkingLevel::High,
+        Agentmaster::HarnessThinkingLevel::XHigh,
+        Agentmaster::HarnessThinkingLevel::Max,
+    };
 }
 
 namespace Agentmaster
@@ -574,6 +601,292 @@ namespace Agentmaster
         return asked == HarnessPermissionMode::Bypass ? HarnessPermissionStep::SwitchToAuto : HarnessPermissionStep::SwitchToDontAsk;
     }
 
+    // ===== the thinking policy ==============================================================
+
+    const wchar_t* HarnessThinkingLevelWord(HarnessThinkingLevel level) noexcept
+    {
+        switch (level)
+        {
+        case HarnessThinkingLevel::Low:
+            return L"low";
+        case HarnessThinkingLevel::Medium:
+            return L"medium";
+        case HarnessThinkingLevel::High:
+            return L"high";
+        case HarnessThinkingLevel::XHigh:
+            return L"xhigh";
+        case HarnessThinkingLevel::Max:
+            return L"max";
+        case HarnessThinkingLevel::Off:
+        default:
+            return L"off";
+        }
+    }
+
+    std::optional<HarnessThinkingLevel> ParseHarnessThinkingLevel(std::wstring_view word) noexcept
+    {
+        // A hand-edited settings.json may carry spaces; the word itself is compared caselessly.
+        while (!word.empty() && (word.front() == L' ' || word.front() == L'\t'))
+        {
+            word.remove_prefix(1);
+        }
+        while (!word.empty() && (word.back() == L' ' || word.back() == L'\t'))
+        {
+            word.remove_suffix(1);
+        }
+        for (const HarnessThinkingLevel level : kThinkingLevels)
+        {
+            if (EqualsAsciiNoCase(word, HarnessThinkingLevelWord(level)))
+            {
+                return level;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool HarnessThinkingLevelThinks(HarnessThinkingLevel level) noexcept
+    {
+        return level != HarnessThinkingLevel::Off;
+    }
+
+    const wchar_t* HarnessThinkingLevelEffort(HarnessThinkingLevel level) noexcept
+    {
+        // Off shares Low's effort word: thinking off is "the fastest", and low effort is the
+        // fastest effort (the search agent's one setting before the levels existed).
+        return level == HarnessThinkingLevel::Off ? L"low" : HarnessThinkingLevelWord(level);
+    }
+
+    HarnessThinkingLevel NextHarnessThinkingLevel(HarnessThinkingLevel level, const std::vector<std::wstring>& supportedEfforts) noexcept
+    {
+        const auto supported = [&supportedEfforts](HarnessThinkingLevel candidate) noexcept {
+            if (candidate == HarnessThinkingLevel::Off || supportedEfforts.empty())
+            {
+                return true; // Off needs no effort level; an unknown list hides nothing
+            }
+            const std::wstring_view effort = HarnessThinkingLevelEffort(candidate);
+            return std::any_of(supportedEfforts.begin(), supportedEfforts.end(), [effort](const std::wstring& s) noexcept { return EqualsAsciiNoCase(s, effort); });
+        };
+        constexpr size_t count = std::size(kThinkingLevels);
+        const size_t from = static_cast<size_t>(level) < count ? static_cast<size_t>(level) : 0;
+        // At most one full turn: Off is always supported, so the loop always finds a level.
+        for (size_t step = 1; step <= count; ++step)
+        {
+            const HarnessThinkingLevel candidate = kThinkingLevels[(from + step) % count];
+            if (supported(candidate))
+            {
+                return candidate;
+            }
+        }
+        return HarnessThinkingLevel::Off;
+    }
+
+    bool IsHarnessEffortWord(std::wstring_view effort) noexcept
+    {
+        return effort == L"low" || effort == L"medium" || effort == L"high" || effort == L"xhigh" || effort == L"max";
+    }
+
+    bool HarnessModelRefusesDisabledThinking(std::wstring_view model) noexcept
+    {
+        // Reduce the name to Claude Code's canonical form without allocating (noexcept): views
+        // only, every comparison without regard to ASCII case.
+        while (!model.empty() && (model.front() == L' ' || model.front() == L'\t'))
+        {
+            model.remove_prefix(1);
+        }
+        while (!model.empty() && (model.back() == L' ' || model.back() == L'\t'))
+        {
+            model.remove_suffix(1);
+        }
+        constexpr std::wstring_view kOneMillion = L"[1m]"; // Claude Code's 1M-context marker
+        if (model.size() >= kOneMillion.size() && EqualsAsciiNoCase(model.substr(model.size() - kOneMillion.size()), kOneMillion))
+        {
+            model.remove_suffix(kOneMillion.size());
+        }
+        // Bedrock: "us.anthropic.claude-sonnet-4-5-20250929-v1:0" — the id starts after "anthropic.".
+        constexpr std::wstring_view kProvider = L"anthropic.";
+        for (size_t i = 0; i + kProvider.size() <= model.size(); ++i)
+        {
+            if (EqualsAsciiNoCase(model.substr(i, kProvider.size()), kProvider))
+            {
+                model.remove_prefix(i + kProvider.size());
+                break;
+            }
+        }
+        // Vertex: "claude-sonnet-4-5@20250929".
+        if (const size_t at = model.find(L'@'); at != std::wstring_view::npos)
+        {
+            model = model.substr(0, at);
+        }
+        const auto isDigit = [](wchar_t c) noexcept { return c >= L'0' && c <= L'9'; };
+        // Bedrock's "-v1" / "-v1:0" version suffix.
+        if (const size_t dash = model.rfind(L"-v"); dash != std::wstring_view::npos && dash + 2 < model.size())
+        {
+            bool versionOnly = true;
+            for (size_t i = dash + 2; i < model.size(); ++i)
+            {
+                versionOnly = versionOnly && (isDigit(model[i]) || model[i] == L':');
+            }
+            if (versionOnly)
+            {
+                model = model.substr(0, dash);
+            }
+        }
+        // A dated id: "claude-sonnet-4-5-20250929" -> "claude-sonnet-4-5".
+        if (model.size() > 9 && model[model.size() - 9] == L'-')
+        {
+            bool date = true;
+            for (size_t i = model.size() - 8; i < model.size(); ++i)
+            {
+                date = date && isDigit(model[i]);
+            }
+            if (date)
+            {
+                model.remove_suffix(9);
+            }
+        }
+        // Claude 3 in every variant takes "disabled" (Claude Code tests `includes("claude-3-")`).
+        constexpr std::wstring_view kClaude3 = L"claude-3-";
+        for (size_t i = 0; i + kClaude3.size() <= model.size(); ++i)
+        {
+            if (EqualsAsciiNoCase(model.substr(i, kClaude3.size()), kClaude3))
+            {
+                return false;
+            }
+        }
+        // Claude Code 2.1.291's list of the models that take "disabled". "claude-opus-4" and
+        // "claude-sonnet-4" are the 4.0 models' undated names, which the date drop above yields
+        // for their ids (claude-opus-4-20250514).
+        static constexpr std::wstring_view kTakesDisabled[] = {
+            L"claude-opus-4",
+            L"claude-opus-4-0",
+            L"claude-opus-4-1",
+            L"claude-opus-4-5",
+            L"claude-opus-4-6",
+            L"claude-opus-4-7",
+            L"claude-opus-4-8",
+            L"claude-opus-5",
+            L"claude-sonnet-4",
+            L"claude-sonnet-4-0",
+            L"claude-sonnet-4-5",
+            L"claude-sonnet-4-6",
+            L"claude-sonnet-5",
+            L"claude-haiku-4-5",
+        };
+        for (const std::wstring_view listed : kTakesDisabled)
+        {
+            if (EqualsAsciiNoCase(model, listed))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    HarnessThinkingChange PlanHarnessThinkingChange(const HarnessReasoningState& applied, const HarnessReasoningState& wanted)
+    {
+        HarnessThinkingChange change;
+        change.thinkingOff = applied.thinks && !wanted.thinks;
+        change.thinkingOn = !applied.thinks && wanted.thinks;
+        // between_tools only ever goes with Claude Code's thinking off: the API refuses it next to
+        // Claude Code's adaptive request (the clear_thinking strategy), so a wanted pair of
+        // "thinks" and "betweenTools" is read as "thinks" alone.
+        const bool wantBetweenTools = wanted.betweenTools && !wanted.thinks;
+        change.betweenToolsOn = !applied.betweenTools && wantBetweenTools;
+        change.betweenToolsOff = applied.betweenTools && !wantBetweenTools;
+        // An unknown wanted word is never sent (IsHarnessEffortWord): the applied effort stays.
+        if (IsHarnessEffortWord(wanted.effort) && wanted.effort != applied.effort)
+        {
+            change.effort = wanted.effort;
+        }
+        return change;
+    }
+
+    HarnessModelReasoning ReadHarnessModelReasoning(std::wstring_view modelsJson, std::wstring_view model)
+    {
+        HarnessModelReasoning out;
+        const auto parsed = json::Parse(modelsJson);
+        if (!parsed || parsed->type != json::Value::Type::Arr || model.empty())
+        {
+            return out;
+        }
+        for (const auto& entry : parsed->arr)
+        {
+            if (entry.type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            // Claude Code lists an alias row ("sonnet") whose resolvedModel is the wire id; the
+            // harness passes the wire id, so either field can name it.
+            if (!EqualsAsciiNoCase(entry.StrAt(L"value"), model) && !EqualsAsciiNoCase(entry.StrAt(L"resolvedModel"), model))
+            {
+                continue;
+            }
+            out.known = true;
+            // The wire id the row resolves to: what decides whether the model takes "disabled"
+            // (HarnessModelRefusesDisabledThinking). An older Claude Code without the field lists
+            // the id itself as the value.
+            out.resolvedModel = entry.StrAt(L"resolvedModel");
+            if (out.resolvedModel.empty())
+            {
+                out.resolvedModel = entry.StrAt(L"value");
+            }
+            out.adaptiveThinking = entry.BoolAt(L"supportsAdaptiveThinking");
+            if (const auto* levels = entry.Find(L"supportedEffortLevels"); levels && levels->type == json::Value::Type::Arr)
+            {
+                for (const auto& level : levels->arr)
+                {
+                    if (level.type != json::Value::Type::Str)
+                    {
+                        continue;
+                    }
+                    std::wstring word = level.str;
+                    for (auto& c : word)
+                    {
+                        c = AsciiLower(c);
+                    }
+                    if (IsHarnessEffortWord(word))
+                    {
+                        out.supportedEfforts.push_back(std::move(word));
+                    }
+                }
+            }
+            break; // the first matching row decides: Claude Code lists a model once
+        }
+        return out;
+    }
+
+    // The env object of the --settings text: ONE builder for BuildHarnessSettingsJson and
+    // BuildHarnessEnvPatchJson, so that a live patch can never drop a variable the start set.
+    //   throws — std::bad_alloc.
+    static json::Value BuildHarnessSettingsEnvObject(const HarnessSettingsSpec& spec)
+    {
+        using json::Value;
+        Value env = Value::MkObj();
+        env.Set(L"CLAUDE_CODE_MAX_RETRIES", Value::MkStr(std::to_wstring(std::clamp(spec.apiMaxRetries, 0, 15))));
+        env.Set(L"CLAUDE_CODE_RETRY_WATCHDOG", Value::MkStr(L"0"));
+        // No CLAUDE_CODE_EFFORT_LEVEL here (the header's thinking policy): it would override every
+        // live effort change while Claude Code answers each one with "success".
+        env.Set(L"DISABLE_AUTOUPDATER", Value::MkStr(L"1"));
+        env.Set(L"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", Value::MkStr(L"1"));
+        env.Set(L"CLAUDE_CODE_DISABLE_TERMINAL_TITLE", Value::MkStr(L"1"));
+        env.Set(L"CLAUDE_CODE_DISABLE_CLAUDE_MDS", Value::MkStr(L"1"));
+        env.Set(L"CLAUDE_CODE_DISABLE_AUTO_MEMORY", Value::MkStr(L"1"));
+        env.Set(L"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", Value::MkStr(L"1"));
+        // Always written, empty included: an empty value is "no extra body" to Claude Code (it
+        // tests the variable for truth), and a live patch that turns between_tools off must
+        // overwrite the earlier value, not leave it behind.
+        env.Set(L"CLAUDE_CODE_EXTRA_BODY", Value::MkStr(spec.extraRequestBody));
+        return env;
+    }
+
+    std::wstring BuildHarnessEnvPatchJson(const HarnessSettingsSpec& spec)
+    {
+        using json::Value;
+        Value root = Value::MkObj();
+        root.Set(L"env", BuildHarnessSettingsEnvObject(spec));
+        return json::Dump(root);
+    }
+
     std::wstring BuildHarnessSettingsJson(const HarnessSettingsSpec& spec)
     {
         using json::Value;
@@ -599,20 +912,7 @@ namespace Agentmaster
             root.Set(L"autoCompactEnabled", Value::MkBool(true));
             root.Set(L"autoCompactWindow", Value::MkNum(static_cast<double>(window)));
         }
-        Value env = Value::MkObj();
-        env.Set(L"CLAUDE_CODE_MAX_RETRIES", Value::MkStr(std::to_wstring(std::clamp(spec.apiMaxRetries, 0, 15))));
-        env.Set(L"CLAUDE_CODE_RETRY_WATCHDOG", Value::MkStr(L"0"));
-        if (IsKnownEffort(spec.effort))
-        {
-            env.Set(L"CLAUDE_CODE_EFFORT_LEVEL", Value::MkStr(spec.effort));
-        }
-        env.Set(L"DISABLE_AUTOUPDATER", Value::MkStr(L"1"));
-        env.Set(L"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", Value::MkStr(L"1"));
-        env.Set(L"CLAUDE_CODE_DISABLE_TERMINAL_TITLE", Value::MkStr(L"1"));
-        env.Set(L"CLAUDE_CODE_DISABLE_CLAUDE_MDS", Value::MkStr(L"1"));
-        env.Set(L"CLAUDE_CODE_DISABLE_AUTO_MEMORY", Value::MkStr(L"1"));
-        env.Set(L"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", Value::MkStr(L"1"));
-        root.Set(L"env", std::move(env));
+        root.Set(L"env", BuildHarnessSettingsEnvObject(spec));
         return json::Dump(root);
     }
 
@@ -643,6 +943,15 @@ namespace Agentmaster
             "CLAUDE_CODE_EFFORT_LEVEL",
             "CLAUDE_EFFORT",
             "MAX_THINKING_TOKENS",
+            // The thinking level is the harness's (the thinking policy, AgentHarnessCore.h): with
+            // the first, Claude Code never asks for adaptive thinking; the second switches some
+            // models to budgeted thinking; the third drops thinking between tool calls.
+            "CLAUDE_CODE_DISABLE_THINKING",
+            "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+            "DISABLE_INTERLEAVED_THINKING",
+            // Set by the harness itself through its settings (between_tools for an "off" level):
+            // an inherited value could carry a `thinking` field of its own.
+            "CLAUDE_CODE_EXTRA_BODY",
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
             "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
             "DISABLE_AUTO_COMPACT",
@@ -807,6 +1116,15 @@ namespace Agentmaster
                 facts.postTokens = m->I64At(L"post_tokens");
                 facts.compactDurationMs = m->I64At(L"duration_ms");
             }
+            return facts;
+        }
+        if (subtype == L"thinking_tokens")
+        {
+            // {"estimated_tokens": 207, "estimated_tokens_delta": 157, ...} while the model thinks
+            // (Claude Code 2.1.291). A negative number is no estimate.
+            facts.kind = HarnessSystemKind::ThinkingTokens;
+            facts.thinkingTokens = (std::max)(int64_t{ 0 }, parsed->I64At(L"estimated_tokens"));
+            facts.thinkingTokensDelta = (std::max)(int64_t{ 0 }, parsed->I64At(L"estimated_tokens_delta"));
             return facts;
         }
         return facts;

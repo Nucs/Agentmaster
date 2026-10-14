@@ -3871,6 +3871,7 @@ namespace winrt::TerminalApp::implementation
             _appSettings.tabColorPickerAdvancedOpen = disk.tabColorPickerAdvancedOpen; // ditto for the picker's More/Less "advanced" inputs
             _appSettings.transcriptOverlayLevel = disk.transcriptOverlayLevel; // the transcript overlay's last-picked level, written by the overlay's own RMW
             _appSettings.transcriptOverlayWrapLines = disk.transcriptOverlayWrapLines; // the transcript overlay's ↵ line-wrap toggle, written by the overlay's own RMW
+            _appSettings.sessionsAiThinkingLevel = disk.sessionsAiThinkingLevel; // the Sessions AI search's thinking level, written by the page's own RMW
             _appSettings.allowUpdatePrerelease = disk.allowUpdatePrerelease; // updater pre-release opt-in (instant-applied by the switch itself)
             _appSettings.allowUpdateNightly = disk.allowUpdateNightly; // updater NIGHTLY opt-in (instant-applied by its warning-gated switch)
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)

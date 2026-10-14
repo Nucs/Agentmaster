@@ -640,8 +640,8 @@ key, so every change of one is visible.
 | Setting | Today | Proposed | Why |
 |---|---|---|---|
 | Model | Sonnet 5.5 | Sonnet 5.5 | speed; the tools carry the precision |
-| Thinking | disabled | disabled | each step stays ~1.5–1.7 s (§1.2) |
-| Effort | low | **decided by the evaluation (E4)**: low or medium | a multi-step plan (phrasings, filters, a check) is where effort may matter |
+| Thinking | the user's level: off by default (the strip's toggle since 2026-10-14, changed live: `SESSIONS.md` 9.1, `SDK_HARNESS.md` 5.3). On Sonnet 5.5 "off" is the API's `between_tools` (no thinking before the answer; per the API, the short updates between tool calls may come back as thinking blocks — measured: none, they came as text) — the measurements of §1 ran with an "off" that still thought | off by default; the toggle stays | each step stays ~1.5–1.7 s (§1.2) |
+| Effort | low with thinking off; the level's own effort otherwise (the same toggle) | **decided by the evaluation (E4)**: the default level, low or medium | a multi-step plan (phrasings, filters, a check) is where effort may matter |
 | `--max-turns` | 12 | 12 | a safety net under the stop rule (§7.3) |
 | Auto-compaction | 500,000 tokens | **200,000 (E5)** | a search conversation piles up tool results (a peek ~3K tokens, a read up to ~15K); a smaller window keeps each step's context small, and the record and digest carry the continuity |
 | `--tools ""` | yes | yes | no built-in tools; and no ToolSearch, so the MCP tools are always loaded (§5) |

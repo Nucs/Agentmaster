@@ -7,6 +7,7 @@
 
 #include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException
 #include "Engine.h" // SharedEngine — the shared agent's registry
+#include "Persistence.h" // LoadAppSettings — the shared agent's persisted thinking level
 #include "SessionRegistry.h" // LiveTabBindings / HeadlinesOf — the open sessions
 #include "SessionStore.h" // WarmSessionStore — the store's first read, kept off the search's path
 
@@ -633,6 +634,16 @@ namespace Agentmaster
             e.turn = h.turn;
             bool notify = false;
             bool save = false;
+            // A process that just came up (or answered its first turn) has reported the model's
+            // effort levels: the page's thinking toggle offers only those. Read before our lock:
+            // the inventory takes the conversation's own lock, and the conversation calls this
+            // sink outside it.
+            const bool processReported = (h.kind == HarnessEventKind::State && h.state == HarnessState::Ready) || h.kind == HarnessEventKind::Ready;
+            std::vector<std::wstring> efforts;
+            if (processReported && conversation)
+            {
+                efforts = conversation->Inventory().supportedEfforts;
+            }
             {
                 std::lock_guard lock{ mutex };
                 if (h.epoch < snapshot.epoch)
@@ -641,6 +652,10 @@ namespace Agentmaster
                 }
                 snapshot.state = h.state;
                 snapshot.usage = h.usage;
+                if (processReported)
+                {
+                    snapshot.supportedEfforts = std::move(efforts); // a new process's report replaces the old one
+                }
                 switch (h.kind)
                 {
                 case HarnessEventKind::State:
@@ -743,8 +758,10 @@ namespace Agentmaster
             return impl->claudeExePath;
         } };
         h.model = impl->options.model;
-        h.effort = impl->options.effort;
-        h.thinking = HarnessThinking::Disabled; // the fastest: no thinking blocks before a tool call
+        // The start level (SetThinkingLevel changes it later, live). Off = no thinking blocks
+        // before a tool call, at effort low: the fastest answer.
+        h.thinking = HarnessThinkingLevelThinks(impl->options.thinkingLevel) ? HarnessThinking::Adaptive : HarnessThinking::Disabled;
+        h.effort = HarnessThinkingLevelEffort(impl->options.thinkingLevel);
         h.systemPrompt = SessionSearchToolset::SystemPrompt();
         h.toolServers = impl->toolset->Servers();
         h.autoCompactTokens = impl->options.autoCompactTokens;
@@ -765,6 +782,7 @@ namespace Agentmaster
         impl->snapshot.usage = record.usage;
         impl->snapshot.model = record.model;
         impl->snapshot.compactions = record.compactions;
+        impl->snapshot.thinkingLevel = impl->options.thinkingLevel;
         impl->latestTurn = record.turns;
         if (impl->options.persist)
         {
@@ -873,6 +891,35 @@ namespace Agentmaster
         _impl->conversation->Interrupt();
     }
 
+    void SessionSearchAgent::SetThinkingLevel(HarnessThinkingLevel level) noexcept
+    {
+        try
+        {
+            {
+                std::lock_guard lock{ _impl->mutex };
+                if (_impl->shuttingDown || _impl->snapshot.thinkingLevel == level)
+                {
+                    return; // nothing changes: no event, no log line (the pages seed the level at every AI-on)
+                }
+                _impl->snapshot.thinkingLevel = level;
+                // Under our lock, so that two windows that set levels at the same moment leave the
+                // snapshot and the conversation agreeing on the last one. Safe: the conversation
+                // never calls into this object while it holds its own lock (its sink runs outside
+                // it), so the two locks are only ever taken in this order.
+                _impl->conversation->SetThinking(HarnessThinkingLevelThinks(level) ? HarnessThinking::Adaptive : HarnessThinking::Disabled, HarnessThinkingLevelEffort(level));
+            }
+            LogAgent(std::wstring{ L"thinking -> " } + HarnessThinkingLevelWord(level) + L" (from the next request)");
+            SessionSearchEvent e;
+            e.kind = SessionSearchEventKind::StateChanged; // every window repaints its strip from the snapshot
+            _impl->Notify(std::move(e));
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the level the snapshot holds stays in effect for the next request.
+            LogSwallowedException(L"SessionSearchAgent::SetThinkingLevel");
+        }
+    }
+
     void SessionSearchAgent::Reset()
     {
         {
@@ -888,10 +935,16 @@ namespace Agentmaster
         {
             std::lock_guard lock{ _impl->mutex };
             const std::wstring model = _impl->snapshot.model; // the next conversation uses the same one
+            // The thinking level is the user's setting, not part of the conversation: a reset
+            // keeps it (and the model's levels, which the next process reports again anyway).
+            const HarnessThinkingLevel thinkingLevel = _impl->snapshot.thinkingLevel;
+            std::vector<std::wstring> supportedEfforts = std::move(_impl->snapshot.supportedEfforts);
             _impl->snapshot = SessionSearchSnapshot{};
             _impl->snapshot.epoch = _impl->conversation->Epoch();
             _impl->snapshot.state = _impl->conversation->State();
             _impl->snapshot.model = model;
+            _impl->snapshot.thinkingLevel = thinkingLevel;
+            _impl->snapshot.supportedEfforts = std::move(supportedEfforts);
             _impl->latestTurn = 0;
         }
         _impl->SaveView(); // an empty conversation: deletes the file
@@ -985,6 +1038,20 @@ namespace Agentmaster
         // Leaked on purpose (see the header). A function-local static: created once, thread-safe.
         static SessionSearchAgent* const agent = [] {
             SessionSearchAgentOptions options;
+            // The persisted thinking level (the Sessions page's strip toggle): the agent STARTS with
+            // it, so its first process has it on the command line. An unknown word reads as Off.
+            try
+            {
+                if (const auto level = ParseHarnessThinkingLevel(LoadAppSettings().sessionsAiThinkingLevel))
+                {
+                    options.thinkingLevel = *level;
+                }
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the agent starts at Off; the page's toggle still sets a level.
+                LogSwallowedException(L"SharedSessionSearchAgent: read the thinking level");
+            }
             options.openSessions = [] {
                 std::vector<std::pair<std::wstring, std::wstring>> open;
                 const auto registry = SharedEngine().registry;

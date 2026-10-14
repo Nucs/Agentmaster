@@ -524,7 +524,28 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   **request line**: write what you remember ("the session where I fixed the tab drag crash") and
   press **Enter**.
 - A **strip** under the header shows the request, what happens now ("Searching: …"), then the
-  model's one-sentence answer, and the size of the conversation ("ctx 12K / 500K").
+  model's one-sentence answer. Its right end reads **"thinking off  ctx 15k / 200k"**: the
+  thinking toggle, then the size of the conversation (of the most it can hold before Claude Code
+  compacts it: the model's own window or 500K, whichever is smaller).
+- **The thinking toggle** (the user's request of 2026-10-14, NOT BUILT yet) sets how much the
+  model thinks before it searches. A click moves to the next level: **off → low → medium → high →
+  xhigh → max → off**.
+  - **Off** (the default) is the fastest: no thinking before the answer, at effort low — the
+    setting the AI search was meant to have before the toggle. On Sonnet 5.5 it is the API's own
+    off, `{"thinking": {"type": "between_tools"}}`, which the harness sends itself (Claude Code
+    leaves the `thinking` field out for this model, and the API then thinks by default: the AI
+    search's "thinking off" of 2026-10-10 to 10-14 still thought, `SDK_HARNESS.md` 5.3). Per the
+    API, the short notes the model writes between two searches may come back as thinking blocks
+    (the first measured search had none: its notes came as text).
+  - The other levels turn on Claude Code's **adaptive thinking** (the model decides when and how
+    much to think), at that **effort** level: on Sonnet 5.5 the effort is what defines the
+    thinking level. Deeper is slower.
+  - A level the model does not support is skipped, once its process reported the model's levels
+    (Sonnet 5.5 has all five).
+  - It applies from the **next request**, to the running process (the conversation keeps its
+    whole context; 9.2), in **every window**, and it is kept after a restart
+    (`AppSettings::sessionsAiThinkingLevel`, written by the toggle itself).
+  - Off reads dim like the context size; a level that thinks reads brighter.
 - The **table shows exactly the sessions that the model picked**, best match first. The first
   row is selected, so its detail pane is there without a click.
 - A **follow-up refines the list** ("only the open ones", "older than that"): the conversation
@@ -543,12 +564,21 @@ There is **one** search conversation, in every window (`SharedSessionSearchAgent
 from one window shows its list in every page that has the AI search on. This is the engine's rule
 (one fleet, many lenses), and it is what "one conversation at a time" means here.
 
-The model and its settings are fixed: **Sonnet 5.5, thinking off, low effort**, no built-in tools,
-nothing written under `~/.claude` (`--no-session-persistence`, so the search conversation is never
-one of the sessions it searches), auto-compaction at 500,000 tokens, and **bypass permissions**
-(the harness's rule for every conversation; auto mode when Claude Code does not allow bypass —
-`SDK_HARNESS.md` 5.1). The model has exactly two tools (9.3), so bypass refuses nothing that it
-could otherwise do: the tool list is the limit.
+The model and its settings are fixed: **Sonnet 5.5**, no built-in tools, nothing written under
+`~/.claude` (`--no-session-persistence`, so the search conversation is never one of the sessions
+it searches), auto-compaction at 500,000 tokens, and **bypass permissions** (the harness's rule
+for every conversation; auto mode when Claude Code does not allow bypass — `SDK_HARNESS.md` 5.1).
+The model has exactly two tools (9.3), so bypass refuses nothing that it could otherwise do: the
+tool list is the limit.
+
+The one setting the user picks is the **thinking level** (9.1; until 2026-10-14 it was fixed:
+thinking "off", effort low — an off that did not hold on Sonnet 5.5, 9.1). The agent hands it to
+the harness (`SessionSearchAgent::SetThinkingLevel` → `HarnessConversation::SetThinking`), which
+changes the RUNNING process before the next request with Claude Code's control requests — the
+thinking, the request body (`between_tools` for off) and the effort —, so the conversation keeps
+its process and its whole context (`SDK_HARNESS.md` 5.3). The process's one agent reads the
+persisted level once, when it is created; the toggle persists every change and gives it to the
+agent, whose event repaints every window's strip.
 
 ### 9.3 Two tool servers, and the system prompt
 

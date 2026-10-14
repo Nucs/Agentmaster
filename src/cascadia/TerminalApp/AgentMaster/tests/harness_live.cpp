@@ -26,6 +26,10 @@
 //   P. THE PERMISSION POLICY when bypass is not allowed (made with the test seam, refused by
 //      Claude Code itself): P1 a policy switch -> auto; P2 both modes switched off -> dontAsk;
 //      P3 an error at start (--restricted) -> a second start with auto, remembered;
+//   T. THE THINKING SWITCH: thinking off at effort high (on Sonnet 5.5 the API's between_tools,
+//      since the model refuses "disabled") -> adaptive at effort max -> off at effort low, each
+//      change LIVE in one process, with the effort in effect and the turns' thinking blocks as the
+//      evidence;
 //   9. (with --agent) the Sessions search agent finds real sessions of this machine — and the
 //      run prints HOW: the command line, the system prompt, the tools as the model reads them,
 //      each request step by step (tool calls with their arguments, results, replies, times),
@@ -34,7 +38,8 @@
 //      it can use and how, and the page's answer stays the final sentence alone.
 //
 // Usage: harness_live.exe [--claude <path to claude.exe>] [--model <id>] [--agent "<request>"]
-//                         [--only-agent] [--only-permissions] [--verbose]
+//                         [--only-agent] [--only-permissions] [--only-thinking]
+//                         [--agent-thinking off|low|medium|high|xhigh|max] [--verbose]
 //        harness_live.exe --index [days]     measure the session index alone (no model call)
 //   --verbose prints each tool result in full (as far as the record keeps it).
 // Exit code: the number of failed checks.
@@ -65,6 +70,9 @@ namespace
     int g_failures = 0;
     int g_checks = 0;
     bool g_verbose = false;
+    // --agent-thinking <level>: the thinking level the search agent of scenario 9 starts with
+    // (the Sessions page's strip toggle; off by default, like the app's default).
+    HarnessThinkingLevel g_agentThinking = HarnessThinkingLevel::Off;
 
     double Seconds()
     {
@@ -504,7 +512,7 @@ namespace
             HarnessConversation conversation{ BaseOptions(claudeExe, model, dir, tools), {} };
             std::wstring line;
             bool hasNoPersistence = false, hasAutocompact = false, hasNoTools = false, hasStrict = false, hasThinking = false, hasSources = false, hasPromptFile = false;
-            bool hasBypassMode = false, hasDangerously = false, hasAllowedTools = false, hasRestricted = false, hasPermissionsKey = false;
+            bool hasBypassMode = false, hasDangerously = false, hasAllowedTools = false, hasRestricted = false, hasPermissionsKey = false, hasEmptyBody = false;
             const auto args = conversation.DescribeCommandLine();
             for (size_t i = 0; i < args.size(); ++i)
             {
@@ -518,11 +526,14 @@ namespace
                 {
                     hasAutocompact = hasAutocompact || (args[i] == L"--autocompact" && args[i + 1] == L"500000");
                     hasNoTools = hasNoTools || (args[i] == L"--tools" && args[i + 1].empty());
-                    hasThinking = hasThinking || (args[i] == L"--thinking" && args[i + 1] == L"disabled");
+                    // The thinking policy: a conversation wanted without thinking starts ADAPTIVE (the
+                    // reset anchor) and is switched off live, between_tools body included.
+                    hasThinking = hasThinking || (args[i] == L"--thinking" && args[i + 1] == L"adaptive");
                     hasSources = hasSources || (args[i] == L"--setting-sources" && args[i + 1].empty());
                     hasBypassMode = hasBypassMode || (args[i] == L"--permission-mode" && args[i + 1] == L"bypassPermissions");
                     hasAllowedTools = hasAllowedTools || (args[i] == L"--allowedTools" && args[i + 1].find(L"mcp__search") != std::wstring::npos && args[i + 1].find(L"mcp__display") != std::wstring::npos);
                     hasPermissionsKey = hasPermissionsKey || (args[i] == L"--settings" && args[i + 1].find(L"\"permissions\"") != std::wstring::npos);
+                    hasEmptyBody = hasEmptyBody || (args[i] == L"--settings" && args[i + 1].find(L"\"CLAUDE_CODE_EXTRA_BODY\":\"\"") != std::wstring::npos);
                 }
             }
             Say(L"  " + line);
@@ -530,7 +541,8 @@ namespace
             Check(hasAutocompact, L"--autocompact 500000 is passed");
             Check(hasNoTools, L"--tools \"\" is passed (no built-in tools)");
             Check(hasStrict, L"--strict-mcp-config is passed");
-            Check(hasThinking, L"--thinking disabled is passed");
+            Check(hasThinking, L"--thinking adaptive is passed (wanted without thinking, the process is switched off live before its first message)");
+            Check(hasEmptyBody, L"the --settings env writes CLAUDE_CODE_EXTRA_BODY empty at start (the between_tools body of 'off' is set live, after Claude Code stopped thinking)");
             Check(hasSources, L"--setting-sources \"\" is passed");
             Check(hasPromptFile, L"the system prompt goes through --system-prompt-file");
             Check(hasBypassMode && hasDangerously, L"BYPASS PERMISSIONS is asked for: --permission-mode bypassPermissions and --dangerously-skip-permissions");
@@ -788,6 +800,109 @@ namespace
             }
             Check(asksAuto && !asksBypass, L"later starts of this conversation ask for auto directly (no failed start each time)");
         }
+    }
+
+    // T. THE THINKING SWITCH (the thinking policy of AgentHarnessCore.h): a conversation starts with
+    // thinking OFF at effort low, stays off at effort HIGH, is switched to adaptive thinking at
+    // effort max, then back to off at effort low. Each change must be LIVE: the same process
+    // answers all three turns (one "process up" line in hooks.log), the effort Claude Code reports
+    // in effect follows (get_settings), and the turns' thinking is the evidence — the thinking
+    // blocks and Claude Code's estimate of their tokens: none, then some, then none. Three short
+    // Sonnet turns, none of which calls a tool (between_tools would report the short updates
+    // between tool calls as thinking blocks).
+    //   claudeExe / model / dir — as for the other scenarios.
+    //   throws — std::bad_alloc (the printed lines).
+    // Why "off" is tried at effort HIGH: at effort low the model may skip thinking by itself, so an
+    // off turn at low proves little. At high, the same farmer puzzle made Sonnet 5.5 think (~186
+    // tokens) whenever "off" was only Claude Code's `disabled` (which it leaves out of the request
+    // for this model, 2026-10-14); with the API's between_tools it thought 0.
+    // Each turn asks a DIFFERENT small puzzle on purpose: adaptive thinking decides by itself
+    // whether to think, and a question it answered before (or an easy one) may get no thinking at
+    // all, which would read as a failed switch. (The first run asked the same puzzle three times:
+    // the adaptive turn answered "9" from the turn before, without thinking.)
+    void RunThinkingScenario(const std::wstring& claudeExe, const std::wstring& model, const std::wstring& dir)
+    {
+        Say(L"=== T. the thinking level changes LIVE: off (effort high) -> adaptive at effort max -> off (effort low), in one process ===");
+        FakeTools tools;
+        Collector events;
+        HarnessOptions o = BaseOptions(claudeExe, model, dir, tools);
+        o.name = L"live-thinking"; // its own log tag
+        o.persistRecord = false;
+        o.workDir = dir + L"\\live-thinking";
+        o.systemPrompt = L"You are a test assistant. Answer the user's question yourself, without calling a tool, in one short line.";
+        o.thinking = HarnessThinking::Disabled;
+        o.effort = L"low";
+        const uintmax_t mark = HooksLogSize();
+        HarnessConversation conversation{ std::move(o), std::ref(events) };
+
+        // The command line: every process starts adaptive (Claude Code's reset anchor), the effort
+        // rides its own flag, the effort variable is nowhere, and the request body starts empty
+        // (between_tools is set live, after Claude Code stopped thinking).
+        bool adaptiveFlag = false;
+        bool effortLow = false;
+        bool effortVariable = false;
+        bool emptyBody = false;
+        const auto args = conversation.DescribeCommandLine();
+        for (const auto& arg : args)
+        {
+            effortVariable = effortVariable || arg.find(L"CLAUDE_CODE_EFFORT_LEVEL") != std::wstring::npos; // the --settings text is one argument
+            emptyBody = emptyBody || arg.find(L"\"CLAUDE_CODE_EXTRA_BODY\":\"\"") != std::wstring::npos;
+        }
+        for (size_t i = 0; i + 1 < args.size(); ++i)
+        {
+            adaptiveFlag = adaptiveFlag || (args[i] == L"--thinking" && args[i + 1] == L"adaptive");
+            effortLow = effortLow || (args[i] == L"--effort" && args[i + 1] == L"low");
+        }
+        Check(adaptiveFlag && effortLow && !effortVariable && emptyBody, L"wanted without thinking, it still starts --thinking adaptive --effort low with an empty request body (switched off live before the first message), with no CLAUDE_CODE_EFFORT_LEVEL");
+
+        // "Off" is the API's between_tools on a model that refuses "disabled" (Sonnet 5.5), and
+        // Claude Code's own "disabled" on an older model.
+        const std::wstring offWord = HarnessModelRefusesDisabledThinking(model) ? L"between_tools" : L"disabled";
+        conversation.Prewarm();
+        Check(WaitReady(conversation), L"the process started");
+        HarnessInventory inventory = conversation.Inventory();
+        Say(L"  inventory  thinking " + inventory.thinking + L", effort in effect " + inventory.effort + L", the model's effort levels: " + Join(inventory.supportedEfforts) + L", adaptive thinking " + (inventory.adaptiveThinking ? L"yes" : L"no"));
+        Check(inventory.thinking == offWord && inventory.effort == L"low", L"at start: thinking off (" + inventory.thinking + L"), effort low in effect (get_settings)");
+        Check(std::find(inventory.supportedEfforts.begin(), inventory.supportedEfforts.end(), L"high") != inventory.supportedEfforts.end() && inventory.adaptiveThinking, L"the process reports the model's effort levels and adaptive thinking (its initialize answer)");
+
+        // One turn, with its time, its thinking (blocks and Claude Code's token estimate) and its
+        // answer printed.
+        const auto ask = [&](const wchar_t* label, const wchar_t* question) {
+            const uint64_t turn = conversation.Send(question);
+            const HarnessEvent done = events.WaitTurn(turn);
+            Say(std::wstring{ L"  " } + label + L": " + std::to_wstring(done.durationMs) + L" ms, " + std::to_wstring(done.thinkingBlocks) + L" thinking block(s), ~" + std::to_wstring(done.thinkingTokens) + L" thinking token(s): " + Short(done.text));
+            return done;
+        };
+        const auto thought = [](const HarnessEvent& e) { return e.thinkingBlocks > 0 || e.thinkingTokens > 0; };
+
+        // Off at effort HIGH first: the effort that made the model think on this puzzle while "off"
+        // was not a real off (the scenario's header).
+        conversation.SetThinking(HarnessThinking::Disabled, L"high");
+        const HarnessEvent off1 = ask(L"turn 1 (off, effort high)", L"A farmer has 17 sheep. All but 9 run away. He then buys twice as many as remain, and later sells a third of all he has. How many sheep are left? Work it out, then reply with the number only.");
+        inventory = conversation.Inventory();
+        Check(off1.kind == HarnessEventKind::TurnCompleted && !off1.isError && !thought(off1), L"thinking off at effort high: the turn has no thinking (no block, no estimate)" + (off1.isError ? L": " + Short(off1.text) : std::wstring{}));
+        Check(inventory.thinking == offWord && inventory.effort == L"high", L"still off (" + inventory.thinking + L"), effort " + inventory.effort + L" in effect: the effort moved alone");
+
+        conversation.SetThinking(HarnessThinking::Adaptive, L"max");
+        const HarnessEvent deep = ask(L"turn 2 (adaptive, effort max)", L"How many positive integers below 1000 have digits that sum to 13? Work it out, then reply with the number only.");
+        inventory = conversation.Inventory();
+        Check(deep.kind == HarnessEventKind::TurnCompleted && !deep.isError && thought(deep), L"adaptive thinking at effort max: the turn thinks (" + std::to_wstring(deep.thinkingBlocks) + L" block(s), ~" + std::to_wstring(deep.thinkingTokens) + L" token(s))" + (deep.isError ? L": " + Short(deep.text) : std::wstring{}));
+        Check(inventory.thinking == L"adaptive" && inventory.effort == L"max", L"switched live: thinking " + inventory.thinking + L", effort " + inventory.effort + L" in effect");
+
+        conversation.SetThinking(HarnessThinking::Disabled, L"low");
+        const HarnessEvent off2 = ask(L"turn 3 (off again, effort low)", L"A train leaves at 9:40 and travels 210 km at 84 km/h, then waits 25 minutes, then travels 99 km at 66 km/h. At what time does it arrive? Work it out, then reply with the time only.");
+        inventory = conversation.Inventory();
+        Check(off2.kind == HarnessEventKind::TurnCompleted && !off2.isError && !thought(off2), L"back to off: no thinking (no block, no estimate)" + (off2.isError ? L": " + Short(off2.text) : std::wstring{}));
+        Check(inventory.thinking == offWord && inventory.effort == L"low", L"thinking off (" + inventory.thinking + L"), effort low in effect again");
+
+        const std::wstring logged = SayHarnessLogSince(mark);
+        size_t starts = 0;
+        for (size_t at = logged.find(L"process up"); at != std::wstring::npos; at = logged.find(L"process up", at + 1))
+        {
+            ++starts;
+        }
+        Check(starts == 1, L"ONE process answered the three turns: every change was live (" + std::to_wstring(starts) + L" start(s))");
+        Check(logged.find(L"changed live at start") != std::wstring::npos && logged.find(L"changed live before turn 1") != std::wstring::npos && logged.find(L"changed live before turn 2") != std::wstring::npos && logged.find(L"changed live before turn 3") != std::wstring::npos, L"hooks.log has a 'changed live' line for the start and for each change");
     }
 
 #ifndef AM_LIVE_NO_AGENT
@@ -1050,6 +1165,8 @@ namespace
         SessionSearchAgentOptions options;
         options.claudeExe = [claudeExe] { return claudeExe; };
         options.persist = false; // a test must not leave a conversation in the profile
+        options.thinkingLevel = g_agentThinking;
+        Say(std::wstring{ L"  thinking level: " } + HarnessThinkingLevelWord(g_agentThinking) + L" (--agent-thinking)");
         SessionSearchAgent agent{ options };
         SayAgentSetup(agent);
         const uintmax_t logMark = HooksLogSize();
@@ -1237,6 +1354,7 @@ int wmain(int argc, wchar_t** argv)
     std::wstring agentRequest;
     bool onlyAgent = false;
     bool onlyPermissions = false; // --only-permissions: the permission scenarios alone (two short turns)
+    bool onlyThinking = false; // --only-thinking: scenario T alone (three short turns)
     int indexDays = -1; // --index [days]: -1 = not asked, 0 = the default period
     for (int i = 1; i < argc; ++i)
     {
@@ -1269,6 +1387,15 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--only-permissions")
         {
             onlyPermissions = true;
+        }
+        else if (a == L"--only-thinking")
+        {
+            onlyThinking = true;
+        }
+        else if (a == L"--agent-thinking" && i + 1 < argc)
+        {
+            // An unknown word keeps Off, as the app reads an unknown persisted level.
+            g_agentThinking = ParseHarnessThinkingLevel(argv[++i]).value_or(HarnessThinkingLevel::Off);
         }
         else if (a == L"--verbose")
         {
@@ -1304,16 +1431,27 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     }
 #endif
-    if (!onlyAgent && !onlyPermissions)
+    if (onlyThinking)
     {
-        RunHarnessScenarios(claudeExe, model, dir);
+        RunThinkingScenario(claudeExe, model, dir);
     }
-    if (!onlyAgent)
+    else
     {
-        RunPermissionScenarios(claudeExe, model, dir);
+        if (!onlyAgent && !onlyPermissions)
+        {
+            RunHarnessScenarios(claudeExe, model, dir);
+        }
+        if (!onlyAgent)
+        {
+            RunPermissionScenarios(claudeExe, model, dir);
+        }
+        if (!onlyAgent && !onlyPermissions)
+        {
+            RunThinkingScenario(claudeExe, model, dir);
+        }
     }
 #ifndef AM_LIVE_NO_AGENT
-    if (!agentRequest.empty())
+    if (!agentRequest.empty() && !onlyThinking)
     {
         RunAgentScenario(claudeExe, agentRequest);
     }

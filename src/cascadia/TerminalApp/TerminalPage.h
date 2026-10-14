@@ -1063,6 +1063,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiQuestionText{ nullptr }; // the strip's first line: the newest request
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiStatusText{ nullptr }; // the strip's second line: the activity, the answer, or the hint
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiUsageText{ nullptr }; // the strip's right end: context tokens of the conversation
+        // The strip's "thinking <level>" toggle, left of the context size: a click moves the AI
+        // search to the next thinking level (off -> low -> ... -> max -> off), persisted for every
+        // window (AppSettings::sessionsAiThinkingLevel). Shown in AI mode only, with the strip.
+        winrt::Windows::UI::Xaml::Controls::Button _sessAiThinkingBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessAiThinkingText{ nullptr }; // the toggle's label, "thinking off" ... "thinking max"
 
         // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
         // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit
@@ -2167,6 +2172,7 @@ namespace winrt::TerminalApp::implementation
         void _SessionsAiMergeExtraRows(); // make _sessionsRows / _sessionsEntries hold exactly the extra rows the current AI list needs (aiExtra rows, at the end)
         bool _SessionsAiApplyView(std::vector<const _SessionsRow*>& view, bool& keepOrder) const; // _RenderSessionsTable: replace the view with the AI list when one is active; false = no AI list, the view is untouched
         void _UpdateSessionsAiStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot); // repaint the strip, the reset button and the placeholder from the conversation's state
+        void _CycleSessionsAiThinking(); // the strip's thinking toggle was clicked: the next level (skipping levels the model lacks), persisted for every window, applied by the agent from the next request
         static _SessionsRow _SessionsRowFromIndexEntry(const ::Agentmaster::SessionIndexEntry& entry); // a table row from an index entry alone (no directory listing): the rows of sessions outside the page's window
         bool _AddSessionIdToHiddenList(const std::wstring& sessionId); // Agentmaster: append an id to AppSettings.hiddenSessionIds (freshest-disk RMW + in-memory copy); idempotent, returns true if newly added. Shared by the row right-click hide AND the auto-hide-on-delete seam. NO UI side effects — the caller refreshes.
         void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)

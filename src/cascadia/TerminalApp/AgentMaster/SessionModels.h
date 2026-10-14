@@ -2681,6 +2681,16 @@ namespace Agentmaster
         // every open re-reads it, so a flip in one window decides the next open in every window (an
         // overlay already open in another window keeps its state until it is opened again). Default true.
         bool transcriptOverlayWrapLines{ true };
+        // Agentmaster (SESSIONS.md §9.1): the THINKING LEVEL of the Sessions page's AI search — the
+        // strip's "thinking <level>" toggle, left of "ctx N / M" (the user's request of 2026-10-14).
+        // The word of an AgentHarnessCore HarnessThinkingLevel: "off" (no thinking, effort low — the
+        // fastest, and the only setting before the toggle existed) or adaptive thinking at "low" /
+        // "medium" / "high" / "xhigh" / "max" effort. GLOBAL + persisted like transcriptOverlayLevel:
+        // each click is a freshest-disk RMW written by the page itself (never the cog form — so both
+        // cog-Save preserve blocks restore it), and the page reads it from disk when the AI search is
+        // turned on; the process's one search agent applies it, so every window shows the same level.
+        // The engine stores the word opaquely; an unknown or empty word reads as "off". Default "off".
+        std::wstring sessionsAiThinkingLevel{ L"off" };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

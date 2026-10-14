@@ -27,10 +27,12 @@
 // the request, what happens ("Searching: ..."), then the model's one-sentence answer; the table
 // shows exactly the sessions the model picked, in its order. A follow-up ("only the open ones")
 // refines the list, because the conversation keeps its context. The crossed circle beside the
-// toggle throws the conversation away and brings the normal list back.
+// toggle throws the conversation away and brings the normal list back. The strip's right end
+// reads "thinking off  ctx 15k / 200k": a click on "thinking off" moves to the next thinking
+// level (off -> low -> medium -> high -> xhigh -> max), kept for every window and after a restart.
 //
 // What is behind it: ONE conversation per process (SharedSessionSearchAgent, SessionSearchAgent.h)
-// -- a hosted Sonnet 5.5 without thinking, started through the Claude agent SDK, with two tool
+// -- a hosted Sonnet 5.5 (thinking off, unless the strip's toggle picks a level), started through the Claude agent SDK, with two tool
 // servers: one searches (the page's own search, SessionSearchTools.h), one shows. This file is
 // only the VIEW of that conversation for one window:
 //   - it sends requests (Ask), resets (Reset), and tells the agent when no page uses it;
@@ -295,7 +297,7 @@ namespace winrt::TerminalApp::implementation
             };
             col(0, GridUnitType::Auto); // the state dot
             col(1, GridUnitType::Star); // the request line over the status line
-            col(0, GridUnitType::Auto); // the context size
+            col(0, GridUnitType::Auto); // the thinking toggle, then the context size
         }
         _sessAiDot = Border{};
         _sessAiDot.Width(8);
@@ -319,12 +321,45 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(lines, 1);
         inner.Children().Append(lines);
 
+        // The right end reads "thinking off  ctx 15k / 200k": the thinking toggle, then the context
+        // size, side by side and centered on each other.
+        StackPanel rightEnd;
+        rightEnd.Orientation(Orientation::Horizontal);
+        rightEnd.VerticalAlignment(VerticalAlignment::Top);
+        rightEnd.Margin(Thickness{ 10, 0, 0, 0 });
+
+        // The thinking toggle: a FLAT button (no fill, no border at rest — local values that only
+        // the rest state uses, so the stock hover and pressed fills still show), as small as the
+        // strip's text, so the row keeps its height. A click moves to the next level; the change
+        // itself runs on a clean tick (the page's pointer-handler rule).
+        _sessAiThinkingText = SessText(L"thinking off", 11, false, 0.6);
+        _sessAiThinkingBtn = Button{};
+        _sessAiThinkingBtn.Content(_sessAiThinkingText);
+        _sessAiThinkingBtn.Padding(Thickness{ 5, 0, 5, 1 });
+        _sessAiThinkingBtn.MinWidth(0);
+        _sessAiThinkingBtn.MinHeight(0);
+        _sessAiThinkingBtn.Background(SessBrush(0, 0, 0, 0));
+        _sessAiThinkingBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        _sessAiThinkingBtn.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
+        _sessAiThinkingBtn.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessAiThinkingBtn, L"Thinking", L"How much the model thinks before it searches. Click for the next level: off \x2192 low \x2192 medium \x2192 high \x2192 xhigh \x2192 max \x2192 off.\n\nOff is the fastest: the model does not think before it answers (at most, the short notes it writes between two searches can count as thinking). The other levels turn on adaptive thinking (the model decides when to think), and the level (Claude Code\x2019s effort) sets how deep. A deeper level answers harder requests better and takes longer.\n\nIt applies from your next request, in every window, and is kept after a restart. The conversation keeps its context.");
+        _sessAiThinkingBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (auto self = weak.get())
+                {
+                    self->_CycleSessionsAiThinking();
+                }
+            });
+        });
+        rightEnd.Children().Append(_sessAiThinkingBtn);
+
         _sessAiUsageText = SessText(L"", 11, false, 0.5);
-        _sessAiUsageText.Margin(Thickness{ 10, 0, 0, 0 });
-        _sessAiUsageText.VerticalAlignment(VerticalAlignment::Top);
-        SessSetTip(_sessAiUsageText, L"Conversation size", L"How much the AI search's conversation holds, in tokens, of the size at which Claude Code compacts it by itself (500K). A longer conversation is not slower to answer, but a new subject is better served by a new conversation: the crossed circle.");
-        Grid::SetColumn(_sessAiUsageText, 2);
-        inner.Children().Append(_sessAiUsageText);
+        _sessAiUsageText.Margin(Thickness{ 4, 0, 0, 0 });
+        _sessAiUsageText.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessAiUsageText, L"Conversation size", L"How much the AI search's conversation holds, in tokens, of the most it can hold before Claude Code compacts it by itself: the model's own window or 500K, whichever is smaller. A longer conversation is not slower to answer, but a new subject is better served by a new conversation: the crossed circle.");
+        rightEnd.Children().Append(_sessAiUsageText);
+        Grid::SetColumn(rightEnd, 2);
+        inner.Children().Append(rightEnd);
 
         _sessAiStrip.Child(inner);
         Grid::SetColumn(_sessAiStrip, 0);
@@ -1021,6 +1056,15 @@ namespace winrt::TerminalApp::implementation
         _sessAiStatusText.Foreground(SolidColorBrush{ ink });
         _sessAiStatusText.Opacity(inkOpacity);
         _sessAiDot.Background(SolidColorBrush{ dot });
+        // The thinking level the next request runs with — the agent's, so a click in another
+        // window shows here too. Off stays dim like the context size; a level that thinks reads
+        // brighter, since it changes how long a request takes.
+        if (_sessAiThinkingText)
+        {
+            const bool thinks = ::Agentmaster::HarnessThinkingLevelThinks(snapshot.thinkingLevel);
+            _sessAiThinkingText.Text(winrt::hstring{ std::wstring{ L"thinking " } + ::Agentmaster::HarnessThinkingLevelWord(snapshot.thinkingLevel) });
+            _sessAiThinkingText.Opacity(thinks ? 0.95 : 0.6);
+        }
         // The context size, once the model answered at least once.
         std::wstring usage;
         if (snapshot.usage.contextTokens > 0)
@@ -1036,6 +1080,39 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _sessAiUsageText.Text(winrt::hstring{ usage });
+    }
+
+    // The strip's thinking toggle was clicked: move the AI search to the next thinking level.
+    //   - The next level comes from the AGENT's level (not this page's label), so two windows that
+    //     click in turn walk one rotation; it skips a level whose effort the model does not have
+    //     (the model's list, once its process reported one).
+    //   - It is persisted first (a freshest-disk read-modify-write of one field, the transcript
+    //     overlay's idiom: never a stale in-memory copy over a cog Save or another window's change),
+    //     then given to the agent, whose StateChanged event repaints every window's strip.
+    //   - It applies from the next request; one that runs now keeps its level.
+    // Never throws: a failure is logged, and the agent keeps the level it had.
+    void TerminalPage::_CycleSessionsAiThinking()
+    {
+        try
+        {
+            _SessionsAiAttach(); // AI mode is on (the toggle shows only then), so the agent exists; this only registers the listener when needed
+            auto& agent = ::Agentmaster::SharedSessionSearchAgent();
+            const auto snapshot = agent.Snapshot();
+            const auto next = ::Agentmaster::NextHarnessThinkingLevel(snapshot.thinkingLevel, snapshot.supportedEfforts);
+            const std::wstring word = ::Agentmaster::HarnessThinkingLevelWord(next);
+            auto settings = ::Agentmaster::LoadAppSettings();
+            if (settings.sessionsAiThinkingLevel != word)
+            {
+                settings.sessionsAiThinkingLevel = word;
+                ::Agentmaster::SaveAppSettings(settings);
+            }
+            agent.SetThinkingLevel(next);
+            ::Agentmaster::LogNav(L"sessions ai thinking -> " + word);
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_CycleSessionsAiThinking");
+        }
     }
 
     // A table row from an index entry alone — no directory listing, no registry. The same
