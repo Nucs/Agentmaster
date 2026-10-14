@@ -2146,6 +2146,9 @@ namespace winrt::TerminalApp::implementation
                     // form — a Save must not reset them.
                     s.transcriptOverlayLevel = disk.transcriptOverlayLevel;
                     s.transcriptOverlayWrapLines = disk.transcriptOverlayWrapLines;
+                    // The Sessions AI search's thinking level: written by the page's strip toggle
+                    // (freshest-disk RMW), never by this form — a Save must not reset it.
+                    s.sessionsAiThinkingLevel = disk.sessionsAiThinkingLevel;
                     // Updater (Updater.h): ALL update state is written outside the cog form —
                     // skip/postpone by the prompt's JSON RMW (possibly from another window or the
                     // startup check), the prerelease + nightly opt-ins by each switch's own

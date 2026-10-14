@@ -716,6 +716,7 @@ void TestAppSettings()
         in.tabColorPickerAdvancedOpen = false; // non-default (default true = ... and its More/Less "advanced" inputs expanded)
         in.transcriptOverlayLevel = L"compact"; // non-default (default "default") — the transcript overlay's last-picked level tab
         in.transcriptOverlayWrapLines = false; // non-default (default true = long lines wrap) — the transcript overlay's line-wrap toggle
+        in.sessionsAiThinkingLevel = L"xhigh"; // non-default (default "off") — the Sessions AI search's strip toggle
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
@@ -819,6 +820,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerAdvancedOpen == false, "settings tabColorPickerAdvancedOpen round-trip");
         CHECK(out.transcriptOverlayLevel == L"compact", "settings transcriptOverlayLevel round-trip (the remembered level name)");
         CHECK(out.transcriptOverlayWrapLines == false, "settings transcriptOverlayWrapLines round-trip (the transcript overlay's line-wrap toggle)");
+        CHECK(out.sessionsAiThinkingLevel == L"xhigh", "settings sessionsAiThinkingLevel round-trip (the AI search's thinking level word)");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
@@ -910,6 +912,7 @@ void TestAppSettings()
         CHECK(out.tabColorPickerCustomOpen == true && out.tabColorPickerAdvancedOpen == true, "settings tab color picker opens with Custom + advanced expanded by default on empty");
         CHECK(out.transcriptOverlayLevel == L"default", "settings transcriptOverlayLevel default \"default\" (the overlay opens at Default) on empty");
         CHECK(out.transcriptOverlayWrapLines == true, "settings transcriptOverlayWrapLines default true (long lines wrap) on empty");
+        CHECK(out.sessionsAiThinkingLevel == L"off", "settings sessionsAiThinkingLevel default \"off\" (no thinking, the agent's setting before the toggle) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
         CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");

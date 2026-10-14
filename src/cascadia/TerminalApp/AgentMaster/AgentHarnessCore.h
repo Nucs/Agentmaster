@@ -257,12 +257,217 @@ namespace Agentmaster
     //   (Claude Code chose it because bypass is not allowed).
     HarnessPermissionStep DecideHarnessPermissionStep(HarnessPermissionMode asked, std::wstring_view reportedMode) noexcept;
 
+    // ----- the thinking policy -------------------------------------------------------------
+    //
+    // How much the model reasons before it answers is a LEVEL: no thinking at all, or Claude
+    // Code's ADAPTIVE thinking (the model decides when and how much to think) at one of Claude
+    // Code's effort levels. On Sonnet 5.5 the effort is what defines the thinking level (the
+    // user's words, 2026-10-14), so the levels are "off" plus the effort words.
+    //
+    // A level can change while the process runs, with no restart — the conversation keeps its
+    // process and its whole context (measured on Claude Code 2.1.291 with control requests only,
+    // no model request):
+    //   - THINKING: the control request set_max_thinking_tokens. 0 turns thinking off; null
+    //     brings back the thinking config the process was STARTED with — but only when that
+    //     config was given explicitly: Claude Code keeps an explicit start config as its reset
+    //     anchor (`new obr(thinkingConfig, thinkingConfigExplicit ? thinkingConfig : undefined)`
+    //     in its bundle). A process started with `--thinking disabled` therefore has no way back
+    //     to adaptive. So a harness process always starts with `--thinking adaptive`, and an
+    //     "off" level is applied with set_max_thinking_tokens 0 before the first message.
+    //   - EFFORT: the control request apply_flag_settings {"effortLevel": <word>}. The request
+    //     get_settings then reports the effort in effect (applied.effort: after Claude Code's own
+    //     caps and the model's step-down of a level it does not support).
+    //     ⚠ The variable CLAUDE_CODE_EFFORT_LEVEL OVERRIDES a live change, and Claude Code still
+    //     answers "success": measured, every change then stayed "low". So the harness never sets
+    //     it (BuildHarnessSettingsJson) and removes an inherited one (BuildHarnessEnvironment);
+    //     the start effort rides the --effort flag, which nothing then overrides.
+    //   - OFF, on a model that REFUSES `"thinking": {"type": "disabled"}` (Sonnet 5.5 and every
+    //     current model; HarnessModelRefusesDisabledThinking). set_max_thinking_tokens 0 alone
+    //     does NOT turn thinking off there: Claude Code then LEAVES OUT the request's `thinking`
+    //     field (its rule: send "disabled" only to a model that takes it), and the API runs its
+    //     default, adaptive thinking (measured: with --thinking disabled, Sonnet 5.5 still thought,
+    //     ~186 tokens on a small puzzle at effort high). Sent anyway, "disabled" gets an HTTP 400:
+    //     "To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead
+    //     of {"type": "disabled"}. The model does not think before responding. The short updates
+    //     it writes between tool calls come back as thinking blocks." Claude Code 2.1.291 does not
+    //     know that type, so the harness sends it ITSELF: Claude Code spreads the JSON object in
+    //     the variable CLAUDE_CODE_EXTRA_BODY over every request body AFTER its own `thinking`
+    //     field, and reads the variable from its process environment at every request. So "off"
+    //     on such a model is TWO live changes, in this order:
+    //       1. set_max_thinking_tokens 0 — Claude Code now believes thinking is off, so it also
+    //          leaves out its clear_thinking context strategy, which the API refuses next to
+    //          between_tools ("`clear_thinking_20251015` strategy requires `thinking` to be
+    //          enabled or adaptive" — measured with the variable alone);
+    //       2. apply_flag_settings {"env": {... "CLAUDE_CODE_EXTRA_BODY": <between_tools>}}.
+    //     Back on: the variable is cleared FIRST, then set_max_thinking_tokens null. Both orders
+    //     keep the one combination the API refuses (Claude Code adaptive + between_tools) from
+    //     ever existing between two requests.
+    //     Measured in ONE process (Claude Code 2.1.291, Sonnet 5.5, 2026-10-14): off at effort
+    //     high and at effort low — 0 thinking blocks, no error, the reasoning written in the
+    //     visible answer instead; adaptive at effort max — 1 block, ~354 tokens; off again — 0.
+    //     ⚠ apply_flag_settings merges SHALLOW: a patch's "env" REPLACES the whole env object of
+    //     the --settings layer. So every patch carries the COMPLETE env object
+    //     (BuildHarnessEnvPatchJson), never the one variable alone.
+    //     ⚠ Claude Code ignores CLAUDE_CODE_EXTRA_BODY under an organization policy that turns
+    //     experimental betas off ("ignored: experimental betas are disabled by your
+    //     organization's policy"). "Off" then runs as the API's default (adaptive thinking).
+    //     On a model that TAKES "disabled" (the older models Claude Code lists), "off" is the
+    //     first change alone: Claude Code sends "disabled" itself, and the variable stays empty.
+    //
+    // The functions below are the DECISIONS; AgentHarness.cpp carries them out
+    // (StartOnce, EnsureProcess, ApplyThinkingLive).
+
+    // A thinking level, in the order the Sessions page's toggle rotates through them.
+    enum class HarnessThinkingLevel
+    {
+        // No thinking before the answer, at effort "low": the fastest answer. (On a model that
+        // refuses "disabled" this is the API's own "between_tools" off, the policy above: per the
+        // API, the short updates the model writes BETWEEN tool calls may come back as thinking
+        // blocks — the search agent's 4-request turn measured none, its notes came as text.)
+        Off,
+        Low, // adaptive thinking at effort "low"
+        Medium, // adaptive thinking at effort "medium"
+        High, // adaptive thinking at effort "high"
+        XHigh, // adaptive thinking at effort "xhigh"
+        Max, // adaptive thinking at effort "max": the deepest, and the slowest
+    };
+
+    // The level's word: "off", "low", "medium", "high", "xhigh" or "max". It is the persisted
+    // form (AppSettings::sessionsAiThinkingLevel) and the word a page shows; for every level but
+    // Off it is also Claude Code's effort word.
+    const wchar_t* HarnessThinkingLevelWord(HarnessThinkingLevel level) noexcept;
+
+    // Read a level word back.
+    //   word    — compared without regard to ASCII case; spaces and tabs around it are ignored.
+    //   returns — the level; nullopt for any other word (a hand-edited or a future setting), which
+    //             a caller treats as Off.
+    std::optional<HarnessThinkingLevel> ParseHarnessThinkingLevel(std::wstring_view word) noexcept;
+
+    // True for every level but Off: the level runs adaptive thinking.
+    bool HarnessThinkingLevelThinks(HarnessThinkingLevel level) noexcept;
+
+    // The effort Claude Code gets at `level`: the level's own word for Low..Max, and "low" for
+    // Off — no thinking keeps the lowest effort, the fastest answer, which was the search agent's
+    // only setting before the levels existed.
+    const wchar_t* HarnessThinkingLevelEffort(HarnessThinkingLevel level) noexcept;
+
+    // The level after `level` in the toggle's rotation, Off -> Low -> Medium -> High -> XHigh ->
+    // Max -> Off, skipping a level whose effort the model does not support.
+    //   level            — the current level.
+    //   supportedEfforts — the model's effort words as Claude Code reports them
+    //                      (HarnessModelReasoning::supportedEfforts). EMPTY = not known yet
+    //                      (no process answered): every level counts as supported. Off is
+    //                      always offered, so the rotation always ends.
+    //   returns          — the next offered level; Off after the last one.
+    HarnessThinkingLevel NextHarnessThinkingLevel(HarnessThinkingLevel level, const std::vector<std::wstring>& supportedEfforts) noexcept;
+
+    // True when `effort` is one of Claude Code's effort words ("low", "medium", "high", "xhigh",
+    // "max"). Anything else must not reach the command line or a control request: Claude Code
+    // ignores an unknown --effort with a warning, and would hand a wrong value to the API.
+    bool IsHarnessEffortWord(std::wstring_view effort) noexcept;
+
+    // True when the API refuses `"thinking": {"type": "disabled"}` for `model`, so that "off"
+    // has to be the API's own `{"type": "between_tools"}` (the thinking policy above). It mirrors
+    // the rule Claude Code 2.1.291 decides by for the first-party API (qEe in its bundle): a
+    // model TAKES "disabled" when Claude Code lists it — Claude 3, Opus 4.0, 4.1 and 4.5 to 4.8,
+    // Opus 5, Sonnet 4.0, 4.5, 4.6 and 5, Haiku 4.5 — and refuses it otherwise. That way the
+    // harness adds between_tools exactly where Claude Code leaves the field out.
+    //   model   — a model id as --model takes it or as Claude Code reports it (resolvedModel).
+    //             Compared without regard to ASCII case, after dropping what does not name the
+    //             model: the "[1m]" context marker, a provider prefix up to "anthropic." (Bedrock),
+    //             an "@..." suffix (Vertex), a "-v<n>[:<n>]" suffix (Bedrock), and a trailing
+    //             "-YYYYMMDD" date.
+    //   returns — false for the listed models; true for every other name, an alias such as
+    //             "sonnet" and an empty name included (Claude Code's own default for a model it
+    //             does not list: a current model). A caller that knows the alias's resolved id
+    //             (HarnessModelReasoning::resolvedModel) passes that instead.
+    // ⚠ A new Claude Code version can change the list. When "off" stops working (an API 400 that
+    //   names between_tools, or thinking in an "off" turn without tools), compare with its bundle.
+    bool HarnessModelRefusesDisabledThinking(std::wstring_view model) noexcept;
+
+    // The request-body object that turns thinking off on a model that refuses "disabled":
+    // CLAUDE_CODE_EXTRA_BODY's value for an "off" level there (the thinking policy above).
+    inline constexpr std::wstring_view kHarnessBetweenToolsRequestBody = LR"({"thinking":{"type":"between_tools"}})";
+
+    // The reasoning a process runs with, as far as the harness sets it: the three things a live
+    // change can move.
+    struct HarnessReasoningState
+    {
+        // Claude Code's own thinking config: true = adaptive, false = off
+        // (set_max_thinking_tokens 0).
+        bool thinks{ true };
+        // The request body carries kHarnessBetweenToolsRequestBody (CLAUDE_CODE_EXTRA_BODY): only
+        // ever with `thinks` false, and only for a model that refuses "disabled".
+        bool betweenTools{ false };
+        // The effort word; empty = none was set (Claude Code's default).
+        std::wstring effort;
+    };
+
+    // What has to change in a RUNNING process to go from the reasoning it has to the one wanted.
+    // Only for a process that was started with `--thinking adaptive` (the thinking policy above):
+    // that is the one kind whose thinking can be turned off and on again live.
+    // SEND ORDER (ApplyThinkingLive, AgentHarness.cpp): betweenToolsOff, thinkingOff, thinkingOn,
+    // betweenToolsOn, effort. So a change toward "on" clears the body before Claude Code thinks
+    // again, and a change toward "off" sets the body only after Claude Code stopped thinking: the
+    // API refuses between_tools next to Claude Code's adaptive request.
+    struct HarnessThinkingChange
+    {
+        bool thinkingOff{}; // send set_max_thinking_tokens 0
+        bool thinkingOn{}; // send set_max_thinking_tokens null (back to the adaptive start config)
+        bool betweenToolsOn{}; // send apply_flag_settings with the env object whose CLAUDE_CODE_EXTRA_BODY is between_tools
+        bool betweenToolsOff{}; // send apply_flag_settings with the env object whose CLAUDE_CODE_EXTRA_BODY is empty
+        std::wstring effort; // non-empty: send apply_flag_settings {"effortLevel": effort}
+
+        // True when the process already runs as wanted: no request is to be sent.
+        bool Empty() const noexcept { return !thinkingOff && !thinkingOn && !betweenToolsOn && !betweenToolsOff && effort.empty(); }
+    };
+
+    // Plan the control requests for one change. Pure.
+    //   applied — what the process runs with now, as the harness last set it.
+    //   wanted  — what is wanted. An empty or unknown wanted.effort keeps the applied effort (no
+    //             effort request). A wanted.betweenTools with wanted.thinks true is a caller error
+    //             and is read as false (the API refuses that pair).
+    //   returns — the requests; Empty() when nothing differs.
+    //   throws  — std::bad_alloc.
+    HarnessThinkingChange PlanHarnessThinkingChange(const HarnessReasoningState& applied, const HarnessReasoningState& wanted);
+
+    // What Claude Code says one model can do in reasoning: the model's entry in the `models` list
+    // of its answer to `initialize`.
+    struct HarnessModelReasoning
+    {
+        bool known{}; // the list had an entry for the model
+        // The entry's wire id: its resolvedModel ("claude-sonnet-5-5" for the "sonnet" row), else
+        // its value. What HarnessModelRefusesDisabledThinking is to be asked about, since --model
+        // may be an alias.
+        std::wstring resolvedModel;
+        std::vector<std::wstring> supportedEfforts; // supportedEffortLevels, in Claude Code's order (lower-cased); empty when the entry lists none
+        bool adaptiveThinking{}; // supportsAdaptiveThinking
+    };
+
+    // Find `model` in the `models` array of an initialize answer. Pure and total.
+    //   modelsJson — the ARRAY's JSON text, and only that: the answer also holds the user's
+    //                ACCOUNT object, which must never be passed around or logged.
+    //   model      — the --model value. An entry matches when its `value` or its `resolvedModel`
+    //                is this text (ASCII case ignored): Claude Code lists Sonnet 5.5 as
+    //                {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", ...}.
+    //   returns    — the entry's facts; `known` false when no entry matches or the text is not an
+    //                array.
+    //   throws     — std::bad_alloc.
+    // Measured on Claude Code 2.1.291: Sonnet 5.5 lists low, medium, high, xhigh and max, and
+    // supports adaptive thinking.
+    HarnessModelReasoning ReadHarnessModelReasoning(std::wstring_view modelsJson, std::wstring_view model);
+
     // What BuildHarnessSettingsJson needs to know.
     struct HarnessSettingsSpec
     {
         int64_t autoCompactTokens{}; // 0 = leave auto-compaction as Claude Code decides; else the window in tokens (clamped to 100,000..1,000,000)
-        std::wstring effort; // "low" | "medium" | "high" | "xhigh" | "max"; anything else (or empty) sets no effort
         int apiMaxRetries{ 3 }; // how often Claude Code retries a failed API request (clamped to 0..15)
+        // The value of CLAUDE_CODE_EXTRA_BODY: a JSON object's text that Claude Code spreads over
+        // every request body (kHarnessBetweenToolsRequestBody for an "off" level on a model that
+        // refuses "disabled", the thinking policy above), or empty for none. The variable is
+        // written EITHER WAY: the harness owns it, so a value inherited from the user's
+        // environment never reaches a request.
+        std::wstring extraRequestBody;
         // TEST SEAM (HarnessPermissionProbe, AgentHarness.h): write the settings switch with which
         // an administrator forbids a permission mode. Claude Code then refuses that mode for this
         // process. No product code sets either.
@@ -280,10 +485,14 @@ namespace Agentmaster
     //     Code 2.1.291: isAutoCompactEnabled false). Both keys are written only when
     //     spec.autoCompactTokens is not 0.
     //   - "env": bounded API retries and no retry watchdog (a user's settings can make a failed
-    //     request retry for hours), the effort level (the CLAUDE_CODE_EFFORT_LEVEL variable beats
-    //     the --effort flag), and the switches that keep a background child quiet and fast: no
-    //     auto-update, no nonessential traffic, no terminal-title model call, no CLAUDE.md, no
-    //     auto memory, no background tasks.
+    //     request retry for hours), and the switches that keep a background child quiet and fast:
+    //     no auto-update, no nonessential traffic, no terminal-title model call, no CLAUDE.md, no
+    //     auto memory, no background tasks; and CLAUDE_CODE_EXTRA_BODY = spec.extraRequestBody
+    //     (empty included). A live change of that variable sends this same env object again
+    //     (BuildHarnessEnvPatchJson), so the two never disagree.
+    //     ⚠ NOT the effort variable CLAUDE_CODE_EFFORT_LEVEL (it was written here until
+    //     2026-10-14): it overrides a live effort change (the thinking policy above), so the
+    //     effort rides the --effort flag alone.
     //   - "permissions": ONLY for the test seam (spec.disableBypassPermissions /
     //     spec.disableAutoMode). A product launch writes no "permissions" key: the permission mode
     //     is asked for on the command line, and the tools are limited by --tools and
@@ -291,6 +500,16 @@ namespace Agentmaster
     //   returns — ASCII JSON text (safe on any command line).
     //   throws  — std::bad_alloc.
     std::wstring BuildHarnessSettingsJson(const HarnessSettingsSpec& spec);
+
+    // The `settings` object of an apply_flag_settings request that changes CLAUDE_CODE_EXTRA_BODY
+    // live: {"env": <the COMPLETE env object of BuildHarnessSettingsJson(spec)>}. Complete,
+    // because the request merges shallow and its "env" replaces the whole env object of the
+    // --settings layer (the thinking policy above); a patch with the one variable alone would
+    // drop the retry bound and the quiet switches from the settings Claude Code reports.
+    //   spec    — the spec of the running process, with the new extraRequestBody.
+    //   returns — ASCII JSON text.
+    //   throws  — std::bad_alloc.
+    std::wstring BuildHarnessEnvPatchJson(const HarnessSettingsSpec& spec);
 
     // The clamp BuildHarnessSettingsJson and the --autocompact flag share: 0 stays 0 (no window),
     // any other value is brought into Claude Code's accepted range, 100,000..1,000,000.
@@ -303,7 +522,9 @@ namespace Agentmaster
     //             Observer and the CLI recognize (and skip) a harness child.
     //   returns — removals for every variable of a parent Claude Code session or terminal tab
     //             (CLAUDECODE, CLAUDE_CODE_SESSION_ID, WT_SESSION, AM_SESSION, the hook pipe, the
-    //             effort variables, DEBUG, ...), plus AM_HARNESS=<name>.
+    //             effort variables, DEBUG, ...) and for CLAUDE_CODE_EXTRA_BODY (the harness sets
+    //             that one itself, through its settings: the thinking policy), plus
+    //             AM_HARNESS=<name>.
     //   throws  — std::bad_alloc.
     // Why removals matter: Agentmaster can itself be started from inside a Claude Code session or
     // a terminal tab; a child that inherits those variables reports the parent's session and tab
@@ -343,6 +564,12 @@ namespace Agentmaster
         CompactFinished, // the compaction ended; compactOk says how
         CompactBoundary, // the compaction's record: preTokens -> postTokens
         PermissionDenied, // Claude Code refused a tool call of the model: deniedTool, deniedReason
+        // Claude Code's running ESTIMATE of the thinking of the request in flight:
+        // thinkingTokens (so far) and thinkingTokensDelta (since the line before). Sent only
+        // while the model thinks, so it is the stream's own sign that a turn thought — also when
+        // the thinking text itself is omitted (the default thinking display of stream-json:
+        // the thinking block then arrives with an empty text and only a signature).
+        ThinkingTokens,
     };
 
     // The facts of one `system` line. Fields that the line does not carry stay empty / 0.
@@ -370,6 +597,8 @@ namespace Agentmaster
         int64_t preTokens{}; // CompactBoundary: the context before
         int64_t postTokens{}; // CompactBoundary: the context after
         int64_t compactDurationMs{}; // CompactBoundary
+        int64_t thinkingTokens{}; // ThinkingTokens: estimated_tokens, the request's thinking so far
+        int64_t thinkingTokensDelta{}; // ThinkingTokens: estimated_tokens_delta, since the line before
     };
 
     // Read one `system` line (the line's whole JSON object). Pure and total.
@@ -393,6 +622,17 @@ namespace Agentmaster
         std::wstring model;
         std::wstring askedPermissionMode; // what the launch asked for ("bypassPermissions" unless a start with it was refused)
         std::wstring permissionMode; // the mode in effect, after the harness's own correction
+        // The model's reasoning, as the process reported it and as the harness set it (the
+        // thinking policy). Filled when the process answered `initialize`, and again after every
+        // live change.
+        // What the harness set: "adaptive"; "disabled" (thinking off through Claude Code's own
+        // "disabled", for a model that takes it); "between_tools" (thinking off through the API's
+        // between_tools, for a model that refuses "disabled"); "default" for a process left to
+        // Claude Code's own default.
+        std::wstring thinking;
+        std::wstring effort; // the effort IN EFFECT, as get_settings reports it (after Claude Code's caps and the model's step-down); empty when it could not be read
+        std::vector<std::wstring> supportedEfforts; // the model's effort words (initialize answer); empty when not reported
+        bool adaptiveThinking{}; // the model supports adaptive thinking (initialize answer)
         std::wstring apiKeySource; // "none" = the Claude login
         std::wstring outputStyle;
         std::vector<std::wstring> tools; // every tool the model can call, by full name

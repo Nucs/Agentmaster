@@ -157,8 +157,13 @@ claude.exe --output-format stream-json --input-format stream-json --verbose
   --model claude-sonnet-5-5 --permission-mode bypassPermissions --strict-mcp-config
   --settings <json> --mcp-config {"mcpServers":{…"type":"sdk"…}} --setting-sources ""
   --autocompact 500000 --dangerously-skip-permissions --disable-slash-commands
-  --no-session-persistence --thinking disabled --effort low
+  --no-session-persistence --thinking adaptive --effort low
 ```
+
+(`--thinking adaptive` also for a conversation that wants thinking OFF: it is switched off live
+before the first message, so that it can be switched on again without a restart — 5.3. Until
+2026-10-14 the line read `--thinking disabled`, which on Sonnet 5.5 never turned thinking off: Claude
+Code leaves the `thinking` field out for that model, and the API then thinks by default.)
 
 - **No built-in tools** (`--tools ""`): the model can call only the caller's tools.
 - **Nothing of the user**: no settings, no `CLAUDE.md`, no hooks, no MCP servers
@@ -238,15 +243,24 @@ Code's own.
   (measured: `isAutoCompactEnabled: false`). With the key: `maxTokens 500000`,
   `autoCompactThreshold 467000`.
 - Bounded API retries and no retry watchdog (a user's settings can make a failed request retry
-  for hours), the effort variable (`CLAUDE_CODE_EFFORT_LEVEL` beats `--effort`), and the switches
-  of a quiet background child: no auto-update, no nonessential traffic, no terminal-title model
-  call, no `CLAUDE.md`, no auto memory, no background tasks.
+  for hours), and the switches of a quiet background child: no auto-update, no nonessential
+  traffic, no terminal-title model call, no `CLAUDE.md`, no auto memory, no background tasks.
+- ⚠ **NOT the effort variable** `CLAUDE_CODE_EFFORT_LEVEL` (written here until 2026-10-14): it
+  overrides every live effort change, and Claude Code still answers each one with "success" (5.3).
+  The effort rides `--effort` alone; the environment removes an inherited variable.
+- **`CLAUDE_CODE_EXTRA_BODY`, always** (2026-10-14): empty, or the API's `{"thinking": {"type":
+  "between_tools"}}` when "off" runs on a model that refuses `disabled` and could not be switched
+  live (5.3). The harness owns the variable: one builder (`BuildHarnessSettingsEnvObject`) writes
+  the env object of the start and of every live patch (`BuildHarnessEnvPatchJson`).
 
 **The environment** (`BuildHarnessEnvironment`): the variables of a parent Claude Code session or
 terminal tab are **removed** (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `WT_SESSION`, `AM_SESSION`,
 the hook pipe, the effort and compaction variables, `DEBUG`, …). Agentmaster can itself be started
 from inside a Claude Code session; a child that inherits those variables reports the parent's
-session and tab as its own.
+session and tab as its own. The variables that would change the thinking level are removed too
+(`CLAUDE_CODE_DISABLE_THINKING`, `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`,
+`DISABLE_INTERLEAVED_THINKING`, `MAX_THINKING_TOKENS`, and `CLAUDE_CODE_EXTRA_BODY`, which the
+settings set).
 
 **The harness mark.** The child gets `AM_HARNESS=<conversation name>` (`kHarnessEnvMarker`,
 `Activity.h`). It has no `WT_SESSION` and no `AM_SESSION`, so without the mark the Fleet Observer
@@ -257,6 +271,134 @@ per process) and the CLI's (`agentcli.cpp`). It is never listed, adopted or reap
 
 **The end of the child.** The app ends with `TerminateProcess`, so no exit handler runs. The child
 is in a kill-on-close job object: when the app's process goes, Windows ends the child.
+
+### 5.3 The thinking policy: thinking and effort change live
+
+(2026-10-14, NOT BUILT yet; the user's request: a controllable thinking level, "effort, which is
+how Sonnet 5.5 defines the thinking level".)
+
+**What can change.** `HarnessConversation::SetThinking(thinking, effort)` sets how the model reasons
+from the NEXT message on: thinking off (`Disabled`) or Claude Code's adaptive thinking (`Adaptive`:
+the model decides when and how much to think), and the effort level (`low`, `medium`, `high`,
+`xhigh`, `max`). `HarnessOptions::thinking` / `effort` are only the start values. A turn that runs
+keeps its settings; a process that is not up starts with the new values.
+
+**How it is applied: LIVE, before the next message.** The running process is changed with
+Claude Code's own control requests, so the conversation keeps its process and its whole context
+(no restart, no digest). Measured on Claude Code 2.1.291 (control requests only, no model request):
+
+| What | The control request | What Claude Code does |
+|---|---|---|
+| Thinking off | `set_max_thinking_tokens` `{"max_thinking_tokens": 0}` | the thinking config becomes `{type: "disabled"}`. ⚠ Claude Code SENDS that only to a model it lists as taking it; for every other model, Sonnet 5.5 included, it leaves the request's `thinking` field out, and the API thinks by default (below) |
+| Thinking on again | `set_max_thinking_tokens` `{"max_thinking_tokens": null}` | back to the **start** config — but only when the start gave it **explicitly**: Claude Code keeps an explicit start config as its reset anchor (`new obr(thinkingConfig, thinkingConfigExplicit ? thinkingConfig : undefined)` in its bundle). After `--thinking disabled` there is no way back to adaptive |
+| The request body | `apply_flag_settings` `{"settings": {"env": {…the COMPLETE env object…, "CLAUDE_CODE_EXTRA_BODY": "<JSON>"}}}` | Claude Code spreads the JSON object over every request body, AFTER its own `thinking` field, and reads the variable from its process environment at every request. ⚠ The request merges SHALLOW: its `env` replaces the whole env object of the `--settings` layer, so the patch carries all of it (`BuildHarnessEnvPatchJson`) |
+| The effort | `apply_flag_settings` `{"settings": {"effortLevel": "<word>"}}` | the session effort; all five words were accepted for Sonnet 5.5 |
+| The effort in effect | `get_settings` → `applied.effort` | the effort after Claude Code's caps and the model's step-down of a level it does not support (`max` → `high`) |
+
+**Thinking OFF on Sonnet 5.5 is the API's `between_tools`** (found 2026-10-14, while the first
+version of this policy reported "off" and the model still thought):
+
+- **Claude Code's rule** (`qEe` in the 2.1.291 bundle; `HarnessModelRefusesDisabledThinking`
+  mirrors it): a model TAKES `{"type": "disabled"}` when Claude Code lists it — Claude 3, Opus 4.0,
+  4.1 and 4.5 to 4.8, Opus 5, Sonnet 4.0, 4.5, 4.6 and 5, Haiku 4.5 — and refuses it otherwise
+  (`TU(provider)`: true for the first-party API and Bedrock / Vertex / Foundry). For a refusing
+  model the request builder leaves `thinking` out
+  (`else if (r.type === "disabled" && firstParty && … && !rejectsDisabled) thinking = {type: "disabled"}`),
+  and its own `Mb` flag even counts that as "thinking active". The variable
+  `CLAUDE_CODE_DISABLE_THINKING` takes the same branch.
+- **What the API says** when `disabled` is sent anyway (forced with
+  `CLAUDE_CODE_MODEL_CAPABILITIES=-rejects_disabled_thinking`; an HTTP 400, no model tokens): *"To
+  turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type":
+  "disabled"}. The model does not think before responding. The short updates it writes between
+  tool calls come back as thinking blocks."* Claude Code 2.1.291 does not know that type (no
+  `between_tools` in its bundle).
+- **So the harness sends it itself**, through `CLAUDE_CODE_EXTRA_BODY` — but only after Claude Code
+  stopped thinking: with the body alone, Claude Code (still adaptive) also sends its
+  `clear_thinking` context strategy, and the API refuses the pair (*"`clear_thinking_20251015`
+  strategy requires `thinking` to be enabled or adaptive"*, measured).
+- **The order** (`HarnessThinkingChange`): toward off, `set_max_thinking_tokens 0` FIRST, then the
+  body; toward on, the body cleared FIRST, then `set_max_thinking_tokens null`. Either way the pair
+  the API refuses never exists between two requests. A body change on its own (the resolved model
+  turned out to refuse `disabled`) is one patch.
+- **Which model**: decided from `HarnessOptions::model` at construction, then from the
+  `resolvedModel` of the process's `initialize` answer (`HarnessModelReasoning::resolvedModel`; an
+  alias such as `sonnet` names no version) — before the at-start apply.
+- ⚠ Under an organization policy that turns experimental betas off, Claude Code ignores
+  `CLAUDE_CODE_EXTRA_BODY` ("ignored: experimental betas are disabled by your organization's
+  policy"): "off" then runs as the API's default, adaptive thinking.
+
+So:
+
+- **Every process starts `--thinking adaptive`** (also when thinking is wanted off), with the
+  effort on `--effort` and an empty request body. A process wanted off is switched off right after
+  `initialize`, before Ready (`EnsureProcess` → `ApplyThinkingLive("at start")`):
+  `set_max_thinking_tokens 0`, then — on a model that refuses `disabled` — the between_tools body.
+- Before every message `Run()` calls `ApplyThinkingLive("before turn N")`. When nothing changed it
+  sends nothing. Otherwise it plans the requests (`PlanHarnessThinkingChange`, pure, over two
+  `HarnessReasoningState`s: Claude Code's thinking, the body, the effort), sends them in the order
+  above, then reads `get_settings` into `Inventory().effort`.
+- ⚠ **`CLAUDE_CODE_EFFORT_LEVEL` OVERRIDES a live effort change**, and Claude Code still answers
+  every `apply_flag_settings` with "success": with the variable set to `low`, all five changes left
+  the effort at `low` (measured). The harness therefore never sets it (5.2) and removes an
+  inherited one.
+- **Where the requests go.** The SDK client's control protocol is private (it offers only
+  `set_permission_mode`, `set_model` and `interrupt`). The harness writes its own requests through
+  the transport wrapper (`WatchedTransport::Request`, ids `am_ctl_<n>`; the transport's write lock
+  keeps them from interleaving with the client's lines), and takes their answers OUT of the stream
+  in `read_messages`, before the client's reader would drop them. 5 s timeout; Claude Code answers
+  between turns in milliseconds.
+- **The model's levels** come from the `initialize` answer: its `models` list has
+  `supportedEffortLevels` and `supportsAdaptiveThinking` per model (`ReadHarnessModelReasoning`;
+  only that array is read, never the `account` object). Sonnet 5.5: low, medium, high, xhigh, max;
+  adaptive thinking yes. `Inventory().supportedEfforts` / `adaptiveThinking` hold them.
+- **The fallback is a restart.** A request Claude Code refuses or does not answer, or a change
+  that involves `CliDefault` (no `--thinking` at all), cannot be applied live: the worker ends the
+  process and starts one with the wanted values on its command line, and the conversation
+  continues from its digest (as after a park). A refused thinking switch or body patch also sets
+  `liveThinking` false for the object's life: later starts then pass the literal `--thinking`
+  value, and a start with `--thinking disabled` on a model that refuses it carries the between_tools
+  body in its `--settings` env (`LaunchBetweenToolsFor`). A refused effort change sets `liveEffort`
+  false: later effort changes restart.
+- **The evidence of a turn's thinking**: `HarnessEvent::thinkingBlocks` on TurnCompleted (the
+  turn's `ThinkingBlock`s, which arrive with an EMPTY text: stream-json omits the thinking) and
+  `HarnessEvent::thinkingTokens` (Claude Code's own estimate, the `system/thinking_tokens` lines
+  `{"estimated_tokens": …, "estimated_tokens_delta": …}` summed — sent only while the model
+  thinks), also in the `turn N done: … K thinking block(s), ~T thinking token(s)` line. With
+  between_tools, a turn that calls tools may still show blocks: the short updates between the
+  calls.
+
+**Logs** (hooks.log): one `[harness] <name>: thinking <adaptive|between_tools|disabled|default>,
+effort <word> in effect (at start | changed live at start)` line per process start, a `… (changed
+live before turn N)` line per change (with `(asked for X; Claude Code lowered it)` when the effort
+in effect differs), a `thinking: the live change of the request body … was REFUSED` line when a
+patch fails, and a `the reasoning cannot be changed live; starting a new process …` line for the
+fallback.
+
+**Measured in ONE process** (Claude Code 2.1.291, Sonnet 5.5, 2026-10-14): first a scratch probe
+of the control requests, then scenario T of the live test, which runs the harness code itself
+(76 of 76 checks with scenarios 1–8 and P):
+
+| Level | Effort | Puzzle | Probe: blocks, ~tokens | Scenario T: blocks, ~tokens, time | Error |
+|---|---|---|---|---|---|
+| off (between_tools) | high | the farmer puzzle | 0, 0 | 0, 0, 2.9 s | none — the model wrote its working in the visible answer |
+| adaptive | max | the digits that sum to 13 | 1, 354 | 1, 290, 5.1 s | none (answer 75, right) |
+| off (between_tools) | low | the train timetable | 0, 0 | 0, 0, 3.6 s | none |
+| (for comparison) `--thinking disabled`, no body | high | the farmer puzzle | 1, 186 | — | none — "off" that was not off |
+
+**What the levels cost the AI search** (one request and one follow-up, the agent scenario):
+
+- Before between_tools: "off" (then not a true off) — list on screen in 5.4 s, answer 7.1 s; high
+  — 5.2 s, 6.7 s; max — 10.6 s, 11.9 s, and the follow-up 26.9 s to its first tool call (~3,350
+  thinking tokens).
+- With between_tools (2026-10-14, 13 of 13 checks): request 1 made 4 model requests with 0 thinking
+  blocks between its tool calls (the notes came as text); the first tool call came 3.0 s and 2.5 s
+  after the request and the follow-up. The lists took 8.5 s and 7.2 s, slower than above only
+  because the test profile's session index was still being read (each search took ~2.1 s): no
+  timing comparison from this run.
+
+**The one user so far** is the Sessions page's AI search: the strip's thinking toggle
+(`SESSIONS.md` 9.1, `AppSettings::sessionsAiThinkingLevel`, `HarnessThinkingLevel` in
+`AgentHarnessCore.h`: off, or adaptive at one of the five effort levels).
 
 ## 6. Persistence
 
@@ -380,7 +522,31 @@ format; no session data was touched).
 Claude Code 2.1.291, Sonnet 5.5, 2026-10-10. Re-check them after a Claude Code release that
 touches headless mode.
 
-- `--thinking disabled` is accepted; thinking tokens are then 0.
+- `--thinking disabled` is accepted, but on Sonnet 5.5 it is NOT an off (2026-10-14): Claude Code
+  leaves the `thinking` field out for a model that refuses `disabled`, and the API thinks by
+  default (~186 thinking tokens on a small puzzle at effort high). The API's off for that model is
+  `{"type": "between_tools"}`, sent through `CLAUDE_CODE_EXTRA_BODY` (5.3). (Until 2026-10-14 this
+  line read "thinking tokens are then 0": measured on requests the model would not have thought
+  about anyway.)
+- **Thinking and effort change live** (2026-10-14, control requests only, no model request; 5.3):
+  - `--thinking` takes `enabled` (= adaptive), `adaptive` or `disabled` (a hidden flag);
+    `--max-thinking-tokens` is "DEPRECATED … Use --thinking instead for newer models".
+  - `set_max_thinking_tokens` 0 and null are answered "success". null returns to an EXPLICIT
+    start config only (the reset anchor).
+  - `apply_flag_settings {"effortLevel": …}` set low, medium, high, xhigh and max, each confirmed
+    by `get_settings` `applied.effort`. In print mode the request's settings are not checked
+    against the settings schema (whose `effortLevel` lists no `max`).
+  - With `CLAUDE_CODE_EFFORT_LEVEL=low` in the child, every change answered "success" and
+    `applied.effort` stayed `low`.
+  - The `initialize` answer's `models` list: Sonnet 5.5 as `{"value": "sonnet", "resolvedModel":
+    "claude-sonnet-5-5", "supportedEffortLevels": ["low","medium","high","xhigh","max"],
+    "supportsAdaptiveThinking": true, …}`. It says nothing about `disabled` (no such field).
+  - `apply_flag_settings {"env": {"CLAUDE_CODE_EXTRA_BODY": …}}` takes effect for the NEXT request
+    of the running process (`get_settings` reports it under `effective.env`); `""` clears it. Off
+    → on → off in one process: 0, 1 (~354 tokens), 0 thinking blocks (with model requests).
+  - Claude Code spreads `CLAUDE_CODE_EXTRA_BODY` over the request AFTER its own `thinking` field,
+    so a `thinking` there wins; `{type: "disabled"}` from Claude Code is sanitized of extra keys,
+    any other type passes unchanged.
 - Process start to ready: 0.7 to 1.05 s. One model round trip: 0.9 to 1.3 s. `claude -v`: 100 ms.
 - `--autocompact` alone does not turn auto-compaction on (section 5).
 - `--session-mirror` sends nothing under `--no-session-persistence` (section 6).

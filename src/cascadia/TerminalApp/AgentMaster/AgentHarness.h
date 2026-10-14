@@ -94,12 +94,27 @@ namespace Agentmaster
 
     // ===== options ==========================================================================
 
-    // How the model may think before it answers.
+    // How the model may think before it answers. The THINKING POLICY of AgentHarnessCore.h says
+    // how each is carried out; in short:
     enum class HarnessThinking
     {
-        CliDefault, // pass nothing: Claude Code decides (adaptive on current models)
-        Disabled, // --thinking disabled: no thinking blocks at all (the fastest; measured 0 thinking tokens on Sonnet 5.5)
-        Adaptive, // --thinking adaptive
+        // Pass nothing: Claude Code decides (adaptive on current models). A process started this
+        // way cannot be switched live: a later SetThinking restarts it.
+        CliDefault,
+        // No thinking before the answer (the fastest; measured 0 thinking blocks on Sonnet 5.5).
+        // The process is started with --thinking adaptive and switched off with the control
+        // request set_max_thinking_tokens 0 before the first message, so that a later SetThinking
+        // can turn thinking on again without a restart. On a model that refuses the API's
+        // "disabled" (Sonnet 5.5 and every current model) that alone is not off — Claude Code then
+        // leaves the field out and the API thinks by default —, so the harness also puts the
+        // API's own off, `"thinking": {"type": "between_tools"}`, into the request body
+        // (CLAUDE_CODE_EXTRA_BODY, changed live too). Nothing is thought before the answer; per
+        // the API, the short updates the model writes BETWEEN tool calls may come back as
+        // thinking blocks (the search agent measured none: its notes came as text).
+        Disabled,
+        // --thinking adaptive: the model decides when and how much to think; the effort level
+        // (HarnessOptions::effort, SetThinking) sets how deep.
+        Adaptive,
     };
 
     // TEST SEAM of the permission policy (AgentHarnessCore.h). No product code sets a field.
@@ -120,7 +135,9 @@ namespace Agentmaster
         bool restricted{ false };
     };
 
-    // Everything that defines a conversation. Read once, by the constructor.
+    // Everything that defines a conversation. Read once, by the constructor — except the
+    // reasoning (`effort`, `thinking`), whose start values HarnessConversation::SetThinking
+    // replaces while the conversation lives.
     struct HarnessOptions
     {
         // The conversation's key (IsValidHarnessName): the record file, the working folder, the
@@ -135,6 +152,8 @@ namespace Agentmaster
         std::function<std::wstring()> claudeExe;
 
         std::wstring model{ L"claude-sonnet-5-5" }; // the --model value
+        // The START values of the model's reasoning. HarnessConversation::SetThinking replaces both
+        // later; every process start (also after a park or a reset) uses the newest values.
         std::wstring effort{ L"low" }; // low | medium | high | xhigh | max; empty or unknown = Claude Code's default
         HarnessThinking thinking{ HarnessThinking::Disabled };
 
@@ -228,6 +247,15 @@ namespace Agentmaster
         bool isError{ false };
         bool interrupted{ false }; // TurnCompleted: stopped by Interrupt, by a newer Send, or by a Reset
         int64_t durationMs{ 0 }; // TurnCompleted: from Send to the result, as the harness measured it; Compacted: the compaction
+        // TurnCompleted: how many thinking blocks the model wrote in this turn, and Claude Code's
+        // ESTIMATE of their tokens (its system/thinking_tokens lines, summed) — the signs of
+        // whether the turn thought: both are 0 with thinking off in a turn without tool calls
+        // (with between_tools, per the API, the short updates between tool calls may come back as
+        // thinking blocks), and adaptive thinking may also choose not to think about an easy request (or
+        // one it answered before). The blocks arrive with an empty text (stream-json omits the
+        // thinking itself), so the estimate is the only measure of HOW MUCH the model thought.
+        int thinkingBlocks{ 0 };
+        int64_t thinkingTokens{ 0 };
         int64_t preTokens{ 0 };
         int64_t postTokens{ 0 };
         std::wstring model;
@@ -289,6 +317,26 @@ namespace Agentmaster
         // Stop the running turn (the model's request is cancelled; the context keeps what was
         // said so far). Does nothing when no turn runs.
         void Interrupt();
+
+        // Change how the model thinks, from the NEXT message on: thinking off, or adaptive
+        // thinking, at an effort level. Returns at once.
+        //   thinking — Disabled or Adaptive. CliDefault (Claude Code's own default) can only be
+        //              reached by a new process: the running one is restarted before the next
+        //              message.
+        //   effort   — "low" | "medium" | "high" | "xhigh" | "max"; an empty or unknown word keeps
+        //              the current one.
+        // HOW it is applied (the thinking policy, AgentHarnessCore.h): before the next message the
+        // worker changes the RUNNING process with Claude Code's control requests — the thinking,
+        // the request body (between_tools, for "off" on a model that refuses "disabled") and the
+        // effort —, so the conversation keeps its process and its whole context; get_settings then
+        // reports the effort in effect (Inventory().effort, and Inventory().thinking names the
+        // way thinking runs), and hooks.log has one "[harness] <name>: thinking ..." line. A
+        // process that cannot take the change live — Claude Code refused a request, or the change
+        // involves CliDefault — is restarted with the new values, and the conversation continues
+        // from its digest. A turn that runs now keeps its settings; a process that is not up yet
+        // simply starts with the new values.
+        // Never throws.
+        void SetThinking(HarnessThinking thinking, std::wstring effort) noexcept;
 
         // Throw the conversation away: end the process, clear the record (and delete its file),
         // and raise the epoch. A turn in flight ends as interrupted. If a process was up, a new
