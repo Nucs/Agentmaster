@@ -2,8 +2,9 @@
 
 > **Status: DESIGN (2026-10-12). Not implemented.** Every number here was measured on this machine's
 > real corpus, with a prototype of the schema in a scratch database (DuckDB 2.0.0-alpha through Python;
-> the scripts are in [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/), §14). The decisions D1–D16
-> (§13) are open; the recommendations are marked. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
+> the scripts are in [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/), §14). D14 (the summary)
+> and D16 (the refresh) were decided by the user on 2026-10-14; the other decisions (§13) are open, and
+> their recommendations are marked. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
 > page, its search and the AI search as they work today), [`SDK_HARNESS.md`](./SDK_HARNESS.md) (the agent
 > harness the AI search runs on), [`CLI.md`](./CLI.md), [`PROFILES.md`](./PROFILES.md).
 
@@ -37,22 +38,23 @@
 - **Size and cost.** About **3.1 GB** on disk for today's corpus: 2.2 GB for every line verbatim
   (10.4 GB of JSONL at 4.7×, measured; D11 can leave it out) and ~0.9 GB for the search projection and
   its index (§5.4). A cold build is estimated at about 2 minutes in C++ (§7.3); new text is searchable
-  within about 2 s (§7.4). `duckdb.dll` is 36.7 MB (x64, 1.5.6): about +13 MB per architecture in the
+  within one refresh period, default 5 s (§7.6). `duckdb.dll` is 36.7 MB (x64, 1.5.6): about +13 MB per architecture in the
   downloads (D10).
-- **The summary panel from the database (§8.5, measured and verified).** The summary box (per-tab
-  panel, side panel, tab tooltip, Sessions detail) re-reads the whole transcript on every growth: 2.7 s
-  for a 128.7 MB session in today's C++. A precomputed summary row answers in **2.8 ms**. Its 20 facts
-  equal the C++ analyzer's on **921 of 921** sessions.
+- **The database can form the session summary (§8.5, measured and verified)** — a precomputed row in
+  **2.8 ms**, its 20 facts equal to the C++ analyzer's on **921 of 921** sessions — for its own
+  consumers: the AI search's tools, the MCP `session` tool, the CLI. **The app's summary surfaces do
+  not use it** (decided 2026-10-14): the per-tab panel, the side panel, the tab tooltip and the Sessions
+  detail keep `AnalyzeSessionTranscript`.
 - **The session row (§5.6).** About 120 columns per session, grounded in a census of what Claude Code
   writes: normalized place keys (`cwd_key`, `inferred_dir_key`, `git_root_key`, …, by `NormDirKey`),
   versions, models, effort, Claude Code's **own cost record** (`cost-state`), token usage, outcomes,
   work done, titles, lineage. One pass computes them: 922 sessions (3.11 GB) in 11.5 s.
-- **Kept current by events, ~1 s behind the transcripts, never rebuilt for a search (§7.6).** A file
-  watcher in the service (the same `TranscriptWatcher` class the app's scanner uses; D16 weighs letting
-  the app's observer feed it instead) appends each file's new lines in the background, and tells the
-  app's summary surfaces when their session changed (`sessionsChanged`). The live-session summaries set
-  the ~1 s bar; after a downtime the next start catches up. Measured load: ~190 MB of transcript lines
-  a day; the busiest hour costs 0.18–0.34% of one core in the service, and nothing in the GUI.
+- **Refreshed by the app's observer, never rebuilt for a search (§7.6; decided 2026-10-14).** The app's
+  `TranscriptWatcher` counts each session's changes; every refresh tick (a setting, default 5 s) the
+  sessions that changed are upserted — their new lines appended, their derived rows upserted — and a
+  tick without a change does nothing. At the app's connect a `resync` catches up. Measured: ~190 MB of
+  transcript lines written a day; a tick ~17–27 ms; the busiest hour 0.18–0.34% of one core in the
+  service.
 - **What DuckDB buys and what it does not (§3.5)**, and **the other parts of Agentmaster that would
   read it (§8.6)**: the conversation chain, the inferred folder of closed sessions, the Fleet
   Observer's External rows, the launch bar's id check, usage and cost, diagnostics.
@@ -141,7 +143,8 @@ The AI search pays the same costs: a five-search request took 43 s, 15 s of it a
   sessions, not a window; the full content answer in < 150 ms (p95). Queries of 1–2 characters search
   titles, folders, paths and prompts in < 50 ms.
 - **G2 — page open.** The list on screen in < 100 ms; no per-session file read.
-- **G3 — freshness.** Text that a running claude writes is searchable within ~2 s.
+- **G3 — freshness.** Text that a running claude writes is searchable within one refresh period
+  (default 5 s, a setting from 1 to 60 s; §7.6) while the app runs.
 - **G4 — one store.** The page, the AI search, the CLI and MCP clients read the same database.
 - **G5 — the same semantics.** Today's query grammar (AND terms, `"quoted phrases"`, session ids,
   scopes, fuzzy) gives the same sessions for substring queries; tools also get BM25 ranking.
@@ -219,8 +222,9 @@ autoload are off.
 - **Full-text search over every session:** 2–42 s → 2–33 ms (§6; our own inverted index in DuckDB
   tables).
 - **The session list without a file read per session:** 6 s+ → 8 ms.
-- **A session's summary:** 2.7 s → 2.8 ms (a precomputed row). It equals the C++ analyzer's on 921 of
-  921 sessions (§8.5).
+- **A session's summary for the database's own consumers** (the AI search's tools, the MCP `session`
+  tool, the CLI): 2.8 ms as a precomputed row, equal to the C++ analyzer's on 921 of 921 sessions. The
+  app's summary panels keep the analyzer (§8.5).
 - **One pass computes every fact of every session:** `from_json` parses each line once into a typed
   struct (3.11 GB in 6.7 s on 4 threads), and ordered aggregates turn the lines into a session row:
   922 sessions in 11.5 s (§5.6).
@@ -404,8 +408,9 @@ CREATE TABLE session (
     first_doc_id   UINTEGER, last_doc_id UINTEGER  -- the session's block range after the last re-cluster (§6.8)
 );
 
--- The summary box of every session (§8.5), one row each, refreshed for the sessions an ingest batch
--- touched: the precomputed form the summary surfaces read with one point query (~3 ms).
+-- The summary box of every session (§8.5), one row each, upserted for the sessions a refresh tick
+-- named: the database's OWN summary, for its consumers (the AI search's tools, the MCP `session` tool,
+-- the CLI) — one point query, ~3 ms. The app's summary surfaces do not read it (decided 2026-10-14).
 CREATE TABLE summary (
     sid_key INTEGER PRIMARY KEY,
     prompts STRUCT(seg SMALLINT, kind UTINYINT, text VARCHAR, uuid UUID)[],  -- the numbered list, earlier segments first
@@ -1044,17 +1049,18 @@ Stop-hook times), and the ingest runs `ActiveBranchUuids` per changed session fo
 
 ### 7.4 Incremental
 
-- The watcher (the `TranscriptWatcher` code: one `ReadDirectoryChangesW` on `projects`, subtree on)
-  plus a belt sweep — the service's own, not the GUI's (§7.6: why, how fresh each consumer needs it, the
-  belts and the measured load; D16).
-- Per changed file: read from `parsed_bytes` to the last complete line; classify; append to `doc_hot`,
-  `prompt`, `path_access`, `usage`; update the `session` row and the cursor; **one transaction**.
-- From a line written to it being searchable: **≤ 2 s**, ~1 s typical (a ≤ 1 s batching window + one
-  transaction).
+- **The trigger** (decided 2026-10-14, D16): the app's observer counts each session's changes (its
+  `TranscriptWatcher`'s change sequences), and every refresh tick (default 5 s) it sends the sessions
+  that changed (`upsertSessions`), or a `resync` after a connect or a re-index (§7.6).
+- Per changed session: read its files from their cursors (`parsed_bytes`) to the last complete line;
+  classify; append to `doc_hot`, `prompt`, `line_hot`; upsert the `session`, `summary`, `usage` and
+  `path_access` rows; advance the cursors; **one transaction** per request.
+- From a line written to it being searchable: **one refresh period** (default 5 s) plus the tick
+  (~20–30 ms).
 - **The live branch and the summary** (§8.5): new lines normally extend the live branch (they descend
   from the current leaf), so they are `on_branch`. A new leaf marker that does not descend from the old
   leaf is a rewind: that session is walked again and its `on_branch` flags rewritten. The `summary` rows
-  of the sessions in the batch are rebuilt in the same transaction.
+  of the sessions in the request are upserted in the same transaction.
 
 ### 7.5 Correctness rules
 
@@ -1070,22 +1076,30 @@ Stop-hook times), and the ingest runs `ActiveBranchUuids` per changed session fo
 - **Never lose a swallowed exception** (Rule #18): the service reports through the same
   `LogSwallowedException` chokepoint into its log.
 
-### 7.6 Staying current: driven by events, in the background, never rebuilt for a search
+### 7.6 Staying current: the app's observer counts changes, a refresh tick upserts
 
 **The questions** (2026-10-13): does the database stay current by itself, from events in the
 background, or does it belong to the Sessions page and get rebuilt when the page re-indexes? Can the
 changes come from the observer? Must the data be 1–2 s behind real time, or is 30–60 s enough?
 
-**The answers, in short:**
+**Decided by the user (2026-10-14):** "Duckdb will be refreshed by counting changes from the observer
+and if we had changes within the refresh rate range then we update or rather upsert." And for the
+summary: "I want the duckdb to be capable of forming a summary but I don't want summary to use duckdb"
+(§8.5).
 
-- **By events, in the service, all the time;** never rebuilt for a search or a page open.
-- **About 1 s behind the transcripts, for every session.** The live-session summaries set that bar
-  (§7.6.2), and the measured cost of meeting it is tiny (§7.6.4). Slow cadences are only for
-  maintenance: merges, re-clusters, checkpoints, the belt sweep.
-- **The change signal is a file watcher:** the same `TranscriptWatcher` class the app's scanner uses,
-  run in the service. The app's observer could feed the service instead (§7.6.1; D16).
+**In short:**
 
-#### 7.6.1 What wakes the ingest
+- **The app's observer counts each session's changes.** Every refresh tick (a setting, default 5 s),
+  the sessions whose count moved since the last tick are upserted; a tick without a change does
+  nothing.
+- **Never rebuilt for a search or a page open.** Full rebuilds happen only in the three cases of
+  §7.6.5.
+- **Freshness = the refresh period** (default 5 s) plus the tick itself (~20–30 ms). That is enough for
+  every consumer, now that the summary surfaces stay on the C++ analyzer (§7.6.2).
+- The 2026-10-13 version of this section recommended the service's own watcher (A below); the user
+  chose the observer (B).
+
+#### 7.6.1 Where the changes come from (D16, decided)
 
 What the app's engine knows today (read from the code):
 
@@ -1101,80 +1115,95 @@ What the app's engine knows today (read from the code):
 
 So the app knows WHEN and WHICH files change, but not what they hold. Whatever wakes it, the service
 reads and classifies the new bytes itself: the database keeps every line, the scanner a few facts of
-live sessions. The only choice is who delivers "file X grew":
+live sessions.
 
-| | **A. The service's own watcher** (recommended) | B. The app forwards its watcher's changes | C. Poll the files of live sessions |
+**The design that follows the decision:**
+
+- **The counting.** The app's `TranscriptWatcher` already bumps a per-session change sequence for every
+  write to a session's transcript and side folder (subagent transcripts, spilled outputs). The tick
+  needs the sessions whose sequence moved since the previous tick: a small addition,
+  `TakeChangedSessions()`, returns those ids and clears them, plus an `epochChanged` flag when the
+  watcher re-indexed everything. It counts every session under `projects/`, managed or not, while the
+  app runs.
+- **The tick** (the app's engine thread, never the UI thread), every refresh period:
+  - no changed session → nothing, not even a request;
+  - otherwise ONE `upsertSessions` request: each changed session's id and transcript path (the index
+    knows it);
+  - the response carries each session's new cursor; a failed request keeps its ids for the next tick.
+    The counts only say "look again", and the cursors say where, so nothing is lost or read twice.
+- **The belts:**
+  - at the app's (re)connect, and whenever its watcher re-indexes (the epoch moved: an overflow, a lost
+    watch), the tick sends `resync` instead: the service compares every file's size with its cursor (a
+    sweep, ~150 ms) and upserts what moved;
+  - while the app's watcher is unhealthy (no counts), a `resync` every 30 s;
+  - `history.jsonl` is not under `projects/`: a tick that sends anything also stats it (one stat).
+- **With the app closed, nothing refreshes the database.** The CLI and the MCP tools read it as of the
+  app's last tick, and their results say so (`as_of`). One exception is recommended: a service started
+  without the app (by the CLI or an MCP client) sweeps once at its start (~150 ms). Without it, a
+  session written in another terminal stays invisible until the app runs again.
+- **The app's own facts** still go as `factsChanged` and `openChanged`, and the app never reads the
+  database for live state (Rules #1 and #7).
+
+The three triggers that were compared (A was recommended on 2026-10-13; the user chose B):
+
+| | A. The service's own watcher | **B. The app's observer counts, the tick upserts** (decided) | C. Poll the files of live sessions |
 |---|---|---|---|
-| How | the same `TranscriptWatcher` class, instantiated in the service | a new "sessions changed since sequence N" call on the app's watcher, sent over the pipe: coalesced, never blocking, re-sent after a reconnect | read Claude's presence files (the observer's own source), stat those sessions' files about every second |
-| Latency while the app runs | ~1 s (the coalescing window) | ~1 s | ~1 s for live sessions; other changes at the next sweep |
-| With the app closed (CLI, MCP, claudes in other terminals) | the same | stale until a sweep: 30–60 s | the same |
-| Idle cost | none: the kernel notifies, microseconds per event | none | ~6 ms a second for 49 presence files, plus the stats |
-| New code | none: the class exists, and the m5 harness tests it end to end | an API on the watcher, a message, a replay after a reconnect, a second mode for "no app" | presence parsing with pid validation (the observer's `PresenceRowMatchesProcess` exists) |
-| Failure modes | an overflow → a sweep | the app's watcher thread gains an IPC send; an app crash or hang delays the database | a change no claude made (Claude's sweep deleting a file, a moved file) waits for the sweep |
+| How | the same `TranscriptWatcher` class, instantiated in the service | `TakeChangedSessions()` on the app's watcher; the tick sends the changed sessions over the pipe; `resync` after a reconnect or a re-index | read Claude's presence files (the observer's own source), stat those sessions' files about every second |
+| Latency while the app runs | ~1 s (a coalescing window) | the refresh period (default 5 s) | ~1 s for live sessions; other changes at the next sweep |
+| With the app closed (CLI, MCP, claudes in other terminals) | the same | as of the app's last tick (plus the one sweep of a service started without the app) | the same |
+| Idle cost | none: the kernel notifies, microseconds per event | none: no change, no request | ~6 ms a second for 49 presence files, plus the stats |
+| New code | none: the class exists, and the m5 harness tests it end to end | `TakeChangedSessions()`, the tick, `upsertSessions` / `resync` | presence parsing with pid validation (the observer's `PresenceRowMatchesProcess` exists) |
+| Failure modes | an overflow → a sweep | an app crash or hang delays the database until the next connect's `resync` | a change no claude made (Claude's sweep deleting a file, a moved file) waits for the sweep |
 
-All three share the same backbone — the per-file cursor committed with the rows, a sweep at start and
-as a belt — so correctness does not depend on the choice; only latency without the app, coupling and
-code do. A keeps the service self-contained at no cost: it IS the observer's mechanism, run in the
-process that needs the data.
-
-What the app's observer contributes is what only the app knows:
-
-- `factsChanged`: a title, tag, favorite or link changed; the service re-reads that session's record.
-- `openChanged`: the open set, for the `open` filter and the catch-up order.
-
-The app never reads the database for live state (Rules #1 and #7).
+All three share the same backbone — the per-file cursor committed with the rows, and a sweep at start
+and as a belt — so correctness does not depend on the choice. Only the latency without the app, the
+coupling and the code do.
 
 #### 7.6.2 How fresh, per consumer
 
 | Consumer | Today | Needs | Why |
 |---|---|---|---|
-| A live session's summary surfaces (the side panel, the per-tab panel, the tab tooltip's card) | re-analyzed on every registry notify, plus a 5 s backstop tick; one analyze of a 128.7 MB session takes 2.7 s | **≤ 1–2 s** | the user is looking at that session; anything slower than today's ≤ 5 s is a regression |
-| The Sessions page for an open session (its row and detail), and the AI search asked about "the session I just worked in" | the gather at page open and ↻ (sidecars) | **≤ 1–2 s** | the last prompt must be findable at once |
-| A global prompt history (§8.6) | — | ≤ 1–2 s | the prompt just sent in another tab must come back on Up |
-| Search over history, the CLI, the MCP tools | 2–42 s per content search | ≤ 30–60 s | the sessions asked about are mostly closed, and a request takes seconds anyway |
+| The app's summary surfaces (the side panel, the per-tab panel, the tab tooltip's card, the Sessions detail, the Manager's Summary tab, Copy ▸ Summary) | `AnalyzeSessionTranscript` on every registry notify, plus a 5 s backstop tick | — | **not a consumer:** they keep the C++ analyzer (decided 2026-10-14, §8.5) |
+| The Sessions page for an open session (its row and detail), and the AI search asked about "the session I just worked in" | the gather at page open and ↻ (sidecars) | ≤ 5–10 s | the last prompt is findable soon after it was sent |
+| A global prompt history (§8.6) | — | ≤ 5–10 s | the prompt just sent in another tab comes back on Up |
+| The AI search's tools and the MCP `session` tool, which read the database's summary (§8.5) | — | ≤ 30–60 s | a request takes seconds anyway |
+| Search over history, the CLI, the MCP tools | 2–42 s per content search | ≤ 30–60 s | the sessions asked about are mostly closed |
 | The inferred folder | a ~15 s throttle per open session | ≤ 30–60 s | it changes slowly |
 | The External rows, closed sessions' sort keys, the launch bar's id check | head reads, sidecars, a glob | ≤ 30–60 s | facts of sessions that are not growing; resume itself reads the disk (Rule #6) |
 | Usage, cost, diagnostics | — | minutes | reports |
 | Live state: status dots, the delivery gate, the Prompt Queue Runner | hooks and the scanner, milliseconds | — | never from the database |
 
-So there is **one target: ~1 s behind the transcripts, for every session.** Tiers per consumer would
-save nothing (the busiest hour costs under 0.35% of one core, §7.6.4), and a 30–60 s refresh would
-regress the live summaries.
+So **the refresh period sets the freshness: default 5 s**, a setting from 1 to 60 s. The ~1 s target
+of the 2026-10-13 version came from the summary surfaces, which no longer read the database. The
+`sessionsChanged` notification of that version is dropped as well: the app drives the refresh, so each
+`upsertSessions` response already tells it that the data landed.
 
-**Consumers are told when data lands.** After each committed batch the service sends `sessionsChanged`
-(the session ids and their new cursors) to the clients that subscribed (§9). A summary surface re-reads
-its `summary` row (~3 ms) when the message names its session, instead of re-analyzing a file on every
-registry notify and every 5 s; its "ago" times line keeps its own tick. End to end, from Claude's write
-to the screen:
+#### 7.6.3 One tick, step by step
 
-1. the watcher is notified (~0.4 ms);
-2. the coalescing window closes (≤ 1 s);
-3. parse and commit (milliseconds);
-4. `sessionsChanged` reaches the app;
-5. the panel reads its row (~3 ms).
-
-About **1 s** in all.
-
-#### 7.6.3 One change, step by step
-
-- **Per change**, coalesced per file (a ≤ 1 s window, at most one commit a second):
-  1. read from the file's cursor to its last complete line;
-  2. classify the new lines and append them;
-  3. update the touched sessions' derived rows: the session row's aggregates; the `summary` row, from
-     the small section tables; the live branch, recomputed in C++ from that session's `parent_uuid` /
-     `leaf_uuid` columns (milliseconds), writing only the flags that changed;
-  4. advance the cursor in the SAME transaction (a crash replays the batch, never loses or doubles it).
+- **The app** (its engine thread, every refresh period):
+  1. take the changed sessions (`TakeChangedSessions()`);
+  2. none → stop; otherwise send `upsertSessions` (or `resync`, §7.6.1);
+  3. a failed request keeps its ids for the next tick.
+- **The service**, one transaction per request:
+  1. for each named session, read its transcript and side files from their cursors to the last complete
+     line;
+  2. classify the new lines and APPEND them. Transcripts are append-only, and the cursor commits with
+     the rows, so a replay can neither lose nor double a line;
+  3. UPSERT the session's derived rows, each once per tick:
+     - the `session` row, its aggregates (`INSERT … ON CONFLICT (sid_key) DO UPDATE`);
+     - its `summary` row (`INSERT OR REPLACE`; the database's own summary, §8.5);
+     - `usage` per API message (a message's later line carries its final usage);
+     - `path_access` per (session, path, operation);
+     - the live branch, recomputed in C++ from that session's `parent_uuid` / `leaf_uuid` columns
+       (milliseconds), writing only the flags that changed;
+  4. advance the cursors in the SAME transaction, and answer with them.
 
   Every step is proportional to the new bytes: no step re-reads a session's history.
-- **Belts.** A sweep of the whole tree (directory enumeration, ~150 ms) every 5 minutes while the watch
-  is healthy and every 30 s while it is not, and at once when it overflows (`ERROR_NOTIFY_ENUM_DIR`) or
-  fails. At service start, a reconciliation: every `src_file` against a sweep, the deltas ingested, open
-  and newest sessions first, with `indexing` coverage reported meanwhile.
-- **Lifecycle.** The GUI holds a connection, so the service runs whenever Agentmaster runs. It exits
-  10 minutes after its last client. No resident daemon: the next start (GUI, CLI or MCP) catches up — a
-  sweep plus whatever was appended meanwhile (a whole day here, ~190 MB: about 4 s of parsing at
+- **Lifecycle.** The app holds a connection, so the service runs while Agentmaster runs. It exits
+  10 minutes after its last client. No resident daemon: at the app's next connect, the `resync` catches
+  up — a sweep plus whatever was appended meanwhile (a whole day here, ~190 MB: about 4 s of parsing at
   46 MB/s).
-- **The page's ↻** asks the service to resync now (a sweep), never to rebuild.
+- **The page's ↻** sends a `resync` (a sweep), never a rebuild.
 
 #### 7.6.4 The load, measured
 
@@ -1190,10 +1219,14 @@ About **1 s** in all.
 | A whole busy hour (23 MB) in 20-line transactions | 6.6–12.3 s of database time: **0.18–0.34% of one core for that hour**, inserted through Python (the C API's appender is cheaper) |
 | Merging the hot lines into the ZSTD table (6.9–9.7 K lines) | 0.21–0.28 s |
 | A checkpoint after it | 0.22–0.27 s |
+| A refresh tick's upserts: the changed sessions' `session` and `summary` rows, one transaction (a 4,500-row `session` table with a primary key) | 1–5 sessions **~17 ms** median (p95 19–25 ms), 20 sessions ~27 ms, through Python. One key written twice in one transaction was accepted by this build, but a tick writes each session once anyway |
 
 So the steady cost is under 1% of one core in the busiest hour, at background CPU and I/O priority, in
-another process; the GUI pays nothing. Merges, re-clusters and checkpoints run when no query runs (the
-service knows when one does), and they can be interrupted.
+another process. A tick without a change costs nothing (no request); a tick with changes ~20–30 ms of
+database time plus the parse of the new bytes — at the default 5 s and constant activity, at most ~0.5%
+of one core. The app pays one change count per write (it already does, for its scanner) and one
+request per busy tick. Merges, re-clusters and checkpoints run when no query runs (the service knows
+when one does), and they can be interrupted.
 
 #### 7.6.5 Full rebuilds happen only in three cases
 
@@ -1563,10 +1596,16 @@ Schema), the **result**, the **errors**, the **plan** (what the service runs) an
    description change changes the model's prompt (and its cache), so changes ship together.
 9. **Docs.** The contract goes into §8.4.3, and a line into SESSIONS.md §9.3.
 
-### 8.5 The summary panel, from the database
+### 8.5 The session summary, formed by the database
 
 **The question** (2026-10-12): can the summary we show in the side panel come from DuckDB? Yes. It
 was measured, and verified field for field against today's code.
+
+**Decided by the user (2026-10-14):** "I want the duckdb to be capable of forming a summary but I don't
+want summary to use duckdb." So the database forms the summary for ITS consumers (the AI search's
+tools — SESSIONS_AGENT.md reads this row —, the MCP `session` tool, the CLI), and the app's summary
+surfaces keep `AnalyzeSessionTranscript`, unchanged: the per-tab panel, the side panel, the tab
+tooltip's card, the Sessions detail, the Manager's Summary tab and Copy ▸ Summary.
 
 **Today.** The summary box is `AnalyzeSessionTranscript` (`ProcessInspect.Content.cpp`). It serves the
 per-tab summary panel, the side panel's summary area (the same `AgentTabOverlay` in fill-host mode), the
@@ -1626,15 +1665,16 @@ three rules a first SQL draft had wrong (each is now a comment in the script):
   - `is_copy`.
 - **A `summary` table** (§5.2): one row per session with the numbered prompts (with segment numbers
   and uuids), the three file-label lists, the skills, the task counts, the plan facts, the recap and
-  the times. It is refreshed for the sessions an ingest batch touched, with one SQL statement.
-- **`sessionSummary(id)`** (§9) returns that row in ~3 ms. The page, the tooltip and the panels stop
-  reading transcripts, and a transcript's growth costs the summary nothing beyond its own ingest. They
-  re-read the row when `sessionsChanged` names their session (§7.6.2): about 1 s after Claude's write,
-  where today's panel waits for a registry notify or its 5 s tick and then a whole-file analyze.
-- **Two implementations of the rules.** The C++ analyzer stays, for the CLI's offline readers and as the
-  fallback. So parity is a test: the m5 fixtures, a live corpus check (the prototype's `--verify`), and
-  Shadow mode's `[sessdb-diff] summary <sid8> <field>` lines (D14).
-- **The whole-conversation chain** (`CollectConversationUpstream`):
+  the times. A refresh tick upserts the rows of the sessions it names, in the same transaction as their
+  lines (§7.6.3; measured: ~17 ms for a tick of 1–5 sessions, with the `session` rows).
+- **`sessionSummary(id)`** (§9) returns that row in ~3 ms, to the AI search's tools, the MCP `session`
+  tool and the CLI. The app's summary surfaces never call it.
+- **Two implementations of the rules,** so parity is a test: the app shows the C++ analyzer's summary
+  and the tools show the database's, and the two must agree. The m5 fixtures, a live corpus check (the
+  prototype's `--verify`), and, while the database runs in Shadow mode, a `[sessdb-diff] summary <sid8>
+  <field>` line whenever the app's analyzer and the database's row disagree (D14).
+- **The whole-conversation chain** — the database's own, for the same consumers; the app's summary
+  keeps `CollectConversationUpstream`:
   - the fork parent is a lookup: 29 ms by scanning every line's uuid, 8.7 ms through a uuid →
     first-file map (715,662 uuids, built in 0.1 s), and none at all once the ingest stores
     `forked_from` (§5.6). It finds the same 150 copied lines as the C++ chain walk;
@@ -1646,8 +1686,9 @@ three rules a first SQL draft had wrong (each is now a comment in the script):
 
 | Part | Today | Cost (measured or logged) | With the database | Phase |
 |---|---|---|---|---|
-| The summary panel, the side panel's summary, the tab tooltip's card, the Sessions detail, the Manager's Summary tab, Copy ▸ Summary | `AnalyzeSessionTranscript`: the whole file, on every growth | 2.7 s per growth of a 128.7 MB session; 5–8× the file size in memory | `sessionSummary`, ~3 ms (§8.5) | P3 |
-| The summary's conversation chain | `CollectConversationUpstream`: a project-folder scan, then each parent analyzed | 17–309 ms, plus each parent's analyze | `forked_from`, `plan_parent`, `am_link`, and the parents' summary rows | P3 |
+| The summary panel, the side panel's summary, the tab tooltip's card, the Sessions detail, the Manager's Summary tab, Copy ▸ Summary | `AnalyzeSessionTranscript`: the whole file, on every growth | 2.7 s per growth of a 128.7 MB session; 5–8× the file size in memory | **none: they keep the C++ analyzer** (decided 2026-10-14, §8.5) | — |
+| The summary's conversation chain | `CollectConversationUpstream`: a project-folder scan, then each parent analyzed | 17–309 ms, plus each parent's analyze | none for the app (it keeps the C++ chain walk); the database's own chain serves its tools | — |
+| The AI search's tools, the MCP `session` tool, the CLI asking for a session's summary | — (the AI search reads no summary today) | — | `sessionSummary`, ~3 ms (§8.5) | P3 |
 | The transcript overlay, Copy ▸ Transcript levels | `RenderTranscriptTurnsFile`: read, parse, render | 1.62 s at Default for 128.7 MB (measured); 0.27–5.3 s in the release log, once 94.2 s | Later: the render reads parsed rows instead of re-parsing JSON; the Markdown rules stay in C++ (the goldens) | Later |
 | The Sessions page | sidecars, ripgrep, re-parse | §1.1: 6 s+ to open, 2–42 s for content | §8.1 | P2 |
 | The AI search's catalog and index keeper | `GatherSessionCatalog` | 3 minutes for a cold catalog | §8.2 | P3 |
@@ -1680,10 +1721,15 @@ decision reads the transcript on disk: the database can lag by up to ~2 s (G3).
   also the rows of the sessions it continues), `messages`, `grep`, `files`, `whoTouched`, `timeline`, `usage`,
   `related`, `sql`, `rebuild` (a transcript from the lossless store, or the whole index), `status`,
   `factsChanged` (the GUI says a title, tag, favorite or link changed), `openChanged` (the GUI's open
-  sessions), `subscribe` (ask for `sessionsChanged`), `shutdown`. Each tool of §8.4 maps to one method.
-- **Notifications** (service → client, no `id`): `sessionsChanged` `{sessions: [{id, cursor}]}`, sent to
-  subscribed clients after each committed batch, at most one a second (§7.6.2). A client that missed
-  some (a reconnect) asks again; nothing is queued for a client that is not connected.
+  sessions), `upsertSessions`, `resync`, `shutdown`. Each tool of §8.4 maps to one method.
+- **The refresh** (§7.6, decided 2026-10-14), both sent by the app's refresh tick:
+  - `upsertSessions` `{sessions: [{id, path}]}` — the sessions whose change count moved since the last
+    tick; the service reads their files from the cursors and upserts. Answer: `{sessions: [{id, cursor,
+    lines}]}`. A failed request leaves the ids for the next tick.
+  - `resync` `{}` — after the app's (re)connect, a watcher re-index, an unhealthy watcher (every 30 s)
+    or the page's ↻: the service sweeps every file against its cursor and upserts what moved.
+
+  The service sends nothing unasked: the app drives the refresh, and each answer says what landed.
 - **Limits:** a request ≤ 1 MB, a response ≤ 16 MB; per-request timeouts (2 s for `sql`, 10 s for
   `search`); one query connection per request, from a pool of 4.
 
@@ -1725,9 +1771,9 @@ decision reads the transcript on disk: the database can lag by up to ~2 s (G3).
 | Phase | Content |
 |---|---|
 | **P0 spike** | A new project `agentmaster-sessiondb` linking `duckdb.dll` (2.0.0), shipped in the wapproj, the portable zip and CI (x64 and arm64); the copy-out and a hot-swap with an MCP client connected; appender throughput, `duckdb_interrupt`, and **the C++ cold build measured on this corpus**. |
-| **P1 engine** | Schema and migrations; the lossless line store (D11) and its byte-exact rebuild check; `ClassifyTranscriptBlocks` shared with the sidecars, extended to the line kinds of §5.6 (`cost-state`, `worktree-state`, `relocated`, `agent-name`, `frame-link`, the `environment` attachment); the session row of §5.6; the live-branch walk at ingest (`line.on_branch`, `seg`, `is_copy`) and the `summary` table (§8.5); tokenizer; cold build, incremental ingest, merge, re-cluster; the planner; the pipe server; harness tests; `agentmaster sessdb status`. |
+| **P1 engine** | Schema and migrations; the lossless line store (D11) and its byte-exact rebuild check; `ClassifyTranscriptBlocks` shared with the sidecars, extended to the line kinds of §5.6 (`cost-state`, `worktree-state`, `relocated`, `agent-name`, `frame-link`, the `environment` attachment); the session row of §5.6; the live-branch walk at ingest (`line.on_branch`, `seg`, `is_copy`) and the `summary` table (§8.5); tokenizer; cold build, incremental ingest, merge, re-cluster; the planner; the pipe server; the refresh (§7.6): `TranscriptWatcher::TakeChangedSessions()` in the app, the app's refresh tick (setting `sessionDbRefreshSeconds`, default 5), `upsertSessions` / `resync` with upserts in the service; harness tests; `agentmaster sessdb status`. |
 | **P2 page** | The virtualized table (can ship first, on today's data); `SessionDbClient`; list / search / detail through the service behind `AppSettings::sessionDb` = Off / Shadow / On. **Shadow** runs both and logs timings and differences (`[sessdb-diff]`). The sort keys of sessions that are not open; the launch bar's session-id lookup. |
-| **P3 AI search and the summary** | The AI search on the service; the tool registry of §8.4.4 with the contracts of §8.4.3 (`scopes` replace `deep`); a live trace per tool. The summary surfaces read `sessionSummary` (§8.5); in Shadow they also run `AnalyzeSessionTranscript` and log `[sessdb-diff] summary`; the conversation chain from `forked_from` / `plan_parent` / `am_link`. |
+| **P3 AI search and the database's summary** | The AI search on the service; the tool registry of §8.4.4 with the contracts of §8.4.3 (`scopes` replace `deep`); a live trace per tool. The database's summary (`sessionSummary`, §8.5) for the AI search's tools, the MCP `session` tool and the CLI, with its parity test against `AnalyzeSessionTranscript` (in Shadow: `[sessdb-diff] summary`); the database's conversation chain from `forked_from` / `plan_parent` / `am_link`. The app's summary surfaces stay as they are (decided 2026-10-14). |
 | **P4 CLI and MCP** | The verbs; `mcp` mode; the Settings button (D6); the Fleet Observer's External rows and the Manager's external prompt list from the `session` and `summary` rows. |
 | **P5 cleanup** | After weeks of Shadow parity: remove the sidecars and the ripgrep path; the inferred-folder scan reads `path_access` and `session.inferred_dir_key` (D15). |
 | **Later** | `vss` semantic search, Codex rollouts, a usage and cost view, diagnostics views, a global prompt history, the transcript overlay from parsed rows (§8.6). |
@@ -1758,9 +1804,9 @@ decision reads the transcript on disk: the database can lag by up to ~2 s (G3).
 | **D11** | The lossless store: every transcript line verbatim (§5.5) | **Yes**: +2.2 GB, byte-exact rebuilds, resumable after Claude's sweep, re-derivable index | No: the search projection only (~0.9 GB); a transcript cannot be rebuilt |
 | **D12** | `file-history/` (2.07 GB, the `/rewind` snapshots) in the lossless store | **No** for version 1: files, not conversation | Yes: a swept session would keep `/rewind` |
 | **D13** | `usage` costs | **Claude Code's own `cost-state` totals where a session has them** (562 of 4,444 sessions, written since ~2.1.225, with per-model `costUSD`; `hasUnknownModelCost` marks a model it cannot price), and **a price table only for the others**, shipped with the app, versioned, labeled an estimate | A price table for every session; or tokens only, no cost |
-| **D14** | How the summary is computed (§8.5) | **A precomputed `summary` row per session**: SQL over the section tables, the live branch walked in C++ at ingest, and a parity test against the C++ analyzer (fixtures, a live corpus check, Shadow diffs) | The C++ analyzer as an incremental fold inside the service (one implementation, a larger refactor: the analyzer is a whole-file pass today); or keep reading transcripts |
+| **D14** | The session summary (§8.5) | **DECIDED by the user (2026-10-14):** the database must be able to form the summary — a precomputed `summary` row per session (SQL over the section tables, the live branch walked in C++ at ingest, a parity test against the C++ analyzer) — for its own consumers (the AI search's tools, the MCP `session` tool, the CLI); the app's summary surfaces do NOT use it and keep `AnalyzeSessionTranscript` | (Rejected: the app's summary surfaces reading the database's row; the C++ analyzer as an incremental fold inside the service) |
 | **D15** | Columns that need the filesystem: the git root, the worktree's main root, the inferred working directory (§5.6) | **The service computes them for every session** with Agentmaster's C++ (`FindGitRootForDir`, `ResolveWorktreeMainRoot`, `InferWorkingDirectory`), probes again when the session changes and once a day, and re-infers every session when `inferGitRoot` changes | The GUI computes them for its open sessions only, as today (closed sessions cannot be grouped by where they worked) |
-| **D16** | What wakes the ingest (§7.6.1) | **The service's own watcher** (the `TranscriptWatcher` class the app's scanner uses): ~1 s behind with the app open or closed, no new code, no load on the app | The app's observer forwards its watcher's changes over the pipe (~1 s while the app runs, 30–60 s at the sweep when it does not; a new watcher API, a message, a reconnect replay); or polling the live sessions' files from Claude's presence files |
+| **D16** | What refreshes the database (§7.6.1) | **DECIDED by the user (2026-10-14):** the app's observer counts each session's changes (`TranscriptWatcher`'s change sequences, `TakeChangedSessions()`); every refresh tick (setting, default 5 s, 1–60 s) the sessions that changed are upserted (`upsertSessions`), a `resync` after a connect or a re-index. Still open within it: should a service started WITHOUT the app (by the CLI or an MCP client) sweep once at its start (~150 ms)? Recommended yes; no keeps the observer the only refresher, and such clients then read the data as of the app's last tick | (Rejected: the service's own watcher, recommended on 2026-10-13; polling the live sessions' files from Claude's presence files) |
 
 ## 14. Measurements
 
@@ -1788,7 +1834,7 @@ cache; best of 3–5 runs. The corpus as in §1.2.
 | The field census (`field_census.py`) | the newest 3.0 GB (332 sessions, 633,905 lines, Claude Code 2.1.123–2.1.291) in 31 s; `cost-state` in 562 of 4,444 top-level transcripts (`rg -l`) |
 | A fork's parent (NumSharp's 1.63 M lines) | 29.1 ms by scanning every line's uuid; 8.7 ms through a uuid → first-file map (715,662 uuids, built in 0.1 s); the same 150 copied lines as `CollectConversationUpstream` |
 | The ingest load (`append_rate.py`, 2026-10-12/13) | 190 MB of transcript lines in 24 h (38,720 lines, 71 files; 21.7 MB of it fork copies in 19 new files), 2.2 KB/s average, 23.4 MB in the busiest hour; + 32.5 MB of spills; a sweep of the whole tree by directory enumeration (12,749 files, 1,293 folders) 145–150 ms warm, ~0.36–0.39 s with a cold directory cache; the 49 live sessions' presence files read in 6 ms |
-| Its cost in DuckDB (`commit_cost.py`, a file database on C:) | COMMIT of a 20-line transaction 1.9–2.3 ms median (p95 3.1–4.6 ms); a 23 MB busy hour 6.6–12.3 s of database time (0.18–0.34% of one core); a merge of 6.9–9.7 K hot lines 0.21–0.28 s; a checkpoint 0.22–0.27 s |
+| Its cost in DuckDB (`commit_cost.py`, a file database on C:) | COMMIT of a 20-line transaction 1.9–2.3 ms median (p95 3.1–4.6 ms); a 23 MB busy hour 6.6–12.3 s of database time (0.18–0.34% of one core); a merge of 6.9–9.7 K hot lines 0.21–0.28 s; a checkpoint 0.19–0.28 s; a refresh tick's upserts (the `session` + `summary` rows of the changed sessions, one transaction, a 4,500-row table with a primary key): 1–5 sessions ~17 ms median, 20 sessions ~27 ms (2026-10-14) |
 
 **Reproduce** with [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/): Python 3.12 in a venv
 outside the repo with `pip install --pre duckdb` (2.0 until it is released). Scratch files go to
@@ -1827,7 +1873,8 @@ the transcripts are only read. The order matters, each step uses the previous on
       comparison;
     - `session_columns.py <project db> [session id prefix]` — the session row and its coverage.
 12. `append_rate.py [--samples N] [--interval S]` and `commit_cost.py` — what keeping the database
-    current costs (§7.6); no database needed for the first, the second makes and deletes its own.
+    current costs (§7.6), the refresh tick's upserts included; no database needed for the first, the
+    second makes and deletes its own.
 
 ## 15. Sources
 
