@@ -13,6 +13,12 @@ file database in the work folder (the same drive as the profile) and times:
      whole busy hour's ingest takes the database.
   3. THE MERGE: `line_hot` moved into the ZSTD `line` table sorted by line_id, in one transaction.
   4. A CHECKPOINT after all of it.
+  5. THE REFRESH TICK'S UPSERTS (SESSIONS_DB.md section 7.6, decided 2026-10-14: the app's observer
+     counts each session's changes, and every refresh tick upserts the sessions that changed): a
+     `session` table with a PRIMARY KEY and 4,500 rows, then 100 ticks that each upsert 20 sessions'
+     rows (`INSERT ... ON CONFLICT DO UPDATE`) and replace their `summary` rows (`INSERT OR REPLACE`) in
+     ONE transaction. Prints the time per tick, and whether writing one key twice in one transaction is
+     refused (DuckDB checks unique keys eagerly), which decides that a tick writes each session once.
 
 Each batch is inserted with one statement per table (parameter lists unnested into rows); the C API's
 appender would be faster still, so the insert times are an upper bound. The COMMIT and CHECKPOINT times
@@ -157,8 +163,60 @@ def main() -> None:
     start = time.perf_counter()
     con.execute("CHECKPOINT")
     print(f"== 4. checkpoint: {(time.perf_counter() - start) * 1000:.0f} ms; file {os.path.getsize(path) / 1e6:.1f} MB")
+
+    upsert_ticks(con)
     con.close()
     bc.remove_db(path)
+
+
+def upsert_ticks(con) -> None:
+    """Measurement 5: the refresh tick's upserts of the changed sessions' rows (see the module docstring).
+
+    Args:
+        con: the open database.
+
+    Raises:
+        duckdb.Error: a statement fails (other than the one deliberately refused write it reports).
+    """
+    import random
+    con.execute("""CREATE TABLE session (sid_key INTEGER PRIMARY KEY, lines BIGINT, bytes BIGINT, last_ts VARCHAR,
+                                         prompts INTEGER, tool_calls INTEGER, cost_usd DOUBLE)""")
+    con.execute("""CREATE TABLE summary (sid_key INTEGER PRIMARY KEY, prompts VARCHAR[], files_edited VARCHAR[],
+                                         recap VARCHAR)""")
+    con.execute("INSERT INTO session SELECT i, 100, 100000, '2026-10-14T00:00:00Z', 5, 50, 1.0 FROM range(4500) t(i)")
+    con.execute("INSERT INTO summary SELECT i, ['first prompt', 'second prompt'], ['a.cpp'], 'recap' FROM range(4500) t(i)")
+    rng = random.Random(14)
+    for changed in (1, 5, 20):  # how many sessions changed within one tick
+        ticks = []
+        for _ in range(60):
+            sids = rng.sample(range(4500), changed)
+            start = time.perf_counter()
+            con.execute("BEGIN TRANSACTION")
+            con.execute("""INSERT INTO session SELECT unnest($1), 120, 120000, '2026-10-14T01:00:00Z', 6, 60, 1.5
+                           ON CONFLICT (sid_key) DO UPDATE SET lines = session.lines + 20, bytes = excluded.bytes,
+                               last_ts = excluded.last_ts, prompts = excluded.prompts, tool_calls = excluded.tool_calls,
+                               cost_usd = excluded.cost_usd""", [sids])
+            con.execute("INSERT OR REPLACE INTO summary SELECT unnest($1), ['first prompt', 'second prompt', 'third'], ['a.cpp', 'b.h'], 'new recap'",
+                        [sids])
+            con.execute("COMMIT")
+            ticks.append((time.perf_counter() - start) * 1000)
+        print(f"== 5. a refresh tick upserting {changed:2d} session(s) (session + summary rows, one transaction): "
+              f"median {statistics.median(ticks):.2f} ms (p95 {p95(ticks):.2f})")
+    # The same key twice in one transaction: DuckDB's unique-key check is eager, so the second write of
+    # one key inside a transaction can be refused. A tick therefore folds every change of a session into
+    # ONE row write.
+    try:
+        con.execute("BEGIN TRANSACTION")
+        con.execute("INSERT INTO session VALUES (7, 1, 1, 'x', 1, 1, 1) ON CONFLICT (sid_key) DO UPDATE SET lines = excluded.lines")
+        con.execute("INSERT INTO session VALUES (7, 2, 2, 'y', 2, 2, 2) ON CONFLICT (sid_key) DO UPDATE SET lines = excluded.lines")
+        con.execute("COMMIT")
+        print("   one key upserted twice in one transaction: accepted")
+    except Exception as ex:  # report, then leave the transaction cleanly
+        print(f"   one key upserted twice in one transaction: REFUSED ({str(ex).splitlines()[0][:120]})")
+        try:
+            con.execute("ROLLBACK")
+        except Exception as rollback_ex:
+            print(f"   (rollback after the refusal failed: {rollback_ex})")
 
 
 if __name__ == "__main__":
