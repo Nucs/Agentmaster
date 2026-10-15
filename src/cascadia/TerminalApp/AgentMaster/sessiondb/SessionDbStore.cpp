@@ -525,6 +525,11 @@ namespace Agentmaster::SessionDb
             _db = Database{};
             return state;
         }
+        if (state == SchemaState::Created)
+        {
+            // Every summary row of a new database is formed by this build's rules: no rebuild is due.
+            SetMeta(*_w, "summary_version", std::to_string(kSummaryVersion));
+        }
         // Staging tables for the set-based upserts (regular tables, always emptied before use: an
         // appender targets them by name, which a TEMP table would complicate).
         _w->Execute(R"SQL(
@@ -1449,6 +1454,28 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
             {
                 SetMeta(*_w, "cold_build_done", std::to_string(NowMs()));
             }
+            // Summary rows formed by older rules (SessionDbSummary.h kSummaryVersion): rebuild every row once. A
+            // database created by this build already has the current version stamped (Store::Open).
+            if (GetMeta(*_w, "summary_version") != std::to_string(kSummaryVersion))
+            {
+                try
+                {
+                    const int64_t t0 = NowMs();
+                    const size_t n = RebuildSummaries({}, cancel);
+                    const bool finished = !(cancel && cancel());
+                    if (finished)
+                    {
+                        SetMeta(*_w, "summary_version", std::to_string(kSummaryVersion));
+                    }
+                    _log(L"[sessdb] summaries rebuilt with the rules of version " + std::to_wstring(kSummaryVersion) + L": " + std::to_wstring(n) +
+                         L" session(s) in " + std::to_wstring(NowMs() - t0) + L" ms" + (finished ? L"" : L" (paused; the next sweep finishes them)"));
+                }
+                catch (...)
+                {
+                    // The rows keep their older form until the next complete sweep tries again.
+                    LogSwallowedException(L"sessiondb Resync (rebuild the summaries)");
+                }
+            }
         }
         rr.ms = NowMs() - started;
         _log(L"[sessdb] resync done: " + std::to_wstring(rr.sessionsUpserted) + L" session(s), " + std::to_wstring(rr.linesIngested) +
@@ -2261,6 +2288,40 @@ ORDER BY file_id, line_no)SQL");
                 p.Execute();
             }
         }
+    }
+
+    size_t Store::RebuildSummaries(const std::vector<int32_t>& sidKeys, const CancelFn& cancel)
+    {
+        // (top-level file, session) pairs: the summary statement's input.
+        std::vector<std::pair<int32_t, int32_t>> pairs;
+        {
+            auto r = _w->Query("SELECT file_id, sid_key FROM session WHERE file_id IS NOT NULL ORDER BY sid_key");
+            const std::unordered_set<int32_t> wanted(sidKeys.begin(), sidKeys.end());
+            while (r.Next())
+            {
+                const auto sid = static_cast<int32_t>(r.Int64(1));
+                if (wanted.empty() || wanted.count(sid))
+                {
+                    pairs.emplace_back(static_cast<int32_t>(r.Int64(0)), sid);
+                }
+            }
+        }
+        constexpr size_t kBatch = 256;
+        size_t done = 0;
+        for (size_t at = 0; at < pairs.size(); at += kBatch)
+        {
+            if (cancel && cancel())
+            {
+                break;
+            }
+            const std::vector<std::pair<int32_t, int32_t>> batch(pairs.begin() + static_cast<std::ptrdiff_t>(at),
+                                                                 pairs.begin() + static_cast<std::ptrdiff_t>(std::min(pairs.size(), at + kBatch)));
+            Transaction tx{ *_w };
+            _buildSummaries(*_w, batch);
+            tx.Commit();
+            done += batch.size();
+        }
+        return done;
     }
 
     void Store::_buildSummaries(Connection& con, const std::vector<std::pair<int32_t, int32_t>>& fileSids)

@@ -26,6 +26,10 @@ namespace Agentmaster::SessionDb
     };
 
     // Compare the database's summary with AnalyzeSessionTranscript for up to `limit` sessions (newest first;
-    // 0 = every session). Read-only; opens its own reader connection. Throws DbError.
-    VerifyReport VerifySummaries(Store& store, size_t limit);
+    // 0 = every session). Opens its own reader connection for the comparison.
+    //   rebuild — first re-form the compared sessions' summary rows with THIS build's rules
+    //             (Store::RebuildSummaries, on the store's writer connection): the check then tests the
+    //             running code, not rows an older build wrote. The one-shot `verify-summary` passes true.
+    // Throws DbError.
+    VerifyReport VerifySummaries(Store& store, size_t limit, bool rebuild = false);
 }

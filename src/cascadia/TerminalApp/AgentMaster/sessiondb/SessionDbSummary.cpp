@@ -23,7 +23,8 @@ namespace Agentmaster::SessionDb
         //   ln  — the files' stored lines (merged + hot): what the facts read.
         //   nd  — minus the re-written copies (flags & 16): the analyzer skips a uuid seen earlier in the file.
         //   br  — the live branch (on_branch, set by the C++ walk): every field but the earlier segments' prompts.
-        //   ls  — the CURRENT segment number (the last boundary's, by position) and the boundary count.
+        //   ls  — the last segment number by position (the earlier segments are those below it) and the boundary count.
+        //   cb  — where the CURRENT prompt list starts: after the last ON-BRANCH boundary (the analyzer's main walk).
         constexpr const char* kSummarySql = R"SQL(
 INSERT OR REPLACE INTO summary
 WITH f AS (SELECT CAST(unnest(CAST($1 AS BIGINT[])) AS INTEGER) AS file_id, CAST(unnest(CAST($2 AS BIGINT[])) AS INTEGER) AS sid_key),
@@ -43,23 +44,37 @@ fx AS (SELECT file_id,
               arg_min(branch, line_no) FILTER (WHERE coalesce(branch, '') <> '') AS branch,
               min(line_no) FILTER (WHERE (flags & 8) <> 0) AS first_ext
        FROM br GROUP BY file_id),
--- The prompts (SummaryPromptOfLine's rows) with their branch flag and time.
-p AS (SELECT sp.file_id, sp.line_no, sp.seg, sp.kind, sp.uuid, sp.text, n.on_branch, n.ts_ms
-      FROM sec_prompt sp JOIN nd n ON n.file_id = sp.file_id AND n.line_no = sp.line_no),
+-- Where the CURRENT list starts: after the last ON-BRANCH boundary. The analyzer's main walk reads only live-branch
+-- lines and clears its Messages list at each boundary it reaches, so an OFF-branch boundary (a rewind past a
+-- compaction) never restarts it, and the earlier live-branch prompts stay listed (2026-10-15: one session of 296 at
+-- full scale listed 2 prompts here and 9 in the analyzer, its only compaction being off-branch).
+cb AS (SELECT f.file_id, coalesce(max(b.line_no) FILTER (WHERE (b.flags & 2) <> 0), -1) AS cur_from
+       FROM f LEFT JOIN br b ON b.file_id = f.file_id GROUP BY f.file_id),
+-- The prompts (SummaryPromptOfLine's rows) with their branch flag, time, and whether they belong to the current list.
+p AS (SELECT sp.file_id, sp.line_no, sp.seg, sp.kind, sp.uuid, sp.text, n.on_branch, n.ts_ms,
+             (n.on_branch AND sp.line_no > cb.cur_from) AS cur
+      FROM sec_prompt sp JOIN nd n ON n.file_id = sp.file_id AND n.line_no = sp.line_no JOIN cb ON cb.file_id = sp.file_id),
 pk AS (SELECT p.*,
               row_number() OVER (PARTITION BY p.file_id, p.seg, p.text ORDER BY p.line_no) AS nth_all,
-              row_number() OVER (PARTITION BY p.file_id, p.seg, p.text, p.on_branch ORDER BY p.line_no) AS nth_branch
+              row_number() OVER (PARTITION BY p.file_id, p.cur, p.text ORDER BY p.line_no) AS nth_cur
        FROM p),
--- Listed: in the CURRENT segment, the live-branch prompts deduplicated among themselves (the analyzer's
--- main walk); in an EARLIER segment, every prompt deduplicated within the segment (by position).
+-- Listed: the CURRENT list (the live-branch prompts after the last on-branch boundary, deduplicated among
+-- themselves: the analyzer's main walk), and the EARLIER segments (split by position at EVERY boundary, every prompt
+-- deduplicated within its segment: CollectConversationSegments). The two rules differ, so one prompt can be in both
+-- lists (an off-branch boundary): each entry carries `cur`.
+lst AS (SELECT file_id, line_no, seg, kind, text, uuid, true AS cur FROM pk WHERE cur AND nth_cur = 1
+        UNION ALL
+        SELECT pk.file_id, pk.line_no, pk.seg, pk.kind, pk.text, pk.uuid, false AS cur
+        FROM pk JOIN ls ON ls.file_id = pk.file_id WHERE pk.seg < ls.last_seg AND pk.nth_all = 1),
+pl AS (SELECT file_id,
+              to_json(list({'seg': seg, 'kind': kind, 'text': text, 'uuid': uuid, 'cur': cur} ORDER BY cur, line_no))::VARCHAR AS prompts,
+              count(*) AS listed
+       FROM lst GROUP BY file_id),
 -- "Last user message": the last live-branch typed prompt (duplicates count), the latest queued message.
-pl AS (SELECT pk.file_id,
-              to_json(list({'seg': pk.seg, 'kind': pk.kind, 'text': pk.text, 'uuid': pk.uuid} ORDER BY pk.line_no)
-                      FILTER (WHERE (pk.seg = ls.last_seg AND pk.on_branch AND pk.nth_branch = 1) OR (pk.seg < ls.last_seg AND pk.nth_all = 1)))::VARCHAR AS prompts,
-              count(*) FILTER (WHERE (pk.seg = ls.last_seg AND pk.on_branch AND pk.nth_branch = 1) OR (pk.seg < ls.last_seg AND pk.nth_all = 1)) AS listed,
-              arg_max(pk.ts_ms, pk.line_no) FILTER (WHERE pk.kind = 1 AND pk.on_branch) AS last_typed_ms,
-              max(pk.ts_ms) FILTER (WHERE pk.kind = 2 AND pk.on_branch) AS last_queued_ms
-       FROM pk JOIN ls ON ls.file_id = pk.file_id GROUP BY pk.file_id),
+pt AS (SELECT file_id,
+              arg_max(ts_ms, line_no) FILTER (WHERE kind = 1 AND on_branch) AS last_typed_ms,
+              max(ts_ms) FILTER (WHERE kind = 2 AND on_branch) AS last_queued_ms
+       FROM p GROUP BY file_id),
 -- An answered AskUserQuestion moves "last user message" too.
 ans AS (SELECT r.file_id, arg_max(b.ts_ms, r.line_no) AS last_answer_ms
         FROM sec_result r JOIN br b ON b.file_id = r.file_id AND b.line_no = r.line_no WHERE r.ask GROUP BY r.file_id),
@@ -111,7 +126,7 @@ SELECT f.sid_key, pl.prompts, sg.segments, ls.last_seg,
        coalesce(tl.exit_plan, false), coalesce(fu.plan_content, false), tl.plan_file, tl.plan_reads,
        fu.parent, rc.recap, ls.boundaries,
        fx.first_ms, fx.last_ms,
-       nullif(greatest(coalesce(pl.last_typed_ms, 0), coalesce(pl.last_queued_ms, 0), coalesce(ans.last_answer_ms, 0)), 0),
+       nullif(greatest(coalesce(pt.last_typed_ms, 0), coalesce(pt.last_queued_ms, 0), coalesce(ans.last_answer_ms, 0)), 0),
        fx.branch,
        coalesce(pl.listed, 0), coalesce(fl.read_n, 0), coalesce(fl.created_n, 0), coalesce(fl.edited_n, 0),
        $3
@@ -119,6 +134,7 @@ FROM f
 JOIN ls ON ls.file_id = f.file_id
 LEFT JOIN fx ON fx.file_id = f.file_id
 LEFT JOIN pl ON pl.file_id = f.file_id
+LEFT JOIN pt ON pt.file_id = f.file_id
 LEFT JOIN ans ON ans.file_id = f.file_id
 LEFT JOIN fl ON fl.file_id = f.file_id
 LEFT JOIN tl ON tl.file_id = f.file_id
@@ -222,7 +238,10 @@ LEFT JOIN sg ON sg.file_id = f.file_id
                     const int64_t seg = e.contains("seg") && e["seg"].is_number() ? e["seg"].get<int64_t>() : 0;
                     std::wstring text = FromUtf8(e["text"].get_ref<const std::string&>());
                     std::wstring uuid = e.contains("uuid") && e["uuid"].is_string() ? FromUtf8(e["uuid"].get_ref<const std::string&>()) : std::wstring{};
-                    if (seg == currentSeg)
+                    // `cur` says which list an entry is in (the SQL's two rules can put one prompt in both). A row
+                    // written before the flag existed falls back to the segment test it used then.
+                    const bool current = e.contains("cur") && e["cur"].is_boolean() ? e["cur"].get<bool>() : seg == currentSeg;
+                    if (current)
                     {
                         out.userMsgs.push_back(std::move(text));
                         out.userMsgUuids.push_back(std::move(uuid));

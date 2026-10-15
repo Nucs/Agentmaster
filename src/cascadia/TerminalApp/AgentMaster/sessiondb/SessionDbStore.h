@@ -157,6 +157,15 @@ namespace Agentmaster::SessionDb
 
         // Index maintenance: true when the hot tier is big enough (or old enough) to merge.
         bool MergeDue() const;
+        // Rebuild summary rows with this build's rules (SummaryBuildSql), in batches of 256 sessions, each its own
+        // transaction. The service runs it once after a complete sweep when meta `summary_version` differs from
+        // kSummaryVersion (then records it); verify-summary runs it for the sessions it compares.
+        //   sidKeys — the sessions; empty = every session that has a top-level transcript.
+        //   cancel  — polled between batches; may be empty.
+        // Returns the sessions rebuilt (fewer when cancelled). Writer thread. Throws DbError (the failing batch
+        // rolled back; the batches before it stay rebuilt).
+        size_t RebuildSummaries(const std::vector<int32_t>& sidKeys, const CancelFn& cancel);
+
         // Run a merge (see TextIndex::Merge): the hot blocks slice by slice, then the hot lines. A cancel keeps the
         // merged slices and leaves the rest hot; the MergeDue estimates are re-read then (and after a failure).
         //   cancel — polled before each slice (the service passes "a write job is waiting"); may be empty.

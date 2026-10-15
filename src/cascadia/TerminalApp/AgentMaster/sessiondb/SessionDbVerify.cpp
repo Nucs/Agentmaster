@@ -46,7 +46,7 @@ namespace Agentmaster::SessionDb
         }
     }
 
-    VerifyReport VerifySummaries(Store& store, size_t limit)
+    VerifyReport VerifySummaries(Store& store, size_t limit, bool rebuild)
     {
         VerifyReport rep;
         Connection con{ store.Db() };
@@ -73,6 +73,17 @@ namespace Agentmaster::SessionDb
                     break;
                 }
             }
+        }
+        if (rebuild && !cands.empty())
+        {
+            // The rows as THIS build forms them (an older build's rows would test the older rules).
+            std::vector<int32_t> sids;
+            sids.reserve(cands.size());
+            for (const auto& c : cands)
+            {
+                sids.push_back(c.sid);
+            }
+            (void)store.RebuildSummaries(sids, {});
         }
         // field name -> (agreed, examples)
         std::map<std::wstring, std::pair<int64_t, std::vector<std::wstring>>> fields;
