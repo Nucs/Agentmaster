@@ -159,8 +159,13 @@ namespace Agentmaster::SessionDb
         bool MergeDue() const;
         // Run a merge (see TextIndex::Merge). Returns the blocks merged.
         size_t Merge(const CancelFn& cancel);
-        // Run a re-cluster (see TextIndex::Recluster).
+        // Run a re-cluster (see TextIndex::Recluster) and record when, and over how many blocks, it ran.
         void Recluster(const CancelFn& cancel);
+        // Whether a re-cluster is worth its cost now (§6.4): the blocks merged since the last one are at least
+        // a quarter of the index (and at least 20,000), or a day passed and new blocks arrived. ⚠ A re-cluster
+        // rewrites the big tables: DuckDB reuses the freed blocks but does not shrink the file at once, so the
+        // file peaks at about twice the live data around one (measured: 184 -> 343 -> 183 MB). Writer thread.
+        bool ReclusterDue();
         // CHECKPOINT the write-ahead log into the file.
         void Checkpoint();
 
@@ -175,6 +180,12 @@ namespace Agentmaster::SessionDb
         std::wstring ShortIdOf(int32_t sidKey) const;
         // The session id of a session key ("" when unknown).
         std::wstring SessionIdOf(int32_t sidKey) const;
+        // A source file's subagent id ("" for a top-level transcript, history.jsonl or an unknown id): the
+        // part of a block's ref that names a subagent's transcript (`<id>/<agent>:<line>`).
+        std::wstring AgentIdOfFile(int32_t fileId) const;
+        // The file id of a session's subagent transcript with that agent id (0 when unknown): the reverse of
+        // AgentIdOfFile, for resolving a ref.
+        int32_t SubagentFileOf(int32_t sidKey, std::wstring_view agentId) const;
         // Every session key with its id (a snapshot).
         std::vector<SessionKey> AllSessions() const;
         // The open-session set the GUI last pushed (lowercase ids).

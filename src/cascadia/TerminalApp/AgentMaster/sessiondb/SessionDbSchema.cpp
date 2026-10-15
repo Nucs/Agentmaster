@@ -221,6 +221,10 @@ CREATE INDEX IF NOT EXISTS line_by_id ON line (line_id);
         // The read-only surface (§5.3): the views the `sql` tool documents, and the macro the GUI's
         // grouping rule needs. CREATE OR REPLACE: a newer service rewrites them freely (no data).
         constexpr const char* kViews = R"SQL(
+-- A Unix-ms column as a local time (TIMESTAMPTZ, shown in the machine's time zone through the bundled ICU):
+-- every tool result speaks local time (§8.4.2), so the views do too. NULL for 0 / NULL.
+CREATE OR REPLACE MACRO local_time(ms) AS CASE WHEN ms IS NULL OR ms <= 0 THEN NULL ELSE to_timestamp(ms / 1000.0) END;
+
 CREATE OR REPLACE MACRO effective_dir_key(cwd_key, inferred_dir_key, home_launch, inferred_mode) AS
     CASE WHEN (inferred_mode OR coalesce(home_launch, false)) AND coalesce(inferred_dir_key, '') <> '' THEN inferred_dir_key ELSE cwd_key END;
 
@@ -228,7 +232,7 @@ CREATE OR REPLACE VIEW v_sessions AS
 SELECT s.short_id AS id, s.session_id AS uuid,
        coalesce(nullif(t.title, ''), nullif(s.custom_title, ''), nullif(s.ai_title, ''), nullif(s.legacy_summary, ''), s.first_prompt) AS title,
        s.cwd AS dir, s.cwd_key AS dir_key, s.inferred_dir, s.inferred_dir_key, s.git_root, s.branch_last AS branch,
-       epoch_ms(s.created_ms) AS created, epoch_ms(s.last_activity_ms) AS active,
+       local_time(s.created_ms) AS created, local_time(s.last_activity_ms) AS active,
        s.prompts_typed AS msgs, s.tool_calls AS tools, s.model_last AS model, s.models, s.effort_last AS effort,
        s.version_last AS version, s.in_tokens AS input_tokens, s.out_tokens AS output_tokens,
        s.cache_read_tokens, s.cache_write_tokens, s.cost_usd, s.api_errors, s.interrupts, s.compactions,
@@ -245,7 +249,7 @@ LEFT JOIN rt_open op ON op.session_id = s.session_id
 LEFT JOIN summary sm ON sm.sid_key = s.sid_key;
 
 CREATE OR REPLACE VIEW v_messages AS
-SELECT s.short_id AS id, s.short_id || ':' || d.line_no || '.' || d.block AS ref, epoch_ms(d.ts_ms) AS time,
+SELECT s.short_id AS id, s.short_id || ':' || d.line_no || '.' || d.block AS ref, local_time(d.ts_ms) AS time,
        CASE d.role WHEN 1 THEN 'prompt' WHEN 2 THEN 'reply' WHEN 3 THEN 'thinking' WHEN 4 THEN 'tool_call'
                    WHEN 5 THEN 'tool_result' WHEN 6 THEN 'system' WHEN 7 THEN 'queued' ELSE 'other' END AS role,
        d.tool, (d.flags & 8) <> 0 AS subagent, d.text
@@ -256,7 +260,7 @@ FROM (SELECT x.sid_key, x.line_no, x.block, x.ts_ms, x.role, x.flags, x.tool, co
 JOIN session s ON s.sid_key = d.sid_key;
 
 CREATE OR REPLACE VIEW v_lines AS
-SELECT s.short_id AS id, l.line_no AS line, l.type, epoch_ms(l.ts_ms) AS time, l.raw
+SELECT s.short_id AS id, l.line_no AS line, l.type, local_time(l.ts_ms) AS time, l.raw
 FROM (SELECT file_id, line_no, type, ts_ms, raw FROM line UNION ALL SELECT file_id, line_no, type, ts_ms, raw FROM line_hot) l
 JOIN src_file f ON f.file_id = l.file_id AND f.kind = 0
 JOIN session s ON s.sid_key = f.sid_key;
@@ -264,11 +268,11 @@ JOIN session s ON s.sid_key = f.sid_key;
 CREATE OR REPLACE VIEW v_paths AS
 SELECT s.short_id AS id, p.path, p.dir_fold AS dir, p.leaf_fold AS file,
        CASE p.op WHEN 1 THEN 'read' WHEN 2 THEN 'edit' WHEN 3 THEN 'write' WHEN 4 THEN 'search' WHEN 5 THEN 'shell' ELSE 'other' END AS op,
-       p.n, epoch_ms(p.first_ms) AS first, epoch_ms(p.last_ms) AS last
+       p.n, local_time(p.first_ms) AS first, local_time(p.last_ms) AS last
 FROM path_access p JOIN session s ON s.sid_key = p.sid_key;
 
 CREATE OR REPLACE VIEW v_usage AS
-SELECT s.short_id AS id, epoch_ms(u.ts_ms) AS time, u.model, u.in_tok AS input_tokens, u.out_tok AS output_tokens,
+SELECT s.short_id AS id, local_time(u.ts_ms) AS time, u.model, u.in_tok AS input_tokens, u.out_tok AS output_tokens,
        u.cache_read AS cache_read_tokens, u.cache_write AS cache_write_tokens
 FROM usage u JOIN session s ON s.sid_key = u.sid_key;
 

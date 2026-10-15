@@ -81,129 +81,6 @@ namespace Agentmaster::SessionDb
             return { sids.begin(), sids.end() };
         }
 
-        // Ids fetched by ONE point-lookup query at most: DuckDB serves an id list through the doc_by_id ART
-        // index only while it matches fewer than MAX(2,048 rows, 0.1% of the table); past that it scans and
-        // decompresses every block's text (§6.8).
-        constexpr size_t kMaxPointLookup = 1000;
-
-        // One block as the snippet and verification steps read it.
-        struct DocRow
-        {
-            int32_t line{ 0 };
-            uint16_t block{ 0 };
-            uint8_t role{ 0 };
-            uint8_t flags{ 0 };
-            std::wstring text; // the original text (not folded)
-        };
-
-        // Tool texts read from doc_tool by one query at most. Each scattered block there costs a ZSTD vector's
-        // decompression, so small chunks let the deadline stop the reads close to the budget.
-        constexpr size_t kToolChunk = 32;
-
-        // Read the blocks named by `ids` and hand each one whose text was read to `fn`.
-        //   ids      — doc ids, best first (duplicates allowed): when the deadline cuts the tool texts short,
-        //              the best candidates were read.
-        //   withHot  — also look in doc_hot (blocks not merged yet; a small table, scanned).
-        //   cache    — the tool-text cache: doc_tool reads go through it.
-        //   deadline — tool texts are read from doc_tool until this time; the tool blocks left are not handed out.
-        // Conversation text (doc.text, doc_hot.text) is always read: ~0.05 ms per block through doc_by_id.
-        // Returns false when the deadline left tool blocks unread. Throws DbError.
-        bool ForEachDocText(Connection& con, const std::vector<int64_t>& ids, bool withHot, DocTextCache& cache,
-                            std::chrono::steady_clock::time_point deadline, const std::function<void(uint32_t, DocRow&)>& fn)
-        {
-            if (ids.empty())
-            {
-                return true;
-            }
-            std::vector<std::pair<uint32_t, DocRow>> tool; // merged tool blocks: their text is in doc_tool
-            const char* const tables[] = { "doc", "doc_hot" };
-            for (const char* table : tables)
-            {
-                if (!withHot && table == tables[1])
-                {
-                    break;
-                }
-                auto p = con.Prepare(std::string{ "SELECT doc_id, line_no, block, role, flags, text FROM " } + table +
-                                     " WHERE doc_id IN (SELECT unnest(CAST($1 AS BIGINT[])))");
-                for (size_t at = 0; at < ids.size(); at += kMaxPointLookup)
-                {
-                    const size_t end = std::min(ids.size(), at + kMaxPointLookup);
-                    p.BindInt64List(1, std::vector<int64_t>(ids.begin() + static_cast<ptrdiff_t>(at), ids.begin() + static_cast<ptrdiff_t>(end)));
-                    auto r = p.Execute();
-                    while (r.Next())
-                    {
-                        const uint32_t id = static_cast<uint32_t>(r.Int64(0));
-                        DocRow row{ static_cast<int32_t>(r.Int64(1)), static_cast<uint16_t>(r.Int64(2)), static_cast<uint8_t>(r.Int64(3)),
-                                    static_cast<uint8_t>(r.Int64(4)), {} };
-                        if (r.IsNull(5))
-                        {
-                            tool.emplace_back(id, std::move(row)); // a merged tool block (doc.text is NULL for it)
-                            continue;
-                        }
-                        row.text = FromUtf8(r.Str(5));
-                        fn(id, row);
-                    }
-                }
-            }
-            if (tool.empty())
-            {
-                return true;
-            }
-            // Spend the budget on the best candidates: the tool blocks in the order `ids` named them.
-            std::unordered_map<uint32_t, size_t> rank;
-            for (size_t i = 0; i < ids.size(); ++i)
-            {
-                rank.emplace(static_cast<uint32_t>(ids[i]), i);
-            }
-            std::sort(tool.begin(), tool.end(), [&rank](const auto& a, const auto& b) { return rank[a.first] < rank[b.first]; });
-            std::vector<size_t> missing; // indexes into `tool` the cache did not hold
-            for (size_t i = 0; i < tool.size(); ++i)
-            {
-                if (cache.Get(tool[i].first, tool[i].second.text))
-                {
-                    fn(tool[i].first, tool[i].second);
-                }
-                else
-                {
-                    missing.push_back(i);
-                }
-            }
-            if (missing.empty())
-            {
-                return true;
-            }
-            auto p = con.Prepare("SELECT doc_id, text FROM doc_tool WHERE doc_id IN (SELECT unnest(CAST($1 AS BIGINT[])))");
-            for (size_t at = 0; at < missing.size(); at += kToolChunk)
-            {
-                if (std::chrono::steady_clock::now() >= deadline)
-                {
-                    return false; // the budget is spent: the remaining (lower-ranked) tool blocks stay unread
-                }
-                const size_t end = std::min(missing.size(), at + kToolChunk);
-                std::vector<int64_t> chunk;
-                std::unordered_map<uint32_t, size_t> slot; // doc id -> index into `tool`
-                for (size_t k = at; k < end; ++k)
-                {
-                    chunk.push_back(tool[missing[k]].first);
-                    slot.emplace(tool[missing[k]].first, missing[k]);
-                }
-                p.BindInt64List(1, chunk);
-                auto r = p.Execute();
-                while (r.Next())
-                {
-                    const auto it = slot.find(static_cast<uint32_t>(r.Int64(0)));
-                    if (it == slot.end() || r.IsNull(1))
-                    {
-                        continue;
-                    }
-                    auto& [id, row] = tool[it->second];
-                    row.text = FromUtf8(r.Str(1));
-                    cache.Put(id, row.text);
-                    fn(id, row);
-                }
-            }
-            return true;
-        }
     }
 
     DocTextCache::DocTextCache(size_t budgetBytes) :
@@ -246,6 +123,116 @@ namespace Agentmaster::SessionDb
             _at.erase(last.first);
             _lru.pop_back();
         }
+    }
+
+    bool ReadBlockTexts(Connection& con, const std::vector<int64_t>& ids, bool withHot, DocTextCache& cache,
+                        std::chrono::steady_clock::time_point deadline, const std::function<void(uint32_t, BlockText&)>& fn)
+    {
+        // Ids fetched by ONE point-lookup query at most: DuckDB serves an id list through the doc_by_id ART
+        // index only while it matches fewer than MAX(2,048 rows, 0.1% of the table); past that it scans and
+        // decompresses every block's text (§6.8).
+        constexpr size_t kMaxPointLookup = 1000;
+        // Tool texts read from doc_tool by one query at most. Each scattered block there costs a ZSTD
+        // vector's decompression, so small chunks let the deadline stop the reads close to the budget.
+        constexpr size_t kToolChunk = 32;
+        if (ids.empty())
+        {
+            return true;
+        }
+        std::vector<std::pair<uint32_t, BlockText>> tool; // merged tool blocks: their text is in doc_tool
+        const char* const tables[] = { "doc", "doc_hot" };
+        for (const char* table : tables)
+        {
+            if (!withHot && table == tables[1])
+            {
+                break;
+            }
+            auto p = con.Prepare(std::string{ "SELECT doc_id, line_no, block, role, flags, text, file_id, ts_ms, coalesce(tool, '') FROM " } + table +
+                                 " WHERE doc_id IN (SELECT unnest(CAST($1 AS BIGINT[])))");
+            for (size_t at = 0; at < ids.size(); at += kMaxPointLookup)
+            {
+                const size_t end = std::min(ids.size(), at + kMaxPointLookup);
+                p.BindInt64List(1, std::vector<int64_t>(ids.begin() + static_cast<ptrdiff_t>(at), ids.begin() + static_cast<ptrdiff_t>(end)));
+                auto r = p.Execute();
+                while (r.Next())
+                {
+                    const uint32_t id = static_cast<uint32_t>(r.Int64(0));
+                    BlockText row;
+                    row.fileId = static_cast<int32_t>(r.Int64(6));
+                    row.line = static_cast<int32_t>(r.Int64(1));
+                    row.block = static_cast<uint16_t>(r.Int64(2));
+                    row.role = static_cast<uint8_t>(r.Int64(3));
+                    row.flags = static_cast<uint8_t>(r.Int64(4));
+                    row.tsMs = r.Int64(7);
+                    row.tool = FromUtf8(r.Str(8));
+                    if (r.IsNull(5))
+                    {
+                        tool.emplace_back(id, std::move(row)); // a merged tool block (doc.text is NULL for it)
+                        continue;
+                    }
+                    row.text = FromUtf8(r.Str(5));
+                    fn(id, row);
+                }
+            }
+        }
+        if (tool.empty())
+        {
+            return true;
+        }
+        // Spend the budget on the best candidates: the tool blocks in the order `ids` named them.
+        std::unordered_map<uint32_t, size_t> rank;
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            rank.emplace(static_cast<uint32_t>(ids[i]), i);
+        }
+        std::sort(tool.begin(), tool.end(), [&rank](const auto& a, const auto& b) { return rank[a.first] < rank[b.first]; });
+        std::vector<size_t> missing; // indexes into `tool` the cache did not hold
+        for (size_t i = 0; i < tool.size(); ++i)
+        {
+            if (cache.Get(tool[i].first, tool[i].second.text))
+            {
+                fn(tool[i].first, tool[i].second);
+            }
+            else
+            {
+                missing.push_back(i);
+            }
+        }
+        if (missing.empty())
+        {
+            return true;
+        }
+        auto p = con.Prepare("SELECT doc_id, text FROM doc_tool WHERE doc_id IN (SELECT unnest(CAST($1 AS BIGINT[])))");
+        for (size_t at = 0; at < missing.size(); at += kToolChunk)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                return false; // the budget is spent: the remaining (lower-ranked) tool blocks stay unread
+            }
+            const size_t end = std::min(missing.size(), at + kToolChunk);
+            std::vector<int64_t> chunk;
+            std::unordered_map<uint32_t, size_t> slot; // doc id -> index into `tool`
+            for (size_t k = at; k < end; ++k)
+            {
+                chunk.push_back(tool[missing[k]].first);
+                slot.emplace(tool[missing[k]].first, missing[k]);
+            }
+            p.BindInt64List(1, chunk);
+            auto r = p.Execute();
+            while (r.Next())
+            {
+                const auto it = slot.find(static_cast<uint32_t>(r.Int64(0)));
+                if (it == slot.end() || r.IsNull(1))
+                {
+                    continue;
+                }
+                auto& [id, row] = tool[it->second];
+                row.text = FromUtf8(r.Str(1));
+                cache.Put(id, row.text);
+                fn(id, row);
+            }
+        }
+        return true;
     }
 
     std::wstring CardTitle(const SessionCard& c)
@@ -857,7 +844,7 @@ ORDER BY s.sid_key)SQL");
                         }
                         std::unordered_set<uint32_t> keep;
                         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max<int64_t>(0, req.toolTextBudgetMs));
-                        const bool complete = ForEachDocText(con, ids, false, _toolTexts, deadline, [&](uint32_t docId, const DocRow& row) {
+                        const bool complete = ReadBlockTexts(con, ids, false, _toolTexts, deadline, [&](uint32_t docId, const BlockText& row) {
                             const std::wstring text = FoldForIndex(row.text);
                             bool all = true;
                             for (const size_t k : verifyTerms)
@@ -962,11 +949,11 @@ ORDER BY s.sid_key)SQL");
                 snippetDocs.push_back(a.docs[k].second);
             }
         }
-        std::unordered_map<uint32_t, DocRow> texts;
+        std::unordered_map<uint32_t, BlockText> texts;
         // Snippets get their own share of the tool-text budget (half of it), so a verification that spent the
         // whole budget still leaves the page its snippets; a tool block left unread shows without one.
         const auto snippetDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max<int64_t>(0, req.toolTextBudgetMs / 2));
-        ForEachDocText(con, snippetDocs, true, _toolTexts, snippetDeadline, [&texts](uint32_t docId, DocRow& row) { texts[docId] = std::move(row); });
+        ReadBlockTexts(con, snippetDocs, true, _toolTexts, snippetDeadline, [&texts](uint32_t docId, BlockText& row) { texts[docId] = std::move(row); });
         lap(L"snippet text");
         const std::wstring snippetTerm = textTerms.empty() ? std::wstring{} : textTerms.front()->textLower;
         const bool snippetFuzzy = !textTerms.empty() && TermIsFuzzy(*textTerms.front(), req.fuzzy);
@@ -987,6 +974,7 @@ ORDER BY s.sid_key)SQL");
                     continue;
                 }
                 SearchSnippet s;
+                s.fileId = it->second.fileId;
                 s.lineNo = it->second.line;
                 s.block = it->second.block;
                 s.role = it->second.role;
