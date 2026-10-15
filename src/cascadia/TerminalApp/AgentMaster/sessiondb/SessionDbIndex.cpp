@@ -243,6 +243,41 @@ namespace Agentmaster::SessionDb
         return out;
     }
 
+    std::vector<uint32_t> Dictionary::TermsWithSubsequence(std::wstring_view needle, size_t limit) const
+    {
+        std::vector<uint32_t> out;
+        if (needle.empty())
+        {
+            return out;
+        }
+        std::shared_lock lk{ _mtx };
+        for (size_t i = 0; i < _terms.size(); ++i)
+        {
+            const std::wstring& t = _terms[i];
+            if (t.size() < needle.size())
+            {
+                continue;
+            }
+            size_t k = 0;
+            for (size_t j = 0; j < t.size() && k < needle.size(); ++j)
+            {
+                if (t[j] == needle[k])
+                {
+                    ++k;
+                }
+            }
+            if (k == needle.size())
+            {
+                out.push_back(static_cast<uint32_t>(i + 1));
+                if (limit && out.size() >= limit)
+                {
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
     uint32_t Dictionary::Intern(const std::wstring& term)
     {
         {
@@ -489,12 +524,17 @@ namespace Agentmaster::SessionDb
                 }
                 a.Close();
             }
+            // The text splits by role (SessionDbSchema.cpp, `doc`): conversation text stays in doc.text, a
+            // tool block's text goes to the ZSTD doc_tool table.
             auto mv = con.Prepare(R"SQL(
 INSERT INTO doc SELECT h.doc_id, h.sid_key, h.file_id, h.line_no, h.block, h.ts_ms, h.role, h.flags, h.tool, h.tool_use_id,
-                       h.text_len, coalesce(t.tok_len, 0), h.text
+                       h.text_len, coalesce(t.tok_len, 0), CASE WHEN h.role IN (4, 5) THEN NULL ELSE h.text END
 FROM doc_hot h LEFT JOIN stg_toklen t ON t.doc_id = h.doc_id WHERE h.doc_id <= ? ORDER BY h.doc_id)SQL");
             mv.Bind(1, static_cast<int64_t>(maxDoc));
             mv.Execute();
+            auto mvTool = con.Prepare("INSERT INTO doc_tool SELECT doc_id, text FROM doc_hot WHERE role IN (4, 5) AND doc_id <= ? ORDER BY doc_id");
+            mvTool.Bind(1, static_cast<int64_t>(maxDoc));
+            mvTool.Execute();
             auto del = con.Prepare("DELETE FROM doc_hot WHERE doc_id <= ?");
             del.Bind(1, static_cast<int64_t>(maxDoc));
             del.Execute();
@@ -546,8 +586,10 @@ CREATE TABLE doc_new (
     doc_id UINTEGER NOT NULL, sid_key INTEGER NOT NULL, file_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
     block USMALLINT, ts_ms BIGINT, role UTINYINT, flags UTINYINT, tool VARCHAR, tool_use_id VARCHAR,
     text_len INTEGER, tok_len INTEGER,
-    text VARCHAR USING COMPRESSION zstd);
+    text VARCHAR);
 INSERT INTO doc_new SELECT * FROM doc WHERE doc_id NOT IN (SELECT doc_id FROM tomb) ORDER BY doc_id;
+CREATE TABLE doc_tool_new (doc_id UINTEGER NOT NULL, text VARCHAR USING COMPRESSION zstd);
+INSERT INTO doc_tool_new SELECT * FROM doc_tool WHERE doc_id NOT IN (SELECT doc_id FROM tomb) ORDER BY doc_id;
 CREATE TABLE spost_new (term_id UINTEGER, sid_key INTEGER, hits UINTEGER);
 INSERT INTO spost_new SELECT p.term_id, d.sid_key, count(*) FROM post_new p JOIN doc_new d ON d.doc_id = p.doc_id
     GROUP BY p.term_id, d.sid_key ORDER BY p.term_id, d.sid_key;
@@ -563,6 +605,7 @@ INSERT INTO line_new SELECT * FROM (SELECT * FROM line UNION ALL SELECT * FROM l
 DELETE FROM line_hot;
 DROP TABLE post; ALTER TABLE post_new RENAME TO post;
 DROP TABLE doc; ALTER TABLE doc_new RENAME TO doc;
+DROP TABLE doc_tool; ALTER TABLE doc_tool_new RENAME TO doc_tool;
 DROP TABLE spost; ALTER TABLE spost_new RENAME TO spost;
 DROP TABLE line; ALTER TABLE line_new RENAME TO line;
 DELETE FROM tomb;

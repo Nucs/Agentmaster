@@ -7,8 +7,9 @@
 //
 // The LSM shape (§6.4): ingest appends blocks to doc_hot (searchable at once by a scan); a MERGE
 // tokenizes them (SessionDbTokenizer), appends their postings to `post` / `spost` sorted by term, moves
-// the rows into `doc` (ZSTD) and updates the dictionary. A RE-CLUSTER rewrites `post` / `spost` / `doc` /
-// `line` in key order so zonemaps prune range reads. Neither changes a search result — only its speed.
+// the rows into `doc` (a tool block's text into the ZSTD `doc_tool`) and updates the dictionary. A
+// RE-CLUSTER rewrites `post` / `spost` / `doc` / `doc_tool` / `line` in key order so zonemaps prune range
+// reads. Neither changes a search result — only its speed.
 //
 // Threading: the dictionary is read by query threads (TermsContaining / Lookup) while the writer merges;
 // a shared_mutex guards it (merges take the exclusive lock only for the final swap of new terms).
@@ -61,6 +62,9 @@ namespace Agentmaster::SessionDb
         // The ids of every term that CONTAINS `needle` (rule 1 of §6.3), capped at `limit` (0 = no cap).
         // `prefix` / `suffix` restrict to terms that START / END with it (rule 2's first / last token).
         std::vector<uint32_t> TermsContaining(std::wstring_view needle, size_t limit, bool prefix = false, bool suffix = false) const;
+        // The ids of every term holding `needle`'s characters IN ORDER with any gap (the fuzzy (F) expansion
+        // over the dictionary, D9), capped at `limit` (0 = no cap). `needle` is folded.
+        std::vector<uint32_t> TermsWithSubsequence(std::wstring_view needle, size_t limit) const;
         // The term text of an id ("" for an unknown id).
         std::wstring TermText(uint32_t id) const;
         // Total number of blocks indexed (BM25's N) and their average token length (avgdl).
@@ -124,7 +128,7 @@ namespace Agentmaster::SessionDb
         //   cancel — polled between steps; a cancelled merge rolls back and changes nothing.
         // Returns the number of blocks merged. Throws DbError.
         size_t Merge(Connection& con, const std::function<bool()>& cancel);
-        // Rewrite post / spost / doc / line sorted by their read keys, dropping tombstoned blocks and
+        // Rewrite post / spost / doc / doc_tool / line sorted by their read keys, dropping tombstoned blocks and
         // recomputing df / sf / N / avgdl exactly. Throws DbError.
         void Recluster(Connection& con, const std::function<bool()>& cancel);
 

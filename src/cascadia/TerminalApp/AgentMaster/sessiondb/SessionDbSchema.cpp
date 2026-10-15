@@ -6,11 +6,15 @@
 // Storage notes (SESSIONS_DB.md §5.1, §6.8):
 //   - Session and line ids are VARCHAR (the uuid text). The UUID type saves ~20 bytes per line but makes
 //     every malformed id a hard append failure; the lossless store must accept whatever Claude wrote.
-//   - Large text is ZSTD per column (`USING COMPRESSION zstd`, verified on libduckdb 1.5.6): ~3.9x on
-//     transcript text, and those columns are read only for the few rows a request shows. Hot tables stay
-//     uncompressed (they are scanned).
+//   - Large text is ZSTD per column (`USING COMPRESSION zstd`, verified on libduckdb 1.5.6; it needs
+//     storage_compatibility_version 'latest', else it is silently stored uncompressed): ~4x on transcript
+//     text. ⚠ A ZSTD string is served by decompressing its whole 2,048-row vector, so a ZSTD column suits
+//     RANGE reads (a session's lines) and is wrong for scattered point reads: the conversation half of the
+//     search text stays in DuckDB's default compression (doc.text), only the tool half is ZSTD (doc_tool).
+//     Hot tables stay uncompressed (they are scanned).
 //   - No primary key on the big append-only tables: they are kept sorted by their read key and read
-//     through zonemaps. Primary keys only where rows are upserted by key (session, summary, path_access).
+//     through zonemaps; ART indexes only for batches of point lookups by id (doc, doc_tool, line).
+//     Primary keys only where rows are upserted by key (session, summary, path_access).
 
 #include "SessionDbSchema.h"
 
@@ -134,11 +138,25 @@ CREATE TABLE IF NOT EXISTS line_edge (file_id INTEGER, line_no INTEGER, target V
 -- Spilled tool outputs and subagent meta files, one row per file (BLOB: a spill need not be UTF-8).
 CREATE TABLE IF NOT EXISTS side_file (file_id INTEGER, bytes BIGINT, content BLOB);
 
--- Every searchable block, merged into the index (§6.3). Text ZSTD; a block's BM25 length in tok_len.
+-- Every searchable block, merged into the index (§6.3); a block's BM25 length in tok_len.
+-- The TEXT IS SPLIT BY ROLE, because the two halves are read differently (measured on 41,651 blocks):
+--   * doc.text holds the conversation roles (prompt, reply, thinking, system, queued): ~2-3% of the bytes,
+--     read at random by every default search (snippets, verification). It keeps DuckDB's default string
+--     compression, which serves one string without decompressing its neighbours: 30 scattered blocks in
+--     6.9 ms, 1,000 in 47 ms.
+--   * doc_tool.text holds the tool roles (tool_call, tool_result): ~97% of the bytes, read only when a
+--     search asks for tool output. ZSTD packs it 4x, but a point lookup decompresses the whole 2,048-row
+--     vector around it: 30 scattered blocks 145 ms, 1,000 in 2.95 s. Callers budget those reads.
+-- doc.text is NULL for a tool block; a reader takes coalesce(doc.text, doc_tool.text).
 CREATE TABLE IF NOT EXISTS doc (
     doc_id UINTEGER NOT NULL, sid_key INTEGER NOT NULL, file_id INTEGER NOT NULL, line_no INTEGER NOT NULL,
     block USMALLINT, ts_ms BIGINT, role UTINYINT, flags UTINYINT, tool VARCHAR, tool_use_id VARCHAR,
     text_len INTEGER, tok_len INTEGER,
+    text VARCHAR
+);
+-- The tool blocks' text (see doc): one row per tool block of `doc`, ZSTD.
+CREATE TABLE IF NOT EXISTS doc_tool (
+    doc_id UINTEGER NOT NULL,
     text VARCHAR USING COMPRESSION zstd
 );
 -- Blocks written since the last merge: scanned, pre-folded (capped at the index cap), uncompressed.
@@ -188,6 +206,16 @@ CREATE TABLE IF NOT EXISTS am_tag (session_id VARCHAR, tag VARCHAR, tag_fold VAR
 CREATE TABLE IF NOT EXISTS am_link (session_id VARCHAR, from_id VARCHAR, via VARCHAR);
 -- Runtime state the GUI pushes (openChanged): emptied at every service start, never authoritative.
 CREATE TABLE IF NOT EXISTS rt_open (session_id VARCHAR);
+
+-- ART indexes ONLY for batches of random point lookups by id (§6.8 rule 2): snippets and verification
+-- fetch scattered blocks by doc_id, `messages` and raw fetches scattered lines by line_id. Without them a
+-- list of ids becomes an "optional" zonemap filter and the scan decompresses every row's text (measured
+-- on 41,651 blocks: 156 ms for 4 ids; a single `doc_id = k` 0 ms). DuckDB uses an index only below
+-- MAX(2,048 rows, 0.1% of the table) per lookup, so callers fetch at most kMaxPointLookup ids at a time.
+-- A re-cluster drops the tables and with them these indexes; EnsureSchema runs after it and re-creates them.
+CREATE INDEX IF NOT EXISTS doc_by_id ON doc (doc_id);
+CREATE INDEX IF NOT EXISTS doc_tool_by_id ON doc_tool (doc_id);
+CREATE INDEX IF NOT EXISTS line_by_id ON line (line_id);
 )SQL";
 
         // The read-only surface (§5.3): the views the `sql` tool documents, and the macro the GUI's
@@ -221,7 +249,9 @@ SELECT s.short_id AS id, s.short_id || ':' || d.line_no || '.' || d.block AS ref
        CASE d.role WHEN 1 THEN 'prompt' WHEN 2 THEN 'reply' WHEN 3 THEN 'thinking' WHEN 4 THEN 'tool_call'
                    WHEN 5 THEN 'tool_result' WHEN 6 THEN 'system' WHEN 7 THEN 'queued' ELSE 'other' END AS role,
        d.tool, (d.flags & 8) <> 0 AS subagent, d.text
-FROM (SELECT sid_key, line_no, block, ts_ms, role, flags, tool, text FROM doc
+FROM (SELECT x.sid_key, x.line_no, x.block, x.ts_ms, x.role, x.flags, x.tool, coalesce(x.text, t.text) AS text
+      FROM doc x LEFT JOIN doc_tool t ON t.doc_id = x.doc_id
+      WHERE x.doc_id NOT IN (SELECT doc_id FROM tomb)
       UNION ALL SELECT sid_key, line_no, block, ts_ms, role, flags, tool, text FROM doc_hot) d
 JOIN session s ON s.sid_key = d.sid_key;
 
