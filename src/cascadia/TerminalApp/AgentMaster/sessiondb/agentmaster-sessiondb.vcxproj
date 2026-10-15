@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Agentmaster — the session database service, agentmaster-sessiondb.exe (doc/agentmaster/SESSIONS_DB.md §4).
+     One process per profile: it owns <profile>\sessiondb\sessions.duckdb, answers the GUI / the CLI / the stdio MCP
+     server on its named pipe, and is the ONLY process that loads DuckDB (the GUI never does). A console-subsystem
+     exe like agentmaster-cli.vcxproj: the sessiondb\*.cpp units + the pure-C++ engine units it reads transcripts
+     with (no WinRT, no TerminalAppLib, no PCH), linked against the pinned DuckDB C library (duckdb.props; fetched by
+     tools\Get-DuckDb.ps1) and nlohmann/json (vcpkg, the manifest's "terminal" feature). Shipped in the package root
+     beside Agentmaster.exe with duckdb.dll (CascadiaPackage.wapproj); its standalone twin is _compile.bat. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{70B3A274-DB45-4D5C-871D-231E1A0D547E}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>agentmastersessiondb</RootNamespace>
+    <ProjectName>agentmaster-sessiondb</ProjectName>
+    <TargetName>agentmaster-sessiondb</TargetName>
+    <ConfigurationType>Application</ConfigurationType>
+    <VersionInfoFileDescription>Agentmaster session database</VersionInfoFileDescription>
+  </PropertyGroup>
+
+  <Import Project="..\..\..\..\..\common.openconsole.props" Condition="'$(OpenConsoleDir)'==''" />
+  <Import Project="$(OpenConsoleDir)src\common.build.pre.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.props" />
+  <Import Project="duckdb.props" />
+
+  <!-- Source Files: the service (sessiondb\) and the engine units it links. The list MUST stay in lockstep with
+       _compile.bat (its standalone twin). Every unit is <PrecompiledHeader>NotUsing. -->
+  <ItemGroup>
+    <ClCompile Include="sessiondb_main.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="DuckDbWrap.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbSchema.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbExtract.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbFold.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbSummary.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbIndex.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbLog.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbVerify.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbSearch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbTools.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbServer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="SessionDbMcp.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- The pipe client: the `call` mode and the MCP server reach a running service through it. -->
+    <ClCompile Include="..\SessionDbClient.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- The engine units the ingest reuses: the profile, the logs, the settings (ClaudeSpawn, Persistence), the
+         transcript readers and the summary analyzer the summary check compares with (ProcessInspect*), the
+         transcript store and the session store (titles, tags, favorites), the search primitives (FoldLower,
+         MatchesPathQuery), and claude's invisible-character rule (ClaudeInvisibleChars: a LINK dependency of the
+         units above). -->
+    <ClCompile Include="..\ClaudeSpawn.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\Persistence.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.Transcript.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.Content.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.Window.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.Summary.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\TranscriptStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\SessionStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\SessionSearch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ClaudeInvisibleChars.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+
+  <Import Project="$(OpenConsoleDir)src\common.build.post.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.targets" />
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- AGENTMASTER_DEV: like the CLI, an unpackaged run with no AGENTMASTER_PROFILE defaults to the dev profile;
+           the GUI always starts the service with AGENTMASTER_PROFILE set (SessionDbClient's LaunchService). -->
+      <PreprocessorDefinitions>AGENTMASTER_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(DuckDbDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- 4201 (nameless struct in duckdb.h), 4312 / 4467 (the SDK's headers under /W4), 5105 (winbase.h's macro). -->
+      <DisableSpecificWarnings>4201;4312;4467;5105;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>$(DuckDbDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- duckdb.lib: the import library of duckdb.dll (loaded at start, beside the exe). icu.lib: the Windows SDK's
+           ICU (the tokenizer's character classes, ClaudeInvisibleChars). -->
+      <AdditionalDependencies>duckdb.lib;ole32.lib;oleaut32.lib;user32.lib;shell32.lib;advapi32.lib;icu.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- duckdb.dll beside the exe in the project's own output folder, so the exe runs from there too (the package
+       gets its copy from CascadiaPackage.wapproj). -->
+  <Target Name="AgentmasterCopyDuckDbDll" AfterTargets="Build" Condition="Exists('$(DuckDbDir)duckdb.dll')">
+    <Copy SourceFiles="$(DuckDbDir)duckdb.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

@@ -290,3 +290,5 @@ profiles.json
 
 # Agentmaster: the pinned DuckDB C library (tools/Get-DuckDb.ps1 fetches it; never committed)
 /dep/duckdb/
+# Agentmaster: the session database service's standalone build output (sessiondb/_compile.bat)
+/src/cascadia/TerminalApp/AgentMaster/sessiondb/out/
