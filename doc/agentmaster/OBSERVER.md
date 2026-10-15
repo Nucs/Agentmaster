@@ -987,6 +987,12 @@ helpers to `AgentMaster/tests/`.
   - `SessionRegistry::SetDuplicateConversationHosts` publishes the set BEFORE the feed;
   - only the non-duplicate observations are fed to `ObserveClaude`;
   - `_LogDuplicateConversations` logs a change of the set.
+- **Each observation carries its OWN process's heartbeat** (`presenceFactByPid`, 2026-10-15): the
+  by-session table holds one row per session id, so with two processes on one conversation it held
+  whichever row was read last, and the host's observation could carry a copy's `busy` / `idle` /
+  `waiting` (a copy's `busy` promotes the host to Running through `recon-subagent`; its `idle` can end the
+  host's turn through `recon-stop-idle`). A process with no row of its own yet still takes the
+  conversation's row, as before.
 - **The roster** (`TabRosterEntry::boundSessionId`): the UI lane's PASS 1 fills it from `_claudeTabs`;
   `PublishRoster` compares it, so a re-bind reaches the next survey at once (a Wake).
 - **The registry** (`SessionInfo` is not changed):

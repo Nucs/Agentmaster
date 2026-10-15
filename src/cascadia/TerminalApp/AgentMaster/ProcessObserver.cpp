@@ -753,6 +753,13 @@ namespace Agentmaster
         // immune to the cwd-density mis-bind Rule #14 warns of. (See ResolveObservedId + the
         // rostered bind below.)
         std::unordered_map<uint32_t, std::wstring> presenceByPid;
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): pid -> that PROCESS's own heartbeat. When one
+        // conversation runs in two or more claude processes, presenceBySid holds whichever row was read last,
+        // so the host tab's observation could carry a COPY's "busy" / "idle" / "waiting" — and the scanner
+        // acts on it (a copy's "busy" promotes the host to Running, its "idle" can end the host's turn). The
+        // rostered observation below takes its own process's row first and falls back to presenceBySid only
+        // when the process has no row (its heartbeat not written yet), exactly as before.
+        std::unordered_map<uint32_t, PresenceFact> presenceFactByPid;
         for (const auto& r : presence)
         {
             presenceBySid[r.sessionId] = PresenceFact{ r.status, r.waitingFor };
@@ -770,6 +777,7 @@ namespace Agentmaster
                 continue; // not this process's file (PID reuse) — already filtered, belt+suspenders
             }
             presenceByPid[r.pid] = r.sessionId;
+            presenceFactByPid[r.pid] = PresenceFact{ r.status, r.waitingFor };
         }
 
         // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one
@@ -904,10 +912,17 @@ namespace Agentmaster
                     // per-line historical snapshot (first-seen) that reads stale, or "HEAD", when the
                     // repo was momentarily detached as that line was written. A tiny filesystem read.
                     o.gitBranch = ReadGitBranchForDir(f.cwd);
-                    if (const auto pit = presenceBySid.find(sid); pit != presenceBySid.end())
+                    // This PROCESS's own heartbeat first (presenceFactByPid): with one conversation in two or
+                    // more processes, the by-session row can be a copy's (OBSERVER.md §20).
+                    if (const auto fpit = presenceFactByPid.find(cpid); fpit != presenceFactByPid.end())
                     {
-                        o.presenceStatus = pit->second.status; // claude's own heartbeat (busy/idle/waiting/shell)
-                        o.presenceWaitingFor = pit->second.waitingFor; // why it is blocked, when "waiting"
+                        o.presenceStatus = fpit->second.status; // claude's own heartbeat (busy/idle/waiting/shell)
+                        o.presenceWaitingFor = fpit->second.waitingFor; // why it is blocked, when "waiting"
+                    }
+                    else if (const auto pit = presenceBySid.find(sid); pit != presenceBySid.end())
+                    {
+                        o.presenceStatus = pit->second.status; // no row of its own yet: the conversation's heartbeat
+                        o.presenceWaitingFor = pit->second.waitingFor;
                     }
                     o.observedUnixMs = now;
                     o.createdUnixMs = convCreated;
