@@ -425,10 +425,19 @@ namespace winrt::TerminalApp::implementation
         // window's transcripts and load-or-refresh every sidecar index, so a session created (or
         // grown) since the page opened shows up and its new content folds into the search index.
         // The _sessionsIndexing flag dedupes against an in-flight pass, so a double-click is safe.
+        // SESSIONS_DB.md §7.6: with the session database running (Shadow / On) it also asks for a sweep (a
+        // `resync` on the refresher's next tick), the belt for a change the transcript watcher missed.
         _sessRefreshBtn = Button{};
         _sessRefreshBtn.Content(winrt::box_value(winrt::hstring{ L"\x21BB" }));
-        SessSetTip(_sessRefreshBtn, L"Refresh", L"Look again for sessions that are new, or that have grown, since this page opened, and fold their latest content into the search index. Safe to click twice \x2014 a scan already running isn't restarted.");
+        SessSetTip(_sessRefreshBtn, L"Refresh", L"Look again for sessions that are new, or that have grown, since this page opened, and fold their latest content into the search index (and, with the session database on, into the database too). Safe to click twice \x2014 a scan already running isn't restarted.");
         _sessRefreshBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            // The database's sweep: a flag the refresher's thread reads on its next tick (cheap, any thread;
+            // a no-op while the database is Off — the refresher's thread is not running then).
+            if (const auto& db = ::Agentmaster::SharedEngine().sessionDb; db && db->Mode() != ::Agentmaster::SessionDbMode::Off)
+            {
+                db->RequestResync();
+                ::Agentmaster::LogNav(L"sessions refresh: the session database sweeps on its next tick");
+            }
             // Defer off the click tick (the page's pointer-handler discipline); the gather itself
             // runs on a background pass and re-renders when it lands.
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {

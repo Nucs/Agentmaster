@@ -17,8 +17,10 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <iterator> // std::size
 #include <map>
 #include <set>
+#include <stdexcept> // std::logic_error (a definition without a handler)
 #include <unordered_map>
 #include <unordered_set>
 
@@ -33,6 +35,7 @@
 
 #include "../ClaudeSpawn.h" // LogSwallowedException
 #include "../SessionDbProtocol.h"
+#include "../SessionDbToolDefs.h" // the registry's names, descriptions, schemas and budgets (shared with the app)
 #include "../SessionDbTokenizer.h"
 #include "../SessionSearch.h" // FoldLower, MatchesPathQuery
 
@@ -2486,152 +2489,38 @@ GROUP BY o.sid_key ORDER BY score DESC LIMIT $3)SQL");
         // the registry
         // ===================================================================================================
 
+        // The registry: each definition of SessionDbToolDefs.h (the ONE copy of the names, descriptions, schemas and
+        // budgets, which the in-app AI search reads too) paired with its handler here. A definition with no handler,
+        // or a handler with no definition, is a build-time mistake: the registry then throws at its first use (the
+        // service logs it and answers no tool), and the m5 harness's registry check fails.
         std::vector<ToolSpec> BuildRegistry()
         {
+            using Handler = std::function<json(ToolContext&, const json&)>;
+            const std::pair<const char*, Handler> handlers[] = {
+                { "search", ToolSearch }, { "session", ToolSession }, { "messages", ToolMessages }, { "grep", ToolGrep },
+                { "files", ToolFiles }, { "who_touched", ToolWhoTouched }, { "timeline", ToolTimeline }, { "usage", ToolUsage },
+                { "related", ToolRelated }, { "sql", ToolSql },
+            };
+            static_assert(std::size(handlers) == SessionDbToolDefs::kToolCount, "every tool definition needs exactly one handler");
             std::vector<ToolSpec> r;
-            r.push_back(ToolSpec{
-                "search",
-                "Find Claude Code sessions on this computer. Every word of `query` must match somewhere in a session: its title, folder, branch, the path of a file it "
-                "touched, or a message in the chosen `scopes`. Words in double quotes match as one phrase; a whole session id finds that session and its forks. "
-                "Returns up to `limit` sessions, best first, each with why it matched and up to two snippets whose `ref` opens the context in `messages`. Changes "
-                "nothing on the screen. Fast (under 0.2 s), so searching again with other words is cheap.",
-                R"JSON({"type":"object","additionalProperties":false,"properties":{
-"query":{"type":"string","maxLength":500,"description":"Words that must all match. Leave it out to list sessions by the filters only."},
-"scopes":{"type":"array","uniqueItems":true,"items":{"enum":["title","path","prompt","reply","tool","subagent"]},"default":["title","path","prompt","reply"],"description":"Where words may match. title: names. path: folders and touched files. prompt: what the user typed. reply: Claude's answers. tool: tool calls and their output (broad, noisy). subagent: subagents' work."},
-"fuzzy":{"type":"boolean","default":false,"description":"Also match words whose letters appear in order with other letters between them."},
-"days":{"type":"integer","minimum":1,"maximum":3650,"default":90,"description":"Only sessions active in the last N days."},
-"after":{"type":"string","format":"date","description":"Only sessions active on or after this local date (YYYY-MM-DD). Overrides days."},
-"before":{"type":"string","format":"date","description":"Only sessions active on or before this local date (YYYY-MM-DD)."},
-"dir":{"type":"string","maxLength":500,"description":"Part of the working folder's path; '/' and '\\' are the same."},
-"branch":{"type":"string","maxLength":200,"description":"Part of the git branch name."},
-"tag":{"type":"string","maxLength":100,"description":"A bookmark tag, the whole name, any case."},
-"favorite":{"type":"boolean","description":"true: only starred sessions. false: only sessions without a star."},
-"open":{"type":"boolean","description":"true: only sessions with a tab open now. false: only closed ones."},
-"sort":{"enum":["relevance","active","created"],"default":"relevance","description":"relevance: name matches first, then path, prompt, other text; BM25 inside a group. active / created: newest first."},
-"limit":{"type":"integer","minimum":1,"maximum":50,"default":15},
-"cursor":{"type":"string","description":"The `next` value of the previous result, for the following rows."}}})JSON",
-                150,
-                ToolSearch });
-            r.push_back(ToolSpec{
-                "session",
-                "Everything known about one session, without its messages: its titles, folder and branch, when it was created and last active, its size, models and "
-                "tokens, its lineage (the session it was forked from, its forks, the plan, /clear or /handover it continues), its tags and star, whether a tab has it "
-                "open, and the files it touched most. Use it to check a search result before you show it.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["id"],"properties":{
-"id":{"type":"string","minLength":8,"maxLength":36,"description":"A session id from a result, or a whole UUID."}}})JSON",
-                20,
-                ToolSession });
-            r.push_back(ToolSpec{
-                "messages",
-                "Read one session's conversation in order, a page at a time: what the user typed and Claude's replies, and on request tool calls, tool output and "
-                "thinking. Give `around` a `ref` from search or grep to read the context of a hit, or `order: \"desc\"` to read the end first. Blocks longer than "
-                "2,000 characters are cut unless `full` is true.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["id"],"properties":{
-"id":{"type":"string","minLength":8,"maxLength":36,"description":"A session id from a result, or a whole UUID."},
-"roles":{"type":"array","uniqueItems":true,"items":{"enum":["prompt","queued","reply","thinking","tool_call","tool_result","system","subagent"]},"default":["prompt","queued","reply"],"description":"Which blocks to read. subagent: also the subagents' transcripts, merged in by time."},
-"around":{"type":"string","description":"A ref: the blocks before and after it."},
-"from":{"type":"string","description":"A ref: the blocks starting at it."},
-"order":{"enum":["asc","desc"],"default":"asc","description":"desc: newest first."},
-"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
-"full":{"type":"boolean","default":false,"description":"Do not cut long blocks (the 64 KB result cap still applies)."},
-"cursor":{"type":"string","description":"The `next` value of the previous result."}}})JSON",
-                30,
-                ToolMessages });
-            r.push_back(ToolSpec{
-                "grep",
-                "Find exact text, or a regular expression, in conversations, with the words around it. Use it for precise lookups: an error message, a function name, a "
-                "command. Searches the sessions in `ids`, or every session in the filters. A regex needs a literal of 3 or more characters, or `ids`.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["pattern"],"properties":{
-"pattern":{"type":"string","minLength":1,"maxLength":500,"description":"The text to find (or a regular expression, RE2 syntax, with regex: true)."},
-"regex":{"type":"boolean","default":false},
-"case_sensitive":{"type":"boolean","default":false},
-"ids":{"type":"array","maxItems":50,"items":{"type":"string"},"description":"Only these sessions (ids from results)."},
-"dir":{"type":"string","maxLength":500,"description":"Part of the working folder's path (when ids is not given)."},
-"days":{"type":"integer","minimum":1,"maximum":3650,"default":90,"description":"Only sessions active in the last N days (when ids is not given)."},
-"after":{"type":"string","format":"date","description":"Only sessions active on or after this local date (YYYY-MM-DD)."},
-"before":{"type":"string","format":"date","description":"Only sessions active on or before this local date (YYYY-MM-DD)."},
-"roles":{"type":"array","uniqueItems":true,"items":{"enum":["prompt","queued","reply","thinking","tool_call","tool_result","system","subagent"]},"default":["prompt","queued","reply","tool_call","tool_result","system"]},
-"context":{"type":"integer","minimum":0,"maximum":400,"default":80,"description":"Characters shown on each side of a match."},
-"limit":{"type":"integer","minimum":1,"maximum":200,"default":30},
-"cursor":{"type":"string","description":"The `next` value of the previous result."}}})JSON",
-                200,
-                ToolGrep });
-            r.push_back(ToolSpec{
-                "files",
-                "The files and folders one session read, edited, wrote, searched or named in a shell command, with counts and first and last times. Use it to see what "
-                "a session worked on.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["id"],"properties":{
-"id":{"type":"string","minLength":8,"maxLength":36,"description":"A session id from a result, or a whole UUID."},
-"op":{"enum":["read","edit","write","search","shell"],"description":"Only this kind of use."},
-"under":{"type":"string","maxLength":500,"description":"Only files under this folder."},
-"limit":{"type":"integer","minimum":1,"maximum":500,"default":100},
-"cursor":{"type":"string","description":"The `next` value of the previous result."}}})JSON",
-                20,
-                ToolFiles });
-            r.push_back(ToolSpec{
-                "who_touched",
-                "Which sessions touched a file, or anything under a folder, newest first, and what they did to it. Takes a full path, a folder (everything under it), or "
-                "a file name alone (TerminalPage.cpp).",
-                R"JSON({"type":"object","additionalProperties":false,"required":["path"],"properties":{
-"path":{"type":"string","minLength":1,"maxLength":500,"description":"A full path, a folder, or a file name alone."},
-"op":{"enum":["read","edit","write","search","shell"],"description":"Only this kind of use."},
-"days":{"type":"integer","minimum":1,"maximum":3650,"default":365},
-"after":{"type":"string","format":"date","description":"Only sessions active on or after this local date (YYYY-MM-DD)."},
-"before":{"type":"string","format":"date","description":"Only sessions active on or before this local date (YYYY-MM-DD)."},
-"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
-"cursor":{"type":"string","description":"The `next` value of the previous result."}}})JSON",
-                30,
-                ToolWhoTouched });
-            r.push_back(ToolSpec{
-                "timeline",
-                "What happened when: for each day (or hour) of a period, the sessions that were active, with their prompts and turns. Use it for questions like 'what "
-                "was I doing last Tuesday'.",
-                R"JSON({"type":"object","additionalProperties":false,"properties":{
-"from":{"type":"string","format":"date","description":"The first local date (YYYY-MM-DD); default 6 days before today."},
-"to":{"type":"string","format":"date","description":"The last local date (YYYY-MM-DD); default today."},
-"group":{"enum":["day","hour"],"default":"day"},
-"dir":{"type":"string","maxLength":500,"description":"Part of the working folder's path."},
-"limit":{"type":"integer","minimum":1,"maximum":50,"default":10,"description":"Sessions per bucket."}}})JSON",
-                50,
-                ToolTimeline });
-            r.push_back(ToolSpec{
-                "usage",
-                "Token use, grouped by session, day, model or folder. Each API message counts once. Cost appears only where Claude Code recorded it for a session "
-                "(cost_source \"claude\", the whole session's cost, with group_by session); no estimate is made.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["group_by"],"properties":{
-"group_by":{"enum":["session","day","model","dir"]},
-"days":{"type":"integer","minimum":1,"maximum":3650,"default":30},
-"after":{"type":"string","format":"date","description":"From this local date (YYYY-MM-DD). Overrides days."},
-"before":{"type":"string","format":"date","description":"Until this local date (YYYY-MM-DD)."},
-"dir":{"type":"string","maxLength":500,"description":"Part of the working folder's path."},
-"id":{"type":"string","minLength":8,"maxLength":36,"description":"Only this session."},
-"limit":{"type":"integer","minimum":1,"maximum":200,"default":20}}})JSON",
-                50,
-                ToolUsage });
-            r.push_back(ToolSpec{
-                "related",
-                "Sessions connected to one session: its lineage (forked from, its forks, the plan, /clear or /handover chain), and the sessions that share the most "
-                "files or rare words with it.",
-                R"JSON({"type":"object","additionalProperties":false,"required":["id"],"properties":{
-"id":{"type":"string","minLength":8,"maxLength":36,"description":"A session id from a result, or a whole UUID."},
-"kinds":{"type":"array","uniqueItems":true,"items":{"enum":["lineage","files","words"]},"default":["lineage","files","words"]},
-"limit":{"type":"integer","minimum":1,"maximum":20,"default":5,"description":"Sessions per kind."}}})JSON",
-                100,
-                ToolRelated });
-            r.push_back(ToolSpec{
-                "sql",
-                "Run one read-only SQL query (DuckDB dialect) over these views when no other tool fits: counts, groupings, unusual filters. Returns at most 200 rows "
-                "within 2 s. Views: v_sessions(id, uuid, title, dir, dir_key, inferred_dir, inferred_dir_key, git_root, branch, created, active, msgs, tools, model, "
-                "models, effort, version, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, api_errors, interrupts, compactions, "
-                "forked_from, bytes, lines, favorite, tags, open, prompts_listed, files_read, files_created, files_edited, transcript_present); "
-                "v_messages(id, ref, time, role, tool, subagent, text); v_lines(id, line, type, time, raw): raw is the line's JSON, read fields with json_extract; "
-                "v_paths(id, path, dir, file, op, n, first, last); v_usage(id, time, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens); "
-                "v_links(id, from_id, via).",
-                R"JSON({"type":"object","additionalProperties":false,"required":["query"],"properties":{
-"query":{"type":"string","minLength":1,"maxLength":4000,"description":"One SELECT over the views."},
-"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}}})JSON",
-                2000,
-                ToolSql });
+            r.reserve(SessionDbToolDefs::kToolCount);
+            for (const SessionDbToolDefs::ToolDef& d : SessionDbToolDefs::kTools)
+            {
+                const Handler* handler = nullptr;
+                for (const auto& [name, h] : handlers)
+                {
+                    if (std::string_view{ name } == d.name)
+                    {
+                        handler = &h;
+                        break;
+                    }
+                }
+                if (!handler)
+                {
+                    throw std::logic_error(std::string{ "the tool definition \"" } + d.name + "\" has no handler");
+                }
+                r.push_back(ToolSpec{ d.name, d.description, d.inputSchema, d.budgetMs, *handler });
+            }
             return r;
         }
     }

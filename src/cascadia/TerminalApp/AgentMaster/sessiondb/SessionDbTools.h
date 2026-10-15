@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the session database's TOOL REGISTRY (SESSIONS_DB.md §8.4): one entry per tool — its
-// name, the description the model reads, its JSON Schema, its budget and its handler. Every consumer
-// builds its tool list from here, so they cannot disagree (§8.4.4 rule 1):
+// name, the description the model reads, its JSON Schema, its budget and its handler. The text (name,
+// description, schema, budget) lives in ../SessionDbToolDefs.h, the one copy the app reads too; this
+// registry pairs each definition with its handler. Every consumer builds its tool list from there, so
+// they cannot disagree (§8.4.4 rule 1):
 //   - the stdio MCP server (`agentmaster-sessiondb.exe mcp`, server name `agentmaster`): tools/list
 //     answers ToolDefinitionsJson(), tools/call reaches CallTool through the service's `toolCall`;
 //   - the service's protocol methods (`search`, `sessionDetail`, `messages`, ...): each one is the
 //     tool of the same contract;
-//   - the in-app AI search, later (P3), through the same `toolCall`.
+//   - the in-app AI search with the session database On (SessionSearchTools.cpp): the same tools as the
+//     in-process server `agentmaster`, each call forwarded through the pipe's `toolCall`.
 //
 // The conventions of §8.4.2 hold for every tool: read-only; sessions named by short ids (8+ characters
 // of the UUID, longer when two share them), blocks by refs (`<id>:<line>.<block>`, a subagent's block
@@ -66,7 +69,8 @@ namespace Agentmaster::SessionDb
         std::function<nlohmann::json(ToolContext&, const nlohmann::json& args)> handler;
     };
 
-    // The registry, in the order tools/list presents it.
+    // The registry, in the order tools/list presents it (SessionDbToolDefs::kTools' order). Built at the first
+    // call. Throws std::logic_error when a definition has no handler (a build mistake; every call throws again).
     const std::vector<ToolSpec>& ToolRegistry();
 
     // The tool list as MCP tool definitions: [{name, description, inputSchema, annotations}] (§8.4.2:

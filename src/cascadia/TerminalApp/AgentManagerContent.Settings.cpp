@@ -1085,7 +1085,7 @@ namespace winrt::TerminalApp::implementation
         _setSessionDbMode.Items().Append(winrt::box_value(L"Off")); // 0 == SessionDbMode::Off
         _setSessionDbMode.Items().Append(winrt::box_value(L"Shadow (run beside today's search, log differences)")); // 1 == Shadow
         _setSessionDbMode.Items().Append(winrt::box_value(L"On")); // 2 == On
-        AgentSetTip(_setSessionDbMode, L"A database of every Claude Code session on this computer (every line kept, a full-text index), served by a small background process per profile. Off: nothing runs. Shadow: it is built and kept current, and the Sessions page searches it BESIDE today's search and logs where the two differ ([sessdb-diff] in hooks.log) \x2014 nothing on screen changes. On: the Sessions page searches it. The first build reads every transcript once (minutes, in the background, at low priority).");
+        AgentSetTip(_setSessionDbMode, L"A database of every Claude Code session on this computer (every line kept, a full-text index), served by a small background process per profile. Off: nothing runs. Shadow: it is built and kept current, and the Sessions page searches it BESIDE today's search and logs where the two differ ([sessdb-diff] in hooks.log) \x2014 nothing on screen changes. On: the Sessions page searches it, and the AI search gets its tools (from the next start of Agentmaster). The first build reads every transcript once (minutes, in the background, at low priority).");
         panel.Children().Append(_setSessionDbMode);
         _setSessionDbRefresh = TextBox{};
         _setSessionDbRefresh.Header(winrt::box_value(L"Refresh every (seconds)"));

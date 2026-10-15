@@ -82,7 +82,11 @@ namespace Agentmaster::SessionDbProtocol
     inline constexpr std::string_view kSql = "sql";
     inline constexpr std::string_view kRebuild = "rebuild";
     inline constexpr std::string_view kToolList = "toolList"; // the registry as MCP tool definitions
-    inline constexpr std::string_view kToolCall = "toolCall"; // run one registry tool by name (MCP, CLI)
+    inline constexpr std::string_view kToolCall = "toolCall"; // run one registry tool by name (MCP, CLI, the AI search)
+    // The whole session ids behind short ids (`{ids: ["1e0f7ab2", ...]}` -> `{ids: {"1e0f7ab2": "<uuid>" | null}}`):
+    // the AI search's `show` takes the short ids the database's tools print and needs the full ids for the page.
+    // A prefix shared by two sessions, or unknown, answers null. At most 200 ids per request.
+    inline constexpr std::string_view kResolveIds = "resolveIds";
     inline constexpr std::string_view kCancel = "cancel";
 
     // ===== error codes (the `error.code` of a response) ==========================================

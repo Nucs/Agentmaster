@@ -17,6 +17,13 @@
 // changes what the user sees, so the model can look around freely, and the show tool is the ONE
 // place where the screen changes.
 //
+// With the session database On (SESSIONS_DB.md §8.2; Callbacks::database), the first server is
+// replaced by the database's read tools (SessionDbToolDefs.h) as the server `agentmaster`: search
+// (with scopes instead of `deep`), session, messages, grep, files, who_touched, timeline, usage,
+// related and sql, each call forwarded to the database service. No catalog is read then (no
+// sidecar gather, no index keeper); `show` and its short ids work the same way, and a short id the
+// conversation's own searches never printed is resolved through the service.
+//
 // This file needs neither the SDK nor nlohmann/json (it uses AgentHarness.h only for the tool
 // types), so the standalone test harness compiles it and calls the tool handlers directly.
 // Plain C++ + Win32, no WinRT (the .cpp is <PrecompiledHeader>NotUsing</PrecompiledHeader>).
@@ -282,15 +289,44 @@ namespace Agentmaster
             std::function<void(const std::vector<std::wstring>& sessionIds, const std::wstring& note)> onShow;
             SessionContentSearch content; // empty members = DefaultSessionContentSearch()
             std::function<int64_t()> now; // empty = the system clock
+
+            // The session database (SESSIONS_DB.md §8.2), optional. When `call` is set, the toolset
+            // serves the DATABASE's tools (SessionDbToolDefs.h: search, session, messages, grep,
+            // files, who_touched, timeline, usage, related, sql) as the in-process server
+            // "agentmaster" INSTEAD of its own search, and `catalog` is never asked (it may be
+            // empty). `show` stays the one tool that changes the screen. The app sets it when
+            // AppSettings::sessionDbMode is On (SharedSessionSearchAgent).
+            struct DatabaseTools
+            {
+                // Run one database tool with the model's arguments and return its result text
+                // and error flag (the app forwards it to the service's `toolCall`). Called on the
+                // tool-call thread with the model waiting; must be thread-safe (read-only calls of
+                // one model step may run at the same time). May throw (the harness answers the
+                // model with the message).
+                std::function<HarnessToolResult(const std::string& tool, const json::Value& arguments)> call;
+                // The whole session ids behind short ids, in order ("" where a handle is unknown
+                // or shared by two sessions), in one round trip (the service's `resolveIds`).
+                // Same thread rules. Optional: without it `show` knows only the ids of searches.
+                std::function<std::vector<std::wstring>(const std::vector<std::wstring>& handles)> resolve;
+            } database;
         };
 
-        //   throws — std::invalid_argument when a required callback is missing; std::bad_alloc.
+        //   throws — std::invalid_argument when a required callback is missing (catalog — unless
+        //            database.call is set — and onShow); std::bad_alloc.
         explicit SessionSearchToolset(Callbacks callbacks);
 
         // The servers to put into HarnessOptions::toolServers: "sessions" (search) and "display"
-        // (show). The handlers refer to this object: it must outlive the conversation's process.
+        // (show); with Callbacks::database.call set, "agentmaster" (the database's tools) and
+        // "display" instead. The handlers refer to this object: it must outlive the
+        // conversation's process.
         //   throws — std::bad_alloc.
         std::vector<HarnessToolServer> Servers();
+
+        // True when the toolset serves the session database's tools (Callbacks::database.call).
+        bool UsesDatabase() const noexcept
+        {
+            return static_cast<bool>(_callbacks.database.call);
+        }
 
         // Forget the short ids and the latest search (a conversation reset).
         void Reset();
@@ -310,15 +346,45 @@ namespace Agentmaster
         //   new cache entry, and the m5 suite pins rule 1 and the count of rules.
         static const wchar_t* SystemPrompt() noexcept;
 
+        // The system prompt of the AI search on the SESSION DATABASE (Callbacks::database.call): the
+        // same role and the same eight rules, for the database's tools (mcp__agentmaster__search with
+        // `scopes` where the page search had `deep`; grep, who_touched, timeline, session, messages,
+        // files, related, usage and sql to look further) and mcp__display__show. ASCII.
+        //   returns — a static, NUL-terminated string; never null.
+        // ⚠ Like SystemPrompt(): part of every request's prompt and of the prompt cache's key; the m5
+        //   suite pins its rule count and that it names every database tool.
+        static const wchar_t* DatabaseSystemPrompt() noexcept;
+
+        // A one-line description of a database tool call for the user (the page's "Searching: ..."
+        // line): `"tab drag crash" · last 365 days` for search, `grep "foo"`, `reading 1e0f7ab2`, ...
+        //   tool      — a SessionDbToolDefs.h name.
+        //   arguments — the model's argument object.
+        //   throws    — std::bad_alloc.
+        static std::wstring DescribeDatabaseCall(const std::string& tool, const json::Value& arguments);
+
         // The servers' and tools' names (the model calls mcp__sessions__search and mcp__display__show).
         static constexpr wchar_t kSearchServer[] = L"sessions";
         static constexpr wchar_t kSearchTool[] = L"search";
         static constexpr wchar_t kDisplayServer[] = L"display";
         static constexpr wchar_t kDisplayTool[] = L"show";
+        // The database's server (the model calls mcp__agentmaster__<tool>): the same name as the
+        // stdio MCP server `agentmaster-sessiondb.exe mcp`, so a tool reads the same everywhere.
+        static constexpr wchar_t kDatabaseServer[] = L"agentmaster";
 
     private:
         HarnessToolResult Search(const json::Value& arguments);
         HarnessToolResult Show(const json::Value& arguments);
+        // One database tool call (Callbacks::database.call), with the page's reports: onSearching
+        // before it; for `search`, the rows' short ids are resolved and recorded (show's ids, top:N,
+        // onCandidates). A call whose request was replaced meanwhile answers "cancelled".
+        //   tool      — a SessionDbToolDefs.h name.
+        //   arguments — the model's argument object.
+        //   returns   — the database's result (text + error flag), or the cancelled error.
+        //   throws    — what database.call / database.resolve throw; std::bad_alloc.
+        HarnessToolResult DatabaseCall(const std::string& tool, const json::Value& arguments);
+        // Record handle -> full id pairs, index-aligned (an empty full id is skipped). Takes _mutex.
+        //   throws — std::bad_alloc.
+        void RememberHandles(const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds);
         int64_t Now() const;
 
         Callbacks _callbacks;

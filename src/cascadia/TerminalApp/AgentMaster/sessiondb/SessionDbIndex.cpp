@@ -537,9 +537,75 @@ namespace Agentmaster::SessionDb
         con.Execute("DELETE FROM line_hot");
     }
 
-    size_t TextIndex::Merge(Connection& con, const std::function<bool()>& cancel)
+    size_t TextIndex::Merge(Connection& con, const std::function<bool()>& cancel, bool* finished)
     {
-        // Step 1 (outside the transaction): tokenize every hot block. Tokens come from the ORIGINAL text
+        if (finished)
+        {
+            *finished = false;
+        }
+        // The hot blocks in slices of about mergeSliceBytes of text (doc_id ranges; one block larger than that is
+        // a slice of its own), planned from the small (doc_id, text_len) columns. The ids ascend in doc_hot
+        // (the ingest numbers blocks in order), so every slice's blocks land in `doc` / `doc_tool` in order.
+        std::vector<std::pair<uint32_t, uint32_t>> slices;
+        {
+            const int64_t budget = std::max<int64_t>(mergeSliceBytes, 1ll << 20);
+            auto r = con.Query("SELECT doc_id, coalesce(text_len, 0) + 64 FROM doc_hot ORDER BY doc_id");
+            bool open = false;
+            uint32_t lo = 0;
+            uint32_t hi = 0;
+            int64_t acc = 0;
+            while (r.Next())
+            {
+                const auto doc = static_cast<uint32_t>(r.Int64(0));
+                const int64_t bytes = r.Int64(1);
+                if (open && acc + bytes > budget)
+                {
+                    slices.emplace_back(lo, hi);
+                    open = false;
+                }
+                if (!open)
+                {
+                    lo = doc;
+                    acc = 0;
+                    open = true;
+                }
+                hi = doc;
+                acc += bytes;
+            }
+            if (open)
+            {
+                slices.emplace_back(lo, hi);
+            }
+        }
+        size_t merged = 0;
+        for (const auto& [lo, hi] : slices)
+        {
+            if (cancel && cancel())
+            {
+                return merged; // the slices merged so far are committed; the rest stays hot for the next merge
+            }
+            merged += _mergeSlice(con, lo, hi, cancel);
+        }
+        if (cancel && cancel())
+        {
+            return merged;
+        }
+        // The hot lines (a tick can append lines without blocks): their own transaction, in memory-bounded slices.
+        {
+            Transaction tx{ con };
+            _moveHotLines(con);
+            tx.Commit();
+        }
+        if (finished)
+        {
+            *finished = true;
+        }
+        return merged;
+    }
+
+    size_t TextIndex::_mergeSlice(Connection& con, uint32_t loDoc, uint32_t hiDoc, const std::function<bool()>& cancel)
+    {
+        // Step 1 (outside the transaction): tokenize the slice's hot blocks. Tokens come from the ORIGINAL text
         // (the camelCase split needs the case); the postings and per-session hit counts accumulate here.
         struct Posting
         {
@@ -589,7 +655,9 @@ namespace Agentmaster::SessionDb
         };
         const uint64_t t0 = ::GetTickCount64();
         {
-            auto r = con.Query("SELECT doc_id, sid_key, text FROM doc_hot ORDER BY doc_id");
+            auto q = con.Prepare("SELECT doc_id, sid_key, text FROM doc_hot WHERE doc_id BETWEEN ? AND ? ORDER BY doc_id");
+            q.Bind(1, static_cast<int64_t>(loDoc)).Bind(2, static_cast<int64_t>(hiDoc));
+            auto r = q.Execute();
             while (r.Next())
             {
                 if (cancel && cancel())
@@ -628,11 +696,7 @@ namespace Agentmaster::SessionDb
         }
         if (tokLens.empty())
         {
-            // Nothing hot: still move any hot lines (a tick can append lines without blocks).
-            Transaction tx{ con };
-            _moveHotLines(con);
-            tx.Commit();
-            return 0;
+            return 0; // the slice's blocks went away meanwhile (a forgotten file): nothing to merge
         }
         const uint64_t t1 = ::GetTickCount64();
         std::sort(postings.begin(), postings.end(), [](const Posting& a, const Posting& b) {
@@ -680,23 +744,22 @@ namespace Agentmaster::SessionDb
                 a.Close();
             }
             // The text splits by role (SessionDbSchema.cpp, `doc`): conversation text stays in doc.text, a
-            // tool block's text goes to the ZSTD doc_tool table.
+            // tool block's text goes to the ZSTD doc_tool table. Only this slice's ids (Merge plans them so the
+            // sorts here hold about mergeSliceBytes of text: the whole hot tier in one sort is what ran out of
+            // memory in the 2026-10-15 cold build once a large batch had left it big).
             auto mv = con.Prepare(R"SQL(
 INSERT INTO doc SELECT h.doc_id, h.sid_key, h.file_id, h.line_no, h.block, h.ts_ms, h.role, h.flags, h.tool, h.tool_use_id,
                        h.text_len, coalesce(t.tok_len, 0), CASE WHEN h.role IN (4, 5) THEN NULL ELSE h.text END
-FROM doc_hot h LEFT JOIN stg_toklen t ON t.doc_id = h.doc_id WHERE h.doc_id <= ? ORDER BY h.doc_id)SQL");
-            mv.Bind(1, static_cast<int64_t>(maxDoc));
+FROM doc_hot h LEFT JOIN stg_toklen t ON t.doc_id = h.doc_id WHERE h.doc_id BETWEEN ? AND ? ORDER BY h.doc_id)SQL");
+            mv.Bind(1, static_cast<int64_t>(loDoc)).Bind(2, static_cast<int64_t>(maxDoc));
             mv.Execute();
-            auto mvTool = con.Prepare("INSERT INTO doc_tool SELECT doc_id, text FROM doc_hot WHERE role IN (4, 5) AND doc_id <= ? ORDER BY doc_id");
-            mvTool.Bind(1, static_cast<int64_t>(maxDoc));
+            auto mvTool = con.Prepare("INSERT INTO doc_tool SELECT doc_id, text FROM doc_hot WHERE role IN (4, 5) AND doc_id BETWEEN ? AND ? ORDER BY doc_id");
+            mvTool.Bind(1, static_cast<int64_t>(loDoc)).Bind(2, static_cast<int64_t>(maxDoc));
             mvTool.Execute();
-            auto del = con.Prepare("DELETE FROM doc_hot WHERE doc_id <= ?");
-            del.Bind(1, static_cast<int64_t>(maxDoc));
+            auto del = con.Prepare("DELETE FROM doc_hot WHERE doc_id BETWEEN ? AND ?");
+            del.Bind(1, static_cast<int64_t>(loDoc)).Bind(2, static_cast<int64_t>(maxDoc));
             del.Execute();
             con.Execute("DELETE FROM stg_toklen;");
-            // The hot lines move too, sorted (§6.8: one merged batch holds each session's new lines in one run),
-            // in memory-bounded slices.
-            _moveHotLines(con);
             const uint64_t t3 = ::GetTickCount64();
             for (size_t id = 1; id < dfDelta.size(); ++id)
             {
@@ -711,9 +774,9 @@ FROM doc_hot h LEFT JOIN stg_toklen t ON t.doc_id = h.doc_id WHERE h.doc_id <= ?
             tx.Commit();
             if (log)
             {
-                log(L"[sessdb] merge steps (ms): tokenize " + std::to_wstring(t1 - t0) + L" (" + std::to_wstring(postings.size()) + L" postings), sort + postings " +
-                    std::to_wstring(t2 - t1) + L", move blocks + lines " + std::to_wstring(t3 - t2) + L", dictionary " + std::to_wstring(t4 - t3) +
-                    L", commit " + std::to_wstring(::GetTickCount64() - t4));
+                log(L"[sessdb] merge steps (ms): tokenize " + std::to_wstring(t1 - t0) + L" (" + std::to_wstring(tokLens.size()) + L" block(s), " +
+                    std::to_wstring(postings.size()) + L" postings), sort + postings " + std::to_wstring(t2 - t1) + L", move blocks " +
+                    std::to_wstring(t3 - t2) + L", dictionary " + std::to_wstring(t4 - t3) + L", commit " + std::to_wstring(::GetTickCount64() - t4));
             }
         }
         catch (...)
@@ -731,26 +794,31 @@ FROM doc_hot h LEFT JOIN stg_toklen t ON t.doc_id = h.doc_id WHERE h.doc_id <= ?
         {
             return false;
         }
-        Transaction tx{ con };
-        // Postings sorted by (term, doc) without the tombstoned blocks; the tombstoned blocks deleted from the
-        // block tables; session postings recomputed EXACTLY from the new postings (one row per term and
-        // session). The sorts and the join here touch fixed-width columns only (term_id, doc_id, tf, sid_key),
-        // which DuckDB spills to disk under the memory limit. `doc` and `doc_tool` are NOT copied: every merge
-        // appends them in doc_id order, so deleting the tombstoned rows leaves them sorted, and DuckDB's
-        // checkpoint reclaims the deleted rows. (Until 2026-10-15 this step also re-sorted `doc`, `doc_tool` and
-        // `line` with their text in one statement each: correct, but a sort of gigabytes of text that the
-        // service's memory limit could not hold — the line part now lives in ReclusterLines, in slices.)
+        // Postings sorted by (term, doc) without the tombstoned blocks; session postings recomputed EXACTLY from
+        // them (one row per term and session); exact df / sf; the tombstoned blocks deleted from the block tables.
+        // The sorts and the joins touch fixed-width columns only (term_id, doc_id, tf, sid_key), which DuckDB
+        // spills to disk under the memory limit. `doc` and `doc_tool` are NOT copied: every merge appends them in
+        // doc_id order, so deleting the tombstoned rows leaves them sorted, and DuckDB's checkpoint reclaims the
+        // deleted rows. (Until 2026-10-15 this step also re-sorted `doc`, `doc_tool` and `line` with their text:
+        // a sort of gigabytes of text that the service's memory limit could not hold; the line part now lives in
+        // ReclusterLines, in slices.)
+        //
+        // The three new tables are built by statements that COMMIT one by one, and only the swap is one
+        // transaction. Measured on the full corpus (127.6 M postings, 2026-10-15): each statement passes alone
+        // under the 1 GB limit (the postings sort 27 s, the session postings 5 s, the counts 0.1 s), but the same
+        // statements inside ONE transaction ran out of memory. Nothing else writes meanwhile (this runs on the
+        // writer thread, which yields to no job until it returns), and readers keep using the old tables, which
+        // the new ones replace only in the swap: a crash in between leaves orphan *_new tables, dropped here at
+        // the next start of this step.
+        con.Execute("DROP TABLE IF EXISTS post_new; DROP TABLE IF EXISTS spost_new; DROP TABLE IF EXISTS dict_new;");
         con.Execute(R"SQL(
 CREATE TABLE post_new (term_id UINTEGER, doc_id UINTEGER, tf USMALLINT);
 INSERT INTO post_new SELECT term_id, doc_id, tf FROM post WHERE doc_id NOT IN (SELECT doc_id FROM tomb) ORDER BY term_id, doc_id;
-DELETE FROM doc WHERE doc_id IN (SELECT doc_id FROM tomb);
-DELETE FROM doc_tool WHERE doc_id IN (SELECT doc_id FROM tomb);
+)SQL");
+        con.Execute(R"SQL(
 CREATE TABLE spost_new (term_id UINTEGER, sid_key INTEGER, hits UINTEGER);
 INSERT INTO spost_new SELECT p.term_id, d.sid_key, count(*) FROM post_new p JOIN doc d ON d.doc_id = p.doc_id
     GROUP BY p.term_id, d.sid_key ORDER BY p.term_id, d.sid_key;
-DROP TABLE post; ALTER TABLE post_new RENAME TO post;
-DROP TABLE spost; ALTER TABLE spost_new RENAME TO spost;
-DELETE FROM tomb;
 )SQL");
         // Exact df / sf from the rewritten postings.
         con.Execute(R"SQL(
@@ -758,12 +826,22 @@ CREATE TABLE dict_new (term_id UINTEGER, term VARCHAR, df UINTEGER, sf UINTEGER)
 INSERT INTO dict_new
 SELECT d.term_id, d.term, coalesce(p.df, 0), coalesce(s.sf, 0)
 FROM dict d
-LEFT JOIN (SELECT term_id, count(*) AS df FROM post GROUP BY term_id) p ON p.term_id = d.term_id
-LEFT JOIN (SELECT term_id, count(*) AS sf FROM spost GROUP BY term_id) s ON s.term_id = d.term_id
+LEFT JOIN (SELECT term_id, count(*) AS df FROM post_new GROUP BY term_id) p ON p.term_id = d.term_id
+LEFT JOIN (SELECT term_id, count(*) AS sf FROM spost_new GROUP BY term_id) s ON s.term_id = d.term_id
 ORDER BY d.term_id;
-DROP TABLE dict; ALTER TABLE dict_new RENAME TO dict;
 )SQL");
-        tx.Commit();
+        {
+            Transaction tx{ con };
+            con.Execute(R"SQL(
+DELETE FROM doc WHERE doc_id IN (SELECT doc_id FROM tomb);
+DELETE FROM doc_tool WHERE doc_id IN (SELECT doc_id FROM tomb);
+DROP TABLE post; ALTER TABLE post_new RENAME TO post;
+DROP TABLE spost; ALTER TABLE spost_new RENAME TO spost;
+DROP TABLE dict; ALTER TABLE dict_new RENAME TO dict;
+DELETE FROM tomb;
+)SQL");
+            tx.Commit();
+        }
         // The views name the tables, and DuckDB binds a view at creation: re-create them over the new tables.
         EnsureSchema(con);
         _dict.Load(con);
