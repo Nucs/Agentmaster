@@ -1,0 +1,1 @@
+{ "name": "amprobe", "version": "0.0.1", "description": "Throwaway probe: which local transports a mod's $.http.fetch reaches, long-poll length, detached loops, event fidelity." }
