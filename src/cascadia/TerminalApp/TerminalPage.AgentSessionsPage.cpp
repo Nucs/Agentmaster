@@ -64,6 +64,11 @@
 #include "AgentMaster/SessionSearch.h" // the two-phase search
 #include "AgentMaster/SessionStore.h" // durable per-session store (LoadAllStoredSessionTitles — the title overlay)
 #include "AgentMaster/TranscriptStore.h" // EnumerateTranscripts / LoadOrRefreshSessionIndex / PickDisplayTitle
+#include "AgentMaster/Json.h" // SESSIONS_DB.md §8.1 — the pageSearch request / answer
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::detail::WideToUtf8 / Utf8ToWide (the pipe speaks UTF-8)
+#include "AgentMaster/SessionDbClient.h" // SESSIONS_DB.md §8.1 — the content phase through the session database
+#include "AgentMaster/SessionDbProtocol.h"
+#include "AgentMaster/SessionDbRefresher.h" // the mode (Off / Shadow / On) and whether the first sweep is done
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation::Collections;
@@ -1171,8 +1176,119 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    namespace
+    {
+        // The content phase through the session database (SESSIONS_DB.md §8.1), in the slow phase's shapes.
+        struct SessDbContentHits
+        {
+            bool ok{ false }; // the service answered
+            std::wstring error; // why not, when !ok
+            int64_t ms{ 0 }; // the round trip
+            std::wstring timings; // the service's own step times (Shadow logs them)
+            std::unordered_map<std::wstring, int> counts; // session id -> matched blocks
+            std::unordered_map<std::wstring, std::vector<std::wstring>> snippets; // session id -> "👤 …" / "🤖 …"
+        };
+
+        // Ask the profile's service for the page's CONTENT matches: its 👤 / 🤖 scopes (names and paths stay in the
+        // page's fast phase), its window, its fuzzy switch. Only rows with content hits count, like the slow phase.
+        // Runs on a background thread. Never throws (an exception is logged and reads as !ok).
+        //   profile  — the active profile (the service's pipe derives from it).
+        //   q        — the page's parsed query and scope switches.
+        //   afterMs / beforeMs — the page's window in Unix ms (0 = open).
+        SessDbContentHits SessSearchContentOnService(const std::wstring& profile, const ::Agentmaster::SessionQuery& q, int64_t afterMs, int64_t beforeMs)
+        {
+            SessDbContentHits out;
+            try
+            {
+                namespace json = ::Agentmaster::json;
+                const ULONGLONG t0 = ::GetTickCount64();
+                json::Value scopes = json::Value::MkObj();
+                scopes.Set(L"title", json::Value::MkBool(false));
+                scopes.Set(L"dirs", json::Value::MkBool(false));
+                scopes.Set(L"files", json::Value::MkBool(false));
+                scopes.Set(L"prompt", json::Value::MkBool(q.scopeUser));
+                scopes.Set(L"reply", json::Value::MkBool(q.scopeAgent));
+                scopes.Set(L"tool", json::Value::MkBool(q.scopeAgent)); // today's 🤖 reads tool inputs and results too
+                scopes.Set(L"subagent", json::Value::MkBool(false)); // today's search never reads subagents (parity in Shadow)
+                json::Value params = json::Value::MkObj();
+                params.Set(L"query", json::Value::MkStr(q.text));
+                params.Set(L"scopes", std::move(scopes));
+                params.Set(L"fuzzy", json::Value::MkBool(q.fuzzy));
+                params.Set(L"afterMs", json::Value::MkNum(static_cast<double>(afterMs)));
+                params.Set(L"beforeMs", json::Value::MkNum(static_cast<double>(beforeMs)));
+                params.Set(L"limit", json::Value::MkNum(5000));
+                params.Set(L"snippets", json::Value::MkNum(3));
+                ::Agentmaster::SessionDb::ServiceClient client{ profile };
+                std::string answer;
+                if (!client.Connect(false, 2000, out.error) ||
+                    !client.Call(::Agentmaster::SessionDbProtocol::kPageSearch, ::Agentmaster::Profiles::detail::WideToUtf8(json::Dump(params)), answer, 15000, out.error))
+                {
+                    return out;
+                }
+                out.ms = static_cast<int64_t>(::GetTickCount64() - t0);
+                const auto env = json::Parse(::Agentmaster::Profiles::detail::Utf8ToWide(answer));
+                const json::Value* result = env ? env->Find(L"result") : nullptr;
+                if (!result)
+                {
+                    out.error = env && env->Find(L"error") ? env->Find(L"error")->StrAt(L"message", L"failed") : std::wstring{ L"an unreadable answer" };
+                    return out;
+                }
+                out.timings = result->StrAt(L"timings");
+                if (const json::Value* rows = result->Find(L"rows"); rows && rows->type == json::Value::Type::Arr)
+                {
+                    for (const auto& row : rows->arr)
+                    {
+                        const int64_t hits = row.I64At(L"hits");
+                        if (hits <= 0)
+                        {
+                            continue; // a name / folder match: the fast phase owns those
+                        }
+                        const std::wstring id = row.StrAt(L"id");
+                        out.counts[id] = static_cast<int>(hits);
+                        auto& sn = out.snippets[id];
+                        if (const json::Value* snips = row.Find(L"snippets"); snips && snips->type == json::Value::Type::Arr)
+                        {
+                            for (const auto& sv : snips->arr)
+                            {
+                                const int64_t role = sv.I64At(L"role");
+                                // The slow phase's two prefixes: typed prompts (and history.jsonl) 👤, everything else 🤖.
+                                const bool user = role == 1 || role == 7 || sv.BoolAt(L"history");
+                                sn.push_back(std::wstring{ user ? L"👤 " : L"🤖 " } + sv.StrAt(L"text"));
+                            }
+                        }
+                    }
+                }
+                out.ok = true;
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"SessSearchContentOnService");
+                out.ok = false;
+                out.error = L"the request failed";
+            }
+            return out;
+        }
+
+        // The first few ids of a set, short, for a log line.
+        std::wstring SessFewIds(const std::vector<std::wstring>& ids)
+        {
+            std::wstring out;
+            for (size_t i = 0; i < ids.size() && i < 8; ++i)
+            {
+                out += (i ? L", " : L"") + ids[i].substr(0, 8);
+            }
+            if (ids.size() > 8)
+            {
+                out += L", +" + std::to_wstring(ids.size() - 8);
+            }
+            return out.empty() ? std::wstring{ L"none" } : out;
+        }
+    }
+
     // The two-phase search. FAST runs inline (in-memory over the index entries); the history
     // accelerator + the SLOW content phase run on a background pass, generation-cancelled.
+    // SESSIONS_DB.md §8.1: with the session database On (and its first sweep done) the content phase asks the
+    // service instead of scanning the transcripts; in Shadow both run and [sessdb-diff] logs where they differ.
     winrt::fire_and_forget TerminalPage::_RunSessionsSearch()
     {
         const uint64_t gen = ++_sessionsSearchGen;
@@ -1237,6 +1353,13 @@ namespace winrt::TerminalApp::implementation
             refs.push_back(std::move(r));
         }
         auto weakThis{ get_weak() };
+        // SESSIONS_DB.md §8.1: the mode and the page's window, read on the UI thread before the background hop.
+        const auto& sessionDb = ::Agentmaster::SharedEngine().sessionDb;
+        const auto dbMode = sessionDb ? sessionDb->Mode() : ::Agentmaster::SessionDbMode::Off;
+        const bool dbReady = sessionDb && sessionDb->Ready();
+        const int64_t dbAfterMs = _SessionsCutoffFromMs();
+        const int64_t dbBeforeMs = _sessionsToMs;
+        const std::wstring dbProfile = ::Agentmaster::AgentmasterStateDir();
 
         co_await winrt::resume_background();
 
@@ -1246,7 +1369,23 @@ namespace winrt::TerminalApp::implementation
         };
         std::unordered_map<std::wstring, int> counts;
         std::unordered_map<std::wstring, std::vector<std::wstring>> snippets;
-        if (q.scopeUser)
+        bool servedByDb = false;
+        if (dbMode == ::Agentmaster::SessionDbMode::On && dbReady)
+        {
+            auto db = SessSearchContentOnService(dbProfile, q, dbAfterMs, dbBeforeMs);
+            if (db.ok)
+            {
+                counts = std::move(db.counts);
+                snippets = std::move(db.snippets);
+                servedByDb = true;
+            }
+            else
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessdb] the Sessions page searched the transcripts instead: " + db.error + L"\n");
+            }
+        }
+        const ULONGLONG transcriptsStart = ::GetTickCount64();
+        if (!servedByDb && q.scopeUser)
         {
             for (auto& [sid, hit] : ::Agentmaster::SearchHistoryPrompts(SessHistoryPath(), q, 3))
             {
@@ -1261,7 +1400,7 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
-        if (!cancelled())
+        if (!servedByDb && !cancelled())
         {
             for (auto& hit : ::Agentmaster::SearchTranscriptsSlow(refs, q, 3, cancelled))
             {
@@ -1274,6 +1413,53 @@ namespace winrt::TerminalApp::implementation
                         sn.push_back(std::move(s));
                     }
                 }
+            }
+        }
+        // Shadow: the same content search through the database, compared on the page's own sessions (the
+        // database also keeps sessions whose transcript Claude deleted, D7, which the page does not list).
+        if (!servedByDb && dbMode == ::Agentmaster::SessionDbMode::Shadow && !cancelled())
+        {
+            const int64_t transcriptsMs = static_cast<int64_t>(::GetTickCount64() - transcriptsStart);
+            const auto db = SessSearchContentOnService(dbProfile, q, dbAfterMs, dbBeforeMs);
+            if (db.ok)
+            {
+                std::unordered_set<std::wstring> listed;
+                for (const auto& r : refs)
+                {
+                    listed.insert(r.sessionId);
+                }
+                std::vector<std::wstring> onlyOld, onlyDb;
+                size_t dbListed = 0;
+                for (const auto& [id, n] : counts)
+                {
+                    if (!db.counts.count(id))
+                    {
+                        onlyOld.push_back(id);
+                    }
+                }
+                for (const auto& [id, n] : db.counts)
+                {
+                    if (!listed.count(id))
+                    {
+                        continue;
+                    }
+                    ++dbListed;
+                    if (!counts.count(id))
+                    {
+                        onlyDb.push_back(id);
+                    }
+                }
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessdb-diff] search \"" + q.text + L"\": transcripts " + std::to_wstring(counts.size()) +
+                                                                L" session(s) in " + std::to_wstring(transcriptsMs) + L" ms, database " +
+                                                                std::to_wstring(dbListed) + L" in " + std::to_wstring(db.ms) + L" ms" +
+                                                                (onlyOld.empty() && onlyDb.empty() ? std::wstring{ L"; the same sessions" }
+                                                                                                   : L"; only in the transcripts: " + SessFewIds(onlyOld) +
+                                                                                                         L"; only in the database: " + SessFewIds(onlyDb)) +
+                                                                L" (" + db.timings + L")\n");
+            }
+            else
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessdb-diff] search \"" + q.text + L"\": the database did not answer: " + db.error + L"\n");
             }
         }
 

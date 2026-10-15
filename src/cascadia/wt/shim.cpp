@@ -30,7 +30,8 @@ namespace
     {
         // Keep in sync with the agentmaster-cli verb set (CLI.md §5).
         static constexpr std::wstring_view kVerbs[] = {
-            L"show", L"list", L"sessions", L"tabs", L"windows", L"external", L"restore", L"archive"
+            L"show", L"list", L"sessions", L"tabs", L"windows", L"external", L"restore", L"archive",
+            L"search", L"sql", L"sessdb" // SESSIONS_DB.md §8.3 — the session database's verbs
         };
         for (const auto k : kVerbs)
         {

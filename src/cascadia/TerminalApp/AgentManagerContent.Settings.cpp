@@ -1085,21 +1085,21 @@ namespace winrt::TerminalApp::implementation
         _setSessionDbMode.Items().Append(winrt::box_value(L"Off")); // 0 == SessionDbMode::Off
         _setSessionDbMode.Items().Append(winrt::box_value(L"Shadow (run beside today's search, log differences)")); // 1 == Shadow
         _setSessionDbMode.Items().Append(winrt::box_value(L"On")); // 2 == On
-        AgentSetTip(_setSessionDbMode, L"A database of every Claude Code session on this computer (every line kept, a full-text index), served by a small background process per profile. Off: nothing runs. Shadow: it is built and kept current, and the Sessions page searches it BESIDE today's search and logs where the two differ ([sessdb-diff] in hooks.log)  14 nothing on screen changes. On: the Sessions page searches it. The first build reads every transcript once (minutes, in the background, at low priority).");
+        AgentSetTip(_setSessionDbMode, L"A database of every Claude Code session on this computer (every line kept, a full-text index), served by a small background process per profile. Off: nothing runs. Shadow: it is built and kept current, and the Sessions page searches it BESIDE today's search and logs where the two differ ([sessdb-diff] in hooks.log) \x2014 nothing on screen changes. On: the Sessions page searches it. The first build reads every transcript once (minutes, in the background, at low priority).");
         panel.Children().Append(_setSessionDbMode);
         _setSessionDbRefresh = TextBox{};
         _setSessionDbRefresh.Header(winrt::box_value(L"Refresh every (seconds)"));
-        _setSessionDbRefresh.PlaceholderText(L"5 (1 13" L"60)");
-        AgentSetTip(_setSessionDbRefresh, L"How often the sessions that changed are written into the database. Agentmaster counts the changes it already watches for; a tick with nothing changed costs nothing. Blank resets to 5; the range is 1 13" L"60.");
+        _setSessionDbRefresh.PlaceholderText(L"5 (1\x2013" L"60)");
+        AgentSetTip(_setSessionDbRefresh, L"How often the sessions that changed are written into the database. Agentmaster counts the changes it already watches for; a tick with nothing changed costs nothing. Blank resets to 5; the range is 1\x2013" L"60.");
         panel.Children().Append(_setSessionDbRefresh);
         _setSessionDbThreads = TextBox{};
         _setSessionDbThreads.Header(winrt::box_value(L"Database threads"));
-        _setSessionDbThreads.PlaceholderText(L"4 (1 13" L"16)");
+        _setSessionDbThreads.PlaceholderText(L"4 (1\x2013" L"16)");
         AgentSetTip(_setSessionDbThreads, L"How many threads the database may use for one query or for the first build. Applies when the database process next starts. Blank resets to 4.");
         panel.Children().Append(_setSessionDbThreads);
         _setSessionDbMemory = TextBox{};
         _setSessionDbMemory.Header(winrt::box_value(L"Database memory limit (MB)"));
-        _setSessionDbMemory.PlaceholderText(L"1024 (256 13" L"16384)");
+        _setSessionDbMemory.PlaceholderText(L"1024 (256\x2013" L"16384)");
         AgentSetTip(_setSessionDbMemory, L"The most memory the database process may use (DuckDB's memory_limit); above it, large work spills to disk. Applies when the database process next starts. Blank resets to 1024.");
         panel.Children().Append(_setSessionDbMemory);
         _setSessionDbStatus = Text(L"", 11, false, 0.7);

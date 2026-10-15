@@ -65,6 +65,11 @@ namespace Agentmaster::SessionDbProtocol
     inline constexpr std::string_view kOpenChanged = "openChanged";
     inline constexpr std::string_view kListSessions = "listSessions";
     inline constexpr std::string_view kSearch = "search";
+    // The Sessions page's content search (SESSIONS_DB.md §8.1): the same engine as `search`, shaped for the page —
+    // full ids, every matching session (up to 5,000), the tier / hits / score per row and its snippets, the page's
+    // own scope switches and window (Unix ms). The page keeps its own rows and fast phase; this replaces the slow
+    // ripgrep phase when AppSettings::sessionDbMode is On (Shadow runs both and logs the differences).
+    inline constexpr std::string_view kPageSearch = "pageSearch";
     inline constexpr std::string_view kSessionDetail = "sessionDetail";
     inline constexpr std::string_view kSessionSummary = "sessionSummary";
     inline constexpr std::string_view kMessages = "messages";

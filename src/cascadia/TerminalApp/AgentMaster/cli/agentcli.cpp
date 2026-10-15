@@ -39,6 +39,9 @@
 #include "../ClaudeSpawn.h"
 #include "../Json.h"
 #include "../Persistence.h"
+#include "../ProfileBootstrap.h" // Profiles::detail::WideToUtf8 / Utf8ToWide (the session database's pipe speaks UTF-8)
+#include "../SessionDbClient.h" // SESSIONS_DB.md §8.3 — search / sql / sessdb talk to the session database service
+#include "../SessionDbProtocol.h"
 #include "../ProcessInspect.h"
 #include "../SessionModels.h"
 #include "../SessionScanner.h"
@@ -1545,6 +1548,215 @@ namespace
         return 0;
     }
 
+    // ===== the session database (SESSIONS_DB.md §8.3) =====
+    // `search`, `sql` and `sessdb` are clients of the profile's session-database service
+    // (agentmaster-sessiondb.exe; the service is started when none runs). They read the database, not the live
+    // fleet, so they skip GatherFleet. --json prints the service's answer as it came; otherwise a readable form.
+
+    // A JSON scalar as one line of text (strings as they are, numbers, true/false, empty for null).
+    std::wstring ScalarText(const json::Value& v)
+    {
+        switch (v.type)
+        {
+        case json::Value::Type::Str:
+            return v.str;
+        case json::Value::Type::Num:
+        {
+            wchar_t buf[40];
+            if (v.num == static_cast<double>(static_cast<int64_t>(v.num)))
+            {
+                swprintf_s(buf, L"%lld", static_cast<long long>(v.num));
+            }
+            else
+            {
+                swprintf_s(buf, L"%.4g", v.num);
+            }
+            return buf;
+        }
+        case json::Value::Type::Bool:
+            return v.boolean ? L"true" : L"false";
+        case json::Value::Type::Null:
+            return L"";
+        default:
+            return json::Dump(v);
+        }
+    }
+
+    // search / sql / sessdb <status|stop|resync|rebuild>.
+    //   verb  — the CLI verb.
+    //   words — the positionals after it (the query words, or the sessdb sub-command).
+    //   a     — the parsed flags (--json, --dir).
+    // Returns the exit code: 0, 1 (the service failed or answered an error), 2 (usage).
+    int CmdSessionDb(const std::wstring& verb, const std::vector<std::wstring>& words, const Args& a)
+    {
+        namespace Proto = SessionDbProtocol;
+        std::wstring joined;
+        for (const auto& w : words)
+        {
+            joined += (joined.empty() ? L"" : L" ") + w;
+        }
+        std::string method;
+        json::Value params = json::Value::MkObj();
+        uint32_t timeoutMs = 30000;
+        if (verb == L"search")
+        {
+            method = std::string{ Proto::kSearch };
+            if (!joined.empty())
+            {
+                params.Set(L"query", json::Value::MkStr(joined));
+            }
+            params.Set(L"limit", json::Value::MkNum(20));
+            if (!a.dirFilter.empty())
+            {
+                params.Set(L"dir", json::Value::MkStr(a.dirFilter));
+            }
+        }
+        else if (verb == L"sql")
+        {
+            if (joined.empty())
+            {
+                Err(L"usage: agentmaster sql \"SELECT ... FROM v_sessions ...\"");
+                return 2;
+            }
+            method = std::string{ Proto::kSql };
+            params.Set(L"query", json::Value::MkStr(joined));
+            params.Set(L"limit", json::Value::MkNum(200));
+        }
+        else
+        {
+            const std::wstring sub = words.empty() ? std::wstring{ L"status" } : words[0];
+            if (sub == L"status")
+            {
+                method = std::string{ Proto::kStatus };
+                timeoutMs = 10000;
+            }
+            else if (sub == L"stop")
+            {
+                method = std::string{ Proto::kShutdown };
+                timeoutMs = 10000;
+            }
+            else if (sub == L"resync")
+            {
+                method = std::string{ Proto::kResync };
+                timeoutMs = 60u * 60u * 1000u; // a cold build takes minutes
+            }
+            else if (sub == L"rebuild")
+            {
+                method = std::string{ Proto::kRebuild };
+                params.Set(L"index", json::Value::MkBool(true));
+                timeoutMs = 60u * 60u * 1000u;
+            }
+            else
+            {
+                Err(L"usage: agentmaster sessdb [status | stop | resync | rebuild]");
+                return 2;
+            }
+        }
+        SessionDb::ServiceClient client{ AgentmasterStateDir() };
+        std::wstring err;
+        // `stop` must not start a service only to stop it.
+        if (!client.Connect(method != Proto::kShutdown, 20000, err))
+        {
+            Err(L"agentmaster: " + err);
+            return 1;
+        }
+        std::string answer;
+        if (!client.Call(method, Profiles::detail::WideToUtf8(json::Dump(params)), answer, timeoutMs, err))
+        {
+            Err(L"agentmaster: " + err);
+            return 1;
+        }
+        const auto env = json::Parse(Profiles::detail::Utf8ToWide(answer));
+        if (!env)
+        {
+            Err(L"agentmaster: the session database sent an unreadable answer");
+            return 1;
+        }
+        if (const json::Value* e = env->Find(L"error"))
+        {
+            Err(L"agentmaster: " + e->StrAt(L"message", L"failed"));
+            return 1;
+        }
+        const json::Value* r = env->Find(L"result");
+        if (!r)
+        {
+            return 0;
+        }
+        if (a.json)
+        {
+            return EmitJson(*r);
+        }
+        if (verb == L"search")
+        {
+            OutLn(ScalarText(r->Find(L"matched") ? *r->Find(L"matched") : json::Value{}) + L" of " +
+                  ScalarText(r->Find(L"searched") ? *r->Find(L"searched") : json::Value{}) + L" session(s) match (" + r->StrAt(L"window") + L")");
+            if (const json::Value* rows = r->Find(L"rows"); rows && rows->type == json::Value::Type::Arr)
+            {
+                for (const auto& row : rows->arr)
+                {
+                    std::wstring head = row.StrAt(L"id") + L"  " + row.StrAt(L"active") + L"  " + row.StrAt(L"match");
+                    if (row.Find(L"hits"))
+                    {
+                        head += L" " + ScalarText(*row.Find(L"hits"));
+                    }
+                    OutLn(head + L"  " + row.StrAt(L"title"));
+                    OutLn(L"    " + row.StrAt(L"dir") + (row.StrAt(L"branch").empty() ? L"" : L"  [" + row.StrAt(L"branch") + L"]"));
+                    if (const json::Value* sn = row.Find(L"snippets"); sn && sn->type == json::Value::Type::Arr)
+                    {
+                        for (const auto& s : sn->arr)
+                        {
+                            OutLn(L"    \x00B7 " + s.StrAt(L"ref") + L" " + s.StrAt(L"role") + L": " + s.StrAt(L"text"));
+                        }
+                    }
+                }
+            }
+            if (r->Find(L"next"))
+            {
+                OutLn(L"(more rows: --json shows the cursor)");
+            }
+            if (!r->StrAt(L"note").empty())
+            {
+                OutLn(L"note: " + r->StrAt(L"note"));
+            }
+            return 0;
+        }
+        if (verb == L"sql")
+        {
+            std::wstring line;
+            if (const json::Value* cols = r->Find(L"columns"); cols && cols->type == json::Value::Type::Arr)
+            {
+                for (const auto& c : cols->arr)
+                {
+                    line += (line.empty() ? L"" : L"\t") + c.StrAt(L"name");
+                }
+            }
+            OutLn(line);
+            if (const json::Value* rows = r->Find(L"rows"); rows && rows->type == json::Value::Type::Arr)
+            {
+                for (const auto& row : rows->arr)
+                {
+                    line.clear();
+                    for (size_t i = 0; i < row.arr.size(); ++i)
+                    {
+                        line += (i ? L"\t" : L"") + ScalarText(row.arr[i]);
+                    }
+                    OutLn(line);
+                }
+            }
+            if (r->BoolAt(L"truncated"))
+            {
+                OutLn(L"(truncated)");
+            }
+            return 0;
+        }
+        // sessdb: one "key: value" line per member.
+        for (const auto& [k, v] : r->members)
+        {
+            OutLn(k + L": " + (v.type == json::Value::Type::Obj || v.type == json::Value::Type::Arr ? json::Dump(v) : ScalarText(v)));
+        }
+        return 0;
+    }
+
     int Usage()
     {
         OutLn(L"agentmaster — query the Claude session fleet (CLI.md)");
@@ -1556,6 +1768,9 @@ namespace
         OutLn(L"  tabs [--window W]       every tab across windows");
         OutLn(L"  windows                 saved windows: geometry, ordered tabs, lens");
         OutLn(L"  external                unmanaged live claudes (real-WT / bare console)");
+        OutLn(L"  search <words> [--dir D] every Claude session on this computer, from the session database");
+        OutLn(L"  sql \"<SELECT ...>\"      one read-only query over the database's views (v_sessions, v_messages, ...)");
+        OutLn(L"  sessdb [status|stop|resync|rebuild]  the session database service");
         OutLn(L"");
         OutLn(L"global: --json  --self  --profile <dir>  --instance dev|release  --help");
         return 0;
@@ -1689,6 +1904,12 @@ int wmain(int argc, wchar_t** argv)
     if (positionals.size() > 1)
     {
         a.ref = positionals[1];
+    }
+
+    // The session database's verbs read the database, not the live fleet (SESSIONS_DB.md §8.3).
+    if (a.verb == L"search" || a.verb == L"sql" || a.verb == L"sessdb")
+    {
+        return CmdSessionDb(a.verb, std::vector<std::wstring>(positionals.begin() + 1, positionals.end()), a);
     }
 
     const Fleet fleet = GatherFleet();

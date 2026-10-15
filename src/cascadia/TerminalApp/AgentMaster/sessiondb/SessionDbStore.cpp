@@ -44,6 +44,75 @@ namespace Agentmaster::SessionDb
         constexpr int64_t kMergeDocs = 20000;
         constexpr int64_t kMergeBytes = 64ll * 1024 * 1024;
         constexpr int64_t kMergeAgeMs = 30ll * 60 * 1000;
+        // The line store is re-sorted (TextIndex::ReclusterLines) once it holds this many sorted runs: a merge
+        // that interleaves files adds one, so at the 30-minute merge cadence about a day and a half of steady
+        // activity; a cold build that appended its batches out of file order passes it at once (wanted: the
+        // sorted store is what lets the upserts' per-file reads prune). A rewrite costs minutes on a large
+        // store, so the threshold keeps it rare.
+        constexpr int64_t kLineRunsForResort = 64;
+        // The memory budget of one sorting statement over the line store, as a share of the database's memory
+        // limit (TextIndex::sortChunkBytes): a quarter, measured to pass where half the 1.6 GB store already did.
+        constexpr int64_t kSortChunkShareOfMemory = 4;
+
+        // DuckDB's memory_limit text ("1024MB", "1GB", "512MiB") in bytes, the way DuckDB reads it (KB / MB / GB
+        // decimal, KiB / MiB / GiB binary, a bare number = bytes). 0 when it cannot be read. Pure.
+        int64_t MemoryLimitBytes(const std::string& text) noexcept
+        {
+            size_t i = 0;
+            while (i < text.size() && text[i] == ' ')
+            {
+                ++i;
+            }
+            int64_t n = 0;
+            bool digits = false;
+            while (i < text.size() && text[i] >= '0' && text[i] <= '9' && n < (1ll << 40))
+            {
+                n = n * 10 + (text[i] - '0');
+                digits = true;
+                ++i;
+            }
+            if (!digits)
+            {
+                return 0;
+            }
+            std::string unit;
+            for (; i < text.size(); ++i)
+            {
+                if (text[i] != ' ')
+                {
+                    unit.push_back(static_cast<char>(::tolower(static_cast<unsigned char>(text[i]))));
+                }
+            }
+            if (unit.empty() || unit == "b" || unit == "bytes")
+            {
+                return n;
+            }
+            if (unit == "kb")
+            {
+                return n * 1000;
+            }
+            if (unit == "mb")
+            {
+                return n * 1000 * 1000;
+            }
+            if (unit == "gb")
+            {
+                return n * 1000 * 1000 * 1000;
+            }
+            if (unit == "kib")
+            {
+                return n << 10;
+            }
+            if (unit == "mib")
+            {
+                return n << 20;
+            }
+            if (unit == "gib")
+            {
+                return n << 30;
+            }
+            return 0;
+        }
         // The inferred-folder vote reads at most this many distinct paths (the sidecar's kMaxPathsAccessed).
         constexpr int kMaxInferPaths = 512;
 
@@ -472,6 +541,12 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
 )SQL");
         _loadMaps(*_w);
         _index.log = _cfg.log;
+        // A quarter of the memory limit per sorting statement over the line store (32 MB at least; the default
+        // when the limit cannot be read).
+        if (const int64_t limit = MemoryLimitBytes(_cfg.db.memoryLimit); limit > 0)
+        {
+            _index.sortChunkBytes = std::max<int64_t>(limit / kSortChunkShareOfMemory, 32ll * 1024 * 1024);
+        }
         _index.Load(*_w);
         try
         {
@@ -2618,16 +2693,45 @@ FROM (SELECT line_no, uuid, leaf_uuid, flags, on_branch FROM line WHERE file_id 
         return n;
     }
 
-    void Store::Recluster(const CancelFn& cancel)
+    void Store::Recluster(const CancelFn& cancel, bool force)
     {
-        const int64_t started = NowMs();
-        _index.Recluster(*_w, cancel);
-        SetMeta(*_w, "last_recluster_ms", std::to_string(NowMs()));
-        SetMeta(*_w, "last_recluster_docs", std::to_string(_w->ScalarInt64("SELECT count(*) FROM doc")));
-        _log(L"[sessdb] re-cluster done in " + std::to_wstring(NowMs() - started) + L" ms");
+        const bool postings = force || _postingsReclusterDue();
+        const int64_t runs = _index.LineRuns(*_w);
+        const bool lines = force || runs >= kLineRunsForResort || _index.LineResortInProgress(*_w);
+        std::wstring done;
+        if (postings)
+        {
+            const int64_t t0 = NowMs();
+            if (!_index.ReclusterPostings(*_w, cancel))
+            {
+                _log(L"[sessdb] re-cluster: interrupted before the text index (a write job is waiting)");
+                return;
+            }
+            SetMeta(*_w, "last_recluster_ms", std::to_string(NowMs()));
+            SetMeta(*_w, "last_recluster_docs", std::to_string(_w->ScalarInt64("SELECT count(*) FROM doc")));
+            done += L"text index " + std::to_wstring(NowMs() - t0) + L" ms";
+        }
+        if (lines)
+        {
+            const int64_t t0 = NowMs();
+            LineResortTally tally;
+            const bool finished = _index.ReclusterLines(*_w, cancel, &tally);
+            done += (done.empty() ? L"" : L", ") + std::wstring{ L"line store (" } + std::to_wstring(runs) + L" run(s)" +
+                    (tally.resumed ? L", resumed" : L"") + L"): " + std::to_wstring(tally.moved) + L" of " + std::to_wstring(tally.slices) +
+                    L" slice(s) moved (" + std::to_wstring(tally.movedBytes / (1024 * 1024)) + L" MB), " + std::to_wstring(tally.inPlace) +
+                    L" in place, " + std::to_wstring(NowMs() - t0) + L" ms" + (finished ? L"" : L"; paused for a write job, resumes when idle");
+            if (finished)
+            {
+                SetMeta(*_w, "last_line_sort_ms", std::to_string(NowMs()));
+            }
+        }
+        if (!done.empty())
+        {
+            _log(L"[sessdb] re-cluster: " + done);
+        }
     }
 
-    bool Store::ReclusterDue()
+    bool Store::_postingsReclusterDue()
     {
         const int64_t docs = _w->ScalarInt64("SELECT count(*) FROM doc");
         const int64_t lastDocs = std::strtoll(GetMeta(*_w, "last_recluster_docs").c_str(), nullptr, 10);
@@ -2642,6 +2746,11 @@ FROM (SELECT line_no, uuid, leaf_uuid, flags, on_branch FROM line WHERE file_id 
             return true;
         }
         return NowMs() - lastMs >= 24LL * 3600 * 1000;
+    }
+
+    bool Store::ReclusterDue()
+    {
+        return _postingsReclusterDue() || _index.LineRuns(*_w) >= kLineRunsForResort || _index.LineResortInProgress(*_w);
     }
 
     void Store::Checkpoint()
