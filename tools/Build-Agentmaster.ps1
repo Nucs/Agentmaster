@@ -106,6 +106,15 @@ if (-not $NoRestore) {
     }
 }
 
+# Agentmaster: the session database service links the pinned DuckDB C library, which is not in the repository
+# (doc/agentmaster/SESSIONS_DB.md section 3.4; agentmaster-sessiondb.vcxproj stops without it). Get-DuckDb.ps1 is
+# idempotent: a folder that already holds the checked files costs no network. There is no 32-bit DuckDB library, so a
+# Win32 build (never shipped) leaves the service out and needs none.
+if ($Platform -ne 'Win32') {
+    $duckArch = if ($Platform -eq 'ARM64') { 'arm64' } else { 'x64' }
+    & "$root\tools\Get-DuckDb.ps1" -Arch $duckArch -Root $root
+}
+
 $mFlag = if ($MaxCpu -gt 0) { "/m:$MaxCpu" } else { '/m' }
 
 $msbuildArgs = @(

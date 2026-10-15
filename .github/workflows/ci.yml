@@ -71,6 +71,18 @@ jobs:
           Write-Host "VCPKG_ROOT=$root"
           "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
 
+      # Agentmaster: the session database service links the pinned DuckDB C library, which is not in the repository
+      # (doc/agentmaster/SESSIONS_DB.md section 3.4). The script checks the archive's SHA-256 against its pin.
+      - name: Cache libduckdb
+        uses: actions/cache@v4
+        with:
+          path: dep/duckdb
+          key: duckdb-${{ runner.os }}-x64-${{ hashFiles('tools/Get-DuckDb.ps1') }}
+
+      - name: Fetch libduckdb (x64)
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/Get-DuckDb.ps1 -Arch x64
+
       - name: Restore (NuGet + solution)
         shell: pwsh
         run: |

@@ -764,6 +764,14 @@
       <Build Solution="Fuzzing|x64" Project="false" />
       <Build Solution="Fuzzing|x86" Project="false" />
     </Project>
+    <Project Path="src/cascadia/TerminalApp/AgentMaster/sessiondb/agentmaster-sessiondb.vcxproj" Id="70b3a274-db45-4d5c-871d-231e1a0d547e">
+      <Platform Solution="*|Any CPU" Project="Win32" />
+      <Build Solution="*|Any CPU" Project="false" />
+      <Build Solution="*|x86" Project="false" />
+      <Build Solution="Fuzzing|ARM64" Project="false" />
+      <Build Solution="Fuzzing|x64" Project="false" />
+      <Build Solution="Fuzzing|x86" Project="false" />
+    </Project>
     <Project Path="src/cascadia/WindowsTerminalShim/WindowsTerminalShim.vcxproj" Id="34770444-5033-4daf-8a4b-6a16022bb90a">
       <Platform Solution="*|Any CPU" Project="Win32" />
       <Build Solution="*|Any CPU" Project="false" />

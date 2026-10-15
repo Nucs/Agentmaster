@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Agentmaster — where the pinned DuckDB C library (libduckdb) lives for a build (doc/agentmaster/SESSIONS_DB.md §3.4).
+
+     tools\Get-DuckDb.ps1 downloads it, checks its SHA-256 and extracts duckdb.h / duckdb.lib / duckdb.dll into
+         dep\duckdb\<DuckDbVersion>\<DuckDbArch>\
+     (the folder is gitignored: ~37 MB per architecture, never committed). Two projects read this file:
+       - agentmaster-sessiondb.vcxproj (the service): the include folder, the import library, and a copy of
+         duckdb.dll beside its exe;
+       - CascadiaPackage.wapproj: duckdb.dll as package content, beside agentmaster-sessiondb.exe in the package root
+         (the GUI copies both out into <profile>\sessiondb\bin before it starts the service, §4.2).
+     ⚠ DuckDbVersion must equal the pin in tools\Get-DuckDb.ps1 ($Pins): move both together. -->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <DuckDbVersion>1.5.6</DuckDbVersion>
+    <!-- The release archives are per architecture: the x64 one also serves the "Any CPU" and Win32 solution platforms
+         the service never builds for (the slnx turns its build off there). -->
+    <DuckDbArch Condition="'$(Platform)'=='ARM64' or '$(Platform)'=='arm64'">arm64</DuckDbArch>
+    <DuckDbArch Condition="'$(DuckDbArch)'==''">x64</DuckDbArch>
+    <DuckDbDir>$(OpenConsoleDir)dep\duckdb\$(DuckDbVersion)\$(DuckDbArch)\</DuckDbDir>
+  </PropertyGroup>
+
+  <!-- A build without the library stops with the one command that fixes it (CI runs it before the build). An x86 build
+       is skipped: DuckDB publishes no 32-bit Windows library, so neither the service nor duckdb.dll is built for it. -->
+  <Target Name="AgentmasterRequireDuckDb" BeforeTargets="PrepareForBuild;_ConvertItems"
+          Condition="'$(DesignTimeBuild)'!='true' and '$(Platform)'!='x86' and '$(Platform)'!='Win32'">
+    <Error Condition="!Exists('$(DuckDbDir)duckdb.h') or !Exists('$(DuckDbDir)duckdb.lib') or !Exists('$(DuckDbDir)duckdb.dll')"
+           Text="libduckdb $(DuckDbVersion) ($(DuckDbArch)) is missing from $(DuckDbDir). Fetch it with: pwsh -File tools\Get-DuckDb.ps1 -Arch $(DuckDbArch)" />
+  </Target>
+</Project>
