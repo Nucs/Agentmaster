@@ -296,6 +296,27 @@ namespace Agentmaster
             return L"workingDirectory";
         }
     }
+    std::wstring ToString(SessionDbMode m)
+    {
+        switch (m)
+        {
+        case SessionDbMode::Shadow:
+            return L"shadow";
+        case SessionDbMode::On:
+            return L"on";
+        case SessionDbMode::Off:
+        default:
+            return L"off";
+        }
+    }
+    SessionDbMode SessionDbModeFromString(std::wstring_view s)
+    {
+        if (s == L"shadow")
+            return SessionDbMode::Shadow;
+        if (s == L"on")
+            return SessionDbMode::On;
+        return SessionDbMode::Off; // default + unknown token -> no service (the prior behavior)
+    }
     TabColorMode TabColorModeFromString(std::wstring_view s)
     {
         if (s == L"individual")
@@ -829,6 +850,11 @@ namespace Agentmaster
         o.Set(L"transcriptOverlayLevel", json::Value::MkStr(s.transcriptOverlayLevel)); // the level the transcript overlay opens at (the overlay's own RMW)
         o.Set(L"transcriptOverlayWrapLines", json::Value::MkBool(s.transcriptOverlayWrapLines)); // the transcript overlay's ↵ line-wrap toggle (the overlay's own RMW)
         o.Set(L"sessionsAiThinkingLevel", json::Value::MkStr(s.sessionsAiThinkingLevel)); // the Sessions AI search's thinking level (the page's own RMW)
+        // The session database (SESSIONS_DB.md): its mode, the refresh tick's period (D16), DuckDB's limits.
+        o.Set(L"sessionDbMode", json::Value::MkStr(ToString(s.sessionDbMode)));
+        o.Set(L"sessionDbRefreshSeconds", json::Value::MkNum(ClampSessionDbRefreshSeconds(s.sessionDbRefreshSeconds)));
+        o.Set(L"sessionDbThreads", json::Value::MkNum(ClampSessionDbThreads(s.sessionDbThreads)));
+        o.Set(L"sessionDbMemoryMb", json::Value::MkNum(ClampSessionDbMemoryMb(s.sessionDbMemoryMb)));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
         o.Set(L"autoTestingShowsSummary", json::Value::MkBool(s.autoTestingShowsSummary));
@@ -1044,6 +1070,10 @@ namespace Agentmaster
         // an unknown one as "off", so a hand-edited value can never break a request (absent => "off",
         // the agent's only setting before the toggle existed).
         s.sessionsAiThinkingLevel = v.StrAt(L"sessionsAiThinkingLevel", L"off");
+        s.sessionDbMode = SessionDbModeFromString(v.StrAt(L"sessionDbMode", L"off")); // absent/unknown => Off (no service)
+        s.sessionDbRefreshSeconds = ClampSessionDbRefreshSeconds(v.U32At(L"sessionDbRefreshSeconds", 5));
+        s.sessionDbThreads = ClampSessionDbThreads(v.U32At(L"sessionDbThreads", 4));
+        s.sessionDbMemoryMb = ClampSessionDbMemoryMb(v.U32At(L"sessionDbMemoryMb", 1024));
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         // Triage Board sort (a separate global from treeSort). Absent => the board's MostActive default
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never

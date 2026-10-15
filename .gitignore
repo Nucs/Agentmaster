@@ -287,3 +287,6 @@ profiles.json
 # MSBuildCache
 /MSBuildCacheLogs/
 /scratch
+
+# Agentmaster: the pinned DuckDB C library (tools/Get-DuckDb.ps1 fetches it; never committed)
+/dep/duckdb/
