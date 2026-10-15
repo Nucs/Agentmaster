@@ -1,47 +1,55 @@
 # Agentmaster — messaging: the fleet in Telegram, Microsoft Teams, and any other messenger
 
-> **Status: DESIGN ONLY (2026-10-15). Nothing here is built.** The user's ask: "We plan messaging apps
-> abstract support for Telegram + Microsoft Teams. We will support anything." Every platform fact was
-> checked on 2026-10-15 in the platform's own documentation (Telegram's and Claude Code's pages read in
-> full; Microsoft's through searches of its pages), unless the line names a third-party source or says
-> "from memory" (sources in §20). Every name from Agentmaster's own code exists in the tree today. The
-> decisions that are the user's: §18. What must be measured before any code: §19.
+> **Status: DESIGN ONLY (2026-10-15, revised 2026-10-16). Nothing here is built.** The user's ask: "We
+> plan messaging apps abstract support for Telegram + Microsoft Teams. We will support anything."
+> **2026-10-16, the user:** "The agentmaster process running is supposed to be the program running the
+> bot" — D1 is DECIDED: the bot runs inside Agentmaster, no separate service (§4); and "the topics are
+> great, can they really serve and manage the sessions in entirety?" — §10.2 says how a topic carries a
+> whole session and §10.3 what a topic cannot do. Every platform fact was checked on 2026-10-15/16 in the
+> platform's own documentation (Telegram's and Claude Code's pages read in full; Microsoft's through
+> searches of its pages), unless the line names a third-party source or says "from memory" (sources in
+> §20). Every name from Agentmaster's own code exists in the tree today. Decisions: §18. What must be
+> measured before any code: §19.
 
 ## 0. Summary
 
 **What it is.** Agentmaster tells you, in a messenger you already carry, when a session needs you, and
 lets you act from there: reply to a session, answer its question, approve its plan, queue its next
 prompt, pause or resume its runner, stop its turn, resume a closed session, start a new one. **One bot
-serves the whole fleet** — every session, every window, every folder — and every message is about ONE
-session, in that session's own place in the chat.
+serves the whole fleet**, and **each session has its own topic** in the bot's chat: its card, its
+conversation, its questions, its controls (§10.2). A topic you start in Telegram starts a new session.
 
 **The picture.**
 
 ```
-claude.exe ×N  ⇄ ConPTY ⇄  Agentmaster.exe (the GUI process, one per profile)
-                            engine: registry · scanner · scheduler · observer · unread census
-                            └─ FleetLink (new, §4–§8): fleet events out · intents in · redaction · authorization
-                                    ║  named pipe, length-prefixed JSON (the session database's framing, §4.3)
-                           agentmaster-messaging.exe (new, one per profile, §4)
-                            ├─ outbox · conversation map · pairing · action tokens · renderers
-                            └─ connectors: Telegram · Teams · Webhook · External (JSON-RPC over stdio, §12)
-                                    ║  outbound HTTPS only (+ a tunnel for the platforms that only push, §11.4)
-                           Telegram Bot API · Azure Bot Service (Teams) · Workflows (Teams) · Slack · Discord · …
+Agentmaster.exe  (one process per profile; runs the bot — D1, decided 2026-10-16)
+ ├─ engine: registry · scanner · scheduler · observer · unread census      (exists)
+ ├─ FleetLink (new): fleet events out · intents in · authorization · redaction · Fleet Control API
+ ├─ Messaging hub (new): connections · outbox · topic map · pairing · action tokens · renderers
+ └─ connectors (new, worker threads): Telegram · Teams Lite · Teams Bot · Webhook
+      ├─ child processes it starts: external connectors (JSON-RPC over stdio, §12) · cloudflared (§11.4)
+      ║  outbound HTTPS (+ a tunnel for the platforms that only push)
+ Telegram Bot API · Azure Bot Service (Teams) · Workflows (Teams) · Slack · Discord · …
+claude.exe ×N ⇄ ConPTY ⇄ the same process (every reply goes through SubmitPrompt, §7.2)
 ```
 
-**Three facts shape the design (verified 2026-10-15):**
+**Four facts shape the design (verified 2026-10-15/16):**
 
-1. **Telegram needs no public address.** A bot reads its messages by long polling (`getUpdates`).
-   Since Bot API 9.3–9.5 (December 2025 – March 2026) a bot's private chat can hold **topics** — one per
-   session — and **stream a draft** of a reply; Bot API 10.3 (2026-08-24) adds a **stop button** on that
-   draft. Only one reader may poll a bot, so Agentmaster needs a bot of its own — not the homelab's
-   `@balash_fastrun_bot`, and one each for the release and the dev install.
-2. **Teams has no two-way path without a public HTTPS endpoint.** A Teams bot receives through Azure Bot
+1. **Telegram needs no public address, and its topics were made for this.** A bot reads its messages by
+   long polling (`getUpdates`). Since Bot API 9.3–9.5 (December 2025 – March 2026) a bot's private chat
+   can hold **topics** — Telegram's own pitch: "Topics in Private Chats keep separate projects or support
+   cases organized – improving on established web-based AI chat UIs" — and **stream a draft** with a
+   **stop button** (10.3, 2026-08-24). Only one reader may poll a bot, so Agentmaster needs a bot of its
+   own — not the homelab's `@balash_fastrun_bot`, and one each for the release and the dev install.
+2. **Telegram keeps a bot's incoming messages for 24 hours.** The bot lives inside Agentmaster, so it is
+   offline whenever Agentmaster is closed; a message sent meanwhile waits at Telegram and is handled at
+   the next start, under a backlog rule that never acts on an old message unasked (§4.3).
+3. **Teams has no two-way path without a public HTTPS endpoint.** A Teams bot receives through Azure Bot
    Service, which POSTs every message to the bot's messaging endpoint. Microsoft's Teams API rules allow
    an app to poll a chat **once a day**; a message you post to yourself (Graph's `48:notes` self chat)
    never alerts your phone. One-way alerts need no endpoint: a **Workflows** webhook posts cards into a
    chat (the Office 365 connectors were retired 18–22 May 2026).
-3. **Claude Code has its own remote features, and this plan is built around them, not over them.**
+4. **Claude Code has its own remote features, and this plan is built around them, not over them.**
    *Remote Control* puts ONE session into the Claude app and pushes its questions and permission prompts
    — claude.ai logins only, so never for a preset session (OpenRouter, Kimi, …) or a Codex session.
    *Channels* (a research preview) are MCP servers that push messages into ONE session; a custom channel
@@ -56,12 +64,20 @@ privacy level, an away rule and a routing filter. A **binding** ties a session t
 (a topic, a thread, a reply chain, a card, or an explicit `#3f9a`). Events out and intents in are
 provider-neutral; one pure renderer turns them into each provider's format, degrading gracefully
 (no buttons → numbered choices; no topics → reply chains; no edits → a new short message). Anything that
-can carry text can join: the built-in connectors are C++ inside the service, every other platform is a
-process that speaks a small JSON-RPC contract over stdio (§12).
+can carry text can join: the built-in connectors run inside Agentmaster, every other platform is a small
+process Agentmaster starts, speaking a JSON-RPC contract over stdio (§12).
 
-**The recommended build order (§17):** P0 measurements → P1 Telegram alerts → P2 Telegram two-way → P3
-questions, plans and stop → P4 Teams alerts (Workflows) + generic webhooks → P5 Teams bot → P6 external
-connectors → P7 live view, digests, the concierge.
+**Can a topic carry a whole session? (§10.2–§10.3)** Everything that is conversation or control: yes —
+the card (state, queue, runner, model, the unsent draft at the PC) with its buttons, every turn both ways
+(prompts from the PC, the queue and the phone; final replies; tool calls folded), questions and plan
+approvals as buttons, Claude Code's slash commands, and the whole lifecycle (start, rename, `/clear`,
+fork, close, resume). Not the terminal's screen-only parts (spinners, the TUI's own pickers, keyboard-only
+actions — a text snapshot and a few buttons stand in), not a big busy fleet mirrored line by line (one
+message per second for the whole chat), and nothing while Agentmaster is closed.
+
+**The recommended build order (§17):** P0 measurements → P1 Telegram alerts → P2 Telegram two-way with a
+topic per session → P3 questions, plans and stop → P4 Teams alerts (Workflows) + generic webhooks → P5
+Teams bot → P6 external connectors → P7 live view, digests, the concierge.
 
 ## 1. Goals and non-goals
 
@@ -80,8 +96,8 @@ connectors → P7 live view, digests, the concierge.
   and a leaked secret are each handled by a rule (§9, §16). Managed sessions run with
   `--dangerously-skip-permissions` by default: a remote prompt is remote code execution on this PC, and
   the design treats it so.
-- **G6 — One place per session.** In the chat, each session has its own thread (a Telegram topic, a
-  Teams card or channel thread), named with the session's ONE title (Rule #11) and colored after its tab.
+- **G6 — One place per session.** Each session has its own topic, named with the session's ONE title
+  (Rule #11), colored after its tab, able to carry the whole session (§10.2).
 
 **Non-goals (version 1)**
 
@@ -91,8 +107,8 @@ connectors → P7 live view, digests, the concierge.
   live view (P7) streams the conversation, not pixels.
 - **N3** Replacing Remote Control. A user on a claude.ai plan can keep it for in-session work; §2.2 says
   what Agentmaster adds and the one setting it shares.
-- **N4** A cloud service run by us. Everything runs on the user's PC; the only optional third party is
-  the user's own tunnel or relay (§11.4).
+- **N4** A cloud service run by us, or any always-on helper process. The bot runs inside Agentmaster; the
+  only optional third party is the user's own tunnel (§11.4).
 - **N5** Voice, photos and files from the phone into a session (P7, §7.7).
 
 ## 2. What exists already
@@ -103,15 +119,17 @@ connectors → P7 live view, digests, the concierge.
 |---|---|---|
 | Notice a session left Running | Registry observers (`AddObserver`), the toast edge rules and holds (`ShouldHoldCompletionToast`, `DecideHeldToast`, `ShouldSuppressDuplicateToast`, `kNotifyExternalHoldCapMs` 30 s, `kNotifyDuplicateToastMs` 20 s) | `SessionRegistry.h`, `SessionScanner.h`; NOTIFICATIONS.md §3, §6 |
 | Know you have not looked | The process-wide unread census (`PublishWindowUnreadSessions`, the flash-ring set ∪ Mark Unread) | `Engine.h`; NOTIFICATIONS.md §8 |
-| Say what just finished | `LastDeliveredPrompt` + `PromptPreviewLine` (the toast's line 3); the turns renderer for the final reply | `SessionModels.h`, `TranscriptTurns.{h,cpp}` |
+| Say what just finished | `LastDeliveredPrompt` + `PromptPreviewLine` (the toast's line 3); the turns renderer for replies and tool calls | `SessionModels.h`, `TranscriptTurns.{h,cpp}` |
+| Follow a conversation as it grows | The scanner's transcript tail (`ParseTranscriptDelta`: prompts, assistant text, tool uses, command echoes, compaction boundaries) | `SessionScanner.{h,cpp}` |
 | Send a prompt safely | `SessionRegistry::SubmitPrompt` — the ONE send seam: delivery gate, draft swap, verified placement, Enter-retry, lost-send verdict, invisible-character sanitize | DELIVERY.md, PENDING_INPUT.md §9 |
 | Queue and run | The Prompt Queue + `Scheduler::DecideAdvance` (dormant gate, settle hold, question guard, global pause, interrupt hold) | DELIVERY.md §14–§17 |
-| Read the box or a menu | `ControlCore::ReadPendingInputDraft`, `IsMenuOptionCaret`, `pendingBoxState` (`MenuOpen`) | PENDING_INPUT.md §2, §12 |
+| Read the box or a menu | `ControlCore::ReadPendingInputDraft`, `IsMenuOptionCaret`, `pendingBoxState` (`MenuOpen`), the remembered draft `SessionInfo::pendingInput` | PENDING_INPUT.md §2, §5, §12 |
 | Act in the window that hosts a tab | Per-window sinks: activate, activate-all-dormant, restart, close, deactivate, command-action | `Engine.h` |
+| Long-lived engine threads | `SessionDbRefresher` (a plain-C++ thread started from `SharedEngine`), the scheduler's and the observer's workers | `Engine.cpp` |
 | Keep a secret | Windows Credential Manager (`ReadPresetProviderKey` / `WritePresetProviderKey` / `DeletePresetProviderKey`) | `LaunchPresetsOs.h` |
-| Talk HTTPS | WinHTTP with bounded timeouts (`HttpsGet` — GET only today) | `Updater.h` |
+| Talk HTTPS | WinHTTP with bounded timeouts (`HttpsGet` — GET only today; already linked into `TerminalApp.dll` for the cog's update check) | `Updater.h` |
 | Parse JSON | nlohmann-json (vcpkg, `terminal` feature), `Json.h` | |
-| Run a per-profile service | `agentmaster-sessiondb.exe`: a per-profile mutex, a named pipe with 4-byte LE length + UTF-8 JSON frames, copied into the profile and started from there (so it never pins the package during a hot swap), idle exit | SESSIONS_DB.md §4, §16; `SessionDbProtocol.h` |
+| A child process that dies with the app | The agent harness's kill-on-close job | `ClaudeSdkProcessWin32.cpp` |
 | Read verbs | The CLI's `show` / `sessions` readers; the session database's `search` | CLI.md, SESSIONS_DB.md |
 | A hosted model | The agent harness (`HarnessConversation`) | SDK_HARNESS.md |
 | Routing keys | Bookmark tags, favorites, `EffectiveWorkingDir` | `SessionStore.h`, `Persistence.h` |
@@ -165,17 +183,22 @@ connectors → P7 live view, digests, the concierge.
   keeps the delivery into a session behind one interface (`DeliveryRoute`: `Keystrokes` today, `Channel`
   later), decided per session.
 
-### 2.4 Prior art (seen 2026-10-15)
+### 2.4 Prior art (seen 2026-10-15/16)
 
-- **One topic per agent session in a Telegram bot's private chat** is already the pattern of other agent
-  frameworks (OpenClaw, Hermes Agent), whose documentation names the BotFather switch (§10.1).
+- **Telegram designed private-chat topics for AI bots.** The Bot Features page: "Topics in Private Chats
+  keep separate projects or support cases organized – improving on established web-based AI chat UIs";
+  the October 2025 announcement: bots "support threaded conversations to manage several different topics
+  in parallel", "especially useful for AI chatbots".
+- **One topic per agent session** is already the pattern of other agent frameworks (OpenClaw, Hermes
+  Agent: "each topic becomes an isolated workspace with its own conversation history"), whose
+  documentation names the BotFather switch (§10.1).
 - **OpenClaw's Teams connector** has issues that report Teams streaming failures (a final chunk rejected
   and the answer delivered twice; messages lost around tool calls) — one more reason this design updates
   Teams by editing a message instead of streaming (§11.7).
 - **matterbridge** bridges ~20 platforms behind a REST API, but the original has had no release since
   v1.26.0 (2023-01-29) and its community fork has published none: not a dependency.
 - **Apprise** (outbound notifications to many services) can be wrapped as an external connector for
-  alert-only platforms (not re-checked today).
+  alert-only platforms (not re-checked).
 
 ## 3. The platforms
 
@@ -183,18 +206,22 @@ connectors → P7 live view, digests, the concierge.
 
 | Fact | Detail | Use here |
 |---|---|---|
-| Receiving | `getUpdates` long polling: `timeout` seconds, `offset` confirms everything below it, `limit` 1–100, `allowed_updates`; "will not work if an outgoing webhook is set up" | The service's poll loop (§10.3) |
-| One poller per bot | A second concurrent `getUpdates` gets `409 Conflict: terminated by other getUpdates request` (known behavior; not on the API page) | One bot per install, a per-token lock (§10.3) |
-| Topics in a private chat | 9.3 (2025-12-31): `has_topics_enabled` in `getMe`, `message_thread_id` for private chats; 9.4 (2026-02-09): `createForumTopic` in private chats, `allows_users_to_create_topics` | One topic per session (§10.2) |
+| Receiving | `getUpdates` long polling: `timeout` seconds, `offset` confirms everything below it, `limit` 1–100, `allowed_updates`; "will not work if an outgoing webhook is set up" | The poll loop (§10.4) |
+| Retention | "Incoming updates are stored on the server until the bot receives them either way, but they will not be kept longer than 24 hours" | The backlog rule (§4.3) |
+| One poller per bot | A second concurrent `getUpdates` gets `409 Conflict: terminated by other getUpdates request` (known behavior; not on the API page) | One bot per install, a per-token lock (§10.4) |
+| Topics in a private chat | 9.3 (2025-12-31): `has_topics_enabled` in `getMe`, `message_thread_id` and `is_topic_message` for private chats; 9.4 (2026-02-09): `createForumTopic` in private chats, `allows_users_to_create_topics` | One topic per session (§10.2) |
 | Turning topics on | BotFather **Mini App** → My bots → the bot → Bot Settings → Threads Settings → **Threaded Mode** (third-party docs; the classic `/mybots` menu does not have it); when off, `createForumTopic` fails "the chat is not a forum" | The setup check (§10.1) |
-| Topic fields | Name 1–128 characters; `icon_color` one of six (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F); `editForumTopic` (name, icon emoji) and `deleteForumTopic` work in private chats; `closeForumTopic` is for supergroups | Topic name = the session title; color = the nearest of the six to the session's tab color |
-| Drafts | `sendMessageDraft` (9.3; every bot since 9.5, 2026-03-01): private chats only, `draft_id`, text 0–4,096 ("empty = Thinking…"), "an ephemeral 30-second preview", finalize with `sendMessage`; 10.3: `can_stop`, `keep_on_stop`, the `stopped_message_generation` update | The live view (§6.7), stop (§7.4) |
-| Rich messages | 10.1 (2026-06-11): `sendRichMessage` / `sendRichMessageDraft` with blocks (tables, details, lists, preformatted); 10.3: buttons inside rich messages, expandable quotations, document blocks | Plans and long replies, later |
+| How clients start topics | In Threaded Mode, a non-reply message sent from the chat's main view starts a NEW topic by itself, with an implicit name: `ForumTopicCreated.is_name_implicit` — "likely needs to be changed by the bot" (iOS client; a request to send to the main thread instead, Telegram-iOS #2236, was closed as completed 2026-07-17 — what shipped is P0-11) | A new topic = a new session (§10.2) |
+| Topic fields and verbs | Name 1–128 characters; `icon_color` one of six (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F); `editForumTopic` (name, icon emoji; a `forum_topic_edited` service message type exists — whether it shows in a private chat is P0-12), `deleteForumTopic` ("along with all its messages") and `unpinAllForumTopicMessages` work in private chats; `closeForumTopic` / `reopenForumTopic` are for supergroups | Topic name = the session title; color = the nearest of the six to the tab color |
+| What a bot cannot see | No method lists a chat's topics (the only topic getter is `getForumTopicIconStickers`); no update reports a deleted topic | Agentmaster keeps the topic map itself (§10.3) |
+| Pins | In private chats "all non-service messages can be pinned"; each topic has its own pinned messages | The session card (§10.2), the board (§6.5) |
+| Drafts | `sendMessageDraft` (9.3; every bot since 9.5, 2026-03-01): private chats only, `message_thread_id`, `draft_id`, text 0–4,096 ("empty = Thinking…"), "an ephemeral 30-second preview", finalize with `sendMessage`; 10.3: `can_stop`, `keep_on_stop`, the `stopped_message_generation` update | The live view (§6.7), stop (§7.4) |
+| Rich messages | 10.1 (2026-06-11): `sendRichMessage` / `sendRichMessageDraft` with blocks (tables, details, lists, preformatted, a `tg-thinking` placeholder); 10.3: buttons inside rich messages, expandable quotations, document blocks | Plans, long replies, folded tool calls, later |
 | Buttons | `callback_data` 1–64 bytes; `style` `danger` / `success` / `primary` (9.4); copy-text buttons (7.11); disabled buttons (10.3) | Action tokens (§5.7) |
-| Text | `sendMessage` 1–4,096 characters after entity parsing; HTML mode escapes only `<` `>` `&` (and `&quot;`); `pre` + `code class="language-…"`, `blockquote expandable`, `tg-time unix=… format=…` | The renderer (§10.4) |
+| Text | `sendMessage` 1–4,096 characters after entity parsing; HTML mode escapes only `<` `>` `&` (and `&quot;`); `pre` + `code class="language-…"`, `blockquote expandable`, `tg-time unix=… format=…` | The renderer (§10.5) |
 | Files | Upload 50 MB (photos 10 MB); download 20 MB | Transcripts as `.md` documents |
-| Pinning | In private chats "all non-service messages can be pinned" | The board message (§6.5) |
-| Limits (Bots FAQ) | One message per second per chat (short bursts, then 429); 20 per minute in a group; ~30 per second overall; a 429 carries `retry_after` | The outbox's rate limiter |
+| Deleting | "Bots can delete incoming messages in private chats", within 48 hours | Deleting a typed PIN (§9.3) |
+| Limits (Bots FAQ) | "In a single chat, avoid sending more than one message per second" (short bursts, then 429) — ALL topics of the private chat share it; 20 per minute in a group; ~30 per second overall; a 429 carries `retry_after` | The outbox's pacing (§6.4, §10.3) |
 | Privacy | Bot chats are cloud chats: Telegram's servers see the content (Telegram's design) | §9.6 |
 
 ### 3.2 Microsoft Teams
@@ -208,7 +235,7 @@ connectors → P7 live view, digests, the concierge.
 | Polling | "Your app can poll a resource to see whether it has changed only once per day"; real-time = change notifications (a webhook again) | No Graph-polling design |
 | Messages to yourself | Graph `POST /chats/48:notes/messages` (undocumented id, delegated `ChatMessage.Send`) posts as YOU — no alert; personal Microsoft accounts not supported; "It is a violation of the terms of use to use Microsoft Teams as a log file. Only send messages that people will read." | Rejected; the volume rule applies to every route |
 | One-way alerts | **Workflows** ("When a Teams webhook request is received" → post a card to a chat or channel); appears as the Workflows bot; Adaptive Cards; buttons only with workflow plumbing. Office 365 connectors retired 2026-05-18…22 (MC1181996) | Teams Lite (§11.2) |
-| Rate limits per bot per conversation | 7 / 1 s, 8 / 2 s, 60 / 30 s, 1,800 / 3,600 s for sends; 50 requests per second per app per tenant | The outbox's limiter |
+| Rate limits per bot per conversation | 7 / 1 s, 8 / 2 s, 60 / 30 s, 1,800 / 3,600 s for sends; 50 requests per second per app per tenant | The outbox's pacing |
 | Message size | ~100 KB counted in UTF-16, keep ≤ 80 KB; 413 `MessageSizeTooBig` | The renderer's budget |
 | Streaming | 1:1 chats only; ≤ 1 request per second; each chunk repeats all previous text; a stream lives 2 minutes (then 403 `ContentStreamNotAllowed`); edits have no time limit | The live view edits a message instead (§11.7) |
 
@@ -233,100 +260,115 @@ platforms are alert channels.
 | ntfy / Gotify | dial-out (subscribe stream) | HTTP POST | self-hostable; simple actions | from memory |
 | Pushover, Discord / Slack incoming webhooks | none | HTTP POST | alerts only | from memory |
 
-## 4. Architecture
+## 4. Architecture: the bot runs inside Agentmaster
 
-### 4.1 The processes
+### 4.1 The parts
 
-- **Agentmaster.exe** — the engine, plus a new engine component, **FleetLink**: it watches the registry
-  and the unread census, decides which fleet events to send and when (§6), executes inbound intents
-  through the **Fleet Control API** (§8), redacts every text that leaves the process (§9.6) and
-  authorizes every intent against the connection's level (§9.3). Plain C++ (no WinRT), like
-  `SessionDbRefresher`; one worker thread; UI-hosted actions go through per-window sinks.
-- **agentmaster-messaging.exe** — one per profile. It owns everything that touches a messaging platform:
-  the connectors, the network, the outbox, rate limits and retries, the conversation map (session ↔
-  topic / thread / message ids), pairing, sender authentication, action tokens and rendering. It never
-  touches a session: it only sends events out and hands intents to FleetLink.
-- **External connectors** — optional child processes of the service, one per configured external
-  connection, speaking JSON-RPC over stdio (§12.2).
-- **A tunnel** — optional, only for a push-in platform (the Teams bot): `cloudflared` (or the user's own),
-  run by the service or by the user, forwarding to the service's loopback listener (§11.4).
+All of it lives in the running Agentmaster process — one bot set per process, shared by every window,
+like the registry (Rule #10):
 
-### 4.2 Why a separate service
+- **FleetLink** (engine, plain C++, one worker thread): watches the registry and the unread census,
+  decides which fleet events to send and when (§6), executes inbound intents through the **Fleet Control
+  API** (§8), redacts every text before it leaves (§9.6) and authorizes every intent against the
+  connection's level (§9.3). Started from `SharedEngine` like `SessionDbRefresher`.
+- **The messaging hub** (engine, plain C++, one worker thread): the connections, the persistent outbox and
+  its pacing, the topic map (session ↔ topic, message ids for edits), pairing, action tokens and the
+  renderers. It talks to FleetLink through in-process queues; it never touches a session.
+- **Connectors** (worker threads): Telegram (a long-poll thread per connection), Teams Lite and Webhook
+  (senders), Teams Bot (a loopback listener thread + a sender). They only move bytes and authenticate
+  senders; the hub keeps every rule.
+- **Child processes Agentmaster starts** (in a kill-on-close job, so they end with it): an external
+  connector per configured external connection (§12.2), and `cloudflared` when the Teams bot uses the
+  tunnel (§11.4). The bot itself — its logic, rules and state — stays in Agentmaster.
+- **UI-hosted actions** (answer a menu, read a screen, open a tab) go to the ONE window that hosts the
+  session through per-window sinks (§8.2).
 
-- **Internet input is parsed outside the process that can type into shells.** The GUI holds a stdin
-  injector for every session, and the sessions run with skip-permissions. A parser bug fed by a stranger's
-  message (a Telegram bot is public by username) or a hostile POST (a Teams endpoint is public by design)
-  should cost a restart of a small process, not the GUI with 600 tabs. The service can later run with
-  less privilege (a restricted token / AppContainer with network access and the one pipe) without
-  touching the GUI.
-- **It outlives the GUI** (D2): when Agentmaster exits or crashes, the service can still say so ("⚠
-  Agentmaster stopped at 03:12 without saying goodbye"), answer "offline" to an incoming message, and —
-  at the Operate level — start Agentmaster again (§4.4).
-- **It never pins the package.** Like the session database's service, it runs from a copy in the
-  profile, so a hot swap (`Swap-AgentmasterLayout.ps1`) is not blocked by it (`0x80073D02`).
-- **The platform code stays out of TerminalApp.dll** (WinHTTP sessions, a listener, JWT checks), which
-  keeps the GUI's link and its startup unchanged.
+### 4.2 Why inside Agentmaster (D1, decided by the user 2026-10-16) — and what replaces a process boundary
 
-### 4.3 The pipe
+**What it gains:** no second program to install, start, version or keep alive; no pipe protocol; nothing
+copied into the profile; nothing that can block a hot swap; FleetLink reaches the registry, the
+scheduler and the sinks directly.
 
-- `\\.\pipe\agentmaster-messaging.<profile hash>`, a DACL for the current user only (the sessiondb pipe's
-  rules); frames are the session database's: a 4-byte little-endian length, then UTF-8 JSON
-  (`SessionDbProtocol.h` `EncodeFrame` / `DecodeFrameLength`); 1 MiB per frame.
-- **FleetLink → service:** `hello` (protocol version, app identity and version, profile, pid, the
-  launch command that starts this install), `sessions` (upserts and removes of the session HEADLINES the
-  service needs: id, short ref, title, state, effective folder, tab color, tags, unread — never
-  conversation text), `event` (§5.3), `retract` (an event stopped being true: edit or clear its message),
-  `result` (the outcome of an intent), `stream` (live view text, P7), `bye` (a clean exit, with the
-  reason: exit / update / restart).
-- **Service → FleetLink:** `ready` (connections and their states), `intent` (§5.5), `status` (a
-  connection's state changed: connected, degraded, auth failed, rate limited), `ack` (an event was
-  delivered: platform message refs, for later edits).
-- **At least once, never twice:** every event and intent has an id; both sides keep the ids of the last
-  hour and drop repeats.
+**What it costs, and the answer to each:**
 
-### 4.4 Lifetime
+| Cost | Answer |
+|---|---|
+| The bot is offline whenever Agentmaster is closed | Telegram keeps incoming messages 24 h; Agentmaster handles them at its next start under the backlog rule (§4.3). A Teams message sent while it is closed fails in Teams ("the bot is not responding") |
+| No crash alert from outside the process | At the next start: "the previous run ended unexpectedly at <time>" (a dirty-run marker, §4.3) |
+| No "start Agentmaster from the phone" | Dropped (it needs something running while Agentmaster is not) |
+| Internet input is parsed in the process that can type into every session (sessions run with skip-permissions) | The hardening rules H1–H6 below |
 
-- **Start.** At engine init, when messaging is on and a connection exists, FleetLink copies the service
-  from the package into `<profile>\messaging\bin` if the copy differs (the sessiondb rule), starts it
-  (or finds it running by its mutex), and connects. `hello` carries both versions; a service older than
-  the GUI is asked to exit and is replaced.
-- **GUI exit.** A clean exit sends `bye(exit)`; a swap or an update `bye(update)`. No `bye` and a broken
-  pipe = a crash: the service waits 90 s for a new GUI (the measured hot swaps were down 2–40 s), then
-  sends "Agentmaster stopped unexpectedly" once; a new GUI within the wait turns that into nothing (or,
-  for an update, "Agentmaster updated to &lt;version&gt;").
-- **While the GUI is gone** (D2): the service keeps polling. An incoming message gets "Agentmaster is not
-  running" with a **Start** button (Operate level only), which runs the install's own alias by name
-  (`agentmaster.exe` / `agentmasterdev.exe`, the `_AgentmasterReopenTarget` rule); the workspace restores
-  as from the Start menu. The service exits after 24 h without a GUI, or when the user turns messaging off.
+**H1 — Never on the UI thread, never escaping a thread.** Every connector runs on worker threads; no UI
+thread ever waits on the network. Every thread body and every callback is wrapped (Rule #18): an
+exception that escapes a `std::thread` ends the whole process.
+
+**H2 — Bounded input.** Response and request bodies are capped before parsing (Telegram ≤ 2 MB per
+`getUpdates` answer, Teams ≤ 256 KB per request, an external connector's line ≤ 1 MB); JSON nesting is
+capped; every string is length-capped before use.
+
+**H3 — The sender first.** An update from anyone but the paired owner is dropped after reading only its
+sender id — the rest of the code never sees a stranger's message (M2).
+
+**H4 — The Teams listener.** Loopback only, `POST` only, the JWT verified before the body is parsed: an
+unauthenticated request reaches only the header reader and the signature check.
+
+**H5 — A circuit breaker.** A connector that throws, or fails N times in M minutes, is stopped and
+reported in the cog and hooks.log — never crash-looped.
+
+**H6 — Plugins out of process.** An external connector is a child process: a buggy or hostile plugin can
+reach the hub only through validated JSON-RPC lines, never Agentmaster's memory.
+
+(Considered and set aside by the user: a separate per-profile service, `agentmaster-messaging.exe`, the
+2026-10-15 draft's recommendation.)
+
+### 4.3 Lifetime
+
+- **Start.** After the registry has loaded (engine init), when messaging is on: read the connections and
+  their secrets, start the connectors. Telegram: `getMe` (the bot, Threaded Mode), then the BACKLOG
+  (everything Telegram kept while Agentmaster was closed), then the long poll.
+- **The backlog rule (D2).** An update older than 10 minutes when it is processed:
+  - read verbs (`board`, `show`, …) → answered;
+  - a reply or a queue verb → "This message is 3 h old — send it to *Agentmaster/feature* now?"
+    [Send] [Queue] [Drop];
+  - an answer to a question → checked against the CURRENT menu (§5.7), so a stale one is refused;
+  - Operate verbs (stop, close, restart, …) → never executed; the bot asks again.
+- **Clean exit.** The outbox is flushed (at most 2 s), the optional `app.closed` event is sent, the
+  connectors and child processes stop, the dirty-run marker is removed.
+- **Crash, kill or hot swap.** The marker (`messaging\run.marker`, rewritten every 60 s with a heartbeat
+  time and the app version) stays behind; at the next start the `app.restarted` event says "the previous
+  run ended unexpectedly at <heartbeat>", or "updated to <version>" when the version changed (a swap stops
+  the GUI by force).
 - **Sleep and network loss.** Long polls time out; reconnect with backoff (1, 2, 4 … 60 s, jitter); on
   resume from sleep, poll at once. Events queued meanwhile are revalidated before sending (§6.2).
+- **Two installs.** The release and the dev process each run their own bots (D13).
 
-### 4.5 Files (all under the active profile, Rule #15)
+### 4.4 Files (all under the active profile, Rule #15)
 
 | File | What |
 |---|---|
-| `messaging\connections.json` | The connections: provider, name, non-secret settings, owner identity, level, events, privacy, away rule, routing, quiet hours. Edited by the cog; read by FleetLink (authorization) and the service. |
-| `messaging\bin\` | The service's copy (and `cloudflared.exe` if the user points the setting at one). |
-| `messaging\<connectionId>\state.json` | Provider state: Telegram's update offset, the topic map (session → `message_thread_id`), the board message id; Teams' conversation reference. |
+| `messaging\connections.json` | The connections: provider, name, non-secret settings, owner identity, level, events, privacy, mirror level, away rule, routing, quiet hours. Edited by the cog; read by FleetLink (authorization) and the hub. |
+| `messaging\<connectionId>\state.json` | Provider state: Telegram's update offset, the topic map (session → `message_thread_id`, card message id), the Fleet topic and board message ids; Teams' conversation reference. Written atomically: the Bot API cannot list topics, so this map is the only record of them. |
 | `messaging\<connectionId>\outbox.jsonl` | Events not yet delivered (compacted on start). |
 | `messaging\tokens.json` | Live action tokens (id → intent, expiry, single-use flag), at most a few hundred, expired ones dropped on load. |
-| `messaging\status.json` | Written every 30 s by the service: per connection state, last delivery, last error; read by the cog's status line and a future `agentmaster msg status`. |
-| `messaging\messaging.log` | The service's log (§14). |
-| Windows Credential Manager | Every secret: `Agentmaster:messaging:<profile hash>:<connectionId>:<name>` (bot token, webhook URL, app secret, tunnel token, PIN hash salt). Per profile ON PURPOSE, unlike the preset keys: two installs must never share one bot. |
+| `messaging\run.marker` | The dirty-run marker (§4.3). |
+| `messaging\present.marker` | Exists while the user is present (§6.3), for Remote Control (D17). |
+| `messaging\status.json` | Written every 30 s: per connection state, last delivery, last error; read by the cog's status line and a future `agentmaster msg status`. |
+| `messaging\messaging.log` | The connectors' transport log (§14). |
+| Windows Credential Manager | Every secret: `Agentmaster:messaging:<profile hash>:<connectionId>:<name>` (bot token, webhook URL, app secret, tunnel token, PIN hash). Per profile ON PURPOSE, unlike the preset keys: two installs must never share one bot. |
 
-### 4.6 Which side does what
+### 4.5 Which part does what
 
-| Job | FleetLink (engine) | Service |
-|---|---|---|
-| Decide that something is worth telling | ✓ (§6) | |
-| Redact, trim to the privacy level | ✓ | trims per connection |
-| Render to a platform | | ✓ |
-| Rate limits, retries, outbox | | ✓ |
-| Authenticate the sender (platform identity → owner) | | ✓ |
-| Authorize the intent (level, PIN window, confirmation) | ✓ (authoritative) | first check |
-| Resolve a session reference | ✓ (authoritative) | from bindings and headlines |
-| Execute | ✓ through the Fleet Control API | |
-| Report the outcome | builds the text | sends / edits |
+| Job | FleetLink | Hub | Connector |
+|---|---|---|---|
+| Decide that something is worth telling | ✓ (§6) | | |
+| Redact, trim to the privacy level | ✓ | trims per connection | |
+| Render to a platform | | ✓ | serializes |
+| Pacing, retries, outbox | | ✓ | reports 429s |
+| Authenticate the sender (platform identity → owner) | | ✓ | reads the sender id first (H3) |
+| Authorize the intent (level, PIN window, confirmation, backlog rule) | ✓ (authoritative) | first check | |
+| Resolve a session reference | ✓ (authoritative) | from the topic map | |
+| Execute | ✓ through the Fleet Control API | | |
+| Report the outcome | builds the text | sends / edits | |
 
 ## 5. The abstraction
 
@@ -336,13 +378,14 @@ platforms are alert channels.
   `webhook`, `external:<id>`. Declares its capabilities (§5.2) and its settings fields (the PRESETS idiom:
   a field table drives the cog's form).
 - **Connection** — one configured use of a provider: credentials (in Credential Manager), the target chat,
-  the owner identity (set by pairing), and the policy: level, events, privacy, away rule, routing filter,
-  quiet hours. Several connections run at once (e.g. sessions under `K:\work\` → Teams, everything else →
-  Telegram).
+  the owner identity (set by pairing), and the policy: level, events, privacy, mirror level, away rule,
+  routing filter, quiet hours. Several connections run at once (e.g. sessions under `K:\work\` → Teams,
+  everything else → Telegram).
 - **Binding** — where a session lives inside a connection, chosen from the provider's capabilities in this
   order: **topic / thread** (a Telegram topic, a Teams channel thread) → **card** (a message that carries
-  the session id and its own reply input: Teams) → **reply chain** (a reply to a message about the session)
-  → **explicit reference** (`#3f9a` in the text). Bindings persist in the connection's `state.json`.
+  the session id and its own reply input: Teams 1:1) → **reply chain** (a reply to a message about the
+  session) → **explicit reference** (`#3f9a` in the text). Bindings persist in the connection's
+  `state.json`.
 
 ### 5.2 Capabilities
 
@@ -354,26 +397,31 @@ struct ProviderCaps {
   buttons: { max, perRow, payloadBytes, styles? }      // 0 = none
   inputsInMessage: bool                     // a text box inside a card (Teams)
   threads: topic | thread | reply | none
-  edit, delete, pin: bool
+  userCreatesThreads: bool                  // a new topic from the user = a new session (§10.2)
+  edit, delete, pin, pinPerThread: bool
   stream: draft | editThrottled | none      // Telegram drafts / Teams edits
   files: { maxUploadBytes }
   silentSend: bool                          // Telegram disable_notification
+  retentionHours                            // how long the platform keeps messages for an offline bot (Telegram 24)
   rate: { perChatPerSecond, perChatPerMinute, globalPerSecond }
 }
 ```
 
-### 5.3 The outbound event (FleetLink → service)
+### 5.3 The outbound event (FleetLink → hub)
+
+Shown as JSON for readability; inside Agentmaster these are C++ structs, and JSON crosses only the
+external-connector contract (§12.2).
 
 ```json
 { "type": "event", "id": "ev-3f9a1c2e-0042", "kind": "session.needs-you", "severity": "attention",
   "at": 1760536800123, "session": "3f9a1c2e-6c1d-4f7e-9a51-0b6f2a7d9c11",
   "headline": "Has completed after 12m and is waiting for you",
   "blocks": [
-    { "t": "prompt", "text": "rebase onto agentmaster and fix the three conflicts…" },
+    { "t": "prompt", "text": "rebase onto agentmaster and fix the three conflicts…", "origin": "typed" },
+    { "t": "tools",  "text": "6 tool calls: Bash ×4, Edit ×2" },
     { "t": "reply",  "text": "Rebased; the three conflicts are fixed; the m5 suite passes." },
     { "t": "facts",  "items": [["queue", "2 waiting · runner Paused"], ["branch", "agentmaster"]] } ],
   "actions": [
-    { "id": "reply",      "label": "Reply",            "intent": { "kind": "reply" },     "input": true },
     { "id": "send-next",  "label": "Send queued #1",   "intent": { "kind": "queue.sendNext", "item": "q-77" }, "style": "primary" },
     { "id": "runner-on",  "label": "Runner: Auto",     "intent": { "kind": "runner.mode", "mode": "Full" } },
     { "id": "show",       "label": "Show",             "intent": { "kind": "show" } } ],
@@ -382,10 +430,10 @@ struct ProviderCaps {
 ```
 
 - **Text is already redacted and trimmed** to the HIGHEST privacy level among the connections that will
-  receive the event; the service trims further per connection.
+  receive the event; the hub trims further per connection.
 - **`replaceKey`** groups the messages that describe one fact, so a newer one edits the older (Telegram
   `editMessageText`, Teams `updateActivity`) instead of piling up, and a `retract` finds it.
-- **`validWhile`** is what the event assumed; FleetLink sends a `retract` when it stops holding (§6.6).
+- **`validWhile`** is what the event assumed; FleetLink retracts the event when it stops holding (§6.6).
 
 ### 5.4 Rendering
 
@@ -402,20 +450,21 @@ connector serializes. Degradation is in the renderer, never in the connectors:
 | HTML / markdown | plain text, code as indented lines |
 | short limits | the headline only + `show #ref` hint |
 
-### 5.5 The inbound intent (service → FleetLink)
+### 5.5 The inbound intent (hub → FleetLink)
 
 ```json
 { "type": "intent", "id": "in-tg-884213377", "connection": "c-telegram-1",
   "principal": { "provider": "telegram", "userId": "123456789", "name": "Eli" },
   "kind": "reply", "session": "3f9a1c2e-6c1d-4f7e-9a51-0b6f2a7d9c11", "via": "topic",
-  "text": "also update the docs", "token": null, "receivedAt": 1760536812000 }
+  "text": "also update the docs", "token": null, "sentAt": 1760536811000, "receivedAt": 1760536812000 }
 ```
 
-- `kind` is one of the verbs of §7 (`reply`, `queue.add`, `queue.sendNext`, `answer`, `stop`,
+- `kind` is one of the verbs of §7 (`reply`, `slash`, `queue.add`, `queue.sendNext`, `answer`, `stop`,
   `runner.mode`, `pause.all`, `show`, `tail`, `screen`, `board`, `search`, `open`, `new`, `fork`,
   `restart`, `deactivate`, `close`, `away`, `mute`, …).
-- `session` is resolved by the service from the binding (`via`: `topic`, `card`, `reply`, `ref`, `pick`);
-  FleetLink re-resolves and refuses an id it does not know.
+- `session` is resolved by the hub from the binding (`via`: `topic`, `card`, `reply`, `ref`, `pick`, or
+  `newTopic` for a session to create); FleetLink re-resolves and refuses an id it does not know.
+- `sentAt` (the platform's own timestamp) drives the backlog rule (§4.3).
 - `token` is set when the intent came from a button (§5.7).
 
 ### 5.6 Session references
@@ -449,10 +498,12 @@ connector serializes. Degradation is in the renderer, never in the connectors:
 | `session.plan` | A plan waits for approval (`ExitPlanMode`) | ✓ | urgent | no |
 | `session.permission` | A tool permission prompt (sessions without skip-permissions) | ✓ | urgent | no |
 | `session.error` | Error: an API failure (with its HTTP status — a usage limit names its reset), a cut-off turn | ✓ | urgent | no |
+| `session.turn` | A turn ended: the prompt that started it, the folded tool calls, the final reply — for a topic whose mirror level is *turns* or *live* (§10.2, D19) | per mirror level | info | yes |
 | `session.done` | claude exited (Done) | ✗ | info | yes |
 | `runner.paused` | A backstop paused a session's runner: stop-on-error, Enter-retry give-up, lost send, merge verdict | ✓ | attention | no |
 | `runner.plan-done` | A session's queue ran empty after sending the last prompt | ✓ | info | yes |
-| `app.stopped` / `app.updated` | §4.4 (from the service) | ✓ | attention | no |
+| `app.restarted` | At start, after a run that ended without a clean exit (or an update) (§4.3) | ✓ | attention | no |
+| `app.closed` | Agentmaster closes cleanly ("the bot is offline until it starts again") | ✗ | info | yes |
 | `fleet.digest` | Every N minutes while away: counts and the sessions that need you | ✗ | info | yes |
 
 ### 6.2 The tracker
@@ -470,6 +521,8 @@ connector serializes. Degradation is in the renderer, never in the connectors:
   unread (the flash-ring rule: not the focused tab of the active window) OR the user is away (§6.3) — a
   session that finishes in the focused tab of a locked PC is never marked unread, and must still reach the
   phone. It is dropped when the session is read before it is sent.
+- **Turns for mirrored topics** come from the same transcript tail the scanner reads; a turn is sent when
+  it ends (one message per turn, §10.2), never line by line.
 - **Revalidate before telling.** An event leaves FleetLink only if its `validWhile` still holds, and the
   outbox drops anything older than 30 minutes unless it is still true (M8).
 
@@ -481,24 +534,28 @@ connector serializes. Degradation is in the renderer, never in the connectors:
   local input).
 - **Per connection (D6):** *when away* (default) / *always* / *never* (pull only). **Escalation:** a
   needs-you or question that stays unread for 10 minutes is sent even while present (the user is at the PC
-  but not at Agentmaster).
+  but not at Agentmaster). Mirrored turns (`session.turn`) follow the topic's mirror level, not the away
+  rule: a mirror is a record, sent silently.
 - **Shared with Remote Control (D17):** FleetLink keeps `<profile>\messaging\present.marker` in step with
   "present", for sessions launched with `CLAUDE_CLIENT_PRESENCE_FILE` pointing at it.
 - **Quiet hours** per connection: events are held and sent as one digest when the hours end; `urgent`
   events can be allowed through (a setting).
 
-### 6.4 Coalescing and rates
+### 6.4 Coalescing and pacing
 
-- Several sessions finishing within 5 s become one message ("3 sessions need you" + one button each) in
-  the general chat, plus the usual message in each session's topic, silent.
-- The outbox's limiter follows each provider's documented rates (Telegram 1/s per chat, 30/s overall;
-  Teams 7/1 s, 60/30 s per conversation) and obeys `retry_after` / `Retry-After`.
+- **One budget per chat.** Telegram allows about one message per second per chat, and all topics of the
+  private chat share it; edits are paced from the same budget. The outbox serves, in this order: urgent
+  events, needs-you, answers to the user's own actions, card edits, mirrored turns, the board, digests.
+- Several sessions finishing within 5 s become one message in the 📋 Fleet topic ("3 sessions need you" +
+  one button each), plus the usual message in each session's topic, silent.
+- Card edits are coalesced (at most one per session per 30 s; a state that flips back within the window is
+  never sent); the board at most one per 15 s.
+- The limiter obeys `retry_after` / `Retry-After`; Teams follows its documented per-conversation rates.
 - Telegram `disable_notification` for `info` events; everything else alerts.
 
 ### 6.5 The board message
 
-One pinned message in the general chat (Telegram) or one card (Teams), **edited in place** at most every
-15 s when something changes:
+One pinned message in the 📋 Fleet topic (Telegram) or one card (Teams), **edited in place**:
 
 ```
 Fleet · 21 open sessions                        updated 14:02
@@ -512,21 +569,25 @@ Needs you:  #3f9a Agentmaster/feature · question    #b210 proxmox · waiting 12
 - The session is read on the PC → the message is edited: "✓ seen on the PC 14:05" and its buttons go.
 - The question is answered (here, in the terminal or in the Claude app) → "✓ answered: *Option 2*".
 - The session is Running again → "↻ running since 14:06".
-- The session is closed → its topic gets "closed — `open #3f9a` to resume"; the topic stays (history).
+- The session is closed → its card reads Closed with [Resume]; the topic stays (history).
 
 ### 6.7 The live view (P7)
 
-`follow #3f9a` streams the current turn into the session's topic: the assistant's text as it is written
-(the scanner already reads each new transcript line) and one line per tool call ("● Bash: npm test"),
-throttled to one update per second. Telegram: `sendMessageDraft` with `can_stop` (refreshed before its
-30 s preview ends), then `sendMessage` at the turn's end. Teams: edits of one message (a Teams stream
-dies after 2 minutes; a turn often runs longer). The stop button maps to §7.4.
+`follow` (a card button, or `!follow`) streams the current turn into the session's topic: the assistant's
+text as it is written (the scanner already reads each new transcript line) and one line per tool call
+("● Bash: npm test"), throttled to one update per second. Telegram: `sendMessageDraft` with
+`message_thread_id` and `can_stop` (refreshed before its 30 s preview ends), then `sendMessage` at the
+turn's end. Teams: edits of one message (a Teams stream dies after 2 minutes; a turn often runs longer).
+The stop button maps to §7.4.
 
 ## 7. Inbound: what you can do from the chat
 
 ### 7.1 Commands
 
-| Command (Telegram `/…`; Teams words) | Level | Does | Through |
+Where they are typed: in Telegram's 📋 Fleet topic as `/command`; inside a session's topic as `!command`
+or the card's buttons — plain text and `/…` there belong to the session (§10.2, D22); in Teams as words.
+
+| Command | Level | Does | Through |
 |---|---|---|---|
 | `board`, `status` | Read | the board (§6.5) | registry headlines |
 | `sessions [words]` | Read | live sessions, numbered, with buttons | registry |
@@ -535,15 +596,17 @@ dies after 2 minutes; a turn often runs longer). The stop button maps to §7.4.
 | `screen #ref` | Read | the visible terminal text (≤ 60 lines), redacted | the hosting window's buffer read |
 | `transcript #ref [level]` | Read | the conversation as a `.md` file | TranscriptTurns |
 | `search words` | Read | sessions matching, with buttons | the session database (On), else the Sessions page's fast phase |
-| *(text in a session's place)* | Steer | reply (§7.2) | `SubmitPrompt` / the queue |
+| *(text in a session's topic)* | Steer | reply (§7.2) | `SubmitPrompt` / the queue |
+| *(`/…` in a session's topic)* | Steer | a Claude Code slash command, typed into the session | `SubmitPrompt` |
 | `queue #ref text` | Steer | add to the session's queue | the Prompt Queue |
 | `next #ref` | Steer | Send now the first queued prompt | the Manager's Send-now path |
 | `auto #ref`, `pause #ref` | Steer | the session's runner mode | `AutorunnerMode` |
 | `pauseall`, `resumeall` | Steer | the global pause | `Scheduler::SetGlobalPause` |
+| `follow #ref`, `mirror #ref <level>` | Read | the topic's mirror level (§10.2) | the hub |
 | *(buttons)* | Steer | answer a question / plan / permission (§7.3) | the hosting window, verified |
 | `stop #ref` | Operate | interrupt the turn (§7.4) | the hosting window |
 | `open #ref` | Operate | resume a closed session into a tab, or start a dormant one | restore + activate sinks |
-| `new <folder> [model] [-- first prompt]` | Operate | a new session | the launch seam |
+| `new <folder> [model] [-- first prompt]`, or a new topic | Operate | a new session | the launch seam |
 | `fork #ref` | Operate | fork it | `_ForkManagedSessionById` |
 | `restart #ref`, `deactivate #ref`, `close #ref` | Operate | as in the tab menu (with a confirmation) | the existing sinks |
 | `away`, `back`, `mute #ref [time]`, `quiet [time]` | Notify | notification control | FleetLink |
@@ -564,10 +627,11 @@ answers with what happened.
 | Closed (archived) | **Resume and send** (Operate level): restored into the window that last hosted it, else the most recent window |
 | Done (claude exited, tab open) | **Restart and send** (Operate level) |
 | A delivery is in flight (gate held) | Queued as next |
+| From the backlog (older than 10 minutes) | Asked first (§4.3) |
 
 - **Recorded like any prompt.** A remote prompt joins the session's queue history with a new origin,
   `PromptOrigin::Remote` (serialized `"Remote"`), and the connection id; the Prompt Queue's SENT list tags
-  it **remote**; its echo is consumed like an Autorun send's.
+  it **remote**; its echo is consumed like an Autorun send's; a mirrored topic shows it with 📱.
 - **Sanitized like any paste.** It goes through `BuildPromptFill` (DELIVERY.md §15), so a phone's
   invisible characters (an RLM in Hebrew text) cannot cancel the Enter.
 
@@ -596,7 +660,7 @@ answers with what happened.
 
 ### 7.4 Stop
 
-- `stop #ref`, the stop button of a live draft (`stopped_message_generation`), or a card's Stop sends ONE
+- `!stop`, the card's Stop, or the stop button of a live draft (`stopped_message_generation`) sends ONE
   `Esc` through the hosting window, only while the session is Running and no menu is open (an `Esc` on an
   idle empty box twice opens the rewind menu; PENDING_INPUT.md §9). Operate level and a confirmation,
   unless the connection allows a one-tap stop.
@@ -606,14 +670,14 @@ answers with what happened.
 ### 7.5 Lifecycle verbs
 
 `open`, `new`, `fork`, `restart`, `deactivate`, `close` reach the window-hosted seams through per-window
-sinks (§8.2). Each answers with the session's new state and its topic. `new` with a first prompt passes it
+sinks (§8.2). Each answers with the session's new state in its topic. `new` with a first prompt passes it
 as the launch command line's positional prompt when it fits (the /handover tier-1 path: nothing typed into
 the TUI), else queues it.
 
 ### 7.6 Read verbs
 
 `show`, `tail`, `screen`, `transcript` and `search` read through FleetLink, apply the connection's privacy
-level and the redactor, and answer in the session's topic (or in the general chat for `board`, `sessions`,
+level and the redactor, and answer in the session's topic (or in 📋 Fleet for `board`, `sessions`,
 `search`).
 
 ### 7.7 Later: files, photos, voice
@@ -630,7 +694,7 @@ transcription connector. Not in version 1.
 Headlines(filter) / Card(id) / Board()                      read, lean registry copies
 Tail(id, n, level) / Transcript(id, level) / Screen(id)      read
 Search(words)                                                session database or the fast phase
-Reply(id, text, mode, origin)                                §7.2 — SubmitPrompt or the queue
+Reply(id, text, mode, origin) / Slash(id, command)           §7.2 — SubmitPrompt or the queue
 QueueAdd(id, text) / QueueSendNext(id, itemId) / QueueSkip(id, itemId)
 RunnerMode(id, mode) / PauseAll(on)
 Answer(id, menuStamp, choice)                                §7.3
@@ -639,8 +703,8 @@ Open(id) / New(folder, model, firstPrompt) / Fork(id) / Restart(id) / Deactivate
 ```
 
 Every call returns `{ok, code, text}`, where `code` is one of a fixed set (`sent`, `queued`, `refused:level`,
-`refused:dormant`, `refused:stale`, `refused:unknown-session`, `failed:…`), and logs one `[nav] remote …`
-line (§14).
+`refused:dormant`, `refused:stale`, `refused:backlog`, `refused:unknown-session`, `failed:…`), and logs one
+`[nav] remote …` line (§14).
 
 ### 8.2 Window-hosted actions
 
@@ -661,22 +725,23 @@ exposing it to them is a separate decision.
 
 | Threat | Rule |
 |---|---|
-| A stranger messages the bot (Telegram bots are found by username) | Sender allowlist by platform user id; silent drop; pairing answers strangers only with "this bot is private" (rate-limited) |
+| A stranger messages the bot (Telegram bots are found by username) | Sender allowlist by platform user id; silent drop after reading only the sender id (H3); pairing answers strangers only with "this bot is private" (rate-limited) |
 | A member of a group the bot is in | Gate on the sender (`from.id`), never the chat (the channels reference makes the same rule) |
 | The owner's messenger account is taken over | Permission levels; an optional drive PIN for Steer and Operate (§9.3); Operate off by default; every remote action audited |
-| A stale or replayed button | Single-use tokens bound to the exact question / item / state (§5.7) |
-| A leaked bot token | The thief can read new messages first (and so break ours, 409) and post as the bot — not drive the fleet; rotate in BotFather; the service raises an alert on a 409 it did not cause |
-| A hostile POST to a public endpoint (Teams) | JWT validation before parsing the body; size caps; loopback-only listener behind the tunnel |
+| A stale or replayed button, an old message from the backlog | Single-use tokens bound to the exact question / item / state (§5.7); the backlog rule (§4.3) |
+| A leaked bot token | The thief can read new messages first (and so break ours, 409) and post as the bot — not drive the fleet; rotate in BotFather; Agentmaster raises an alert on a 409 it did not cause |
+| A hostile POST to a public endpoint (Teams) | H4: loopback only, `POST` only, a size cap, the JWT verified before the body is parsed |
+| A parser bug fed by internet input, inside Agentmaster | H1–H6 (§4.2) |
 | Secrets in session output reaching a chat | The redactor (§9.6), always on |
-| A prompt-injection in a chat message | Remote text is the owner's own prompt; it is never interpreted by FleetLink beyond the command grammar |
+| A prompt-injection in a chat message | Remote text is the owner's own prompt; FleetLink never interprets it beyond the command grammar |
 
 ### 9.2 Identity and pairing
 
 - **Telegram:** the cog shows a one-time code (6 digits, valid 10 minutes) and the deep link
-  `https://t.me/<bot>?start=<code>` (with a QR code). Opening it sends `/start <code>`; the service binds
-  the connection's owner to that `from.id` and the private chat id, and both sides confirm. Re-pairing
-  replaces the owner.
-- **Teams Bot:** after the app is installed, the owner sends `pair <code>` in the 1:1 chat; the service
+  `https://t.me/<bot>?start=<code>` (with a QR code). Opening it sends `/start <code>`; Agentmaster binds
+  the connection's owner to that `from.id` and the private chat id, creates the 📋 Fleet topic, and both
+  sides confirm. Re-pairing replaces the owner.
+- **Teams Bot:** after the app is installed, the owner sends `pair <code>` in the 1:1 chat; Agentmaster
   stores the user's `aadObjectId`, the tenant id and the conversation reference (`serviceUrl`,
   `conversation.id`) for proactive messages. Messages from any other user or tenant are dropped.
 - **Teams Lite, Webhook:** one-way; no identity.
@@ -686,12 +751,12 @@ exposing it to them is a separate decision.
 | Level | Allows |
 |---|---|
 | **Notify** | events out; `away`, `back`, `mute`, `quiet`, `help` |
-| **Read** | + `board`, `sessions`, `show`, `tail`, `screen`, `transcript`, `search` |
-| **Steer** | + replies, queue, Send now, runner modes, pause all, answers to questions / plans / permissions |
-| **Operate** | + stop, open, new, fork, restart, deactivate, close, Start Agentmaster |
+| **Read** | + `board`, `sessions`, `show`, `tail`, `screen`, `transcript`, `search`, mirror levels |
+| **Steer** | + replies, slash commands, queue, Send now, runner modes, pause all, answers to questions / plans / permissions |
+| **Operate** | + stop, open, new (incl. a new topic), fork, restart, deactivate, close |
 
 - The default for a paired owner is a decision (D4); the cog sets it per connection.
-- **Drive PIN (optional):** with it on, Steer and Operate intents are refused until `/unlock <PIN>`
+- **Drive PIN (optional):** with it on, Steer and Operate intents are refused until `!unlock <PIN>`
   (valid 30 minutes); the PIN is stored salted and hashed in Credential Manager; 5 wrong tries lock the
   connection for 15 minutes and send an alert; the PIN message is deleted from the chat after it is read.
 - **Confirmations:** every Operate verb answers with a confirm button first (single-use token, 2 minutes).
@@ -699,9 +764,9 @@ exposing it to them is a separate decision.
 ### 9.4 Secrets
 
 Bot tokens, webhook URLs (a Workflows URL is itself a credential), the Teams app secret, the tunnel
-token and the PIN hash live in Windows Credential Manager only (§4.5); never in `connections.json`,
-`settings.json`, logs, the catalog, artifacts or commit messages (M4). The service reads them at start;
-an external connector receives only the names its manifest declares, at `initialize` (§12.2).
+token and the PIN hash live in Windows Credential Manager only (§4.4); never in `connections.json`,
+`settings.json`, logs, the catalog, artifacts or commit messages (M4). An external connector receives only
+the names its manifest declares, at `initialize` (§12.2).
 
 ### 9.5 Audit
 
@@ -715,9 +780,9 @@ from a phone.
 |---|---|
 | **Minimal** | title, state, folder name (leaf), timing; no conversation text |
 | **Standard** | + the prompt preview (120 characters, the toast's line 3) + the final reply's first 600 characters + question / plan text |
-| **Full** | + whole replies, `tail`, `screen`, `transcript` on demand |
+| **Full** | + whole prompts and replies (a mirrored topic, §10.2), `tail`, `screen`, `transcript` on demand |
 
-- **Redaction, always on, in the engine** (before the text reaches the service): the ONE redactor
+- **Redaction, always on, in the engine** (before the text reaches the hub): the ONE redactor
   SESSIONS_AGENT.md §8.4 specifies for the AI search's results, `RedactSecrets` (pure, header-only,
   unit-tested; whichever feature is built first builds it): GitHub, Anthropic, OpenAI, AWS, Slack, Google,
   Stripe and Azure key shapes, JWTs, PEM private-key blocks, and a long high-entropy value after
@@ -725,8 +790,9 @@ from a phone.
   must not reach Telegram. The `telegram` and `teams` kinds join the list (a bot token is
   `<digits>:<35 characters>`).
 - **What the platforms keep:** Telegram stores bot chats on its servers; Teams stores them in the tenant.
-  The cog says so next to the privacy level. Telegram's per-chat auto-delete timer is the user's own
-  setting; `protect_content` (no forwarding or saving) is a per-connection option.
+  The cog says so next to the privacy level. A mirrored topic (*turns* or *live*) needs the Full level for
+  that session: every prompt and reply then goes to Telegram. Telegram's per-chat auto-delete timer is the
+  user's own setting; `protect_content` (no forwarding or saving) is a per-connection option.
 - **Microsoft's volume rule** ("only send messages that people will read") is met by the away rule and the
   event defaults; the digest replaces bursts.
 
@@ -743,46 +809,118 @@ own policy call; routing filters let work folders go only to Teams.
 1. In Telegram, @BotFather → `/newbot` → a name and a username ending in `bot` → copy the token. One bot
    per install (release and dev each), never the homelab's bot.
 2. In the BotFather **Mini App**: My bots → the bot → Bot Settings → Threads Settings → **Threaded Mode**
-   on (topics in the private chat), and "users may create topics" off.
+   on (topics in the private chat). Leave "users may create topics" ON when new topics should start new
+   sessions (D20).
 3. Cog → MESSAGING → Add → Telegram → paste the token → **Check** (`getMe`: the bot's name, and
    `has_topics_enabled`; when false, the form says how to turn it on and the connection falls back to reply
    chains).
-4. **Pair**: open the link or scan the QR → Start. The chat shows "Paired with Agentmaster (release) on
-   ELI-PC"; the cog shows the owner.
-5. Pick the level, the events, the privacy level and the away rule; **Test** sends a sample event.
+4. **Pair**: open the link or scan the QR → Start. The 📋 Fleet topic appears with "Paired with
+   Agentmaster (release) on ELI-PC"; the cog shows the owner.
+5. Pick the level, the events, the privacy level, the mirror level and the away rule; **Test** sends a
+   sample event.
 
-`setMyCommands` registers the command list (§7.1, filtered by the level).
+`setMyCommands` registers the 📋 Fleet commands (§7.1, filtered by the level) and, under them, Claude Code's
+common slash commands (`/compact`, `/clear`, `/model`, `/cost`, `/context`, …), so the Telegram "/" menu
+offers both; which one a `/…` means depends on the topic it is typed in (D22).
 
-### 10.2 The chat's shape
+### 10.2 One topic per session — the whole session in its topic
 
-- **Private chat with topics** (D3, recommended): **General** holds the board, digests, app events and
-  commands; each session that has something to say gets a topic on first need, named with its title
-  (Rule #11; renamed with `editForumTopic` on a rename), colored with the nearest of the six topic colors
-  to its tab color. Anything typed in a session's topic goes to that session. A fork gets its own topic.
-- **Without Threaded Mode:** one chat; every session message starts `#3f9a · <title>`; a reply to it
-  (swipe-reply) targets that session.
-- **A forum supergroup** (alternative): the same topic model in a group the bot administers
-  (`can_manage_topics`) — for an owner who wants a separate room; other members are ignored.
+**The topics of the chat**
 
-What a session's topic looks like (a sketch):
+- **📋 Fleet** — created by the bot at pairing: the pinned board (§6.5), the coalesced "N need you"
+  messages, digests, `app.*` events, and every fleet command (§7.1).
+- **One topic per session** — named with the session's title (Rule #11), colored with the nearest of the
+  six topic colors to its tab color; created when the session first has something to say or when you
+  follow it.
+- **A topic you start** — a new session (D20).
+- **The main view** — in Threaded Mode a non-reply message sent from the main view starts a new topic by
+  itself (§3.1), so the main view is not a place for commands: a new topic whose first message is a fleet
+  command (`/board`, `/sessions`, …) is answered in 📋 Fleet and deleted; any other new topic is a new
+  session.
 
-```
-Agentmaster (bot) · topic "Agentmaster/feature" (blue)
-  🟡 Waiting for you · 12 minutes ago                              ← tg-time, stays current
-  ❯ rebase onto agentmaster and fix the three conflicts…
-  ● Rebased; the three conflicts are fixed; the m5 suite passes.
-  [ Send queued #1 ]  [ Runner: Auto ]  [ Show ]
-you: also update CLAUDE.md
-  ✓ sent · running                                                 ← edited to "✓ done · 3m" at the turn's end
-  🟠 Question: Which approach for the strip fix?
-  [ 1. Keep the caret design ]  [ 2. Native MUX drag ]  [ Other… ]
-```
+**What a session's topic holds**
 
-### 10.3 Receiving
+1. **The card** — the topic's pinned message, edited in place (at most every 30 s): the title; the state
+   and since when; folder · branch; model · effort; the runner mode and the queue (count + the next
+   prompt); context use; the unsent draft at the PC, if any ("✎ draft at the PC: …", the remembered
+   `pendingInput`). Its buttons: [Stop] [Runner: Auto / Paused] [Queue ▸] [Screen] [Transcript] [Follow]
+   [More ▸ Fork · Restart · Deactivate · Close]. A closed session's card reads Closed with [Resume].
+2. **The conversation**, by the topic's **mirror level** (D19):
+   - *needs-you* — only what needs you: questions, plans, errors, "waiting for you" with the reply excerpt;
+   - *turns* — every turn as ONE message: the prompt that started it, marked with its origin (⌨ typed at
+     the PC, ⚙ from the queue, 📱 from this chat), the tool calls folded into one expandable line ("▸ 6 tool
+     calls: Bash ×4, Edit ×2", HTML `blockquote expandable`), and the final reply; compactions, `/clear` and
+     rewinds as one-line markers;
+   - *live* — *turns* plus the running turn as a streamed draft with a stop button (§6.7).
+3. **The questions** — questions, plan approvals and permission prompts as buttons (§7.3), edited when
+   they are answered anywhere.
+
+**What you type in a session's topic**
+
+| You type | It becomes |
+|---|---|
+| Plain text | A prompt to the session (§7.2) |
+| `/compact`, `/model opus`, any `/…` | Claude Code's slash command, typed into the session (Steer level) |
+| `!stop`, `!queue <text>`, `!screen`, `!runner auto`, `!follow`, `!mirror turns` | Agentmaster's own verbs (D22), same as the card's buttons |
+| A reply to the bot's question message | The "Other" answer to that question (§7.3) |
+| A photo or a file | P7 (§7.7) |
+
+**The lifecycle, both ways**
+
+| In Agentmaster | In the topic |
+|---|---|
+| A session first has something to say, or you follow it | Its topic is created and backfilled: the card, the last 3 turns, and the transcript as a `.md` file |
+| Renamed (Explorer, tab, F2) | `editForumTopic` renames the topic (P0-12: whether that posts a visible service message) |
+| `/clear` (same tab, a new conversation id) | The same topic continues, with a marker "— /clear: a new conversation —" (the tab's lineage keeps the topic) |
+| Forked | A new topic, "<title> (fork)" |
+| Closed (archived) | The card reads Closed with [Resume]; the topic stays (D21) |
+| Resumed (at the PC or from the topic) | The same topic continues |
+| **← A new topic started in Telegram** | A new session (D20): the folder from the first message (`in K:\source\proj: fix the flaky test`), else buttons of the recent folders and "Other path…"; launched with the first message as its first prompt; the topic is bound and renamed to the session's title (`is_name_implicit` asks the bot to name it) |
+| **← A message in a closed session's topic** | "Resume and send" (§7.2) |
+| **← The topic deleted in Telegram** | Nothing happens to the session; a new topic is made at its next event |
+| **← The topic renamed in Telegram** (if the client lets the user) | The session is renamed (Rule #11: one title) — P0-13 |
+
+**The budget** — about one message per second for the whole chat, edits included (§3.1). An estimate for
+30 open sessions, each ending a turn every 3 minutes: the mirrored turns of 10 followed sessions ~0.06/s;
+the cards, which change at least twice per turn (Running, then Waiting), ~0.33/s if all 30 have topics;
+needs-you messages while away ~0.17/s — about 0.55/s in all: inside the budget, with little room. So card
+edits are the first thing the outbox thins (one per session per 30 s; a state that flips back within the
+window is never sent), and a burst (ten sessions ending at once) waits a few seconds. *live* is meant for
+one or two followed sessions; what drafts count against the budget is P0-15.
+
+**Without Threaded Mode** — one chat; every session message starts `#3f9a · <title>`; a reply to it
+(swipe-reply) targets that session; no cards (the card is a message on demand: `show #3f9a`).
+
+**A forum supergroup** (alternative) — the same topic model in a group the bot administers
+(`can_manage_topics`), for an owner who wants a separate room; other members are ignored. A group allows
+20 bot messages per minute: no mirroring there.
+
+**Teams** has no topics in a 1:1 chat; its equivalent is a Team channel with one thread per session (the
+bot posts the card as the thread's first message, replies continue it) — a P5 option.
+
+### 10.3 What a topic cannot do
+
+| Limit | Why | What Agentmaster does |
+|---|---|---|
+| The terminal's screen-only parts: spinners and progress bars, the TUI's own pickers and panels (`/model` with no argument, `/config`, `/resume`, the transcript view), the input box itself | A topic carries messages, not a screen | `screen` sends a text snapshot; numbered menus become buttons (§7.3); the unsent draft shows on the card with a "Take the draft" button |
+| Keyboard-only actions: Shift+Tab (permission and plan mode), double-Esc (rewind), Ctrl+B (background a shell) | No key events in a chat | A few become card buttons through measured key plans (P0-1); the rest stay at the PC |
+| A big busy fleet mirrored live | One message per second per chat, all topics together | Mirror per turn, live only for followed sessions, the outbox paces (§6.4) |
+| 4,096 characters per message | Telegram's limit | Expandable quotes, the rest as a `.md` file, the full transcript on demand |
+| No list of topics; no event when a topic is deleted | Bot API | Agentmaster's topic map is the record (written atomically, §4.4); a send into a deleted topic fails → a new topic at the next event; deleting a topic never closes a session |
+| A private-chat topic cannot be closed, only deleted | `closeForumTopic` is for supergroups | A closed session keeps its topic; its card reads Closed |
+| Codex sessions, and claude sessions Agentmaster did not launch | Agentmaster cannot type into a Codex TUI yet (C4), nor into an unmanaged claude (Rule #13) | Read-only topics: card, mirror, no replies (D23) |
+| Anything while Agentmaster is closed | The bot runs inside Agentmaster (D1) | Telegram keeps messages 24 h; handled at the next start under the backlog rule (§4.3) |
+| Privacy | A mirrored topic sends every prompt and reply to Telegram's servers | Mirroring needs the Full level for that session; redaction always on (§9.6) |
+| Hundreds of topics | Client limits unknown | Topics only for sessions that have something to say or that you follow; P0-14 |
+
+### 10.4 Receiving
 
 - One thread per connection: `getUpdates(offset, timeout=50, allowed_updates=["message",
-  "callback_query","stopped_message_generation"])`; the offset is persisted only after FleetLink accepted
-  or refused each update (at least once; intents carry the update id, so a repeat is dropped).
+  "callback_query","stopped_message_generation"])`; at start, the backlog first (§4.3). The offset is
+  persisted only after FleetLink accepted or refused each update (at least once; intents carry the update
+  id, so a repeat is dropped).
+- `message_thread_id` routes a message to its topic's session; a `forum_topic_created` with a thread id
+  unknown to the topic map starts the new-session flow (§10.2).
 - **Never a webhook** for this provider (it would disable `getUpdates`); `deleteWebhook` on setup if one
   is set (with the user's OK: someone else may own it).
 - **One poller per token:** a machine-wide mutex named from the token's hash; a 409 from Telegram stops
@@ -790,25 +928,27 @@ you: also update CLAUDE.md
 - Callback queries are answered at once (`answerCallbackQuery` "working…"), the message is edited with the
   outcome when FleetLink returns.
 
-### 10.4 Sending
+### 10.5 Sending
 
-- HTML parse mode; text escaped (`<`, `>`, `&`); code and screens in `<pre>`; replies longer than the
-  limit become an expandable quotation + the rest as a `.md` document.
+- HTML parse mode; text escaped (`<`, `>`, `&`); code and screens in `<pre>`; tool calls folded in
+  `<blockquote expandable>`; replies longer than the limit become an expandable quotation + the rest as a
+  `.md` document.
 - **Length:** 4,096 characters after entity parsing; chunks split on paragraph, then line boundaries,
   never inside a `<pre>`; more than 3 chunks → a document instead.
 - **Buttons:** inline keyboards, `style` `primary` for the safe default, `danger` for Stop / Close.
 - **Times:** `<tg-time unix=… format="r">` shows "12 minutes ago" that stays right as time passes.
-- **Silent:** `disable_notification` for `info` severity.
+- **Silent:** `disable_notification` for `info` severity (mirrored turns, card edits, digests).
 
-### 10.5 Failure modes
+### 10.6 Failure modes
 
 | Symptom | Handling |
 |---|---|
 | 401 (token revoked) | stop the connection, alert in the cog and with a Windows toast |
 | 403 (the user blocked the bot) | stop sending; status "blocked by the user" |
-| 409 | §10.3 |
+| 409 | §10.4 |
 | 429 | wait `retry_after`, then resume in order |
-| A topic was deleted by the user | recreate it on the next event; the old binding is dropped |
+| A topic was deleted by the user | a new topic at the next event; the old binding is dropped |
+| The topic map was lost | old topics become orphans the bot cannot find again (no list method); new topics are made; the map is backed up with `state.json`'s previous copy |
 | Network down | backoff; the outbox keeps events, revalidated before sending |
 
 ## 11. The Teams connector
@@ -819,7 +959,7 @@ you: also update CLAUDE.md
 |---|---|---|
 | Direction | one-way (alerts) | two-way |
 | Needs | Workflows in the tenant | a work tenant with **Upload custom apps**, an Azure Bot (single-tenant, free tier), a public HTTPS endpoint |
-| Looks like | cards from "Workflows" in a chat | cards from "Agentmaster" in a 1:1 chat |
+| Looks like | cards from "Workflows" in a chat | cards from "Agentmaster" in a 1:1 chat (or a thread per session in a Team channel) |
 | Buttons | links only | everything in §7 |
 | Phase | P4 | P5 |
 
@@ -852,14 +992,15 @@ you: also update CLAUDE.md
 
 | Option | How | For | Against |
 |---|---|---|---|
-| **Cloudflare Tunnel on the PC** (recommended) | `cloudflared tunnel run --token <T>` as a child of the service (token in Credential Manager); a hostname on the user's own domain → `http://127.0.0.1:<port>` | free; a stable name; nothing listens beyond loopback; no relay to run | a Cloudflare account and a domain on it |
+| **Cloudflare Tunnel on the PC** (recommended) | `cloudflared tunnel run --token <T>`, started by Agentmaster as a child process (token in Credential Manager), a hostname on the user's own domain → `http://127.0.0.1:<port>` | free; a stable name; nothing listens beyond loopback; nothing else to run | a Cloudflare account and a domain on it |
 | Microsoft dev tunnel | `devtunnel host` with a persistent tunnel, anonymous access | Microsoft's own, used in Teams docs | meant for development; account login; usage limits |
 | ngrok | a static free domain | quick | account; free-tier limits |
-| A relay | a small public service receives, validates and holds the posts; the PC dials out to collect them | works while the PC sleeps (queues; answers "offline"); one URL for every push-in platform | another component to build, host and secure; the homelab has no public ingress today ("an internet caller needs a tunnel in front (not built)") |
+| A relay | a small public service receives, validates and holds the posts; Agentmaster dials out to collect them | holds messages while Agentmaster is closed; one URL for every push-in platform | an always-on component of its own, against N4 and the spirit of D1; the homelab has no public ingress today ("an internet caller needs a tunnel in front (not built)") |
 
-The listener: loopback only; `POST` only; 256 KB body cap; JWT checked before the body is parsed; one path
-per connection. Implementation choice (P0): the Windows HTTP Server API (kernel-side request parsing, if a
-loopback URL can be registered without admin) or a minimal bounded parser on a loopback socket.
+The listener (inside Agentmaster, H4): loopback only; `POST` only; 256 KB body cap; JWT checked before the
+body is parsed; one path per connection. Implementation choice (P0-8): the Windows HTTP Server API
+(kernel-side request parsing, if a loopback URL can be registered without admin) or a minimal bounded
+parser on a loopback socket.
 
 ### 11.5 Receiving (the Bot Connector protocol)
 
@@ -898,6 +1039,7 @@ view therefore edits one message every 3 s instead of streaming.
 | 413 `MessageSizeTooBig` | not retryable: re-render at the next lower privacy level, then headline only |
 | 429 | wait `Retry-After` |
 | The tunnel is down | inbound fails in Teams ("the bot is not responding"); outbound still works; status degraded |
+| Agentmaster is closed | the same as a tunnel down: Teams shows the message as failed |
 | The app was removed from Teams | the conversation reference dies (403); status "uninstalled" |
 
 ## 12. Any other messenger
@@ -922,25 +1064,27 @@ incoming webhooks, Home Assistant and n8n. The URL and any header marked secret 
 
   The cog renders the form from `settings` and `secrets`; secrets go to Credential Manager.
 - **The process** speaks JSON-RPC 2.0, one JSON object per line, on stdin / stdout (stderr = its log).
-  The service starts it, restarts it with backoff when it exits, and stops it with `shutdown`.
-- **Service → connector:** `initialize {protocol, connection {id, name, settings}, secrets {…}}` →
+  Agentmaster starts it as a child process in its kill-on-close job, restarts it with backoff when it
+  exits, and stops it with `shutdown`. The bot — the rules, the state, the decisions — stays in
+  Agentmaster (D1); a connector process only moves bytes for one platform.
+- **Agentmaster → connector:** `initialize {protocol, connection {id, name, settings}, secrets {…}}` →
   `{capabilities}` (§5.2); `send {eventId, binding, render {plain, markdown, html, card}, buttons, silent}`
   → `{ref, binding}`; `edit {ref, render}`; `delete {ref}`; `ensureThread {session, title, color}` →
   `{binding}`; `stream {key, text, final}`; `ack {inboundId, outcome {ok, text}}`; `shutdown`.
-- **Connector → service (notifications):** `inbound {id, user {id, name}, chat {id, kind}, binding?,
-  replyTo?, text?, token?, stop?}`, `status {state, detail}`, `log {level, text}`.
-- **The service keeps every rule** — authentication (the owner's platform id is stored by the service at
-  pairing, which works through `inbound` like any other provider), authorization, tokens, rate limits,
-  redaction — so a connector is only a transport. A connector that crashes three times in ten minutes is
-  stopped and reported.
+- **Connector → Agentmaster (notifications):** `inbound {id, user {id, name}, chat {id, kind}, binding?,
+  replyTo?, newThread?, text?, token?, stop?, sentAt}`, `status {state, detail}`, `log {level, text}`.
+- **Agentmaster keeps every rule** — authentication (the owner's platform id is stored at pairing, which
+  works through `inbound` like any other provider), authorization, tokens, pacing, redaction — so a
+  connector is only a transport. A connector that crashes three times in ten minutes is stopped and
+  reported (H5).
 - **Samples** (P6, in `tools/messaging-connectors/`): Slack Socket Mode (Python), Discord gateway (Node),
   Matrix (Python), each under 300 lines.
 
 ### 12.3 Push-in platforms
 
-WhatsApp, a Teams bot, LINE and other webhook-only platforms share the service's loopback listener and the
+WhatsApp, a Teams bot, LINE and other webhook-only platforms share Agentmaster's loopback listener and the
 tunnel of §11.4 (one path per connection); a connector for such a platform declares `inbound: pushIn` and
-receives its requests from the service as `inbound` notifications after the provider's signature check
+receives its requests from Agentmaster as `inbound` notifications after the provider's signature check
 (the check is part of the connector).
 
 ## 13. Settings and UI
@@ -949,113 +1093,132 @@ receives its requests from the service as `inbound` notifications after the prov
   owner, a status dot, last delivery, **Test**, **Edit**, **Remove**); **Add** (Telegram / Teams Lite /
   Teams Bot / Webhook / External…).
 - **Per connection:** the provider form (§10.1, §11.2, §11.3, §12); pairing (code, link, QR); level and
-  drive PIN; events (the §6.1 table as checkboxes); privacy level; away rule (when away / always / never;
-  idle minutes; escalate after minutes); quiet hours; routing (all sessions / favorites / tags / folders);
-  topic colors on/off.
+  drive PIN; events (the §6.1 table as checkboxes); privacy level; the default mirror level; away rule (when
+  away / always / never; idle minutes; escalate after minutes); quiet hours; routing (all sessions /
+  favorites / tags / folders); new topics start sessions (on/off); topic colors on/off.
 - **Global:** away detection (idle minutes, lock); the Remote Control presence file (D17).
 - **The Manager toolbar:** a status pill (📱 + a dot per connection: green, amber, red), its tooltip naming
   each connection's state and last delivery; a click opens the tab.
-- **Tab menu:** Messaging ▸ Mute this session (1 h, today, until unmuted) / Follow live (P7) / Send its
-  card now.
-- **Per-tab badge:** a small 📱 while a remote follow is on (P7).
+- **Tab menu:** Messaging ▸ Mirror (needs-you / turns / live) · Mute this session (1 h, today, until
+  unmuted) · Send its card now.
+- **Per-tab badge:** a small 📱 while the session's topic mirrors at *turns* or *live*.
 
 ## 14. Logs
 
 - **hooks.log:** `[msg] <conn> event <kind> <sid8> → sent|held(<why>)|dropped(<why>)`;
   `[msg] <conn> intent <kind> <sid8> → <code>`; `[nav] remote <conn> <verb> <sid8> → <code>` (§9.5);
-  `[msg] service up|down|restarted (<why>)`.
-- **messaging.log** (the service): `[tg]`, `[teams]`, `[hook]`, `[ext:<id>]` with HTTP status, latency,
-  `retry_after`, poll gaps, connector restarts. Never a message body or a token: ids, sizes and hashes only.
-- **Rule #18** applies to the service as to the app: every `catch (...)` reports through the service's own
-  `LogSwallowedException`, with the throw-site stack.
+  `[msg] <conn> started|stopped|backlog N updates (oldest <age>)|breaker open (<why>)`.
+- **messaging.log** (the connectors' transport log, through `AppendStateLog`): `[tg]`, `[teams]`,
+  `[hook]`, `[ext:<id>]` with HTTP status, latency, `retry_after`, poll gaps, connector restarts. Never a
+  message body or a token: ids, sizes and hashes only.
+- **Rule #18:** every `catch (...)` in FleetLink, the hub and the connectors reports through
+  `LogSwallowedException`, with the throw-site stack (H1).
 
 ## 15. Testing
 
 - **m5 (pure):** the event decider (edges, holds, dedupe, unread, away, escalation, quiet hours, routing);
-  `DecideRemoteReply`; the command grammar and session references; levels, PIN windows and confirmations;
-  the token table (bind checks, single use, expiry); the redactor (a pattern table + false-positive
-  fixtures); Telegram escaping and chunking (UTF-16 counting, `<pre>` safety); the Adaptive Card builder
-  (goldens); the JWT check (RS256 with a test key); `MenuSnapshot` over captured screens.
-- **Service integration:** a fake Telegram server on loopback (the connector's base URL is a setting —
-  Telegram's self-hosted Bot API server uses the same knob); a fake Bot Connector with test-signed JWTs; a
-  webhook echo; a fake external connector.
+  the backlog rule; `DecideRemoteReply`; the topic text router (plain / `/` / `!` / reply); the command
+  grammar and session references; levels, PIN windows and confirmations; the token table (bind checks,
+  single use, expiry); the redactor (a pattern table + false-positive fixtures); Telegram escaping and
+  chunking (UTF-16 counting, `<pre>` safety); the turn renderer (folded tools, origins, markers); the
+  Adaptive Card builder (goldens); the JWT check (RS256 with a test key); `MenuSnapshot` over captured
+  screens.
+- **Connector integration:** a fake Telegram server on loopback (the connector's base URL is a setting —
+  Telegram's self-hosted Bot API server uses the same knob), incl. topics, a backlog and 429s; a fake Bot
+  Connector with test-signed JWTs; a webhook echo; a fake external connector.
 - **Abuse:** a stranger, a group member, a replayed update id, an expired / reused / mismatched token, PIN
-  guessing, a 64 KB message, a malformed JSON update, a 409 storm.
+  guessing, a 64 KB message, a malformed JSON update, deeply nested JSON, a 409 storm, a connector that
+  throws on every update (the breaker opens, the app stays up).
 - **Live (by hand):** a test bot and chat (`AgentmasterTestBot`), the claude-wrap-ConPTY driver for the
   menu key plans, a Teams developer tenant, the cog on a disposable Windows desktop (claude-desktops).
 
 ## 16. Proposed invariants (to join the Correctness rules when built)
 
 - **M1 — One send seam.** A remote reply goes through `SubmitPrompt` or the Prompt Queue; a remote key
-  press goes through the hosting window under the delivery gate. The service never writes to a ConPTY
-  (extends Rules #3, #4, #13).
+  press goes through the hosting window under the delivery gate. No connector writes to a ConPTY or calls
+  the registry: only FleetLink acts, through the Fleet Control API (extends Rules #3, #4, #13).
 - **M2 — Sender, not chat.** Every inbound message is checked against the connection's owner by the
-  platform's USER id (Telegram `from.id`; Teams `aadObjectId` + tenant id); anything else is dropped.
-- **M3 — The engine authorizes.** FleetLink checks every intent against the connection's level in its own
-  read of `connections.json`; the service's claim is not trusted for it.
-- **M4 — Never send a secret.** Redaction runs in the engine before any text leaves the GUI process;
-  credentials live in Credential Manager only; message bodies never reach a log.
+  platform's USER id (Telegram `from.id`; Teams `aadObjectId` + tenant id), before anything else reads it;
+  anything else is dropped.
+- **M3 — FleetLink authorizes.** FleetLink checks every intent against the connection's level in its own
+  read of `connections.json`; a connector's claim is not trusted for it.
+- **M4 — Never send a secret.** Redaction runs in the engine before any text reaches the hub; credentials
+  live in Credential Manager only; message bodies never reach a log.
 - **M5 — Never act on a stale button.** A token names exactly what it answers; a mismatch refuses and shows
   the current state.
 - **M6 — Never guess a session.** A message that names no session gets a picker.
 - **M7 — One poller per token.** A machine-wide lock per bot token; a 409 stops polling and alerts.
 - **M8 — Revalidate before telling; follow up after.** An event is sent only if still true; when it stops
   being true after it was sent, its message is updated.
+- **M9 — An old message never acts unasked.** A message from the backlog older than 10 minutes asks before
+  it sends; an Operate verb from the backlog never runs.
+- **M10 — The network never stalls the app.** No UI thread waits on a connector; no exception leaves a
+  connector thread (H1).
 
 ## 17. Phases
 
 | Phase | Scope | Exit |
 |---|---|---|
 | **P0** | The measurements of §19; no product code | Every P0 row answered in this document |
-| **P1** — Telegram alerts | The service skeleton + pipe; FleetLink's tracker (needs-you, question, error, runner paused, app stopped); away detection; redactor + privacy levels; pairing; the MESSAGING tab (one Telegram connection); logs; m5 | A needs-you edge reaches the phone within 5 s while the PC is locked; nothing while present (until escalation); a stranger is dropped; no secret leaves (redactor tests) |
-| **P2** — Telegram two-way | Read verbs; replies (§7.2) with `PromptOrigin::Remote`; queue and runner verbs; topics; tokens and confirmations; the board; message follow-ups (§6.6) | From the phone: replies into sessions in four different states, each with the right outcome; every action in `[nav] remote` |
+| **P1** — Telegram alerts | FleetLink's tracker (needs-you, question, error, runner paused, app restarted); the hub (outbox, pacing, tokens) + the Telegram connector inside the engine (H1–H5); the backlog rule; away detection; redactor + privacy levels; pairing + the 📋 Fleet topic; the MESSAGING tab (one Telegram connection); logs; m5 | A needs-you edge reaches the phone within 5 s while the PC is locked; nothing while present (until escalation); a stranger is dropped; no secret leaves (redactor tests); a message sent while Agentmaster was closed is handled at the next start under the backlog rule |
+| **P2** — Telegram two-way, a topic per session | Topics with cards; mirror levels *needs-you* and *turns*; replies (§7.2) with `PromptOrigin::Remote`; slash commands; `!` verbs; queue and runner verbs; read verbs; tokens and confirmations; the board; message follow-ups (§6.6); a new topic = a new session | From the phone: a new session started from a new topic; replies into sessions in four different states, each with the right outcome; a mirrored session's topic matches its transcript turn for turn; every action in `[nav] remote` |
 | **P3** — menus and stop | `pendingQuestion` capture; `ReadMenuSnapshot`; verified key plans; stop | 20 of 20 answers verified across the measured menu shapes in the ConPTY harness; stale tokens refused |
 | **P4** — Teams Lite + Webhook | The Workflows connector; the Webhook connector with presets | Alerts in a Teams chat and in ntfy |
-| **P5** — Teams Bot | App package generator; the loopback listener + tunnel; JWT; Bot Connector client; cards with inputs; pairing; read and steer verbs | Two-way from Teams in the user's tenant (or a developer tenant) |
+| **P5** — Teams Bot | App package generator; the loopback listener + `cloudflared`; JWT; Bot Connector client; cards with inputs; pairing; read and steer verbs; optionally a thread per session in a Team channel | Two-way from Teams in the user's tenant (or a developer tenant) |
 | **P6** — external connectors | The contract (§12.2); the three samples; the connector manager | A Slack and a Discord sample pass the integration suite |
-| **P7** — live and more | The live view; digests; the concierge (`ask …` answered by a harness conversation with the session database's tools); Start Agentmaster from the phone; files and photos | |
+| **P7** — live and more | The live view (*live* mirror level); digests; the concierge (`ask …` answered by a harness conversation with the session database's tools); files and photos | |
 
 ## 18. Decisions for the user
 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
-| **D1** | Where the platform code runs | **A per-profile service** (`agentmaster-messaging.exe`, §4.2) | Inside the GUI process |
-| **D2** | The service after Agentmaster exits | **Keep running up to 24 h**: report the exit, answer "offline", offer Start (Operate level) | Exit with the GUI |
-| **D3** | Telegram's chat shape | **A private chat with one topic per session** (reply chains when Threaded Mode is off) | One chat with reply chains only; a forum supergroup |
+| **D1** | Where the bot runs | **DECIDED by the user (2026-10-16): inside the running Agentmaster process** ("The agentmaster process running is supposed to be the program running the bot"); external connectors and `cloudflared` are child processes it starts | (Set aside: a separate per-profile service, the 2026-10-15 draft) |
+| **D2** | Messages that arrive while Agentmaster is closed (Telegram keeps them 24 h) | **Handle them at the next start**: older than 10 min → ask before sending; Operate verbs never run from the backlog | Drop the backlog; or act on everything |
+| **D3** | Telegram's chat shape | **A private chat with one topic per session** + the 📋 Fleet topic (reply chains when Threaded Mode is off) | One chat with reply chains only; a forum supergroup |
 | **D4** | A paired owner's default level | **Steer** (Operate off; the drive PIN offered, off) | Read; Operate |
-| **D5** | Default events | **Waiting, Needs approval, questions, plans, permissions, errors, runner paused, app stopped** | Also Idle and Done; also digests |
+| **D5** | Default events | **Waiting, Needs approval, questions, plans, permissions, errors, runner paused, app restarted** | Also Idle and Done; also digests |
 | **D6** | When to send | **When away** (locked, or idle ≥ 5 min), **escalate** an unread needs-you after 10 min even when present | Always; only when away |
 | **D7** | Default privacy | **Standard** (prompt preview + a 600-character reply excerpt), redaction always on | Minimal; Full |
 | **D8** | A reply to a Running session | **Queued as next, sent when the turn ends even under Paused**, with a **Steer now** button | Always steer now; queue under the runner's own mode |
 | **D9** | Questions and plans from the chat | **Yes, by verified key plans** (§7.3) | Leave them to the terminal or Remote Control |
 | **D10** | The Teams route | **Teams Lite first** (P4), the bot when the tenant allows custom apps (P5) | The bot first; no Teams |
 | **D11** | Which Microsoft tenant | The user's call: the work tenant (its policy, its data rules) or a personal developer tenant | — |
-| **D12** | The public endpoint for push-in platforms | **Cloudflare Tunnel on the PC**, run by the service | A dev tunnel; ngrok; a relay service |
+| **D12** | The public endpoint for push-in platforms | **Cloudflare Tunnel on the PC**, started by Agentmaster | A dev tunnel; ngrok; a relay service |
 | **D13** | Bots per install | **One bot for release, another for dev** (one poller per token) | Messaging in one install only |
-| **D14** | Built-in connectors' language | **C++** in the service (WinHTTP, nlohmann-json, BCrypt), the house style | A .NET service using the Teams SDK |
-| **D15** | The external contract | **JSON-RPC over stdio, one object per line** | Loopback HTTP |
+| **D14** | Built-in connectors' language | **C++** inside Agentmaster (WinHTTP, nlohmann-json, BCrypt), the house style | — (D1 rules out a .NET service) |
+| **D15** | The external contract | **JSON-RPC over stdio, one object per line**, the connector a child process | In-process plugins (DLLs) — they would share Agentmaster's memory |
 | **D16** | Claude Code channels | **Not in version 1**; delivery stays pluggable (§2.3) | Deliver through channels now, with the development flag |
 | **D17** | The Remote Control presence file | **Yes**: Agentmaster keeps it in step with "present" for managed launches | Leave Remote Control alone |
 | **D18** | The name in the UI | **Messaging** | Remote; Phone |
+| **D19** | What a session's topic shows by default | **needs-you**; *turns* for the sessions you follow, tag or set from the tab menu; *live* on demand | *turns* for every session; needs-you only |
+| **D20** | A topic started in Telegram | **Starts a new session** (the folder from the first message, else picked from buttons) | Ignored (sessions start only at the PC or with `/new`) |
+| **D21** | Topics of closed sessions | **Kept** (the history stays; the card says Closed) | Deleted after N days |
+| **D22** | Inside a session's topic | **Plain text and `/…` go to the session; Agentmaster's verbs are `!…` and the card's buttons** | Agentmaster's verbs take `/`, Claude Code's commands need a prefix |
+| **D23** | Codex sessions and unmanaged claude sessions | **Read-only topics** (card + mirror) | No topics |
 
 ## 19. P0 — measure before code
 
 | # | Question | How |
 |---|---|---|
-| P0-1 | The key plan of each menu: `AskUserQuestion` single-select, multi-select, several questions, "Other" with text; the plan approval menu; a permission prompt — on the Claude Code version in use | claude-wrap-ConPTY driver: provoke each, capture the screen, try keys, read the transcript's tool result |
+| P0-1 | The key plan of each menu: `AskUserQuestion` single-select, multi-select, several questions, "Other" with text; the plan approval menu; a permission prompt; Shift+Tab's mode cycle — on the Claude Code version in use | claude-wrap-ConPTY driver: provoke each, capture the screen, try keys, read the transcript's tool result |
 | P0-2 | Does `SubmitPrompt` (the draft swap) place a prompt into a RUNNING session's box, and how is it recorded (the `queued_command` attachment)? | the same driver, on a turn that runs a long tool |
 | P0-3 | How the transcript records `AskUserQuestion` input and answers (for `pendingQuestion`) | the corpus: `tool_use` / `tool_result` pairs of the last 30 days |
-| P0-4 | Telegram topics in a private chat: rename noise (service messages?), `pinChatMessage` in a topic, icon colors on Android / iOS / Desktop, the limit on the number of topics | a test bot |
+| P0-4 | Telegram: `pinChatMessage` inside a topic (one pinned card per topic); icon colors on Android / iOS / Desktop | a test bot |
 | P0-5 | Telegram: drafts in a topic (`message_thread_id`) and the stop update end to end | a test bot |
 | P0-6 | Teams: is **Upload custom apps** allowed in the user's tenant? Is Workflows available? Does a Workflows post to a chat alert the phone? | the user's Teams; a developer tenant if the work tenant says no |
 | P0-7 | The Bot Connector's JWT issuers and endorsements for a single-tenant bot, today | Microsoft's page + one real request through the tunnel |
 | P0-8 | A loopback listener without admin: the HTTP Server API's URL registration rules | a probe exe |
 | P0-9 | The presence file: does `CLAUDE_CLIENT_PRESENCE_FILE` set at launch (spawn env) suppress Remote Control pushes as documented? | one session with Remote Control |
 | P0-10 | Channels later: does a channel event fire `UserPromptSubmit`, and how is it written to the transcript? | a fakechat session |
+| P0-11 | The user's clients in Threaded Mode (Android, iOS, Desktop): does a non-reply message from the main view always start a new topic, or is there now a way to write to the main thread (Telegram-iOS #2236)? Where do the bot's messages without a thread id appear? | a test bot on each client |
+| P0-12 | Does `editForumTopic` (rename, icon) post a visible `forum_topic_edited` message in a private chat, and does it notify? | a test bot |
+| P0-13 | Can the user rename or delete a topic in a bot's private chat, and what does the bot receive? | a test bot |
+| P0-14 | How the clients behave with 100+ topics (the list, search, unread counts); any limit on the number of topics | a test bot |
+| P0-15 | The real pacing: how many messages and edits per second the private chat takes across topics before a 429, and whether drafts count | a test bot |
 
-## 20. Sources (read 2026-10-15)
+## 20. Sources (read 2026-10-15/16)
 
-- Telegram Bot API: [the API reference](https://core.telegram.org/bots/api), [the changelog](https://core.telegram.org/bots/api-changelog) (9.3 – 10.3), [the Bots FAQ](https://core.telegram.org/bots/faq) (limits); Threaded Mode's location: [Hermes Agent's Telegram docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram) and [its fix PR #116803](https://github.com/NousResearch/hermes-agent/pull/116803).
+- Telegram: [the Bot API reference](https://core.telegram.org/bots/api) (incl. "Getting updates": the 24-hour retention), [the changelog](https://core.telegram.org/bots/api-changelog) (9.3 – 10.3), [the Bots FAQ](https://core.telegram.org/bots/faq) (limits), [Bot Features](https://core.telegram.org/bots/features) ("Topics in Private Chats", "Streaming Replies", "AI Agents"), [the October 2025 announcement](https://telegram.org/blog/comments-in-video-chats-threads-for-bots), [Telegram-iOS #2236](https://github.com/TelegramMessenger/Telegram-iOS/issues/2236) (new topics from the main view); Threaded Mode's location: [Hermes Agent's Telegram docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram) and [its fix PR #116803](https://github.com/NousResearch/hermes-agent/pull/116803).
 - Claude Code: [channels](https://code.claude.com/docs/en/channels), [the channels reference](https://code.claude.com/docs/en/channels-reference), [Remote Control](https://code.claude.com/docs/en/remote-control).
 - Teams bots: [what is the Bot Framework SDK](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-overview?view=azure-bot-service-4.0) (end of support), [the Teams SDK 2.1 announcement](https://microsoft.github.io/teams-sdk/blog/announcing-teams-sdk-dotnet-2-1/), [choosing an SDK](https://microsoft.github.io/teams-sdk/teams/choosing-an-sdk/), [create an Azure Bot resource](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart?view=azure-bot-service-4.0) (single-tenant), [rate limits](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/rate-limit), [message formatting and size](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages), [streaming](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux), [the two-minute stream limit PR](https://github.com/microsoft/teams-sdk/pull/2989), [developer prerequisites](https://learn.microsoft.com/en-us/microsoftteams/platform/toolkit/tools-prerequisites).
 - Microsoft Graph and Teams: [the Teams API overview](https://learn.microsoft.com/en-us/graph/api/resources/teams-api-overview?view=graph-rest-1.0) (polling once a day), [send a message in a chat](https://learn.microsoft.com/en-us/graph/api/chat-post-messages?view=graph-rest-1.0) (the "log file" rule), [list messages in a chat](https://learn.microsoft.com/en-us/graph/api/chat-list-messages?view=graph-rest-1.0), [change notifications for messages](https://learn.microsoft.com/en-us/graph/teams-changenotifications-chatmessage), the `48:notes` self chat ([a community article](https://dev.to/thecodewrapper/how-to-send-microsoft-teams-self-message-using-graph-sdk-1ojm)).
