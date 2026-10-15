@@ -17,6 +17,7 @@
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
+#include "SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the session database refresh tick
 #include "SessionStore.h"
 #include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
 
@@ -476,6 +477,11 @@ namespace Agentmaster
                 }
             }
             e->scanner->Start();
+            // SESSIONS_DB.md §7.6 (D16): the session database's refresh tick drains the scanner's transcript
+            // watcher; it starts only when the setting asks for the database (Shadow / On), after the scanner (its
+            // watcher is up), and Apply never throws (a failure is logged and leaves the app as it was).
+            e->sessionDb = std::make_shared<SessionDbRefresher>(e->scanner, e->registry, AgentmasterStateDir());
+            e->sessionDb->Apply(LoadAppSettings());
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
             // `claude` in a fresh tab is then correlated out-of-band by the observer). The transcript-

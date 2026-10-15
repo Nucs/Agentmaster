@@ -45,6 +45,7 @@
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
+#include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / GlobalPaused + the global-pause observer (the Manager's Pause button, DELIVERY.md §17)
@@ -2279,6 +2280,12 @@ namespace winrt::TerminalApp::implementation
                 if (self->_observer)
                 {
                     self->_observer->SetReapOrphanedSessions(s.reapOrphanedSessions);
+                }
+                // SESSIONS_DB.md §7.6: the session database's mode and refresh interval apply at once (Off stops
+                // the refresh tick; Shadow / On start it; the service itself exits 10 minutes after its last client).
+                if (const auto& db = ::Agentmaster::SharedEngine().sessionDb)
+                {
+                    db->Apply(s);
                 }
                 // Side panel: adopt the (possibly changed) globals — the shared boardSort label,
                 // the dock side, the summary content flags (its fill-hosted overlay sits outside

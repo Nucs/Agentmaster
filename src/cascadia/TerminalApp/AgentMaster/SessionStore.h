@@ -363,4 +363,12 @@ namespace Agentmaster
     //   returns — the current epoch; 0 until the first tag or tag-color change of this process.
     //   throws  — nothing.
     uint64_t SessionTagsEpoch() noexcept;
+
+    // Agentmaster (SESSIONS_DB.md §7.6): the FACTS EPOCH — moves after every write that CHANGES a session's
+    // title, favorite or tag list (the facts the session database mirrors into its am_* tables). The database's
+    // refresh tick compares it and sends `factsChanged` only when it moved, instead of re-reading the profile
+    // every tick. Same reader contract and the same limit as SessionTagsEpoch (this process's writes only).
+    //   returns — the current epoch; 0 until the first such change of this process.
+    //   throws  — nothing.
+    uint64_t SessionFactsEpoch() noexcept;
 }

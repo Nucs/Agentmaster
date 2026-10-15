@@ -37,6 +37,7 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
+#include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md — the cog's SESSION DATABASE status line
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
@@ -1074,6 +1075,36 @@ namespace winrt::TerminalApp::implementation
         _setCarryDraftOnFork.Header(winrt::box_value(L"Copy my unsent prompt into a forked session"));
         AgentSetTip(_setCarryDraftOnFork, L"When you fork a session \x2014 a tab's \x201C" L"Fork session\x201D (or Ctrl+Shift+D), the Manager's Fork, or the Sessions page's Fork here \x2014 the message sitting UNSENT in the source's input box is typed into the new fork's box as well, WITHOUT pressing Enter, so the fork starts one Enter away from the same prompt. The source keeps its copy.\n\nPasted blocks come across as the real pasted text: each [Pasted text #N +M lines] is rebuilt from what you actually pasted (Agentmaster records every paste it passes to Claude), so the fork's box shows the same placeholder backed by the same content \x2014 never the bare label, which Claude would send as literal text. A draft whose pasted block can't be matched for certain (or that holds an image) is not copied at all.\n\nNever fights you: if you start typing into the fork before it lands, your text wins. Off: forks start with an empty input box.");
         panel.Children().Append(_setCarryDraftOnFork);
+        // SESSIONS_DB.md: the session database. Off by default: nothing changes until the user picks Shadow (it
+        // runs beside today's search and logs where the two differ) or On (the Sessions page and the AI search
+        // read it). Save applies the mode and the interval at once (the refresh tick starts or stops); the threads
+        // and the memory limit apply when the service next starts (it exits 10 minutes after its last client).
+        panel.Children().Append(SettingsSeparator(L"SESSION DATABASE (preview)"));
+        _setSessionDbMode = ComboBox{};
+        _setSessionDbMode.Header(winrt::box_value(L"Session database"));
+        _setSessionDbMode.Items().Append(winrt::box_value(L"Off")); // 0 == SessionDbMode::Off
+        _setSessionDbMode.Items().Append(winrt::box_value(L"Shadow (run beside today's search, log differences)")); // 1 == Shadow
+        _setSessionDbMode.Items().Append(winrt::box_value(L"On")); // 2 == On
+        AgentSetTip(_setSessionDbMode, L"A database of every Claude Code session on this computer (every line kept, a full-text index), served by a small background process per profile. Off: nothing runs. Shadow: it is built and kept current, and the Sessions page searches it BESIDE today's search and logs where the two differ ([sessdb-diff] in hooks.log)  14 nothing on screen changes. On: the Sessions page searches it. The first build reads every transcript once (minutes, in the background, at low priority).");
+        panel.Children().Append(_setSessionDbMode);
+        _setSessionDbRefresh = TextBox{};
+        _setSessionDbRefresh.Header(winrt::box_value(L"Refresh every (seconds)"));
+        _setSessionDbRefresh.PlaceholderText(L"5 (1 13" L"60)");
+        AgentSetTip(_setSessionDbRefresh, L"How often the sessions that changed are written into the database. Agentmaster counts the changes it already watches for; a tick with nothing changed costs nothing. Blank resets to 5; the range is 1 13" L"60.");
+        panel.Children().Append(_setSessionDbRefresh);
+        _setSessionDbThreads = TextBox{};
+        _setSessionDbThreads.Header(winrt::box_value(L"Database threads"));
+        _setSessionDbThreads.PlaceholderText(L"4 (1 13" L"16)");
+        AgentSetTip(_setSessionDbThreads, L"How many threads the database may use for one query or for the first build. Applies when the database process next starts. Blank resets to 4.");
+        panel.Children().Append(_setSessionDbThreads);
+        _setSessionDbMemory = TextBox{};
+        _setSessionDbMemory.Header(winrt::box_value(L"Database memory limit (MB)"));
+        _setSessionDbMemory.PlaceholderText(L"1024 (256 13" L"16384)");
+        AgentSetTip(_setSessionDbMemory, L"The most memory the database process may use (DuckDB's memory_limit); above it, large work spills to disk. Applies when the database process next starts. Blank resets to 1024.");
+        panel.Children().Append(_setSessionDbMemory);
+        _setSessionDbStatus = Text(L"", 11, false, 0.7);
+        _setSessionDbStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setSessionDbStatus);
         // ENV_VARS.md: the two-tab "Environment variables" area (Global / Per-directory) replaces the old
         // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
         _BuildEnvVarsArea(panel);
@@ -2781,6 +2812,23 @@ namespace winrt::TerminalApp::implementation
         {
             _setCarryDraftOnFork.IsOn(_appSettings.carryDraftOnFork); // PENDING_INPUT.md §11
         }
+        if (_setSessionDbMode)
+        {
+            // SESSIONS_DB.md: the four settings, clamped the way the engine reads them, and what the refresh tick
+            // last did (read once, at open).
+            _setSessionDbMode.SelectedIndex(static_cast<int32_t>(_appSettings.sessionDbMode));
+            _setSessionDbRefresh.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampSessionDbRefreshSeconds(_appSettings.sessionDbRefreshSeconds)) });
+            _setSessionDbThreads.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampSessionDbThreads(_appSettings.sessionDbThreads)) });
+            _setSessionDbMemory.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampSessionDbMemoryMb(_appSettings.sessionDbMemoryMb)) });
+            std::wstring status = L"Off: the Sessions page reads the transcripts as before.";
+            if (const auto& db = ::Agentmaster::SharedEngine().sessionDb; db && db->Mode() != ::Agentmaster::SessionDbMode::Off)
+            {
+                const std::wstring line = db->StatusText();
+                status = std::wstring{ db->Ready() ? L"Running; it covers every session. " : L"Running; the first build is still under way. " } +
+                         (line.empty() ? std::wstring{} : line);
+            }
+            _setSessionDbStatus.Text(winrt::hstring{ status });
+        }
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
@@ -3496,6 +3544,26 @@ namespace winrt::TerminalApp::implementation
         if (_setCarryDraftOnFork)
         {
             _appSettings.carryDraftOnFork = _setCarryDraftOnFork.IsOn(); // PENDING_INPUT.md §11
+        }
+        if (_setSessionDbMode)
+        {
+            // SESSIONS_DB.md: blank / garbage / 0 fall back to each setting's default through the engine's clamps.
+            const auto digits = [](const winrt::hstring& text) -> uint32_t {
+                uint32_t v = 0;
+                for (const wchar_t c : std::wstring_view{ text })
+                {
+                    if (c >= L'0' && c <= L'9' && v < 1000000)
+                    {
+                        v = v * 10 + static_cast<uint32_t>(c - L'0');
+                    }
+                }
+                return v;
+            };
+            const int32_t mode = _setSessionDbMode.SelectedIndex();
+            _appSettings.sessionDbMode = mode == 2 ? ::Agentmaster::SessionDbMode::On : mode == 1 ? ::Agentmaster::SessionDbMode::Shadow : ::Agentmaster::SessionDbMode::Off;
+            _appSettings.sessionDbRefreshSeconds = ::Agentmaster::ClampSessionDbRefreshSeconds(digits(_setSessionDbRefresh.Text()));
+            _appSettings.sessionDbThreads = ::Agentmaster::ClampSessionDbThreads(digits(_setSessionDbThreads.Text()));
+            _appSettings.sessionDbMemoryMb = ::Agentmaster::ClampSessionDbMemoryMb(digits(_setSessionDbMemory.Text()));
         }
         if (_setConfirmKill)
         {

@@ -219,6 +219,17 @@ namespace Agentmaster
             g_tagsEpoch.fetch_add(1, std::memory_order_acq_rel);
         }
 
+        // Agentmaster (SESSIONS_DB.md §7.6): the FACTS EPOCH behind SessionFactsEpoch — a session's title,
+        // favorite or tags changed on disk. Bumped after the write, like the tag epoch.
+        std::atomic<uint64_t> g_factsEpoch{ 0 };
+
+        // Whether a session-store key is one of the facts the session database mirrors (am_title, am_favorite,
+        // am_tag): drafts, command progress and launch snapshots are not.
+        bool IsFactKey(const std::wstring& key) noexcept
+        {
+            return key == kSessionStoreTitleKey || key == kSessionStoreFavoriteKey || key == kSessionStoreTagsKey;
+        }
+
         // Agentmaster (tags perf, 2026-10-10): the stores of this process that had ONE complete
         // whole-directory read (VisitStoreDir) — the "warm" set behind SessionStoreScanIsWarmIn. Key: the
         // case-folded store directory (RecCacheKey). Guarded by g_recCacheMtx, like the cache it describes.
@@ -581,6 +592,10 @@ namespace Agentmaster
         {
             NoteTagsChanged();
         }
+        if (written && IsFactKey(key))
+        {
+            g_factsEpoch.fetch_add(1, std::memory_order_acq_rel);
+        }
         return written;
     }
 
@@ -593,6 +608,7 @@ namespace Agentmaster
         SessionStoreRecord rec = ParseRecord(storeDir, sessionId); // freshest-disk RMW (as the single-field setter)
         bool changed = false;
         bool tagsChanged = false; // the batch changed the `tags` key — moves the tag-change epoch once written
+        bool factsChanged = false; // the batch changed a title, favorite or tags — moves the facts epoch once written
         for (const auto& [key, value] : fields)
         {
             if (key.empty())
@@ -608,6 +624,7 @@ namespace Agentmaster
                     rec.erase(it);
                     changed = true;
                     tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
+                    factsChanged = factsChanged || IsFactKey(key);
                 }
                 continue; // absent already — nothing to remove
             }
@@ -618,6 +635,7 @@ namespace Agentmaster
             rec[key] = value;
             changed = true;
             tagsChanged = tagsChanged || key == kSessionStoreTagsKey;
+            factsChanged = factsChanged || IsFactKey(key);
         }
         if (!changed)
         {
@@ -628,6 +646,10 @@ namespace Agentmaster
         if (written && tagsChanged)
         {
             NoteTagsChanged(); // after the write — the SessionTagsEpoch reader contract
+        }
+        if (written && factsChanged)
+        {
+            g_factsEpoch.fetch_add(1, std::memory_order_acq_rel);
         }
         return written;
     }
@@ -1297,6 +1319,11 @@ namespace Agentmaster
     uint64_t SessionTagsEpoch() noexcept
     {
         return g_tagsEpoch.load(std::memory_order_acquire);
+    }
+
+    uint64_t SessionFactsEpoch() noexcept
+    {
+        return g_factsEpoch.load(std::memory_order_acquire);
     }
 
     std::map<std::wstring, std::wstring> LoadAllTagColors()

@@ -596,6 +596,19 @@ namespace Agentmaster
         }
     }
 
+    void SessionScanner::SetTranscriptChangeTracking(bool on) noexcept
+    {
+        if (_watcher)
+        {
+            _watcher->SetChangeTracking(on);
+        }
+    }
+
+    void SessionScanner::TakeChangedTranscripts(ChangedSessions& out)
+    {
+        out = _watcher ? _watcher->TakeChangedSessions() : ChangedSessions{};
+    }
+
     void SessionScanner::Wake() noexcept
     {
         {
