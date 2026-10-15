@@ -279,6 +279,23 @@ namespace Agentmaster
         NoColor = 3 // "Remove colors": no tab is colored; persisted colors kept but not loaded
     };
 
+    // Agentmaster (SESSIONS_DB.md §12 rollout): how the app uses the session database (DuckDB, served by
+    // agentmaster-sessiondb.exe). GLOBAL (AppSettings::sessionDbMode), persisted as a string token
+    // (Persistence ToString / SessionDbModeFromString); a missing / unknown token reads as Off.
+    //   * Off    — the app starts no service and refreshes nothing; every surface reads what it read before.
+    //   * Shadow — the service runs and the app refreshes it (D16), but every surface still shows today's
+    //              results; the Sessions page also runs the database's search and logs the differences
+    //              ([sessdb-diff] in hooks.log), so the two can be compared before switching.
+    //   * On     — the service runs, the app refreshes it, and the Sessions page lists and searches through
+    //              it (today's code path stays the fallback when the service is unavailable).
+    // A change applies at the next app start (the engine starts or skips the service once, at init).
+    enum class SessionDbMode
+    {
+        Off = 0,
+        Shadow = 1,
+        On = 2,
+    };
+
     // Agentmaster (tab title naming): HOW an untitled session's default tab title is derived from
     // its working directory — the cog's TABS "Tab title naming" dropdown. Every technique starts
     // from the MEANINGFUL folder (the walk past generic bin/obj/Debug/... segments
@@ -2691,6 +2708,20 @@ namespace Agentmaster
         // turned on; the process's one search agent applies it, so every window shows the same level.
         // The engine stores the word opaquely; an unknown or empty word reads as "off". Default "off".
         std::wstring sessionsAiThinkingLevel{ L"off" };
+        // --- the session database (SESSIONS_DB.md; the cog's SESSIONS tab, "Session database") ---
+        // How the app uses it (see SessionDbMode). Default Off: the database costs a background cold
+        // build (minutes of CPU, ~1 GB per 3 GB of transcripts on disk) the first time it runs, so it is
+        // an explicit choice. Applies at the next app start.
+        SessionDbMode sessionDbMode{ SessionDbMode::Off };
+        // D16, decided 2026-10-14: the app's observer counts each session's changes, and every refresh
+        // tick (this many seconds) the sessions that changed are upserted into the database. 1..60
+        // (ClampSessionDbRefreshSeconds); read by every tick, so a cog Save applies at the next one.
+        uint32_t sessionDbRefreshSeconds{ 5 };
+        // DuckDB's limits in the service (SESSIONS_DB.md §10): worker threads per query, and the memory
+        // limit in MB (DuckDB's own default is 80% of RAM — far too much beside 100+ claude sessions).
+        // Read by the service when it opens the database (a change applies when the service restarts).
+        uint32_t sessionDbThreads{ 4 };
+        uint32_t sessionDbMemoryMb{ 1024 };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
@@ -2994,6 +3025,43 @@ namespace Agentmaster
             return 20;
         }
         return v > 40 ? 40 : v;
+    }
+
+    // Agentmaster (SESSIONS_DB.md §7.6, D16): clamp AppSettings::sessionDbRefreshSeconds into 1..60. 0 /
+    // absent / garbage falls back to the 5 s default (a refresh period of 0 would be a busy loop). Shared by
+    // the Persistence load, the cog Save and the engine's refresh tick, so all three agree.
+    // Parameters: v — the stored or typed seconds. Returns: the period in seconds, 1..60.
+    inline uint32_t ClampSessionDbRefreshSeconds(uint32_t v) noexcept
+    {
+        if (v < 1)
+        {
+            return 5;
+        }
+        return v > 60 ? 60 : v;
+    }
+
+    // Agentmaster (SESSIONS_DB.md §10): clamp AppSettings::sessionDbThreads into 1..16 (0 / garbage -> 4).
+    // Parameters: v — the stored or typed thread count. Returns: 1..16.
+    inline uint32_t ClampSessionDbThreads(uint32_t v) noexcept
+    {
+        if (v < 1)
+        {
+            return 4;
+        }
+        return v > 16 ? 16 : v;
+    }
+
+    // Agentmaster (SESSIONS_DB.md §10): clamp AppSettings::sessionDbMemoryMb into 256..16384 MB (0 /
+    // garbage -> 1024). Below 256 MB a cold build spills constantly; above 16 GB is never wanted beside a
+    // fleet of claude sessions.
+    // Parameters: v — the stored or typed megabytes. Returns: 256..16384.
+    inline uint32_t ClampSessionDbMemoryMb(uint32_t v) noexcept
+    {
+        if (v == 0)
+        {
+            return 1024;
+        }
+        return v < 256 ? 256 : (v > 16384 ? 16384 : v);
     }
 
     // Agentmaster (RENDERING.md §4c): clamp AppSettings::releaseHiddenTerminalDevicesAfterSeconds into

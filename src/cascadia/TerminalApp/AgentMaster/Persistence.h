@@ -52,6 +52,10 @@ namespace Agentmaster
     std::wstring ToString(FavoriteIcon i);
     FavoriteIcon FavoriteIconFromString(std::wstring_view s);
     std::wstring ToString(TabColorMode m);
+    // SESSIONS_DB.md: AppSettings::sessionDbMode's settings.json token ("off" / "shadow" / "on"), and back
+    // (an absent or unknown token reads as Off). Pure.
+    std::wstring ToString(SessionDbMode m);
+    SessionDbMode SessionDbModeFromString(std::wstring_view s);
     TabColorMode TabColorModeFromString(std::wstring_view s);
     std::wstring ToString(TabTitleNaming n);
     TabTitleNaming TabTitleNamingFromString(std::wstring_view s);
