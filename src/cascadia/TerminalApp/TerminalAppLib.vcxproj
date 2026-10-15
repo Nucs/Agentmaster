@@ -211,6 +211,7 @@
     <ClInclude Include="AgentMaster\SessionDbProtocol.h" />
     <ClInclude Include="AgentMaster\SessionDbClient.h" />
     <ClInclude Include="AgentMaster\SessionDbRefresher.h" />
+    <ClInclude Include="AgentMaster\SessionDbToolDefs.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
     <ClInclude Include="AgentMaster\Splash.h" />

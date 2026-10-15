@@ -67,6 +67,16 @@ namespace Agentmaster
         // (AppSettings::sessionsAiThinkingLevel), before its first process starts.
         HarnessThinkingLevel thinkingLevel{ HarnessThinkingLevel::Off };
         int64_t autoCompactTokens{ 500000 };
+
+        // SESSIONS_DB.md §8.2: the profile whose SESSION DATABASE the agent searches, or empty for the
+        // page search. Non-empty: the model gets the database's read tools (search, session, messages,
+        // grep, files, who_touched, timeline, usage, related, sql — SessionDbToolDefs.h) as the server
+        // `agentmaster`, each call forwarded to the profile's service (agentmaster-sessiondb.exe,
+        // started when none runs), and DatabaseSystemPrompt(); no session index is read (no index
+        // keeper, no sidecar gather) except the few sidecar files of the sessions it shows. The app
+        // sets it when AppSettings::sessionDbMode is On at the agent's creation, so a change of the
+        // mode reaches the AI search at the next start of the app (the agent lives for the process).
+        std::wstring sessionDbProfile;
     };
 
     // What an event reports.

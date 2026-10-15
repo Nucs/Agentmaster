@@ -275,6 +275,8 @@ void TestAgentHarnessCore();
 // on scratch folders (a gather that stops early says how far it got; steps always move forward; a refresh reads
 // only what changed)
 void TestSessionSearchTools();
+// tests_sessiondb.cpp
+void TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts: protocol names + framing, the tool definitions, the settings clamps, the watcher's change set (D16), the facts epoch, the AI search's database mode
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs

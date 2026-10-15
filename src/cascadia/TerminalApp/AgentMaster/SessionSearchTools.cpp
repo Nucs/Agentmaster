@@ -6,6 +6,7 @@
 #include "SessionSearchTools.h"
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir, LogSwallowedException
+#include "SessionDbToolDefs.h" // the session database's tools (the database mode's server)
 #include "SessionStore.h" // stored titles, tags, favorites
 
 #include <windows.h>
@@ -334,6 +335,67 @@ namespace
         L"7. Times in the results are local time. Each result gives the current local time as `now`.\n"
         L"8. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
         L"fits, and say in your sentence that older sessions are still being indexed.\n";
+
+    // The same role and rules for the SESSION DATABASE's tools (SESSIONS_DB.md §8.2): rule 1 lists the database's
+    // kinds of calls, rule 3 widens with `scopes` (the database's content search is cheap, so a longer period comes
+    // before more scopes) and lets the model check a doubtful candidate before it shows it. Rules 2 and 4-8 are the
+    // page search's, word for word (rule 8 reads the same `indexing` field, which the database adds while its first
+    // build runs). ASCII on purpose, like kSystemPrompt.
+    // ⚠ The m5 suite pins its rule count and that it names every tool of SessionDbToolDefs.h.
+    const wchar_t kDatabaseSystemPrompt[] =
+        L"You are the search assistant inside the Sessions browser of Agentmaster, an app that manages Claude Code sessions. "
+        L"The user looks for past Claude Code sessions (conversations) on this computer. You find them with the tools of the "
+        L"session database and put them on the screen with another tool. The user sees the list on the screen and your "
+        L"one-sentence reply. The user does not see your tool calls or their results.\n"
+        L"\n"
+        L"Tools:\n"
+        L"- mcp__agentmaster__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, "
+        L"branch, the paths of files it touched, or a message in `scopes` (by default title, path, prompt and reply; tool adds "
+        L"tool calls and their output; subagent adds the subagents' work). Filters narrow it: days, after, before, dir, branch, "
+        L"tag, favorite, open. Rows carry a short id, why they matched, and snippets with a ref.\n"
+        L"- To look further: mcp__agentmaster__grep finds exact text or a regex with its context; mcp__agentmaster__who_touched "
+        L"lists the sessions that touched a file or folder; mcp__agentmaster__timeline lists what ran in a period; "
+        L"mcp__agentmaster__session gives one session's facts; mcp__agentmaster__messages reads its conversation (around a ref); "
+        L"mcp__agentmaster__files lists the files it touched; mcp__agentmaster__related finds its forks and relatives; "
+        L"mcp__agentmaster__usage counts tokens; mcp__agentmaster__sql runs one read-only query.\n"
+        L"- mcp__display__show puts sessions on the screen, in your order, and replaces what was there. Give it the short ids "
+        L"from any result, best match first, or top:N to show the first N rows of your latest search as they are.\n"
+        L"\n"
+        L"Rules:\n"
+        L"1. Your first step, for every request: before your first tool call, in the same message, mention in one or two short "
+        L"lines which kinds of tool calls you can use for this request, out of everything your tools can do (search by words "
+        L"and scopes; by folder, branch, tag, favorite or open; by a period with days, after or before; grep for exact text; "
+        L"who_touched for a file; timeline for a period; session or messages to check a candidate; show by ids or top:N), and "
+        L"how you will use them in different ways (the words or phrasings you will try, the filters, a longer period, more "
+        L"scopes). Then make the calls of that step at once.\n"
+        L"2. Act at once. Never ask a question before you search. For every request: the first step of rule 1 (its mention and "
+        L"its searches), then call show exactly once, then reply.\n"
+        L"3. Be fast. One search is usually enough: 1 to 3 distinctive words, no filler words. Leave `days` out (a search then "
+        L"covers the last 90 days) unless the user names a period. If a search finds nothing useful, try again with other or "
+        L"fewer words, then a longer period (days:365), then more scopes (tool). Make independent calls in one step. Check a "
+        L"doubtful candidate with session or messages before you show it.\n"
+        L"4. Show only what fits the request, best first: usually 1 to 15 sessions. When nothing fits, call show with an empty "
+        L"ids list.\n"
+        L"5. After show returns, reply with exactly ONE short sentence, under 25 words, in the user's language: what is on "
+        L"the screen and the title of the best match, for example: Three sessions are on the screen; the best match is "
+        L"\"Fix tab drag crash\". The mention of rule 1 is not your reply: no second sentence, no list, no markdown, no ids.\n"
+        L"6. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
+        L"7. Times in the results are local time. Each result gives the current local time as `now`.\n"
+        L"8. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
+        L"fits, and say in your sentence that older sessions are still being indexed.\n";
+
+    // `ascii` (a SessionDbToolDefs.h string: ASCII by its contract) as a wide string; a byte above 0x7F becomes '?'
+    // rather than a guess at an encoding. Never throws beyond std::bad_alloc.
+    std::wstring WidenAscii(const char* ascii)
+    {
+        std::wstring out;
+        for (const char* p = ascii; p && *p; ++p)
+        {
+            const auto b = static_cast<unsigned char>(*p);
+            out.push_back(b < 0x80 ? static_cast<wchar_t>(b) : L'?');
+        }
+        return out;
+    }
 }
 
 namespace Agentmaster
@@ -954,9 +1016,10 @@ namespace Agentmaster
     SessionSearchToolset::SessionSearchToolset(Callbacks callbacks) :
         _callbacks{ std::move(callbacks) }
     {
-        if (!_callbacks.catalog || !_callbacks.onShow)
+        // The catalog feeds the page search only: the database mode never asks for one.
+        if ((!_callbacks.catalog && !_callbacks.database.call) || !_callbacks.onShow)
         {
-            throw std::invalid_argument("SessionSearchToolset needs the catalog and onShow callbacks.");
+            throw std::invalid_argument("SessionSearchToolset needs the catalog (or the database's call) and onShow callbacks.");
         }
         const SessionContentSearch defaults = DefaultSessionContentSearch();
         if (!_callbacks.content.prompts)
@@ -977,6 +1040,151 @@ namespace Agentmaster
     const wchar_t* SessionSearchToolset::SystemPrompt() noexcept
     {
         return kSystemPrompt;
+    }
+
+    const wchar_t* SessionSearchToolset::DatabaseSystemPrompt() noexcept
+    {
+        return kDatabaseSystemPrompt;
+    }
+
+    std::wstring SessionSearchToolset::DescribeDatabaseCall(const std::string& tool, const json::Value& arguments)
+    {
+        using Type = json::Value::Type;
+        const auto quoted = [](const std::wstring& text) { return L"\"" + Cut(OneLine(text), 60) + L"\""; };
+        const auto window = [&arguments]() -> std::wstring {
+            const std::wstring after = arguments.StrAt(L"after");
+            const std::wstring before = arguments.StrAt(L"before");
+            if (!after.empty() || !before.empty())
+            {
+                return (after.empty() ? std::wstring{ L"..." } : after) + L" to " + (before.empty() ? std::wstring{ L"today" } : before);
+            }
+            const auto* days = arguments.Find(L"days");
+            const int64_t n = days && days->type == Type::Num ? days->AsI64() : 0;
+            return n > 0 ? L"last " + std::to_wstring(n) + L" days" : std::wstring{};
+        };
+        std::wstring text;
+        if (tool == "search")
+        {
+            const std::wstring q = arguments.StrAt(L"query");
+            text = q.empty() ? std::wstring{ L"all sessions" } : quoted(q);
+            const std::wstring w = window();
+            text += L" \x00B7 " + (w.empty() ? std::wstring{ L"last 90 days" } : w);
+            if (const std::wstring dir = arguments.StrAt(L"dir"); !dir.empty())
+            {
+                text += L" \x00B7 in " + Cut(dir, 60);
+            }
+            if (const auto* scopes = arguments.Find(L"scopes"); scopes && scopes->type == Type::Arr)
+            {
+                for (const auto& s : scopes->arr)
+                {
+                    if (s.type == Type::Str && (s.str == L"tool" || s.str == L"subagent"))
+                    {
+                        text += L" \x00B7 with " + s.str + L" text";
+                    }
+                }
+            }
+            return text;
+        }
+        if (tool == "grep")
+        {
+            return L"grep " + quoted(arguments.StrAt(L"pattern"));
+        }
+        if (tool == "who_touched")
+        {
+            return L"who touched " + quoted(arguments.StrAt(L"path"));
+        }
+        if (tool == "timeline")
+        {
+            const std::wstring from = arguments.StrAt(L"from");
+            const std::wstring to = arguments.StrAt(L"to");
+            return L"timeline " + (from.empty() ? std::wstring{ L"of the last week" } : from + L" to " + (to.empty() ? std::wstring{ L"today" } : to));
+        }
+        if (tool == "sql")
+        {
+            return L"a database query";
+        }
+        if (tool == "usage")
+        {
+            return L"token use by " + arguments.StrAt(L"group_by", L"session");
+        }
+        // session / messages / files / related: one session.
+        const std::wstring id = Cut(Trim(arguments.StrAt(L"id")), 12);
+        return (tool == "files" ? std::wstring{ L"the files of " } : tool == "related" ? std::wstring{ L"the relatives of " } : std::wstring{ L"reading " }) +
+               (id.empty() ? std::wstring{ L"a session" } : id);
+    }
+
+    void SessionSearchToolset::RememberHandles(const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds)
+    {
+        std::lock_guard lock{ _mutex };
+        for (size_t i = 0; i < handles.size() && i < fullIds.size(); ++i)
+        {
+            if (!fullIds[i].empty())
+            {
+                _handles[FoldLower(Trim(handles[i]))] = fullIds[i];
+            }
+        }
+    }
+
+    HarnessToolResult SessionSearchToolset::DatabaseCall(const std::string& tool, const json::Value& arguments)
+    {
+        // "Is this call still wanted?" (Search's rule: the handler blocks the SDK's reader thread, so a replaced
+        // request must not leave a trace.)
+        std::function<bool()> cancelled;
+        if (_callbacks.generation)
+        {
+            const uint64_t startGeneration = _callbacks.generation();
+            cancelled = [this, startGeneration] { return _callbacks.generation() != startGeneration; };
+        }
+        if (_callbacks.onSearching)
+        {
+            _callbacks.onSearching(DescribeDatabaseCall(tool, arguments));
+        }
+        HarnessToolResult result = _callbacks.database.call(tool, arguments);
+        if (cancelled && cancelled())
+        {
+            return { L"The call was cancelled: the request was stopped or replaced.", true };
+        }
+        if (result.isError || tool != "search")
+        {
+            return result;
+        }
+        // A search's rows: their short ids become show's ids (and top:N its order), and the page previews them.
+        std::vector<std::wstring> handles;
+        if (const auto parsed = json::Parse(result.text); parsed && parsed->type == json::Value::Type::Obj)
+        {
+            if (const auto* rows = parsed->Find(L"rows"); rows && rows->type == json::Value::Type::Arr)
+            {
+                for (const auto& row : rows->arr)
+                {
+                    if (const std::wstring id = row.StrAt(L"id"); !id.empty())
+                    {
+                        handles.push_back(id);
+                    }
+                }
+            }
+        }
+        std::vector<std::wstring> ids;
+        if (!handles.empty() && _callbacks.database.resolve)
+        {
+            const std::vector<std::wstring> full = _callbacks.database.resolve(handles);
+            RememberHandles(handles, full);
+            for (const auto& id : full)
+            {
+                if (!id.empty())
+                {
+                    ids.push_back(id);
+                }
+            }
+        }
+        {
+            std::lock_guard lock{ _mutex };
+            _lastSearchIds = ids;
+        }
+        if (_callbacks.onCandidates && !ids.empty())
+        {
+            _callbacks.onCandidates(ids);
+        }
+        return result;
     }
 
     void SessionSearchToolset::Reset()
@@ -1119,6 +1327,23 @@ namespace Agentmaster
         std::vector<std::wstring> resolved;
         std::vector<std::wstring> unknown;
         std::unordered_set<std::wstring> seen;
+        if (hasIds && _callbacks.database.resolve)
+        {
+            // The database's other tools (grep, who_touched, timeline, related, ...) print short ids that no search
+            // of this conversation recorded: resolve those in one round trip before reading the list.
+            std::vector<std::wstring> missing;
+            for (const auto& v : idsArg->arr)
+            {
+                if (v.type == Type::Str && missing.size() < kMaxShown && ResolveHandle(v.str).empty())
+                {
+                    missing.push_back(Trim(v.str));
+                }
+            }
+            if (!missing.empty())
+            {
+                RememberHandles(missing, _callbacks.database.resolve(missing));
+            }
+        }
         if (hasIds)
         {
             for (const auto& v : idsArg->arr)
@@ -1151,12 +1376,12 @@ namespace Agentmaster
         if (resolved.empty() && !unknown.empty())
         {
             // Nothing usable: do not clear the screen for a list of ids that mean nothing.
-            std::wstring text = L"None of these ids is from a search result of this conversation:";
+            std::wstring text = _callbacks.database.call ? L"None of these ids names a session:" : L"None of these ids is from a search result of this conversation:";
             for (const auto& u : unknown)
             {
                 text += L" " + u;
             }
-            text += L". Search first, then pass the ids exactly as search returned them.";
+            text += _callbacks.database.call ? L". Pass the ids exactly as a result printed them." : L". Search first, then pass the ids exactly as search returned them.";
             return { text, true };
         }
         const std::wstring note = Cut(OneLine(arguments.StrAt(L"note")), 160);
@@ -1178,6 +1403,36 @@ namespace Agentmaster
 
     std::vector<HarnessToolServer> SessionSearchToolset::Servers()
     {
+        if (_callbacks.database.call)
+        {
+            // The database mode: its read tools, from the one copy of their text the service's registry uses too
+            // (SessionDbToolDefs.h), each forwarded; then the same `show`.
+            HarnessToolServer db;
+            db.name = kDatabaseServer;
+            for (const auto& def : SessionDbToolDefs::kTools)
+            {
+                HarnessTool t;
+                t.name = WidenAscii(def.name);
+                t.description = WidenAscii(def.description);
+                t.inputSchemaJson = WidenAscii(def.inputSchema);
+                t.readOnly = true; // every database tool only reads: one model step may run several at once
+                t.handler = [this, name = std::string{ def.name }](const json::Value& arguments) { return DatabaseCall(name, arguments); };
+                db.tools.push_back(std::move(t));
+            }
+            HarnessTool show;
+            show.name = kDisplayTool;
+            show.description = L"Show sessions to the user in the Sessions browser, in the given order. Replaces what the list shows. Call it once per request, after searching.";
+            show.inputSchemaJson = kShowSchema;
+            show.handler = [this](const json::Value& arguments) { return Show(arguments); };
+            HarnessToolServer display;
+            display.name = kDisplayServer;
+            display.tools.push_back(std::move(show));
+            std::vector<HarnessToolServer> servers;
+            servers.push_back(std::move(db));
+            servers.push_back(std::move(display));
+            return servers;
+        }
+
         HarnessTool search;
         search.name = kSearchTool;
         search.description = L"Find Claude Code sessions on this computer. Returns matching sessions as JSON rows (id, title, dir, branch, active, created, msgs, tools, match), best match first. Changes nothing on the screen.";

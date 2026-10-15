@@ -157,7 +157,10 @@ namespace Agentmaster::SessionDb
 
         // Index maintenance: true when the hot tier is big enough (or old enough) to merge.
         bool MergeDue() const;
-        // Run a merge (see TextIndex::Merge). Returns the blocks merged.
+        // Run a merge (see TextIndex::Merge): the hot blocks slice by slice, then the hot lines. A cancel keeps the
+        // merged slices and leaves the rest hot; the MergeDue estimates are re-read then (and after a failure).
+        //   cancel — polled before each slice (the service passes "a write job is waiting"); may be empty.
+        // Returns the blocks merged. Writer thread. Throws DbError (the failing slice rolled back).
         size_t Merge(const CancelFn& cancel);
         // Run the parts of a re-cluster that are due (see ReclusterDue), each in its own transaction:
         //   1. the text index (TextIndex::ReclusterPostings), recording when and over how many blocks it ran
@@ -315,6 +318,9 @@ namespace Agentmaster::SessionDb
         // The text index's part of ReclusterDue: the blocks merged since its last re-cluster are at least a
         // quarter of the index (and at least 20,000), or a day passed and new blocks arrived. Throws DbError.
         bool _postingsReclusterDue();
+        // Re-read the hot tier's size into the MergeDue estimates (after a merge that stopped early or failed:
+        // the blocks it did not reach are still hot). Never throws (a failed read leaves the estimate non-zero).
+        void _recountHotTier() noexcept;
 
         // --- logging ---
         void _log(const std::wstring& line) const;

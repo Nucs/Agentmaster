@@ -5,11 +5,14 @@
 // The Sessions browser's AI search; see SessionSearchAgent.h and SESSIONS.md §9.
 #include "SessionSearchAgent.h"
 
-#include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException
+#include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException, ResolveClaudeTranscriptPath
 #include "Engine.h" // SharedEngine — the shared agent's registry
 #include "Persistence.h" // LoadAppSettings — the shared agent's persisted thinking level
+#include "SessionDbClient.h" // SESSIONS_DB.md §8.2 — the database mode's tool calls
+#include "SessionDbProtocol.h" // kToolCall / kResolveIds
 #include "SessionRegistry.h" // LiveTabBindings / HeadlinesOf — the open sessions
 #include "SessionStore.h" // WarmSessionStore — the store's first read, kept off the search's path
+#include "TranscriptStore.h" // LoadOrRefreshSessionIndex — a shown session's row in the database mode
 
 #include <windows.h>
 
@@ -21,6 +24,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <optional>
 
 namespace
 {
@@ -58,6 +62,155 @@ namespace
     // it). The first step, plus room for one very large transcript that a step cannot split
     // (a transcript with no sidecar is parsed whole: seconds for hundreds of megabytes).
     constexpr int64_t kCatalogFirstWaitMs = 15000;
+
+    // ===== the session database mode (SESSIONS_DB.md §8.2) =====
+
+    // How long one forwarded database call may take: the service ends a query at 10 s (`sql` at 2.5 s) and answers
+    // 408, so this is only the belt for a service that stopped answering.
+    constexpr uint32_t kDatabaseCallTimeoutMs = 20000;
+    // How long a forwarded call waits for a service it had to start (the copy-out and the database's open).
+    constexpr uint32_t kDatabaseStartWaitMs = 20000;
+
+    // Connect a client to the profile's service, starting one when none runs. Returns false with `error` set.
+    bool ConnectDatabase(SessionDb::ServiceClient& client, std::wstring& error)
+    {
+        return client.Connect(true, kDatabaseStartWaitMs, error);
+    }
+
+    // One database tool call through the service: its own connection (a ServiceClient makes one call at a time, and
+    // the model may run several read-only calls of one step at once), `toolCall` with the tool's name and the
+    // model's arguments, then the answer's text and error flag as the model reads them. Every failure becomes an
+    // error result that tells the model what to do (it must not read "no session matched" into it).
+    //   profile   — the profile whose service answers.
+    //   tool      — a SessionDbToolDefs.h name.
+    //   arguments — the model's argument object.
+    // Returns the tool's result. Throws only std::bad_alloc (the harness answers the model with it).
+    HarnessToolResult CallDatabaseTool(const std::wstring& profile, const std::string& tool, const json::Value& arguments)
+    {
+        SessionDb::ServiceClient client{ profile };
+        std::wstring error;
+        if (!ConnectDatabase(client, error))
+        {
+            AppendStateLog(L"hooks.log", L"[ai-search] the session database did not answer a " + HarnessFromUtf8(tool) + L" call: " + error + L"\n");
+            return { L"The session database is not available (" + error + L"). Do not search again now and do not call show: reply that the session database is not running and that the user can ask again in a moment.", true };
+        }
+        json::Value params = json::Value::MkObj();
+        params.Set(L"name", json::Value::MkStr(HarnessFromUtf8(tool)));
+        params.Set(L"arguments", arguments.type == json::Value::Type::Obj ? arguments : json::Value::MkObj());
+        std::string answer;
+        if (!client.Call(SessionDbProtocol::kToolCall, HarnessToUtf8(json::Dump(params)), answer, kDatabaseCallTimeoutMs, error))
+        {
+            AppendStateLog(L"hooks.log", L"[ai-search] the session database's " + HarnessFromUtf8(tool) + L" call failed: " + error + L"\n");
+            return { L"The session database did not answer (" + error + L"). Try the call once more; if it fails again, reply that the session database is not answering.", true };
+        }
+        const auto env = json::Parse(HarnessFromUtf8(answer));
+        if (!env || env->type != json::Value::Type::Obj)
+        {
+            return { L"The session database sent an unreadable answer.", true };
+        }
+        if (const auto* e = env->Find(L"error"))
+        {
+            // 408 / 499 / 400 ...: the service's message says what happened and, for a bad argument, how to fix it.
+            return { e->StrAt(L"message", L"The call failed."), true };
+        }
+        const auto* result = env->Find(L"result");
+        if (!result || result->type != json::Value::Type::Obj)
+        {
+            return { L"The session database sent an empty answer.", true };
+        }
+        return { result->StrAt(L"text"), result->BoolAt(L"isError") };
+    }
+
+    // The whole session ids behind short ids, in order ("" for an unknown or shared one), in one `resolveIds` round
+    // trip. Never throws beyond std::bad_alloc: a failure answers "" for every handle (show then reports them as
+    // unknown ids, which the model can correct).
+    std::vector<std::wstring> ResolveDatabaseIds(const std::wstring& profile, const std::vector<std::wstring>& handles)
+    {
+        std::vector<std::wstring> out(handles.size());
+        if (handles.empty())
+        {
+            return out;
+        }
+        SessionDb::ServiceClient client{ profile };
+        std::wstring error;
+        if (!ConnectDatabase(client, error))
+        {
+            AppendStateLog(L"hooks.log", L"[ai-search] resolveIds: the session database did not answer: " + error + L"\n");
+            return out;
+        }
+        json::Value list = json::Value::MkArr();
+        for (size_t i = 0; i < handles.size() && i < 200; ++i)
+        {
+            list.Push(json::Value::MkStr(handles[i]));
+        }
+        json::Value params = json::Value::MkObj();
+        params.Set(L"ids", std::move(list));
+        std::string answer;
+        if (!client.Call(SessionDbProtocol::kResolveIds, HarnessToUtf8(json::Dump(params)), answer, kDatabaseCallTimeoutMs, error))
+        {
+            AppendStateLog(L"hooks.log", L"[ai-search] resolveIds failed: " + error + L"\n");
+            return out;
+        }
+        const auto env = json::Parse(HarnessFromUtf8(answer));
+        const json::Value* result = env ? env->Find(L"result") : nullptr;
+        const json::Value* ids = result ? result->Find(L"ids") : nullptr;
+        if (!ids || ids->type != json::Value::Type::Obj)
+        {
+            return out;
+        }
+        for (size_t i = 0; i < handles.size(); ++i)
+        {
+            if (const auto* v = ids->Find(handles[i]); v && v->type == json::Value::Type::Str)
+            {
+                out[i] = v->str;
+            }
+        }
+        return out;
+    }
+
+    // FILETIME (UTC, 100 ns since 1601) as Unix milliseconds; 0 for a time before 1970.
+    int64_t FileTimeUnixMs(const FILETIME& ft) noexcept
+    {
+        const uint64_t t = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        constexpr uint64_t kEpochDiff = 116444736000000000ull; // 1601 -> 1970 in 100 ns
+        return t < kEpochDiff ? 0 : static_cast<int64_t>((t - kEpochDiff) / 10000);
+    }
+
+    // The index entry of one session by its whole id, for a row the page shows outside its own window (the database
+    // mode has no catalog to take it from): the transcript found where Claude keeps it, then its sidecar index
+    // (LoadOrRefreshSessionIndex: one small file read, or a parse of a transcript that grew). nullopt when the
+    // transcript is gone (the page then shows no row for it, like for any deleted session). Never throws beyond
+    // std::bad_alloc (a failed read is logged and reads as nullopt).
+    std::optional<SessionIndexEntry> IndexEntryForSession(const std::wstring& sessionId)
+    {
+        try
+        {
+            const std::wstring path = ResolveClaudeTranscriptPath(sessionId);
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (path.empty() || !::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                return std::nullopt;
+            }
+            TranscriptRef ref;
+            ref.sessionId = sessionId;
+            ref.path = path;
+            const size_t slash = path.find_last_of(L"\\/");
+            if (slash != std::wstring::npos && slash > 0)
+            {
+                const size_t parent = path.find_last_of(L"\\/", slash - 1);
+                ref.projectDirLeaf = path.substr(parent == std::wstring::npos ? 0 : parent + 1, slash - (parent == std::wstring::npos ? 0 : parent + 1));
+            }
+            ref.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            ref.mtimeMs = FileTimeUnixMs(fad.ftLastWriteTime);
+            ref.birthMs = FileTimeUnixMs(fad.ftCreationTime);
+            return LoadOrRefreshSessionIndex(ref);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"SessionSearchAgent: the index entry of a shown session");
+            return std::nullopt;
+        }
+    }
 
     // The shown list as JSON (the "view" file, version 1): what a page needs to show the
     // conversation's last result again after a restart.
@@ -455,7 +608,8 @@ namespace Agentmaster
             try
             {
                 std::lock_guard lock{ mutex };
-                if (shuttingDown)
+                // The database mode searches the session database: no index is read here (SESSIONS_DB.md §8.2).
+                if (shuttingDown || !options.sessionDbProfile.empty())
                 {
                     return;
                 }
@@ -552,7 +706,27 @@ namespace Agentmaster
                 current = catalog;
             }
             std::vector<SessionIndexEntry> out;
-            if (!current || ids.empty())
+            if (ids.empty())
+            {
+                return out;
+            }
+            if (!options.sessionDbProfile.empty())
+            {
+                // The database mode has no catalog: each listed session's row comes from its own sidecar index (the
+                // page needs it only for a session outside its window; at most the 100 a show lists).
+                out.reserve(ids.size());
+                for (const auto& id : ids)
+                {
+                    if (auto entry = IndexEntryForSession(id))
+                    {
+                        entry->stats.pathsAccessed.clear();
+                        entry->stats.pathsAccessed.shrink_to_fit();
+                        out.push_back(std::move(*entry));
+                    }
+                }
+                return out;
+            }
+            if (!current)
             {
                 return out;
             }
@@ -749,6 +923,16 @@ namespace Agentmaster
         callbacks.onSearching = [impl](const std::wstring& summary) { impl->OnSearching(summary); };
         callbacks.onCandidates = [impl](const std::vector<std::wstring>& ids) { impl->OnCandidates(ids); };
         callbacks.onShow = [impl](const std::vector<std::wstring>& ids, const std::wstring& note) { impl->OnShow(ids, note); };
+        const bool database = !impl->options.sessionDbProfile.empty();
+        if (database)
+        {
+            // SESSIONS_DB.md §8.2: the database's read tools instead of the page search (each call forwarded to the
+            // profile's service), and `show` resolves the short ids those tools print.
+            const std::wstring profile = impl->options.sessionDbProfile;
+            callbacks.database.call = [profile](const std::string& tool, const json::Value& arguments) { return CallDatabaseTool(profile, tool, arguments); };
+            callbacks.database.resolve = [profile](const std::vector<std::wstring>& handles) { return ResolveDatabaseIds(profile, handles); };
+            LogAgent(L"the AI search uses the session database (profile " + profile + L")");
+        }
         impl->toolset = std::make_unique<SessionSearchToolset>(std::move(callbacks));
 
         HarnessOptions h;
@@ -762,7 +946,7 @@ namespace Agentmaster
         // before a tool call, at effort low: the fastest answer.
         h.thinking = HarnessThinkingLevelThinks(impl->options.thinkingLevel) ? HarnessThinking::Adaptive : HarnessThinking::Disabled;
         h.effort = HarnessThinkingLevelEffort(impl->options.thinkingLevel);
-        h.systemPrompt = SessionSearchToolset::SystemPrompt();
+        h.systemPrompt = database ? SessionSearchToolset::DatabaseSystemPrompt() : SessionSearchToolset::SystemPrompt();
         h.toolServers = impl->toolset->Servers();
         h.autoCompactTokens = impl->options.autoCompactTokens;
         h.persistRecord = impl->options.persist;
@@ -1042,15 +1226,24 @@ namespace Agentmaster
             // it, so its first process has it on the command line. An unknown word reads as Off.
             try
             {
-                if (const auto level = ParseHarnessThinkingLevel(LoadAppSettings().sessionsAiThinkingLevel))
+                const AppSettings settings = LoadAppSettings();
+                if (const auto level = ParseHarnessThinkingLevel(settings.sessionsAiThinkingLevel))
                 {
                     options.thinkingLevel = *level;
+                }
+                // SESSIONS_DB.md §8.2: with the session database On, the AI search searches it (its read tools, no
+                // index keeper). Read once: the agent lives for the process, so a later change applies at the next
+                // start of the app (the cog's tooltip says so). Shadow keeps the page search (nothing on screen
+                // changes in Shadow).
+                if (settings.sessionDbMode == SessionDbMode::On)
+                {
+                    options.sessionDbProfile = AgentmasterStateDir();
                 }
             }
             catch (...)
             {
-                // Rule #18. Recovery: the agent starts at Off; the page's toggle still sets a level.
-                LogSwallowedException(L"SharedSessionSearchAgent: read the thinking level");
+                // Rule #18. Recovery: the agent starts at Off with the page search; the page's toggle still sets a level.
+                LogSwallowedException(L"SharedSessionSearchAgent: read the settings");
             }
             options.openSessions = [] {
                 std::vector<std::pair<std::wstring, std::wstring>> open;

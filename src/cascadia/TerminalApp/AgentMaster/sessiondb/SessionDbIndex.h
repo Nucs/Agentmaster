@@ -139,22 +139,36 @@ namespace Agentmaster::SessionDb
         // error back; too small only costs more statements (each scans the source's key column once).
         int64_t sortChunkBytes{ 256ll * 1024 * 1024 };
 
-        // Rows waiting in doc_hot (an estimate kept by the store; a merge reads the table).
-        // Merge every doc_hot block into the index in ONE transaction, then move line_hot into line.
-        //   con    — the writer connection (no transaction open).
-        //   cancel — polled between steps; a cancelled merge rolls back and changes nothing.
-        // Returns the number of blocks merged. Throws DbError.
-        size_t Merge(Connection& con, const std::function<bool()>& cancel);
+        // The most block text one merge transaction tokenizes and moves, in bytes (Merge's slices). The store sets
+        // a sixteenth of its memory limit (64 MB at the default 1 GB; Store::Open). ⚠ The 2026-10-15 cold build
+        // merged the whole hot tier at once: one large batch made it fail with "Out of Memory", and every failure
+        // left a bigger hot tier for the next try (401 K blocks, 640 MB of text, by the end).
+        int64_t mergeSliceBytes{ 64ll * 1024 * 1024 };
+
+        // Merge the doc_hot blocks into the index, one SLICE per transaction (about mergeSliceBytes of text each,
+        // in doc_id order: tokenize, append the postings, move the blocks into doc / doc_tool, update the
+        // dictionary), then move line_hot into line (its own transaction, sliced by CopyLinesSorted).
+        //   con      — the writer connection (no transaction open).
+        //   cancel   — polled before each slice and while tokenizing; a cancel keeps the slices merged so far
+        //              (each committed) and leaves the rest hot. May be empty.
+        //   finished — out (optional): true when every block and line moved (no cancel).
+        // Returns the number of blocks merged. Throws DbError (the failing slice rolled back; the earlier slices
+        // stay merged).
+        size_t Merge(Connection& con, const std::function<bool()>& cancel, bool* finished = nullptr);
 
         // Re-cluster, part 1 — the text index (§6.4): rewrite `post` sorted by (term, doc) without the
-        // tombstoned blocks, recompute `spost` exactly from it (one row per term and session), delete the
-        // tombstoned blocks from `doc` / `doc_tool`, empty `tomb`, and recompute df / sf / N / avgdl. ONE
-        // transaction. Every sort in it is over fixed-width keys, which DuckDB spills to disk; `doc` and
-        // `doc_tool` are never sorted, because every merge appends them in doc_id order and a delete keeps that
-        // order (the sorted copy of their TEXT is what the old one-statement re-cluster could not fit in memory).
+        // tombstoned blocks, recompute `spost` exactly from it (one row per term and session) and df / sf, then
+        // in ONE swap transaction replace post / spost / dict, delete the tombstoned blocks from `doc` /
+        // `doc_tool` and empty `tomb`. The three new tables are built by statements that commit one by one
+        // (inside one transaction they ran out of memory at full scale, alone each passed); readers keep the
+        // old tables until the swap, and orphan *_new tables of a crash are dropped at the next run. Every sort
+        // is over fixed-width keys, which DuckDB spills to disk; `doc` and `doc_tool` are never sorted, because
+        // every merge appends them in doc_id order and a delete keeps that order. Measured on the full corpus
+        // (127.6 M postings): ~35 s.
         //   con    — the writer connection (no transaction open).
-        //   cancel — polled before the transaction starts; may be empty.
-        // Returns false when cancelled (nothing changed). Throws DbError (the transaction rolled back).
+        //   cancel — polled before it starts; may be empty.
+        // Returns false when cancelled (nothing changed). Throws DbError (the swap rolled back; the old tables
+        // stand, and the *_new ones are dropped by the next run).
         bool ReclusterPostings(Connection& con, const std::function<bool()>& cancel);
         // Re-cluster, part 2 — the line store (§6.8): put `line` in line_id order (one file = one id range), slice
         // by slice (PlanLineSlices: about sortChunkBytes of raw JSON each, whole files where they fit). The
@@ -182,9 +196,14 @@ namespace Agentmaster::SessionDb
         int64_t LineRuns(Connection& con);
 
     private:
+        // Merge one slice of doc_hot (the blocks with loDoc <= doc_id <= hiDoc) in ONE transaction: tokenize them,
+        // append their postings and session postings, move them into doc / doc_tool with their BM25 lengths,
+        // update the dictionary. Returns the blocks merged (0 when cancelled while tokenizing, or when the range
+        // holds none). Throws DbError (rolled back; the in-memory dictionary is reloaded from the database).
+        size_t _mergeSlice(Connection& con, uint32_t loDoc, uint32_t hiDoc, const std::function<bool()>& cancel);
         // Move line_hot into line as ONE sorted run (CopyLinesSorted) and empty line_hot, counting a new run in
         // meta `line_runs` when the hot lines start below the line store's largest id. Runs inside the caller's
-        // transaction (both merge paths). Throws DbError.
+        // transaction. Throws DbError.
         void _moveHotLines(Connection& con);
 
         Dictionary _dict;

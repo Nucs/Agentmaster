@@ -53,6 +53,9 @@ namespace Agentmaster::SessionDb
         // The memory budget of one sorting statement over the line store, as a share of the database's memory
         // limit (TextIndex::sortChunkBytes): a quarter, measured to pass where half the 1.6 GB store already did.
         constexpr int64_t kSortChunkShareOfMemory = 4;
+        // The block text one merge transaction handles, as a share of the memory limit (TextIndex::mergeSliceBytes):
+        // the slice is read, sorted and moved twice (doc / doc_tool) inside one transaction.
+        constexpr int64_t kMergeSliceShareOfMemory = 16;
 
         // DuckDB's memory_limit text ("1024MB", "1GB", "512MiB") in bytes, the way DuckDB reads it (KB / MB / GB
         // decimal, KiB / MiB / GiB binary, a bare number = bytes). 0 when it cannot be read. Pure.
@@ -546,6 +549,9 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
         if (const int64_t limit = MemoryLimitBytes(_cfg.db.memoryLimit); limit > 0)
         {
             _index.sortChunkBytes = std::max<int64_t>(limit / kSortChunkShareOfMemory, 32ll * 1024 * 1024);
+            // A merge slice: a sixteenth (64 MB of text at 1 GB), 16-256 MB. Its tokenizing also holds the
+            // slice's postings in this process's own memory (~1.5 bytes of postings per byte of text).
+            _index.mergeSliceBytes = std::clamp<int64_t>(limit / kMergeSliceShareOfMemory, 16ll * 1024 * 1024, 256ll * 1024 * 1024);
         }
         _index.Load(*_w);
         try
@@ -2685,12 +2691,50 @@ FROM (SELECT line_no, uuid, leaf_uuid, flags, on_branch FROM line WHERE file_id 
     size_t Store::Merge(const CancelFn& cancel)
     {
         const int64_t started = NowMs();
-        const size_t n = _index.Merge(*_w, cancel);
-        _hotDocsEstimate = 0;
-        _hotBytesEstimate = 0;
+        bool finished = false;
+        size_t n = 0;
+        try
+        {
+            n = _index.Merge(*_w, cancel, &finished);
+        }
+        catch (...)
+        {
+            // A slice failed (rolled back); the slices before it stay merged. Re-count what is still hot so
+            // MergeDue keeps asking (the estimate would otherwise still hold the whole tier), then rethrow.
+            _recountHotTier();
+            throw;
+        }
+        if (finished)
+        {
+            _hotDocsEstimate = 0;
+            _hotBytesEstimate = 0;
+        }
+        else
+        {
+            _recountHotTier(); // a cancel left the later slices hot
+        }
         _lastMergeMs = NowMs();
-        _log(L"[sessdb] merge: " + std::to_wstring(n) + L" block(s) into the index in " + std::to_wstring(NowMs() - started) + L" ms");
+        if (n > 0 || !finished)
+        {
+            _log(L"[sessdb] merge: " + std::to_wstring(n) + L" block(s) into the index in " + std::to_wstring(NowMs() - started) + L" ms" +
+                 (finished ? L"" : L" (paused for a write job; " + std::to_wstring(_hotDocsEstimate) + L" block(s) stay hot)"));
+        }
         return n;
+    }
+
+    void Store::_recountHotTier() noexcept
+    {
+        try
+        {
+            _hotDocsEstimate = _w->ScalarInt64("SELECT count(*) FROM doc_hot");
+            _hotBytesEstimate = _w->ScalarInt64("SELECT coalesce(sum(text_len), 0) FROM doc_hot") * 2;
+        }
+        catch (...)
+        {
+            // The estimate only paces merges: keep it non-zero so the next merge reads the table itself.
+            LogSwallowedException(L"sessiondb Merge (recount the hot tier)");
+            _hotDocsEstimate = std::max<int64_t>(_hotDocsEstimate, 1);
+        }
     }
 
     void Store::Recluster(const CancelFn& cancel, bool force)

@@ -506,7 +506,7 @@ namespace Agentmaster::SessionDb
         bool IsQueryMethod(std::string_view m)
         {
             return m == Proto::kStatus || m == Proto::kListSessions || m == Proto::kSearch || m == Proto::kPageSearch || m == Proto::kSessionDetail ||
-                   m == Proto::kSessionSummary ||
+                   m == Proto::kSessionSummary || m == Proto::kResolveIds ||
                    m == Proto::kMessages || m == Proto::kGrep || m == Proto::kFiles || m == Proto::kWhoTouched || m == Proto::kTimeline || m == Proto::kUsage ||
                    m == Proto::kRelated || m == Proto::kSql || m == Proto::kToolCall;
         }
@@ -852,6 +852,29 @@ namespace Agentmaster::SessionDb
             if (method == Proto::kPageSearch)
             {
                 return _pageSearch(con, params, f);
+            }
+            if (method == Proto::kResolveIds)
+            {
+                // The maps answer it (no query): every id the request names, mapped to its whole id or null.
+                if (!params.contains("ids") || !params["ids"].is_array() || params["ids"].size() > 200)
+                {
+                    errCode = Proto::kErrBadRequest;
+                    errText = "resolveIds takes {ids: [up to 200 short ids or UUIDs]}.";
+                    return nullptr;
+                }
+                json ids = json::object();
+                for (const auto& v : params["ids"])
+                {
+                    if (!v.is_string())
+                    {
+                        continue;
+                    }
+                    const std::string text = v.get<std::string>();
+                    int matches = 0;
+                    const auto key = _store->ResolveSession(FromUtf8(text), matches);
+                    ids[text] = key ? json(ToUtf8(key->sessionId)) : json(nullptr);
+                }
+                return { { "ids", std::move(ids) } };
             }
             ToolContext ctx{ *_store, *_search, con, [&f] { return f.cancelled.load() || f.timedOut.load(); }, NowUnixMs() };
             std::string tool;
