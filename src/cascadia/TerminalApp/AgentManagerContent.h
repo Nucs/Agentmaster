@@ -1278,6 +1278,14 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setVerifySend{ nullptr }; // DELIVERY_PLAN.md R4 — verified placement (fill → read-back → CR)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setRestoreDraft{ nullptr }; // PENDING_INPUT.md §10 — the restore RE-FILL: type a remembered unsent draft back into a reopened session's box
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCarryDraftOnFork{ nullptr }; // PENDING_INPUT.md §11 — the FORK CARRY: copy the source's unsent draft (pastes expanded) into a new fork's box; SESSIONS tab (not autorunner-gated — release builds fork too)
+        // SESSIONS_DB.md §4 / §7.6 — the session database (SESSIONS tab, "SESSION DATABASE"): the mode (Off / Shadow /
+        // On), the refresh tick's interval (D16), DuckDB's threads and memory limit (§10), and a status line read from
+        // the engine's refresher when the cog opens.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setSessionDbMode{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setSessionDbRefresh{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setSessionDbThreads{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setSessionDbMemory{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setSessionDbStatus{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setReapOrphans{ nullptr }; // OBSERVER.md §13a: shut down a session whose terminal host died (reapOrphanedSessions)
         // RENDERING.md: draw every terminal on the CPU (WARP) instead of the GPU (AppSettings::softwareRendering,

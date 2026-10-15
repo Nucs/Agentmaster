@@ -64,6 +64,10 @@ namespace Agentmaster::SessionDb
         // Ask the service to interrupt the request this client's Call is waiting for (call it from another
         // thread). The Call then returns the service's 499 answer. No-op when nothing is pending. Never throws.
         void CancelPending() noexcept;
+        // Make a Call that waits in ANOTHER thread return false at once (an app that stops must not wait out a
+        // long request, such as a sweep during the cold build). The pipe stays open until its owner closes it
+        // (Close from the Call's own thread); every later Call fails until a new Connect. Never throws.
+        void Abort() noexcept;
 
         // The service executable for a profile: the copied-out <profile>\sessiondb\bin\agentmaster-sessiondb.exe
         // when it exists, else the one beside the calling process. "" when neither exists.
@@ -86,6 +90,7 @@ namespace Agentmaster::SessionDb
         std::mutex _writeMtx; // Call's request and CancelPending's frame never interleave
         std::atomic<uint64_t> _nextId{ 1 };
         std::atomic<uint64_t> _pendingId{ 0 }; // the request a Call waits for (0 = none)
+        std::atomic<bool> _aborted{ false }; // Abort() was called: every wait returns at its next slice
     };
 
     // Copy agentmaster-sessiondb.exe and duckdb.dll from `sourceDir` (the package or unzip folder) into

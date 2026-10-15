@@ -55,6 +55,7 @@ namespace Agentmaster
     class SessionRegistry;
     class CommandWatch; // COMMANDS.md — the slash-command binding/await engine the scanner feeds
     class TranscriptWatcher; // HOOKS.md "Transcript watcher" — the ReadDirectoryChangesW change feed (TranscriptWatcher.h)
+    struct ChangedSessions; // the session database's change feed (TranscriptWatcher.h, SESSIONS_DB.md §7.6)
 
     // --- cadence + bound tunables (see DecideAdvance-style separation: values are explicit) ---
     inline constexpr int64_t kScanRunningMs = 300; // a turn is in progress: poll quickly
@@ -1640,6 +1641,14 @@ namespace Agentmaster
         // in Engine so a newly-launched/adopted session is picked up immediately, not after a
         // timeout. Cheap + idempotent.
         void Wake() noexcept;
+
+        // The session database's change feed (SESSIONS_DB.md §7.6, D16), forwarded to the transcript watcher:
+        // turn the changed-session set on or off, and take the sessions changed since the last take. A scanner
+        // whose watcher could not start answers "not healthy" (out.healthy false), which tells the refresh tick
+        // to sweep instead. Call only between Start() and Stop(): the engine stops its refresher first.
+        // SetTranscriptChangeTracking never throws; TakeChangedTranscripts throws only std::bad_alloc.
+        void SetTranscriptChangeTracking(bool on) noexcept;
+        void TakeChangedTranscripts(ChangedSessions& out);
 
         // Register / detach an app-layer liveness probe (one per window; M9 fan-out, mirroring the
         // registry's adoption handlers). Tokens are monotonic and never reused, so removing a stale

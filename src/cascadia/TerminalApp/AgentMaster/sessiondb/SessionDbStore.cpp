@@ -1223,12 +1223,29 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
 
         size_t at = 0;
         int64_t done = 0;
+        int64_t batches = 0;
+        int64_t mergeMs = 0; // the merges after the batches (bulk mode), for the progress line
+        int64_t lastProgressMs = NowMs();
         while (at < todo.size())
         {
             if (cancel && cancel())
             {
                 rr.cancelled = true;
                 break;
+            }
+            // A long sweep (the cold build) says where it is and where its time goes, once a minute: the steps
+            // that grow with the database show up here long before the sweep ends.
+            if (NowMs() - lastProgressMs >= 60000)
+            {
+                lastProgressMs = NowMs();
+                const int64_t secs = std::max<int64_t>(1, (NowMs() - started) / 1000);
+                _log(L"[sessdb] resync progress: " + std::to_wstring(done) + L" / " + std::to_wstring(todo.size()) + L" session(s), " +
+                     std::to_wstring(rr.bytesRead / (1024 * 1024)) + L" MB in " + std::to_wstring(secs) + L" s (" +
+                     std::to_wstring(rr.bytesRead / (1024 * 1024) / secs) + L" MB/s), " + std::to_wstring(batches) + L" batch(es); steps (ms): ingest " +
+                     std::to_wstring(_times.ingest) + L", appenders " + std::to_wstring(_times.appenders) + L", paths " + std::to_wstring(_times.paths) +
+                     L", usage " + std::to_wstring(_times.usage) + L", walk " + std::to_wstring(_times.walk) + L", summary " + std::to_wstring(_times.summary) +
+                     L", session rows " + std::to_wstring(_times.sessionRows) + L", cursors " + std::to_wstring(_times.cursors) + L", commit " +
+                     std::to_wstring(_times.commit) + L", merges " + std::to_wstring(mergeMs));
             }
             size_t end = at;
             int64_t bytes = 0;
@@ -1257,6 +1274,7 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
             }
             done += static_cast<int64_t>(end - at);
             at = end;
+            ++batches;
             if (progress)
             {
                 progress(done, static_cast<int64_t>(todo.size()));
@@ -1265,7 +1283,9 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
             {
                 try
                 {
+                    const int64_t m0 = NowMs();
                     Merge(cancel);
+                    mergeMs += NowMs() - m0;
                 }
                 catch (...)
                 {

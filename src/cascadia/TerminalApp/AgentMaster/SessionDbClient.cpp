@@ -216,9 +216,20 @@ namespace Agentmaster::SessionDb
         return true;
     }
 
+    void ServiceClient::Abort() noexcept
+    {
+        _aborted.store(true);
+        std::lock_guard lk{ _writeMtx };
+        if (_pipe)
+        {
+            ::CancelIoEx(static_cast<HANDLE>(_pipe), nullptr); // the pending read completes now (aborted)
+        }
+    }
+
     bool ServiceClient::Connect(bool start, uint32_t waitMs, std::wstring& error)
     {
         Close();
+        _aborted.store(false);
         if (_open(error))
         {
             return _helloCheck(start, waitMs, error);
@@ -350,13 +361,29 @@ namespace Agentmaster::SessionDb
                     error = L"The session database service closed the connection.";
                     return false;
                 }
-                const ULONGLONG now = ::GetTickCount64();
-                const DWORD left = now >= until ? 0 : static_cast<DWORD>(until - now);
-                if (::WaitForSingleObject(ev, left) != WAIT_OBJECT_0)
+                // Wait in slices so an Abort() from another thread is seen even if it came before this read was
+                // issued (its CancelIoEx then had nothing to cancel).
+                bool done = false;
+                for (;;)
+                {
+                    const ULONGLONG now = ::GetTickCount64();
+                    const DWORD left = now >= until ? 0 : static_cast<DWORD>(until - now);
+                    if (::WaitForSingleObject(ev, std::min<DWORD>(left, 250)) == WAIT_OBJECT_0)
+                    {
+                        done = true;
+                        break;
+                    }
+                    if (_aborted.load() || ::GetTickCount64() >= until)
+                    {
+                        break;
+                    }
+                }
+                if (!done)
                 {
                     ::CancelIoEx(pipe, &ov);
                     ::GetOverlappedResult(pipe, &ov, &r, TRUE);
-                    error = L"The session database service did not answer within " + std::to_wstring(timeoutMs / 1000) + L" s.";
+                    error = _aborted.load() ? std::wstring{ L"The call was aborted." }
+                                            : L"The session database service did not answer within " + std::to_wstring(timeoutMs / 1000) + L" s.";
                     return false;
                 }
                 if (!::GetOverlappedResult(pipe, &ov, &r, FALSE))
@@ -377,9 +404,9 @@ namespace Agentmaster::SessionDb
 
     bool ServiceClient::Call(std::string_view method, std::string_view paramsJson, std::string& response, uint32_t timeoutMs, std::wstring& error)
     {
-        if (!_pipe)
+        if (!_pipe || _aborted.load())
         {
-            error = L"Not connected to the session database service.";
+            error = _aborted.load() ? std::wstring{ L"The call was aborted." } : std::wstring{ L"Not connected to the session database service." };
             return false;
         }
         const uint64_t id = _nextId++;

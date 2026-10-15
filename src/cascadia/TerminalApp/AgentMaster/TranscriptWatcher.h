@@ -44,6 +44,8 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Agentmaster
@@ -155,7 +157,23 @@ namespace Agentmaster
         // How many transcript paths are indexed (tests + the watch log line). Never throws.
         size_t TranscriptCount() const noexcept;
 
+        // --- the session database's change feed (SESSIONS_DB.md §7.6, D16) ---
+        // While tracking is on, every change the index records (a transcript added / removed / modified, a
+        // side file touched, a project folder removed) also puts its session id into a CHANGED set, which
+        // TakeChanged hands out and empties. Off by default, so an install that does not run the database keeps
+        // no set at all; turning it off drops the set. Never throws.
+        void SetChangeTracking(bool on) noexcept;
+        // The ids changed since the last take (lowercase, any order), and the set emptied. Never throws
+        // (beyond std::bad_alloc).
+        std::vector<std::wstring> TakeChanged();
+        // Empty the changed set without handing it out: a full re-index made it meaningless (the epoch bump
+        // tells takers to sweep everything instead). Never throws.
+        void ClearChanged() noexcept;
+
     private:
+        // Record `lowerId` in the changed set when tracking is on. Never throws (beyond std::bad_alloc).
+        void _noteChanged(const std::wstring& lowerId);
+
         // One indexed transcript file of an id.
         struct Location
         {
@@ -173,6 +191,17 @@ namespace Agentmaster
         // re-index); the id set is bounded by the transcripts that ever existed on this machine.
         std::unordered_map<std::wstring, Entry> _byId;
         size_t _paths{ 0 }; // total Location count across entries (TranscriptCount)
+        bool _tracking{ false }; // the database's change feed is on (SetChangeTracking)
+        std::unordered_set<std::wstring> _changed; // lowercase ids changed since the last TakeChanged
+    };
+
+    // What TranscriptWatcher::TakeChangedSessions hands the database's refresh tick (D16).
+    struct ChangedSessions
+    {
+        bool healthy{ false }; // the watch is live: the set is complete (false => the tick must sweep instead)
+        uint64_t epoch{ 0 }; // the index epoch: a value different from the previous take's => a full re-index
+                             // happened, the set says nothing, and the tick sweeps (resync)
+        std::vector<std::pair<std::wstring, std::wstring>> sessions; // (lowercase id, indexed transcript path or "")
     };
 
     // The live watcher: one background thread owning a ReadDirectoryChangesW watch on the projects root
@@ -216,6 +245,13 @@ namespace Agentmaster
 
         // True while the watch is live and indexed. Never throws.
         bool Healthy() const noexcept;
+
+        // The session database's change feed (SESSIONS_DB.md §7.6, D16): turn the changed-session set on or off
+        // (off drops it). The database's refresh tick turns it on while the database runs. Never throws.
+        void SetChangeTracking(bool on) noexcept;
+        // The sessions whose transcript or side files changed since the last take (each with its indexed path),
+        // the watch's health and its epoch; the set is emptied. Throws only std::bad_alloc.
+        ChangedSessions TakeChangedSessions();
 
         // The watched root, as passed to the constructor. Never throws.
         const std::wstring& Root() const noexcept

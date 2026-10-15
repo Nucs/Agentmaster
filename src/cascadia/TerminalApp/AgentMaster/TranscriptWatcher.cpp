@@ -211,6 +211,7 @@ namespace Agentmaster
         }
         std::sort(entry.locations.begin(), entry.locations.end(), [](const Location& a, const Location& b) { return LessNoCase(a.path, b.path); });
         ++entry.transcriptSeq;
+        _noteChanged(Lower(sessionId));
     }
 
     void TranscriptIndex::RemoveTranscript(std::wstring_view projectDir, std::wstring_view sessionId)
@@ -226,6 +227,7 @@ namespace Agentmaster
         locs.erase(std::remove_if(locs.begin(), locs.end(), [&key](const Location& l) { return l.projectKey == key; }), locs.end());
         _paths -= before - locs.size();
         ++it->second.transcriptSeq; // even a no-op removal: the scanner re-stats, which a vanished file needs
+        _noteChanged(it->first);
     }
 
     void TranscriptIndex::RemoveProjectDir(std::wstring_view projectDir)
@@ -240,18 +242,52 @@ namespace Agentmaster
             {
                 _paths -= before - locs.size();
                 ++entry.transcriptSeq;
+                _noteChanged(id);
             }
         }
     }
 
     void TranscriptIndex::TouchTranscript(std::wstring_view sessionId)
     {
-        ++_byId[Lower(sessionId)].transcriptSeq;
+        const std::wstring id = Lower(sessionId);
+        ++_byId[id].transcriptSeq;
+        _noteChanged(id);
     }
 
     void TranscriptIndex::TouchSide(std::wstring_view sessionId)
     {
-        ++_byId[Lower(sessionId)].sideSeq;
+        const std::wstring id = Lower(sessionId);
+        ++_byId[id].sideSeq;
+        _noteChanged(id);
+    }
+
+    void TranscriptIndex::SetChangeTracking(bool on) noexcept
+    {
+        _tracking = on;
+        if (!on)
+        {
+            _changed.clear();
+        }
+    }
+
+    std::vector<std::wstring> TranscriptIndex::TakeChanged()
+    {
+        std::vector<std::wstring> out(_changed.begin(), _changed.end());
+        _changed.clear();
+        return out;
+    }
+
+    void TranscriptIndex::ClearChanged() noexcept
+    {
+        _changed.clear();
+    }
+
+    void TranscriptIndex::_noteChanged(const std::wstring& lowerId)
+    {
+        if (_tracking && !lowerId.empty())
+        {
+            _changed.insert(lowerId);
+        }
     }
 
     std::wstring TranscriptIndex::Apply(ProjectsChangeAction action, std::wstring_view relative, std::wstring_view root)
@@ -451,6 +487,26 @@ namespace Agentmaster
     {
         std::lock_guard lk{ _mtx };
         return _healthy;
+    }
+
+    void TranscriptWatcher::SetChangeTracking(bool on) noexcept
+    {
+        std::lock_guard lk{ _mtx };
+        _index.SetChangeTracking(on);
+    }
+
+    ChangedSessions TranscriptWatcher::TakeChangedSessions()
+    {
+        ChangedSessions out;
+        std::lock_guard lk{ _mtx };
+        out.healthy = _healthy;
+        out.epoch = _epoch;
+        for (auto& id : _index.TakeChanged())
+        {
+            std::wstring path = _index.Resolve(id);
+            out.sessions.emplace_back(std::move(id), std::move(path));
+        }
+        return out;
     }
 
     void TranscriptWatcher::_run() noexcept
@@ -739,6 +795,9 @@ namespace Agentmaster
                 _index.AddTranscript(f.projectDir, Lower(id), _root + L"\\" + f.projectDir + L"\\" + f.fileName);
             }
             indexed = _index.TranscriptCount();
+            // The enumeration "changed" every session; the epoch bump below tells the database's refresh tick to
+            // sweep instead, so the set it would hand out is meaningless.
+            _index.ClearChanged();
             ++_epoch;
             _healthy = true;
         }

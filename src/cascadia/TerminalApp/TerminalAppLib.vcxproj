@@ -206,6 +206,11 @@
     <ClInclude Include="AgentMaster\AgentHarness.h" />
     <ClInclude Include="AgentMaster\AgentHarnessCore.h" />
     <ClInclude Include="AgentMaster\SessionStore.h" />
+    <!-- Agentmaster (SESSIONS_DB.md §4, §7.6): the session database's wire contract, its client and the app's
+         refresh tick (D16). The GUI never links DuckDB: the service (agentmaster-sessiondb.exe) owns the file. -->
+    <ClInclude Include="AgentMaster\SessionDbProtocol.h" />
+    <ClInclude Include="AgentMaster\SessionDbClient.h" />
+    <ClInclude Include="AgentMaster\SessionDbRefresher.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
     <ClInclude Include="AgentMaster\Splash.h" />
@@ -477,6 +482,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionDbClient.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionDbRefresher.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (DELIVERY.md §15): claude's invisible-character rule, mirrored — the ICU half of

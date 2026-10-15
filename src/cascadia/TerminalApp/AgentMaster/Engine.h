@@ -43,6 +43,7 @@ namespace Agentmaster
     class SessionScanner;
     class ProcessObserver;
     class CommandWatch; // COMMANDS.md — slash-command bindings + awaited follow-up activity
+    class SessionDbRefresher; // SESSIONS_DB.md §7.6 — the session database's refresh tick (D16)
 
     // Agentmaster (cross-window tab DOCKING — the pointer-owned gesture's replacement for the OLE
     // docking that died with CanDragTabs(false); see Engine::DockTargetSink). What a dragging window
@@ -75,6 +76,10 @@ namespace Agentmaster
         std::shared_ptr<SessionScanner> scanner; // the interval reconciler (PULL; complements the bridge's PUSH)
         std::shared_ptr<ProcessObserver> observer; // the Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §8)
         std::shared_ptr<CommandWatch> commandWatch; // slash-command bindings + async awaits, fed by the scanner (COMMANDS.md)
+        // The session database's refresh tick (SESSIONS_DB.md §7.6, D16): runs while AppSettings::sessionDbMode is
+        // Shadow or On, drains the scanner's transcript-change set into the service every refresh interval. The
+        // cog's Save re-applies the settings to it (Apply). Never null after init.
+        std::shared_ptr<SessionDbRefresher> sessionDb;
 
         // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
         // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY
