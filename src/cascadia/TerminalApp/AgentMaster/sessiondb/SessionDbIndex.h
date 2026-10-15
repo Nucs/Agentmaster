@@ -104,6 +104,16 @@ namespace Agentmaster::SessionDb
         mutable std::mutex _blobMtx; // serializes the lazy rebuild (readers hold the shared lock)
     };
 
+    // What one TextIndex::ReclusterLines call did (the service log's re-cluster line).
+    struct LineResortTally
+    {
+        int64_t slices{ 0 }; // slices planned (from the resume point on)
+        int64_t inPlace{ 0 }; // slices found in place and left alone
+        int64_t moved{ 0 }; // slices moved to the end of the table
+        int64_t movedBytes{ 0 }; // their planned raw bytes
+        bool resumed{ false }; // continued a re-sort an earlier call left unfinished
+    };
+
     // The merge and re-cluster.
     class TextIndex
     {
@@ -122,17 +132,61 @@ namespace Agentmaster::SessionDb
             return _dict;
         }
 
+        // The most raw JSON one sorting statement over the line store may hold, in bytes (CopyLinesSorted in
+        // SessionDbIndex.cpp). DuckDB's sort and the ZSTD column writer together outgrew a 1 GB memory limit on a
+        // 1.6 GB line table ("failed to pin block"), while a 0.8 GB slice passed (measured 2026-10-15), so the
+        // store sets a quarter of its memory limit here (Store::Open). ⚠ Too large brings the out-of-memory
+        // error back; too small only costs more statements (each scans the source's key column once).
+        int64_t sortChunkBytes{ 256ll * 1024 * 1024 };
+
         // Rows waiting in doc_hot (an estimate kept by the store; a merge reads the table).
         // Merge every doc_hot block into the index in ONE transaction, then move line_hot into line.
         //   con    — the writer connection (no transaction open).
         //   cancel — polled between steps; a cancelled merge rolls back and changes nothing.
         // Returns the number of blocks merged. Throws DbError.
         size_t Merge(Connection& con, const std::function<bool()>& cancel);
-        // Rewrite post / spost / doc / doc_tool / line sorted by their read keys, dropping tombstoned blocks and
-        // recomputing df / sf / N / avgdl exactly. Throws DbError.
+
+        // Re-cluster, part 1 — the text index (§6.4): rewrite `post` sorted by (term, doc) without the
+        // tombstoned blocks, recompute `spost` exactly from it (one row per term and session), delete the
+        // tombstoned blocks from `doc` / `doc_tool`, empty `tomb`, and recompute df / sf / N / avgdl. ONE
+        // transaction. Every sort in it is over fixed-width keys, which DuckDB spills to disk; `doc` and
+        // `doc_tool` are never sorted, because every merge appends them in doc_id order and a delete keeps that
+        // order (the sorted copy of their TEXT is what the old one-statement re-cluster could not fit in memory).
+        //   con    — the writer connection (no transaction open).
+        //   cancel — polled before the transaction starts; may be empty.
+        // Returns false when cancelled (nothing changed). Throws DbError (the transaction rolled back).
+        bool ReclusterPostings(Connection& con, const std::function<bool()>& cancel);
+        // Re-cluster, part 2 — the line store (§6.8): put `line` in line_id order (one file = one id range), slice
+        // by slice (PlanLineSlices: about sortChunkBytes of raw JSON each, whole files where they fit). The
+        // longest prefix of slices already in place (contiguous rows, in order) stays where it is; every later
+        // slice moves to the END of the table in its own transaction (insert it sorted, delete the old copies),
+        // which records the resume point (meta `line_resort_from`). So a cancel loses at most the slice in flight,
+        // the next call continues where this one stopped, and the file grows by one slice at a time (a whole-table
+        // copy would double it). Minutes on a large store (the ZSTD writer runs at ~30-90 MB/s). At the end the
+        // run count (LineRuns) goes back to 1, plus the runs merges added meanwhile.
+        //   con    — the writer connection (no transaction open). line_hot is left alone: merge first.
+        //   cancel — polled before each slice; may be empty.
+        //   tally  — out (optional): what this call did, for the log.
+        // Returns true when the re-sort finished, false when cancelled (resumable). Throws DbError (the slice
+        // in flight rolled back; the moved ones stay, and the resume point names the next).
+        bool ReclusterLines(Connection& con, const std::function<bool()>& cancel, LineResortTally* tally);
+        // True while a re-sort of the line store is under way (a slice moved, later ones remain): the store keeps
+        // the re-cluster due until it finishes. Throws DbError.
+        bool LineResortInProgress(Connection& con);
+        // Both parts, postings first (the one-shot `recluster` mode). A cancel before a part skips the rest.
+        // Throws DbError.
         void Recluster(Connection& con, const std::function<bool()>& cancel);
+        // How many sorted runs `line` holds since its last rewrite: 1 for a sorted table, +1 for every merge whose
+        // lines started below the table's largest line_id (meta `line_runs`; absent = 1). The store re-sorts the
+        // line table when this passes kLineRunsForResort (SessionDbStore.cpp). Throws DbError.
+        int64_t LineRuns(Connection& con);
 
     private:
+        // Move line_hot into line as ONE sorted run (CopyLinesSorted) and empty line_hot, counting a new run in
+        // meta `line_runs` when the hot lines start below the line store's largest id. Runs inside the caller's
+        // transaction (both merge paths). Throws DbError.
+        void _moveHotLines(Connection& con);
+
         Dictionary _dict;
     };
 }

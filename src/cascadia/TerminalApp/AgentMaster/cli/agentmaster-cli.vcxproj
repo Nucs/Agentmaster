@@ -70,6 +70,9 @@
     <ClCompile Include="..\SessionSearch.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\SessionDbClient.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <!-- DELIVERY.md §15: SessionRegistry.cpp's echo/dedupe compares + the BuildPromptFill it links call
          into ClaudeInvisibleChars (NormalizePromptTextForCompare / SanitizeForClaudeInput) — omitting
          it fails at LINK, not compile (the CommandWatch.cpp lesson in _compile.bat). -->

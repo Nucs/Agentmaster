@@ -159,12 +159,24 @@ namespace Agentmaster::SessionDb
         bool MergeDue() const;
         // Run a merge (see TextIndex::Merge). Returns the blocks merged.
         size_t Merge(const CancelFn& cancel);
-        // Run a re-cluster (see TextIndex::Recluster) and record when, and over how many blocks, it ran.
-        void Recluster(const CancelFn& cancel);
-        // Whether a re-cluster is worth its cost now (§6.4): the blocks merged since the last one are at least
-        // a quarter of the index (and at least 20,000), or a day passed and new blocks arrived. ⚠ A re-cluster
-        // rewrites the big tables: DuckDB reuses the freed blocks but does not shrink the file at once, so the
-        // file peaks at about twice the live data around one (measured: 184 -> 343 -> 183 MB). Writer thread.
+        // Run the parts of a re-cluster that are due (see ReclusterDue), each in its own transaction:
+        //   1. the text index (TextIndex::ReclusterPostings), recording when and over how many blocks it ran
+        //      (meta last_recluster_ms / last_recluster_docs), so a later failure of part 2 never re-runs it;
+        //   2. the line store (TextIndex::ReclusterLines), minutes on a large store, slice by slice: a cancel keeps
+        //      the slices moved so far and leaves it due, and the next idle period resumes it.
+        //   cancel — polled before each part and between the line store's slices (the service passes "a write
+        //            job is waiting"); may be empty.
+        //   force  — run both parts whether due or not (the one-shot `recluster` mode).
+        // Writer thread. Throws DbError (the failing part rolled back; the parts before it stay done).
+        void Recluster(const CancelFn& cancel, bool force = false);
+        // Whether a part of the re-cluster is worth its cost now (§6.4):
+        //   - the text index: the blocks merged since its last re-cluster are at least a quarter of the index (and
+        //     at least 20,000), or a day passed and new blocks arrived;
+        //   - the line store: it holds at least kLineRunsForResort sorted runs (TextIndex::LineRuns), or a re-sort of
+        //     it is under way (TextIndex::LineResortInProgress).
+        // ⚠ A re-cluster rewrites big tables: DuckDB reuses the freed blocks but does not shrink the file at once,
+        // so the file peaks at about twice the rewritten data around one (measured: 184 -> 343 -> 183 MB).
+        // Writer thread. Throws DbError.
         bool ReclusterDue();
         // CHECKPOINT the write-ahead log into the file.
         void Checkpoint();
@@ -298,6 +310,11 @@ namespace Agentmaster::SessionDb
         bool _probeable(const std::wstring& dir);
         // FindGitRootForDir, memoized per directory key and gated by _probeable ("" when not probeable).
         std::wstring _gitRootOf(const std::wstring& dir);
+
+        // --- maintenance ---
+        // The text index's part of ReclusterDue: the blocks merged since its last re-cluster are at least a
+        // quarter of the index (and at least 20,000), or a day passed and new blocks arrived. Throws DbError.
+        bool _postingsReclusterDue();
 
         // --- logging ---
         void _log(const std::wstring& line) const;

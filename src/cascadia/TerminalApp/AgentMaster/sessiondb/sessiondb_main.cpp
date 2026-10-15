@@ -11,7 +11,9 @@
 //   search <query> [options]   one-shot: run one search on the database as it is (no ingest) and print the
 //                              page with tiers, hits, snippets and the cold / warm times (diagnostics)
 //   sql <statement> [--limit N] one-shot: run one statement and print its rows as text with the time
-//   recluster                  one-shot: merge the hot tier and rewrite the big tables in key order
+//   recluster [--limit N]      one-shot: merge the hot tier, re-cluster the text index and put the line store in
+//                              key order (both parts, due or not); --limit N pauses the line store's re-sort after
+//                              N moved slices, as a waiting write job would (the next run resumes it — a test aid)
 //   tool <name> [<json>]       one-shot: run one registry tool (SessionDbTools) and print its result
 //   call <method> [<json>]     a client: send one protocol request to the profile's service (started when none
 //                              runs) and print the answer
@@ -155,8 +157,12 @@ namespace
         return env.is_object() && env.contains("error") ? 1 : 0;
     }
 
-    // One-shot re-cluster (diagnostics): merge the hot tier, rewrite the big tables in key order, checkpoint.
-    int RunRecluster(const std::wstring& profileDir)
+    // One-shot re-cluster (diagnostics): merge the hot tier, re-cluster both parts, checkpoint.
+    //   profileDir — the profile whose database it rewrites (never a live one: the service may own it).
+    //   pauseAfter — > 0: the line store's re-sort pauses after that many polls of its cancel check, i.e. after
+    //                that many slices were considered (the store's resume path, testable without a service).
+    // Returns 0, or 3 when the database belongs to a newer service.
+    int RunRecluster(const std::wstring& profileDir, size_t pauseAfter)
     {
         Store store{ ConfigFor(profileDir) };
         if (store.Open() == SchemaState::TooNew)
@@ -167,7 +173,11 @@ namespace
         const ULONGLONG t0 = ::GetTickCount64();
         const size_t merged = store.Merge({});
         const ULONGLONG t1 = ::GetTickCount64();
-        store.Recluster({});
+        // The cancel check runs once before the text index and once per line slice; the first poll is the text
+        // index's, so `pauseAfter` slices pass before the pause.
+        size_t polls = 0;
+        const auto pause = [&polls, pauseAfter] { return pauseAfter > 0 && polls++ > pauseAfter; };
+        store.Recluster(pause, true); // both parts, due or not
         const ULONGLONG t2 = ::GetTickCount64();
         store.Checkpoint();
         const ULONGLONG t3 = ::GetTickCount64();
@@ -425,7 +435,7 @@ int wmain(int argc, wchar_t** argv)
         }
         if (mode == L"recluster")
         {
-            return RunRecluster(profileDir);
+            return RunRecluster(profileDir, limit);
         }
         if (mode == L"tool")
         {

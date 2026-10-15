@@ -25,7 +25,7 @@ REM TranscriptWatcher.cpp (HOOKS.md "Transcript watcher") is the same kind of LI
 REM SessionScanner::Start constructs the watcher, even though the CLI never starts a scanner.
 cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\CommandWatch.cpp ^
-   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ^
+   ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\ClaudeInvisibleChars.cpp ..\SessionDbClient.cpp ^
    ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed

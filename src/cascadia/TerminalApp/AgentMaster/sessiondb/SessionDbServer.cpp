@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -70,6 +71,10 @@ namespace Agentmaster::SessionDb
         // Idle maintenance: history.jsonl at most this often; a re-cluster only after this long without a write job.
         constexpr int64_t kHistoryEveryMs = 60000;
         constexpr int64_t kReclusterIdleMs = 120000;
+        // After a failed re-cluster the next try waits this long, doubling per failure up to the maximum; a
+        // success (or a service restart) resets it.
+        constexpr int64_t kReclusterBackoffFirstMs = 15ll * 60 * 1000;
+        constexpr int64_t kReclusterBackoffMaxMs = 24ll * 60 * 60 * 1000;
 
         int64_t NowUnixMs()
         {
@@ -195,6 +200,7 @@ namespace Agentmaster::SessionDb
             void _postWrite(std::function<void()> job);
             json _runQuery(const std::string& method, const json& params, Connection& con, InFlight& f, int& errCode, std::string& errText);
             json _status(Connection& con);
+            json _pageSearch(Connection& con, const json& params, InFlight& f);
             json _summary(Connection& con, const json& params, int& errCode, std::string& errText);
             json _rebuild(Connection& con, const json& params, int& errCode, std::string& errText);
 
@@ -240,6 +246,10 @@ namespace Agentmaster::SessionDb
             std::atomic<bool> _writerBusy{ false };
             std::atomic<int64_t> _lastWriteJobTick{ 0 };
             int64_t _lastHistoryTick{ 0 };
+            // The re-cluster's back-off (writer thread only): no try before _reclusterRetryTick; the current
+            // wait, 0 after a success.
+            int64_t _reclusterRetryTick{ 0 };
+            int64_t _reclusterBackoffMs{ 0 };
             // The sweep: pending at start (the catch-up) and after a `resync`; it yields to waiting write jobs
             // and resumes (cursor-based, so a cut sweep loses nothing).
             std::atomic<bool> _sweepPending{ true };
@@ -495,7 +505,8 @@ namespace Agentmaster::SessionDb
 
         bool IsQueryMethod(std::string_view m)
         {
-            return m == Proto::kStatus || m == Proto::kListSessions || m == Proto::kSearch || m == Proto::kSessionDetail || m == Proto::kSessionSummary ||
+            return m == Proto::kStatus || m == Proto::kListSessions || m == Proto::kSearch || m == Proto::kPageSearch || m == Proto::kSessionDetail ||
+                   m == Proto::kSessionSummary ||
                    m == Proto::kMessages || m == Proto::kGrep || m == Proto::kFiles || m == Proto::kWhoTouched || m == Proto::kTimeline || m == Proto::kUsage ||
                    m == Proto::kRelated || m == Proto::kSql || m == Proto::kToolCall;
         }
@@ -838,6 +849,10 @@ namespace Agentmaster::SessionDb
             {
                 return _rebuild(con, params, errCode, errText);
             }
+            if (method == Proto::kPageSearch)
+            {
+                return _pageSearch(con, params, f);
+            }
             ToolContext ctx{ *_store, *_search, con, [&f] { return f.cancelled.load() || f.timedOut.load(); }, NowUnixMs() };
             std::string tool;
             json args = params;
@@ -904,6 +919,50 @@ namespace Agentmaster::SessionDb
                 j["writeQueue"] = _writeJobs.size();
             }
             return j;
+        }
+
+        json Service::_pageSearch(Connection& con, const json& params, InFlight& f)
+        {
+            // The page's own request: its scope switches, its window (Unix ms), and how much to return.
+            SearchRequest req;
+            req.query = FromUtf8(params.value("query", std::string{}));
+            const json scopes = params.contains("scopes") && params["scopes"].is_object() ? params["scopes"] : json::object();
+            req.scopeTitle = scopes.value("title", true);
+            req.scopeDirs = scopes.value("dirs", true);
+            req.scopeFiles = scopes.value("files", true);
+            req.scopePrompt = scopes.value("prompt", true);
+            req.scopeReply = scopes.value("reply", false);
+            req.scopeTool = scopes.value("tool", false);
+            req.scopeSubagent = scopes.value("subagent", false);
+            req.fuzzy = params.value("fuzzy", false);
+            req.afterMs = params.value("afterMs", static_cast<int64_t>(0));
+            req.beforeMs = params.value("beforeMs", static_cast<int64_t>(0));
+            req.limit = static_cast<size_t>(std::clamp<int64_t>(params.value("limit", static_cast<int64_t>(2000)), 1, 5000));
+            req.snippetsPerRow = static_cast<size_t>(std::clamp<int64_t>(params.value("snippets", static_cast<int64_t>(3)), 0, 6));
+            req.snippetChars = 160;
+            req.cancel = [&f] { return f.cancelled.load() || f.timedOut.load(); };
+            const SearchResult r = _search->Search(con, req);
+            json rows = json::array();
+            for (const SearchRow& row : r.rows)
+            {
+                const SessionCard& c = r.cards->cards[r.cards->bySid.at(row.sidKey)];
+                json snips = json::array();
+                for (const SearchSnippet& s : row.snippets)
+                {
+                    snips.push_back({ { "role", s.role }, { "history", s.history }, { "text", ToUtf8(s.text) } });
+                }
+                rows.push_back({ { "id", ToUtf8(c.sessionId) }, { "tier", row.tier }, { "hits", row.hits }, { "score", row.score }, { "snippets", std::move(snips) } });
+            }
+            json out = { { "matched", r.matched }, { "searched", r.searched }, { "rows", std::move(rows) }, { "timings", ToUtf8(r.timings) } };
+            if (r.partial)
+            {
+                out["partial"] = true;
+            }
+            if (!r.note.empty())
+            {
+                out["note"] = ToUtf8(r.note);
+            }
+            return out;
         }
 
         json Service::_summary(Connection& con, const json& params, int& errCode, std::string& errText)
@@ -1136,16 +1195,33 @@ namespace Agentmaster::SessionDb
                     _lastHistoryTick = TickMs();
                     _store->IngestHistory();
                 }
-                if (TickMs() - _lastWriteJobTick.load() >= kReclusterIdleMs && !yield() && _store->ReclusterDue())
-                {
-                    _store->Merge(yield);
-                    _store->Recluster(yield);
-                }
             }
             catch (const std::exception& e)
             {
                 LogSwallowedException(L"sessiondb maintenance");
                 ServiceLog(L"[sessdb] maintenance failed: " + FromUtf8(e.what()));
+            }
+            // The re-cluster on its own, behind a back-off: a failure (out of memory, a full disk) leaves it due,
+            // and without the back-off every maintenance tick retried it (2026-10-15: every ~20 s, each try a
+            // full read of the database, for as long as the service ran).
+            if (TickMs() >= _reclusterRetryTick && TickMs() - _lastWriteJobTick.load() >= kReclusterIdleMs && !yield())
+            {
+                try
+                {
+                    if (_store->ReclusterDue())
+                    {
+                        _store->Merge(yield);
+                        _store->Recluster(yield);
+                    }
+                    _reclusterBackoffMs = 0;
+                }
+                catch (const std::exception& e)
+                {
+                    _reclusterBackoffMs = _reclusterBackoffMs == 0 ? kReclusterBackoffFirstMs : std::min(_reclusterBackoffMs * 2, kReclusterBackoffMaxMs);
+                    _reclusterRetryTick = TickMs() + _reclusterBackoffMs;
+                    LogSwallowedException(L"sessiondb re-cluster");
+                    ServiceLog(L"[sessdb] re-cluster failed (next try in " + std::to_wstring(_reclusterBackoffMs / 60000) + L" min): " + FromUtf8(e.what()));
+                }
             }
             ::SetThreadPriority(::GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
         }
