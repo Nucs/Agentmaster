@@ -1007,3 +1007,82 @@ Estimated from the measured parts. The app is not built, so no live number exist
   `LoadAllSessionTags` one after the other. With the scan cache that is three directory listings.
 - A tag written by another PROCESS to the same profile is not seen by the board's and the side panel's
   tag caches until the epoch moves. No other process writes tags today.
+
+## 12. The freeze of 2026-10-14: a re-bind loop, three leaks and a rebuild storm (NOT BUILT yet)
+
+**The report (release 0.7.9, the portable install in `~/.agentmaster\bin`, pid 2964):** the window stopped
+answering clicks; the machine's RAM use reached 98 %; after the memory was released the window still
+looked busy. It was investigated read-only (no thread suspended), then restarted by the user at 17:46; the
+restart took the 0.7.10 pre-release, which does not hold these fixes.
+
+### 12a. What was measured
+
+- **The UI thread** was busy without a pause. A stack sampler that never suspends a thread (`stacksnap`,
+  Microsoft's public symbols) put most busy samples in XAML's `CEventManager` list scans
+  (`xpairlist::Get` / `xpairlist::RemoveByKey`, linear searches over every registered element) under
+  `AgentManagerContent::_Refresh` → `_RebuildBoard`.
+- **One board rebuild took about 4 s**, and the registry-driven path waited only 250 ms after each one, so
+  the UI thread spent about 94 % of its time in rebuilds. Input and rendering got the rest.
+- **The heap held 2,920 `ScrollViewer`s** from the Triage Board's columns (a window shows at most 6), each
+  still holding its whole card stack (about 50 KB per card). The page was on screen from 16:06:08; while
+  it was, the process grew by 2–3 MB a second.
+- **The heap held 194,698 sets of the summary panel's resize grips** (three per per-tab overlay).
+- **hooks.log** (the release profile): 175,433 lines `[adopt] 97eb07dd… bound via observer re-home (moved)`
+  from 2026-10-11 23:28 to 2026-10-14 17:46, and 20,942 lines `[liveness] dead -> archived 97eb07dd…`. No
+  such line follows the restart.
+
+### 12b. The chain
+
+1. **One conversation ran in two or three tabs** (a `/resume` of an open conversation, Restart copies). The
+   UI lane bound it to each tab in turn, about once a second for 2.8 days (OBSERVER.md §20).
+2. **Every bind built a new per-tab overlay**, and each overlay's three resize grips held themselves through
+   their own hover handlers, so none was ever freed (TAB_OVERLAY.md §13k).
+3. **Every bind changed the registry**, so every window's Agent Manager page rebuilt. With the page on
+   screen, each rebuild made all its columns again: a new `ScrollViewer` per column, with new cards.
+4. **The replaced `ScrollViewer`s were never freed**, nor the cards in them. What holds them is NOT proven:
+   a column `ScrollViewer` registered a `Loaded` handler (the offset restore) only when the column was
+   scrolled, and a rebuild could replace it before it loaded.
+5. **XAML's event manager keeps per-element lists and searches them linearly.** With hundreds of thousands
+   of leaked elements every list operation slowed down, a rebuild took ~4 s, and the 250 ms gap made the
+   rebuilds run back to back.
+
+### 12c. The fixes
+
+- **The loop** (OBSERVER.md §20): one host tab per conversation; the other tabs are never bound, and their
+  hooks and observations are dropped.
+- **The self-holding handlers** (TAB_OVERLAY.md §13k): the overlay grips, the "Specify a model" prompt's
+  Fetch button and the Commands tab's successor-model combos reach their element through `sender` or a weak
+  reference.
+- **The board's columns are PERSISTENT** (`AgentManagerContent::BoardColumnView`, `_EnsureBoardColumn`):
+  each window builds each column once, the first time a rebuild shows it. A rebuild rewrites the header's
+  count (`_SetBoardColumnCount`, only on a change) and refills the column's card list; it makes no
+  `ScrollViewer` and registers no `Loaded` handler. The one `ScrollViewer` per column keeps its offset by
+  itself, so `_boardColumnScrollers` / `_boardColumnOffsets` and the restore-on-`Loaded` are gone.
+  `_SyncBoardColumnOrder` adds or removes only the Error and External columns, with the fewest removes /
+  inserts / moves (`PlanKeyedListOps`, the side panel's recipe), so a column that stays is never taken out
+  of the tree. A column that leaves the board drops its cards at once.
+- **The registry-driven gap follows the rebuild's cost** (`AgentMaster/RefreshPacing.h`,
+  `ManagerRefreshGapMs`): twice the last rebuild's cost, between 250 ms and 5 s. `_Refresh` measures every
+  rebuild that runs (`_lastRefreshCostMs`); a rebuild of 1 s or more is logged at most once a minute:
+  `[manager] slow rebuild: N ms (live sessions=…, board cards=…, tree rows=…, external=…, board only=…);
+  registry-driven rebuilds now wait M ms between them …`.
+- **Tests:** `TestConversationHosts`, `TestDuplicateConversationHosts` and `TestRefreshPacing`
+  (`tests_state.cpp`). The XAML half (the columns, the UI lane, the bind chokepoint) is not compiled or run
+  yet.
+
+### 12d. Not changed
+
+- **The cards are still rebuilt** on every rebuild (the side panel edits its cards in place, §10j; the board
+  does not). A card that leaks for another reason still leaks once per rebuild.
+- **The focus restore** in `_Refresh` registers a `Loaded` handler on a rebuilt card when the card it
+  replaced held keyboard focus (one per rebuild at most). It has the same shape as the column
+  `ScrollViewer`'s old handler.
+- **The tree and the Prompt Queue** are still cleared and rebuilt on every full rebuild.
+
+### 12e. Check after the build
+
+- hooks.log: no `[adopt] … bound via observer re-home (moved)` run for one session; when two tabs run one
+  conversation, one `[observer] duplicate conversation …` line and the `… not bound …` lines, then quiet.
+- hooks.log: no `[manager] slow rebuild` line in normal use.
+- With the Agent Manager page on screen for an hour, the process's private memory stays flat, and a heap
+  census finds at most 6 board `ScrollViewer`s per window.

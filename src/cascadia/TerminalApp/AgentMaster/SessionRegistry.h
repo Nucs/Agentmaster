@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "ConversationHosts.h" // DuplicateConversation (OBSERVER.md §20 — one conversation in two or more tabs)
 #include "DraftCarry.h" // PasteJournalEntry + the journal caps (PENDING_INPUT.md §2c — the paste journal)
 #include "HookEvents.h"
 #include "SessionModels.h"
@@ -274,6 +275,29 @@ namespace Agentmaster
         //   returns   — true when observations and hooks from that host must be ignored for that session.
         //   throws    — nothing beyond std::mutex::lock's std::system_error.
         bool IsRetiredHostToken(const std::wstring& sessionId, const std::wstring& tabToken) const;
+
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): replace the set of DUPLICATE hosts — tabs
+        // whose claude runs a conversation that another tab hosts (ConversationHosts.h). The Fleet Observer
+        // publishes the whole set after every survey (an empty vector when no conversation runs twice, the
+        // normal case). From then on every hook and every ObserveClaude that names a (session, duplicate tab)
+        // pair is dropped whole, so the session's record (tabToken, pid, heartbeat, state) follows its host
+        // tab only. Before this the three copies of one conversation took turns writing their tab token onto
+        // the record: the liveness sweep then found the token in no pane of the bound tab and archived the
+        // session, and a Restart started in whichever tab the token named last. The first drop per pair is
+        // logged ([duplicate-host] in hooks.log); a pair that leaves the set and comes back logs again.
+        // Thread-safe.
+        //   duplicates — the survey's duplicated conversations (session id, host tab, duplicate tabs). A
+        //                duplicate list naming the host tab, or an empty session id, is ignored for that entry.
+        //   throws     — std::bad_alloc on allocation failure only.
+        void SetDuplicateConversationHosts(const std::vector<DuplicateConversation>& duplicates);
+
+        // Agentmaster (duplicate conversations): is `tabToken` a duplicate host of `sessionId` in the set the
+        // last survey published (SetDuplicateConversationHosts)? Case-insensitive token match. Thread-safe.
+        //   sessionId — the session to ask about.
+        //   tabToken  — a WT_SESSION as a hook, an observation or the UI lane reported it ("" never matches).
+        //   returns   — true when that tab runs the conversation but does not host it.
+        //   throws    — nothing beyond std::mutex::lock's std::system_error.
+        bool IsDuplicateConversationHost(const std::wstring& sessionId, const std::wstring& tabToken) const;
 
         // Mutate a session's Auto Testing / autorunner under the lock (used by the scheduler
         // and UI). The mutator runs while holding the lock; the post-change snapshot is
@@ -556,6 +580,23 @@ namespace Agentmaster
         //   nowUnixMs — the TTL clock.
         //   returns   — the matching entry (its log latch may be flipped) or nullptr. Never throws.
         const RetiredHostToken* _FindRetiredHostTokenLocked(const std::wstring& sessionId, const std::wstring& tabToken, int64_t nowUnixMs) const noexcept;
+
+        // Agentmaster (duplicate conversations): is `tabToken` one of `sessionId`'s duplicate hosts in
+        // _duplicateHosts? Caller holds _mtx.
+        //   sessionId — the session to ask about.
+        //   tabToken  — the token to look for (case-insensitive; "" never matches).
+        //   returns   — true when the tab runs the conversation but another tab hosts it. Never throws.
+        bool _IsDuplicateConversationHostLocked(const std::wstring& sessionId, const std::wstring& tabToken) const noexcept;
+
+        // Agentmaster (duplicate conversations, SetDuplicateConversationHosts): session id -> the WT_SESSIONs
+        // of the tabs that run the conversation without hosting it. Replaced whole by every survey. Guarded
+        // by _mtx.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> _duplicateHosts;
+        // Agentmaster (duplicate conversations): "<session id>|<lowercase token>" pairs whose dropped hook or
+        // observation was already logged — one [duplicate-host] line per pair while it stays a duplicate
+        // (a duplicate claude's hooks and its ~2 s observations would otherwise repeat the line). Pruned to
+        // the current set on every SetDuplicateConversationHosts. Guarded by _mtx.
+        std::unordered_map<std::wstring, bool> _duplicateHostDropLogged;
 
         mutable std::mutex _mtx;
         // insertion-ordered storage so the UI shows a stable order

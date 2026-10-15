@@ -8163,6 +8163,35 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): the belt at the chokepoint every bind path
+        // passes (the observer probe, the reconcile tick's _AdoptExternalSession, hook adoption). When the last
+        // survey found this tab running a conversation that ANOTHER tab hosts, binding it here would move the
+        // session off the tab whose claude still runs it — the re-bind loop of 2026-10-11..14 (UI_THREAD.md
+        // §12). Refuse, and log the first refusal per (session, tab); _ObserverProbeImpl forgets the pair once
+        // the registry stops listing it, so a later duplicate of the same pair logs again. A tab stops being a
+        // duplicate on the first survey after the host's claude exits or switches conversation, and then
+        // binds normally.
+        {
+            std::wstring token{ ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId()) };
+            for (auto& c : token)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a'); // the roster / pair-key form (lowercase)
+                }
+            }
+            if (_sessionRegistry->IsDuplicateConversationHost(id, token))
+            {
+                if (_duplicateConversationLogged.insert(id + L"|" + token).second)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                  L"[adopt] " + id + L" not bound via " + origin + L": tab wt=" + token +
+                                                      L" runs the same conversation as the tab that hosts it\n");
+                }
+                return;
+            }
+        }
+
         // RE-HOME (in-session `/resume`): if this SAME tab is currently bound to a DIFFERENT session
         // id, the conversation switched ids on a stable ConPTY. Supersede the old id — archive it
         // (its Auto Testing stays restorable) and drop its tab/overlay binding — then re-point below.
@@ -10746,11 +10775,13 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             bool bound = false;
+            std::wstring boundSessionId; // which session this window binds to the tab (OBSERVER.md §20)
             for (const auto& [boundId, weakBound] : _claudeTabs)
             {
                 if (const auto t = weakBound.get(); t && t == projectedTab)
                 {
                     bound = true;
+                    boundSessionId = boundId;
                     break;
                 }
             }
@@ -10758,6 +10789,10 @@ namespace winrt::TerminalApp::implementation
             e.wtSession = wt;
             e.shellPid = shellPid;
             e.bound = bound;
+            // The survey keeps a conversation that runs in two or more tabs on the tab that is bound to it
+            // (ConversationHosts.h, rule 1), so it must know WHICH session the tab is bound to, not only
+            // that it is bound to one.
+            e.boundSessionId = std::move(boundSessionId);
             roster.push_back(std::move(e));
             probeTabs.push_back({ winrt::make_weak(projectedTab), conn, wt });
         }
@@ -10798,6 +10833,9 @@ namespace winrt::TerminalApp::implementation
             actByWt[a.wtSession] = a; // the whole row (Codex carries its model, to enrich the badge)
         }
         std::unordered_set<std::wstring> rosterWts; // this window's tabs this tick (for observe-badge pruning)
+        // "<session id>|<WT_SESSION>" of every tab this tick left unbound because another tab hosts its
+        // conversation (OBSERVER.md §20) — keeps their _duplicateConversationLogged entries alive below.
+        std::unordered_set<std::wstring> duplicateSkipsNow;
         for (const auto& pt : probeTabs)
         {
             rosterWts.insert(pt.wt);
@@ -10835,6 +10873,58 @@ namespace winrt::TerminalApp::implementation
 
             if (oursClaude && !it->second.sessionId.empty())
             {
+                // Agentmaster (duplicate conversations, OBSERVER.md §20): never bind a tab whose claude runs a
+                // conversation that ANOTHER tab hosts. Claude Code lets one conversation run in several
+                // processes (a `/resume` of a conversation that is already open, a second `claude -c`, a
+                // Restart beside a copy that keeps running); a session binds to ONE tab, so binding this tab
+                // would MOVE the session off a tab whose claude still runs it, and the next tick would move it
+                // back. On the release of 2026-10-11..14 that loop bound one session ~175,000 times in 2.8
+                // days; every bind built a new overlay and saved sessions.json, and the registry change
+                // rebuilt the Agent Manager page each time (UI_THREAD.md §12).
+                //   * The observer marks such a row (duplicateOfWt = the host tab), from the facts of every
+                //     window: the tab already bound to the conversation keeps it.
+                //   * The belt: the conversation is bound to ANOTHER tab of this window whose claude still
+                //     runs it (the observer did not group the two rows — a survey that predates the roster
+                //     publish, an id spelled differently). Moving it is the same loop.
+                // A row whose host stopped running the conversation is no duplicate any more, so the session
+                // then follows the remaining tab through the ordinary bind below.
+                std::wstring hostOfConversation = it->second.duplicateOfWt;
+                if (hostOfConversation.empty())
+                {
+                    if (const auto bit = _claudeTabs.find(it->second.sessionId); bit != _claudeTabs.end())
+                    {
+                        if (const auto boundTab = bit->second.get(); boundTab && boundTab != hostTab)
+                        {
+                            for (const auto& other : probeTabs)
+                            {
+                                if (other.wt == pt.wt || other.tab.get() != boundTab)
+                                {
+                                    continue;
+                                }
+                                if (const auto oit = byWt.find(other.wt); oit != byWt.end() && oit->second.sessionId == it->second.sessionId)
+                                {
+                                    hostOfConversation = other.wt; // its claude still runs the conversation
+                                }
+                                break; // found the bound tab's row (or learned that its claude moved on)
+                            }
+                        }
+                    }
+                }
+                if (!hostOfConversation.empty())
+                {
+                    const std::wstring pairKey = it->second.sessionId + L"|" + pt.wt;
+                    duplicateSkipsNow.insert(pairKey);
+                    if (_duplicateConversationLogged.insert(pairKey).second)
+                    {
+                        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                      L"[discover] " + it->second.sessionId + L" wt=" + pt.wt + L" (pid " + std::to_wstring(it->second.claudePid) +
+                                                          L") not bound: tab wt=" + hostOfConversation +
+                                                          L" hosts the same conversation; this tab shows an observe badge until it runs a conversation of its own\n");
+                    }
+                    _SetTabActivityBadge(hostTab, pt.wt, L"claude  \x00B7  same conversation as another tab");
+                    continue;
+                }
+
                 // This window hosts the connection NOW (it's in OUR roster, walked from _tabs), so we are
                 // its rightful local owner. Bind via the shared tail — keyed on the exact WT_SESSION, so a
                 // hand-typed claude after a `cd` binds to the right id even with no hook; the bound overlay
@@ -10929,6 +11019,18 @@ namespace winrt::TerminalApp::implementation
                 }
                 pit = _pendingOverlays.erase(pit);
             }
+        }
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): forget a logged pair when nothing reports it
+        // as a duplicate any more — neither this tick's skips above nor the registry's duplicate set, which
+        // the bind chokepoint (_BindClaudeSessionToTab) logs against. A pair that returns later logs again.
+        // Empty in the normal case, so this costs nothing then.
+        for (auto lit = _duplicateConversationLogged.begin(); lit != _duplicateConversationLogged.end();)
+        {
+            const auto bar = lit->find(L'|');
+            const bool stillDuplicate =
+                duplicateSkipsNow.count(*lit) != 0 ||
+                (bar != std::wstring::npos && _sessionRegistry->IsDuplicateConversationHost(lit->substr(0, bar), lit->substr(bar + 1)));
+            lit = stillDuplicate ? std::next(lit) : _duplicateConversationLogged.erase(lit);
         }
         co_return;
     }

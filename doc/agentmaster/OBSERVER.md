@@ -565,6 +565,8 @@ _ObserverProbe():                                  // co_await resume_foreground
 - **Roster build** is the only added per-tab WinRT work (`SessionId()` + `RootProcessHandle()` —
   both µs). `tabIsBound` = `_claudeTabs` has an entry whose weak tab == this tab.
 - `_BindClaudeSessionToTab` is **unchanged** — the observer only changes the *trigger* and the *key*.
+- A row that the survey marks as a duplicate (`CorrelationRow::duplicateOfWt`: its conversation runs in
+  another tab that hosts it) is never bound; the tab gets an observe badge (§20).
 - Register/unregister with the observer in `_InitAgentmasterEngine` / `~TerminalPage` by token
   (Rule #10): `_observer = engine.observer; … _observer->UnpublishWindow(_windowId)`.
 
@@ -933,3 +935,105 @@ helpers to `AgentMaster/tests/`.
    than a parallel Codex-managed path. The remaining open question is **C3/C4** (PUSH + driving).
 4. O7 debounce: gate on roster-equality + PID-liveness only, or add a `ReadDirectoryChangesW` watch on
    `projects/` to event-drive transcript-appear instead of the heartbeat?
+
+---
+
+## 20. Duplicate conversations — one host tab per conversation (2026-10-14, NOT BUILT yet)
+
+### 20a. The incident
+
+- **What froze:** the release instance (pid 2964) stopped answering on 2026-10-14. Its UI thread was busy,
+  RAM use reached 98 %, and a click waited for minutes (the UI half is UI_THREAD.md §12).
+- **The trigger:** ONE conversation (`97eb07dd…`) ran in two or three claude processes, each in its own tab
+  of one window. Claude Code allows this: a `/resume` of a conversation that is already open, a second
+  `claude -c` in the same folder, or a Restart beside a copy that keeps running each start a new process on
+  the same conversation. Each process writes the same transcript and reports the same session id in its
+  presence heartbeat (`~/.claude/sessions/<pid>.json`).
+- **The loop:** the survey reads the presence id first (§8b), so it correlated EVERY such tab to the
+  session. A session binds to ONE tab (`_claudeTabs` is keyed by session id), so in each UI-lane tick one
+  of the tabs was unbound, and PASS 2 bound it (`[discover] … (observer re-home (moved) wt=…)`). That MOVED
+  the session off the other tab, which the next tick bound back. hooks.log holds about 175,000 such binds in
+  2.8 days.
+- **What each bind cost:**
+  - a new per-tab overlay; each overlay leaked its three summary-panel grips (TAB_OVERLAY.md §13k);
+  - a synchronous `SaveSessions(Snapshot())` of the whole fleet;
+  - registry notifications, so the Agent Manager page rebuilt itself about once a second (UI_THREAD.md §12).
+- **Facts flipping:** the copies' observations and hooks wrote their own tab token onto the record in turn.
+  The liveness sweep looks for the record's token in the bound tab (`_SweepClaudeLivenessImpl`); when the
+  token named the other tab, it found no pane and archived the session (`[liveness] dead -> archived`).
+
+### 20b. The rule
+
+- **One host per conversation** (`AgentMaster/ConversationHosts.h`, pure). `PickConversationHost` ranks
+  the tabs that run a conversation:
+  1. the tab that its window binds to the conversation (`TabRosterEntry::boundSessionId`);
+  2. the registry's recorded host (`SessionInfo::tabToken`);
+  3. the claude that started first (an unknown start ranks last);
+  4. the lower `WT_SESSION` (only so that the same facts always give the same host).
+- **Rule 1 is what stops the move:** the tab that already hosts the conversation keeps it while its claude
+  runs it. The host changes only when the host's claude exits, switches conversation (`/clear`,
+  `/resume`), or its tab closes.
+- `FindDuplicateConversations` groups the survey's claims by session id and returns one entry per
+  conversation that runs in two or more tabs: its host and the other tabs (the duplicates). A conversation
+  in one tab, the normal case, costs one hash-map entry and nothing else.
+
+### 20c. Where it applies
+
+- **The survey** (`ProcessObserver::_surveyOnce`, step 3b): every rostered claude with a session id gives a
+  `ConversationClaim`; its `ObservedClaude` waits in `pendingObserved`. After the roster loop:
+  - `FindDuplicateConversations` chooses the hosts (rule 2 asks `SessionRegistry::GetTabToken`, once per
+    duplicated conversation);
+  - each duplicate's correlation row gets `CorrelationRow::duplicateOfWt` = the host's `WT_SESSION`;
+  - `SessionRegistry::SetDuplicateConversationHosts` publishes the set BEFORE the feed;
+  - only the non-duplicate observations are fed to `ObserveClaude`;
+  - `_LogDuplicateConversations` logs a change of the set.
+- **The roster** (`TabRosterEntry::boundSessionId`): the UI lane's PASS 1 fills it from `_claudeTabs`;
+  `PublishRoster` compares it, so a re-bind reaches the next survey at once (a Wake).
+- **The registry** (`SessionInfo` is not changed):
+  - `OnHookEvent` drops a hook whose (session id, tab token) pair is a duplicate, whole: no state change, no
+    token, no Typed row, no provenance. The first drop per pair is logged (`[duplicate-host] dropped <Event>
+    for <sid> from ConPTY <token> …`).
+  - `ObserveClaude` drops such an observation silently (a belt: the survey never feeds one).
+  - A hook from the same tab for ANOTHER session (that tab ran `/clear` or `/resume` into a conversation of
+    its own) is applied as before.
+  - The set is REPLACED by each survey, so a tab that is no longer a duplicate is heard again at once.
+- **The UI lane** (`TerminalPage::_ObserverProbeImpl`, PASS 2) never binds a row with `duplicateOfWt`. A
+  belt also refuses a row whose conversation this window binds to ANOTHER tab whose claude still runs it
+  (a survey that predates the roster publish). Such a tab gets the observe badge
+  `○ claude · same conversation as another tab · unlinked` and a gray status dot; one
+  `[discover] <sid> wt=<wt> (pid N) not bound: tab wt=<host> hosts the same conversation …` line per pair.
+- **The bind chokepoint** (`TerminalPage::_BindClaudeSessionToTab`) refuses a pair that the registry lists
+  as a duplicate, whatever path asks (the reconcile tick's `_AdoptExternalSession`, hook adoption):
+  `[adopt] <sid> not bound via <origin>: tab wt=<token> runs the same conversation as the tab that hosts it`,
+  once per pair (`_duplicateConversationLogged`, pruned when no source reports the pair any more).
+
+### 20d. What still moves a session
+
+- **A new copy can move the session ONCE.** A `/resume` of an open conversation in tab Y sends its
+  `SessionStart` (token Y) before the next survey sees Y's claude. The hook stamps the record's token with
+  Y; the liveness sweep of the window that binds the session to tab X then finds no pane for Y in X and
+  archives the session, and the reconcile tick binds it to Y. On the next survey Y is bound (rule 1), so Y
+  hosts and X is a duplicate. The session followed the user's latest `/resume`, and it stays there.
+- **The host stops running the conversation:** the next survey sees one tab, the set loses the entry, and
+  the remaining tab binds through the ordinary path.
+
+### 20e. Logs
+
+- `[observer] duplicate conversation <sid>: host tab wt=<wt> (pid N), also running in wt=<wt> (pid N) — …`
+  when a conversation starts to run in two or more tabs, or its host or duplicates change;
+  `[observer] duplicate conversation <sid> resolved — one tab runs it again` when it is back to one tab.
+  An unchanged set logs nothing, so a duplicate that lasts for days costs one line.
+- `[duplicate-host] dropped …` (registry), `[discover] … not bound …` (UI lane), `[adopt] … not bound via …`
+  (bind chokepoint): once per (session, tab) pair while it stays a duplicate.
+
+### 20f. Tests and gaps
+
+- **Tests:** `TestConversationHosts` (the ranking, its order independence, the grouping, the incident's
+  three-tab shape) and `TestDuplicateConversationHosts` (the registry drops; the host and other sessions
+  still heard; the set replaced; the pure half end to end), in `tests_state.cpp`.
+- **Not changed:** two claude processes on one conversation still write ONE transcript (Claude Code's
+  behavior; the two-writers hazard of the adopt path). Agentmaster drives only the host: the Prompt Queue
+  Runner's injector is the host's.
+- **Gap:** a conversation bound in TWO windows (each window binds the session to its own tab) keeps both
+  bindings; rules 2–4 pick the host, the other tab's hooks are dropped, and the stdin injector is the one the
+  last bind registered. No such state was seen; the incident was one window.

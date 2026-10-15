@@ -580,6 +580,45 @@ namespace Agentmaster
             }
         }
 
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): a hook from a tab whose claude runs this
+        // conversation while ANOTHER tab hosts it (SetDuplicateConversationHosts). Applying it would write
+        // that tab's token onto the record (the liveness sweep then finds the token in no pane of the bound
+        // tab and archives the session), a SessionStart from it would MOVE the session off its host (the
+        // adoption fan-out binds by token), and its turns would drive the host's state. Drop it whole; log
+        // the first drop per (session, tab). A tab stops being a duplicate on the first survey after the
+        // host's claude exits or switches conversation, and its hooks count again from then on. A hook for
+        // ANOTHER id from the same tab (that tab ran /clear or /resume) is not affected.
+        if (!msg.tabToken.empty() && !msg.sessionId.empty())
+        {
+            bool fromDuplicate = false;
+            bool logDrop = false;
+            {
+                std::lock_guard guard{ _mtx };
+                if (_IsDuplicateConversationHostLocked(msg.sessionId, msg.tabToken))
+                {
+                    fromDuplicate = true;
+                    std::wstring key = msg.sessionId + L"|" + msg.tabToken;
+                    for (auto& c : key)
+                    {
+                        if (c >= L'A' && c <= L'Z')
+                        {
+                            c = static_cast<wchar_t>(c - L'A' + L'a');
+                        }
+                    }
+                    auto [it, inserted] = _duplicateHostDropLogged.emplace(std::move(key), true);
+                    logDrop = inserted;
+                }
+            }
+            if (fromDuplicate)
+            {
+                if (logDrop)
+                {
+                    AppendStateLog(L"hooks.log", L"[duplicate-host] dropped " + std::wstring{ HookEventName(msg.event) } + L" for " + msg.sessionId + L" from ConPTY " + msg.tabToken + L" (this tab runs the same conversation as the tab that hosts it; its hooks are ignored while both run \x2014 later drops from this tab are not logged)\n");
+                }
+                return;
+            }
+        }
+
         // Agentmaster (--fork-session source-id echo, SessionModels.h SessionInfo::forkParentId): a
         // `claude --resume <src> --fork-session --session-id <new>` fork fires its FIRST SessionStart
         // hook under the SOURCE id <src>, NOT the freshly minted <new> we registered + bound to this
@@ -1205,6 +1244,14 @@ namespace Agentmaster
             {
                 return;
             }
+            // Agentmaster (duplicate conversations, OBSERVER.md §20): the belt behind the survey, which never
+            // feeds a duplicate tab's claude here. A duplicate's facts (its tab token, pid, heartbeat) would
+            // overwrite the host's, so the liveness sweep would look for the session in the wrong tab.
+            // Silent: the survey logs each duplicate it finds.
+            if (!o.tabToken.empty() && _IsDuplicateConversationHostLocked(o.sessionId, o.tabToken))
+            {
+                return;
+            }
             auto it = _sessions.find(o.sessionId);
             if (it == _sessions.end())
             {
@@ -1456,6 +1503,76 @@ namespace Agentmaster
             }
         }
         return nullptr; // expired entries are ignored here and pruned on the next RetireHostToken
+    }
+
+    // Agentmaster (duplicate conversations, OBSERVER.md §20): see the declaration. The set is REPLACED, not
+    // merged — the survey sees every tab each time, so a tab whose copy exited (or that became the host)
+    // simply drops out. The drop-log latches are pruned to the pairs that stay duplicates, so a pair that
+    // returns later logs its first drop again.
+    void SessionRegistry::SetDuplicateConversationHosts(const std::vector<DuplicateConversation>& duplicates)
+    {
+        std::unordered_map<std::wstring, std::vector<std::wstring>> next;
+        for (const auto& d : duplicates)
+        {
+            if (d.sessionId.empty())
+            {
+                continue; // nothing names a conversation
+            }
+            std::vector<std::wstring> wts;
+            for (const auto& wt : d.duplicateWts)
+            {
+                // Never list the host itself: its hooks are the ones the record must follow.
+                if (!wt.empty() && !TabTokenEq(wt, d.hostWt))
+                {
+                    wts.push_back(wt);
+                }
+            }
+            if (!wts.empty())
+            {
+                next.emplace(d.sessionId, std::move(wts));
+            }
+        }
+        std::lock_guard guard{ _mtx };
+        _duplicateHosts.swap(next);
+        // Keep a latch only while its pair is still a duplicate. The key is "<session id>|<lowercase token>"
+        // (OnHookEvent writes it); the session id half is compared as given.
+        for (auto it = _duplicateHostDropLogged.begin(); it != _duplicateHostDropLogged.end();)
+        {
+            const auto bar = it->first.find(L'|');
+            const bool keep = bar != std::wstring::npos && _IsDuplicateConversationHostLocked(it->first.substr(0, bar), it->first.substr(bar + 1));
+            it = keep ? std::next(it) : _duplicateHostDropLogged.erase(it);
+        }
+    }
+
+    bool SessionRegistry::IsDuplicateConversationHost(const std::wstring& sessionId, const std::wstring& tabToken) const
+    {
+        std::lock_guard guard{ _mtx };
+        return _IsDuplicateConversationHostLocked(sessionId, tabToken);
+    }
+
+    // Agentmaster (duplicate conversations): see the declaration. A map miss for every session that runs in
+    // one tab — the normal case — so the per-hook cost stays one hash lookup.
+    bool SessionRegistry::_IsDuplicateConversationHostLocked(const std::wstring& sessionId, const std::wstring& tabToken) const noexcept
+    {
+        if (tabToken.empty() || _duplicateHosts.empty())
+        {
+            return false;
+        }
+        // The session ids in the set are the survey's (presence heartbeat, lowercase GUIDs); a hook's id
+        // comes from the same payload field, so an exact find is the right match.
+        const auto it = _duplicateHosts.find(sessionId);
+        if (it == _duplicateHosts.end())
+        {
+            return false;
+        }
+        for (const auto& wt : it->second)
+        {
+            if (TabTokenEq(wt, tabToken))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool SessionRegistry::Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate)

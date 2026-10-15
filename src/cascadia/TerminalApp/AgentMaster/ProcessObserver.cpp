@@ -216,7 +216,10 @@ namespace Agentmaster
             {
                 for (size_t i = 0; i < cur.size(); ++i)
                 {
-                    if (cur[i].wtSession != roster[i].wtSession || cur[i].shellPid != roster[i].shellPid || cur[i].bound != roster[i].bound)
+                    // boundSessionId is part of the change test (OBSERVER.md §20): a tab re-bound to another
+                    // conversation must reach the duplicate-host choice on the next survey, not a heartbeat later.
+                    if (cur[i].wtSession != roster[i].wtSession || cur[i].shellPid != roster[i].shellPid || cur[i].bound != roster[i].bound ||
+                        cur[i].boundSessionId != roster[i].boundSessionId)
                     {
                         changed = true;
                         break;
@@ -262,6 +265,55 @@ namespace Agentmaster
     {
         std::lock_guard lk{ _tableMtx };
         return _presence;
+    }
+
+    // Agentmaster (duplicate conversations, OBSERVER.md §20): see the declaration. The signature is what the
+    // line says, so a log line appears exactly when what it would say changes.
+    void ProcessObserver::_LogDuplicateConversations(const std::vector<DuplicateConversation>& duplicates, const std::vector<CorrelationRow>& corr)
+    {
+        const auto pidOf = [&corr](const std::wstring& wt) -> uint32_t {
+            for (const auto& r : corr)
+            {
+                if (r.wtSession == wt)
+                {
+                    return r.claudePid;
+                }
+            }
+            return 0;
+        };
+        std::unordered_set<std::wstring> current;
+        for (const auto& d : duplicates)
+        {
+            current.insert(d.sessionId);
+            std::wstring sig = L"host=" + d.hostWt + L" dups=";
+            for (const auto& wt : d.duplicateWts)
+            {
+                sig += wt + L",";
+            }
+            auto& last = _duplicateLogState[d.sessionId];
+            if (last == sig)
+            {
+                continue; // unchanged since the last line: say nothing
+            }
+            last = sig;
+            std::wstring line = L"[observer] duplicate conversation " + d.sessionId + L": host tab wt=" + d.hostWt + L" (pid " + std::to_wstring(pidOf(d.hostWt)) + L"), also running in";
+            for (size_t i = 0; i < d.duplicateWts.size(); ++i)
+            {
+                line += (i ? L"," : L"") + std::wstring{ L" wt=" } + d.duplicateWts[i] + L" (pid " + std::to_wstring(pidOf(d.duplicateWts[i])) + L")";
+            }
+            line += L" \x2014 the session stays bound to its host; the other tabs are not bound and their hooks and observations are ignored while both run\n";
+            AppendStateLog(L"hooks.log", line);
+        }
+        for (auto it = _duplicateLogState.begin(); it != _duplicateLogState.end();)
+        {
+            if (current.count(it->first) != 0)
+            {
+                ++it;
+                continue;
+            }
+            AppendStateLog(L"hooks.log", L"[observer] duplicate conversation " + it->first + L" resolved \x2014 one tab runs it again\n");
+            it = _duplicateLogState.erase(it);
+        }
     }
 
     void ProcessObserver::_worker() noexcept
@@ -759,6 +811,13 @@ namespace Agentmaster
         std::unordered_map<uint32_t, std::wstring> rosteredOwner; // claude pid -> owning windowId (== ours)
         corr.reserve(roster.size());
         act.reserve(roster.size());
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): the registry feed waits until every tab is
+        // correlated. Two or more tabs can run ONE conversation (a /resume of an open one, a second
+        // `claude -c`, a Restart beside a live copy); only the tab chosen as its host may feed the record,
+        // and the choice needs all of them (step 3b below). `claims` lists what each claude reports;
+        // `pendingObserved` holds the observations until the choice is made.
+        std::vector<ConversationClaim> claims;
+        std::vector<ObservedClaude> pendingObserved;
         for (const auto& [wtSession, tab] : roster)
         {
             const uint32_t cpid = FindDescendantByImage(snap, tab.shellPid, L"claude.exe");
@@ -856,7 +915,9 @@ namespace Agentmaster
                     o.apiActivityUnixMs = convApi; // the ⚡ half: the parent conversation's OWN last line (no subagent fold)
                     o.turnStartUnixMs = convTurnStart; // MOST RECENT sort: the tail's newest real prompt (pull half; 0 == not in the window)
                     o.turnEndUnixMs = convTurnEnd; // MOST RECENT sort: the tail's newest turn end (terminal stop / interrupt marker)
-                    _registry->ObserveClaude(o);
+                    // Fed after the duplicate-host choice (step 3b), not here: see `claims` above.
+                    claims.push_back(ConversationClaim{ wtSession, sid, tab.boundSessionId, f.startUnixMs });
+                    pendingObserved.push_back(std::move(o));
                 }
                 continue;
             }
@@ -920,6 +981,66 @@ namespace Agentmaster
                 }
             }
             act.push_back(std::move(ar));
+        }
+
+        // 3b) Agentmaster (duplicate conversations, OBSERVER.md §20): ONE host tab per conversation. When two
+        //     or more tabs run the same conversation, FindDuplicateConversations keeps the tab already bound
+        //     to it (else the registry's recorded host, else the earliest claude) and names the others
+        //     duplicates. A duplicate's correlation row carries the host's WT_SESSION, so the UI lane never
+        //     binds it — binding it MOVED the session off a tab whose claude still ran it, and the next pass
+        //     moved it back: the 2026-10-11..14 release loop, ~175,000 binds in 2.8 days. A duplicate's
+        //     observation is not fed (its tab token / pid / heartbeat would overwrite the host's), and the
+        //     registry drops its hooks (SetDuplicateConversationHosts, published BEFORE the feed so the
+        //     registry's own belt agrees with this choice). A single-tab conversation — the normal case —
+        //     costs one hash map entry here and is fed exactly as before.
+        {
+            const auto duplicates = FindDuplicateConversations(claims, [this](const std::wstring& sid) {
+                return _registry->GetTabToken(sid);
+            });
+            // "<session id>|<lowercase WT_SESSION>" -> the host's WT_SESSION, for every duplicate tab.
+            const auto pairKey = [](const std::wstring& sid, const std::wstring& wt) {
+                std::wstring key = sid + L"|" + wt;
+                for (size_t i = sid.size() + 1; i < key.size(); ++i)
+                {
+                    if (key[i] >= L'A' && key[i] <= L'Z')
+                    {
+                        key[i] = static_cast<wchar_t>(key[i] - L'A' + L'a');
+                    }
+                }
+                return key;
+            };
+            std::unordered_map<std::wstring, std::wstring> hostOfDuplicate;
+            for (const auto& d : duplicates)
+            {
+                for (const auto& wt : d.duplicateWts)
+                {
+                    hostOfDuplicate.emplace(pairKey(d.sessionId, wt), d.hostWt);
+                }
+            }
+            if (!hostOfDuplicate.empty())
+            {
+                for (auto& row : corr)
+                {
+                    if (row.sessionId.empty())
+                    {
+                        continue;
+                    }
+                    if (const auto it = hostOfDuplicate.find(pairKey(row.sessionId, row.wtSession)); it != hostOfDuplicate.end())
+                    {
+                        row.duplicateOfWt = it->second;
+                    }
+                }
+            }
+            _registry->SetDuplicateConversationHosts(duplicates);
+            for (const auto& o : pendingObserved)
+            {
+                if (!hostOfDuplicate.empty() && hostOfDuplicate.count(pairKey(o.sessionId, o.tabToken)) != 0)
+                {
+                    continue; // a duplicate copy: the host's record must not take its facts
+                }
+                _registry->ObserveClaude(o);
+            }
+            _LogDuplicateConversations(duplicates, corr);
         }
 
         // Drop cached shell cwds for tabs no longer in any window's roster (closed tabs).

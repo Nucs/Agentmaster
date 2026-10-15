@@ -332,17 +332,28 @@ namespace winrt::TerminalApp::implementation
         const auto hotGrip = Fill(0x55, 0xC0, 0xC0, 0xC0); // subtle highlight on hover / drag
         const auto wireGrip = [weak, idleGrip, hotGrip](const Border& grip, bool left, bool bottom, CoreCursorType cursor) {
             grip.Background(idleGrip);
-            grip.PointerEntered([grip, hotGrip, cursor](const IInspectable&, const PointerRoutedEventArgs&) {
+            // Agentmaster (leak fix, 2026-10-14): the hover handlers reach the grip through `sender`, never
+            // through a captured `grip`. A grip held by its OWN handler is a reference cycle (the Border owns
+            // the delegate, the delegate owns the Border) that nothing breaks, so every overlay ever built
+            // left its three grips alive with all their event sources: the frozen release held 194,698
+            // leaked grip sets after its re-bind loop rebuilt the overlay ~175,000 times (UI_THREAD.md §12).
+            grip.PointerEntered([hotGrip, cursor](const IInspectable& sender, const PointerRoutedEventArgs&) {
                 ApplyCursor(cursor);
-                grip.Background(hotGrip);
+                if (const auto b = sender.try_as<Border>())
+                {
+                    b.Background(hotGrip);
+                }
             });
-            grip.PointerExited([weak, grip, idleGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+            grip.PointerExited([weak, idleGrip](const IInspectable& sender, const PointerRoutedEventArgs&) {
                 if (const auto self = weak.get(); self && self->_summaryDragging)
                 {
                     return; // mid-drag the pointer may leave the thin grip — keep it hot
                 }
                 ApplyCursor(CoreCursorType::Arrow);
-                grip.Background(idleGrip);
+                if (const auto b = sender.try_as<Border>())
+                {
+                    b.Background(idleGrip);
+                }
             });
             grip.PointerPressed([weak, left, bottom, cursor](const IInspectable& sender, const PointerRoutedEventArgs& e) {
                 const auto self = weak.get();

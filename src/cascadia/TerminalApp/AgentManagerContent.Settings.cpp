@@ -6216,6 +6216,14 @@ namespace winrt::TerminalApp::implementation
 
     // Wire a successor-model combo's "Specify..." row (seeded at index 1 by seedModelCombo). Chosen
     // once at BUILD time — seedModelCombo only refills Items(), so the handler survives every reseed.
+    // Picking the row opens the shared "Specify a model" prompt; a typed id is selected when the combo
+    // already lists it, else appended as "(custom) <id>". Cancelling puts the last real pick back.
+    //   combo — the successor-model combo; a null combo wires nothing.
+    //   ids   — the model ids parallel to combo.Items() (the settings member the cog owns for the card's
+    //           life); a typed custom id is appended to it. A null vector wires nothing.
+    //   returns — nothing. Never throws for a null argument; the handlers run on the UI thread.
+    // ⚠ The handlers must never capture `combo` by value: a control held by its own delegate is a
+    //   reference cycle that keeps it (and its card) alive forever (see the leak note below).
     void AgentManagerContent::_WireSuccessorModelCombo(const winrt::Windows::UI::Xaml::Controls::ComboBox& combo, std::vector<std::wstring>* ids)
     {
         if (!combo || !ids)
@@ -6225,7 +6233,16 @@ namespace winrt::TerminalApp::implementation
         // The last REAL pick, so a dismissed prompt can put the selection back exactly where it was
         // (a combo whose "Specify..." row stayed selected would read as a model nobody chose).
         auto prev = std::make_shared<int>(0);
-        combo.SelectionChanged([this, combo, ids, prev](const IInspectable&, const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs&) {
+        // Agentmaster (leak fix, 2026-10-14): the handler reaches the combo through `sender` and hands the
+        // prompt's callback a WEAK reference. A combo captured by value in its own SelectionChanged
+        // delegate is a reference cycle nothing breaks, so the combo (and the settings card around it)
+        // could never be freed.
+        combo.SelectionChanged([this, ids, prev](const IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs&) {
+            const auto combo = sender.try_as<winrt::Windows::UI::Xaml::Controls::ComboBox>();
+            if (!combo)
+            {
+                return;
+            }
             const int idx = combo.SelectedIndex();
             const bool isSentinel = idx > 0 && idx < static_cast<int>(ids->size()) && (*ids)[static_cast<size_t>(idx)] == kSpecifyModelSentinel;
             if (!isSentinel)
@@ -6237,11 +6254,12 @@ namespace winrt::TerminalApp::implementation
             // never the sentinel), so cancelling the prompt simply leaves the combo as it was.
             const int back = *prev;
             combo.SelectedIndex(back);
-            _PromptForModel([combo, ids](winrt::hstring picked) {
+            _PromptForModel([weakCombo = winrt::make_weak(combo), ids](winrt::hstring picked) {
                 const std::wstring id{ picked };
-                if (id.empty())
+                const auto combo = weakCombo.get();
+                if (id.empty() || !combo)
                 {
-                    return;
+                    return; // cancelled, or the settings card closed while the prompt was up
                 }
                 // Already offered (a configured model typed by hand, or a second visit to the same
                 // custom id)? Select that row rather than growing a duplicate.
