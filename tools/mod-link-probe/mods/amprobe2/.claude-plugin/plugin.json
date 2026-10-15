@@ -1,0 +1,1 @@
+{ "name": "amprobe2", "version": "0.0.1", "description": "Throwaway probe: loaded through CLAUDE_CODE_PLUGIN_DIRS beside a --plugin-dir plugin, does it load too?" }
