@@ -32,8 +32,8 @@ namespace Agentmaster::SessionDb
     // changes, so a database whose meta `summary_version` differs holds rows formed by older rules: the store
     // rebuilds every row once (Store::RebuildSummaries, at the end of a complete sweep) and records this value.
     // ⚠ Bump it with every change to SummaryBuildSql that can change a row.
-    //   1 — the first rules (c11be7d9b).
-    //   2 — the current list starts after the last ON-BRANCH boundary, and an entry carries `cur` (2026-10-15).
+    //   1 — the first rules (c0253b8b0).
+    //   2 — the current list starts after the last ON-BRANCH boundary, and an entry carries `cur` (2026-10-15, 41fe5e493).
     inline constexpr int kSummaryVersion = 2;
 
     // The statement that (re)builds the summary rows of a set of sessions: INSERT OR REPLACE INTO summary.

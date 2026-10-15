@@ -2,7 +2,7 @@
 
 > **Status: IMPLEMENTED 2026-10-15, NOT BUILT into the app.** The service (`agentmaster-sessiondb.exe`), the
 > app's refresh tick (D16), the Sessions page's content phase, the AI search's database mode, the CLI verbs, the
-> stdio MCP server and the packaging are written and committed (c11be7d9b … 5050eff4b); the service was built
+> stdio MCP server and the packaging are written and committed (c0253b8b0 … 41fe5e493); the service was built
 > standalone and run over the whole corpus (3,595 sessions, 11.3 GB of transcript files), the app files pass `cl /Zs`,
 > the m5 suite covers the shared parts (`TestSessionDb`). **Off by default** (the Settings cog's SESSION DATABASE
 > section: Off / Shadow / On). What was built, how it differs from this design, and what the full corpus measured:
@@ -1901,7 +1901,7 @@ the transcripts are only read. The order matters, each step uses the previous on
 
 ## 16. What is built (2026-10-15, NOT BUILT into the app)
 
-Asked for on 2026-10-14 ("Kindly implement fully"); built between c11be7d9b and 5050eff4b. Nothing here is in a
+Asked for on 2026-10-14 ("Kindly implement fully"); built between c0253b8b0 and 41fe5e493. Nothing here is in a
 build of the app yet: the service and the CLI were built standalone (`sessiondb\_compile.bat`, `cli\_compile.bat`)
 and run on scratch profiles and on the whole corpus; the app's files pass `cl /Zs` with the last app build's command
 lines; the m5 suite runs `TestSessionDb`. The first msbuild of the solution (the user's next app build, or CI)
@@ -1911,16 +1911,16 @@ compiles `agentmaster-sessiondb.vcxproj` for the first time.
 
 | Piece | Files | Commit |
 |---|---|---|
-| The store: schema, the lossless line store (D11), the ingest of every line, the fold, the live-branch walk, the session row (~110 columns), the section tables, the summary (D14), `upsertSessions` / `resync` | `sessiondb\SessionDbSchema.*`, `SessionDbExtract.*`, `SessionDbFold.*`, `SessionDbWalk.h`, `SessionDbStore.*`, `SessionDbSummary.*`, `SessionDbVerify.*`, `DuckDbWrap.*`, `SessionDbLog.*`; libduckdb pinned by `tools\Get-DuckDb.ps1` | c11be7d9b |
-| The text index and the search: tokenizer, dictionary, postings, the hot tier and merges, the re-cluster, tiers name > path > prompt > text, BM25, snippets, D8, D9 | `AgentMaster\SessionDbTokenizer.h`, `sessiondb\SessionDbIndex.*`, `SessionDbSearch.*` | 0b13871fe, f9d2749b1, 30b8f6c17 |
-| The service: the per-profile pipe server (a query pool of 4, one writer thread, deadlines, `cancel`, idle exit after 10 min), the tool registry (§8.4.3), the stdio MCP server `agentmaster`, the one-shot diagnostic modes | `sessiondb\SessionDbServer.*`, `SessionDbTools.*`, `SessionDbMcp.cpp`, `sessiondb_main.cpp`; `AgentMaster\SessionDbProtocol.h`, `SessionDbToolDefs.h` | 9a1dbf101, 30b8f6c17 |
-| The client the GUI, the CLI and the MCP server share (connect, start a service, versions, `Call`, `CancelPending`, the copy-out to `<profile>\sessiondb\bin`) | `AgentMaster\SessionDbClient.*` | 9a1dbf101 |
-| The app's refresh tick (D16): the watcher's change set, the refresher thread, the facts epoch, the Settings cog's SESSION DATABASE section | `TranscriptWatcher.*`, `SessionScanner.*`, `SessionStore.*`, `AgentMaster\SessionDbRefresher.*`, `Engine.*`, `AgentManagerContent.Settings.cpp` | 0dff9b244 |
-| The Sessions page's content phase (`pageSearch`; Shadow's `[sessdb-diff]`), its ↻ asking for a sweep | `TerminalPage.AgentSessionsPage.cpp` | f9d2749b1, 30b8f6c17 |
-| The CLI verbs `search`, `sql`, `sessdb` | `cli\agentcli.cpp`, `wt\shim.cpp` | f9d2749b1 |
-| The AI search on the database (§8.2) | `SessionSearchTools.*`, `SessionSearchAgent.*` | 30b8f6c17 |
-| Packaging: the service's project and its standalone twin, `duckdb.props`, the solution entry, the package reference and `duckdb.dll` as package content, libduckdb in the build wrapper and both workflows | `sessiondb\agentmaster-sessiondb.vcxproj`, `_compile.bat`, `duckdb.props`, `OpenConsole.slnx`, `CascadiaPackage.wapproj`, `tools\Build-Agentmaster.ps1`, `.github\workflows\*.yml` | 5050eff4b |
-| Tests | `tests\tests_sessiondb.cpp` (`TestSessionDb`: protocol names and framing, the tool definitions, the tokenizer, the settings clamps, the change set, the facts epoch, the AI search's database mode) | 30b8f6c17 and later |
+| The store: schema, the lossless line store (D11), the ingest of every line, the fold, the live-branch walk, the session row (~110 columns), the section tables, the summary (D14), `upsertSessions` / `resync` | `sessiondb\SessionDbSchema.*`, `SessionDbExtract.*`, `SessionDbFold.*`, `SessionDbWalk.h`, `SessionDbStore.*`, `SessionDbSummary.*`, `SessionDbVerify.*`, `DuckDbWrap.*`, `SessionDbLog.*`; libduckdb pinned by `tools\Get-DuckDb.ps1` | c0253b8b0 |
+| The text index and the search: tokenizer, dictionary, postings, the hot tier and merges, the re-cluster, tiers name > path > prompt > text, BM25, snippets, D8, D9 | `AgentMaster\SessionDbTokenizer.h`, `sessiondb\SessionDbIndex.*`, `SessionDbSearch.*` | 1d0e03134, 7804fb2c2, 43762d44a |
+| The service: the per-profile pipe server (a query pool of 4, one writer thread, deadlines, `cancel`, idle exit after 10 min), the tool registry (§8.4.3), the stdio MCP server `agentmaster`, the one-shot diagnostic modes | `sessiondb\SessionDbServer.*`, `SessionDbTools.*`, `SessionDbMcp.cpp`, `sessiondb_main.cpp`; `AgentMaster\SessionDbProtocol.h`, `SessionDbToolDefs.h` | 4a1f44348, 43762d44a |
+| The client the GUI, the CLI and the MCP server share (connect, start a service, versions, `Call`, `CancelPending`, the copy-out to `<profile>\sessiondb\bin`) | `AgentMaster\SessionDbClient.*` | 4a1f44348 |
+| The app's refresh tick (D16): the watcher's change set, the refresher thread, the facts epoch, the Settings cog's SESSION DATABASE section | `TranscriptWatcher.*`, `SessionScanner.*`, `SessionStore.*`, `AgentMaster\SessionDbRefresher.*`, `Engine.*`, `AgentManagerContent.Settings.cpp` | 4139b6d6e |
+| The Sessions page's content phase (`pageSearch`; Shadow's `[sessdb-diff]`), its ↻ asking for a sweep | `TerminalPage.AgentSessionsPage.cpp` | 7804fb2c2, 43762d44a |
+| The CLI verbs `search`, `sql`, `sessdb` | `cli\agentcli.cpp`, `wt\shim.cpp` | 7804fb2c2 |
+| The AI search on the database (§8.2) | `SessionSearchTools.*`, `SessionSearchAgent.*` | 43762d44a |
+| Packaging: the service's project and its standalone twin, `duckdb.props`, the solution entry, the package reference and `duckdb.dll` as package content, libduckdb in the build wrapper and both workflows | `sessiondb\agentmaster-sessiondb.vcxproj`, `_compile.bat`, `duckdb.props`, `OpenConsole.slnx`, `CascadiaPackage.wapproj`, `tools\Build-Agentmaster.ps1`, `.github\workflows\*.yml` | 50df738c1 |
+| Tests | `tests\tests_sessiondb.cpp` (`TestSessionDb`: protocol names and framing, the tool definitions, the tokenizer, the settings clamps, the change set, the facts epoch, the AI search's database mode) | 43762d44a, 41fe5e493 |
 
 ### 16.2 The decisions as built
 
@@ -1945,15 +1945,15 @@ compiles `agentmaster-sessiondb.vcxproj` for the first time.
 
 ### 16.3 Where the build differs from the design
 
-- **The text column's compression** (0b13871fe). A ZSTD block is served by decompressing its whole 2,048-row
+- **The text column's compression** (1d0e03134). A ZSTD block is served by decompressing its whole 2,048-row
   vector: 30 scattered blocks took 145 ms, 1,000 took 2.95 s. Conversation text (prompts, replies, thinking,
   system) therefore stays in DuckDB's default compression in `doc.text` (1,000 blocks in 47 ms); only tool text is
   ZSTD, in `doc_tool`. The line store's `raw` is ZSTD.
-- **Merges run in slices** (30b8f6c17). The design's one-transaction merge failed with "Out of Memory" under the
+- **Merges run in slices** (43762d44a). The design's one-transaction merge failed with "Out of Memory" under the
   default 1 GB limit during the first full cold build, and every failure left a bigger hot tier (§16.4).
   `TextIndex::Merge` now merges about `mergeSliceBytes` of text per transaction (a sixteenth of the memory limit:
   64 MB at 1 GB), then moves the hot lines in their own transaction, sliced.
-- **The re-cluster has two parts with their own triggers** (f9d2749b1, 30b8f6c17), not "weekly, or after 50
+- **The re-cluster has two parts with their own triggers** (7804fb2c2, 43762d44a), not "weekly, or after 50
   merges" (§6.4):
   - the **text index** (`post` re-sorted by term, `spost` and df / sf recomputed exactly, the tombstoned blocks
     deleted from `doc` / `doc_tool`): when the blocks merged since the last one are a quarter of the index (and at
