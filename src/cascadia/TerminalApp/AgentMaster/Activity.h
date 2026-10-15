@@ -153,6 +153,15 @@ namespace Agentmaster
         // timing adornment). 0 until the transcript exists. Stat-only — cheap.
         int64_t createdUnixMs{}; // transcript ctime (≈ conversation start)
         int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity)
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): NON-EMPTY when this tab's claude runs a
+        // conversation that ANOTHER tab also runs (`/resume` of an open conversation, a second `claude -c`,
+        // a Restart beside a live copy) and the survey chose that other tab as the conversation's host
+        // (ConversationHosts.h PickConversationHost). It names the host tab's WT_SESSION. The UI lane never
+        // binds a row that carries it — binding it would MOVE the session off a tab whose claude still runs
+        // it, and the next pass would move it back (the 2026-10-11..14 re-bind loop: ~175,000 binds) — and
+        // the registry drops this tab's hooks and observations for the conversation
+        // (SessionRegistry::SetDuplicateConversationHosts). Empty for every ordinary row.
+        std::wstring duplicateOfWt;
     };
 
     // Per-tab activity for EVERY tab, claude or not (the TabActivityTable; published to the UI
@@ -177,6 +186,11 @@ namespace Agentmaster
         std::wstring wtSession; // ITerminalConnection::SessionId() (GuidToPlainString, lower)
         uint32_t shellPid{}; // GetProcessId((HANDLE)ConptyConnection::RootProcessHandle())
         bool bound{}; // already has an injector in this window
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): the session id this window binds to the
+        // tab (its _claudeTabs key), empty when `bound` is false. The survey reads it to keep a duplicated
+        // conversation on the tab that ALREADY hosts it (PickConversationHost rule 1) instead of choosing
+        // a host on its own, so the host never changes while the bound tab's claude keeps running it.
+        std::wstring boundSessionId;
     };
 
     // What the S-lane upserts into the registry for an OUR claude (mirrors HookMessage's role).

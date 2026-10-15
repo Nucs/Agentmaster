@@ -1241,6 +1241,281 @@ void TestRetiredHostToken()
     CHECK(reg.IsRetiredHostToken(L"other", L"wt-r" + std::to_wstring(kRetiredHostTokensPerSession + 2)), "retired: the newest retirement is kept");
 }
 
+// Agentmaster (duplicate conversations, OBSERVER.md §20 — the 2026-10-11..14 re-bind loop): the pure host
+// choice. One conversation ran in three tabs of the release (a /resume of an open conversation plus two
+// Restart copies); the survey correlated all three to the session, the UI lane bound whichever it saw last,
+// and the binding moved ~175,000 times in 2.8 days. The rules pinned here are what stop the move: the tab
+// already bound keeps the conversation, and the same facts always give the same host, whatever order the
+// survey lists the tabs in.
+void TestConversationHosts()
+{
+    std::wprintf(L"Duplicate conversations: one host tab per conversation (ConversationHosts.h):\n");
+
+    // ---- PickConversationHost ----------------------------------------------------------------------------
+    {
+        const std::vector<ConversationHostCandidate> none;
+        CHECK(PickConversationHost(none) == 0, "pick: no candidate answers size() (0)");
+
+        const std::vector<ConversationHostCandidate> one{ { L"wt-a", false, false, 0 } };
+        CHECK(PickConversationHost(one) == 0, "pick: a single candidate is the host, whatever it knows");
+
+        const std::vector<ConversationHostCandidate> boundVsRecorded{ { L"wt-a", false, true, 100 }, { L"wt-b", true, false, 200 } };
+        CHECK(PickConversationHost(boundVsRecorded) == 1, "pick: the tab BOUND to the conversation beats the recorded host and an earlier start (rule 1)");
+
+        const std::vector<ConversationHostCandidate> recordedVsEarlier{ { L"wt-a", false, false, 100 }, { L"wt-b", false, true, 200 } };
+        CHECK(PickConversationHost(recordedVsEarlier) == 1, "pick: the registry's recorded host beats an earlier start (rule 2)");
+
+        const std::vector<ConversationHostCandidate> earlier{ { L"wt-a", false, false, 300 }, { L"wt-b", false, false, 200 } };
+        CHECK(PickConversationHost(earlier) == 1, "pick: the earlier-started claude wins when nothing is bound or recorded (rule 3)");
+
+        const std::vector<ConversationHostCandidate> unknownLast{ { L"wt-a", false, false, 0 }, { L"wt-b", false, false, 500 } };
+        CHECK(PickConversationHost(unknownLast) == 1, "pick: an unknown start (a denied PEB read) sorts after every known one");
+
+        const std::vector<ConversationHostCandidate> tie{ { L"wt-b", false, false, 100 }, { L"wt-a", false, false, 100 } };
+        CHECK(PickConversationHost(tie) == 1, "pick: a full tie goes to the lower WT_SESSION (deterministic)");
+
+        const std::vector<ConversationHostCandidate> bothUnknown{ { L"wt-z", false, false, 0 }, { L"wt-m", false, false, 0 } };
+        CHECK(PickConversationHost(bothUnknown) == 1, "pick: two unknown starts go to the lower WT_SESSION");
+
+        // Order independence: every permutation of the same facts picks the same tab.
+        std::vector<ConversationHostCandidate> base{ { L"wt-c", false, false, 300 }, { L"wt-a", false, true, 0 }, { L"wt-b", false, false, 100 } };
+        std::vector<size_t> order{ 0, 1, 2 };
+        bool allSame = true;
+        do
+        {
+            std::vector<ConversationHostCandidate> perm;
+            for (const auto i : order)
+            {
+                perm.push_back(base[i]);
+            }
+            const size_t host = PickConversationHost(perm);
+            allSame = allSame && host < perm.size() && perm[host].wtSession == L"wt-a";
+        } while (std::next_permutation(order.begin(), order.end()));
+        CHECK(allSame, "pick: every order of the same candidates picks the same host (the recorded one here)");
+    }
+
+    // ---- FindDuplicateConversations ----------------------------------------------------------------------
+    int lookups = 0;
+    std::wstring recorded;
+    const auto recordedHostOf = [&](const std::wstring&) {
+        ++lookups;
+        return recorded;
+    };
+
+    {
+        lookups = 0;
+        const auto out = FindDuplicateConversations(std::vector<ConversationClaim>{}, recordedHostOf);
+        CHECK(out.empty() && lookups == 0, "find: no claims, no duplicates, and the registry is not asked");
+    }
+    {
+        lookups = 0;
+        const std::vector<ConversationClaim> claims{ { L"wt-a", L"s1", L"s1", 100 }, { L"wt-b", L"s2", L"", 200 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.empty() && lookups == 0, "find: one tab per conversation (the normal case) gives no entry and asks the registry nothing");
+    }
+    {
+        lookups = 0;
+        const std::vector<ConversationClaim> claims{ { L"wt-a", L"", L"", 100 }, { L"wt-b", L"", L"", 200 } };
+        CHECK(FindDuplicateConversations(claims, recordedHostOf).empty(), "find: claims with no conversation id (never-prompted claudes) are never grouped");
+    }
+    {
+        const std::vector<ConversationClaim> claims{ { L"", L"s1", L"", 100 }, { L"wt-b", L"s1", L"", 200 } };
+        CHECK(FindDuplicateConversations(claims, recordedHostOf).empty(), "find: a claim with no WT_SESSION is ignored");
+    }
+    {
+        const std::vector<ConversationClaim> claims{ { L"wt-a", L"s1", L"", 100 }, { L"WT-A", L"s1", L"", 100 } };
+        CHECK(FindDuplicateConversations(claims, recordedHostOf).empty(), "find: the same tab listed twice (any case) is one tab, not a duplicate");
+    }
+
+    // The incident's shape: one conversation in three tabs; tab a is the one this window binds.
+    const std::wstring sid = L"97eb07dd-0000-4000-8000-000000000000";
+    {
+        lookups = 0;
+        recorded = L"wt-c"; // the record's token flipped between the copies; it last named c
+        const std::vector<ConversationClaim> claims{ { L"wt-b", sid, L"", 100 }, { L"wt-c", sid, L"", 200 }, { L"wt-a", sid, sid, 300 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 1, "find: the incident gives one duplicated conversation");
+        CHECK(out.size() == 1 && out[0].sessionId == sid, "find: ...naming its session id");
+        CHECK(out.size() == 1 && out[0].hostWt == L"wt-a", "find: the tab already BOUND stays the host (no move while its claude runs the conversation)");
+        CHECK(out.size() == 1 && out[0].duplicateWts == std::vector<std::wstring>({ L"wt-b", L"wt-c" }), "find: the other two tabs are its duplicates, in ascending order");
+        CHECK(lookups == 1, "find: the registry is asked once per duplicated conversation");
+    }
+    {
+        recorded = L"WT-C"; // a hook's token can differ in case from the roster's
+        const std::vector<ConversationClaim> claims{ { L"wt-b", sid, L"", 100 }, { L"wt-c", sid, L"", 200 }, { L"wt-a", sid, L"", 300 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 1 && out[0].hostWt == L"wt-c", "find: with nothing bound, the recorded host wins (case-insensitive token match)");
+        CHECK(out.size() == 1 && out[0].duplicateWts == std::vector<std::wstring>({ L"wt-a", L"wt-b" }), "find: ...and the rest are duplicates");
+    }
+    {
+        recorded.clear();
+        const std::vector<ConversationClaim> claims{ { L"wt-c", sid, L"", 200 }, { L"wt-b", sid, L"", 100 }, { L"wt-a", sid, L"", 300 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 1 && out[0].hostWt == L"wt-b", "find: with nothing bound or recorded, the earliest claude hosts");
+    }
+    {
+        recorded.clear();
+        const std::vector<ConversationClaim> claims{ { L"wt-a", L"s1", L"S1", 300 }, { L"wt-b", L"s1", L"", 100 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 1 && out[0].hostWt == L"wt-a", "find: the bound id matches the conversation case-insensitively");
+    }
+    {
+        recorded.clear();
+        const std::vector<ConversationClaim> claims{ { L"wt-a", L"s1", L"other", 100 }, { L"wt-b", L"s1", L"", 50 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 1 && out[0].hostWt == L"wt-b", "find: a tab bound to ANOTHER session does not count as bound to this one");
+    }
+    {
+        recorded.clear();
+        lookups = 0;
+        const std::vector<ConversationClaim> claims{ { L"wt-1", L"zz", L"", 1 }, { L"wt-2", L"zz", L"", 2 }, { L"wt-3", L"aa", L"", 3 }, { L"wt-4", L"aa", L"", 4 }, { L"wt-5", L"mm", L"", 5 } };
+        const auto out = FindDuplicateConversations(claims, recordedHostOf);
+        CHECK(out.size() == 2, "find: two duplicated conversations beside a single one give two entries");
+        CHECK(out.size() == 2 && out[0].sessionId == L"aa" && out[1].sessionId == L"zz", "find: the entries come in ascending session-id order (the log lines never depend on the roster's order)");
+        CHECK(lookups == 2, "find: one registry lookup per duplicated conversation, none for the single one");
+    }
+}
+
+// Agentmaster (duplicate conversations, OBSERVER.md §20): what the registry does with the survey's set. A
+// duplicate tab's hooks and observations would write its token, pid and heartbeat over the host's — the
+// liveness sweep then looked for the session in the wrong tab — and a SessionStart from it would move the
+// session there. All of it is dropped; the host and every other session are heard as before.
+void TestDuplicateConversationHosts()
+{
+    std::wprintf(L"SessionRegistry duplicate hosts (one conversation in two or more tabs):\n");
+    SessionRegistry reg;
+    {
+        SessionInfo s = MakeSession(L"conv", SessionState::WaitingForInput);
+        s.live = true;
+        s.tabToken = L"wt-host";
+        s.pid = 100;
+        reg.Upsert(s);
+    }
+    reg.SetDuplicateConversationHosts({ DuplicateConversation{ L"conv", L"wt-host", { L"wt-dup" } } });
+    CHECK(reg.IsDuplicateConversationHost(L"conv", L"wt-dup"), "dup: the duplicate tab is listed");
+    CHECK(reg.IsDuplicateConversationHost(L"conv", L"WT-DUP"), "dup: the token match is case-insensitive");
+    CHECK(!reg.IsDuplicateConversationHost(L"conv", L"wt-host"), "dup: the host is not a duplicate");
+    CHECK(!reg.IsDuplicateConversationHost(L"other", L"wt-dup"), "dup: a duplicate belongs to ONE conversation");
+    CHECK(!reg.IsDuplicateConversationHost(L"conv", L""), "dup: an empty token is never a duplicate");
+
+    // (1) the duplicate's observation changes nothing.
+    ObservedClaude o;
+    o.sessionId = L"conv";
+    o.tabToken = L"wt-dup";
+    o.pid = 999;
+    o.cwd = L"K:/x";
+    o.runningApp = RunningApp::Agentmaster;
+    o.presenceStatus = L"busy";
+    o.observedUnixMs = NowMsTest();
+    reg.ObserveClaude(o);
+    auto s = reg.Get(L"conv");
+    CHECK(s && s->tabToken == L"wt-host", "dup: the duplicate's observation does not move tabToken");
+    CHECK(s && s->pid == 100, "dup: ...nor its pid");
+    CHECK(s && s->presenceStatus.empty(), "dup: ...nor its heartbeat");
+
+    // (2) none of its hooks applies: no state change, no token, no Typed row, no provenance.
+    for (const auto ev : { HookEvent::SessionStart, HookEvent::Stop, HookEvent::Notification, HookEvent::PostToolUse, HookEvent::SessionEnd })
+    {
+        HookMessage m = Msg(L"conv", ev);
+        m.tabToken = L"wt-dup";
+        reg.OnHookEvent(m);
+    }
+    {
+        HookMessage m = UPS(L"conv", L"typed in the duplicate tab");
+        m.tabToken = L"WT-DUP";
+        reg.OnHookEvent(m);
+    }
+    s = reg.Get(L"conv");
+    CHECK(s && s->state == SessionState::WaitingForInput, "dup: no hook from the duplicate moves the state (SessionStart / Stop / Notification / PostToolUse / SessionEnd / UserPromptSubmit)");
+    CHECK(s && s->tabToken == L"wt-host", "dup: no hook from the duplicate moves tabToken (a SessionStart would have re-homed the session)");
+    CHECK(s && s->queue.empty(), "dup: the duplicate's prompt is not recorded as a Typed row");
+    CHECK(s && !s->hookWired, "dup: a dropped hook leaves no provenance (it was never applied)");
+
+    // (3) the host is heard.
+    o.tabToken = L"wt-host";
+    o.pid = 101;
+    o.presenceStatus = L"idle";
+    reg.ObserveClaude(o);
+    s = reg.Get(L"conv");
+    CHECK(s && s->pid == 101, "dup: the host's observation enriches normally");
+    {
+        HookMessage m = UPS(L"conv", L"typed in the host tab");
+        m.tabToken = L"wt-host";
+        reg.OnHookEvent(m);
+    }
+    s = reg.Get(L"conv");
+    CHECK(s && s->state == SessionState::Running && s->hookWired, "dup: the host's UserPromptSubmit is applied (Running)");
+    CHECK(s && s->queue.size() == 1, "dup: ...and recorded");
+
+    // (4) the same tab speaks for ANOTHER conversation (it ran /clear or /resume into a session of its own).
+    {
+        SessionInfo other = MakeSession(L"other", SessionState::Idle);
+        other.live = true;
+        other.tabToken = L"wt-elsewhere";
+        reg.Upsert(other);
+    }
+    {
+        HookMessage m = Msg(L"other", HookEvent::SessionStart);
+        m.tabToken = L"wt-dup";
+        reg.OnHookEvent(m);
+    }
+    auto other = reg.Get(L"other");
+    CHECK(other && other->hookWired && other->tabToken == L"wt-dup", "dup: a duplicate of one conversation still speaks for another");
+
+    // (5) the published set is cleaned: the host listed as its own duplicate, and an empty id, are ignored.
+    reg.SetDuplicateConversationHosts({ DuplicateConversation{ L"conv", L"wt-host", { L"wt-host", L"wt-dup" } }, DuplicateConversation{ L"", L"wt-x", { L"wt-y" } } });
+    CHECK(!reg.IsDuplicateConversationHost(L"conv", L"wt-host"), "dup: a host listed among its own duplicates stays the host");
+    CHECK(reg.IsDuplicateConversationHost(L"conv", L"wt-dup"), "dup: ...while the real duplicate is listed");
+    CHECK(!reg.IsDuplicateConversationHost(L"", L"wt-y"), "dup: an entry with no session id is ignored");
+
+    // (6) the set is REPLACED by every survey: once the duplicate is gone from it, its hooks count again.
+    reg.SetDuplicateConversationHosts({});
+    CHECK(!reg.IsDuplicateConversationHost(L"conv", L"wt-dup"), "dup: an empty set clears every duplicate");
+    {
+        HookMessage m = Msg(L"conv", HookEvent::SessionStart);
+        m.tabToken = L"wt-dup";
+        reg.OnHookEvent(m);
+    }
+    s = reg.Get(L"conv");
+    CHECK(s && s->tabToken == L"wt-dup", "dup: a tab that is no duplicate any more is heard again (its SessionStart re-homes the session)");
+
+    // (7) end to end with the pure half: the incident's set, published as the survey publishes it.
+    const std::vector<ConversationClaim> claims{ { L"wt-b", L"conv", L"", 100 }, { L"wt-c", L"conv", L"", 200 }, { L"wt-a", L"conv", L"conv", 300 } };
+    reg.SetDuplicateConversationHosts(FindDuplicateConversations(claims, [&reg](const std::wstring& id) { return reg.GetTabToken(id); }));
+    CHECK(!reg.IsDuplicateConversationHost(L"conv", L"wt-a"), "dup e2e: the bound tab hosts");
+    CHECK(reg.IsDuplicateConversationHost(L"conv", L"wt-b") && reg.IsDuplicateConversationHost(L"conv", L"wt-c"), "dup e2e: both copies are duplicates");
+}
+
+// Agentmaster (UI_THREAD.md §12): the Agent Manager page's registry-driven rebuild gap (RefreshPacing.h).
+// The frozen release of 2026-10-14 rebuilt in ~4 s with a fixed 250 ms gap, so the UI thread was ~94% busy;
+// the gap now follows the rebuild's cost.
+void TestRefreshPacing()
+{
+    std::wprintf(L"Agent Manager refresh pacing (the adaptive gap):\n");
+    static_assert(ManagerRefreshGapMs(4000) == kManagerRefreshMaxGapMs, "the gap is computable at compile time");
+    CHECK(ManagerRefreshGapMs(0) == 250, "pacing: no rebuild yet -> the old 250 ms");
+    CHECK(ManagerRefreshGapMs(-5) == 250, "pacing: a negative cost (a clock oddity) -> 250 ms");
+    CHECK(ManagerRefreshGapMs(1) == 250 && ManagerRefreshGapMs(125) == 250, "pacing: a cheap rebuild keeps the 250 ms floor");
+    CHECK(ManagerRefreshGapMs(126) == 252, "pacing: past the floor the gap is twice the cost");
+    CHECK(ManagerRefreshGapMs(200) == 400, "pacing: 200 ms -> 400 ms");
+    CHECK(ManagerRefreshGapMs(2499) == 4998, "pacing: just under the cap");
+    CHECK(ManagerRefreshGapMs(2500) == 5000 && ManagerRefreshGapMs(4000) == 5000, "pacing: the frozen release's ~4 s rebuild -> the 5 s cap");
+    CHECK(ManagerRefreshGapMs(INT64_MAX) == 5000, "pacing: a huge cost saturates instead of overflowing");
+    CHECK(ManagerRefreshGapMs(INT64_MIN) == 250, "pacing: the most negative cost reads as no rebuild");
+    bool monotonic = true;
+    for (int64_t cost = 0; cost <= 10000; ++cost)
+    {
+        monotonic = monotonic && ManagerRefreshGapMs(cost) <= ManagerRefreshGapMs(cost + 1);
+    }
+    CHECK(monotonic, "pacing: a costlier rebuild never gets a shorter gap");
+
+    CHECK(!ShouldLogSlowManagerRebuild(999, 100000, 0), "slow log: under 1 s is not slow");
+    CHECK(ShouldLogSlowManagerRebuild(1000, 100000, 0), "slow log: 1 s is slow, and the first one is logged");
+    CHECK(!ShouldLogSlowManagerRebuild(1500, 100000, 50000), "slow log: a second slow rebuild within the minute is not logged");
+    CHECK(!ShouldLogSlowManagerRebuild(1500, 109999, 50000), "slow log: ...up to the last millisecond of the minute");
+    CHECK(ShouldLogSlowManagerRebuild(1500, 110000, 50000), "slow log: a minute after the last line, the next slow rebuild logs again");
+}
+
 void TestTypedCapture()
 {
     std::wprintf(L"Auto Testing: record typed messages + suppress our own echoes:\n");

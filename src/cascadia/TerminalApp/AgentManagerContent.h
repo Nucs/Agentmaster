@@ -587,25 +587,69 @@ namespace winrt::TerminalApp::implementation
         // that drives it depending on whether any bar is tracked. _RebuildBoard re-seeds the tracks.
         void _UpdateCardProgress();
         void _SyncProgressTimer();
-        // Agentmaster: assemble one Triage Board column. With `fill` (default) the column fills the
-        // board height with a pinned `header` over a vertically-scrolling `cards` list, so a tall
-        // column (e.g. a large External census) scrolls within the board instead of clipping past
-        // the bottom edge (the board's own ScrollViewer has vertical scroll disabled). With
-        // `fill=false` the box hugs its content (a collapsed column: header only, nothing to scroll).
-        // `columnKey` (when `fill`) registers the new card ScrollViewer in _boardColumnScrollers and,
-        // with `restoreOffset > 0`, re-applies that vertical offset once the column lays out — so a
-        // rebuild preserves the user's scroll instead of snapping to the top (see _RebuildBoard).
-        winrt::Windows::UI::Xaml::Controls::Border _MakeBoardColumn(
-            const winrt::Windows::UI::Xaml::UIElement& header,
-            const winrt::Windows::UI::Xaml::UIElement& cards,
-            bool fill = true,
-            const std::wstring& columnKey = {},
-            double restoreOffset = 0.0);
-        // Agentmaster (O6): build the "External (N)" board column (real-WindowsTerminal claudes,
-        // observe-only); empty if there are none. The header toggles _externalCollapsed; each card is
-        // non-interactive with an (currently disabled) Adopt seam for future external-session restore.
-        // `restoreOffset` preserves the column's scroll across a rebuild (see _RebuildBoard).
-        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalColumn(double restoreOffset = 0.0);
+        // Agentmaster (UI_THREAD.md §12 — the board's PERSISTENT columns): one Triage Board column. A window
+        // builds each column ONCE, the first time a rebuild shows it, and keeps it for the window's life; a
+        // rebuild only rewrites the header's count and refills `cards`. Until 2026-10-14 every rebuild made
+        // all the columns again — a new ScrollViewer per column per rebuild — and the replaced ScrollViewers
+        // were never freed: the frozen release of 2026-10-14 held 2,920 of them, each holding its whole card
+        // stack, and the XAML event manager's lists grew with them until one rebuild took ~4 s and rebuilds
+        // ran back to back (the window read "Not Responding"). A kept ScrollViewer also keeps its scroll
+        // offset by itself, so the per-rebuild offset capture and its restore-on-Loaded handler are gone.
+        struct BoardColumnView
+        {
+            // The column box: a _boardHost child while the column is shown (Error and External leave the
+            // board while they are empty; the other four are always shown).
+            winrt::Windows::UI::Xaml::Controls::Border root{ nullptr };
+            // The header's card count, rewritten only when the number changes.
+            winrt::Windows::UI::Xaml::Controls::TextBlock count{ nullptr };
+            // External only: the header's collapse chevron (▸ collapsed / ▾ expanded). Null for a state column.
+            winrt::Windows::UI::Xaml::Controls::TextBlock chevron{ nullptr };
+            // The card list's ScrollViewer: ONE per column for the window's life (see the struct comment).
+            winrt::Windows::UI::Xaml::Controls::ScrollViewer scroller{ nullptr };
+            // The card list, cleared and refilled by every rebuild.
+            winrt::Windows::UI::Xaml::Controls::StackPanel cards{ nullptr };
+            // The count the header shows now; -1 until the first rebuild sets it.
+            int shownCount{ -1 };
+            // External only: the collapsed state the column shows now (mirrors _externalCollapsed after a
+            // rebuild), so a rebuild touches the chevron, the scroller and the alignment only on a change.
+            bool shownCollapsed{ false };
+        };
+        // Agentmaster (UI_THREAD.md §12): the persistent column for `key`, built on its first use with a
+        // pinned header over a vertically scrolling card list. The column fills the board height, so a tall
+        // column scrolls within the board instead of clipping past the bottom edge (the board's own
+        // ScrollViewer has its vertical scroll disabled).
+        //   key     — the column key: a state column's title ("Running", "Waiting-for-you", "Needs-approval",
+        //             "Error", "Idle / Done") or "External".
+        //   title   — the header's title text (for a state column, the same as `key`).
+        //   state   — the state column's SessionState: its header dot color and its header tooltip. Ignored
+        //             for "External" (gray dot, its own tooltip, a header that collapses the column).
+        //   returns — the column, a reference into _boardColumns that stays valid while the content lives
+        //             (the map never erases an entry).
+        //   throws  — winrt::hresult_error from XAML construction, which propagates to the rebuild's caller
+        //             exactly as the old per-rebuild construction did.
+        BoardColumnView& _EnsureBoardColumn(const std::wstring& key, const winrt::hstring& title, ::Agentmaster::SessionState state);
+        // Agentmaster (UI_THREAD.md §12): rewrite a column header's count. A no-op when the number did not
+        // change, so a rebuild that changes nothing in a column writes nothing to its header.
+        //   view  — the column.
+        //   count — the number of cards the column holds now.
+        //   throws — winrt::hresult_error from the TextBlock write only.
+        void _SetBoardColumnCount(BoardColumnView& view, int count);
+        // Agentmaster (UI_THREAD.md §12): make _boardHost show exactly the columns of `order`, in that order,
+        // with the fewest removes / inserts / moves (KeyedListDiff.h — the side panel's card-list recipe). A
+        // column that stays on the board is never taken out of the tree, so its ScrollViewer keeps its
+        // offset. In the normal case nothing changes and nothing is touched; only the Error and External
+        // columns come and go. A plan that ends out of step with its mirror (a bug) is repaired by clearing
+        // the host and appending `order` again, and logged.
+        //   order  — the keys of the columns to show, in board order (each key built by _EnsureBoardColumn).
+        //   throws — winrt::hresult_error from the collection edits, or std::bad_alloc.
+        void _SyncBoardColumnOrder(const std::vector<std::wstring>& order);
+        // Agentmaster (O6, UI_THREAD.md §12): refill the persistent "External (N)" column — real-WindowsTerminal /
+        // console claudes the observer detected, observe-only. Its header (a Button) toggles _externalCollapsed;
+        // collapsed, the column shows the header alone in a box that hugs it. The caller adds the column to the
+        // board only while _externalClaudes is not empty.
+        //   view   — the External column (_EnsureBoardColumn(L"External", …)).
+        //   throws — winrt::hresult_error from XAML construction / writes.
+        void _FillExternalColumn(BoardColumnView& view);
         winrt::Windows::UI::Xaml::Controls::Button _MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex);
 
         // Draggable pane splitters (resize + on-hover cursor + persisted sizes).
@@ -835,6 +879,15 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<std::atomic<bool>> _refreshQueued{ std::make_shared<std::atomic<bool>>(false) };
         int64_t _lastRegistryRefreshMs{ 0 };
         winrt::Windows::UI::Xaml::DispatcherTimer _refreshDelayTimer{ nullptr };
+        // Agentmaster (UI_THREAD.md §12 — the adaptive gap): how long the last real rebuild took, in ms
+        // (_Refresh measures every rebuild that runs, whoever asked for it; a refresh gated off while the
+        // page is hidden does not count). _RefreshFromRegistryEvent waits ManagerRefreshGapMs(this) between
+        // registry-driven rebuilds, so a slow page leaves the UI thread room for input instead of rebuilding
+        // back to back (RefreshPacing.h). 0 until the first rebuild.
+        int64_t _lastRefreshCostMs{ 0 };
+        // Agentmaster (UI_THREAD.md §12): when the last `[manager] slow rebuild` line was written
+        // (GetTickCount64 ms; 0 = never), so a page that stays slow logs once a minute, not per rebuild.
+        int64_t _lastSlowRebuildLoggedMs{ 0 };
 
         // Agentmaster (perf — the hidden-lens rebuild tax, SetLensVisible): _lensVisible mirrors "the
         // Agent Manager page is on screen"; _refreshDirty records a refresh that was REQUESTED while
@@ -1060,22 +1113,15 @@ namespace winrt::TerminalApp::implementation
         // picks alone — so unchecking it is how you say "only tagged cards", and it stays meaningful
         // whether or not any tag is picked. Also per-window persisted (ManagerState::boardShowUntagged).
         bool _boardShowUntagged{ true };
-        // Agentmaster: column title (e.g. "Running", "External") -> that column's live card
-        // ScrollViewer, repopulated on every _RebuildBoard. Used ONLY to PRESERVE each column's
-        // vertical scroll offset across a rebuild: _RebuildBoard recreates the per-column ScrollViewers
-        // from scratch (fresh => offset 0), so without capturing+restoring the offset, any _Refresh (a
-        // select, a state/title change, an observer enrichment) would snap a scrolled column to the TOP
-        // and lose the card the user just clicked. Captured before the clear, restored on Loaded.
-        std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::ScrollViewer> _boardColumnScrollers;
-        // Agentmaster (scroll-jump fix): the DURABLE remembered scroll offset per column title — the
-        // authoritative restore source, persisted ACROSS rebuilds (unlike the per-rebuild local capture
-        // it replaced). Why a member: a refresh that lands before a PRIOR rebuild's restore-on-Loaded has
-        // fired would read that rebuild's fresh, not-yet-restored ScrollViewer sitting at 0 and PERMANENTLY
-        // lose the saved scroll (the "a click jumps the scroll to top" race when a background scanner/observer
-        // refresh coincides with the user's click). The capture in _RebuildBoard updates this map only from a
-        // LOADED ScrollViewer (FrameworkElement::IsLoaded) — a fresh SV's meaningless 0 never clobbers the
-        // remembered offset, while a genuinely-scrolled-to-top loaded column records its real 0.
-        std::unordered_map<std::wstring, double> _boardColumnOffsets;
+        // Agentmaster (UI_THREAD.md §12): column key -> the window's persistent column (BoardColumnView). Filled
+        // on first use by _EnsureBoardColumn; never erased, so a reference into it stays valid. At most six
+        // entries. The scroll offset each column used to capture and restore across a rebuild
+        // (_boardColumnScrollers / _boardColumnOffsets, until 2026-10-14) needs no bookkeeping now: the
+        // column's one ScrollViewer keeps it.
+        std::unordered_map<std::wstring, BoardColumnView> _boardColumns;
+        // Agentmaster (UI_THREAD.md §12): the keys of _boardHost's children, in order — the mirror that
+        // _SyncBoardColumnOrder plans its edits against.
+        std::vector<std::wstring> _boardColumnOrder;
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)

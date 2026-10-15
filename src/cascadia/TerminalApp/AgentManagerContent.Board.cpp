@@ -25,6 +25,7 @@
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor (the cog's color pickers) + ResolveTagDisplayColor (the card's bookmark ribbons)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the kept board columns' order edits (UI_THREAD.md §12)
 #include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the card title band's bookmark ribbons; CollectGlobalTags / FoldTagName — the header's tag-filter chips
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
@@ -742,8 +743,8 @@ namespace winrt::TerminalApp::implementation
                     _SetTreeScope(isLocal ? TreeScope::Local : TreeScope::Global, /*refresh*/ true);
                 }
                 // Agentmaster (double-click fix): _SelectSession (+ the scope sync above) just TORE
-                // DOWN and rebuilt this board — every card Button is cleared + recreated from scratch
-                // (_RebuildBoard: _boardHost.Children().Clear() then _MakeCard per session). The
+                // DOWN and rebuilt this board's cards — every card Button is cleared + recreated from scratch
+                // (_RebuildBoard: each kept column's card list is cleared, then _MakeCard per session). The
                 // replacement card for THIS id is in the tree but NOT yet arranged (a fresh element
                 // has 0x0 bounds until the next async layout pass), so a second mouse-down arriving
                 // microseconds later (the user double-clicking to Activate) hit-tests to nothing and
@@ -1003,40 +1004,17 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)
     {
-        // Agentmaster: preserve each column's vertical scroll offset across this rebuild. _RebuildBoard
-        // recreates the per-column ScrollViewers from scratch (a fresh ScrollViewer sits at offset 0),
-        // so without this a mere _Refresh — a select, a state/title change, an observer enrichment —
-        // would snap the board to the TOP, losing the card the user just clicked near the bottom of a
-        // tall column. The remembered offsets live in the DURABLE member _boardColumnOffsets (keyed by
-        // column title), not a per-rebuild local: a refresh that lands before a PRIOR rebuild's
-        // restore-on-Loaded has fired would otherwise read that rebuild's fresh, not-yet-restored
-        // ScrollViewer sitting at 0 and PERMANENTLY lose the saved scroll — the "a click jumps the scroll
-        // to top" race when a background scanner/observer refresh coincides with the user's click. Capture
-        // the live offsets now (the old scrollers are still valid), but ONLY trust a LOADED ScrollViewer:
-        // a not-yet-loaded SV (IsLoaded == false) reports a meaningless 0 — keep the remembered offset
-        // rather than clobber it; a genuinely-scrolled-to-top LOADED column records its real 0. Each new
-        // column re-applies its remembered offset on Loaded (see _MakeBoardColumn).
-        for (const auto& [key, sv] : _boardColumnScrollers)
-        {
-            if (!sv)
-            {
-                continue;
-            }
-            const auto off = sv.VerticalOffset();
-            if (off > 0.0)
-            {
-                _boardColumnOffsets[key] = off; // a real, restored scroll position
-            }
-            else if (sv.IsLoaded())
-            {
-                _boardColumnOffsets[key] = 0.0; // genuinely at the top (the SV has loaded, so 0 is real)
-            }
-            // else: a fresh / not-yet-restored SV reading 0 — preserve the remembered offset (its
-            // restore-on-Loaded is still pending), so a coincident refresh can't lose the user's scroll.
-        }
-        _boardColumnScrollers.clear(); // refilled by _MakeBoardColumn below
-
-        _boardHost.Children().Clear();
+        // Agentmaster (UI_THREAD.md §12 — the PERSISTENT columns): this rebuild refills the cards; it does
+        // not build the columns. Each column is built once (_EnsureBoardColumn) and kept for the window's
+        // life, so its one ScrollViewer keeps the user's scroll offset by itself, and _SyncBoardColumnOrder
+        // (at the end) only adds or removes the Error and External columns when they fill or empty.
+        //
+        // Until 2026-10-14 this rebuild cleared _boardHost and made every column again: a new ScrollViewer
+        // per column per rebuild, plus a capture-and-restore of each column's offset (a Loaded handler on
+        // every scrolled column). The replaced ScrollViewers were never freed. The frozen release of
+        // 2026-10-14 held 2,920 of them with their whole card stacks (~2-3 MB a second while the page was
+        // up), the XAML event manager's lists grew with them, a rebuild took ~4 s, and the rebuilds ran
+        // back to back — the window read "Not Responding".
         _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
         _cardProgress.clear(); // Agentmaster: refilled by _MakeCard for each Waiting-for-you countdown bar (drained by _progressTimer)
         if (_boardScope)
@@ -1174,10 +1152,13 @@ namespace winrt::TerminalApp::implementation
             { L"Idle / Done", SessionState::Idle },
         };
 
+        // The keys of the columns this rebuild shows, in board order: what _SyncBoardColumnOrder makes
+        // _boardHost show at the end.
+        std::vector<std::wstring> columnOrder;
+        columnOrder.reserve(std::size(cols) + 1);
         for (const auto& col : cols)
         {
-            auto colStack = StackPanel{};
-            colStack.Spacing(0);
+            const std::wstring colKey{ col.title };
 
             // collect matching sessions (respecting the LOCAL/GLOBAL scope + the directory scope)
             std::vector<const SessionInfo*> matches;
@@ -1209,13 +1190,20 @@ namespace winrt::TerminalApp::implementation
 
             // Agentmaster: the Error column is SPECIAL — it collapses out of the board entirely when
             // it holds no cards and reappears in place (between Needs-approval and Idle / Done) the
-            // moment a session errors. Skipping the Append below means the horizontal StackPanel
+            // moment a session errors. Leaving it out of columnOrder means the horizontal StackPanel
             // (_boardHost) reserves NO width — nor its 8px inter-column spacing — for it, so an empty
-            // Error column costs zero board space; and because the columns are appended in fixed order
-            // on every rebuild, it always returns to the SAME slot when it reappears. The other four
-            // states are always shown — they are the steady-state columns of the triage model.
+            // Error column costs zero board space; and because columnOrder lists the columns in fixed
+            // order, it always returns to the SAME slot when it reappears. The other four states are
+            // always shown — they are the steady-state columns of the triage model.
             if (col.state == SessionState::Error && matches.empty())
             {
+                // The kept column leaves the board (at the order sync below): drop the cards it showed, so
+                // nothing it no longer shows stays alive (UI_THREAD.md §12).
+                if (const auto errIt = _boardColumns.find(colKey); errIt != _boardColumns.end() && errIt->second.cards)
+                {
+                    errIt->second.cards.Children().Clear();
+                    _SetBoardColumnCount(errIt->second, 0);
+                }
                 continue;
             }
 
@@ -1228,45 +1216,19 @@ namespace winrt::TerminalApp::implementation
                 return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
             });
 
-            auto hdr = StackPanel{};
-            hdr.Orientation(Orientation::Horizontal);
-            hdr.Spacing(6);
-            hdr.Margin(Thickness{ 0, 0, 0, 6 });
-            auto dot = Text(L"\x25CF", 12, false, 1.0);
-            dot.Foreground(SolidColorBrush{ StateColor(col.state) });
-            hdr.Children().Append(dot);
-            hdr.Children().Append(Text(col.title, 12, true, 0.9));
-            hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(matches.size())), 12, false, 0.6));
-            // Agentmaster: explain what each Triage state means — the board's five columns ARE the
-            // state model, so naming them on hover is the core learning-curve aid. The state's name is
-            // the tip's TITLE (the header is a StackPanel, so nothing derives one), which leaves the
-            // body free to say what actually puts a session here and what gets it out again.
-            const wchar_t* colTipTitle =
-                col.state == SessionState::Running         ? L"Running" :
-                col.state == SessionState::WaitingForInput ? L"Waiting-for-you" :
-                col.state == SessionState::NeedsApproval   ? L"Needs-approval" :
-                col.state == SessionState::Error           ? L"Error" :
-                                                             L"Idle / Done";
-            const wchar_t* colTip =
-                col.state == SessionState::Running         ? L"The agent is working on a turn right now. Work that outlives the turn \x2014 a background shell, a subagent, a teammate \x2014 keeps a session here too, rather than letting it read as finished while it is still going." :
-                col.state == SessionState::WaitingForInput ? L"The turn is finished and the agent is waiting for your next prompt. With the Prompt Queue Runner on Auto, the next queued prompt goes out on its own. A card you haven't looked at yet stays here \x2014 it only drops to Idle / Done once you have read it and the unread timeout has passed." :
-                col.state == SessionState::NeedsApproval   ? L"The agent stopped part-way through a turn on a tool-permission prompt or a question, and cannot continue until you answer. Nothing is auto-sent into it \x2014 the queue is held so a queued prompt can never answer the question for you." :
-                col.state == SessionState::Error           ? L"The agent's last turn did not finish. Either it died \x2014 a rate or usage limit, a prompt too long for the context, an auth failure, a dropped connection \x2014 or its session was shut down while the turn ran: the app closed or crashed, or the tab was restarted or deactivated. The card carries the reason. Nothing is auto-sent into an errored session. A session leaves Error on its next turn; right-click \x2192 Move to Idle / Done dismisses it now." :
-                                                             L"No turn in progress \x2014 freshly launched, just resumed, or done. A queued prompt still starts from here: a session that has never run emits no turn to wait for.";
-            AgentSetTitledTip(hdr, colTipTitle, colTip);
-            // colStack holds the cards only; _MakeBoardColumn pins the header above a vertically
-            // scrolling card list so a tall column scrolls within the board height instead of
-            // clipping past the bottom edge (the board ScrollViewer's vertical scroll is disabled).
+            // The kept column (built on its first use: header, tooltip, ScrollViewer — see _EnsureBoardColumn):
+            // rewrite its count and refill its cards. Clear + Append runs before any layout pass, so the
+            // ScrollViewer measures the new card list once and keeps its offset (clamped only when the
+            // list got shorter than the offset).
+            auto& view = _EnsureBoardColumn(colKey, col.title, col.state);
+            _SetBoardColumnCount(view, static_cast<int>(matches.size()));
+            auto cardChildren = view.cards.Children();
+            cardChildren.Clear();
             for (const auto* s : matches)
             {
-                colStack.Children().Append(_MakeCard(*s));
+                cardChildren.Append(_MakeCard(*s));
             }
-
-            // Preserve this column's remembered scroll offset (keyed by its title; durable across rebuilds).
-            const std::wstring colKey{ col.title };
-            const auto savedIt = _boardColumnOffsets.find(colKey);
-            const double restore = (savedIt != _boardColumnOffsets.end()) ? savedIt->second : 0.0;
-            _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack, true, colKey, restore));
+            columnOrder.push_back(colKey);
         }
 
         // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
@@ -1274,9 +1236,17 @@ namespace winrt::TerminalApp::implementation
         // unscoped (it is a global census, not part of the managed directory tree).
         if (!_externalClaudes.empty())
         {
-            const auto extIt = _boardColumnOffsets.find(L"External");
-            _boardHost.Children().Append(_MakeExternalColumn(extIt != _boardColumnOffsets.end() ? extIt->second : 0.0));
+            auto& external = _EnsureBoardColumn(L"External", L"External", SessionState::Idle);
+            _FillExternalColumn(external);
+            columnOrder.emplace_back(L"External");
         }
+        else if (const auto extIt = _boardColumns.find(L"External"); extIt != _boardColumns.end() && extIt->second.cards)
+        {
+            extIt->second.cards.Children().Clear(); // the column leaves the board below: drop its cards
+            _SetBoardColumnCount(extIt->second, 0);
+        }
+
+        _SyncBoardColumnOrder(columnOrder);
     }
 
     // ===== the board header's TAG FILTER chips (bookmark tags) ===============================
@@ -1594,130 +1564,191 @@ namespace winrt::TerminalApp::implementation
         return false;
     }
 
-    // Agentmaster: assemble one Triage Board column. When `fill` is true the column fills the board
-    // height with a pinned `header` (Grid row 0) over a vertically-scrolling `cards` list (row 1),
-    // so a tall column (e.g. a large External census) scrolls within the board instead of clipping
-    // past the bottom edge — the board's own ScrollViewer (BuildUI) has vertical scroll disabled.
-    // When `fill` is false the box hugs its content (a collapsed column: header only, no scroll).
-    // Shared by the per-state columns and the External group so they stay visually in lockstep.
-    Border AgentManagerContent::_MakeBoardColumn(const UIElement& header, const UIElement& cards, bool fill, const std::wstring& columnKey, double restoreOffset)
+    // Agentmaster (UI_THREAD.md §12 — the board's PERSISTENT columns): see the declaration. The layout is the
+    // one the per-rebuild builder (_MakeBoardColumn, until 2026-10-14) made: a 220-DIP box that fills the
+    // board height, with the header pinned in Grid row 0 over a vertically scrolling card list in row 1, so
+    // a tall column scrolls within the board instead of clipping past the bottom edge (the board's own
+    // ScrollViewer has its vertical scroll disabled). Every handler here captures the content WEAKLY or not
+    // at all, and none captures its own element: the column lives as long as the window, and a handler
+    // that held the element it is registered on would be a cycle C++/WinRT never collects.
+    AgentManagerContent::BoardColumnView& AgentManagerContent::_EnsureBoardColumn(const std::wstring& key, const winrt::hstring& title, SessionState state)
     {
-        auto col_border = Border{};
-        col_border.Width(220);
-        col_border.Padding(Thickness{ 8, 8, 8, 8 });
-        col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
-        col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
-
-        if (fill)
+        if (const auto it = _boardColumns.find(key); it != _boardColumns.end())
         {
-            auto grid = Grid{};
-            auto rdHeader = RowDefinition{};
-            rdHeader.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            grid.RowDefinitions().Append(rdHeader);
-            auto rdCards = RowDefinition{};
-            rdCards.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            grid.RowDefinitions().Append(rdCards);
-
-            Grid::SetRow(header.as<FrameworkElement>(), 0); // Grid::SetRow takes a FrameworkElement; header is typed UIElement
-            grid.Children().Append(header);
-
-            auto cardsSv = ScrollViewer{};
-            cardsSv.VerticalScrollMode(ScrollMode::Enabled);
-            cardsSv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-            cardsSv.HorizontalScrollMode(ScrollMode::Disabled);
-            cardsSv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-            cardsSv.Content(cards);
-            Grid::SetRow(cardsSv, 1);
-            grid.Children().Append(cardsSv);
-
-            // Agentmaster: track this column's ScrollViewer so the NEXT _RebuildBoard can capture its
-            // offset, and re-apply the offset this rebuild inherited. A fresh ScrollViewer sits at 0
-            // until restored; do it on Loaded with animation disabled (an instant restore, no visible
-            // jump). Capture only the offset — the sender IS the ScrollViewer, never self-capture the
-            // element (that leaks it via the delegate).
-            if (!columnKey.empty())
-            {
-                _boardColumnScrollers[columnKey] = cardsSv;
-                if (restoreOffset > 0.0)
-                {
-                    cardsSv.Loaded([restoreOffset](const IInspectable& sender, const RoutedEventArgs&) {
-                        if (const auto sv = sender.try_as<ScrollViewer>())
-                        {
-                            // Agentmaster (scroll-jump fix): when Loaded fires, a fresh ScrollViewer's
-                            // CONTENT extent often isn't realized yet — ScrollableHeight still reads 0 —
-                            // so a bare ChangeView(restoreOffset) CLAMPS to 0 and the column snaps to the
-                            // TOP. That is the "sometimes a click jumps the scroll to top" report:
-                            // _RebuildBoard recreates these ScrollViewers on EVERY refresh (a select, a
-                            // state/title change, an observer enrichment), and the restore raced the
-                            // content's first measure. Force the content to measure+arrange first so
-                            // ScrollableHeight reflects the real height, THEN restore — the same realize-
-                            // then-scroll recipe BringSelectedIntoView uses (UpdateLayout before the
-                            // scroll). UpdateLayout is synchronous + idempotent, so it is a no-op when the
-                            // extent is already valid.
-                            sv.UpdateLayout();
-                            sv.ChangeView(nullptr, restoreOffset, nullptr, true);
-                        }
-                    });
-                }
-            }
-
-            // Stretch so the board's horizontal StackPanel gives the column the full viewport height
-            // (the board SV's vertical scroll is off, so the cross-axis is bounded) -> the inner
-            // ScrollViewer has a real height to scroll within.
-            col_border.VerticalAlignment(VerticalAlignment::Stretch);
-            col_border.Child(grid);
+            return it->second; // built on an earlier rebuild: the common case
         }
-        else
-        {
-            auto stack = StackPanel{};
-            stack.Spacing(0);
-            stack.Children().Append(header);
-            stack.Children().Append(cards);
-            col_border.VerticalAlignment(VerticalAlignment::Top);
-            col_border.Child(stack);
-        }
-        return col_border;
-    }
+        const bool external = (key == L"External");
 
-    // Agentmaster (O6): the "External (N)" board column. Observe-only — each card is a real
-    // Windows Terminal claude the observer correlated out-of-band but will never bind (Rule #9/#13).
-    Border AgentManagerContent::_MakeExternalColumn(double restoreOffset)
-    {
-        auto colStack = StackPanel{};
-        colStack.Spacing(0);
+        BoardColumnView view;
+        view.cards = StackPanel{};
+        view.cards.Spacing(0);
 
+        // The header row: [● title count] for a state column; [● External count ▾] in a Button for the
+        // External census, whose header doubles as the collapse toggle.
         auto hdr = StackPanel{};
         hdr.Orientation(Orientation::Horizontal);
         hdr.Spacing(6);
         auto dot = Text(L"\x25CF", 12, false, 1.0);
-        dot.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
+        dot.Foreground(external ? Fill(0xFF, 0x9E, 0x9E, 0x9E) : SolidColorBrush{ StateColor(state) }); // gray — external / observe-only
         hdr.Children().Append(dot);
-        hdr.Children().Append(Text(L"External", 12, true, 0.9));
-        hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(_externalClaudes.size())), 12, false, 0.6));
-        hdr.Children().Append(Text(_externalCollapsed ? winrt::hstring{ L"\x25B8" } : winrt::hstring{ L"\x25BE" }, 11, false, 0.6)); // ▸ / ▾
+        hdr.Children().Append(Text(title, 12, true, 0.9));
+        view.count = Text(L"0", 12, false, 0.6);
+        hdr.Children().Append(view.count);
+        UIElement header{ nullptr };
+        if (external)
+        {
+            view.chevron = Text(L"\x25BE", 11, false, 0.6); // ▾ expanded (_FillExternalColumn flips it)
+            hdr.Children().Append(view.chevron);
+            // The header doubles as the collapse toggle (a Button styled to read like the other column
+            // headers — transparent, borderless, left-aligned).
+            auto hdrBtn = Button{};
+            hdrBtn.Content(hdr);
+            hdrBtn.Background(Fill(0x00, 0, 0, 0));
+            hdrBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            hdrBtn.Padding(Thickness{ 0, 0, 0, 0 });
+            hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
+            hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
+            hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
+            AgentSetTitledTip(hdrBtn, L"External", L"Claude and Codex sessions running outside Agentmaster \x2014 in a plain console, in Windows Terminal, or in another install. They are found and read, never driven, and no window scope applies to them. Click a card to read its conversation, or right-click to Adopt it. Click this header to collapse or expand the column.");
+            // WEAK: the button lives as long as the window's content, so a strong capture would be a
+            // content -> button -> handler -> content cycle.
+            hdrBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+                if (const auto self = weak.get())
+                {
+                    self->_externalCollapsed = !self->_externalCollapsed;
+                    self->_Refresh();
+                }
+            });
+            header = hdrBtn;
+        }
+        else
+        {
+            hdr.Margin(Thickness{ 0, 0, 0, 6 });
+            // Agentmaster: explain what each Triage state means — the board's five columns ARE the
+            // state model, so naming them on hover is the core learning-curve aid. The state's name is
+            // the tip's TITLE (the header is a StackPanel, so nothing derives one), which leaves the
+            // body free to say what actually puts a session here and what gets it out again.
+            const wchar_t* colTip =
+                state == SessionState::Running         ? L"The agent is working on a turn right now. Work that outlives the turn \x2014 a background shell, a subagent, a teammate \x2014 keeps a session here too, rather than letting it read as finished while it is still going." :
+                state == SessionState::WaitingForInput ? L"The turn is finished and the agent is waiting for your next prompt. With the Prompt Queue Runner on Auto, the next queued prompt goes out on its own. A card you haven't looked at yet stays here \x2014 it only drops to Idle / Done once you have read it and the unread timeout has passed." :
+                state == SessionState::NeedsApproval   ? L"The agent stopped part-way through a turn on a tool-permission prompt or a question, and cannot continue until you answer. Nothing is auto-sent into it \x2014 the queue is held so a queued prompt can never answer the question for you." :
+                state == SessionState::Error           ? L"The agent's last turn did not finish. Either it died \x2014 a rate or usage limit, a prompt too long for the context, an auth failure, a dropped connection \x2014 or its session was shut down while the turn ran: the app closed or crashed, or the tab was restarted or deactivated. The card carries the reason. Nothing is auto-sent into an errored session. A session leaves Error on its next turn; right-click \x2192 Move to Idle / Done dismisses it now." :
+                                                         L"No turn in progress \x2014 freshly launched, just resumed, or done. A queued prompt still starts from here: a session that has never run emits no turn to wait for.";
+            AgentSetTitledTip(hdr, title, colTip);
+            header = hdr;
+        }
 
-        // The header doubles as the collapse toggle (a Button styled to read like the other column
-        // headers — transparent, borderless, left-aligned).
-        auto hdrBtn = Button{};
-        hdrBtn.Content(hdr);
-        hdrBtn.Background(Fill(0x00, 0, 0, 0));
-        hdrBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
-        hdrBtn.Padding(Thickness{ 0, 0, 0, 0 });
-        hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
-        hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
-        hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
-        AgentSetTitledTip(hdrBtn, L"External", L"Claude and Codex sessions running outside Agentmaster \x2014 in a plain console, in Windows Terminal, or in another install. They are found and read, never driven, and no window scope applies to them. Click a card to read its conversation, or right-click to Adopt it. Click this header to collapse or expand the column.");
-        hdrBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-            _externalCollapsed = !_externalCollapsed;
-            _Refresh();
-        });
-        // Collapsed: just the header in a hugging box (no card list to scroll). Expanded: the header
-        // pinned above a vertically-scrolling card list (fills the board height) so a large External
-        // census scrolls within the board instead of clipping past the bottom edge. colStack holds
-        // the cards only (the header is pinned by _MakeBoardColumn, not stacked above them).
+        auto grid = Grid{};
+        auto rdHeader = RowDefinition{};
+        rdHeader.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+        grid.RowDefinitions().Append(rdHeader);
+        auto rdCards = RowDefinition{};
+        rdCards.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        grid.RowDefinitions().Append(rdCards);
+        Grid::SetRow(header.as<FrameworkElement>(), 0); // Grid::SetRow takes a FrameworkElement
+        grid.Children().Append(header);
+
+        view.scroller = ScrollViewer{};
+        view.scroller.VerticalScrollMode(ScrollMode::Enabled);
+        view.scroller.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        view.scroller.HorizontalScrollMode(ScrollMode::Disabled);
+        view.scroller.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        view.scroller.Content(view.cards);
+        Grid::SetRow(view.scroller, 1);
+        grid.Children().Append(view.scroller);
+
+        view.root = Border{};
+        view.root.Width(220);
+        view.root.Padding(Thickness{ 8, 8, 8, 8 });
+        view.root.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+        view.root.Background(Fill(0x14, 0x80, 0x80, 0x80));
+        // Stretch so the board's horizontal StackPanel gives the column the full viewport height (the
+        // board ScrollViewer's vertical scroll is off, so the cross-axis is bounded) -> the card
+        // ScrollViewer has a real height to scroll within. A collapsed External column hugs its header
+        // instead (Top; _FillExternalColumn switches it).
+        view.root.VerticalAlignment(VerticalAlignment::Stretch);
+        view.root.Child(grid);
+        view.shownCollapsed = false; // built expanded; _FillExternalColumn applies a collapsed state
+
+        return _boardColumns.emplace(key, std::move(view)).first->second;
+    }
+
+    // Agentmaster (UI_THREAD.md §12): see the declaration.
+    void AgentManagerContent::_SetBoardColumnCount(BoardColumnView& view, const int count)
+    {
+        if (!view.count || view.shownCount == count)
+        {
+            return; // unchanged: no TextBlock write (and no layout invalidation) for a quiet column
+        }
+        view.shownCount = count;
+        view.count.Text(winrt::to_hstring(count));
+    }
+
+    // Agentmaster (UI_THREAD.md §12): see the declaration. A Move is a reorder of the panel's item array
+    // (no Unloaded / Loaded — KeyedListDiff.h), and a column that is neither removed nor inserted is never
+    // touched, so its ScrollViewer keeps its offset across an Error column that comes and goes beside it.
+    void AgentManagerContent::_SyncBoardColumnOrder(const std::vector<std::wstring>& order)
+    {
+        auto children = _boardHost.Children();
+        bool mirrorBroken = false;
+        for (const auto& op : ::Agentmaster::PlanKeyedListOps(_boardColumnOrder, order))
+        {
+            switch (op.kind)
+            {
+            case ::Agentmaster::KeyedListOpKind::Remove:
+                children.RemoveAt(op.from);
+                break;
+            case ::Agentmaster::KeyedListOpKind::Insert:
+                children.InsertAt(op.to, _boardColumns.at(op.key).root); // every key in `order` was ensured by the rebuild
+                break;
+            case ::Agentmaster::KeyedListOpKind::Move:
+                children.Move(op.from, op.to);
+                break;
+            }
+            if (!::Agentmaster::ApplyKeyedListOp(_boardColumnOrder, op))
+            {
+                mirrorBroken = true; // an index out of range: the mirror no longer describes the host
+                break;
+            }
+        }
+        if (mirrorBroken || _boardColumnOrder != order || children.Size() != order.size())
+        {
+            // A planned edit applied in order can't end anywhere else — this would be a planner or mirror bug.
+            // Editing on from a wrong mirror would only compound it, so put the host in order from scratch:
+            // the columns are kept, so this re-parents them; nothing is rebuilt.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[board] column order edit ended out of step with its plan \x2014 re-adding the " + std::to_wstring(order.size()) + L" column(s)\n");
+            children.Clear();
+            for (const auto& key : order)
+            {
+                children.Append(_boardColumns.at(key).root);
+            }
+            _boardColumnOrder = order;
+        }
+    }
+
+    // Agentmaster (O6, UI_THREAD.md §12): see the declaration. Each card is a real Windows Terminal /
+    // console claude the observer correlated out-of-band but will never bind (Rule #9/#13).
+    void AgentManagerContent::_FillExternalColumn(BoardColumnView& view)
+    {
+        _SetBoardColumnCount(view, static_cast<int>(_externalClaudes.size()));
+        if (view.shownCollapsed != _externalCollapsed)
+        {
+            // Collapsed: just the header in a hugging box (no card list to scroll). Expanded: the header
+            // pinned above a vertically-scrolling card list that fills the board height, so a large External
+            // census scrolls within the board instead of clipping past the bottom edge.
+            view.shownCollapsed = _externalCollapsed;
+            if (view.chevron)
+            {
+                view.chevron.Text(_externalCollapsed ? winrt::hstring{ L"\x25B8" } : winrt::hstring{ L"\x25BE" }); // ▸ / ▾
+            }
+            view.scroller.Visibility(_externalCollapsed ? Visibility::Collapsed : Visibility::Visible);
+            view.root.VerticalAlignment(_externalCollapsed ? VerticalAlignment::Top : VerticalAlignment::Stretch);
+        }
+        auto children = view.cards.Children();
+        children.Clear();
         if (_externalCollapsed)
         {
-            return _MakeBoardColumn(hdrBtn, colStack, false);
+            return; // the header alone: no card is built while nobody can see it
         }
 
         // Agentmaster: order the External census cards by the same (global) board sort as the managed
@@ -1735,9 +1766,8 @@ namespace winrt::TerminalApp::implementation
         });
         for (const auto* ex : exts)
         {
-            colStack.Children().Append(_MakeExternalCard(*ex));
+            children.Append(_MakeExternalCard(*ex));
         }
-        return _MakeBoardColumn(hdrBtn, colStack, true, L"External", restoreOffset);
     }
 
     winrt::Windows::UI::Xaml::Controls::Button AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)

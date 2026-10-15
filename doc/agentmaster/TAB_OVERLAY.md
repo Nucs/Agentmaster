@@ -580,3 +580,19 @@ An empty box + no remembered draft is an honest no-op: nothing queued, **no chim
 (`[pending] <sid8> queue current prompt: nothing …`) so it is never a silent dead click. A success chimes
 and logs `[nav] queue <sid8> "<label>" (overlay draft)` + `[pending] <sid8> queue current prompt:
 live|remembered chars=N`.
+
+### 13k. The summary panel's resize grips must not hold themselves (2026-10-14, NOT BUILT yet)
+
+- **The leak:** each of the three grips (left, bottom, corner; `AgentTabOverlay.Summary.cpp`, `wireGrip`)
+  registered `PointerEntered` / `PointerExited` handlers that captured the grip itself, to repaint it on
+  hover. A `Border` that owns a delegate which owns the same `Border` is a reference cycle, and C++/WinRT
+  never collects a cycle. So EVERY overlay ever built left its three grips alive, with their brushes and
+  event sources.
+- **How much:** the frozen release of 2026-10-14 held 194,698 leaked grip sets. Its re-bind loop
+  (OBSERVER.md §20) built a new overlay on every bind, about 175,000 times in 2.8 days.
+- **The fix:** the hover handlers reach the grip through `sender` (`sender.try_as<Border>()`), and capture
+  only the brushes and the cursor. The press / move / release handlers already did.
+- **The rule for every element this overlay builds:** a handler never captures the element it is
+  registered on. Use `sender`, or a weak reference (`winrt::make_weak`). The same rule fixed the "Specify a
+  model" prompt's Fetch button (`AgentModelPrompt.h`) and the Commands tab's successor-model combos
+  (`AgentManagerContent::_WireSuccessorModelCombo`).

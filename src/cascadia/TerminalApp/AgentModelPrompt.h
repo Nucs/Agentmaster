@@ -416,7 +416,19 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        fetchBtn.Click([box, status, fetchBtn, configuredIds](const winrt::Windows::Foundation::IInspectable&, const WUX::RoutedEventArgs&) {
+        // Agentmaster (leak fix, 2026-10-14): the handler holds the box and the status line WEAKLY and reaches
+        // the button through `sender`. Captured by value, the button sat in its own Click delegate (a
+        // reference cycle nothing breaks), and the delegate kept the box and the status line alive with it,
+        // so every opened prompt left its card behind. The worker thread below still captures strong
+        // copies: those live only until the fetch's UI tail has run.
+        fetchBtn.Click([weakBox = winrt::make_weak(box), weakStatus = winrt::make_weak(status), configuredIds](const winrt::Windows::Foundation::IInspectable& sender, const WUX::RoutedEventArgs&) {
+            const auto fetchBtn = sender.try_as<WUXC::Button>();
+            const auto box = weakBox.get();
+            const auto status = weakStatus.get();
+            if (!fetchBtn || !box || !status)
+            {
+                return; // the card is being torn down: nothing to fetch for
+            }
             fetchBtn.IsEnabled(false);
             status.Text(L"Fetching model lists\x2026");
             status.Visibility(WUX::Visibility::Visible);

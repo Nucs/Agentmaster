@@ -72,6 +72,9 @@ int wmain()
     TestForkSourceIdEcho();
     TestSummaryChainLinks(); // the summary's conversation chain: the /clear pairing (tests_state.cpp)
     TestRetiredHostToken(); // Deactivate/Restart: the closing claude of a replaced connection cannot re-stamp the record (tests_state.cpp)
+    TestConversationHosts(); // OBSERVER.md §20: one host tab per conversation that runs in two or more tabs (tests_state.cpp)
+    TestDuplicateConversationHosts(); // OBSERVER.md §20: the registry ignores a duplicate tab's hooks and observations (tests_state.cpp)
+    TestRefreshPacing(); // UI_THREAD.md §12: the Agent Manager page's adaptive rebuild gap (tests_state.cpp)
     TestTypedCapture();
     TestQueueHistoryTrim();
     TestTakeLastPendingPrompt();

@@ -56,6 +56,7 @@
 // run-m5-tests.bat) so each keeps its own anonymous-namespace helpers.
 #include "../Activity.h"
 #include "../ClaudeSpawn.h"
+#include "../ConversationHosts.h" // one host tab per conversation that runs in two or more tabs (OBSERVER.md §20) - pure, header-only
 #include "../DraftCarry.h" // the fork carry + paste journal core (PENDING_INPUT.md §11 / §2c) - pure, header-only
 #include "../HookWire.h"
 #include "../HooksBridge.h"
@@ -67,6 +68,7 @@
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
 #include "../PromptAnchor.h" // the summary-panel JUMP resolver (SUMMARY_JUMP.md) - pure, benchmarked here
 #include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
+#include "../RefreshPacing.h" // the Agent Manager page's registry-driven rebuild gap (UI_THREAD.md §12) - pure, header-only
 #include "../RegexUtil.h" // the ONE guarded regex component (COMMANDS.md §6b) - pure, header-only
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
@@ -143,6 +145,9 @@ void TestRegistryLeanReads(); // UI_THREAD.md §10a #4 — the lean registry rea
 void TestForkSourceIdEcho();
 void TestSummaryChainLinks(); // the summary's conversation chain: a /clear's SessionStart(source "clear") paired with the conversation whose SessionEnd(clear) arrived on its ConPTY (beats a fresher child record), the ConPTY fallback (live before archived), other sources / no candidate / no token => no link, per-ConPTY + consumed entries, an unknown ended id, first writer wins
 void TestRetiredHostToken(); // RETIRED HOSTS (SessionRegistry::RetireHostToken — the 2026-08-26 deactivate unbind + the restart archives): an observation / any hook from a replaced connection changes NOTHING on the record (token, pid, heartbeat, state, provenance); case-insensitive; per session; the new host still heard; Remove forgets; the per-session bound
+void TestConversationHosts(); // DUPLICATE CONVERSATIONS (OBSERVER.md §20, ConversationHosts.h — the 2026-10-11..14 re-bind loop): PickConversationHost's rules (bound > recorded host > earliest known start > lowest WT_SESSION) and their stability under any claim order; FindDuplicateConversations' grouping (one tab = no entry, a tab listed twice = one tab, empty ids / tokens ignored, the recorded-host lookup asked once per duplicated conversation only, case-insensitive matches, sorted output); the incident's three-tab shape
+void TestDuplicateConversationHosts(); // DUPLICATE CONVERSATIONS (SessionRegistry::SetDuplicateConversationHosts): a duplicate tab's hooks (SessionStart / UserPromptSubmit / Stop / Notification / SessionEnd) and observations change NOTHING on the record; the host is heard; another session's hook from the same tab is applied; case-insensitive; a host listed as its own duplicate and an empty id are ignored; the set is REPLACED, so a resolved duplicate is heard again
+void TestRefreshPacing(); // UI_THREAD.md §12 (RefreshPacing.h): the Agent Manager page's registry-driven rebuild gap — 2× the last rebuild's cost, clamped to [250 ms, 5 s], saturating; the slow-rebuild log once a minute from 1 s
 void TestTypedCapture();
 void TestQueueHistoryTrim(); // bounded queue history: TrimQueueHistory (pure) + the registry append-seam cap
 void TestTakeLastPendingPrompt(); // queue pop (Ctrl+Shift+Up on the empty compose box): TakeLastPendingPrompt (pure) — last-in-queue-order Pending/legacy-Held pops whole, completed history never, LIFO drain

@@ -28,6 +28,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
+#include "AgentMaster/RefreshPacing.h" // ManagerRefreshGapMs / ShouldLogSlowManagerRebuild — the registry-driven rebuild pacing (UI_THREAD.md §12)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
@@ -601,10 +602,11 @@ namespace winrt::TerminalApp::implementation
         // it (UpdateLayout) so each card has a real extent, then StartBringIntoView walks up to the
         // card's column ScrollViewer and scrolls it into view (a no-op if already fully visible) — the
         // same UpdateLayout-then-scroll recipe the Auto-Testing auto-scroll-to-bottom uses. Run at LOW
-        // priority so this lands AFTER the framework's own restore work this attach triggers (each fresh
-        // column ScrollViewer re-applies its saved offset on Loaded; see _MakeBoardColumn) — our reveal
-        // must be the last word on the selected card's column, else the offset restore would re-hide it.
-        // _selectedId is re-read inside (it may change before this runs).
+        // priority so this lands AFTER the framework's own layout work this attach triggers — our reveal
+        // must be the last word on the selected card's column. (Until 2026-10-14 each rebuild made fresh
+        // column ScrollViewers that re-applied a saved offset on Loaded, which would have re-hidden the
+        // card; the columns are kept now and keep their offset — UI_THREAD.md §12 — but the ordering
+        // still costs nothing.) _selectedId is re-read inside (it may change before this runs).
         disp.TryEnqueue(winrt::Windows::System::DispatcherQueuePriority::Low, [weak]() {
             auto self = weak.get();
             if (!self || self->_selectedId.empty())
@@ -1851,15 +1853,21 @@ namespace winrt::TerminalApp::implementation
     // observer hop (SetRegistry) lands here on the UI thread; this enforces a MINIMUM GAP between
     // event-driven full rebuilds — a burst runs one rebuild now and ONE trailing rebuild at the gap
     // boundary (the one-shot _refreshDelayTimer), so the final state always renders and the rebuild
-    // rate is bounded (~4/s) no matter how hot the notify stream gets. Every USER-action refresh
+    // rate is bounded no matter how hot the notify stream gets. Every USER-action refresh
     // (RefreshNow, scope/sort toggles, selection, the 30s idle timer) still calls _Refresh() directly —
     // interactive latency is untouched.
+    //
+    // Agentmaster (UI_THREAD.md §12 — the adaptive gap, 2026-10-14): the gap is twice the cost of the last
+    // rebuild, between 250 ms and 5 s (ManagerRefreshGapMs, RefreshPacing.h). It was a fixed 250 ms: on the
+    // frozen release of 2026-10-14 a rebuild took ~4 s and the registry changed every second, so rebuilds
+    // ran back to back and the UI thread was ~94% busy with them — clicks waited for minutes. A cheap
+    // rebuild keeps the 250 ms gap; a slow one now leaves the thread at least two thirds free.
     void AgentManagerContent::_RefreshFromRegistryEvent()
     {
-        constexpr int64_t kMinGapMs = 250;
+        const int64_t gapMs = ::Agentmaster::ManagerRefreshGapMs(_lastRefreshCostMs);
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
         const int64_t since = now - _lastRegistryRefreshMs;
-        if (since >= kMinGapMs)
+        if (since >= gapMs)
         {
             _Refresh();
             // Agentmaster (perf): stamp AFTER the rebuild returns, not before it starts — the gap is
@@ -1889,7 +1897,7 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
-        _refreshDelayTimer.Interval(std::chrono::milliseconds(kMinGapMs - since));
+        _refreshDelayTimer.Interval(std::chrono::milliseconds(gapMs - since));
         _refreshDelayTimer.Start();
     }
 
@@ -1914,6 +1922,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _refreshDirty = false;
+        // Agentmaster (UI_THREAD.md §12): time this rebuild — the registry path paces itself by it, and a
+        // slow one is logged (see the end of this function).
+        const auto rebuildStart = std::chrono::steady_clock::now();
 
         // Agentmaster: preserve keyboard focus across the rebuild below. _Refresh fires on ANY
         // registry notification — including a mere title change (a rename, or claude floating its
@@ -2001,6 +2012,26 @@ namespace winrt::TerminalApp::implementation
                     });
                 }
             }
+        }
+
+        // Agentmaster (UI_THREAD.md §12): the cost of this rebuild. _RefreshFromRegistryEvent makes the gap
+        // before the next registry-driven rebuild twice this (RefreshPacing.h), and a rebuild of a second or
+        // more is logged at most once a minute — a page that slows down as the fleet grows (or as something
+        // leaks again) shows up in hooks.log with its size, instead of only as a window that stops answering.
+        const auto costMs = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rebuildStart).count());
+        _lastRefreshCostMs = costMs;
+        const int64_t nowMs = static_cast<int64_t>(::GetTickCount64());
+        if (::Agentmaster::ShouldLogSlowManagerRebuild(costMs, nowMs, _lastSlowRebuildLoggedMs))
+        {
+            _lastSlowRebuildLoggedMs = nowMs;
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[manager] slow rebuild: " + std::to_wstring(costMs) + L" ms (live sessions=" + std::to_wstring(sessions.size()) +
+                                              L", board cards=" + std::to_wstring(_boardCardsById.size()) +
+                                              L", tree rows=" + std::to_wstring(_treeRowsById.size()) +
+                                              L", external=" + std::to_wstring(_externalClaudes.size()) +
+                                              L", board only=" + (boardOnly ? std::wstring{ L"yes" } : std::wstring{ L"no" }) +
+                                              L"); registry-driven rebuilds now wait " + std::to_wstring(::Agentmaster::ManagerRefreshGapMs(costMs)) +
+                                              L" ms between them (later slow rebuilds within a minute are not logged)\n");
         }
     }
 

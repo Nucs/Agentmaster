@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "Activity.h" // CorrelationRow, TabActivityRow, TabRosterEntry, ObservedClaude
+#include "ConversationHosts.h" // DuplicateConversation / FindDuplicateConversations (OBSERVER.md §20)
 #include "ProcessInspect.h" // ProcEntry (the orphan reaper walks the survey's snapshot)
 #include "TranscriptStore.h" // SessionPresenceRow (the validated presence table the S-lane publishes)
 
@@ -94,8 +95,21 @@ namespace Agentmaster
         // pass always does the full Toolhelp snapshot; an unforced fast tick may cheap-skip (§8c).
         void _surveyOnce(bool forcedByWake);
 
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): log what changed in the survey's set of
+        // duplicated conversations — one `[observer] duplicate conversation` line when a conversation starts
+        // running in two or more tabs or its host / duplicate tabs change, one `... resolved` line when it is
+        // back to one tab. An unchanged set logs nothing, so a duplicate that lasts for days costs one line,
+        // not one per survey. Survey thread only (it owns _duplicateLogState).
+        //   duplicates — this survey's duplicated conversations (FindDuplicateConversations).
+        //   corr       — this survey's correlation rows, read for each tab's claude pid.
+        //   returns    — nothing. Throws only std::bad_alloc (the caller's survey catches it).
+        void _LogDuplicateConversations(const std::vector<DuplicateConversation>& duplicates, const std::vector<CorrelationRow>& corr);
+
         std::shared_ptr<SessionRegistry> _registry;
         std::wstring _amSession;
+        // Agentmaster (duplicate conversations): session id -> the "host=<wt> dups=<wt,...>" signature last
+        // logged by _LogDuplicateConversations. Survey thread only.
+        std::unordered_map<std::wstring, std::wstring> _duplicateLogState;
 
         std::thread _thread;
         std::mutex _mtx; // guards _woken (the condvar wait predicate)

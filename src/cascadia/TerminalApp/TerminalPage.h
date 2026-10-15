@@ -738,6 +738,14 @@ namespace winrt::TerminalApp::implementation
         // for yet (never prompted). Keyed by WT_SESSION (there is no sessionId). Replaced by the real
         // _claudeOverlays entry once the session resolves; pruned when the tab leaves this window's roster.
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _pendingOverlays;
+        // Agentmaster (duplicate conversations, OBSERVER.md §20): the "<session id>|<lowercase WT_SESSION>"
+        // pairs for which this window has already logged that it did NOT bind the tab, because the tab's
+        // claude runs a conversation that another tab hosts (the observer marked the row a duplicate, the
+        // registry lists the pair as a duplicate host, or the conversation is still bound to another tab
+        // of this window whose claude still runs it). A pair is logged once, not once per ~2.5 s probe tick
+        // — a duplicate can last for days. _ObserverProbeImpl prunes a pair when no source reports it any
+        // more, so a later duplicate of the same pair logs again. UI thread only; empty in the normal case.
+        std::unordered_set<std::wstring> _duplicateConversationLogged;
         // Agentmaster (alt+up/down prompt nav): per-session cache of the transcript's sent prompts + the
         // (path, mtime) they were read at, so stepping between off-screen prompts re-reads the transcript
         // only when it GREW. Populated off-thread by _ScrollAdjacentPrompt; touched UI-thread only.
