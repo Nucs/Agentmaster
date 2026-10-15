@@ -11,6 +11,12 @@
 > open, and §16.2 says what the build does for each. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
 > page, its search and the AI search as they work today), [`SDK_HARNESS.md`](./SDK_HARNESS.md) (the agent
 > harness the AI search runs on), [`CLI.md`](./CLI.md), [`PROFILES.md`](./PROFILES.md).
+>
+> **2026-10-16: the user's three requirements, and the review of this build against them: §17.** DuckDB must be the
+> engine of BOTH the agent and the Sessions page's search; the agent calls that code as a tool, with no separate
+> program and no MCP server; the database builds from scratch in under 30 s and then only adds the difference. The
+> build of §16 meets only the last part (it builds in 37 min, through a second program). §17.2 has the measurements
+> (the existing extractor parses the whole corpus in 16.4 s on 16 threads), and §17.3 the recommended redesign.
 
 ## 0. Summary
 
@@ -1879,6 +1885,14 @@ the transcripts are only read. The order matters, each step uses the previous on
 12. `append_rate.py [--samples N] [--interval S]` and `commit_cost.py` — what keeping the database
     current costs (§7.6), the refresh tick's upserts included; no database needed for the first, the
     second makes and deletes its own.
+13. The cold build in under 30 s (§17, 2026-10-16):
+    - `review_cold_build.py <scan|measure|build|fold|search|write> [--threads N] [--memory 4GB]
+      [--project <folder>]` — DuckDB's side: the read floor, the SQL extraction (and how it fails at
+      scale), the write cost, and searches by scan. A commit guard interrupts DuckDB below 3 GB of free
+      commit. Run it from this folder without `-I` (it imports `bench_common`);
+    - `build_bench_extract.bat`, then `bench_extract.exe [threads] [maxFiles]` with
+      `AGENTMASTER_PROFILE` set to a scratch folder — the existing C++ extractor over the whole corpus
+      on N threads.
 
 ## 15. Sources
 
@@ -2029,3 +2043,95 @@ semi-join DuckDB cannot prune), and a re-cluster does not change that.
 - The CLI: `agentmaster search <words>`, `agentmaster sql "<SELECT>"`, `agentmaster sessdb status|stop|resync|rebuild`
   (CLI.md §5).
 - Logs: `<profile>\sessiondb\sessiondb.log` (`[sessdb]`), hooks.log (`[sessdb]`, `[sessdb-diff]`, `[ai-search]`).
+
+## 17. Review against the user's requirements of 2026-10-16 (the build of §16 does not meet them)
+
+The user, 2026-10-16:
+
+1. "We should have duckdb (whichever version) to run for the agent AND as the search engine of the sessions page
+   search functionality."
+2. "Additionally the ai agent in sessions page can use that code as a tool (rather mcp which requires binary and is
+   overly engineered."
+3. "We need to build the database quickly and <30s from scratch. Any future additions are done by adding the
+   difference and we do not require to recreate the database each time."
+
+### 17.1 Where the build of §16 stands
+
+| Requirement | The build of §16 | Verdict |
+|---|---|---|
+| 1. The engine of the agent AND of the Sessions page | Off by default. With On, the page sends only its slow CONTENT phase to the database; its list, its fast phase (titles, folders, touched paths), its ranking and its detail pane stay on the sidecar index, `history.jsonl` and ripgrep. The agent gets the database's tools only when the mode is On at the app's start. | Not met |
+| 2. The agent uses the code as a tool, no binary, no MCP | The agent's tool handlers run in the app (the harness's in-process tool servers), but every call goes over a named pipe to a second program, `agentmaster-sessiondb.exe` (copied out to `<profile>\sessiondb\bin`, version handshake, started on demand). The same program carries a stdio MCP server. | Not met |
+| 3a. Built from scratch in < 30 s | 37 min (2,223 s) on the whole corpus (§16.4) | Not met (74×) |
+| 3b. Later changes add only the difference | Per-file byte cursors, `upsertSessions` every refresh tick (D16) | Met, except that a schema, tokenizer or summary-rules version change re-derives every row (§16.3) |
+
+Where the 37 minutes go (§16.4):
+- **ingest, 722 s, on ONE thread:** every line parsed, and its raw bytes written to the lossless line store (10.7 GB in, 2.2 GB of ZSTD out);
+- **merges, 705 s:** the inverted index's hot tier into 127.6 M postings;
+- **the rest:** commit 357 s, session rows 175 s, summary 113 s, cursors 62 s, appenders 33 s, the live-branch walk 23 s, the final checkpoint 19 s.
+
+### 17.2 What was measured (2026-10-16)
+
+This machine under its usual load (100+ claude sessions, 8–11 GB of free commit). The corpus: 6,867 transcripts —
+4,460 top-level (8.60 GB) and 2,406 subagent transcripts (2.14 GB), 10.74 GB and 3.37 M lines — plus 4,340 spilled
+outputs (0.61 GB). Scripts: [`tools/sessiondb-bench/review_cold_build.py`](../../tools/sessiondb-bench/review_cold_build.py)
+(the stages `scan`, `measure`, `build`, `fold`, `search` and `write`) and
+[`bench_extract.cpp`](../../tools/sessiondb-bench/bench_extract.cpp) (built by `build_bench_extract.bat`), both
+writing only into the benchmarks' work folder (§14).
+
+| Step | Result |
+|---|---|
+| Read every line (DuckDB 1.5 `read_ndjson_objects`, 16 threads, count only) | **6.7 s** (1.61 GB/s) |
+| The C++ extractor of §16 (`ExtractLine`, every fact it derives today) on 16 threads, a file per task, biggest file first | **16.4 s** for the whole corpus (0.66 GB/s; about 60 MB/s per thread at 4 threads): 1,537,176 blocks, 2.11 G characters of block text. The disk cache was warm. |
+| The same extraction in DuckDB SQL (`from_json` + `json_extract` + `unnest`) | Out of memory at 16 and at 8 threads with a 4 GB limit (multi-MB lines). At 4 threads one torn line aborted the whole statement. With `try()` around the parse, the process crashed (a segfault in DuckDB 1.5.0). It worked on one project (1.23 GB in 4.6 s at 4 threads). **Not usable for the cold build.** |
+| Write ~1.8 M block rows (2.2 GB of text plus a lowercase copy) | **13.5 s** at 16 threads (CREATE TABLE AS); a 5.2 GB file (DuckDB stores large strings uncompressed) |
+| Search by scan, no index (a lowercase column + `contains()`) | **1.4 s** for one word over all the block text (2.2 GB). `ILIKE` on the original text is 4–8× slower (0.25–0.6 GB/s against 1.2–3.9 GB/s). Prompts and replies alone: 85–113 ms on one project when the scan reads only their data; in a table shared with the tool text the same filter took 0.94 s, because every row group's text column is read. |
+
+### 17.3 A design that meets the three (recommended)
+
+1. **DuckDB inside the app.** The engine owns one database per profile. The ingest and the queries run on background
+   threads. The Sessions page and the agent's tool handlers call the store's functions directly; a tool is a C++
+   function behind the harness's in-process tool server, the same mechanism `mcp__sessions__search` uses today.
+   - **Removed:** the service program and its project, the pipe protocol, the client, the copy-out, the stdio MCP
+     server, and the CLI's database verbs (the CLI cannot open the file while the app holds it: DuckDB allows one
+     writing process per file).
+   - `duckdb.dll` still ships, loaded by the app the first time the database opens.
+2. **The cold build is the extractor on N threads**, a file per task, biggest file first; each worker appends its own
+   rows. The cold build and the deltas run ONE code path: the same per-line extractor, from offset 0 or from the
+   file's byte cursor.
+3. **Not in the cold build:**
+   - the lossless line store (D11): the transcript is on disk, and the block text stays in the database, so a deleted
+     transcript stays searchable (D7), but there is no byte-exact rebuild;
+   - the inverted index, its hot tier, merges and re-cluster;
+   - the precomputed summary of every session. The `session` tool forms a summary when asked, with the existing
+     summary SQL, so D14 ("capable of forming a summary") still holds and its parity check stays.
+4. **The tables:**
+   - `session`: one row per session (ids, folder, branch, titles, times, counts);
+   - conversation blocks: prompts, replies, queued messages, with their text and a lowercase copy;
+   - tool blocks: calls and results, lowercase only (a snippet shows the original line, read from the transcript at
+     the block's byte offset);
+   - `path_access`: session, path, operation;
+   - the summary's inputs: the line envelope without its raw bytes, the section tables, the live-branch flag. If
+     they do not fit in the 30 s, they move to a second pass right after the first build: search works first, and
+     summaries follow a few seconds later.
+   A prompt-only search reads the small conversation table only.
+5. **Search by scan, no index:** estimated ~0.1–0.2 s over prompts and replies, ~1.4 s over everything. If
+   "everything" must be faster, an index can be built in the background after the first 30 s.
+6. **A version change = drop and rebuild** (≤ 30 s): no migrations and no re-derive passes.
+
+Estimated cold build on this machine today: ~16 s of extraction plus ~8–13 s of writes, partly overlapped: 20–30 s.
+A disk that is cold after a reboot adds a few seconds.
+
+### 17.4 Risks, and decisions for the user
+
+- **The corpus grows** ~190 MB of lines a day (§7.6). At 0.66 GB/s that adds ~9 s of build time a month, so the
+  30 s holds for weeks, not months, unless the extractor gets leaner. It derives far more than the search needs.
+  The first step of the work: a leaner extractor, measured against `bench_extract`.
+- **DuckDB in the app's own process:** during the build, 16 threads and ~2–3 GB of commit in the app itself (free
+  commit is often 8 GB here), and a DuckDB failure is the app's failure. Cap the threads and the memory, and catch
+  every DuckDB exception.
+- **Decisions:**
+  - (a) Drop the lossless store? The cost: no byte-exact rebuild of a deleted transcript (its text stays searchable).
+  - (b) Drop the CLI's database verbs and the external MCP server?
+  - (c) Is ~1.4 s for an "everything" search by scan acceptable (the index of §16 answered in 0.3–0.7 s)?
+  - (d) Tool-result text: index it whole, or only its first N KB?
+  - (e) Summaries formed on demand, instead of for every session during the build?
