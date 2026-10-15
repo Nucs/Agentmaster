@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -102,6 +103,7 @@ namespace Agentmaster::SessionDb
 
     struct SearchSnippet
     {
+        int32_t fileId{ 0 }; // the block's source file (0 for history.jsonl); a subagent's file names its agent
         int32_t lineNo{ 0 }; // the block's line in its file (0 for history.jsonl / spills)
         uint16_t block{ 0 };
         uint8_t role{ 0 };
@@ -151,6 +153,33 @@ namespace Agentmaster::SessionDb
         std::list<std::pair<uint32_t, std::wstring>> _lru; // most recent first
         std::unordered_map<uint32_t, std::list<std::pair<uint32_t, std::wstring>>::iterator> _at;
     };
+
+    // One block as the search's snippets and verification, and the `messages` / `grep` tools, read it.
+    struct BlockText
+    {
+        int32_t fileId{ 0 }; // the block's source file (a subagent's transcript names its agent)
+        int32_t line{ 0 }; // its line in that file (1-based)
+        uint16_t block{ 0 }; // its index among the line's blocks
+        uint8_t role{ 0 }; // BlockRole (SessionDbExtract.h)
+        uint8_t flags{ 0 }; // DocFlag bits
+        int64_t tsMs{ 0 }; // the line's timestamp (0 = none)
+        std::wstring tool; // a tool block's tool name
+        std::wstring text; // the original text (not folded)
+    };
+
+    // Read the blocks named by `ids` and hand each one whose text was read to `fn`.
+    //   ids      — doc ids, best first (duplicates allowed): when the deadline cuts the tool texts short, the
+    //              best candidates were read. Fetched in chunks of at most 1,000, so each chunk is an index
+    //              scan (DuckDB uses doc_by_id only below MAX(2,048 rows, 0.1% of the table)).
+    //   withHot  — also look in doc_hot (blocks not merged yet; a small table, scanned).
+    //   cache    — the tool-text cache: doc_tool reads go through it.
+    //   deadline — tool texts are read from doc_tool (ZSTD: ~2-5 ms per scattered block) until this time; the
+    //              tool blocks left are not handed out. Conversation text (doc.text, doc_hot.text) is always
+    //              read: ~0.05 ms per block.
+    //   fn       — called once per block read (in no particular order); it may move the text out.
+    // Returns false when the deadline left tool blocks unread. Throws DbError.
+    bool ReadBlockTexts(Connection& con, const std::vector<int64_t>& ids, bool withHot, DocTextCache& cache,
+                        std::chrono::steady_clock::time_point deadline, const std::function<void(uint32_t, BlockText&)>& fn);
 
     // The search engine: the card cache and the planner. Thread-safe (each call brings its own connection).
     class SearchEngine

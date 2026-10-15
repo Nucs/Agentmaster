@@ -67,6 +67,35 @@ namespace Agentmaster::SessionDb
             return FileTimeToMs(ft);
         }
 
+        // A tool-touched path as stored: every run of separators collapsed into one, except a leading `\\`
+        // (a UNC share). A path mined from a shell command keeps the escaping it was typed with
+        // ("K:\\source\\x.cpp" inside a quoted command), which would otherwise split one file into two keys.
+        std::wstring CollapseSeparators(const std::wstring& p)
+        {
+            std::wstring out;
+            out.reserve(p.size());
+            size_t i = 0;
+            if (p.size() >= 2 && (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+            {
+                out.append(p, 0, 2); // keep the UNC prefix as written
+                i = 2;
+                while (i < p.size() && (p[i] == L'\\' || p[i] == L'/'))
+                {
+                    ++i;
+                }
+            }
+            for (; i < p.size(); ++i)
+            {
+                const bool sep = p[i] == L'\\' || p[i] == L'/';
+                if (sep && !out.empty() && (out.back() == L'\\' || out.back() == L'/'))
+                {
+                    continue;
+                }
+                out += p[i];
+            }
+            return out;
+        }
+
         // A path's lookup key: '/' -> '\', lower-cased (Windows paths compare case-insensitively).
         std::wstring PathKey(const std::wstring& p)
         {
@@ -909,6 +938,28 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
         return s == _sessions.end() ? std::wstring{} : s->second.sessionId;
     }
 
+    std::wstring Store::AgentIdOfFile(int32_t fileId) const
+    {
+        std::shared_lock lk{ _mapMtx };
+        const auto f = _files.find(fileId);
+        return f == _files.end() || f->second.kind != 1 ? std::wstring{} : f->second.agentId;
+    }
+
+    int32_t Store::SubagentFileOf(int32_t sidKey, std::wstring_view agentId) const
+    {
+        std::shared_lock lk{ _mapMtx };
+        for (const auto& [id, f] : _files)
+        {
+            // A linear walk: a ref names a subagent rarely, and the file map holds a few thousand rows.
+            if (f.kind == 1 && f.sidKey == sidKey && _wcsnicmp(f.agentId.c_str(), agentId.data(), agentId.size()) == 0 &&
+                f.agentId.size() == agentId.size())
+            {
+                return id;
+            }
+        }
+        return 0;
+    }
+
     std::vector<SessionKey> Store::AllSessions() const
     {
         std::shared_lock lk{ _mapMtx };
@@ -963,6 +1014,8 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
 
     std::vector<UpsertResult> Store::UpsertSessions(const std::vector<SessionRef>& refs, const CancelFn& cancel)
     {
+        const int64_t started = TickMs();
+        _times = StepTimes{};
         std::vector<UpsertResult> results(refs.size());
         // Resolve and stat every named session first (cheap), then ingest them in byte-bounded batches.
         std::vector<std::pair<DiskFile, std::vector<DiskFile>>> work;
@@ -1056,6 +1109,20 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
         catch (...)
         {
             LogSwallowedException(L"sessiondb UpsertSessions (history)");
+        }
+        // A slow tick says where its time went (a tick runs every few seconds, so only the slow ones are logged).
+        const int64_t took = TickMs() - started;
+        if (took >= 250)
+        {
+            int64_t lines = 0;
+            for (const auto& r : results)
+            {
+                lines += r.lines;
+            }
+            _log(L"[sessdb] upsert: " + std::to_wstring(refs.size()) + L" session(s), " + std::to_wstring(lines) + L" line(s) in " + std::to_wstring(took) +
+                 L" ms; steps (ms): ingest " + std::to_wstring(_times.ingest) + L", walk " + std::to_wstring(_times.walk) + L", summary " +
+                 std::to_wstring(_times.summary) + L", session rows " + std::to_wstring(_times.sessionRows) + L", cursors " + std::to_wstring(_times.cursors) +
+                 L", commit " + std::to_wstring(_times.commit));
         }
         return results;
     }
@@ -1620,11 +1687,12 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
             // --- paths (top-level and subagent files: "who touched" includes a session's subagents) ---
             for (const auto& pr : facts.paths)
             {
-                const std::wstring key = PathKey(pr.path);
+                const std::wstring path = CollapseSeparators(pr.path);
+                const std::wstring key = PathKey(path);
                 auto& agg = batch.paths[{ file.sidKey, key, pr.op }];
                 if (agg.n == 0)
                 {
-                    agg.path = pr.path;
+                    agg.path = path;
                     agg.firstMs = facts.tsMs;
                     agg.firstLine = top ? lineNo : 0x7FFFFFFF; // subagent paths never lead the inferred-folder order
                 }
@@ -1774,8 +1842,14 @@ DROP TABLE IF EXISTS stg_src; CREATE TABLE stg_src AS SELECT * FROM src_file LIM
                     FileRow& sf = _fileFor(side, sidKey);
                     lines += _ingestFile(batch, sf, side, nullptr, topReplaced, nullptr);
                 }
-                batch.tops.emplace_back(top.fileId, sidKey);
-                batch.fileOfSid[sidKey] = top.fileId;
+                // A session whose files gave no new line keeps its derived rows: the live-branch walk, the
+                // summary and the session row read the WHOLE session (a 5,000-line transcript costs ~300 ms),
+                // and nothing they read changed. Its cursors are still saved (size / time may have moved).
+                if (lines > 0 || topReplaced)
+                {
+                    batch.tops.emplace_back(top.fileId, sidKey);
+                    batch.fileOfSid[sidKey] = top.fileId;
+                }
                 out.emplace_back(0, lines);
             }
             _times.ingest += TickMs() - ingestStart;
@@ -2529,7 +2603,25 @@ FROM (SELECT line_no, uuid, leaf_uuid, flags, on_branch FROM line WHERE file_id 
         const int64_t started = NowMs();
         _index.Recluster(*_w, cancel);
         SetMeta(*_w, "last_recluster_ms", std::to_string(NowMs()));
+        SetMeta(*_w, "last_recluster_docs", std::to_string(_w->ScalarInt64("SELECT count(*) FROM doc")));
         _log(L"[sessdb] re-cluster done in " + std::to_wstring(NowMs() - started) + L" ms");
+    }
+
+    bool Store::ReclusterDue()
+    {
+        const int64_t docs = _w->ScalarInt64("SELECT count(*) FROM doc");
+        const int64_t lastDocs = std::strtoll(GetMeta(*_w, "last_recluster_docs").c_str(), nullptr, 10);
+        const int64_t lastMs = std::strtoll(GetMeta(*_w, "last_recluster_ms").c_str(), nullptr, 10);
+        const int64_t grown = docs - lastDocs;
+        if (grown <= 0)
+        {
+            return false;
+        }
+        if (grown >= std::max<int64_t>(20000, lastDocs / 4))
+        {
+            return true;
+        }
+        return NowMs() - lastMs >= 24LL * 3600 * 1000;
     }
 
     void Store::Checkpoint()

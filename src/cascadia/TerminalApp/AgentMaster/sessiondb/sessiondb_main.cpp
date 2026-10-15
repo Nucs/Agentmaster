@@ -12,6 +12,9 @@
 //                              page with tiers, hits, snippets and the cold / warm times (diagnostics)
 //   sql <statement> [--limit N] one-shot: run one statement and print its rows as text with the time
 //   recluster                  one-shot: merge the hot tier and rewrite the big tables in key order
+//   tool <name> [<json>]       one-shot: run one registry tool (SessionDbTools) and print its result
+//   call <method> [<json>]     a client: send one protocol request to the profile's service (started when none
+//                              runs) and print the answer
 //   --version                  the build, schema and tool-registry versions
 //
 // The profile is the one AgentmasterStateDir() resolves (AGENTMASTER_PROFILE, set by whoever starts the
@@ -28,17 +31,19 @@
 #include "SessionDbExtract.h" // the role values (search output)
 #include "SessionDbLog.h"
 #include "SessionDbSearch.h"
+#include "SessionDbServer.h"
 #include "SessionDbStore.h"
+#include "SessionDbTools.h"
 #include "SessionDbVerify.h"
 
 #include "../ClaudeSpawn.h" // AgentmasterStateDir, ClaudeProjectsDir, InstallThrowStackCapture
+#include "../SessionDbClient.h"
 #include "../Persistence.h" // LoadAppSettings
 #include "../SessionDbProtocol.h"
 
 namespace Agentmaster::SessionDb
 {
-    // The serve and mcp modes (SessionDbServer.cpp, SessionDbMcp.cpp).
-    int RunServe(const std::wstring& profileDir);
+    // The mcp mode (SessionDbMcp.cpp); the serve mode is SessionDbServer.h's RunServe.
     int RunMcp(const std::wstring& profileDir);
 }
 
@@ -55,26 +60,11 @@ namespace
         std::fflush(stdout);
     }
 
-    // The <claude config>\history.jsonl beside the projects folder.
-    std::wstring HistoryPathFor(const std::wstring& projectsDir)
-    {
-        const size_t slash = projectsDir.find_last_of(L"\\/");
-        return slash == std::wstring::npos ? std::wstring{} : projectsDir.substr(0, slash) + L"\\history.jsonl";
-    }
-
-    // The store configuration for a profile: DuckDB's limits (§10), the inferred-folder setting.
+    // The store configuration for a profile: the service's (SessionDbServer.h), so the one-shot modes see
+    // the database exactly as the service does.
     StoreConfig ConfigFor(const std::wstring& profileDir)
     {
-        StoreConfig cfg;
-        cfg.profileDir = profileDir;
-        cfg.projectsDir = ClaudeProjectsDir();
-        cfg.historyPath = HistoryPathFor(cfg.projectsDir);
-        const AppSettings settings = LoadAppSettings();
-        cfg.inferGitRoot = settings.inferGitRoot;
-        cfg.db.threads = std::to_string(ClampSessionDbThreads(settings.sessionDbThreads));
-        cfg.db.memoryLimit = std::to_string(ClampSessionDbMemoryMb(settings.sessionDbMemoryMb)) + "MB";
-        cfg.log = [](const std::wstring& line) { ServiceLog(line); };
-        return cfg;
+        return ServiceConfigFor(profileDir);
     }
 
     int RunResync(const std::wstring& profileDir, size_t limit)
@@ -101,6 +91,68 @@ namespace
               L" (+" + std::to_wstring(st.hotLines) + L" hot), blocks " + std::to_wstring(st.docs) + L" (+" + std::to_wstring(st.hotDocs) + L" hot), terms " +
               std::to_wstring(st.terms) + L", " + std::to_wstring(st.dbBytes / (1024 * 1024)) + L" MB on disk\n");
         return 0;
+    }
+
+    // One-shot tool call (diagnostics): run one registry tool with JSON arguments on the database as it is and
+    // print the result (pretty) with its time; an error outcome prints its message and exits 1.
+    int RunTool(const std::wstring& profileDir, const std::wstring& name, const std::wstring& argsJson)
+    {
+        Store store{ ConfigFor(profileDir) };
+        if (store.Open() == SchemaState::TooNew)
+        {
+            Print(L"the database belongs to a newer service; nothing done\n");
+            return 3;
+        }
+        SearchEngine engine{ store };
+        Connection con{ store.Db() };
+        const nlohmann::json args = argsJson.empty() ? nlohmann::json::object() : nlohmann::json::parse(ToUtf8(argsJson), nullptr, false);
+        if (args.is_discarded())
+        {
+            Print(L"the arguments are not JSON\n");
+            return 2;
+        }
+        ToolContext ctx{ store, engine, con, {}, static_cast<int64_t>(::GetTickCount64()) };
+        // The request clock: the wall clock in Unix ms (the tools print local times from it).
+        FILETIME ft{};
+        ::GetSystemTimeAsFileTime(&ft);
+        ctx.nowMs = static_cast<int64_t>(((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000ULL - 11644473600000ULL);
+        const ULONGLONG t0 = ::GetTickCount64();
+        const ToolOutcome o = CallTool(ctx, ToUtf8(name), args);
+        const ULONGLONG t1 = ::GetTickCount64();
+        if (o.isError)
+        {
+            Print(L"error " + std::to_wstring(o.code) + L": " + FromUtf8(o.text) + L"\n");
+            return 1;
+        }
+        Print(FromUtf8(o.result.dump(2, ' ', false, nlohmann::json::error_handler_t::replace)) + L"\n(" + std::to_wstring(t1 - t0) + L" ms, " +
+              std::to_wstring(o.text.size()) + L" bytes)\n");
+        return 0;
+    }
+
+    // A client call (diagnostics, and the way a script talks to the service): connect to the profile's service
+    // (starting one when none runs), send one request and print the answer envelope with its time.
+    int RunCall(const std::wstring& profileDir, const std::wstring& method, const std::wstring& paramsJson)
+    {
+        ServiceClient client{ profileDir };
+        std::wstring error;
+        const ULONGLONG t0 = ::GetTickCount64();
+        if (!client.Connect(true, 15000, error))
+        {
+            Print(L"error: " + error + L"\n");
+            return 1;
+        }
+        const ULONGLONG t1 = ::GetTickCount64();
+        std::string answer;
+        if (!client.Call(ToUtf8(method), paramsJson.empty() ? std::string{ "{}" } : ToUtf8(paramsJson), answer, 600000, error))
+        {
+            Print(L"error: " + error + L"\n");
+            return 1;
+        }
+        const ULONGLONG t2 = ::GetTickCount64();
+        const nlohmann::json env = nlohmann::json::parse(answer, nullptr, false);
+        Print((env.is_discarded() ? FromUtf8(answer) : FromUtf8(env.dump(2, ' ', false, nlohmann::json::error_handler_t::replace))) + L"\n(connect " +
+              std::to_wstring(t1 - t0) + L" ms, call " + std::to_wstring(t2 - t1) + L" ms)\n");
+        return env.is_object() && env.contains("error") ? 1 : 0;
     }
 
     // One-shot re-cluster (diagnostics): merge the hot tier, rewrite the big tables in key order, checkpoint.
@@ -276,6 +328,7 @@ int wmain(int argc, wchar_t** argv)
     std::wstring profileDir;
     size_t limit = 0;
     SearchRequest search; // the `search` mode's request: the words that are no option form the query
+    std::wstring toolName, toolArgs; // the `tool` mode's tool and JSON arguments
     for (size_t i = 1; i < args.size(); ++i)
     {
         if (args[i] == L"--profile" && i + 1 < args.size())
@@ -320,6 +373,11 @@ int wmain(int argc, wchar_t** argv)
         {
             search.query += (search.query.empty() ? L"" : L" ") + args[i];
         }
+        else if (mode == L"tool" || mode == L"call")
+        {
+            // tool <name> [<json arguments>]: the first free word names the tool, the rest is its JSON.
+            (toolName.empty() ? toolName : toolArgs) += (toolName.empty() || toolArgs.empty() ? L"" : L" ") + args[i];
+        }
     }
     if (mode == L"--version")
     {
@@ -335,14 +393,15 @@ int wmain(int argc, wchar_t** argv)
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", profileDir.c_str());
     }
     profileDir = AgentmasterStateDir();
-    const bool oneShot = mode == L"resync" || mode == L"verify-summary" || mode == L"search" || mode == L"sql" || mode == L"recluster";
+    const bool oneShot = mode == L"resync" || mode == L"verify-summary" || mode == L"search" || mode == L"sql" || mode == L"recluster" || mode == L"tool" ||
+                         mode == L"call";
     ::CreateDirectoryW(SessionDbProtocol::ServiceDir(profileDir).c_str(), nullptr);
     InitServiceLog(SessionDbProtocol::LogPath(profileDir), oneShot);
     try
     {
         if (mode == L"serve")
         {
-            return RunServe(profileDir);
+            return RunServe(profileDir, limit);
         }
         if (mode == L"mcp")
         {
@@ -368,9 +427,17 @@ int wmain(int argc, wchar_t** argv)
         {
             return RunRecluster(profileDir);
         }
+        if (mode == L"tool")
+        {
+            return RunTool(profileDir, toolName, toolArgs);
+        }
+        if (mode == L"call")
+        {
+            return RunCall(profileDir, toolName, toolArgs);
+        }
         Print(L"usage: agentmaster-sessiondb [serve | mcp | resync [--limit N] | verify-summary [--limit N] |\n"
               L"       search <query> [--fuzzy] [--tools] [--subagents] [--no-replies] [--no-prompts] [--dir D] [--sort relevance|active|created] [--limit N] |\n"
-              L"       sql <statement> [--limit N] | recluster |\n"
+              L"       sql <statement> [--limit N] | recluster | tool <name> [<json>] | call <method> [<json>] |\n"
               L"       --version] [--profile <dir>]\n");
         return 2;
     }
