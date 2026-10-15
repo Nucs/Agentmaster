@@ -28,6 +28,14 @@ namespace Agentmaster::SessionDb
 {
     class Connection;
 
+    // The version of the summary's RULES (SummaryBuildSql). A summary row is only rebuilt when its session
+    // changes, so a database whose meta `summary_version` differs holds rows formed by older rules: the store
+    // rebuilds every row once (Store::RebuildSummaries, at the end of a complete sweep) and records this value.
+    // ⚠ Bump it with every change to SummaryBuildSql that can change a row.
+    //   1 — the first rules (c11be7d9b).
+    //   2 — the current list starts after the last ON-BRANCH boundary, and an entry carries `cur` (2026-10-15).
+    inline constexpr int kSummaryVersion = 2;
+
     // The statement that (re)builds the summary rows of a set of sessions: INSERT OR REPLACE INTO summary.
     // Parameters: $1 the top-level file ids (BIGINT list), $2 their session keys (same order), $3 now (ms).
     const std::string& SummaryBuildSql();

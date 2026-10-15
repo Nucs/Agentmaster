@@ -114,9 +114,29 @@ agentmaster show <ref> [--tail N] [--json]   # full introspection of one session
             external                          # unmanaged-claude census (real-WT / bare console)
             restore <ref> [--window W]        # archived → live   (control; P2 — deferred, §9)
             archive <ref>                     # live → archived   (control; P2 — deferred, §9)
+            search <words> [--dir D]          # every session on this computer, from the session database
+            sql "<SELECT ...>"                # one read-only query over the database's views
+            sessdb [status|stop|resync|rebuild]   # the session database service itself
 
 global: --json  --profile <dir>  --instance dev|release  --self  --help  --version
 ```
+
+**The session database verbs** (2026-10-15, NOT BUILT yet; [`SESSIONS_DB.md`](SESSIONS_DB.md) §8.3). `search`, `sql`
+and `sessdb` are pipe clients of the profile's database service (`agentmaster-sessiondb.exe`, started when none runs;
+`sessdb stop` never starts one). They read the database, not the live fleet, so they skip the fleet gather; they work
+whether `AppSettings::sessionDbMode` is Off or not (a service started this way sweeps at its start, then answers).
+
+- `search <words> [--dir D]` runs the database's `search` tool (20 rows, the last 90 days): one line per session (short
+  id, last activity, why it matched — name / path / prompt / text — with the hit count, the title), its folder and
+  branch, and its snippets with refs (`<id>:<line>`).
+- `sql "<SELECT ...>"` runs the guarded read-only `sql` tool (200 rows, 2.5 s): tab-separated rows under a header. A
+  statement that is not a SELECT, or a binder error, prints the database's message.
+- `sessdb status` prints one `key: value` line per field (sessions, files, lines, blocks, terms, the file's size, the
+  sweep and its progress, `coveredSince` while the first build runs, the write queue); `stop` asks the service to
+  exit; `resync` sweeps and waits (up to an hour: a first build took 37 minutes on 3,600 sessions); `rebuild`
+  re-derives the index from the stored lines.
+- `--json` prints the service's result object as it came. Exit codes: 0, 1 (the service failed or answered an error),
+  2 (usage: `sql` without a statement, an unknown `sessdb` sub-command).
 
 (All reads are already offline-style — persisted + OS-observable state only — so there is no
 distinct online mode; `--offline` is reserved as a shim dispatch token, not yet a parsed flag.)
@@ -455,7 +475,8 @@ on both installs. Each item says how it is known: **measured** (run on the live 
     the session's `lastMessageWasQuestion`, and `templates.json`.
 - **Engine code that the CLI links and no verb uses.** (read) `SessionSearch.cpp` (the Sessions
   browser's search) and `ProcessInspect.Summary.cpp` (the session summary analyzer) are compiled
-  into `agentmaster-cli.exe`, but there is no `search` verb and no summary in `show`. The turns
+  into `agentmaster-cli.exe`, but no verb runs them: the `search` verb (2026-10-15) asks the session
+  database instead, and there is no summary in `show`. The turns
   renderer (`TranscriptTurns.cpp`, the app's Copy ▸ Transcript) is not in the project, so the
   CLI cannot print a whole conversation.
 - **A turn that a shutdown cut off does not read Error.** (read) Since 2026-10-09 the app shows

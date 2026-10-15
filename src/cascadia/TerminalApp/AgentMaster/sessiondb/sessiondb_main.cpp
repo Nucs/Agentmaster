@@ -7,7 +7,8 @@
 //   (no argument) | serve      the per-profile service: owns the DuckDB file, answers on the named pipe
 //   mcp                        a stdio MCP server for Claude Code (a pipe client of the service, §8.4)
 //   resync [--limit N]         one-shot: open the database, sweep, merge, print the status (diagnostics)
-//   verify-summary [--limit N] one-shot: compare the database's summaries with AnalyzeSessionTranscript (D14)
+//   verify-summary [--limit N] one-shot: re-form the N newest sessions' summary rows with this build's rules, then
+//                              compare them with AnalyzeSessionTranscript (D14)
 //   search <query> [options]   one-shot: run one search on the database as it is (no ingest) and print the
 //                              page with tiers, hits, snippets and the cold / warm times (diagnostics)
 //   sql <statement> [--limit N] one-shot: run one statement and print its rows as text with the time
@@ -322,7 +323,7 @@ namespace
             Print(L"the database belongs to a newer service; nothing done\n");
             return 3;
         }
-        const VerifyReport rep = VerifySummaries(store, limit);
+        const VerifyReport rep = VerifySummaries(store, limit, true); // the rows as this build forms them
         Print(rep.text);
         return rep.compared == rep.allAgree ? 0 : 1;
     }

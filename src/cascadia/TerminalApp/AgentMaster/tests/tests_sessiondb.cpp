@@ -9,6 +9,8 @@
 //   * SessionDbProtocol.h: one set of names per profile whatever the path's case, slashes and trailing
 //     separators (the CLI must find the service the GUI started); two profiles never share a pipe or a mutex;
 //     the files under <profile>\sessiondb; the frame codec (4-byte little-endian length, then the payload);
+//   * SessionDbTokenizer.h: tokens and identifier parts (camelCase, snake_case, acronyms, digits), the token and
+//     block caps (D4), the query side (rule 1 / rule 2, separators only), FoldText;
 //   * SessionDbToolDefs.h: the ten tools in their order, unique names, ASCII text (section 8.4.2), every schema
 //     a JSON object schema with additionalProperties false, positive budgets, FindTool;
 //   * the clamps of the database's three numeric settings (refresh 1..60 s, threads 1..16, memory 256..16384 MB);
@@ -26,6 +28,7 @@
 
 #include "../AgentHarness.h" // HarnessToolServer / HarnessToolResult (types only: no SDK)
 #include "../SessionDbProtocol.h"
+#include "../SessionDbTokenizer.h"
 #include "../SessionDbToolDefs.h"
 #include "../SessionSearchTools.h"
 #include "../SessionStore.h"
@@ -160,6 +163,40 @@ namespace
         CHECK(FindTool("show") == nullptr, "show is not a database tool (it changes the screen: the app's)");
         CHECK(FindTool(nullptr) == nullptr && FindTool("") == nullptr && FindTool("searc") == nullptr && FindTool("searchx") == nullptr,
               "FindTool matches whole names only");
+    }
+
+    // ===== the tokenizer (section 6.3; SessionDbTokenizer.h, shared by the service's index and its query side) =====
+
+    void TestTokenizer()
+    {
+        using namespace SessionDbTokenizer;
+        const Classifier ascii = BasicClassify;
+        // A path: '.' separates tokens; each camelCase token also yields its parts, folded.
+        auto tf = TermFrequencies(L"TerminalPage.AgentSessionsPage.cpp", ascii);
+        CHECK(tf.count(L"terminalpage") && tf.count(L"agentsessionspage") && tf.count(L"cpp"), "a path's tokens, folded");
+        CHECK(tf.count(L"terminal") && tf.count(L"agent") && tf.count(L"sessions"), "camelCase parts");
+        CHECK(tf[L"page"] == 2, "a part counts each occurrence");
+        // snake_case: '_' is a word character (the token stays whole) and splits the parts.
+        CHECK(IdentifierParts(L"pending_input_draft", ascii) == std::vector<std::wstring>({ L"pending", L"input", L"draft" }), "snake_case parts");
+        CHECK(IdentifierParts(L"HTMLParser", ascii) == std::vector<std::wstring>({ L"html", L"parser" }), "an acronym's last capital starts the next part");
+        CHECK(IdentifierParts(L"aValue", ascii).empty(), "a one-letter part is dropped, and one part left is the token itself");
+        CHECK(IdentifierParts(L"renderSessions2", ascii) == std::vector<std::wstring>({ L"render", L"sessions2" }), "digits continue a part");
+        CHECK(IdentifierParts(L"plain", ascii).empty(), "a plain word has no parts");
+        // The caps: a token keeps kMaxTokenChars; a block is tokenized up to kMaxIndexedChars.
+        tf = TermFrequencies(std::wstring(300, L'x'), ascii);
+        CHECK(tf.size() == 1 && tf.begin()->first.size() == kMaxTokenChars, "a long token is cut to kMaxTokenChars");
+        std::wstring big(kMaxIndexedChars, L' ');
+        big += L"beyond";
+        tf = TermFrequencies(L"start " + big, ascii);
+        CHECK(tf.count(L"start") && !tf.count(L"beyond"), "only the first kMaxIndexedChars characters of a block are indexed (D4)");
+        // The query side: a word as typed (no parts), separators decide the rule.
+        auto q = TokenizeQueryTerm(L"Tab", ascii);
+        CHECK(q.tokens == std::vector<std::wstring>({ L"tab" }) && !q.hasSeparator, "one query word: rule 1");
+        q = TokenizeQueryTerm(L"foo.BarBaz", ascii);
+        CHECK(q.tokens == std::vector<std::wstring>({ L"foo", L"barbaz" }) && q.hasSeparator, "a dotted query term: rule 2, no identifier parts");
+        q = TokenizeQueryTerm(L"::=", ascii);
+        CHECK(q.tokens.empty() && q.hasSeparator, "separators only: verified on the other terms' candidates");
+        CHECK(FoldText(L"AbC.dE", ascii) == L"abc.de", "FoldText folds and keeps the separators");
     }
 
     // ===== the settings' clamps =====
@@ -422,6 +459,7 @@ void TestSessionDb()
 {
     TestProtocolNames();
     TestToolDefs();
+    TestTokenizer();
     TestSettingsClamps();
     TestChangeSet();
     TestFactsEpoch();

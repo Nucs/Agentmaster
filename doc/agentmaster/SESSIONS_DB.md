@@ -1,10 +1,14 @@
 # Agentmaster — the session database (DuckDB): one index for every session on the machine
 
-> **Status: DESIGN (2026-10-12). Not implemented.** Every number here was measured on this machine's
-> real corpus, with a prototype of the schema in a scratch database (DuckDB 2.0.0-alpha through Python;
-> the scripts are in [`tools/sessiondb-bench/`](../../tools/sessiondb-bench/), §14). D14 (the summary)
-> and D16 (the refresh) were decided by the user on 2026-10-14; the other decisions (§13) are open, and
-> their recommendations are marked. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
+> **Status: IMPLEMENTED 2026-10-15, NOT BUILT into the app.** The service (`agentmaster-sessiondb.exe`), the
+> app's refresh tick (D16), the Sessions page's content phase, the AI search's database mode, the CLI verbs, the
+> stdio MCP server and the packaging are written and committed (c11be7d9b … 5050eff4b); the service was built
+> standalone and run over the whole corpus (3,595 sessions, 11.3 GB of transcript files), the app files pass `cl /Zs`,
+> the m5 suite covers the shared parts (`TestSessionDb`). **Off by default** (the Settings cog's SESSION DATABASE
+> section: Off / Shadow / On). What was built, how it differs from this design, and what the full corpus measured:
+> **§16**. The design text below (§0–§15) is kept as written on 2026-10-12/14; where the build differs, §16 says so.
+> D14 (the summary) and D16 (the refresh) were decided by the user on 2026-10-14; the other decisions (§13) are
+> open, and §16.2 says what the build does for each. Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions
 > page, its search and the AI search as they work today), [`SDK_HARNESS.md`](./SDK_HARNESS.md) (the agent
 > harness the AI search runs on), [`CLI.md`](./CLI.md), [`PROFILES.md`](./PROFILES.md).
 
@@ -1894,3 +1898,134 @@ the transcripts are only read. The order matters, each step uses the previous on
   `TranscriptTurns.h` (`CollectConversationUpstream`), `Persistence.h` (`NormDirKey`,
   `EffectiveWorkingDir`, `SessionColorKeyDir`), `TerminalPage.AgentSessionsPage.cpp`,
   `SessionSearchTools.h`; the release `hooks.log` `[nav] sessions` and `[transcript]` lines.
+
+## 16. What is built (2026-10-15, NOT BUILT into the app)
+
+Asked for on 2026-10-14 ("Kindly implement fully"); built between c11be7d9b and 5050eff4b. Nothing here is in a
+build of the app yet: the service and the CLI were built standalone (`sessiondb\_compile.bat`, `cli\_compile.bat`)
+and run on scratch profiles and on the whole corpus; the app's files pass `cl /Zs` with the last app build's command
+lines; the m5 suite runs `TestSessionDb`. The first msbuild of the solution (the user's next app build, or CI)
+compiles `agentmaster-sessiondb.vcxproj` for the first time.
+
+### 16.1 The pieces
+
+| Piece | Files | Commit |
+|---|---|---|
+| The store: schema, the lossless line store (D11), the ingest of every line, the fold, the live-branch walk, the session row (~110 columns), the section tables, the summary (D14), `upsertSessions` / `resync` | `sessiondb\SessionDbSchema.*`, `SessionDbExtract.*`, `SessionDbFold.*`, `SessionDbWalk.h`, `SessionDbStore.*`, `SessionDbSummary.*`, `SessionDbVerify.*`, `DuckDbWrap.*`, `SessionDbLog.*`; libduckdb pinned by `tools\Get-DuckDb.ps1` | c11be7d9b |
+| The text index and the search: tokenizer, dictionary, postings, the hot tier and merges, the re-cluster, tiers name > path > prompt > text, BM25, snippets, D8, D9 | `AgentMaster\SessionDbTokenizer.h`, `sessiondb\SessionDbIndex.*`, `SessionDbSearch.*` | 0b13871fe, f9d2749b1, 30b8f6c17 |
+| The service: the per-profile pipe server (a query pool of 4, one writer thread, deadlines, `cancel`, idle exit after 10 min), the tool registry (§8.4.3), the stdio MCP server `agentmaster`, the one-shot diagnostic modes | `sessiondb\SessionDbServer.*`, `SessionDbTools.*`, `SessionDbMcp.cpp`, `sessiondb_main.cpp`; `AgentMaster\SessionDbProtocol.h`, `SessionDbToolDefs.h` | 9a1dbf101, 30b8f6c17 |
+| The client the GUI, the CLI and the MCP server share (connect, start a service, versions, `Call`, `CancelPending`, the copy-out to `<profile>\sessiondb\bin`) | `AgentMaster\SessionDbClient.*` | 9a1dbf101 |
+| The app's refresh tick (D16): the watcher's change set, the refresher thread, the facts epoch, the Settings cog's SESSION DATABASE section | `TranscriptWatcher.*`, `SessionScanner.*`, `SessionStore.*`, `AgentMaster\SessionDbRefresher.*`, `Engine.*`, `AgentManagerContent.Settings.cpp` | 0dff9b244 |
+| The Sessions page's content phase (`pageSearch`; Shadow's `[sessdb-diff]`), its ↻ asking for a sweep | `TerminalPage.AgentSessionsPage.cpp` | f9d2749b1, 30b8f6c17 |
+| The CLI verbs `search`, `sql`, `sessdb` | `cli\agentcli.cpp`, `wt\shim.cpp` | f9d2749b1 |
+| The AI search on the database (§8.2) | `SessionSearchTools.*`, `SessionSearchAgent.*` | 30b8f6c17 |
+| Packaging: the service's project and its standalone twin, `duckdb.props`, the solution entry, the package reference and `duckdb.dll` as package content, libduckdb in the build wrapper and both workflows | `sessiondb\agentmaster-sessiondb.vcxproj`, `_compile.bat`, `duckdb.props`, `OpenConsole.slnx`, `CascadiaPackage.wapproj`, `tools\Build-Agentmaster.ps1`, `.github\workflows\*.yml` | 5050eff4b |
+| Tests | `tests\tests_sessiondb.cpp` (`TestSessionDb`: protocol names and framing, the tool definitions, the tokenizer, the settings clamps, the change set, the facts epoch, the AI search's database mode) | 30b8f6c17 and later |
+
+### 16.2 The decisions as built
+
+| # | What the build does |
+|---|---|
+| D1 | Our own inverted index in DuckDB tables, as recommended. |
+| D2 | **DuckDB 1.5.6**, not 2.0: 2.0.0 ships on 2026-10-21 and had no C-library build on 2026-10-15. The pin is `tools\Get-DuckDb.ps1` + `sessiondb\duckdb.props` (move both). |
+| D3 | A per-profile service process, as recommended. |
+| D4 | Everything is indexed, as recommended; `kMaxIndexedChars` caps one block's tokenization at 64 K characters. |
+| D5 | One database per profile. |
+| D6 | **Not built**: no Settings button. Register by hand: `claude mcp add --scope user agentmaster -- "<profile>\sessiondb\bin\agentmaster-sessiondb.exe" mcp`. |
+| D7 | Kept and searchable: a transcript gone from disk keeps its lines and its session row, marked deleted (`src_file.missing_since`; `v_sessions.transcript_present` false). |
+| D8 | As recommended: a 1-2 character term never uses the index; in a query with a longer term it is checked on the text of that term's candidates. |
+| D9 | Subsequence matching over the in-memory dictionary (`TermsWithSubsequence`): today's `(F)` rule, but over terms, not a scan of the text. Not edit-distance typo tolerance. |
+| D10 | Shipped: `duckdb.dll` in the package root and the portable zips. |
+| D11 | Yes: every line verbatim; a transcript rebuilds byte for byte (`rebuild`, checked on transcripts up to 102 MB). |
+| D12 | No `file-history`. |
+| D13 | **Half**: Claude Code's own `cost-state` totals where a session has them; no price table, no estimate (the `usage` tool says so). |
+| D14 | Decided and built: the database forms the summary (`summary` rows, `sessionSummary`, the `session` tool); the app's summary surfaces keep `AnalyzeSessionTranscript`. `verify-summary` re-forms the rows with the running build's rules and compares the two field by field: §16.4. |
+| D15 | The service computes them for every session: the git root (`FindGitRootForDir`, memoized), the worktree's main root, the inferred working directory (`InferWorkingDirectory` over its touched paths); only on a local, ready drive (a UNC or remote path is never probed). |
+| D16 | Decided and built: the watcher's change set, a tick every `sessionDbRefreshSeconds` (default 5), `upsertSessions` for what changed, `resync` after a connect, a re-index, or every 30 s while the watch is unhealthy. Its open question is answered **yes**: a service started without the app (by the CLI or an MCP client) sweeps once at its start. |
+
+### 16.3 Where the build differs from the design
+
+- **The text column's compression** (0b13871fe). A ZSTD block is served by decompressing its whole 2,048-row
+  vector: 30 scattered blocks took 145 ms, 1,000 took 2.95 s. Conversation text (prompts, replies, thinking,
+  system) therefore stays in DuckDB's default compression in `doc.text` (1,000 blocks in 47 ms); only tool text is
+  ZSTD, in `doc_tool`. The line store's `raw` is ZSTD.
+- **Merges run in slices** (30b8f6c17). The design's one-transaction merge failed with "Out of Memory" under the
+  default 1 GB limit during the first full cold build, and every failure left a bigger hot tier (§16.4).
+  `TextIndex::Merge` now merges about `mergeSliceBytes` of text per transaction (a sixteenth of the memory limit:
+  64 MB at 1 GB), then moves the hot lines in their own transaction, sliced.
+- **The re-cluster has two parts with their own triggers** (f9d2749b1, 30b8f6c17), not "weekly, or after 50
+  merges" (§6.4):
+  - the **text index** (`post` re-sorted by term, `spost` and df / sf recomputed exactly, the tombstoned blocks
+    deleted from `doc` / `doc_tool`): when the blocks merged since the last one are a quarter of the index (and at
+    least 20,000), or after a day with any new block. Its three new tables are built by statements that commit one
+    by one, and only the swap is one transaction: inside one transaction the same statements ran out of memory at
+    full scale. `doc` and `doc_tool` are never copied (every merge appends them in id order);
+  - the **line store**: only once it holds 64 sorted runs (a merge that interleaves files adds one; meta
+    `line_runs`), re-sorted SLICE BY SLICE, each slice moved to the end of the table in its own transaction (insert
+    it sorted, delete the old copies by `rowid`), the resume point in meta `line_resort_from`. A waiting write job
+    pauses it without losing a slice; the next idle period resumes it; an already-sorted prefix stays in place; the
+    file grows by one slice, not by a copy of the table. A cold build leaves the line store sorted (its 44 slices
+    were all found in place).
+  - Both run only after 120 s without a write job; a failure waits 15 min, doubling up to a day.
+- **The Sessions page** uses the database for its CONTENT phase only (`pageSearch`, §8.1's "search"): the page keeps
+  its own gather, its fast phase (titles, folders, touched paths) and its rows. `listSessions` for the list,
+  `sessionDetail` for the detail pane and the virtualized table are not built.
+- **The AI search** gets the ten tools of §8.4.3 (not the redesign of SESSIONS_AGENT.md) when the mode is On at
+  the app's start: the agent lives for the process, so a change of the mode reaches it at the next start. Shadow
+  keeps the page search. `show` resolves the short ids the database prints through a new `resolveIds` method.
+- **The tool registry's text** lives in `AgentMaster\SessionDbToolDefs.h`, one copy for the service and the app.
+- **The summary's rules carry a version** (`SessionDbSummary.h` `kSummaryVersion`, meta `summary_version`). A summary
+  row is re-formed only when its session changes, so after a change of the rules the store re-forms every row once,
+  at the end of a complete sweep (`Store::RebuildSummaries`, batches of 256); a new database is stamped current. Version
+  2 (2026-10-15): the CURRENT prompt list starts after the last ON-BRANCH compaction, as the analyzer's main walk does
+  (version 1 started it at the last compaction by file position, which disagreed with the analyzer on a session whose
+  only compaction was off-branch: 2 prompts listed against 9).
+
+### 16.4 The full corpus, measured (2026-10-15)
+
+This machine's whole corpus: 11,898 files, 11.3 GB — 3,638 top-level transcripts (8.5 GB; 3,595 sessions, the other
+43 files are empty), 2,406 subagent transcripts (2.1 GB), 1,518 subagent meta files, 4,335 spilled outputs (0.6 GB)
+and `history.jsonl`. The service
+built standalone (x64 /O2 /MT), DuckDB 1.5.6, `threads` 4, `memory_limit` 1024 MB (the defaults), under heavy load
+(100+ claude sessions, other builds, 3–13 GB of free commit).
+
+| Step | Result |
+|---|---|
+| First cold build (the one-transaction merge) | the sweep finished in **44 min**, but every merge failed with "Out of Memory Error" from minute 25 on: 401,537 blocks (640 MB of text) and 1.13 M lines (2.4 GB) were left in the hot tier |
+| The sliced merge on that database | the 401,537 hot blocks and 2.4 GB of hot lines into the index in **155 s**, no error |
+| **Clean cold build** (sliced merges) | **37 min** (2,223 s): 3,355,715 lines, 1,533,061 blocks, 1,118,783 terms, 127.6 M postings; steps: ingest 722 s, merges 705 s (111 merges, 120 slices), commit 357 s, session rows 175 s, summary 113 s, cursors 62 s, appenders 33 s, walk 23 s, the final checkpoint 19 s; no failure |
+| The file after it | **6.9 GiB**: 3.5 GiB of used blocks, 3.5 GiB free (the hot tier is written, then deleted by the merges; DuckDB reuses free blocks but does not shrink the file). The design estimated 3.1 GB for 10.4 GB of transcripts |
+| Forced re-cluster (`recluster`) | text index **52 s** (127.6 M postings); line store **0.7 s** (44 slices, all in place) |
+| Search, warm (second run of the one-shot `search`) | `duckdb` 313 ms, `tab drag crash` 594 ms, `the` 391 ms (2,906 of 3,595 sessions); the postings step 263–503 ms of it; a first run 750–1,437 ms. After the forced re-cluster: 329 / 688 / 468 ms |
+| The service's memory | working set 1.3–2.0 GB during a cold build at the 1 GB DuckDB limit (the dictionary, the ART indexes and the batch live outside DuckDB's limit) |
+| Summary parity (D14, `verify-summary`: the summary row against `AnalyzeSessionTranscript`, 18 fields) | rules version 1, the newest 296 sessions: 295 agreed (the one miss: a session whose only compaction was off-branch, §16.3). Version 2: the same 296 all agree; then **every session: 3,591 of 3,591 agree on every field** (the other 4 of the 3,595 skipped: their transcript grew after the ingest), in 336 s including re-forming their summary rows |
+| On the 900 MB scratch database | the old one-statement line re-sort ran out of memory; the slice re-sort paused after 2 of 7 slices (471 MB, 11 s) and resumed the other 5 (24 s) with an identical content checksum; a third run found all in place (22 ms) |
+
+The search is 5–100× faster than today's slow phase (2–42 s), but slower than the prototype's direct queries
+(§6.7): the postings step joins every term of a word's substring expansion with all 127.6 M postings (a hash
+semi-join DuckDB cannot prune), and a re-cluster does not change that.
+
+### 16.5 Open
+
+- **The first app build and a live run** — Off by default; then Shadow, and read hooks.log's `[sessdb-diff]` lines
+  (the database against today's search on the page's own sessions) before switching to On.
+- The postings cost: keep each term's row range in `post` after a re-cluster in the service's memory (§6.8) and
+  read those ranges instead of a semi-join.
+- A smaller file: a compaction after the cold build (copy into a fresh file), or a cold build that skips the hot
+  tier (tokenize at ingest); the merges and commits are 48% of the cold build.
+- D6 (the MCP button), D13's price table, D2 → 2.0 once its C library ships.
+- §8.1's `listSessions`, `sessionDetail` and the virtualized table; SESSIONS_AGENT.md's redesigned tools.
+- The AI search follows a change of the mode only at the next app start.
+
+### 16.6 Running it by hand
+
+- `pwsh -File tools\Get-DuckDb.ps1 -Arch x64`, then `src\cascadia\TerminalApp\AgentMaster\sessiondb\_compile.bat
+  <output folder>`: `agentmaster-sessiondb.exe` with `duckdb.dll` beside it.
+- One-shot modes (`--profile <dir>`; ⚠ never a live profile while its service runs — they open the file
+  themselves): `resync [--limit N]` (a sweep; N newest sessions), `search <query>` (cold and warm times, the steps),
+  `sql "<statement>"` (it CAN write), `recluster [--limit N]` (both parts; `--limit` pauses the line re-sort after N
+  slices), `verify-summary [--limit N]` (D14's comparison), `tool <name> <json>`, `call <method> <json>` (through a
+  running service), `serve [--limit N]`, `mcp`, `--version`.
+- The CLI: `agentmaster search <words>`, `agentmaster sql "<SELECT>"`, `agentmaster sessdb status|stop|resync|rebuild`
+  (CLI.md §5).
+- Logs: `<profile>\sessiondb\sessiondb.log` (`[sessdb]`), hooks.log (`[sessdb]`, `[sessdb-diff]`, `[ai-search]`).
