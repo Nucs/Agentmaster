@@ -1062,8 +1062,12 @@ transport's failures and slow calls.
 
 ### 21.3 Check after the build (live, with `@SidKatrineBot`)
 
-1. Cog → Messaging: token pasted, user id set, Check bot → `topics are ON` (Threaded Mode was off on
-   2026-10-16; the user turns it on in @BotFather). Save. hooks.log: `[msg] messaging started …`,
+1. Cog → Messaging: token pasted, user id set, Check bot → `topics are ON`. ⚠ Threaded Mode lives ONLY in
+   the BotFather **Mini App** (search botfather → tap Open → My bots → the bot → Bot Settings → **Threads
+   Settings** → Threaded Mode); the classic `/mybots` chat menu does not show it. On 2026-10-16 the user
+   flipped "Secretary Mode" and the group rights in the chat menu first — `getMe` then showed
+   `can_connect_to_business: true` (the business-bot setting) while `has_topics_enabled` stayed `false`.
+   Save. hooks.log: `[msg] messaging started …`,
    `[msg] connected as @SidKatrineBot (topics enabled)`, `[msg] topic created: Search`.
 2. In Telegram: the 🔎 Search topic with its welcome; one topic per non-idle Claude tab of every window
    (`[msg] topic created <sid8> …`), each with a pinned card; no topic for idle tabs, Codex tabs or shells.

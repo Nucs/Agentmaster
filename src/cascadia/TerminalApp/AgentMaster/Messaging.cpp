@@ -888,7 +888,10 @@ namespace Agentmaster::Msg
                             }
                             else
                             {
-                                _setStatus(L"Connected as @" + user + L", waiting for Threaded Mode: @BotFather \x2192 /mybots \x2192 @" + user + L" \x2192 Bot Settings \x2192 Threaded Mode \x2192 On. Checked again every minute.");
+                                // ⚠ The switch exists ONLY in the BotFather MINI APP (tap Open on @BotFather); the classic /mybots
+                                // chat menu does not show Threads Settings (the user flipped Secretary Mode there on 2026-10-16,
+                                // which is the business-bot setting, and topics stayed off).
+                                _setStatus(L"Connected as @" + user + L", waiting for Threaded Mode: open the @BotFather MINI APP (tap Open on @BotFather) \x2192 My bots \x2192 @" + user + L" \x2192 Bot Settings \x2192 Threads Settings \x2192 Threaded Mode \x2192 On (the classic /mybots menu has no such setting). Checked again every minute.");
                                 bool sendNotice = false;
                                 {
                                     std::lock_guard lk{ _mtx };
@@ -905,8 +908,8 @@ namespace Agentmaster::Msg
                                 {
                                     _sendText(0,
                                               L"<b>Agentmaster is connected to this bot</b>, but topics are off, so there is nothing to show yet.\n\n"
-                                              L"Turn <b>Threaded Mode</b> on: open @BotFather \x2192 /mybots \x2192 @" +
-                                                  TgEscapeHtml(user) + L" \x2192 Bot Settings \x2192 Threaded Mode \x2192 Turn on. "
+                                              L"Turn <b>Threaded Mode</b> on in the BotFather <b>Mini App</b> (search botfather, tap <b>Open</b> \x2014 the classic /mybots chat menu does not have this setting): My bots \x2192 @" +
+                                                  TgEscapeHtml(user) + L" \x2192 Bot Settings \x2192 <b>Threads Settings</b> \x2192 Threaded Mode \x2192 Turn on. "
                                                                         L"Agentmaster checks again every minute and then creates one topic per working session.",
                                               false,
                                               SendPriority::Final,
