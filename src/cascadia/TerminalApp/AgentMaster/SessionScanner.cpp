@@ -2269,7 +2269,9 @@ namespace Agentmaster
     {
         const uint32_t minutes = _waitingDecayMinutes.load();
         const bool working = PresenceIsWorking(s.presenceStatus);
-        if (!ShouldDecayWaitingToIdle(s.state, s.lastActivityUnixMs, s.readUnixMs, s.manualUnread, working, minutes, nowMs))
+        // MESSAGING.md §5.3: a PINNED session never decays to Idle (its Telegram topic must stay listed); the
+        // registry's pin hold would flip it straight back, so the decay is refused here, with no notify churn.
+        if (s.pinned || !ShouldDecayWaitingToIdle(s.state, s.lastActivityUnixMs, s.readUnixMs, s.manualUnread, working, minutes, nowMs))
         {
             return;
         }
@@ -2277,7 +2279,7 @@ namespace Agentmaster
         _registry->Update(s.id, [&](SessionInfo& live) {
             // Re-check the full gate under the lock against the LIVE record (a visit may have just
             // stamped readUnixMs / cleared manualUnread, or a fresh turn may have moved the state).
-            if (ShouldDecayWaitingToIdle(live.state, live.lastActivityUnixMs, live.readUnixMs, live.manualUnread, PresenceIsWorking(live.presenceStatus), minutes, nowMs))
+            if (!live.pinned && ShouldDecayWaitingToIdle(live.state, live.lastActivityUnixMs, live.readUnixMs, live.manualUnread, PresenceIsWorking(live.presenceStatus), minutes, nowMs))
             {
                 live.state = SessionState::Idle;
                 decayed = true;

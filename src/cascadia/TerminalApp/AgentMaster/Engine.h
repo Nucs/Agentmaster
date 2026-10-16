@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "RemoteLaunch.h" // RemoteLaunchRequest — what a remote surface asks a window to open (MESSAGING.md)
 #include "SessionModels.h" // WindowRecord (M10 window-record claiming)
 
 namespace Agentmaster
@@ -44,6 +45,10 @@ namespace Agentmaster
     class ProcessObserver;
     class CommandWatch; // COMMANDS.md — slash-command bindings + awaited follow-up activity
     class SessionDbRefresher; // SESSIONS_DB.md §7.6 — the session database's refresh tick (D16)
+    namespace Msg
+    {
+        class MessagingService; // MESSAGING.md — the fleet in Telegram (the bot runs inside this process, D1)
+    }
 
     // Agentmaster (cross-window tab DOCKING — the pointer-owned gesture's replacement for the OLE
     // docking that died with CanDragTabs(false); see Engine::DockTargetSink). What a dragging window
@@ -80,6 +85,11 @@ namespace Agentmaster
         // Shadow or On, drains the scanner's transcript-change set into the service every refresh interval. The
         // cog's Save re-applies the settings to it (Apply). Never null after init.
         std::shared_ptr<SessionDbRefresher> sessionDb;
+        // Agentmaster (MESSAGING.md): the fleet in Telegram — the bot that runs inside this process (D1): one topic per
+        // Claude Code tab whose session is not Idle, the whole session mirrored into it, a message in a topic a queued
+        // prompt. Runs while AppSettings::messagingEnabled with a stored token and a paired owner; the cog's Save
+        // re-applies the settings to it (Apply). Never null after init.
+        std::shared_ptr<Msg::MessagingService> messaging;
 
         // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
         // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY
@@ -362,6 +372,41 @@ namespace Agentmaster
         std::mutex deactivateSessionMutex; // guards deactivateSessionSinks + nextDeactivateSessionToken; never held while a sink runs
         std::vector<WindowDeactivateSessionSink> deactivateSessionSinks; // registration order; at most one entry per open window
         uint64_t nextDeactivateSessionToken{ 1 }; // monotonic, never reused, so a stale token can never detach a younger sink
+
+        // Agentmaster (MESSAGING.md §8.2 — window-hosted actions for a REMOTE surface): per-window "do this on a
+        // session's tab" sinks — same shape + lifetime as deactivateSessionSinks. The Telegram bot runs on engine
+        // threads and can read the registry, but a tab's terminal (start it, read its screen), its unread ring and
+        // its badges live in the ONE window that hosts it. A request names the session, an action word ("start",
+        // "screen", "markunread", "rename", "refresh-tags", "refresh-favorite") and an argument; it is fanned out
+        // to every window, each hops to its own UI thread, and only the host acts — answering through `reply`
+        // when the action has a text answer (the screen's text). A window that does not host the session calls
+        // nothing. Snapshot-under-lock / invoke-outside-it, like the rest. Placed LAST (layout-safe incremental
+        // rebuilds, like deactivateSessionSinks).
+        struct WindowSessionActionSink
+        {
+            uint64_t token{ 0 }; // the handle RegisterWindowSessionActionHandler returned; 0 is never issued
+            std::wstring windowId; // the registering window
+            std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> fn;
+        };
+        std::mutex sessionActionMutex; // guards sessionActionSinks + nextSessionActionToken; never held while a sink runs
+        std::vector<WindowSessionActionSink> sessionActionSinks;
+        uint64_t nextSessionActionToken{ 1 };
+
+        // Agentmaster (MESSAGING.md §5.4 / §8.2 — open a session into a tab from a REMOTE surface): per-window
+        // LAUNCH sinks. Unlike the session-action fan-out, a launch has no host: the request goes to ONE window —
+        // the most recently ACTIVATED one (lastActiveWindowId, stamped by NoteWindowActivated), else the first
+        // registered — which opens the session as a background tab (no focus change). Same lifetime as the other
+        // sinks. Placed LAST.
+        struct WindowLaunchSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const RemoteLaunchRequest& request)> fn;
+        };
+        std::mutex launchMutex; // guards launchSinks, nextLaunchToken and lastActiveWindowId
+        std::vector<WindowLaunchSink> launchSinks;
+        uint64_t nextLaunchToken{ 1 };
+        std::wstring lastActiveWindowId; // the window the user activated last (NoteWindowActivated); "" until one did
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -624,6 +669,74 @@ namespace Agentmaster
     //   throws         — std::bad_alloc on allocation failure; std::system_error if the mutex cannot be
     //                    locked; anything a sink throws (a sink must not throw).
     void DeactivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md §8.2): register THIS window's session-action sink — the receiving half of a
+    /// remote surface's window-hosted actions (start a dormant tab, read its screen, mark it unread, rename it,
+    /// repaint its tag badges or favorite marker). The registry-token pattern: keep the token for
+    /// UnregisterWindowSessionActionHandler at teardown (Rule #10).
+    /// </summary>
+    /// <param name="windowId">The registering window's id.</param>
+    /// <param name="handler">Called from ANY thread with (sessionId, action, arg, reply); it must marshal to its own
+    /// UI thread, act only when this window hosts the session, call `reply` (which may be empty) with the action's
+    /// text answer when it acted and the action has one, and must not throw.</param>
+    /// <returns>A non-zero token, or 0 when `handler` is empty.</returns>
+    /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    uint64_t RegisterWindowSessionActionHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> handler);
+
+    /// <summary>Agentmaster (MESSAGING.md §8.2): detach a session-action sink; 0 and a removed token are no-ops.</summary>
+    /// <param name="token">The token RegisterWindowSessionActionHandler returned.</param>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    void UnregisterWindowSessionActionHandler(uint64_t token);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md §8.2): ask every window to run `action` on `sessionId`'s tab. Exactly one window
+    /// hosts a session's tab, so at most one sink acts and calls `reply`; with no host anywhere nothing is called —
+    /// a caller that needs an answer must time out on its own. Fire-and-forget; sinks run OUTSIDE the lock.
+    /// </summary>
+    /// <param name="sessionId">The session; empty is a no-op.</param>
+    /// <param name="action">The action word ("start", "screen", "markunread", "rename", "refresh-tags", "refresh-favorite").</param>
+    /// <param name="arg">The action's argument (the new title for "rename"; "" otherwise).</param>
+    /// <param name="reply">The answer sink (may be empty); called by the host, on its UI thread.</param>
+    /// <exception cref="std::bad_alloc">If the sink snapshot cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    void RequestSessionActionInWindows(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md §5.4 / §8.2): register THIS window's launch sink — "open this session (resume /
+    /// fork / new) as a background tab in my strip". The registry-token pattern (UnregisterWindowLaunchHandler at
+    /// teardown, Rule #10).
+    /// </summary>
+    /// <param name="windowId">The registering window's id.</param>
+    /// <param name="handler">Called from ANY thread with the request; it must marshal to its own UI thread and must not throw.</param>
+    /// <returns>A non-zero token, or 0 when `handler` is empty.</returns>
+    /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<void(const RemoteLaunchRequest& request)> handler);
+
+    /// <summary>Agentmaster (MESSAGING.md §8.2): detach a launch sink; 0 and a removed token are no-ops.</summary>
+    /// <param name="token">The token RegisterWindowLaunchHandler returned.</param>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    void UnregisterWindowLaunchHandler(uint64_t token);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md D27): open a session into ONE window — the most recently activated one
+    /// (NoteWindowActivated), else the first registered. Fire-and-forget: the window opens it as a background tab
+    /// and the registry's live set shows the result.
+    /// </summary>
+    /// <param name="request">What to open.</param>
+    /// <returns>True when a window took the request; false when no window is registered (nothing opened).</returns>
+    /// <exception cref="std::bad_alloc">If the sink copy cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    bool RequestLaunchInWindow(const RemoteLaunchRequest& request);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md D27): record that `windowId` was just activated (brought to the foreground) — the
+    /// window a remote launch opens into. Called by every TerminalPage from its WindowActivated seam. Never throws.
+    /// </summary>
+    /// <param name="windowId">The activated window's id; empty is ignored.</param>
+    void NoteWindowActivated(const std::wstring& windowId) noexcept;
 
     // Agentmaster (cross-window tab DOCKING): register THIS window as a dock TARGET — its top-level
     // HWND + a probe ("is this screen point over MY tab-strip row, and at which insertion slot?";

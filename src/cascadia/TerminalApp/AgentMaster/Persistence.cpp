@@ -536,6 +536,12 @@ namespace Agentmaster
         o.Set(L"maxAttempts", json::Value::MkNum(p.maxAttempts));
         o.Set(L"sentAtUnixMs", json::Value::MkNum(static_cast<double>(p.sentAtUnixMs)));
         o.Set(L"origin", json::Value::MkStr(ToString(p.origin)));
+        // Agentmaster (MESSAGING.md §7.1): where a remote prompt came from ("telegram:<message id>");
+        // omitted for every other prompt, so a sessions.json with no remote prompt is byte-unchanged.
+        if (!p.remoteSource.empty())
+        {
+            o.Set(L"remoteSource", json::Value::MkStr(p.remoteSource));
+        }
         return o;
     }
 
@@ -557,6 +563,7 @@ namespace Agentmaster
         p.maxAttempts = v.U32At(L"maxAttempts", 1);
         p.sentAtUnixMs = v.I64At(L"sentAtUnixMs");
         p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Autorun"));
+        p.remoteSource = v.StrAt(L"remoteSource"); // MESSAGING.md §7.1: absent => "" (not a remote prompt)
         // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already happened in
         // a past run (or never will) — so mark it CONSUMED on load (DELIVERY.md RC3). Left false,
         // every restored Sent prompt read as an in-flight, un-acknowledged send: the Enter-retry
@@ -645,6 +652,12 @@ namespace Agentmaster
             o.Set(L"turnEndUnixMs", json::Value::MkNum(static_cast<double>(s.turnEndUnixMs)));
         }
         o.Set(L"external", json::Value::MkBool(s.external));
+        // Agentmaster (MESSAGING.md §5.3): the PIN (never idle). Omitted when false, so an all-normal
+        // sessions.json is byte-unchanged.
+        if (s.pinned)
+        {
+            o.Set(L"pinned", json::Value::MkBool(true));
+        }
         // Agentmaster (crash/restore fidelity — Rule #16): persist the question-guard flag so a crash
         // while the agent was WaitingForInput on a clarifying question can't drop the guard on reopen
         // (else a queued prompt would auto-ANSWER the question). Omitted when false (the common case), so
@@ -723,6 +736,7 @@ namespace Agentmaster
         s.turnStartUnixMs = v.I64At(L"turnStartUnixMs"); // PERSISTED (MOST RECENT sort): absent => 0 (no turn evidence; the sort falls back to the decay anchor)
         s.turnEndUnixMs = v.I64At(L"turnEndUnixMs"); // ditto — the assistant's last turn END
         s.external = v.BoolAt(L"external", false);
+        s.pinned = v.BoolAt(L"pinned", false); // PERSISTED (MESSAGING.md §5.3): absent => not pinned
         s.lastMessageWasQuestion = v.BoolAt(L"lastMessageWasQuestion", false); // PERSISTED (Rule #16): absent => false (back-compat + the common case)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
@@ -919,6 +933,13 @@ namespace Agentmaster
         o.Set(L"commandHandoverWritePath", json::Value::MkStr(s.commandHandoverWritePath));
         o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
         o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
+        // Agentmaster (MESSAGING.md — the cog's MESSAGING tab): the master switch, the paired Telegram user,
+        // the idle grace (D25) and the Search agent's thinking level. The bot TOKEN is never written here
+        // (Windows Credential Manager, MessagingService::StoreToken).
+        o.Set(L"messagingEnabled", json::Value::MkBool(s.messagingEnabled));
+        o.Set(L"messagingTelegramOwnerId", json::Value::MkStr(s.messagingTelegramOwnerId));
+        o.Set(L"messagingIdleGraceMinutes", json::Value::MkNum(ClampMessagingIdleGraceMinutes(s.messagingIdleGraceMinutes)));
+        o.Set(L"messagingSearchThinking", json::Value::MkStr(s.messagingSearchThinking));
         return o;
     }
 
@@ -1229,6 +1250,11 @@ namespace Agentmaster
         // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
         s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);
         s.claudeCleanupDaysSeeded = v.BoolAt(L"claudeCleanupDaysSeeded", false);
+        // Agentmaster (MESSAGING.md): absent => off, nobody paired, a 10-minute grace, high thinking.
+        s.messagingEnabled = v.BoolAt(L"messagingEnabled", false);
+        s.messagingTelegramOwnerId = v.StrAt(L"messagingTelegramOwnerId");
+        s.messagingIdleGraceMinutes = ClampMessagingIdleGraceMinutes(v.U32At(L"messagingIdleGraceMinutes", 10));
+        s.messagingSearchThinking = v.StrAt(L"messagingSearchThinking", L"high");
         return s;
     }
 

@@ -1317,6 +1317,20 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySound{ nullptr }; // play the Windows notification sound (OFF => <audio silent/>; default ON)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTaskbarUnreadBadge{ nullptr }; // the unread-session count on the taskbar button (AppSettings::taskbarUnreadBadge, NOTIFICATIONS.md section 8; default ON; deliberately NOT greyed by the toast master)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTaskbarUnreadFrame{ nullptr }; // the per-window frame on the taskbar / Alt+Tab preview of a window with unread tabs (AppSettings::taskbarUnreadThumbnailFrame, NOTIFICATIONS.md section 9; default ON; independent of the count and the toast master)
+        // MESSAGING tab (MESSAGING.md — the fleet in Telegram): the master switch, the bot token (typed here, stored in
+        // Windows Credential Manager on Save — never in a profile file), the paired Telegram user id, the idle grace
+        // (D25), the Search topic's thinking level, "Check bot" (a getMe round trip off the UI thread) and a status line
+        // read from the engine's service when the cog opens.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgEnabled{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::PasswordBox _setMsgToken{ nullptr }; // the typed token; empty = keep the stored one
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgOwner{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgGrace{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgThinking{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _setMsgCheck{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _setMsgForget{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgStatus{ nullptr };
+        bool _msgForgetToken{ false }; // "Forget token" was clicked: Save removes the stored token
+        void _CheckTelegramBot(); // the "Check bot" button: getMe with the typed (else stored) token on a worker thread; the result lands in _setMsgStatus
         // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
         // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state
         // ("Active as /x" / "becomes /y after restart" / "disabled after restart"). Rename +

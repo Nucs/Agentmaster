@@ -18,6 +18,7 @@
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
 #include "SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the session database refresh tick
+#include "Messaging.h" // MESSAGING.md — the Telegram bot inside this process (D1)
 #include "SessionStore.h"
 #include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
 
@@ -482,6 +483,23 @@ namespace Agentmaster
             // watcher is up), and Apply never throws (a failure is logged and leaves the app as it was).
             e->sessionDb = std::make_shared<SessionDbRefresher>(e->scanner, e->registry, AgentmasterStateDir());
             e->sessionDb->Apply(LoadAppSettings());
+            // MESSAGING.md (D1): the Telegram bot, inside this process. Its window-hosted actions ride the per-window
+            // sinks above (RequestSessionActionInWindows / RequestLaunchInWindow); restart and park reuse the existing
+            // cross-window seams with an EMPTY source window, so the hosting window — whichever it is — acts. Off until
+            // the settings say otherwise (Apply starts nothing while messagingEnabled is false, the token is missing
+            // or nobody is paired); the Search factory and the version word are set by the app layer at its init
+            // (TerminalPage::_InitAgentmasterEngine), since both need app-only code.
+            {
+                Msg::ServiceHooks hooks;
+                hooks.sessionAction = [](const std::wstring& sid, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply) {
+                    RequestSessionActionInWindows(sid, action, arg, std::move(reply));
+                };
+                hooks.launch = [](const RemoteLaunchRequest& req) { return RequestLaunchInWindow(req); };
+                hooks.restartSession = [](const std::wstring& sid) { RestartSessionInOtherWindows(sid, L""); };
+                hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
+                e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
+                e->messaging->Apply(LoadAppSettings());
+            }
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
             // `claude` in a fresh tab is then correlated out-of-band by the observer). The transcript-
@@ -1738,6 +1756,150 @@ namespace Agentmaster
         for (const auto& fn : sinks)
         {
             fn(sessionId); // fire-and-forget; the (single) hosting window parks the session's tab, the rest miss
+        }
+    }
+
+    // Agentmaster (MESSAGING.md §8.2): see Engine.h. The session-action sinks (the deactivateSessionSinks idiom).
+    uint64_t RegisterWindowSessionActionHandler(const std::wstring& windowId, std::function<void(const std::wstring&, const std::wstring&, const std::wstring&, std::function<void(std::wstring)>)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.sessionActionMutex);
+        const auto token = e.nextSessionActionToken++;
+        e.sessionActionSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowSessionActionHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.sessionActionMutex);
+        for (auto it = e.sessionActionSinks.begin(); it != e.sessionActionSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.sessionActionSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void RequestSessionActionInWindows(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it: each sink hops into its own window's dispatcher.
+        std::vector<std::function<void(const std::wstring&, const std::wstring&, const std::wstring&, std::function<void(std::wstring)>)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.sessionActionMutex);
+            sinks.reserve(e.sessionActionSinks.size());
+            for (const auto& s : e.sessionActionSinks)
+            {
+                if (s.fn)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId, action, arg, reply); // the (single) hosting window acts and replies; the rest miss
+        }
+    }
+
+    // Agentmaster (MESSAGING.md §5.4 / §8.2 / D27): see Engine.h. The launch sinks + the last-active window.
+    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<void(const RemoteLaunchRequest&)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.launchMutex);
+        const auto token = e.nextLaunchToken++;
+        e.launchSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowLaunchHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.launchMutex);
+        for (auto it = e.launchSinks.begin(); it != e.launchSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.launchSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    bool RequestLaunchInWindow(const RemoteLaunchRequest& request)
+    {
+        auto& e = SharedEngine();
+        std::function<void(const RemoteLaunchRequest&)> fn;
+        {
+            std::lock_guard<std::mutex> lk(e.launchMutex);
+            // The most recently activated window first; a window that closed since is no longer in the list, so
+            // the fallback is the first registered (the oldest window).
+            for (const auto& s : e.launchSinks)
+            {
+                if (s.fn && !e.lastActiveWindowId.empty() && s.windowId == e.lastActiveWindowId)
+                {
+                    fn = s.fn;
+                    break;
+                }
+            }
+            if (!fn)
+            {
+                for (const auto& s : e.launchSinks)
+                {
+                    if (s.fn)
+                    {
+                        fn = s.fn;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!fn)
+        {
+            return false;
+        }
+        fn(request);
+        return true;
+    }
+
+    void NoteWindowActivated(const std::wstring& windowId) noexcept
+    {
+        try
+        {
+            if (windowId.empty())
+            {
+                return;
+            }
+            auto& e = SharedEngine();
+            std::lock_guard<std::mutex> lk(e.launchMutex);
+            e.lastActiveWindowId = windowId;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"NoteWindowActivated");
         }
     }
 

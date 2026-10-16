@@ -153,6 +153,7 @@ int wmain()
     TestAgentHarnessCore(); // SDK_HARNESS.md — the agent harness's model-free half: record, digest, settings, environment, readers (tests_harness.cpp)
     TestSessionSearchTools(); // SESSIONS.md section 9 — the AI search's tools: arguments, one search, result text, handlers, the stepwise gather (tests_harness.cpp)
     TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts (tests_sessiondb.cpp)
+    TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)
