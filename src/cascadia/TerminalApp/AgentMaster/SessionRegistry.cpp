@@ -268,6 +268,7 @@ namespace Agentmaster
             // A prompt arriving with no queue stamp is new input as far as the hold is concerned (a
             // freshly built queue, or one reloaded from disk — the field is transient).
             StampNewlyQueuedPrompts(info.queue, settleNow);
+            ApplyPinHold(info); // MESSAGING.md §5.3: a restored / re-upserted pinned live record never lands in Idle
             _sessions[id] = std::move(info);
             // Agentmaster (bounded queue history): a queue persisted before the cap existed (or one
             // carrying a long session's worth of Typed captures) trims on load; the append seams in
@@ -858,6 +859,7 @@ namespace Agentmaster
             // NO further UserPromptSubmit — both used to wrongly land WaitingForInput mid-turn.
             const auto ordered = NextSessionStateOrdered(s.state, msg, s.turns);
             s.state = ordered.state;
+            ApplyPinHold(s); // MESSAGING.md §5.3: a hook that normalizes a pinned live session to Idle (a SessionStart) holds it in Waiting
             // Stamped with the registry's ARRIVAL clock, not the hook's wire ts: the hold must measure
             // from when WE learned of the change (the send-spacing lesson — never trust a wire-derived
             // time to gate a send), and arrival can only start the window later, never earlier.
@@ -1591,6 +1593,7 @@ namespace Agentmaster
             // settle clocks here, after the opaque mutate, instead of trusting each caller to remember.
             const auto settleBefore = CaptureSettleFacts(it->second);
             mutate(it->second);
+            ApplyPinHold(it->second); // MESSAGING.md §5.3: a pinned live session never lands in Idle
             const int64_t settleNow = NowMs();
             StampSettleClock(it->second, settleBefore, settleNow);
             StampNewlyQueuedPrompts(it->second.queue, settleNow);

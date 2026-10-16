@@ -44,6 +44,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
+#include "AgentMaster/RemoteLaunch.h" // Agentmaster (MESSAGING.md §8.2): RemoteLaunchRequest — what the Telegram bot's launch sink asks this window to open
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
@@ -511,6 +512,13 @@ namespace winrt::TerminalApp::implementation
         // would keep calling a sink whose window is gone (harmless — it holds a weak page reference — but
         // the sink list would grow with every closed window).
         uint64_t _windowDeactivateSessionToken{ 0 };
+        // Agentmaster (MESSAGING.md §8.2): this window's two sinks for a REMOTE surface (the Telegram bot): the
+        // session-action sink (start a dormant tab, read its screen, mark it unread, rename it, repaint its tag
+        // badges / favorite marker — acted on only when THIS window hosts the session) and the launch sink (open a
+        // resumed / forked / new session as a background tab here; the engine sends a launch to the most recently
+        // activated window). 0 until engine init registered them; detached in ~TerminalPage (Rule #10).
+        uint64_t _windowSessionActionToken{ 0 };
+        uint64_t _windowLaunchToken{ 0 };
         // Agentmaster (eager-init / "Activate All Tabs"): this window's "wake all dormant tabs" sink on
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
@@ -1914,6 +1922,22 @@ namespace winrt::TerminalApp::implementation
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _RestartClaudeSession(winrt::hstring sessionId); // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's connection in place — local first, then fan out to the hosting window (RestartSessionInOtherWindows), mirroring _ActivateClaudeSession
         bool _RestartClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. Returns false when this window doesn't host the session's tab.
+        // Agentmaster (MESSAGING.md §8.2 — TerminalPage.AgentMessaging.cpp): the receiving half of the Telegram bot's
+        // window-hosted actions. Runs `action` on the session's tab when THIS window hosts it ("start" = start a
+        // dormant tab's claude in place; "screen" = answer the terminal's visible text through `reply`; "markunread";
+        // "rename" = `arg` is the new title, through _RenameClaudeSession (Rule #11); "refresh-tags" /
+        // "refresh-favorite" = repaint after a remote store edit). Returns false, calling nothing, when this window
+        // does not host the session (the fan-out's other windows). UI thread; never throws (Rule #18 inside).
+        bool _RemoteSessionAction(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, const std::function<void(std::wstring)>& reply);
+        // Agentmaster (MESSAGING.md §5.4 / D27): open a session the Telegram bot asked for — resume / fork / a new one —
+        // as a BACKGROUND tab of this window (no focus change: the user is at the phone, and the Sessions page's
+        // bulk-open latch _openClaudeTabInBackground is set around the call). Resume and Fork need the folder; a
+        // request without one is logged and dropped. UI thread; never throws.
+        void _RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request);
+        // Agentmaster (MESSAGING.md §7.3 — /screen): the last `maxLines` lines of the session's terminal buffer as plain
+        // text — what the owner would see on the screen — with trailing blank lines dropped. "" when this window does
+        // not host the session, the tab is dormant, or the read threw (logged). UI thread.
+        std::wstring _ReadScreenTextForSession(const std::wstring& sessionId, size_t maxLines);
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         safe_void_coroutine _ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (the SINGLE folder-close confirm+close entry — Manager board/tree menu AND the WT tab-strip "Close ▸" submenu): show ONE confirm LISTING the tab titles, then _CloseClaudeSessionsInFolder. `excludeId` non-empty == "Other of Same Folder" (keep the clicked one open)
         void _CloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (board/tree "Close ▸ Of Same Folder" / "Other of Same Folder"): close every live managed session whose effective work dir == `folder`, SKIPPING `excludeId` when non-empty ("Other …" keeps the clicked one open) — local tabs directly (skip-confirm; _ConfirmAndClose… already showed the one confirm), remote ones fanned out via CloseSessionInOtherWindows

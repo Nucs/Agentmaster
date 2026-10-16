@@ -4479,6 +4479,9 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // MESSAGING.md D27: the window the user activated last is the one a remote launch (the Telegram bot's
+        // Resume / Fork / New session) opens into.
+        ::Agentmaster::NoteWindowActivated(std::wstring{ _windowId });
         if (const auto tab = _GetFocusedTab())
         {
             if (const auto id = _ClaudeSessionForTab(tab); !id.empty())

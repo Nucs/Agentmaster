@@ -46,6 +46,8 @@
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
+#include "AgentMaster/Messaging.h" // MESSAGING.md — the Telegram bot: the cog Save re-applies its settings; its Search factory + version word are set here
+#include "MessagingSearchBridge.h" // MESSAGING.md §5.4 — the Search topic's agent (a SessionSearchAgent of its own)
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / GlobalPaused + the global-pause observer (the Manager's Pause button, DELIVERY.md §17)
@@ -586,6 +588,16 @@ namespace winrt::TerminalApp::implementation
         if (_windowDeactivateSessionToken)
         {
             ::Agentmaster::UnregisterWindowDeactivateSessionHandler(_windowDeactivateSessionToken);
+        }
+        // Agentmaster (MESSAGING.md §8.2): drop this window's two remote sinks too (Rule #10). Bare like their
+        // neighbors: thread-safe engine work that must never be skipped by a guarded throw.
+        if (_windowSessionActionToken)
+        {
+            ::Agentmaster::UnregisterWindowSessionActionHandler(_windowSessionActionToken);
+        }
+        if (_windowLaunchToken)
+        {
+            ::Agentmaster::UnregisterWindowLaunchHandler(_windowLaunchToken);
         }
         // Agentmaster (cross-window tab DOCKING): drop this window's dock-target sink too (Rule #10) —
         // a torn-down window must never be offered as a drop target.
@@ -1238,6 +1250,29 @@ namespace winrt::TerminalApp::implementation
         _scanner = engine.scanner;
         _observer = engine.observer; // Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §10)
 
+        // Agentmaster (MESSAGING.md §5.4): give the Telegram bot the two things only the app layer has — the Search
+        // topic's agent (a SessionSearchAgent needs the SDK unity file, which Engine.cpp's plain-C++ contract and the
+        // test harness never build) and the version word for its start note. Once per process: the service is the
+        // engine's one instance, and a second window must not replace a factory a running Search already used.
+        {
+            static std::once_flag messagingWiredOnce;
+            std::call_once(messagingWiredOnce, [&engine] {
+                try
+                {
+                    if (engine.messaging)
+                    {
+                        engine.messaging->SetSearchFactory([](std::function<void(const ::Agentmaster::Msg::SearchBridgeEvent&)> sink, std::wstring thinkingWord) {
+                            return ::Agentmaster::Msg::MakeTelegramSearchBridge(std::move(sink), std::move(thinkingWord));
+                        });
+                    }
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"messaging: set the Search factory");
+                }
+            });
+        }
+
         // Agentmaster (System notifications; NOTIFICATIONS.md §4a): register the TOAST COM ACTIVATOR
         // process-wide, so the shell delivers a toast click to THIS running instance
         // (INotificationActivationCallback::Activate -> the activate fan-out -> foreground + jump)
@@ -1455,6 +1490,47 @@ namespace winrt::TerminalApp::implementation
                         catch (...)
                         {
                             ::Agentmaster::AgentLogCaughtException(L"park-session sink (_DeactivateSessionLocal)");
+                        }
+                    }
+                });
+            });
+        }
+
+        // Agentmaster (MESSAGING.md §8.2): the Telegram bot's two window sinks. The SESSION-ACTION sink receives
+        // (session, action, arg, reply) from the engine's fan-out on a bot thread, hops to this window's UI thread
+        // and acts only when this window hosts the session's tab (_RemoteSessionAction); the LAUNCH sink receives a
+        // resume / fork / new-session request the engine aimed at THIS window (the most recently activated one) and
+        // opens it as a background tab (_RemoteLaunch). Both detach in ~TerminalPage (Rule #10). Each item is
+        // contained (Rule #18): an exception escaping a dispatcher item ends the process.
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowSessionActionToken = ::Agentmaster::RegisterWindowSessionActionHandler(_windowId, [weakThis, dispatcher](const std::wstring& id, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id, action, arg, reply]() {
+                    if (auto self = weakThis.get())
+                    {
+                        try
+                        {
+                            self->_RemoteSessionAction(id, action, arg, reply);
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"remote session-action sink (_RemoteSessionAction)");
+                        }
+                    }
+                });
+            });
+            _windowLaunchToken = ::Agentmaster::RegisterWindowLaunchHandler(_windowId, [weakThis, dispatcher](const ::Agentmaster::RemoteLaunchRequest& req) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, req]() {
+                    if (auto self = weakThis.get())
+                    {
+                        try
+                        {
+                            self->_RemoteLaunch(req);
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"remote launch sink (_RemoteLaunch)");
                         }
                     }
                 });
@@ -2286,6 +2362,12 @@ namespace winrt::TerminalApp::implementation
                 if (const auto& db = ::Agentmaster::SharedEngine().sessionDb)
                 {
                     db->Apply(s);
+                }
+                // MESSAGING.md: the Telegram bot's switch, paired owner, idle grace and Search thinking level apply at
+                // once (the token was stored in Credential Manager by the cog before it called this handler).
+                if (const auto& msg = ::Agentmaster::SharedEngine().messaging)
+                {
+                    msg->Apply(s);
                 }
                 // Side panel: adopt the (possibly changed) globals — the shared boardSort label,
                 // the dock side, the summary content flags (its fill-hosted overlay sits outside

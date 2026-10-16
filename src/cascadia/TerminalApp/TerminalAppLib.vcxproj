@@ -212,6 +212,13 @@
     <ClInclude Include="AgentMaster\SessionDbClient.h" />
     <ClInclude Include="AgentMaster\SessionDbRefresher.h" />
     <ClInclude Include="AgentMaster\SessionDbToolDefs.h" />
+    <!-- Agentmaster (MESSAGING.md): the fleet in Telegram - the bot inside this process (D1). -->
+    <ClInclude Include="AgentMaster\TelegramFormat.h" />
+    <ClInclude Include="AgentMaster\MessagingModels.h" />
+    <ClInclude Include="AgentMaster\TelegramApi.h" />
+    <ClInclude Include="AgentMaster\Messaging.h" />
+    <ClInclude Include="AgentMaster\RemoteLaunch.h" />
+    <ClInclude Include="MessagingSearchBridge.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
     <ClInclude Include="AgentMaster\Splash.h" />
@@ -299,6 +306,10 @@
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="TerminalPage.AgentSessionsAi.cpp">
+      <DependentUpon>TerminalPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="TerminalPage.AgentMessaging.cpp">
       <DependentUpon>TerminalPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
@@ -489,6 +500,21 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\SessionDbRefresher.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md): the Telegram bot inside this process - the service (lifecycle, outbox, topic sync,
+         the transcript mirror), its inbound half (updates, commands, buttons, the Search topic), the WinHTTP client,
+         and the Search topic's agent bridge (TerminalApp-only: it wraps SessionSearchAgent). Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\Messaging.Inbound.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\TelegramApi.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="MessagingSearchBridge.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (DELIVERY.md §15): claude's invisible-character rule, mirrored — the ICU half of

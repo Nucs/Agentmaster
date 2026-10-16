@@ -1,7 +1,11 @@
 # Agentmaster — messaging: the fleet in Telegram, Microsoft Teams, and any other messenger
 
-> **Status: DESIGN ONLY (2026-10-15, revised twice on 2026-10-16). Nothing here is built.** The user's
-> ask: "We plan messaging apps abstract support for Telegram + Microsoft Teams. We will support anything."
+> **Status: Telegram v1 IMPLEMENTED on 2026-10-16 (§21 says exactly what was built, where it differs from the
+> design below, and what is still open); designed 2026-10-15, revised twice on 2026-10-16.** The bot on this
+> machine is the user's `@SidKatrineBot` (the token in `K:\source\telegram\SidKatrineBot.env`, stored in
+> Windows Credential Manager by the cog — never in a profile file). Teams, webhooks and external connectors
+> are still design only. The user's ask: "We plan messaging apps abstract support for Telegram + Microsoft
+> Teams. We will support anything."
 > **The user's decisions so far** (quoted in §18): the bot runs inside the running Agentmaster process
 > (D1); the Telegram topics are synced to the tabs of every window, idle tabs being the only ones not
 > listed (D3); a pinned 🔎 Search topic hosts the Sessions page's search agent (Sonnet 5.5, high thinking)
@@ -996,3 +1000,82 @@ tunnel (one path per connection); the provider's signature check is part of its 
 - Teams: [Bot Framework SDK status](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-overview?view=azure-bot-service-4.0), [Teams SDK 2.1](https://microsoft.github.io/teams-sdk/blog/announcing-teams-sdk-dotnet-2-1/), [Azure Bot resource](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart?view=azure-bot-service-4.0), [rate limits](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/rate-limit), [message size](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages), [streaming](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux), [prerequisites](https://learn.microsoft.com/en-us/microsoftteams/platform/toolkit/tools-prerequisites), [the Teams API overview](https://learn.microsoft.com/en-us/graph/api/resources/teams-api-overview?view=graph-rest-1.0), [send a chat message](https://learn.microsoft.com/en-us/graph/api/chat-post-messages?view=graph-rest-1.0), [the connectors' retirement](https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/), [MC1181996](https://mc.merill.net/message/MC1181996).
 - Others: [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Discord gateway](https://docs.discord.com/developers/events/gateway), [matterbridge releases](https://github.com/42wim/matterbridge/releases).
 - The homelab's Telegram bot: the `fastrun` skill (`~/.claude/skills/fastrun/SKILL.md`).
+
+## 21. What was built (2026-10-16) — Telegram v1
+
+The user's instruction: "Use my `K:\source\telegram\SidKatrineBot.env` to be used by our setup on this
+machine. Your goal is to implement this end to end." Built in one pass, against the design above; this
+section is the record of what the code does today, where it differs from §4–§10, and what is still open.
+
+### 21.1 The code
+
+| Piece | File | What |
+|---|---|---|
+| The pure text half | `AgentMaster/TelegramFormat.h` | HTML escaping (`TgEscapeHtml`), Claude's Markdown → Telegram HTML (`TgMarkdownToHtml`: fences with their language, code spans, `**bold**`, `~~strike~~`, links, headings as bold, `> quotes`, bullets; italic and tables deliberately not converted), splitting at Telegram's 4,096 characters with `<pre>` kept balanced (`TgChunkHtml`), the nearest of the six topic colors to a tab color (`TgTopicIconColor`), short spans. |
+| The pure core | `AgentMaster/MessagingModels.h` | What a transcript line means for a topic (`ClassifyTranscriptLine` → `TopicItem`: prompt / mid-turn prompt / text with `turnEnds` / tool call with a one-line summary / failed result / question with its options / plan / compaction / interrupt / API error / command echo; noise, meta, sidechain and the resume placeholder skipped); `PlanTopicSync` (topics = tabs, M8: creates, deletes, renames, the Idle card and the grace); `ParseRemoteCommand` (Agentmaster's `/commands`, Claude Code's commands, the no-record and leaves-the-tab refusal tables, `/cc`); the state file (`MessagingState` ⇄ JSON); the backlog rule (`IsBacklogUpdate`, 10 min); the card (`BuildCardText`). |
+| The HTTPS client | `AgentMaster/TelegramApi.{h,cpp}` | WinHTTP POSTs with a JSON body, the error body read (`retry_after`, `description`), `sendDocument` as multipart, an `Abort` another thread can call (the long poll returns at once). The token lives only in this object. |
+| The service | `AgentMaster/Messaging.{h,cpp}` + `Messaging.Inbound.cpp` | `MessagingService`, one per process, created by `SharedEngine()` (`Engine.messaging`): the three threads (poll / send / tick), the token in Credential Manager, the one-poller-per-token machine mutex (M7), the state file (`<profile>\messaging\telegram\state.json` + `.prev`), the outbox with priorities and the ~1 s pacing, Threaded-Mode detection with a one-a-day setup notice, the Search topic, the topic sync, the transcript mirror (prompts, ONE work-log message per turn edited in place, the final message with sound), the cards, reactions, the inbound half (updates, `/commands`, buttons, tokens, the backlog question, remote prompts, revives). |
+| The Search agent | `MessagingSearchBridge.{h,cpp}` (TerminalApp-only) | A `SessionSearchAgent` named `telegram-search` (its own conversation, `<profile>\harness\telegram-search*.json`), high thinking by default, behind the service's `SearchBridge` seam. |
+| The window half | `TerminalPage.AgentMessaging.cpp` + two engine sinks (`Engine.h`: `RegisterWindowSessionActionHandler` / `RequestSessionActionInWindows`, `RegisterWindowLaunchHandler` / `RequestLaunchInWindow`, `NoteWindowActivated`) | `_RemoteSessionAction` (start a dormant tab, read the screen, mark unread, rename, repaint tags / favorite — only the hosting window acts) and `_RemoteLaunch` (resume / fork / new session as a BACKGROUND tab of the most recently activated window, D27). Restart and park reuse the existing cross-window seams. |
+| The engine rules | `Scheduler.h` (`NextPromptIsRemote`, in `DecideAdvance` and `_wantsIdleStart`), `SessionModels.h` (`QueuedPrompt::remoteSource`, `SessionInfo::pinned`, `ApplyPinHold`), `SessionRegistry.cpp` (the pin hold in Upsert / Update / OnHookEvent), `SessionScanner.cpp` (the decay refuses a pinned session), `Persistence.cpp` (both keys) | D30: a remote prompt is sent whatever the runner's mode, past Pause all and the send budget, and past the question guard (it IS the answer); every other gate holds. §5.3: a pinned live session is held in Waiting for you wherever it would land in Idle. |
+| The settings | `AppSettings::messagingEnabled` / `messagingTelegramOwnerId` / `messagingIdleGraceMinutes` / `messagingSearchThinking`; the cog's **Messaging** tab (`AgentManagerContent.Settings.cpp`: the switch, the token box, the owner id, Check bot, Forget token, the grace, the thinking level, a status line) | Save stores the token in Credential Manager FIRST (`MessagingService::StoreToken`, target `Agentmaster:messaging:telegram:<profile leaf>`), then the page's handler calls `messaging->Apply(settings)`. |
+| Tests | `tests/tests_messaging.cpp` (`TestMessaging`) | The formatting, the classifier on synthetic lines, the sync decider with the grace, the command router, the state file, the card, the D30 bypass in `DecideAdvance`, the pin hold through the registry, the two persisted keys. |
+
+Logs: `[msg] …` in hooks.log (started / stopped / connected / topic created / renamed / idle / deleted /
+queued from topic / final message / revive done / state edges per session), `[nav] remote telegram …` for
+every action from the chat (never the token, never a message body), `[tg] …` in `messaging.log` for the
+transport's failures and slow calls.
+
+### 21.2 Where it differs from the design
+
+- **The setup is the cog, not a pairing link (§9.2).** The owner is the numeric Telegram user id typed
+  into the cog (`@userinfobot` tells it), not a `/start <code>` pairing; H3 is the same (every other sender
+  is dropped after reading only the sender). Levels and the drive PIN (§9.3) are not built: a paired owner
+  can do everything the commands offer.
+- **No backfill (§6.7).** A topic mirrors the session from the moment it is created; its first message says
+  so and points at `/transcript` (the whole session as a `.md` file) and `/summary`.
+- **One fixed mirror level, close to the Default preset (§6.3).** Prompts (⌨ typed at the PC, ⚙ sent by the
+  runner; a prompt sent from the topic is the user's own message and is not mirrored), the work log with
+  every tool call on one line (and a remark's first line, a failed result, a compaction), the final reply as
+  Markdown; verbose items, files, thinking, hooks, the `/show` and `/level` grid are not built.
+- **The activity draft (§6.2) is not built**; the card's state line (edited on every state change, at most
+  every 20 s otherwise) and the work-log edits (every 15 s) show what the session does.
+- **Questions and plans are shown, not answered (§7.4).** A question arrives with its options as a numbered
+  list, a plan with its text, both as the turn's final message; answering is at the PC (the key plans of
+  P0-1 are unmeasured). A permission prompt shows as the state edge's "Needs your approval at the PC".
+- **`/interrupt` is one Esc through the registry's injector** (with a confirmation while running), not the
+  link's abort (the session link is not built).
+- **`/takedraft` queues a COPY** of the unsent draft (the box at the PC keeps it); the mail button's verified
+  clear is a UI-thread action a later build routes through the hosting window.
+- **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
+  is the `/commands`.
+- **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
+  it; the user pins it). Its results carry [Wake] [Wake 📌] for idle tabs and [Resume] [Resume 📌] [Fork] for
+  closed sessions; a revived session is held in Waiting for you once it is live (its topic then appears),
+  pinned when asked. `/newsession <folder> [model]` in Search opens a new session in a folder on this PC.
+- **A topic the user starts in Telegram (D20) is not a new session**: the bot answers with the `/newsession`
+  hint, and the topic can be deleted.
+- **The pin has no PC-side menu item or tab glyph yet (D32)**; `/pin` and the buttons set it.
+- **The run marker's crash note** reads the marker the previous run left (`messaging\run.marker.last` is
+  not produced yet — the note is wired for it, so today a crash leaves no note). Open: write `.last` at start.
+- **Teams, webhooks, external connectors (§11–§12): not built.**
+
+### 21.3 Check after the build (live, with `@SidKatrineBot`)
+
+1. Cog → Messaging: token pasted, user id set, Check bot → `topics are ON` (Threaded Mode was off on
+   2026-10-16; the user turns it on in @BotFather). Save. hooks.log: `[msg] messaging started …`,
+   `[msg] connected as @SidKatrineBot (topics enabled)`, `[msg] topic created: Search`.
+2. In Telegram: the 🔎 Search topic with its welcome; one topic per non-idle Claude tab of every window
+   (`[msg] topic created <sid8> …`), each with a pinned card; no topic for idle tabs, Codex tabs or shells.
+3. Type a prompt in a topic: the ✍ reaction, the prompt queued (`[msg] <sid8> queued from topic`), delivered
+   at the next ready moment even with the runner Paused, then 👨‍💻 when the turn starts; the turn's work log
+   grows in place; the final reply arrives with sound; everything else silent.
+4. `/queue`, `/sendnow`, `/runner paused`, `/pin` (the card's 📌; the session never goes Idle), `/transcript`
+   (a `.md` file), `/summary`, `/screen`, `/rename x` (the tab, the topic and the saved title), `/status`.
+5. A session that goes Idle: the Idle card with the countdown; after the grace the topic is deleted
+   (`[msg] topic deleted <sid8> (idle)`); `/wake` from Search's `/idle` list brings a new topic.
+6. Search: a request in plain words → the agent's sentence + rows with buttons; [Resume] opens a background
+   tab in the most recently used window, and the topic appears once the session is live.
+7. `/reload-plugins` is refused (no record); `/resume x` is refused (leaves the tab); `/cc /mycmd` passes.
+8. A second Agentmaster instance (dev + release) with the SAME token: the second one reports the poller
+   mutex and does not start (one bot per install).

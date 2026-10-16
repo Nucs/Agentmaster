@@ -506,6 +506,16 @@ namespace Agentmaster
         // reads 0 and is stamped by the load's Upsert, which is moot because reopening the session
         // restarts its status clock anyway (a live/started flip — StampSettleClock).
         int64_t queuedAtUnixMs{ 0 };
+        // Agentmaster (MESSAGING.md §7.1 — a message in a topic is a queued prompt): where a REMOTE prompt
+        // came from, "telegram:<message id>" for a message typed in the session's Telegram topic; "" for
+        // every other prompt. PERSISTED, so a restart still knows which Telegram message a Pending prompt
+        // is (its status reaction, an edit of it). A non-empty value is what the scheduler reads as "the
+        // user's own message": DecideAdvance sends it whatever the runner's mode, past Pause all and past
+        // the maxAutoSends budget (D30) — the dormant gate, the delivery gate, the box state and the settle
+        // hold still apply. ⚠ The origin stays Autorun on purpose: every delivery-evidence rule (the echo
+        // consume, the pickup guard, the Enter-retry watch, the lost-send verdict) keys on
+        // origin == Autorun, and a remote prompt needs all of them.
+        std::wstring remoteSource;
     };
 
     // Agentmaster (bounded queue history): the queue records EVERY message a session received
@@ -1568,6 +1578,14 @@ namespace Agentmaster
         // red-flash-ring set so the BOARD STATE (in every window) reflects the mark, not just one
         // window's tab ring.
         bool manualUnread{ false };
+        // Agentmaster (MESSAGING.md §5.3 — PIN: never idle). PERSISTED. A pinned session never decays from
+        // Waiting-for-you to Idle (SessionScanner::_maybeDecayWaiting refuses), and wherever a LIVE pinned
+        // session would land in Idle (a hook's SessionStart, a restore's normalization, a triage move) the
+        // registry holds it in WaitingForInput instead (ApplyPinHold) — so its Telegram topic never leaves
+        // the list (topics = tabs, idle tabs excepted). Set by /pin in the topic, the Search results'
+        // "📌" buttons and (later) the tab menu; cleared by /unpin, which lets the normal decay resume
+        // from that moment.
+        bool pinned{ false };
         // Transient (NOT persisted): turn accounting for the ordered state machine — see
         // TurnAccounting above / NextSessionStateOrdered (HookEvents.h). Reset on
         // SessionStart / SessionEnd (a resume must not inherit stale turn identity) — EXCEPT a
@@ -1837,6 +1855,27 @@ namespace Agentmaster
     inline SettleFacts CaptureSettleFacts(const SessionInfo& s) noexcept
     {
         return SettleFacts{ s.state, s.live, s.started };
+    }
+
+    // Agentmaster (MESSAGING.md §5.3 — PIN: never idle). The PIN HOLD: a LIVE pinned session that a mutation
+    // left in Idle is held in WaitingForInput instead — the state the "Move to Waiting-for-you" button
+    // sets — so its Telegram topic never leaves the list (topics = tabs, idle tabs excepted). Applied by the
+    // registry AFTER every mutation that can move the state (Upsert, Update, OnHookEvent), so no seam has
+    // to know about the pin: a hook's SessionStart normalization, a restore's Idle seed, a triage move and
+    // the scanner's decay all land on the same rule. PURE; the scanner's decay also refuses up front, so
+    // the hold is the belt there, never the first line of defense (SessionScanner::_maybeDecayWaiting).
+    // Done (claude exited) is deliberately NOT held: a pinned session whose claude ended reads Done until it
+    // is restarted — a topic that said "waiting for you" for a dead process would lie.
+    //   s       — the record AFTER the mutation; its state may be rewritten.
+    //   returns — true when the hold rewrote the state (the caller may log it).
+    inline bool ApplyPinHold(SessionInfo& s) noexcept
+    {
+        if (s.pinned && s.live && s.state == SessionState::Idle)
+        {
+            s.state = SessionState::WaitingForInput;
+            return true;
+        }
+        return false;
     }
 
     // Restart the session's settle clock (SessionInfo::stateChangedAtUnixMs) when a mutation changed
@@ -3013,7 +3052,34 @@ namespace Agentmaster
         //    here — it's editable from the cog's "Keep Claude history (days)" field via the repository.)
         uint32_t envDefaultsVersion{ 0 };
         bool claudeCleanupDaysSeeded{ false };
+
+        // Agentmaster (MESSAGING.md — the fleet in Telegram; the cog's MESSAGING tab). The bot runs INSIDE the
+        // running Agentmaster process (D1): one Telegram topic per Claude Code tab of every window whose
+        // session is not Idle, a pinned "Search" topic, every message in a topic a queued prompt.
+        //  - messagingEnabled: the master switch, default OFF — nothing connects, polls or posts until the
+        //    user turns it on. The bot token is NOT here: it lives in Windows Credential Manager
+        //    (MessagingService::StoreToken; target Agentmaster:messaging:telegram:<profile folder leaf>), per
+        //    profile on purpose — two installs must never poll one bot (Telegram allows one reader per token).
+        //  - messagingTelegramOwnerId: the ONE Telegram user (numeric id, as digits) whose messages the bot
+        //    acts on; every other sender is dropped after reading only the sender (H3). Empty = nobody is
+        //    paired yet: the bot answers nothing and the cog says so.
+        //  - messagingIdleGraceMinutes: how long an Idle session's topic stays (with the Idle card and its
+        //    Pin / Wake buttons) before it is DELETED, with its messages (Telegram cannot hide or close a
+        //    private-chat topic) — D25, default 10; 0 deletes at once.
+        //  - messagingSearchThinking: the Search topic's agent thinking level word (off / low / medium / high /
+        //    xhigh / max), default "high" (the user's rule); an unknown word reads as high.
+        bool messagingEnabled{ false };
+        std::wstring messagingTelegramOwnerId{};
+        uint32_t messagingIdleGraceMinutes{ 10 };
+        std::wstring messagingSearchThinking{ L"high" };
     };
+
+    // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back
+    // to the 10-minute default. Shared by the Persistence load and the cog Save.
+    inline uint32_t ClampMessagingIdleGraceMinutes(uint32_t v) noexcept
+    {
+        return v > 1440 ? 1440 : v;
+    }
 
     // Agentmaster (bookmark tags): clamp AppSettings::maxTags into its valid band — the cog allows
     // 1..40 (hard ceiling 40); 0/absent/garbage falls back to the 20 default. Shared by the

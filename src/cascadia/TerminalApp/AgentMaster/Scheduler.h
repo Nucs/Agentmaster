@@ -210,6 +210,26 @@ namespace Agentmaster
     // (None — the prompt stays queued and waits, exactly like a Running mid-turn); the STATE
     // SETTLE hold (kStateSettleMs — a TIMED hold, retryAfterMs set); minimum SEND SPACING
     // (kMinSendSpacingMs — a TIMED hold, retryAfterMs set); otherwise Send.
+    // Agentmaster (MESSAGING.md §7.1 / D30): is the NEXT prompt the queue would send a REMOTE one — a message
+    // the user typed in the session's Telegram topic (QueuedPrompt::remoteSource)? Such a prompt is the user's
+    // own message, like a Send now: it goes out whatever the runner's mode, past Pause all and past the
+    // maxAutoSends budget. The other gates (the open + started test, the ready states, the delivery gate, the
+    // box state, the pickup guard, the settle hold, the spacing) still apply — they protect the session, not
+    // the runner's budget. PURE; shared by DecideAdvance and the scheduler's idle-start trigger.
+    //   s       — the session (its queue read).
+    //   returns — true when the first Pending prompt carries a remoteSource.
+    inline bool NextPromptIsRemote(const SessionInfo& s) noexcept
+    {
+        for (const auto& q : s.queue)
+        {
+            if (q.status == PromptStatus::Pending)
+            {
+                return !q.remoteSource.empty();
+            }
+        }
+        return false;
+    }
+
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
@@ -218,12 +238,16 @@ namespace Agentmaster
     {
         AdvancePlan plan;
 
-        if (globalPause)
+        // MESSAGING.md D30: a remote prompt (typed in the session's Telegram topic) is the user's own message —
+        // the three RUNNER gates below (Pause all, the session's Paused mode, the send budget) do not hold it.
+        const bool remoteNext = NextPromptIsRemote(s);
+
+        if (globalPause && !remoteNext)
         {
             plan.reason = L"global pause";
             return plan;
         }
-        if (s.autorunner.mode == AutorunnerMode::Off)
+        if (s.autorunner.mode == AutorunnerMode::Off && !remoteNext)
         {
             // DELIVERY.md §14: name the interrupt hold so the [advance-skip] trail says WHY it is Off.
             plan.reason = InterruptHoldActive(s.autorunner) ?
@@ -272,7 +296,7 @@ namespace Agentmaster
             plan.reason = L"human typing";
             return plan;
         }
-        if (s.autorunner.autoSendsThisRun >= s.autorunner.maxAutoSends)
+        if (s.autorunner.autoSendsThisRun >= s.autorunner.maxAutoSends && !remoteNext)
         {
             plan.reason = L"maxAutoSends reached";
             return plan;

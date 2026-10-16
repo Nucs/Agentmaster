@@ -38,6 +38,8 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md — the cog's SESSION DATABASE status line
+#include "AgentMaster/Messaging.h" // MESSAGING.md — the cog's MESSAGING tab: the token (Credential Manager), Check bot, the status line
+#include "AgentMaster/TelegramApi.h" // MaskToken — the token box's "stored: 7221…bZ8" placeholder
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
@@ -734,6 +736,8 @@ namespace winrt::TerminalApp::implementation
         commandsPanel.Spacing(10);
         auto notificationsPanel = StackPanel{};
         notificationsPanel.Spacing(10);
+        auto messagingPanel = StackPanel{}; // MESSAGING.md — the Telegram bot
+        messagingPanel.Spacing(10);
         auto tabsPanel = StackPanel{};
         tabsPanel.Spacing(10);
         auto claudePanel = StackPanel{};
@@ -1110,6 +1114,71 @@ namespace winrt::TerminalApp::implementation
         _BuildEnvVarsArea(panel);
         // PRESETS (HARNESSES.md §8.1): its own tab, built here so it sits beside the Sessions code it extends.
         _BuildPresetsArea(presetsPanel);
+
+        // === MESSAGING tab (MESSAGING.md — the fleet in Telegram) ===
+        // The bot runs inside this process (D1). Everything here is a plain setting except the TOKEN, which goes to
+        // Windows Credential Manager on Save (MessagingService::StoreToken) and is never written to settings.json;
+        // the box shows a masked "stored" placeholder and stays empty, so a Save with nothing typed keeps the token.
+        panel = messagingPanel;
+        panel.Children().Append(SettingsSeparator(L"TELEGRAM BOT", true)); // leading section
+        _setMsgEnabled = ToggleSwitch{};
+        _setMsgEnabled.Header(winrt::box_value(L"Run the Telegram bot"));
+        AgentSetTip(_setMsgEnabled, L"One Telegram topic per Claude Code tab of every window whose session is not Idle, each showing the session as it happens (the prompts, one work-log message per turn, the final reply with sound). A message typed in a topic is queued as the session's next prompt \x2014 never typed into a running turn. The pinned \x201C\U0001F50E Search\x201D topic finds old sessions and brings them back into tabs. Needs the token and your user id below; the bot is offline while Agentmaster is closed (Telegram keeps your messages 24 h). Default off.");
+        panel.Children().Append(_setMsgEnabled);
+        {
+            auto steps = Text(L"Setup: @BotFather \x2192 /newbot (or an existing bot of yours) \x2192 copy its token here. Then @BotFather \x2192 /mybots \x2192 the bot \x2192 Bot Settings \x2192 Threaded Mode \x2192 Turn on (topics). Your numeric user id: message @userinfobot. Save, then open the bot in Telegram and send /start.", 11, false, 0.75);
+            steps.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(steps);
+        }
+        _setMsgToken = PasswordBox{};
+        _setMsgToken.Header(winrt::box_value(L"Bot token (from @BotFather)"));
+        AgentSetTip(_setMsgToken, L"Stored in Windows Credential Manager on Save, under a name that includes this profile's folder (two Agentmaster installs must never poll one bot: Telegram allows one reader per token). Never written to settings.json, the logs, or a commit. Leave it empty to keep the stored token; \x201C" L"Forget token\x201D removes it.");
+        panel.Children().Append(_setMsgToken);
+        _setMsgOwner = TextBox{};
+        _setMsgOwner.Header(winrt::box_value(L"Your Telegram user id (numeric)"));
+        _setMsgOwner.PlaceholderText(L"e.g. 473303454 \x2014 ask @userinfobot");
+        AgentSetTip(_setMsgOwner, L"The ONE Telegram account the bot acts for. Every message from anyone else is dropped after reading only the sender (the bot answers \x201Cthis bot is private\x201D). Digits only.");
+        panel.Children().Append(_setMsgOwner);
+        {
+            auto row = StackPanel{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(8);
+            _setMsgCheck = Button{};
+            _setMsgCheck.Content(winrt::box_value(L"Check bot"));
+            AgentSetTip(_setMsgCheck, L"Ask Telegram (getMe) about the typed token, or the stored one when the box is empty: the bot's name, and whether Threaded Mode (topics) is on.");
+            _setMsgCheck.Click([this](const IInspectable&, const RoutedEventArgs&) { _CheckTelegramBot(); });
+            row.Children().Append(_setMsgCheck);
+            _setMsgForget = Button{};
+            _setMsgForget.Content(winrt::box_value(L"Forget token"));
+            AgentSetTip(_setMsgForget, L"Remove the stored token from Credential Manager on Save (the bot stops). Type a new token to replace it instead.");
+            _setMsgForget.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _msgForgetToken = true;
+                if (_setMsgToken)
+                {
+                    _setMsgToken.Password(L"");
+                    _setMsgToken.PlaceholderText(L"the stored token is removed on Save");
+                }
+            });
+            row.Children().Append(_setMsgForget);
+            panel.Children().Append(row);
+        }
+        _setMsgStatus = Text(L"", 11, false, 0.75);
+        _setMsgStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setMsgStatus);
+        panel.Children().Append(SettingsSeparator(L"TOPICS"));
+        _setMsgGrace = TextBox{};
+        _setMsgGrace.Header(winrt::box_value(L"Idle grace (minutes) before a topic is deleted"));
+        _setMsgGrace.PlaceholderText(L"10 (0\x2013" L"1440)");
+        AgentSetTip(_setMsgGrace, L"When a session goes Idle its topic shows an Idle card with Pin and Wake for this long, then the topic is DELETED with its messages (Telegram cannot hide or close a private-chat topic; a woken session gets a new topic). A pinned session never goes idle. 0 deletes at once; blank resets to 10.");
+        panel.Children().Append(_setMsgGrace);
+        _setMsgThinking = ComboBox{};
+        _setMsgThinking.Header(winrt::box_value(L"Search topic thinking level"));
+        for (const auto* w : { L"off", L"low", L"medium", L"high", L"xhigh", L"max" })
+        {
+            _setMsgThinking.Items().Append(winrt::box_value(w));
+        }
+        AgentSetTip(_setMsgThinking, L"How much the Search topic's agent (the Sessions page's search agent, Sonnet 5.5, in a conversation of its own) thinks before it answers. High by default. Applies to the next Search process.");
+        panel.Children().Append(_setMsgThinking);
 
         // === CLAUDE tab ===
         panel = claudePanel;
@@ -2582,6 +2651,7 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::LogNav(L"settings-reset tab=Commands (form only \x2014 Save commits, Cancel discards)");
         });
         addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
+        addSettingsTab(L"Messaging", L"The fleet in Telegram \x2014 one topic per working session, the whole session in it, messages as queued prompts, a Search topic that revives old sessions. The bot token, your user id, the idle grace.", messagingPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, tab size (width, height, title font), the rename key and title naming, the favorite marker, tab colors, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
         addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
@@ -2906,6 +2976,36 @@ namespace winrt::TerminalApp::implementation
         if (_setNotifySound)
         {
             _setNotifySound.IsOn(_appSettings.notifySound);
+        }
+        if (_setMsgEnabled)
+        {
+            // MESSAGING.md: the form's copy, plus what the engine's service says it is doing right now; the token box
+            // only ever shows a masked placeholder (the stored token is never put into a control).
+            _msgForgetToken = false;
+            _setMsgEnabled.IsOn(_appSettings.messagingEnabled);
+            _setMsgOwner.Text(winrt::hstring{ _appSettings.messagingTelegramOwnerId });
+            _setMsgGrace.Text(winrt::hstring{ std::to_wstring(::Agentmaster::ClampMessagingIdleGraceMinutes(_appSettings.messagingIdleGraceMinutes)) });
+            {
+                const std::wstring words[] = { L"off", L"low", L"medium", L"high", L"xhigh", L"max" };
+                int32_t idx = 3;
+                for (int32_t i = 0; i < 6; ++i)
+                {
+                    if (words[i] == _appSettings.messagingSearchThinking)
+                    {
+                        idx = i;
+                    }
+                }
+                _setMsgThinking.SelectedIndex(idx);
+            }
+            _setMsgToken.Password(L"");
+            const std::wstring stored = ::Agentmaster::Msg::MessagingService::ReadStoredToken(::Agentmaster::AgentmasterStateDir());
+            _setMsgToken.PlaceholderText(stored.empty() ? winrt::hstring{ L"paste the token \x2014 123456789:AA\x2026" } : winrt::hstring{ L"stored: " + ::Agentmaster::Msg::TelegramApi::MaskToken(stored) + L" (leave empty to keep it)" });
+            std::wstring status;
+            if (const auto& svc = ::Agentmaster::SharedEngine().messaging)
+            {
+                status = svc->StatusText();
+            }
+            _setMsgStatus.Text(winrt::hstring{ status });
         }
         if (_setTaskbarUnreadBadge)
         {
@@ -3628,6 +3728,35 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.notifySound = _setNotifySound.IsOn();
         }
+        if (_setMsgEnabled)
+        {
+            // MESSAGING.md: the form's fields. The TOKEN is committed by _SaveSettings (Credential Manager, before the
+            // settings sink runs, so the service's Apply finds it).
+            _appSettings.messagingEnabled = _setMsgEnabled.IsOn();
+            std::wstring owner;
+            for (const wchar_t c : std::wstring_view{ _setMsgOwner.Text() })
+            {
+                if (c >= L'0' && c <= L'9' && owner.size() < 20)
+                {
+                    owner += c;
+                }
+            }
+            _appSettings.messagingTelegramOwnerId = owner;
+            uint32_t grace = 0;
+            bool any = false;
+            for (const wchar_t c : std::wstring_view{ _setMsgGrace.Text() })
+            {
+                if (c >= L'0' && c <= L'9' && grace < 100000)
+                {
+                    grace = grace * 10 + static_cast<uint32_t>(c - L'0');
+                    any = true;
+                }
+            }
+            _appSettings.messagingIdleGraceMinutes = any ? ::Agentmaster::ClampMessagingIdleGraceMinutes(grace) : 10u;
+            const std::wstring words[] = { L"off", L"low", L"medium", L"high", L"xhigh", L"max" };
+            const int32_t idx = _setMsgThinking.SelectedIndex();
+            _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
+        }
         if (_setTaskbarUnreadBadge)
         {
             _appSettings.taskbarUnreadBadge = _setTaskbarUnreadBadge.IsOn();
@@ -3957,6 +4086,32 @@ namespace winrt::TerminalApp::implementation
             _appSettings.sidePanelCollapsed = disk.sidePanelCollapsed;
             _appSettings.sidePanelSummaryHidden = disk.sidePanelSummaryHidden; // the header "Sum" toggle's own RMW — this form never edits it
             _appSettings.sidePanelScrollToSelectedTab = disk.sidePanelScrollToSelectedTab; // the header ⌖ toggle's own RMW — this form never edits it
+        }
+        // MESSAGING.md: commit the bot token to Windows Credential Manager BEFORE the sink runs, so the engine
+        // service's Apply (called by the page's settings handler) finds the new token. A typed token replaces the
+        // stored one; "Forget token" removes it; an empty box with no forget keeps it. Never logged, never in a file.
+        if (_setMsgToken)
+        {
+            const std::wstring typed{ _setMsgToken.Password() };
+            const std::wstring profile = ::Agentmaster::AgentmasterStateDir();
+            if (!typed.empty() && typed.find_first_not_of(L" \t\r\n") != std::wstring::npos)
+            {
+                if (!::Agentmaster::Msg::MessagingService::StoreToken(profile, typed))
+                {
+                    ::Agentmaster::LogNav(L"messaging token store FAILED (Credential Manager refused)");
+                }
+                else
+                {
+                    ::Agentmaster::LogNav(L"messaging token stored");
+                }
+                _setMsgToken.Password(L"");
+            }
+            else if (_msgForgetToken)
+            {
+                ::Agentmaster::Msg::MessagingService::ClearToken(profile);
+                ::Agentmaster::LogNav(L"messaging token forgotten");
+            }
+            _msgForgetToken = false;
         }
         if (_settingsSink)
         {
@@ -5772,6 +5927,79 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveAppSettings(disk);
         ::Agentmaster::LogNav(std::wstring{ L"update-nightly -> " } + (on ? L"on (warning accepted)" : L"off"));
         _CheckForUpdates(false);
+    }
+
+    // MESSAGING.md: the cog's "Check bot" — one getMe round trip with the typed token (else the stored one), on a
+    // worker thread (a bounded WinHTTP call must never run on the UI thread), the answer hopped back through the
+    // dispatcher into the status line. The token itself is never logged or shown.
+    void AgentManagerContent::_CheckTelegramBot()
+    {
+        if (!_setMsgStatus || !_dispatcher)
+        {
+            return;
+        }
+        std::wstring token = _setMsgToken ? std::wstring{ _setMsgToken.Password() } : std::wstring{};
+        if (token.find_first_not_of(L" \t\r\n") == std::wstring::npos)
+        {
+            token = ::Agentmaster::Msg::MessagingService::ReadStoredToken(::Agentmaster::AgentmasterStateDir());
+        }
+        if (token.empty())
+        {
+            _setMsgStatus.Text(L"No token: paste the token from @BotFather first.");
+            return;
+        }
+        ::Agentmaster::LogNav(L"check-telegram-bot");
+        _setMsgStatus.Text(L"Asking Telegram\x2026");
+        if (_setMsgCheck)
+        {
+            _setMsgCheck.IsEnabled(false);
+        }
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        try
+        {
+            std::thread([weak, disp, token]() noexcept {
+                const auto check = ::Agentmaster::Msg::MessagingService::CheckBot(token);
+                disp.TryEnqueue([weak, check]() {
+                    if (auto self = weak.get())
+                    {
+                        try
+                        {
+                            if (self->_setMsgCheck)
+                            {
+                                self->_setMsgCheck.IsEnabled(true);
+                            }
+                            if (!self->_setMsgStatus)
+                            {
+                                return;
+                            }
+                            if (!check.ok)
+                            {
+                                self->_setMsgStatus.Text(winrt::hstring{ L"Telegram: " + check.error });
+                                return;
+                            }
+                            std::wstring text = L"Bot " + check.username + L": ";
+                            text += check.topicsEnabled ? L"topics are ON \x2014 ready." : L"topics are OFF \x2014 @BotFather \x2192 /mybots \x2192 " + check.username + L" \x2192 Bot Settings \x2192 Threaded Mode \x2192 Turn on, then Save here.";
+                            self->_setMsgStatus.Text(winrt::hstring{ text });
+                        }
+                        catch (...)
+                        {
+                            ::Agentmaster::AgentLogCaughtException(L"_CheckTelegramBot (apply)");
+                        }
+                    }
+                });
+            }).detach();
+        }
+        catch (...)
+        {
+            // Rule #18: a thread that could not start is logged, and the button comes back.
+            ::Agentmaster::AgentLogCaughtException(L"_CheckTelegramBot (thread start)");
+            if (_setMsgCheck)
+            {
+                _setMsgCheck.IsEnabled(true);
+            }
+            _setMsgStatus.Text(L"Could not start the check (see hooks.log).");
+        }
     }
 
     void AgentManagerContent::_CheckForUpdates(bool interactive)

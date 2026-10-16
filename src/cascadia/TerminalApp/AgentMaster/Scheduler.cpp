@@ -671,7 +671,9 @@ namespace Agentmaster
         // carve-out keeps adopted sessions drivable (mirrors the `!started && !external` "dormant"
         // definition the tab-strip status dot uses). DecideAdvance repeats the open + started test
         // (DELIVERY.md §17), because a timed re-check reaches it without passing through here.
-        if (!(s.live && (s.started || s.external) && s.autorunner.mode != AutorunnerMode::Off &&
+        // MESSAGING.md D30: a remote prompt (typed in the session's Telegram topic) starts a Paused session's
+        // queue too — DecideAdvance lets it through the mode gate, so the idle-start trigger must as well.
+        if (!(s.live && (s.started || s.external) && (s.autorunner.mode != AutorunnerMode::Off || NextPromptIsRemote(s)) &&
               (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
               _registry->HasInjector(s.id)))
         {
