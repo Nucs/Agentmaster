@@ -1,0 +1,1 @@
+{ "name": "libprobe3", "version": "0.0.1", "description": "Throwaway probe: is a module refused when its SOURCE holds eval or new Function, as many libraries' does?" }
