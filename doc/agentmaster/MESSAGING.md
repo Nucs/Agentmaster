@@ -1,115 +1,107 @@
 # Agentmaster — messaging: the fleet in Telegram, Microsoft Teams, and any other messenger
 
-> **Status: DESIGN ONLY (2026-10-15, revised 2026-10-16). Nothing here is built.** The user's ask: "We
-> plan messaging apps abstract support for Telegram + Microsoft Teams. We will support anything."
-> **2026-10-16, the user:** "The agentmaster process running is supposed to be the program running the
-> bot" — D1 is DECIDED: the bot runs inside Agentmaster, no separate service (§4); and "the topics are
-> great, can they really serve and manage the sessions in entirety?" — §10.2 says how a topic carries a
-> whole session and §10.3 what a topic cannot do. Every platform fact was checked on 2026-10-15/16 in the
-> platform's own documentation (Telegram's and Claude Code's pages read in full; Microsoft's through
-> searches of its pages), unless the line names a third-party source or says "from memory" (sources in
-> §20). Every name from Agentmaster's own code exists in the tree today. Decisions: §18. What must be
-> measured before any code: §19.
+> **Status: DESIGN ONLY (2026-10-15, revised twice on 2026-10-16). Nothing here is built.** The user's
+> ask: "We plan messaging apps abstract support for Telegram + Microsoft Teams. We will support anything."
+> **The user's decisions so far** (quoted in §18): the bot runs inside the running Agentmaster process
+> (D1); the Telegram topics are synced to the tabs of every window, idle tabs being the only ones not
+> listed (D3); a pinned 🔎 Search topic hosts the Sessions page's search agent (Sonnet 5.5, high thinking)
+> and revives old sessions (D24); a topic shows the whole session, every message type configurable and
+> able to be disabled, default or verbose (D19); a message sent in a topic is ENQUEUED, never a steer
+> (D8); Claude Code only for now (D23); a message is exactly a prompt, except Claude Code commands that
+> leave no record in the session (D22); most of the tab's right-click menu runs as `/slash` commands,
+> the non-destructive ones plus `/restartsession` (D22); every message in a topic is silent except the
+> turn's final message (D5). A message gets into a session through the session link of
+> [`MOD_LINK.md`](MOD_LINK.md) (designed the same day) where the session has it, else by the typed path
+> (§2.4). Platform facts were checked on 2026-10-15/16 in each platform's own
+> documentation (Telegram's and Claude Code's pages read in full; Microsoft's through searches of its
+> pages) unless a line names a third-party source or says "from memory" (§20). Decisions: §18. What must
+> be measured before any code: §19.
 
 ## 0. Summary
 
-**What it is.** Agentmaster tells you, in a messenger you already carry, when a session needs you, and
-lets you act from there: reply to a session, answer its question, approve its plan, queue its next
-prompt, pause or resume its runner, stop its turn, resume a closed session, start a new one. **One bot
-serves the whole fleet**, and **each session has its own topic** in the bot's chat: its card, its
-conversation, its questions, its controls (§10.2). A topic you start in Telegram starts a new session.
+**What it is.** One Telegram bot, run by Agentmaster itself, turns the bot's private chat into a remote
+Agentmaster: **one topic per tab** of every window (idle tabs excepted), each topic showing its whole
+session live, and a pinned **🔎 Search** topic that finds any session ever run and brings it back. In a
+session's topic you see what the session is doing, you queue prompts for it, you answer its questions,
+and you run its tab-menu actions as `/slash` commands. Only a turn's final message makes a sound.
 
 **The picture.**
 
 ```
-Agentmaster.exe  (one process per profile; runs the bot — D1, decided 2026-10-16)
- ├─ engine: registry · scanner · scheduler · observer · unread census      (exists)
- ├─ FleetLink (new): fleet events out · intents in · authorization · redaction · Fleet Control API
- ├─ Messaging hub (new): connections · outbox · topic map · pairing · action tokens · renderers
- └─ connectors (new, worker threads): Telegram · Teams Lite · Teams Bot · Webhook
-      ├─ child processes it starts: external connectors (JSON-RPC over stdio, §12) · cloudflared (§11.4)
-      ║  outbound HTTPS (+ a tunnel for the platforms that only push)
- Telegram Bot API · Azure Bot Service (Teams) · Workflows (Teams) · Slack · Discord · …
-claude.exe ×N ⇄ ConPTY ⇄ the same process (every reply goes through SubmitPrompt, §7.2)
+Agentmaster.exe  (one process per profile; runs the bot — D1)
+ ├─ engine: registry · scanner · scheduler · observer · unread census           (exists)
+ ├─ FleetLink (new): topic sync · transcript follower · intents · authorization · redaction
+ ├─ Messaging hub (new): connections · outbox + pacing · topic map · tokens · renderers
+ ├─ the Search agent (exists: SessionSearchAgent on the agent harness; Sonnet 5.5, high thinking)
+ ├─ connectors (new, worker threads): Telegram · Teams Lite · Teams Bot · Webhook
+ │    └─ child processes it starts: external connectors (JSON-RPC over stdio) · cloudflared (Teams)
+ └─ into each session: the session link (MOD_LINK.md: submit / command / abort, exact events),
+      else the typed path (SubmitPrompt, the draft swap)              ⇄ claude.exe ×N on their tabs
+
+Telegram, the bot's private chat (Threaded Mode):
+ 📌 🔎 Search                 ← the agent: find, wake, resume, fork; fleet commands
+    Agentmaster/feature        ← tab in window 1, Running      (topic = the whole session)
+    proxmox                    ← tab in window 2, Waiting for you
+    NumSharp/perf              ← tab in window 1, Needs approval (a question as buttons)
+    (idle tabs: no topic — Search wakes them)
 ```
 
-**Four facts shape the design (verified 2026-10-15/16):**
+**Four platform facts shape it (verified 2026-10-15/16):**
 
-1. **Telegram needs no public address, and its topics were made for this.** A bot reads its messages by
-   long polling (`getUpdates`). Since Bot API 9.3–9.5 (December 2025 – March 2026) a bot's private chat
-   can hold **topics** — Telegram's own pitch: "Topics in Private Chats keep separate projects or support
-   cases organized – improving on established web-based AI chat UIs" — and **stream a draft** with a
-   **stop button** (10.3, 2026-08-24). Only one reader may poll a bot, so Agentmaster needs a bot of its
-   own — not the homelab's `@balash_fastrun_bot`, and one each for the release and the dev install.
-2. **Telegram keeps a bot's incoming messages for 24 hours.** The bot lives inside Agentmaster, so it is
-   offline whenever Agentmaster is closed; a message sent meanwhile waits at Telegram and is handled at
-   the next start, under a backlog rule that never acts on an old message unasked (§4.3).
-3. **Teams has no two-way path without a public HTTPS endpoint.** A Teams bot receives through Azure Bot
-   Service, which POSTs every message to the bot's messaging endpoint. Microsoft's Teams API rules allow
-   an app to poll a chat **once a day**; a message you post to yourself (Graph's `48:notes` self chat)
-   never alerts your phone. One-way alerts need no endpoint: a **Workflows** webhook posts cards into a
-   chat (the Office 365 connectors were retired 18–22 May 2026).
-4. **Claude Code has its own remote features, and this plan is built around them, not over them.**
-   *Remote Control* puts ONE session into the Claude app and pushes its questions and permission prompts
-   — claude.ai logins only, so never for a preset session (OpenRouter, Kimi, …) or a Codex session.
-   *Channels* (a research preview) are MCP servers that push messages into ONE session; a custom channel
-   must start with a development flag that asks for a confirmation at every launch. Agentmaster's layer is
-   fleet-wide, built on Agentmaster's own session states, queue and lifecycle; version 1 uses neither,
-   and keeps the delivery into a session pluggable so channels can take it over later (§2.3).
+1. **Telegram needs no public address, and its private-chat topics were made for AI bots** ("Topics in
+   Private Chats keep separate projects or support cases organized – improving on established web-based
+   AI chat UIs", Bot Features). A bot reads its messages by long polling; since Bot API 9.3–9.5 its
+   private chat holds topics and streamed drafts. Only one reader may poll a bot: Agentmaster needs a bot
+   of its own (not the homelab's `@balash_fastrun_bot`), one per install.
+2. **The whole chat shares about one message per second** (all topics together, "in a single chat"), so
+   a live mirror of many busy sessions is paced: one work-log message per turn edited as the turn runs,
+   one final message, a pinned card per topic (§6.6).
+3. **Telegram keeps a bot's incoming messages 24 hours.** The bot lives inside Agentmaster, so it is
+   offline while Agentmaster is closed; messages sent meanwhile are handled at the next start under a
+   backlog rule (§4.3).
+4. **Claude Code's own remote features are per session** — Remote Control (the Claude app, claude.ai
+   logins only, never presets) and channels (a research preview whose custom channels ask for a
+   confirmation at every launch). Agentmaster's bot is fleet-wide and built on Agentmaster's own states,
+   queue and tabs (§2.2–§2.3). Teams has no two-way path without a public HTTPS endpoint (§3.2); it gets
+   alerts first.
 
-**The abstraction (§5).** A **provider** (Telegram, Teams Lite, Teams Bot, Webhook, External) declares
-what it can do (buttons, topics, edits, drafts, inputs inside a message, lengths, rates). A
-**connection** is one configured account and chat, with an owner, a permission level, an event set, a
-privacy level, an away rule and a routing filter. A **binding** ties a session to a place in that chat
-(a topic, a thread, a reply chain, a card, or an explicit `#3f9a`). Events out and intents in are
-provider-neutral; one pure renderer turns them into each provider's format, degrading gracefully
-(no buttons → numbered choices; no topics → reply chains; no edits → a new short message). Anything that
-can carry text can join: the built-in connectors run inside Agentmaster, every other platform is a small
-process Agentmaster starts, speaking a JSON-RPC contract over stdio (§12).
+**What a topic can and cannot carry** (§5–§7, §10.4): everything that is conversation or control — the
+card, every message type, queued prompts, Claude Code's recorded commands, the tab's actions, questions
+as buttons, the lifecycle. Not the terminal's screen-only parts (a text snapshot stands in), not
+keyboard-only actions, not a large busy fleet mirrored without pacing, and nothing while Agentmaster is
+closed.
 
-**Can a topic carry a whole session? (§10.2–§10.3)** Everything that is conversation or control: yes —
-the card (state, queue, runner, model, the unsent draft at the PC) with its buttons, every turn both ways
-(prompts from the PC, the queue and the phone; final replies; tool calls folded), questions and plan
-approvals as buttons, Claude Code's slash commands, and the whole lifecycle (start, rename, `/clear`,
-fork, close, resume). Not the terminal's screen-only parts (spinners, the TUI's own pickers, keyboard-only
-actions — a text snapshot and a few buttons stand in), not a big busy fleet mirrored line by line (one
-message per second for the whole chat), and nothing while Agentmaster is closed.
-
-**The recommended build order (§17):** P0 measurements → P1 Telegram alerts → P2 Telegram two-way with a
-topic per session → P3 questions, plans and stop → P4 Teams alerts (Workflows) + generic webhooks → P5
-Teams bot → P6 external connectors → P7 live view, digests, the concierge.
+**Build order (§17):** P0 measurements → P1 topics synced to tabs + the whole session at the default
+level + queued prompts → P2 questions as buttons, pin, the tab commands → P3 every message type
+configurable, backfill, the activity draft → P4 the Search agent and revive → P5 Teams alerts + webhooks
+→ P6 Teams bot → P7 external connectors.
 
 ## 1. Goals and non-goals
 
 **Goals**
 
-- **G1 — Know.** A session that needs you reaches your phone within seconds when you are away, and does
-  not when you are at the PC looking at it. Agentmaster's states decide (hooks + scanner + observer), not a
-  second copy of them.
-- **G2 — Act.** From the chat: reply, queue, answer, approve, stop, pause, resume, open, start — every
-  action through the same seams the app's own buttons use, with the same safety (the delivery gate, the
-  draft swap, the verified press, the runner's holds).
-- **G3 — Look.** The board, one session's card, its last turns, its screen, a search — on demand.
-- **G4 — Any messenger.** Telegram and Teams first; Slack, Discord, Matrix, Signal, WhatsApp, email,
-  ntfy and the rest through the same contract, built in or as a separate process.
-- **G5 — Safe.** Only the owner can drive. A stranger, a group member, a stale button, a replayed message
-  and a leaked secret are each handled by a rule (§9, §16). Managed sessions run with
-  `--dangerously-skip-permissions` by default: a remote prompt is remote code execution on this PC, and
-  the design treats it so.
-- **G6 — One place per session.** Each session has its own topic, named with the session's ONE title
-  (Rule #11), colored after its tab, able to carry the whole session (§10.2).
+- **G1 — Every working tab in the pocket.** Each tab of every window whose session is not idle has a
+  topic; the topic list IS the working fleet.
+- **G2 — The whole session.** A topic shows the session as it happens — prompts, replies, tool calls,
+  results, agents, questions, markers — each type on, off, default or verbose (§6.3).
+- **G3 — Act like at the PC.** A message is a prompt (queued, never a steer); a `/command` is either
+  Claude Code's or the tab menu's; a question is a set of buttons. Every action goes through the seams
+  the app's own buttons use (the delivery gate, the draft swap, the verified press, the runner's holds).
+- **G4 — Find and revive.** The 🔎 Search topic finds any Claude Code session and wakes, resumes or forks
+  it back into a tab — and so into a topic.
+- **G5 — Quiet unless done.** Everything is silent except a turn's final message.
+- **G6 — Safe.** Only the owner can act; stale buttons, old backlog messages, secrets and hostile input
+  are each handled by a rule (§9, §16). Managed sessions run with `--dangerously-skip-permissions`: a
+  remote prompt is remote code execution on this PC.
+- **G7 — Any messenger later.** The same model through a contract (§12); Teams first among the others.
 
 **Non-goals (version 1)**
 
-- **N1** Sharing a fleet with other people (roles, a team bot). One owner per connection; a group forum
-  works only as the owner's own room (§10.2).
-- **N2** Mirroring the terminal live (a screen stream). `screen` returns the visible text on demand; the
-  live view (P7) streams the conversation, not pixels.
-- **N3** Replacing Remote Control. A user on a claude.ai plan can keep it for in-session work; §2.2 says
-  what Agentmaster adds and the one setting it shares.
-- **N4** A cloud service run by us, or any always-on helper process. The bot runs inside Agentmaster; the
-  only optional third party is the user's own tunnel (§11.4).
-- **N5** Voice, photos and files from the phone into a session (P7, §7.7).
+- **N1** Codex and any non-Claude agent (D23); sessions that are not in a tab.
+- **N2** Sharing the fleet with other people (one owner per connection).
+- **N3** Mirroring the terminal's pixels; `/screen` sends its text.
+- **N4** Any always-on helper or cloud service: the bot runs in Agentmaster (D1).
+- **N5** Voice and files from the phone into a session (later, §7.6).
 
 ## 2. What exists already
 
@@ -117,88 +109,65 @@ Teams bot → P6 external connectors → P7 live view, digests, the concierge.
 
 | Need | Existing piece | Where |
 |---|---|---|
-| Notice a session left Running | Registry observers (`AddObserver`), the toast edge rules and holds (`ShouldHoldCompletionToast`, `DecideHeldToast`, `ShouldSuppressDuplicateToast`, `kNotifyExternalHoldCapMs` 30 s, `kNotifyDuplicateToastMs` 20 s) | `SessionRegistry.h`, `SessionScanner.h`; NOTIFICATIONS.md §3, §6 |
-| Know you have not looked | The process-wide unread census (`PublishWindowUnreadSessions`, the flash-ring set ∪ Mark Unread) | `Engine.h`; NOTIFICATIONS.md §8 |
-| Say what just finished | `LastDeliveredPrompt` + `PromptPreviewLine` (the toast's line 3); the turns renderer for replies and tool calls | `SessionModels.h`, `TranscriptTurns.{h,cpp}` |
-| Follow a conversation as it grows | The scanner's transcript tail (`ParseTranscriptDelta`: prompts, assistant text, tool uses, command echoes, compaction boundaries) | `SessionScanner.{h,cpp}` |
-| Send a prompt safely | `SessionRegistry::SubmitPrompt` — the ONE send seam: delivery gate, draft swap, verified placement, Enter-retry, lost-send verdict, invisible-character sanitize | DELIVERY.md, PENDING_INPUT.md §9 |
-| Queue and run | The Prompt Queue + `Scheduler::DecideAdvance` (dormant gate, settle hold, question guard, global pause, interrupt hold) | DELIVERY.md §14–§17 |
-| Read the box or a menu | `ControlCore::ReadPendingInputDraft`, `IsMenuOptionCaret`, `pendingBoxState` (`MenuOpen`), the remembered draft `SessionInfo::pendingInput` | PENDING_INPUT.md §2, §5, §12 |
-| Act in the window that hosts a tab | Per-window sinks: activate, activate-all-dormant, restart, close, deactivate, command-action | `Engine.h` |
-| Long-lived engine threads | `SessionDbRefresher` (a plain-C++ thread started from `SharedEngine`), the scheduler's and the observer's workers | `Engine.cpp` |
-| Keep a secret | Windows Credential Manager (`ReadPresetProviderKey` / `WritePresetProviderKey` / `DeletePresetProviderKey`) | `LaunchPresetsOs.h` |
-| Talk HTTPS | WinHTTP with bounded timeouts (`HttpsGet` — GET only today; already linked into `TerminalApp.dll` for the cog's update check) | `Updater.h` |
-| Parse JSON | nlohmann-json (vcpkg, `terminal` feature), `Json.h` | |
-| A child process that dies with the app | The agent harness's kill-on-close job | `ClaudeSdkProcessWin32.cpp` |
-| Read verbs | The CLI's `show` / `sessions` readers; the session database's `search` | CLI.md, SESSIONS_DB.md |
-| A hosted model | The agent harness (`HarnessConversation`) | SDK_HARNESS.md |
-| Routing keys | Bookmark tags, favorites, `EffectiveWorkingDir` | `SessionStore.h`, `Persistence.h` |
-| Logs and failures | `AppendStateLog`, `[nav]`, Rule #18 (`LogSwallowedException`) | CLAUDE.md |
+| Which tabs exist, in which window, with which session | `_claudeTabs` per window, the registry's live sessions with their tab tokens (`LiveTabBindings`) | `TerminalPage.h`, `SessionRegistry.h` |
+| Idle, and the decay to it | The state machine; `ShouldDecayWaitingToIdle` (an unread or Mark-Unread session never decays); `waitingForYouTimeoutMinutes` | `SessionScanner.h`, `SessionModels.h` |
+| Wake an idle session | The tab menu's and board's **Move to Waiting-for-you** (and **Move to Idle/Done**) | `Tab.cpp` `_triageMoveMenuItem`, the board |
+| Follow the conversation as it grows | The scanner's transcript tail (`ParseTranscriptDelta`); the turns renderer and its five levels (`TranscriptTurns`, the Copy ▸ Transcript levels) | `SessionScanner.{h,cpp}`, `TranscriptTurns.{h,cpp}` |
+| Send a prompt safely | `SessionRegistry::SubmitPrompt` — the one send seam: delivery gate, draft swap, verified placement, Enter-retry, lost-send verdict, invisible-character sanitize | DELIVERY.md, PENDING_INPUT.md §9 |
+| Queue and run | The Prompt Queue + `Scheduler::DecideAdvance` (dormant gate, settle hold, question guard with `kAnswersQuestionOk`, global pause, interrupt hold) | DELIVERY.md §14–§17 |
+| Read the box or a menu | `ControlCore::ReadPendingInputDraft`, `IsMenuOptionCaret`, `pendingBoxState`, the remembered draft `pendingInput` | PENDING_INPUT.md |
+| The tab's right-click actions | The tab menu (Rename, Change tab color, Copy ▸, Mark Unread, Move to Waiting-for-you / Idle, Favorite, Tags, Activate, Fork session ▸, New Session Here ▸, Restart session, Deactivate ▸, Close ▸, …) and the per-window sinks that reach the hosting window | `Tab.cpp`, `Engine.h` |
+| Search every session | `SessionSearchAgent` on the agent harness (the Sessions page's AI search; thinking levels off → max) and, when On, the session database's tools | SESSIONS.md §9, SDK_HARNESS.md, SESSIONS_DB.md |
+| Resume, fork, start | `_RestoreArchivedSession`, `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`, `_ForkManagedSessionById`, the launch seam | `TerminalPage.AgentSessions.cpp` |
+| Durable per-session flags | `SessionStore` (the `favorite`, `tags` keys) | `SessionStore.h` |
+| Secrets, HTTPS, JSON | Credential Manager helpers (`LaunchPresetsOs.h`), WinHTTP (`Updater.h` `HttpsGet`, already in `TerminalApp.dll`), nlohmann-json | |
+| Child processes that die with the app | The agent harness's kill-on-close job | `ClaudeSdkProcessWin32.cpp` |
+| Logs and failures | `AppendStateLog`, `[nav]`, Rule #18 | CLAUDE.md |
 
 ### 2.2 In Claude Code: Remote Control (verified 2026-10-15)
 
-- **What it is:** `claude remote-control` (a server for many sessions), `claude --remote-control` or
-  `/remote-control` connect a LOCAL session to claude.ai/code and the Claude iOS / Android app. Work runs
-  on the PC; the phone is a window into it. `remoteControlAtStartup: true` in the user's settings connects
-  every interactive session; "each interactive Claude Code process registers one remote session".
-- **Pushes:** "Push when actions required" (permission prompts and questions) and "Push when Claude
-  decides". Skipped while you type in or focus the connected terminal; `CLAUDE_CLIENT_PRESENCE_FILE`
-  names a marker file — "notifications are skipped while the file exists".
-- **Limits that matter here:** Pro / Max / Team / Enterprise, no API keys; unavailable when
-  `ANTHROPIC_BASE_URL` points anywhere but `api.anthropic.com` (so never for an Agentmaster PRESET
-  session, HARNESSES.md) and never for Codex; while connected, the session transcript is stored on
-  Anthropic's servers.
-- **What it does not do:** fleet triage (sessions are separate entries), Agentmaster's states (a lost
-  send, a paused runner, a cut-off turn), the Prompt Queue and runner, Agentmaster's lifecycle (resume a
-  closed session into a tab, start one in a folder), and any messenger but the Claude app.
-- **What Agentmaster can share with it at almost no cost (D17):** own the presence file. Agentmaster's
-  away detector (§6.3) knows when the user is at the PC; launching managed sessions with
-  `CLAUDE_CLIENT_PRESENCE_FILE=<profile>\messaging\present.marker` lets Remote Control's own pushes follow
-  the same rule.
+`claude --remote-control` or `/remote-control` connects ONE local session to claude.ai/code and the
+Claude app ("each interactive Claude Code process registers one remote session"); pushes for questions
+and permission prompts; skipped while a `CLAUDE_CLIENT_PRESENCE_FILE` marker exists. Claude.ai plans
+only, and only when `ANTHROPIC_BASE_URL` is `api.anthropic.com` — never for an Agentmaster preset session.
+It has no fleet view, no Agentmaster states, no queue, no tabs. Agentmaster can keep the presence file
+in step with the user at the PC (D17).
 
 ### 2.3 In Claude Code: channels (verified 2026-10-15)
 
-- **What a channel is:** an MCP server that claude spawns over stdio. It declares
-  `capabilities.experimental['claude/channel']` and emits `notifications/claude/channel` with `content`
-  and `meta`; the model sees `<channel source="…" …>content</channel>`. "Events queue into the session and
-  are processed in order"; while claude is busy they are "delivered together on the next turn". There is
-  no acknowledgement. A two-way channel exposes a reply tool; the terminal shows the tool call, the text
-  goes to the other platform.
-- **Permission relay:** a channel that also declares `claude/channel/permission` receives
-  `notifications/claude/channel/permission_request` (`request_id` of five letters, `tool_name`,
-  `description`, `input_preview`) and answers `notifications/claude/channel/permission`
-  (`request_id`, `behavior: allow|deny`). Only tool approvals relay; trust and MCP-consent dialogs do not.
-- **Research-preview limits:** `--channels` accepts only plugins on Anthropic's allowlist (or an
-  organization's `allowedChannelPlugins`); a custom channel needs
-  `--dangerously-load-development-channels server:<name>`, which runs only in an interactive session
-  "where Claude Code can show the confirmation prompt", and is ignored under `-p` and the Agent SDK.
-  claude.ai or Console authentication only.
-- **Why version 1 does not deliver through channels:** (1) the development flag's confirmation would be
-  an unanswerable startup modal in every managed launch (the Gotcha "An unanswerable startup modal is
-  invisible-by-design"); (2) a channel event is not a user prompt — whether it fires `UserPromptSubmit`,
-  how the transcript records it and how Agentmaster's state machine and queue see it are unmeasured;
-  (3) preset sessions are excluded by the authentication rule.
-- **Why the door stays open (D16):** a channel would deliver a remote message without touching the input
-  box (no draft swap, no eaten Enter) and would relay permission prompts natively. FleetLink therefore
-  keeps the delivery into a session behind one interface (`DeliveryRoute`: `Keystrokes` today, `Channel`
-  later), decided per session.
+An MCP server that claude spawns, pushing `notifications/claude/channel` events into ONE session ("events
+queue into the session and are processed in order"), optionally relaying tool-permission prompts. Research
+preview: custom channels need `--dangerously-load-development-channels`, which asks for a confirmation at
+start — an unanswerable modal in a managed launch. Not used: the session link (§2.4) is the in-session
+route this design uses instead (D16).
 
-### 2.4 Prior art (seen 2026-10-15/16)
+### 2.4 The session link (MOD_LINK.md, designed 2026-10-16 — nothing built)
 
-- **Telegram designed private-chat topics for AI bots.** The Bot Features page: "Topics in Private Chats
-  keep separate projects or support cases organized – improving on established web-based AI chat UIs";
-  the October 2025 announcement: bots "support threaded conversations to manage several different topics
-  in parallel", "especially useful for AI chatbots".
-- **One topic per agent session** is already the pattern of other agent frameworks (OpenClaw, Hermes
-  Agent: "each topic becomes an isolated workspace with its own conversation history"), whose
-  documentation names the BotFather switch (§10.1).
-- **OpenClaw's Teams connector** has issues that report Teams streaming failures (a final chunk rejected
-  and the answer delivered twice; messages lost around tool calls) — one more reason this design updates
-  Teams by editing a message instead of streaming (§11.7).
-- **matterbridge** bridges ~20 platforms behind a REST API, but the original has had no release since
-  v1.26.0 (2023-01-29) and its community fork has published none: not a dependency.
-- **Apprise** (outbound notifications to many services) can be wrapped as an external connector for
-  alert-only platforms (not re-checked).
+A mod, `agentmaster-link`, loaded into every session Agentmaster launches, reporting the session's own
+events to Agentmaster and acting through Claude Code's API ([`MOD_LINK.md`](MOD_LINK.md)). For this
+design it is the better route into a session, wherever a session has it:
+
+| This design needs | Through the link | Without it (typed path) |
+|---|---|---|
+| A queued prompt, never a steer (D8) | `submit` → `$.prompt.submit({text, asUser: true})`, which "starts a turn of its own after the running turn and its Stop hooks" — D8 by construction; an `ack` when the turn starts | Prompt Queue + `SubmitPrompt` (delivery gate, draft swap, Enter rescue) |
+| Claude Code's slash commands | `command` → `$.command.run` | typed like a prompt |
+| `/interrupt` | `abort` → `$.turn.abort` | one Esc through the hosting window |
+| What it is doing, and the turn's end (the final message) | exact `turn.start` / `turn.complete {reason}` / background work / `session.compact` events | the scanner's states and the transcript tail |
+| Questions and plans | `tool.call` on `AskUserQuestion` / `ExitPlanMode`, carrying the questions | the transcript's pending `tool_use` + the screen's menu |
+| The settle before a queued send | 3 s (linked states do not flap) | 40 s |
+
+The transcript stays the record either way (MOD_LINK §13), so a topic's mirror always follows the
+transcript; the link changes how fast and how exactly the topic learns the state, and how a message gets in.
+A prompt with an image keeps the typed path (a plugin's submit carries text only).
+
+### 2.5 Prior art (seen 2026-10-15/16)
+
+- Telegram's own pitch for private-chat topics and streamed replies to AI bots (Bot Features; the
+  October 2025 announcement: "especially useful for AI chatbots").
+- Agent frameworks that map one topic to one session (OpenClaw; Hermes Agent: "each topic becomes an
+  isolated workspace with its own conversation history").
+- OpenClaw's Teams connector issues about Teams streaming (a reason to edit, not stream, on Teams).
+- matterbridge (unmaintained since v1.26.0, 2023-01-29: not a dependency); Apprise (alerts, not re-checked).
 
 ## 3. The platforms
 
@@ -206,518 +175,513 @@ Teams bot → P6 external connectors → P7 live view, digests, the concierge.
 
 | Fact | Detail | Use here |
 |---|---|---|
-| Receiving | `getUpdates` long polling: `timeout` seconds, `offset` confirms everything below it, `limit` 1–100, `allowed_updates`; "will not work if an outgoing webhook is set up" | The poll loop (§10.4) |
-| Retention | "Incoming updates are stored on the server until the bot receives them either way, but they will not be kept longer than 24 hours" | The backlog rule (§4.3) |
-| One poller per bot | A second concurrent `getUpdates` gets `409 Conflict: terminated by other getUpdates request` (known behavior; not on the API page) | One bot per install, a per-token lock (§10.4) |
-| Topics in a private chat | 9.3 (2025-12-31): `has_topics_enabled` in `getMe`, `message_thread_id` and `is_topic_message` for private chats; 9.4 (2026-02-09): `createForumTopic` in private chats, `allows_users_to_create_topics` | One topic per session (§10.2) |
-| Turning topics on | BotFather **Mini App** → My bots → the bot → Bot Settings → Threads Settings → **Threaded Mode** (third-party docs; the classic `/mybots` menu does not have it); when off, `createForumTopic` fails "the chat is not a forum" | The setup check (§10.1) |
-| How clients start topics | In Threaded Mode, a non-reply message sent from the chat's main view starts a NEW topic by itself, with an implicit name: `ForumTopicCreated.is_name_implicit` — "likely needs to be changed by the bot" (iOS client; a request to send to the main thread instead, Telegram-iOS #2236, was closed as completed 2026-07-17 — what shipped is P0-11) | A new topic = a new session (§10.2) |
-| Topic fields and verbs | Name 1–128 characters; `icon_color` one of six (0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F); `editForumTopic` (name, icon emoji; a `forum_topic_edited` service message type exists — whether it shows in a private chat is P0-12), `deleteForumTopic` ("along with all its messages") and `unpinAllForumTopicMessages` work in private chats; `closeForumTopic` / `reopenForumTopic` are for supergroups | Topic name = the session title; color = the nearest of the six to the tab color |
-| What a bot cannot see | No method lists a chat's topics (the only topic getter is `getForumTopicIconStickers`); no update reports a deleted topic | Agentmaster keeps the topic map itself (§10.3) |
-| Pins | In private chats "all non-service messages can be pinned"; each topic has its own pinned messages | The session card (§10.2), the board (§6.5) |
-| Drafts | `sendMessageDraft` (9.3; every bot since 9.5, 2026-03-01): private chats only, `message_thread_id`, `draft_id`, text 0–4,096 ("empty = Thinking…"), "an ephemeral 30-second preview", finalize with `sendMessage`; 10.3: `can_stop`, `keep_on_stop`, the `stopped_message_generation` update | The live view (§6.7), stop (§7.4) |
-| Rich messages | 10.1 (2026-06-11): `sendRichMessage` / `sendRichMessageDraft` with blocks (tables, details, lists, preformatted, a `tg-thinking` placeholder); 10.3: buttons inside rich messages, expandable quotations, document blocks | Plans, long replies, folded tool calls, later |
-| Buttons | `callback_data` 1–64 bytes; `style` `danger` / `success` / `primary` (9.4); copy-text buttons (7.11); disabled buttons (10.3) | Action tokens (§5.7) |
-| Text | `sendMessage` 1–4,096 characters after entity parsing; HTML mode escapes only `<` `>` `&` (and `&quot;`); `pre` + `code class="language-…"`, `blockquote expandable`, `tg-time unix=… format=…` | The renderer (§10.5) |
-| Files | Upload 50 MB (photos 10 MB); download 20 MB | Transcripts as `.md` documents |
-| Deleting | "Bots can delete incoming messages in private chats", within 48 hours | Deleting a typed PIN (§9.3) |
-| Limits (Bots FAQ) | "In a single chat, avoid sending more than one message per second" (short bursts, then 429) — ALL topics of the private chat share it; 20 per minute in a group; ~30 per second overall; a 429 carries `retry_after` | The outbox's pacing (§6.4, §10.3) |
-| Privacy | Bot chats are cloud chats: Telegram's servers see the content (Telegram's design) | §9.6 |
+| Receiving | `getUpdates` long polling (`timeout`, `offset`, `allowed_updates`); not while a webhook is set | §10.2 |
+| Retention | "Incoming updates are stored on the server until the bot receives them … not kept longer than 24 hours" | The backlog rule (§4.3) |
+| One poller per bot | A second concurrent `getUpdates` gets `409 Conflict` (known behavior; not on the API page) | A bot per install, a per-token lock |
+| Topics in a private chat | 9.3: `has_topics_enabled`, `message_thread_id` / `is_topic_message` for private chats; 9.4: `createForumTopic` in private chats, `allows_users_to_create_topics`; turned on in the BotFather Mini App → Threaded Mode (third-party docs) | The topics (§5) |
+| How clients start topics | In Threaded Mode a non-reply message from the main view starts a new topic by itself, with an implicit name the bot should replace (`is_name_implicit`; Telegram-iOS #2236) | §5.1 |
+| Topic verbs | Name 1–128; `icon_color` one of six, set ONLY at creation; `editForumTopic` (name, icon emoji); `deleteForumTopic` ("along with all its messages"); per-topic pins (`unpinAllForumTopicMessages`); no close in private chats (supergroups only) | §5.2, §10.4 |
+| What a bot cannot see | No method lists topics; no update for a deleted topic | Agentmaster's topic map (§4.4) |
+| Drafts | `sendMessageDraft` (private chats, `message_thread_id`), "an ephemeral 30-second preview", `can_stop` (10.3) | The activity draft (§6.2) |
+| Chat actions | `sendChatAction` (typing…) in a private-chat topic; lasts "5 seconds or less" | §6.2 |
+| Buttons | `callback_data` 1–64 bytes; `style` danger/success/primary; copy-text buttons (1–256 characters) | Tokens (§7.5), copy actions (§7.3) |
+| Reactions | `setMessageReaction`: "as non-premium users, bots can set up to one reaction per message"; allowed emoji include ✍ 👀 👨‍💻 👍 👎 | The status of a queued message (§7.1) |
+| Text | 1–4,096 characters; HTML with `pre`/`code`, `blockquote expandable`, `tg-time` | §10.4 |
+| Rich messages | 10.1+: `sendRichMessage` with tables, details, lists | Plans and long replies, later |
+| Checklists | `sendChecklist` is "on behalf of a connected business account" only | Claude's to-do list as a text checklist |
+| Files | Upload 50 MB (photos 10 MB); download 20 MB | Transcripts, diffs, outputs as files |
+| Deleting | Bots may delete their own and the user's messages in a private chat within 48 h | The PIN message (§9.3) |
+| Limits (Bots FAQ) | "In a single chat, avoid sending more than one message per second" (bursts, then 429 with `retry_after`); 20 per minute in a group; ~30 per second overall | §6.6 |
+| Privacy | Bot chats are cloud chats (Telegram's design) | §9.6 |
 
 ### 3.2 Microsoft Teams
 
-| Fact | Detail | Use here |
-|---|---|---|
-| Bot SDKs | The Bot Framework SDK went out of support 2025-12-31 and was archived 2026-01-05; the successors are the Microsoft 365 Agents SDK and the **Teams SDK** (2.1, 2026-09-28) | Agentmaster talks the REST protocol itself (§11.5–§11.6); no SDK needed |
-| How a bot receives | Teams → Azure Bot Service → `POST https://<public host>/api/messages`, a JWT in `Authorization`; "the endpoint must be publicly reachable" | §11.4 |
-| New bot registrations | Single-tenant or user-assigned managed identity since 2025-07-31; multi-tenant creation is deprecated | A single-tenant bot in the user's own tenant |
-| Who can use a custom bot | Work or school tenants only; the user needs **Upload custom apps** (an admin policy); since 2024-01-31 a bot must be part of a Teams app | The tenant check (§19, D11) |
-| Polling | "Your app can poll a resource to see whether it has changed only once per day"; real-time = change notifications (a webhook again) | No Graph-polling design |
-| Messages to yourself | Graph `POST /chats/48:notes/messages` (undocumented id, delegated `ChatMessage.Send`) posts as YOU — no alert; personal Microsoft accounts not supported; "It is a violation of the terms of use to use Microsoft Teams as a log file. Only send messages that people will read." | Rejected; the volume rule applies to every route |
-| One-way alerts | **Workflows** ("When a Teams webhook request is received" → post a card to a chat or channel); appears as the Workflows bot; Adaptive Cards; buttons only with workflow plumbing. Office 365 connectors retired 2026-05-18…22 (MC1181996) | Teams Lite (§11.2) |
-| Rate limits per bot per conversation | 7 / 1 s, 8 / 2 s, 60 / 30 s, 1,800 / 3,600 s for sends; 50 requests per second per app per tenant | The outbox's pacing |
-| Message size | ~100 KB counted in UTF-16, keep ≤ 80 KB; 413 `MessageSizeTooBig` | The renderer's budget |
-| Streaming | 1:1 chats only; ≤ 1 request per second; each chunk repeats all previous text; a stream lives 2 minutes (then 403 `ContentStreamNotAllowed`); edits have no time limit | The live view edits a message instead (§11.7) |
+| Fact | Detail |
+|---|---|
+| Bot SDKs | Bot Framework SDK out of support 2025-12-31, archived 2026-01-05; successors: Microsoft 365 Agents SDK, Teams SDK 2.1 (2026-09-28) — the REST protocol is enough here |
+| How a bot receives | Teams → Azure Bot Service → `POST https://<public host>/api/messages`; "the endpoint must be publicly reachable" |
+| Registration | Single-tenant (multi-tenant creation deprecated 2025-07-31); work or school tenants only; **Upload custom apps** needed; a bot must be part of a Teams app |
+| Polling | Graph: "poll a resource … only once per day" |
+| Messages to yourself | `48:notes` posts as you — no alert; "Teams as a log file" breaks the terms |
+| One-way alerts | Workflows webhooks (Office 365 connectors retired 2026-05-18…22, MC1181996) |
+| Limits | 7 / 1 s, 60 / 30 s, 1,800 / h per conversation; 50 RPS per app per tenant; ~100 KB per message; streaming 1:1 only, 2 minutes per stream |
+| Threads | A 1:1 chat has none; a Team channel has a thread per post (the topic model's equivalent, §11) |
 
-### 3.3 Everything else: the transport rule
+### 3.3 Other platforms: dial-out or push-in
 
-A platform where the program **dials out** (long poll, WebSocket, pull) works from a PC behind NAT with
-nothing else. A platform that only **pushes in** (webhooks) needs a public endpoint (§11.4). Outbound-only
-platforms are alert channels.
-
-| Platform | Inbound | Outbound | Notes | Checked |
-|---|---|---|---|---|
-| Telegram | dial-out (`getUpdates`) | Bot API | topics, drafts, buttons | 2026-10-15 |
-| Teams Bot | push-in (Bot Service) | Bot Connector REST | needs tenant permission + endpoint | 2026-10-15 |
-| Teams Lite | none | Workflows webhook | alerts only | 2026-10-15 |
-| Slack | dial-out (Socket Mode: `apps.connections.open` → WebSocket, ack in 3 s, ≤ 10 sockets) | Web API (`xoxb-`) | Socket Mode apps cannot be in the Marketplace | 2026-10-15 |
-| Discord | dial-out (Gateway WebSocket) | REST | Message Content is a privileged intent (a toggle under 100 servers) | 2026-10-15 |
-| Matrix | dial-out (`/sync` long poll) | client-server API | bridges reach WhatsApp / Signal / others | from memory |
-| Signal | dial-out (signal-cli JSON-RPC daemon, local) | signal-cli | unofficial; a phone number or a linked device | from memory |
-| WhatsApp (Cloud API) | push-in (webhooks) | Graph API | business account; template rules outside the 24 h window | from memory |
-| Google Chat | dial-out possible (Cloud Pub/Sub pull) | Chat API | Workspace accounts | from memory |
-| Email | dial-out (IMAP IDLE) | SMTP | universal; replies by mail | from memory |
-| ntfy / Gotify | dial-out (subscribe stream) | HTTP POST | self-hostable; simple actions | from memory |
-| Pushover, Discord / Slack incoming webhooks | none | HTTP POST | alerts only | from memory |
+| Platform | Inbound | Threads | Checked |
+|---|---|---|---|
+| Slack | dial-out (Socket Mode WebSocket, ack in 3 s, ≤ 10 sockets) | message threads | 2026-10-15 |
+| Discord | dial-out (Gateway; Message Content intent) | threads, forum channels | 2026-10-15 |
+| Matrix | dial-out (`/sync`) | threads | from memory |
+| Signal | dial-out (signal-cli JSON-RPC, local) | none | from memory |
+| WhatsApp Cloud API | push-in (webhooks) | none | from memory |
+| Google Chat | dial-out possible (Pub/Sub pull) | threads | from memory |
+| Email | dial-out (IMAP IDLE) | conversations | from memory |
+| ntfy, Gotify, Pushover, incoming webhooks | none / subscribe | none | from memory |
 
 ## 4. Architecture: the bot runs inside Agentmaster
 
 ### 4.1 The parts
 
-All of it lives in the running Agentmaster process — one bot set per process, shared by every window,
-like the registry (Rule #10):
+All in the running Agentmaster process — one set per process, shared by every window (Rule #10):
 
-- **FleetLink** (engine, plain C++, one worker thread): watches the registry and the unread census,
-  decides which fleet events to send and when (§6), executes inbound intents through the **Fleet Control
-  API** (§8), redacts every text before it leaves (§9.6) and authorizes every intent against the
-  connection's level (§9.3). Started from `SharedEngine` like `SessionDbRefresher`.
-- **The messaging hub** (engine, plain C++, one worker thread): the connections, the persistent outbox and
-  its pacing, the topic map (session ↔ topic, message ids for edits), pairing, action tokens and the
-  renderers. It talks to FleetLink through in-process queues; it never touches a session.
-- **Connectors** (worker threads): Telegram (a long-poll thread per connection), Teams Lite and Webhook
-  (senders), Teams Bot (a loopback listener thread + a sender). They only move bytes and authenticate
-  senders; the hub keeps every rule.
-- **Child processes Agentmaster starts** (in a kill-on-close job, so they end with it): an external
-  connector per configured external connection (§12.2), and `cloudflared` when the Teams bot uses the
-  tunnel (§11.4). The bot itself — its logic, rules and state — stays in Agentmaster.
-- **UI-hosted actions** (answer a menu, read a screen, open a tab) go to the ONE window that hosts the
-  session through per-window sinks (§8.2).
+- **FleetLink** (engine, plain C++, one worker thread): keeps the topic set equal to the qualifying tabs
+  (§5), follows each listed session's transcript and Agentmaster events into typed items (§6), executes
+  inbound intents through the Fleet Control API (§8), redacts every text (§9.6) and authorizes every
+  intent (§9.3). Started from `SharedEngine`, like `SessionDbRefresher`.
+- **The messaging hub** (engine, one worker thread): the connections, the persistent outbox and its
+  pacing (§6.6), the topic map, pairing, action tokens, the renderers.
+- **The Search agent**: a `SessionSearchAgent` conversation on the agent harness (§5.4).
+- **Connectors** (worker threads): Telegram (a long poll per connection), Teams Lite, Webhook, Teams Bot
+  (a loopback listener). They move bytes and authenticate senders; the hub keeps every rule.
+- **Child processes** it starts in a kill-on-close job: external connectors (§12.2) and `cloudflared`
+  for the Teams bot (§11.4).
+- **UI-hosted actions** (answer a menu, read a screen, open a tab, the tab's actions) go to the ONE
+  window that hosts the session through per-window sinks (§8.2).
 
-### 4.2 Why inside Agentmaster (D1, decided by the user 2026-10-16) — and what replaces a process boundary
+### 4.2 Why inside Agentmaster (D1) — and what replaces a process boundary
 
-**What it gains:** no second program to install, start, version or keep alive; no pipe protocol; nothing
-copied into the profile; nothing that can block a hot swap; FleetLink reaches the registry, the
-scheduler and the sinks directly.
-
-**What it costs, and the answer to each:**
+The user's decision (2026-10-16). It gains: no second program, no pipe protocol, nothing that can block a
+hot swap, direct reach of the registry, scheduler and sinks. It costs, with the answers:
 
 | Cost | Answer |
 |---|---|
-| The bot is offline whenever Agentmaster is closed | Telegram keeps incoming messages 24 h; Agentmaster handles them at its next start under the backlog rule (§4.3). A Teams message sent while it is closed fails in Teams ("the bot is not responding") |
-| No crash alert from outside the process | At the next start: "the previous run ended unexpectedly at <time>" (a dirty-run marker, §4.3) |
-| No "start Agentmaster from the phone" | Dropped (it needs something running while Agentmaster is not) |
-| Internet input is parsed in the process that can type into every session (sessions run with skip-permissions) | The hardening rules H1–H6 below |
+| Offline while Agentmaster is closed | Telegram keeps updates 24 h → the backlog rule at the next start (§4.3); a Teams message fails in Teams |
+| No crash alert from outside | `app.restarted` at the next start, from a dirty-run marker (§4.3) |
+| Internet input parsed in the process that types into every session | Hardening H1–H6 |
 
-**H1 — Never on the UI thread, never escaping a thread.** Every connector runs on worker threads; no UI
-thread ever waits on the network. Every thread body and every callback is wrapped (Rule #18): an
-exception that escapes a `std::thread` ends the whole process.
-
-**H2 — Bounded input.** Response and request bodies are capped before parsing (Telegram ≤ 2 MB per
-`getUpdates` answer, Teams ≤ 256 KB per request, an external connector's line ≤ 1 MB); JSON nesting is
-capped; every string is length-capped before use.
-
-**H3 — The sender first.** An update from anyone but the paired owner is dropped after reading only its
-sender id — the rest of the code never sees a stranger's message (M2).
-
-**H4 — The Teams listener.** Loopback only, `POST` only, the JWT verified before the body is parsed: an
-unauthenticated request reaches only the header reader and the signature check.
-
-**H5 — A circuit breaker.** A connector that throws, or fails N times in M minutes, is stopped and
-reported in the cog and hooks.log — never crash-looped.
-
-**H6 — Plugins out of process.** An external connector is a child process: a buggy or hostile plugin can
-reach the hub only through validated JSON-RPC lines, never Agentmaster's memory.
-
-(Considered and set aside by the user: a separate per-profile service, `agentmaster-messaging.exe`, the
-2026-10-15 draft's recommendation.)
+- **H1** Network work only on worker threads; every thread body and callback wrapped (Rule #18) — an
+  exception escaping a `std::thread` ends the process.
+- **H2** Bodies capped before parsing (Telegram ≤ 2 MB per `getUpdates` answer, Teams ≤ 256 KB per
+  request, an external connector's line ≤ 1 MB); JSON nesting capped; strings capped before use.
+- **H3** The sender first: an update from anyone but the paired owner is dropped after reading only its
+  sender id.
+- **H4** The Teams listener: loopback only, `POST` only, the JWT verified before the body is parsed.
+- **H5** A circuit breaker: a connector that throws or keeps failing is stopped and reported.
+- **H6** Plugins out of process: external connectors are child processes speaking validated JSON-RPC.
 
 ### 4.3 Lifetime
 
-- **Start.** After the registry has loaded (engine init), when messaging is on: read the connections and
-  their secrets, start the connectors. Telegram: `getMe` (the bot, Threaded Mode), then the BACKLOG
-  (everything Telegram kept while Agentmaster was closed), then the long poll.
-- **The backlog rule (D2).** An update older than 10 minutes when it is processed:
-  - read verbs (`board`, `show`, …) → answered;
-  - a reply or a queue verb → "This message is 3 h old — send it to *Agentmaster/feature* now?"
-    [Send] [Queue] [Drop];
-  - an answer to a question → checked against the CURRENT menu (§5.7), so a stale one is refused;
-  - Operate verbs (stop, close, restart, …) → never executed; the bot asks again.
-- **Clean exit.** The outbox is flushed (at most 2 s), the optional `app.closed` event is sent, the
-  connectors and child processes stop, the dirty-run marker is removed.
-- **Crash, kill or hot swap.** The marker (`messaging\run.marker`, rewritten every 60 s with a heartbeat
-  time and the app version) stays behind; at the next start the `app.restarted` event says "the previous
-  run ended unexpectedly at <heartbeat>", or "updated to <version>" when the version changed (a swap stops
-  the GUI by force).
-- **Sleep and network loss.** Long polls time out; reconnect with backoff (1, 2, 4 … 60 s, jitter); on
-  resume from sleep, poll at once. Events queued meanwhile are revalidated before sending (§6.2).
-- **Two installs.** The release and the dev process each run their own bots (D13).
+- **Start.** After the registry has loaded: read the connections and their secrets; start the
+  connectors; Telegram `getMe` (Threaded Mode on?), the BACKLOG, then the long poll; then the **topic
+  sync** (§5.2): topics of tabs that no longer qualify are deleted, missing ones created.
+- **The backlog rule (D2).** An update older than 10 minutes when processed: read commands are answered;
+  a message for a session is NOT queued silently — "This message is 3 h old — queue it for
+  *Agentmaster/feature*?" [Queue] [Drop]; a button press is checked against the current state (§7.5);
+  Operate commands never run — the bot asks again.
+- **Clean exit.** Flush the outbox (at most 2 s); post "Agentmaster closed — the bot is offline until it
+  starts again" in 🔎 Search (optional, off by default); stop the connectors and children; remove the
+  dirty-run marker.
+- **Crash, kill, hot swap.** The marker (`messaging\run.marker`, rewritten every 60 s with the time and
+  the version) stays; at the next start 🔎 Search gets "the previous run ended unexpectedly at <time>",
+  or "updated to <version>" when the version changed.
+- **Sleep, network loss.** Backoff 1, 2, 4 … 60 s with jitter; poll at once on resume.
+- **Two installs.** Release and dev each run their own bot (D13).
 
 ### 4.4 Files (all under the active profile, Rule #15)
 
 | File | What |
 |---|---|
-| `messaging\connections.json` | The connections: provider, name, non-secret settings, owner identity, level, events, privacy, mirror level, away rule, routing, quiet hours. Edited by the cog; read by FleetLink (authorization) and the hub. |
-| `messaging\<connectionId>\state.json` | Provider state: Telegram's update offset, the topic map (session → `message_thread_id`, card message id), the Fleet topic and board message ids; Teams' conversation reference. Written atomically: the Bot API cannot list topics, so this map is the only record of them. |
-| `messaging\<connectionId>\outbox.jsonl` | Events not yet delivered (compacted on start). |
-| `messaging\tokens.json` | Live action tokens (id → intent, expiry, single-use flag), at most a few hundred, expired ones dropped on load. |
-| `messaging\run.marker` | The dirty-run marker (§4.3). |
-| `messaging\present.marker` | Exists while the user is present (§6.3), for Remote Control (D17). |
-| `messaging\status.json` | Written every 30 s: per connection state, last delivery, last error; read by the cog's status line and a future `agentmaster msg status`. |
-| `messaging\messaging.log` | The connectors' transport log (§14). |
-| Windows Credential Manager | Every secret: `Agentmaster:messaging:<profile hash>:<connectionId>:<name>` (bot token, webhook URL, app secret, tunnel token, PIN hash). Per profile ON PURPOSE, unlike the preset keys: two installs must never share one bot. |
+| `messaging\connections.json` | The connections and their policy (level, message types, idle grace, backfill, routing, quiet hours); edited by the cog, read by FleetLink (authoritative) and the hub. |
+| `messaging\<connectionId>\state.json` | Telegram's update offset; **the topic map** (session → `message_thread_id`, card message id, work-log message id, last mirrored transcript position); the 🔎 Search topic id. Written atomically, with the previous copy kept: the Bot API cannot list topics, so this is their only record. |
+| `messaging\<connectionId>\outbox.jsonl` | Messages not yet delivered (compacted on start). |
+| `messaging\tokens.json` | Live action tokens (§7.5). |
+| `messaging\run.marker`, `messaging\present.marker` | The dirty-run marker (§4.3); "present at the PC" for Remote Control (D17). |
+| `messaging\status.json`, `messaging\messaging.log` | Connection states every 30 s; the transport log (§14). |
+| `harness\telegram-search.json` | The Search topic's agent conversation (its record and digest, SDK_HARNESS.md §6). |
+| Windows Credential Manager | Every secret: `Agentmaster:messaging:<profile hash>:<connectionId>:<name>`. Per profile on purpose: two installs must never share a bot. |
+| `SessionStore` keys (per session) | `pinned` (§5.3), `topicView` (the topic's message-type overrides, §6.3). |
 
-### 4.5 Which part does what
+### 4.5 Who does what
 
 | Job | FleetLink | Hub | Connector |
 |---|---|---|---|
-| Decide that something is worth telling | ✓ (§6) | | |
-| Redact, trim to the privacy level | ✓ | trims per connection | |
-| Render to a platform | | ✓ | serializes |
-| Pacing, retries, outbox | | ✓ | reports 429s |
-| Authenticate the sender (platform identity → owner) | | ✓ | reads the sender id first (H3) |
-| Authorize the intent (level, PIN window, confirmation, backlog rule) | ✓ (authoritative) | first check | |
-| Resolve a session reference | ✓ (authoritative) | from the topic map | |
-| Execute | ✓ through the Fleet Control API | | |
-| Report the outcome | builds the text | sends / edits | |
+| Which topics exist (§5) | ✓ decides | creates / renames / deletes | serializes |
+| What appears in a topic (§6) | ✓ typed items, redacted | renders, paces | serializes |
+| Notifications (§6.5) | marks the final message | sets `disable_notification` | |
+| Sender authentication | | ✓ | reads the sender id first (H3) |
+| Authorization, backlog rule | ✓ authoritative | first check | |
+| Executing intents | ✓ Fleet Control API | | |
 
-## 5. The abstraction
+## 5. The chat: topics synced to the tabs
 
-### 5.1 Providers, connections, bindings
+### 5.1 Which topics exist (D3, decided)
 
-- **Provider** — a kind of platform with one implementation: `telegram`, `teams-lite`, `teams-bot`,
-  `webhook`, `external:<id>`. Declares its capabilities (§5.2) and its settings fields (the PRESETS idiom:
-  a field table drives the cog's form).
-- **Connection** — one configured use of a provider: credentials (in Credential Manager), the target chat,
-  the owner identity (set by pairing), and the policy: level, events, privacy, mirror level, away rule,
-  routing filter, quiet hours. Several connections run at once (e.g. sessions under `K:\work\` → Teams,
-  everything else → Telegram).
-- **Binding** — where a session lives inside a connection, chosen from the provider's capabilities in this
-  order: **topic / thread** (a Telegram topic, a Teams channel thread) → **card** (a message that carries
-  the session id and its own reply input: Teams 1:1) → **reply chain** (a reply to a message about the
-  session) → **explicit reference** (`#3f9a` in the text). Bindings persist in the connection's
-  `state.json`.
+- **🔎 Search** — created by the bot at pairing, the first topic; the user pins it at the top of the list
+  in the Telegram client (the Bot API has no call to pin a topic; P0-16 checks the clients allow it).
+- **One topic per tab** — for every tab, in every Agentmaster window, that hosts a **Claude Code** session
+  (managed, or a hand-typed claude Agentmaster adopted), **whose state is not Idle**. Running, Waiting for
+  you, Needs approval, Error and Done are listed; **Idle is the only state that is not**. A **pinned**
+  session is never Idle (§5.3), so it is always listed. Not listed at all: Codex tabs, shell tabs, an
+  unprompted claude with no session id yet, sessions in no tab.
+- The topic's name is the tab's title (Rule #11: one title); its color is the nearest of Telegram's six
+  topic colors to the tab's color, fixed when the topic is created (Telegram cannot change it later).
+- Topics are ordered by Telegram (most recent activity first); the tabs' order is not reflected.
+- **A topic started in Telegram** — in Threaded Mode a message sent from the chat's main view starts a
+  new topic by itself (§3.1). Such a topic asks for a folder and starts a new session there (D20); its
+  first message becomes the session's first prompt; the topic is then bound to the new tab and renamed
+  to its title. A new topic whose first message is a 🔎 Search command is answered in 🔎 Search and
+  deleted.
+- An optional routing filter per connection (all tabs by default; favorites, tags or folders) narrows
+  the list.
 
-### 5.2 Capabilities
+### 5.2 A topic's life
 
-```
-struct ProviderCaps {
-  inbound: none | dialOut | pushIn          // §3.3
-  maxTextUnits; textUnit: utf16 | bytes | chars
-  formats: { plain, html?, markdown?, adaptiveCard? }
-  buttons: { max, perRow, payloadBytes, styles? }      // 0 = none
-  inputsInMessage: bool                     // a text box inside a card (Teams)
-  threads: topic | thread | reply | none
-  userCreatesThreads: bool                  // a new topic from the user = a new session (§10.2)
-  edit, delete, pin, pinPerThread: bool
-  stream: draft | editThrottled | none      // Telegram drafts / Teams edits
-  files: { maxUploadBytes }
-  silentSend: bool                          // Telegram disable_notification
-  retentionHours                            // how long the platform keeps messages for an offline bot (Telegram 24)
-  rate: { perChatPerSecond, perChatPerMinute, globalPerSecond }
-}
-```
-
-### 5.3 The outbound event (FleetLink → hub)
-
-Shown as JSON for readability; inside Agentmaster these are C++ structs, and JSON crosses only the
-external-connector contract (§12.2).
-
-```json
-{ "type": "event", "id": "ev-3f9a1c2e-0042", "kind": "session.needs-you", "severity": "attention",
-  "at": 1760536800123, "session": "3f9a1c2e-6c1d-4f7e-9a51-0b6f2a7d9c11",
-  "headline": "Has completed after 12m and is waiting for you",
-  "blocks": [
-    { "t": "prompt", "text": "rebase onto agentmaster and fix the three conflicts…", "origin": "typed" },
-    { "t": "tools",  "text": "6 tool calls: Bash ×4, Edit ×2" },
-    { "t": "reply",  "text": "Rebased; the three conflicts are fixed; the m5 suite passes." },
-    { "t": "facts",  "items": [["queue", "2 waiting · runner Paused"], ["branch", "agentmaster"]] } ],
-  "actions": [
-    { "id": "send-next",  "label": "Send queued #1",   "intent": { "kind": "queue.sendNext", "item": "q-77" }, "style": "primary" },
-    { "id": "runner-on",  "label": "Runner: Auto",     "intent": { "kind": "runner.mode", "mode": "Full" } },
-    { "id": "show",       "label": "Show",             "intent": { "kind": "show" } } ],
-  "replaceKey": "needs:3f9a1c2e", "validWhile": { "state": "WaitingForInput", "stateChangedAt": 1760536799000 },
-  "privacy": "standard" }
-```
-
-- **Text is already redacted and trimmed** to the HIGHEST privacy level among the connections that will
-  receive the event; the hub trims further per connection.
-- **`replaceKey`** groups the messages that describe one fact, so a newer one edits the older (Telegram
-  `editMessageText`, Teams `updateActivity`) instead of piling up, and a `retract` finds it.
-- **`validWhile`** is what the event assumed; FleetLink retracts the event when it stops holding (§6.6).
-
-### 5.4 Rendering
-
-One pure function per provider family, fed the event, the provider's capabilities and the connection's
-privacy level, returns a render plan (text parts with formats, button rows, inputs, attachments), which the
-connector serializes. Degradation is in the renderer, never in the connectors:
-
-| Missing capability | Fallback |
+| On the PC (tab, session) | In Telegram |
 |---|---|
-| buttons | numbered choices in the text ("reply 1, 2 or 3") |
-| topics / threads | reply chains; then `#ref` prefixes on every message |
-| inputs in a message | "reply to this message" |
-| edits | a new short message ("✓ answered at 12:03") |
-| HTML / markdown | plain text, code as indented lines |
-| short limits | the headline only + `show #ref` hint |
+| The session first leaves Idle (its first prompt; a wake; a revive) | Its topic is created: the pinned card, then the backfill (§6.7), then the live mirror |
+| It becomes **Idle** (the 60-minute decay of a read Waiting session; Move to Idle/Done; a restore that normalized it) | The card turns to "💤 Idle — leaves the list at 14:32" with [📌 Pin] and [Wake]; after the **idle grace** (D25, default 10 min) the topic is DELETED, with its messages (Telegram cannot hide or close a private-chat topic) |
+| It leaves Idle within the grace | It stays; the card goes back to normal |
+| Woken again later (Move to Waiting-for-you at the PC, or Wake / Revive from 🔎 Search) | A new topic, rebuilt by the backfill (§6.7) |
+| Renamed (F2, the tab menu, the Explorer, or `/rename` in the topic) | `editForumTopic` renames the topic |
+| Tab color changed | Nothing (a topic's color is set at creation only) |
+| Moved to another window | Nothing |
+| `/clear` (a new conversation in the same tab) | The same topic continues the tab: a marker "— /clear: a new conversation —" |
+| Restarted / Deactivated / Activated | The same topic; a marker; a deactivated tab keeps its state, so it stays listed unless Idle |
+| Forked, or a new session in the same folder | A new tab → a new topic when it leaves Idle (at once when started from Telegram) |
+| Closed (archived) | The topic is deleted at once |
+| Agentmaster closed and reopened | Topics stay in Telegram; at start the sync keeps the topics of the tabs that still qualify (restored Waiting / Needs approval / cut-off Error sessions) and deletes the rest |
+| The user deletes a topic in Telegram | Nothing happens to the session; the next message for it fails, and the topic is created again (topics = tabs) |
 
-### 5.5 The inbound intent (hub → FleetLink)
+**Reading on the phone counts.** Any action in a topic (a message, a button, a command) marks the session
+read on the PC — its flash ring and unread count clear — so the 60-minute Waiting → Idle decay works for a
+session handled only from the phone. (Merely viewing a topic cannot be seen: bots get no read receipts.)
 
-```json
-{ "type": "intent", "id": "in-tg-884213377", "connection": "c-telegram-1",
-  "principal": { "provider": "telegram", "userId": "123456789", "name": "Eli" },
-  "kind": "reply", "session": "3f9a1c2e-6c1d-4f7e-9a51-0b6f2a7d9c11", "via": "topic",
-  "text": "also update the docs", "token": null, "sentAt": 1760536811000, "receivedAt": 1760536812000 }
-```
+### 5.3 Pin: never idle (a new engine feature)
 
-- `kind` is one of the verbs of §7 (`reply`, `slash`, `queue.add`, `queue.sendNext`, `answer`, `stop`,
-  `runner.mode`, `pause.all`, `show`, `tail`, `screen`, `board`, `search`, `open`, `new`, `fork`,
-  `restart`, `deactivate`, `close`, `away`, `mute`, …).
-- `session` is resolved by the hub from the binding (`via`: `topic`, `card`, `reply`, `ref`, `pick`, or
-  `newTopic` for a session to create); FleetLink re-resolves and refuses an id it does not know.
-- `sentAt` (the platform's own timestamp) drives the backlog rule (§4.3).
-- `token` is set when the intent came from a button (§5.7).
+- **What it is:** a durable per-session flag, `pinned` (a `SessionStore` key, like `favorite`). A pinned
+  session never decays to Idle (`ShouldDecayWaitingToIdle` refuses), and wherever it would land in Idle (a
+  restore's normalization, a resume, Move to Idle/Done) it is held in **Waiting for you** instead — the
+  state the **Move to Waiting-for-you** button sets. So a pinned session's topic never leaves the list.
+- **Where:** `/pin`, `/unpin` in its topic; [📌 Pin] on its card, on the Idle card and on 🔎 Search's
+  results ("Revive 📌"); **Pin (never idle)** / **Unpin** in the tab's right-click menu and the board
+  card's menu, beside Move to Waiting-for-you; a small 📌 beside the tab's status dot (D32).
+- **Unpinning** lets the normal decay resume from that moment.
 
-### 5.6 Session references
+### 5.4 🔎 Search: find, wake, revive (D24)
 
-- **In a binding** — the topic, the card, the replied-to message — the session is known; nothing to type.
-- **In text** — `#3f9a`: the shortest prefix of the session id, at least 4 hex characters, unique among
-  the sessions the bot has mentioned in that connection (lengthened on a collision); a list the bot just
-  sent numbers its rows (`/s 3`).
-- **Nothing names a session** — the bot answers with a picker (the sessions that need you first, then the
-  most recent), and holds the text under a token until a pick; it never guesses (M6).
+- **The agent:** the Sessions page's search agent — `SessionSearchAgent` on the agent harness, Sonnet 5.5,
+  its tools (`search`, `show`; the session database's tools when that is On) and system prompt — at
+  **high** thinking (the harness's live thinking level). Its own conversation by default
+  (`harness\telegram-search.json`), so a search from the phone does not move the PC page's list; sharing
+  the page's one conversation is the alternative (D24). Parked after 10 idle minutes like the page's.
+- **A message in 🔎 Search is a request** ("the session where I fixed the tab drag crash"); follow-ups
+  refine it, as on the page. The agent's answer — one sentence and the sessions it shows — arrives as one
+  message (the final message: it makes a sound), each session on a line with its state and its buttons:
 
-### 5.7 Action tokens
+| The session is | Buttons |
+|---|---|
+| Listed (it has a topic) | [→ Topic] (a link if private-chat topic links work, P0-16; else its name) |
+| In a tab but Idle | [Wake] [Wake 📌] — the tab's **Move to Waiting-for-you** (+ pin); its topic appears |
+| Closed (on disk only) | [Resume] [Resume 📌] [Fork] [Fork 📌] — opened into a tab without taking focus (the window: D27), held in Waiting for you so its topic appears; the tab stays dormant until its first queued message starts it |
+| Any | [Details] — the summary card (folder, branch, dates, prompts) |
 
-- Telegram's `callback_data` holds 64 bytes, so a button carries only `a:<token>` (a random 10-character
-  base-62 id); Teams cards carry the same token in `Action.Execute` data.
-- A token maps to `{connection, session, intent, binds}` where `binds` names exactly what the button
-  answers: the question's `tool_use` id, the queue item id, the session's `stateChangedAt`. At press time
-  FleetLink checks `binds` against now; a mismatch refuses with the current state ("already answered in
-  the terminal: *Option 2*").
-- Tokens for answers, sends and every Operate verb are **single use**; read buttons (`show`, `tail`) are
-  reusable. Every token expires (24 h for reads, 2 h for actions, or earlier when its `binds` change).
+- **Fleet commands in 🔎 Search:** `/idle` (the idle tabs, each with [Wake]), `/board` (counts per
+  state), `/newsession <folder> [model] [-- first prompt]` (a new tab + topic), `/pauseall`,
+  `/resumeall`, `/help`.
+- **App notes** land here: started, the previous run ended unexpectedly, updated, closed (§4.3).
 
-## 6. Outbound: fleet events
+## 6. Inside a session's topic: the whole session
 
-### 6.1 The catalog
+### 6.1 The card
 
-| Kind | When | Default (D5) | Severity | Silent? |
-|---|---|---|---|---|
-| `session.needs-you` | Running → Waiting / Needs approval / Idle, after the toast holds (§6.2) | Waiting ✓, Needs approval ✓, Idle ✗ | attention | no |
-| `session.question` | An unanswered `AskUserQuestion` (its options as buttons, §7.3) | ✓ | urgent | no |
-| `session.plan` | A plan waits for approval (`ExitPlanMode`) | ✓ | urgent | no |
-| `session.permission` | A tool permission prompt (sessions without skip-permissions) | ✓ | urgent | no |
-| `session.error` | Error: an API failure (with its HTTP status — a usage limit names its reset), a cut-off turn | ✓ | urgent | no |
-| `session.turn` | A turn ended: the prompt that started it, the folded tool calls, the final reply — for a topic whose mirror level is *turns* or *live* (§10.2, D19) | per mirror level | info | yes |
-| `session.done` | claude exited (Done) | ✗ | info | yes |
-| `runner.paused` | A backstop paused a session's runner: stop-on-error, Enter-retry give-up, lost send, merge verdict | ✓ | attention | no |
-| `runner.plan-done` | A session's queue ran empty after sending the last prompt | ✓ | info | yes |
-| `app.restarted` | At start, after a run that ended without a clean exit (or an update) (§4.3) | ✓ | attention | no |
-| `app.closed` | Agentmaster closes cleanly ("the bot is offline until it starts again") | ✗ | info | yes |
-| `fleet.digest` | Every N minutes while away: counts and the sessions that need you | ✗ | info | yes |
-
-### 6.2 The tracker
-
-- **Process-wide, exactly once.** The toast tracker is per window (`_EvaluateAgentNotification`, keyed to
-  the window that hosts the tab). FleetLink keeps its OWN edge map over the whole fleet, fed by a registry
-  observer that only queues session ids (the notifier must never wait on it); the worker reads the
-  current records with the lean reads (`HeadlinesOf`, `SnapshotLiveForCards`).
-- **Same edges, same holds.** A Running → Idle/Waiting edge is held while the session's external-work
-  signal is live, dropped if it re-lights Running, sent with the CURRENT state when the signal clears or
-  the 30 s cap passes (`DecideHeldToast`); one message per session per 20 s at most
-  (`ShouldSuppressDuplicateToast`). The signal's two inputs (the heartbeat copy, side-file freshness) are
-  engine reads, so the engine can evaluate them without a window.
-- **Unread or away decides "needs you".** A needs-you event goes out when the census marks the session
-  unread (the flash-ring rule: not the focused tab of the active window) OR the user is away (§6.3) — a
-  session that finishes in the focused tab of a locked PC is never marked unread, and must still reach the
-  phone. It is dropped when the session is read before it is sent.
-- **Turns for mirrored topics** come from the same transcript tail the scanner reads; a turn is sent when
-  it ends (one message per turn, §10.2), never line by line.
-- **Revalidate before telling.** An event leaves FleetLink only if its `validWhile` still holds, and the
-  outbox drops anything older than 30 minutes unless it is still true (M8).
-
-### 6.3 Away detection
-
-- **Present** = the workstation is unlocked AND there was keyboard or mouse input in the last N minutes
-  (`GetLastInputInfo`; default 5). Lock and unlock come from `WTSRegisterSessionNotification` on the
-  Emperor's message window. **Away** otherwise, or after `/away` from the phone (until `/back` or the next
-  local input).
-- **Per connection (D6):** *when away* (default) / *always* / *never* (pull only). **Escalation:** a
-  needs-you or question that stays unread for 10 minutes is sent even while present (the user is at the PC
-  but not at Agentmaster). Mirrored turns (`session.turn`) follow the topic's mirror level, not the away
-  rule: a mirror is a record, sent silently.
-- **Shared with Remote Control (D17):** FleetLink keeps `<profile>\messaging\present.marker` in step with
-  "present", for sessions launched with `CLAUDE_CLIENT_PRESENCE_FILE` pointing at it.
-- **Quiet hours** per connection: events are held and sent as one digest when the hours end; `urgent`
-  events can be allowed through (a setting).
-
-### 6.4 Coalescing and pacing
-
-- **One budget per chat.** Telegram allows about one message per second per chat, and all topics of the
-  private chat share it; edits are paced from the same budget. The outbox serves, in this order: urgent
-  events, needs-you, answers to the user's own actions, card edits, mirrored turns, the board, digests.
-- Several sessions finishing within 5 s become one message in the 📋 Fleet topic ("3 sessions need you" +
-  one button each), plus the usual message in each session's topic, silent.
-- Card edits are coalesced (at most one per session per 30 s; a state that flips back within the window is
-  never sent); the board at most one per 15 s.
-- The limiter obeys `retry_after` / `Retry-After`; Teams follows its documented per-conversation rates.
-- Telegram `disable_notification` for `info` events; everything else alerts.
-
-### 6.5 The board message
-
-One pinned message in the 📋 Fleet topic (Telegram) or one card (Teams), **edited in place**:
+The topic's pinned message, edited in place:
 
 ```
-Fleet · 21 open sessions                        updated 14:02
-🔵 Running 4   🟡 Waiting 3   🟠 Needs you 1   🔴 Error 0   ⚪ Idle 13
-Needs you:  #3f9a Agentmaster/feature · question    #b210 proxmox · waiting 12m
-[ #3f9a ] [ #b210 ] [ Pause all ] [ Sessions ]
+📌 Agentmaster/feature
+🔵 Running 3m · Bash: npm test (1m 12s)
+K:\source\Agentmaster · agentmaster · Opus 5.5 · high · ctx 182K / 1M
+Runner Paused · queue 2 — next: "also update the docs"
+✎ unsent at the PC: "and then rebase onto…"
+[Queue ▸] [Runner ▸] [Screen] [Transcript] [📌 Unpin] [More ▸]
 ```
 
-### 6.6 A message follows its fact
+**More ▸** opens the tab's actions as buttons (the same set as the `/commands` of §7.3).
 
-- The session is read on the PC → the message is edited: "✓ seen on the PC 14:05" and its buttons go.
-- The question is answered (here, in the terminal or in the Claude app) → "✓ answered: *Option 2*".
-- The session is Running again → "↻ running since 14:06".
-- The session is closed → its card reads Closed with [Resume]; the topic stays (history).
+### 6.2 What it is doing, or whether it is idle
 
-### 6.7 The live view (P7)
+- **The card's state line** — the state, since when, and while Running the current step ("Bash: npm
+  test"), updated on every state change and at most every 30 s while Running (§6.6). A linked session's
+  state comes from the link's exact events (`turn.start`, `turn.complete {reason}`, background work,
+  compaction); an unlinked one's from the scanner, as today.
+- **The activity draft** — while the session runs, a streamed draft at the bottom of the topic
+  (`sendMessageDraft` with the topic's `message_thread_id`) shows the current step and the text being
+  written, refreshed every 10–20 s (a draft lives 30 s); at the turn's end it is replaced by the final
+  message. A draft is a preview, not a message: no notification, no history (P0-18). Plus Telegram's
+  "typing…" (`sendChatAction`) while a tool runs.
+- **Idle** — the Idle card of §5.2 during the grace, then no topic.
+- **Dormant** (a restored or deactivated tab whose claude is not running) — "⏸ parked: a queued message
+  starts it" on the card.
 
-`follow` (a card button, or `!follow`) streams the current turn into the session's topic: the assistant's
-text as it is written (the scanner already reads each new transcript line) and one line per tool call
-("● Bash: npm test"), throttled to one update per second. Telegram: `sendMessageDraft` with
-`message_thread_id` and `can_stop` (refreshed before its 30 s preview ends), then `sendMessage` at the
-turn's end. Teams: edits of one message (a Teams stream dies after 2 minutes; a turn often runs longer).
-The stop button maps to §7.4.
+### 6.3 Every message type, configurable (D19)
 
-## 7. Inbound: what you can do from the chat
+Each type is **Off**, **Default** or **Verbose**, set per connection (with a preset) and overridable per
+topic. The presets are the Copy ▸ Transcript levels, so a topic at *Default* reads like Copy ▸ Transcript
+▸ Default.
 
-### 7.1 Commands
-
-Where they are typed: in Telegram's 📋 Fleet topic as `/command`; inside a session's topic as `!command`
-or the card's buttons — plain text and `/…` there belong to the session (§10.2, D22); in Teams as words.
-
-| Command | Level | Does | Through |
+| Group | Type (id) | Default | Verbose |
 |---|---|---|---|
-| `board`, `status` | Read | the board (§6.5) | registry headlines |
-| `sessions [words]` | Read | live sessions, numbered, with buttons | registry |
-| `show #ref` | Read | the session card: state and since, folder, branch, model · effort, runner and queue, last prompt, last reply | registry + TranscriptTurns |
-| `tail #ref [n]` | Read | the last n turns at the Compact level, redacted | `RenderTranscriptTurnsFile` |
-| `screen #ref` | Read | the visible terminal text (≤ 60 lines), redacted | the hosting window's buffer read |
-| `transcript #ref [level]` | Read | the conversation as a `.md` file | TranscriptTurns |
-| `search words` | Read | sessions matching, with buttons | the session database (On), else the Sessions page's fast phase |
-| *(text in a session's topic)* | Steer | reply (§7.2) | `SubmitPrompt` / the queue |
-| *(`/…` in a session's topic)* | Steer | a Claude Code slash command, typed into the session | `SubmitPrompt` |
-| `queue #ref text` | Steer | add to the session's queue | the Prompt Queue |
-| `next #ref` | Steer | Send now the first queued prompt | the Manager's Send-now path |
-| `auto #ref`, `pause #ref` | Steer | the session's runner mode | `AutorunnerMode` |
-| `pauseall`, `resumeall` | Steer | the global pause | `Scheduler::SetGlobalPause` |
-| `follow #ref`, `mirror #ref <level>` | Read | the topic's mirror level (§10.2) | the hub |
-| *(buttons)* | Steer | answer a question / plan / permission (§7.3) | the hosting window, verified |
-| `stop #ref` | Operate | interrupt the turn (§7.4) | the hosting window |
-| `open #ref` | Operate | resume a closed session into a tab, or start a dormant one | restore + activate sinks |
-| `new <folder> [model] [-- first prompt]`, or a new topic | Operate | a new session | the launch seam |
-| `fork #ref` | Operate | fork it | `_ForkManagedSessionById` |
-| `restart #ref`, `deactivate #ref`, `close #ref` | Operate | as in the tab menu (with a confirmation) | the existing sinks |
-| `away`, `back`, `mute #ref [time]`, `quiet [time]` | Notify | notification control | FleetLink |
-| `help` | Notify | this table, filtered by the connection's level | |
+| Prompts | `prompt.pc` — typed at the PC | the text, marked ⌨ | + the time and attachments |
+| | `prompt.queue` — sent by the runner | the text, marked ⚙ | + the queue item and attempt |
+| | `prompt.topic` — sent from this topic | your own Telegram message, its status as a reaction (§7.1) | + a "sent at" line |
+| | `prompt.midturn` — typed at the PC while it worked | the text, marked "(mid-turn)" | same |
+| Replies | `reply.final` — the turn's last text | the full text (expandable past 3,500 characters; a file past 4 chunks) | same |
+| | `reply.remark` — text between tool calls | one line in the work log | the full text |
+| | `thinking` | Off | the thinking text, where the transcript holds it |
+| Tools | `tool.bash` | the command line in the work log | + exit code, duration, the output (first 20 lines; the rest as a file) |
+| | `tool.read` | the path | + the range |
+| | `tool.edit` | the path and "+12 −3" | + the diff (a file when long) |
+| | `tool.write` | the path and size | + the content (a file when long) |
+| | `tool.search` (Grep, Glob) | the pattern | + the match count and first matches |
+| | `tool.web` (WebFetch, WebSearch) | the URL or query | + a result summary |
+| | `tool.mcp` | server · tool | + arguments and result |
+| | `tool.todo` (TodoWrite) | the checklist (☐/☑), one message edited in place | same |
+| | `tool.other` | the tool's name | + its input |
+| | `tool.error` — a failed tool result | the error line | the full result |
+| Agents | `agent` — a subagent / Task | its brief and its final report, one line each | + the subagent's turns as a file |
+| | `teammate` — teammate messages | one line | the full text |
+| | `background` — task notifications, background shells | one line | the full text |
+| Interactive | `question` — `AskUserQuestion` | the question with buttons (§7.4) | + the options' descriptions |
+| | `plan` — `ExitPlanMode` | the plan (expandable) with the approval buttons | same |
+| | `permission` — a tool permission prompt | the tool and description with buttons | + the input preview |
+| Markers | `command` — a slash command and its output | `/compact` + the output's first line | the full output |
+| | `compaction` | "— compacted 412K → 38K —" | + the summary text |
+| | `clear`, `rewind`, `restart`, `interrupt` | a one-line marker | same |
+| | `api.error` | the error (status, message, a usage limit's reset) | + the request details |
+| | `attachment` — images and files in a prompt | "🖼 image" | the image itself |
+| | `hook` — hook output | Off | the hook and its output |
+| Agentmaster | `state` — state changes | the card only | + a line per change |
+| | `queue` — queued, sent, failed, reordered | failures only (+ the card) | every change |
+| | `runner` — mode changes, backstop pauses | pauses only | every change |
+| | `draft` — the unsent draft at the PC | the card only | + a line when it changes |
+| | `tab` — renamed, tagged, favorited, pinned, restarted, deactivated | Off | a line each |
+| | `delivery` — enter-retry, lost send, reclaim | lost sends only | every step |
 
-### 7.2 Replying to a session
+**The presets** (D31: the connection's default preset is *Default*):
 
-A pure decider (`DecideRemoteReply`) maps the session's state to the outcome; FleetLink executes it and
-answers with what happened.
-
-| The session is | Outcome |
+| Preset | What it turns on |
 |---|---|
-| Waiting or Idle, started, live | **Send now** through `SubmitPrompt` (the draft swap keeps an unsent local draft safe); a direct send like the Manager's Send now, so it skips the runner's 40 s settle; "✓ sent · running" once its echo arrives |
-| Running | **Queued as next** (shown with a **Steer now** button); it is sent when the turn ends even if the runner is Paused (a one-shot remote item, D8), after the same holds as an automatic send (the 40 s settle included). "Steer now" types it into claude's own queue now, absorbed at its next tool boundary (P0 measures that `SubmitPrompt` handles a running box) |
-| Needs approval (a question or a plan is open) | Buttons: **Use as the answer** (the "Other" text) / **Queue for after** |
-| Error | Send now (a retry is the user's intent) |
-| Dormant (restored, never focused; or deactivated) | **Activate and send**: the tab starts in place without taking focus, the prompt waits as a one-shot item until the session is started and settled |
-| Closed (archived) | **Resume and send** (Operate level): restored into the window that last hosted it, else the most recent window |
-| Done (claude exited, tab open) | **Restart and send** (Operate level) |
-| A delivery is in flight (gate held) | Queued as next |
+| Minimal | prompts, final replies, questions / plans / permissions, errors |
+| Compact | + slash commands, markers, agents' briefs and reports, the to-do list |
+| Default | + every tool call as a line in the work log, remarks, failed results |
+| Full | + Bash output heads and durations, diffstats, agents' and background details |
+| Max | everything Verbose, thinking and hooks included |
+
+**Per topic:** `/show <type or group> off|default|verbose`, `/level <preset>`, `/show` alone prints the
+topic's grid. Stored per session (`topicView`), so a revived session keeps its view.
+
+### 6.4 How a turn is laid out
+
+1. **The prompt** (when it did not come from this topic): ⌨ or ⚙ and the text — silent.
+2. **The work log** — ONE message per turn, created at the first tool call or remark and edited in place
+   as the turn runs (tool calls and remarks per the type modes, folded in an expandable quote past a few
+   lines); it rolls over into a new message past ~3,500 characters — silent (edits never notify).
+3. **Verbose items** — diffs, outputs, contents, thinking: separate messages, or files when long —
+   silent.
+4. **The final message** — the turn's last text (the reply); or what stopped the turn: the question, the
+   plan, the permission prompt, the error, "claude exited", "■ interrupted" — **the only message sent
+   with sound** (§6.5). It is posted when the session leaves Running for a state at rest: a linked
+   session's `turn.complete` with its reason, an unlinked one's state edge after the toast's holds (an
+   outlived turn's background work keeps it Running).
+
+### 6.5 Notifications: silent except the final message (D5)
+
+- Every message in a session's topic goes out with `disable_notification` — Telegram: "Users will receive
+  a notification with no sound" — except **the turn's final message**, which uses the default: it alerts
+  with sound unless the user muted the topic in Telegram.
+- Edits (the card, the work log) never notify; drafts are previews (P0-18).
+- 🔎 Search: the agent's answer is its final message (sound); app notes are silent except "ended
+  unexpectedly".
+- Optional, off by default to keep the rule as specified: "silent while I'm at the PC" (D6) — the final
+  message goes silent too while the user is present at the PC (unlocked, input in the last 5 minutes),
+  since the PC's own toast already rang.
+
+### 6.6 Pacing: one chat, one budget
+
+Telegram allows about one message per second **per chat**, and every topic of the private chat shares it;
+edits are paced from the same budget. The outbox serves, in this order:
+
+1. final messages, questions, plans, permission prompts, answers to the user's own commands;
+2. new prompts and new work-log messages;
+3. work-log edits (normally every 30 s; stretched up to 2 minutes under load);
+4. card edits (on state changes; activity lines thinned first);
+5. backfill (§6.7) and verbose files.
+
+**Estimate** for 20 listed sessions, each ending a turn every 3 minutes, 8 running at a time: new messages
+~0.33/s (prompt + work log + final per turn), work-log edits ~0.27/s, card edits ~0.22/s — ~0.8/s, close to
+the budget. So the pacing is adaptive: under load the work log and the card are edited less often, while a
+final message never waits behind them. P0-15 measures the real limit (edits may be lenient; drafts may not
+count).
+
+### 6.7 Backfill: when a topic is created for a session with history (D26)
+
+A topic must show the whole session, but a revived 300-turn session cannot be replayed message by message
+within the budget. Recommended:
+
+1. the whole transcript at the topic's preset as one `.md` file (complete at once);
+2. the last 10 turns as messages, oldest first, at the backfill's priority;
+3. then the live mirror (live items for this session wait until 1–2 are out, so the order holds).
+
+The alternative — every turn as messages, oldest first — keeps the topic's own history complete, at the
+cost of minutes for a long session ("rebuilding 120 / 480" on the card meanwhile).
+
+## 7. What you do in a topic
+
+### 7.1 A message is a queued prompt (D8)
+
+Anything you type in a session's topic is exactly a prompt — delivered as if typed into the box, recorded
+in the session's queue with the origin `Remote`, sanitized like any paste (DELIVERY.md §15) — and it is
+**enqueued, never a steer**: it never reaches a running turn.
+
+| The session is | What happens to your message |
+|---|---|
+| At rest (Waiting for you, Error) | Queued and sent at once (or when the 40 s settle of a session that just came to rest ends) |
+| Running | Queued; sent when the turn ends |
+| Needs approval (a question, plan or permission prompt is open) | Queued; the bot offers once "Answer the question with this text?" [Answer] — otherwise it is sent after the question is answered |
+| Dormant (restored, revived or deactivated: claude not running) | Queued; the tab is started in place without taking focus, and the message is sent once the session is started and settled |
+| Done (claude exited) | Queued; [Restart and send] |
+| A delivery is in flight | Queued |
 | From the backlog (older than 10 minutes) | Asked first (§4.3) |
 
-- **Recorded like any prompt.** A remote prompt joins the session's queue history with a new origin,
-  `PromptOrigin::Remote` (serialized `"Remote"`), and the connection id; the Prompt Queue's SENT list tags
-  it **remote**; its echo is consumed like an Autorun send's; a mirrored topic shows it with 📱.
-- **Sanitized like any paste.** It goes through `BuildPromptFill` (DELIVERY.md §15), so a phone's
-  invisible characters (an RLM in Hebrew text) cannot cancel the Enter.
+- **Its place in the queue (D30):** next, ahead of the runner's planned prompts, in the order you sent
+  them; delivered at the next ready moment **whatever the runner's mode** (Paused included), not held by
+  Pause all (it is your own message, like Send now), and past the question guard (`kAnswersQuestionOk`,
+  as the overlay's mail button). The dormant gate, the delivery gate and the settle hold still apply.
+- **How it gets in (§2.4):** a linked session receives it as the link's `submit` (`$.prompt.submit`),
+  which by construction starts a turn of its own after the running one — never a steer — and never touches
+  the input box (the user's draft at the PC is safe); the `ack` marks it sent. An unlinked session gets the
+  typed path (`SubmitPrompt`, the draft swap). A message with a photo keeps the typed path.
+- **Its status is a reaction on your message** (no extra message): ✍ queued → 👨‍💻 sent, the turn started
+  (its echo arrived) → 👎 failed, with a reply giving the reason (lost send, refused, closed).
+- **Editing** your message while it is still queued replaces the queued text (`edited_message`); once
+  sent, the bot answers "already sent — send the change as a new message".
+- Removing a queued message: `/unqueue <n>` (Telegram tells a bot nothing about a deleted message).
 
-### 7.3 Questions, plans and permission prompts
+### 7.2 Claude Code's slash commands (D22)
 
-- **What is open.** Two sources, combined: the transcript's pending `tool_use` (for `AskUserQuestion`:
-  each question's text, header, `multiSelect`, options with label and description; for `ExitPlanMode`: the
-  plan text) — a new bounded capture in the scanner's parse, stored transient on the session
-  (`pendingQuestion`, cleared by the matching tool result) — and the **menu on screen**, read by the
-  hosting window (a new `ReadMenuSnapshot`, the `ReadPendingInputDraft` idiom: the question line and the
-  `❯ N. label` rows; pure parser `MenuSnapshot.h`, tested on captured screens). The screen is the only
-  source for menus the transcript never describes (the plan's approval choices, a permission prompt).
-- **How it is shown.** Telegram: the question, one button per option (`N. label`), **Other…** (a forced
-  reply for free text), and for `multiSelect` toggle buttons (✓) plus **Submit**. Teams: an Adaptive Card
-  with `Input.ChoiceSet` (single or multi) and `Input.Text` for "Other".
-- **How it is answered.** The hosting window, holding the delivery gate under a reserved tag
-  (`#menu-answer`), re-reads the menu, checks it is the SAME menu (same question line, same option labels),
-  sends the key plan for that menu shape, and verifies: the menu is gone AND the transcript's tool result
-  for that `tool_use` id carries the chosen label (or, for a plan or a permission, the session left
-  Needs approval). Anything else reports "not confirmed — look at the terminal" and leaves the gate.
-- **The key plans are measured, not guessed** (§19, P0): which key selects an option, whether a digit
-  selects or only moves, how multi-select toggles and submits, how several questions advance, how "Other"
-  takes text, and how the plan and permission menus number their choices on the Claude Code version in use.
-- **Already answered elsewhere** (the terminal, the Claude app): the token's `binds` no longer match → the
-  message is edited to the answer that was given.
+A `/command` that is not one of Agentmaster's (§7.3) is Claude Code's, and it is a prompt like any other —
+queued, then typed into the session — **except** the commands that leave no record in the session. The
+user's rule: if, reopening the session, you would not see the command's messages (`/reload-plugins`,
+`/reload-skills`, …), it is not sent from a topic. Also refused: the commands that would take the
+conversation out of its tab or end it.
 
-### 7.4 Stop
+| Kind | Commands (from Claude Code's command reference, 2026-10-16) | From a topic |
+|---|---|---|
+| Prompts and recorded commands | skills and the user's own commands (`/commit`, `/handover`, …), MCP prompts, `/compact`, `/clear`, `/model <name>`, `/effort <level>`, `/fast on\|off`, `/plan <task>`, `/goal`, `/init`, `/review`, `/code-review`, `/security-review`, `/simplify`, `/subtask`, `/deep-research`, `/loop`, `/schedule`, `/add-dir`, `/output-style <style>`, `/advisor`, `/autocompact`, `/color` (Claude's prompt-bar color) | queued and sent |
+| No record (TUI-only) | `/reload-plugins`, `/reload-skills`, `/btw`, `/config`, `/status`, `/help`, `/hooks`, `/permissions`, `/memory`, `/mcp` and `/model` without arguments, `/tasks`, `/workflows`, `/diff`, `/rewind`, `/release-notes`, `/skills`, `/theme`, `/tui`, `/keybindings`, `/scroll-speed`, `/terminal-setup`, `/voice`, `/export`, `/copy`, `/heapdump`, `/ide`, `/chrome`, `/login`, `/logout`, `/upgrade`, `/usage-credits`, `/privacy-settings`, `/bug`, `/feedback`, `/install-github-app`, `/install-slack-app`, `/mobile`, `/radio`, `/stickers`, `/passes`, `/powerup`, `/artifacts`, … | refused: "leaves no record in the session — run it at the PC" |
+| Take the conversation out of its tab, move it, or end it | `/resume`, `/branch`, `/fork`, `/background`, `/teleport`, `/desktop`, `/stop`, `/exit` (`/quit`); `/cd` (moves the session's folder, which Agentmaster tracks for the transcript and the tab) | refused, with the Agentmaster equivalent where there is one (`/forksession`, `/newsession`) |
 
-- `!stop`, the card's Stop, or the stop button of a live draft (`stopped_message_generation`) sends ONE
-  `Esc` through the hosting window, only while the session is Running and no menu is open (an `Esc` on an
-  idle empty box twice opens the rewind menu; PENDING_INPUT.md §9). Operate level and a confirmation,
-  unless the connection allows a one-tap stop.
-- The interrupt hold then parks the session's runner until your next message (DELIVERY.md §14); the
-  answer says so: "■ stopped · runner Paused until your next message".
+- **The table is provisional** — each row is confirmed by P0-19 (run every command in a scratch session
+  and read the transcript; and count which commands already appear in the user's own transcripts). It
+  ships as a versioned table, viewable and editable in the cog; a command it does not know (a new
+  built-in, a plugin's) is sent, since skills, plugins and the user's commands expand into prompts.
+- `/cc <command …>` sends a command to Claude Code even when its name is one of Agentmaster's (the refusal
+  table still applies).
+- A linked session runs the command through the link's `command` (`$.command.run`); an unlinked one gets it
+  typed into its box. Either way it waits its turn in the queue like any prompt.
 
-### 7.5 Lifecycle verbs
+### 7.3 The tab's actions as `/commands` (D22)
 
-`open`, `new`, `fork`, `restart`, `deactivate`, `close` reach the window-hosted seams through per-window
-sinks (§8.2). Each answers with the session's new state in its topic. `new` with a first prompt passes it
-as the launch command line's positional prompt when it fits (the /handover tier-1 path: nothing typed into
-the TUI), else queues it.
+The right-click menu of a tab, as commands in its topic — the non-destructive actions, plus
+`/restartsession`. Names never collide with Claude Code's (its `/rename`, `/fork`, `/color`, `/stop`,
+`/branch` exist; §7.2).
 
-### 7.6 Read verbs
+| Tab menu | Command | Notes |
+|---|---|---|
+| Rename tab (F2) | `/rename <title>` | renames the tab, the topic and the saved title; also passes `/rename <title>` to Claude Code so its own session name (prompt bar, `/resume` picker) matches (D28) |
+| Change tab color | `/tabcolor <name \| #hex \| default>` | the topic's color stays (set at creation) |
+| Copy ▸ Session Id / Path / Branch / Current Prompt / Launch CLI | `/sessionid`, `/path`, `/gitbranch`, `/draft`, `/launchcli` | a message with a **Copy** button (≤ 256 characters; a code block when longer) |
+| Copy ▸ Summary | `/summary` | the session's summary box |
+| Copy ▸ Transcript ▸ level, Show Transcript | `/transcript [minimal\|compact\|default\|full\|max]` | a `.md` file |
+| Mark Unread | `/markunread` | |
+| Move to Idle/Done | `/moveidle` | the topic leaves the list after the idle grace |
+| *(new)* Pin / Unpin | `/pin`, `/unpin` | §5.3 |
+| Favorite / Unfavorite | `/favorite`, `/unfavorite` | |
+| Tags | `/tags`, `/tag <name>`, `/untag <name>` | |
+| Activate Tab | `/activate` | starts a dormant tab's claude in place, without focus |
+| Fork session ▸ (models, presets) | `/forksession [model \| @preset]` | a new tab + a new topic, held in Waiting for you |
+| New Session Here ▸ (models, presets) | `/newsession [model \| @preset]` | the same folder; a new tab + topic |
+| Restart session | `/restartsession` | a confirmation while Running (the turn is cut) |
+| Deactivate ▸ Deactivate Tab | `/deactivate` | parks the tab (its claude ends, the conversation resumes on the next message); a confirmation while Running |
+| Deactivate ▸ other scopes, Close ▸ (all), Move ▸, Split tab, Close pane, Export text, Find, Open In Explorer | — | destructive, other tabs, layout, or the PC's screen only |
 
-`show`, `tail`, `screen`, `transcript` and `search` read through FleetLink, apply the connection's privacy
-level and the redactor, and answer in the session's topic (or in 📋 Fleet for `board`, `sessions`,
-`search`).
+**Not on the tab menu, but the session's own:** `/queue` (the queue, numbered), `/sendnow` (send the next
+queued prompt now), `/unqueue <n>`, `/runner auto|paused`, `/takedraft` (queue the unsent draft at the
+PC — the overlay's mail button), `/screen` (the visible terminal text, redacted), `/show`, `/level`
+(§6.3), `/interrupt` (stops a running turn, with a confirmation — D29: the link's `abort` →
+`$.turn.abort` in a linked session, one Esc through the hosting window otherwise), `/help`. Telegram's "/"
+menu (`setMyCommands`, one list for the whole chat) lists these.
 
-### 7.7 Later: files, photos, voice
+### 7.4 Questions, plans and permission prompts as buttons (D9)
 
-A photo or file sent in a session's topic → saved under the session's folder
-(`.agentmaster\inbox\<date>-<name>`) and referenced in the prompt as an `@` path. A voice note → a
-transcription connector. Not in version 1.
+- **What is open:** in a linked session, the link's `question` / `permission` events (from `tool.call` on
+  `AskUserQuestion` / `ExitPlanMode`, carrying the questions; MOD_LINK §4.4); otherwise the transcript's
+  pending `tool_use` (the questions with their options and `multiSelect`; the plan text) — a new bounded
+  capture in the scanner, `pendingQuestion`. Plus, in both, the menu on screen, read by the hosting window
+  (`ReadMenuSnapshot`; pure parser `MenuSnapshot.h` over captured screens), the only source for the plan's
+  approval choices and a permission prompt.
+- **Shown as:** the question with one button per option, **Other…** (a reply to it is the free text), and
+  toggles + **Submit** for multi-select.
+- **Answered by:** the hosting window, under the delivery gate (reserved tag `#menu-answer`): re-read the
+  menu, check it is the same menu, send the measured key plan (P0-1), verify the menu is gone and the
+  transcript's tool result carries the answer. Anything else: "not confirmed — look at the terminal".
+- **Answered elsewhere** (the terminal, the Claude app): the message is edited to the answer given.
+
+### 7.5 Action tokens
+
+A button carries `a:<token>` (10 base-62 characters; `callback_data` holds 64 bytes). A token maps to
+`{connection, session, intent, binds}`, where `binds` names exactly what it acts on (the question's
+`tool_use` id, the queue item, the session's state stamp); a mismatch refuses with the current state.
+Action tokens are single use and expire (2 h; reads 24 h).
+
+### 7.6 Later: files, photos, voice
+
+A photo or file in a topic → saved under the session's folder (`.agentmaster\inbox\`) and referenced in
+the queued prompt as an `@` path; a voice note → a transcription connector.
 
 ## 8. The Fleet Control API (engine)
 
-### 8.1 What FleetLink calls
+### 8.1 Calls
 
 ```
-Headlines(filter) / Card(id) / Board()                      read, lean registry copies
-Tail(id, n, level) / Transcript(id, level) / Screen(id)      read
-Search(words)                                                session database or the fast phase
-Reply(id, text, mode, origin) / Slash(id, command)           §7.2 — SubmitPrompt or the queue
-QueueAdd(id, text) / QueueSendNext(id, itemId) / QueueSkip(id, itemId)
-RunnerMode(id, mode) / PauseAll(on)
-Answer(id, menuStamp, choice)                                §7.3
-Stop(id)                                                     §7.4
-Open(id) / New(folder, model, firstPrompt) / Fork(id) / Restart(id) / Deactivate(id) / Close(id)
+Topics:   QualifyingTabs() → [(session, window, title, color, state, pinned)]       the sync's input
+Read:     Card(id) / Board() / Idle() / Tail(id, n, level) / Transcript(id, level) / Screen(id) / Summary(id)
+Search:   (the Search agent's tools)
+Prompts:  Enqueue(id, text, origin=Remote, sourceRef) / Unqueue(id, n) / SendNext(id) / TakeDraft(id)
+Runner:   RunnerMode(id, mode) / PauseAll(on)
+Menus:    Answer(id, menuStamp, choice) / Interrupt(id)
+Tab:      Rename / TabColor / MarkUnread / MoveIdle / Wake / Pin / Favorite / Tags / Activate / Deactivate /
+          RestartSession / ForkSession(model) / NewSession(model) / Revive(id, resume|fork, pin)
 ```
 
-Every call returns `{ok, code, text}`, where `code` is one of a fixed set (`sent`, `queued`, `refused:level`,
-`refused:dormant`, `refused:stale`, `refused:backlog`, `refused:unknown-session`, `failed:…`), and logs one
-`[nav] remote …` line (§14).
+Every call returns `{ok, code, text}` (`queued`, `sent`, `refused:level`, `refused:no-record`,
+`refused:stale`, `refused:backlog`, `refused:unknown-session`, `refused:no-tab`, `failed:…`) and logs one
+`[nav] remote …` line.
 
 ### 8.2 Window-hosted actions
 
-The engine already fans actions out to the ONE window that hosts a tab (activate, restart, close,
-deactivate, command-action). This design adds three sinks of the same shape (registered at engine init,
-token-detached in `~TerminalPage`, Rule #10): **key plan** (answer a menu, stop), **screen read**, and
-**launch** (open / new / fork, with "do not take focus"). A sink that finds no host answers `refused:no-tab`.
+New per-window sinks of the existing shape (registered at engine init, detached in `~TerminalPage`,
+Rule #10): **key plan** (menus, interrupt), **screen read**, **launch** (resume, fork, new — without
+taking focus), **tab action** (rename, color, mark unread, triage moves, favorite, tags, activate,
+deactivate, restart). A sink that finds no host answers `refused:no-tab`.
 
-### 8.3 Other consumers
+### 8.3 New engine features this needs
 
-The same API is what CLI.md's deferred P2 / P3 (`restore`, `archive`, `watch`, `enqueue`, `send-now`,
-`set-autorunner`) and a future MCP control server need. Building it once for messaging gives them a seam;
-exposing it to them is a separate decision.
+| Feature | Where |
+|---|---|
+| **Pin** (never idle): the `pinned` store key, the decay refusal, the hold in Waiting for you, the tab and board menu items, the 📌 glyph | `SessionStore`, `SessionScanner` (`ShouldDecayWaitingToIdle`), the registry's state seam, `Tab.cpp`, the board |
+| **Remote queue items**: `PromptOrigin::Remote` (serialized `"Remote"`), next-in-line placement, delivered whatever the runner mode and Pause all, `kAnswersQuestionOk` | `SessionModels.h`, `Scheduler::DecideAdvance` |
+| **The session link** (MOD_LINK.md) as the delivery, command, abort and state route of linked sessions (§2.4); messaging does not wait for it — P1 ships on the typed path and linked sessions switch over when the link exists | `LinkServer` (MOD_LINK §7) |
+| **Open without focus**: resume, fork and new session into a chosen window as a dormant tab, then held in Waiting for you | `TerminalPage.AgentSessions.cpp` |
+| **The transcript follower**: per listed session, new transcript lines → typed items (§6.3), built on `TranscriptTurns`' parsing, incremental | `AgentMaster/` |
+| **Menus**: `pendingQuestion`, `ReadMenuSnapshot`, key plans | scanner, `ControlCore`, the hosting window |
+| **The command table**: recorded / no record / leaves the tab (§7.2) | `AgentMaster/` |
+
+### 8.4 Other consumers
+
+The same API serves CLI.md's deferred P2 / P3 (`restore`, `archive`, `watch`, `enqueue`, `send-now`,
+`set-autorunner`) and a future MCP control server; exposing it to them is a separate decision.
 
 ## 9. Security
 
@@ -725,503 +689,310 @@ exposing it to them is a separate decision.
 
 | Threat | Rule |
 |---|---|
-| A stranger messages the bot (Telegram bots are found by username) | Sender allowlist by platform user id; silent drop after reading only the sender id (H3); pairing answers strangers only with "this bot is private" (rate-limited) |
-| A member of a group the bot is in | Gate on the sender (`from.id`), never the chat (the channels reference makes the same rule) |
-| The owner's messenger account is taken over | Permission levels; an optional drive PIN for Steer and Operate (§9.3); Operate off by default; every remote action audited |
-| A stale or replayed button, an old message from the backlog | Single-use tokens bound to the exact question / item / state (§5.7); the backlog rule (§4.3) |
-| A leaked bot token | The thief can read new messages first (and so break ours, 409) and post as the bot — not drive the fleet; rotate in BotFather; Agentmaster raises an alert on a 409 it did not cause |
-| A hostile POST to a public endpoint (Teams) | H4: loopback only, `POST` only, a size cap, the JWT verified before the body is parsed |
-| A parser bug fed by internet input, inside Agentmaster | H1–H6 (§4.2) |
-| Secrets in session output reaching a chat | The redactor (§9.6), always on |
-| A prompt-injection in a chat message | Remote text is the owner's own prompt; FleetLink never interprets it beyond the command grammar |
+| A stranger messages the bot | Sender allowlist by user id; dropped after reading only the sender (H3); pairing answers "this bot is private" (rate-limited) |
+| The owner's Telegram account is taken over | Permission levels, an optional drive PIN, confirmations on restart / deactivate / interrupt, every action audited |
+| A stale button, an old backlog message | Tokens bound to what they act on (§7.5); the backlog rule (§4.3) |
+| A leaked bot token | The thief can read new messages first (a 409 we did not cause raises an alert) and post as the bot — not drive the fleet; rotate in BotFather |
+| A hostile POST (Teams) | H4 |
+| A parser bug fed by internet input, inside Agentmaster | H1–H6 |
+| Secrets in a mirrored session | The redactor, always on (§9.6) |
 
-### 9.2 Identity and pairing
+### 9.2 Pairing
 
-- **Telegram:** the cog shows a one-time code (6 digits, valid 10 minutes) and the deep link
-  `https://t.me/<bot>?start=<code>` (with a QR code). Opening it sends `/start <code>`; Agentmaster binds
-  the connection's owner to that `from.id` and the private chat id, creates the 📋 Fleet topic, and both
-  sides confirm. Re-pairing replaces the owner.
-- **Teams Bot:** after the app is installed, the owner sends `pair <code>` in the 1:1 chat; Agentmaster
-  stores the user's `aadObjectId`, the tenant id and the conversation reference (`serviceUrl`,
-  `conversation.id`) for proactive messages. Messages from any other user or tenant are dropped.
-- **Teams Lite, Webhook:** one-way; no identity.
+The cog shows a one-time code (6 digits, 10 minutes) and `https://t.me/<bot>?start=<code>` (with a QR).
+Opening it binds the owner to that `from.id` and the private chat, creates 🔎 Search, and runs the first
+topic sync. Teams Bot: `pair <code>` in the 1:1 chat stores `aadObjectId`, tenant and conversation
+reference.
 
-### 9.3 Permission levels and the drive PIN
+### 9.3 Levels, the drive PIN, confirmations
 
 | Level | Allows |
 |---|---|
-| **Notify** | events out; `away`, `back`, `mute`, `quiet`, `help` |
-| **Read** | + `board`, `sessions`, `show`, `tail`, `screen`, `transcript`, `search`, mirror levels |
-| **Steer** | + replies, slash commands, queue, Send now, runner modes, pause all, answers to questions / plans / permissions |
-| **Operate** | + stop, open, new (incl. a new topic), fork, restart, deactivate, close |
+| **Read** | the topics' mirror, 🔎 Search's searching, `/screen`, `/transcript`, `/summary`, `/queue`, the copy commands |
+| **Steer** | + messages (queued prompts), Claude Code's commands, answers, `/unqueue`, `/sendnow`, `/runner`, `/takedraft`, `/pin`, `/moveidle`, Wake, `/rename`, `/tabcolor`, `/markunread`, `/favorite`, tags, `/show`, `/level` |
+| **Operate** | + `/restartsession`, `/deactivate`, `/activate`, `/forksession`, `/newsession`, Resume / Fork from 🔎 Search, a new topic → a new session, `/interrupt`, `/pauseall` |
 
-- The default for a paired owner is a decision (D4); the cog sets it per connection.
-- **Drive PIN (optional):** with it on, Steer and Operate intents are refused until `!unlock <PIN>`
-  (valid 30 minutes); the PIN is stored salted and hashed in Credential Manager; 5 wrong tries lock the
-  connection for 15 minutes and send an alert; the PIN message is deleted from the chat after it is read.
-- **Confirmations:** every Operate verb answers with a confirm button first (single-use token, 2 minutes).
+- The default for a paired owner (D4): **Operate**, since the topics exist to manage the sessions;
+  confirmations on `/restartsession`, `/deactivate` and `/interrupt` while a turn runs.
+- **Drive PIN** (optional): Steer and Operate refused until `/unlock <PIN>` (30 minutes); salted hash in
+  Credential Manager; 5 wrong tries lock for 15 minutes; the PIN message is deleted after reading.
 
 ### 9.4 Secrets
 
-Bot tokens, webhook URLs (a Workflows URL is itself a credential), the Teams app secret, the tunnel
-token and the PIN hash live in Windows Credential Manager only (§4.4); never in `connections.json`,
-`settings.json`, logs, the catalog, artifacts or commit messages (M4). An external connector receives only
-the names its manifest declares, at `initialize` (§12.2).
+Bot tokens, webhook URLs, the Teams app secret, the tunnel token and the PIN hash: Windows Credential
+Manager only — never in `connections.json`, settings, logs, the catalog, artifacts or commits (M4).
 
 ### 9.5 Audit
 
-Every executed or refused remote intent logs `[nav] remote <connection> <verb> <sid8> → <code>` in
-hooks.log, with the platform user's id hashed. `grep '\[nav\] remote' hooks.log` lists every action taken
-from a phone.
+`[nav] remote <connection> <verb> <sid8> → <code>` in hooks.log for every action from a chat, the user id
+hashed.
 
-### 9.6 Privacy levels and redaction
+### 9.6 Privacy and redaction
 
-| Level | Leaves the PC |
-|---|---|
-| **Minimal** | title, state, folder name (leaf), timing; no conversation text |
-| **Standard** | + the prompt preview (120 characters, the toast's line 3) + the final reply's first 600 characters + question / plan text |
-| **Full** | + whole prompts and replies (a mirrored topic, §10.2), `tail`, `screen`, `transcript` on demand |
-
-- **Redaction, always on, in the engine** (before the text reaches the hub): the ONE redactor
-  SESSIONS_AGENT.md §8.4 specifies for the AI search's results, `RedactSecrets` (pure, header-only,
-  unit-tested; whichever feature is built first builds it): GitHub, Anthropic, OpenAI, AWS, Slack, Google,
-  Stripe and Azure key shapes, JWTs, PEM private-key blocks, and a long high-entropy value after
-  `password` / `secret` / `token` / `api_key` → `[redacted <kind>]`. A reply that echoes a `.env` file
-  must not reach Telegram. The `telegram` and `teams` kinds join the list (a bot token is
-  `<digits>:<35 characters>`).
-- **What the platforms keep:** Telegram stores bot chats on its servers; Teams stores them in the tenant.
-  The cog says so next to the privacy level. A mirrored topic (*turns* or *live*) needs the Full level for
-  that session: every prompt and reply then goes to Telegram. Telegram's per-chat auto-delete timer is the
-  user's own setting; `protect_content` (no forwarding or saving) is a per-connection option.
-- **Microsoft's volume rule** ("only send messages that people will read") is met by the away rule and the
-  event defaults; the digest replaces bursts.
-
-### 9.7 Organizations
-
-A work tenant may forbid custom apps, or forbid sending code context to a personal device. The Teams Bot
-needs the tenant's policy (D11); Teams Lite needs only Workflows. Telegram for work sessions is the user's
-own policy call; routing filters let work folders go only to Teams.
+- A topic carries the whole session (D19), so every prompt, reply and tool call of every listed session
+  goes to Telegram's servers (cloud chats, not end-to-end). The cog says so plainly; the message-type grid
+  (§6.3) is also the privacy control (tool outputs, file contents and thinking are Verbose-only by default).
+- **Redaction, always on, in the engine, before any text reaches the hub:** `RedactSecrets`, the redactor
+  SESSIONS_AGENT.md §8.4 specifies (GitHub, Anthropic, OpenAI, AWS, Slack, Google, Stripe and Azure key
+  shapes, JWTs, PEM private keys, high-entropy values after `password` / `secret` / `token` / `api_key`)
+  → `[redacted <kind>]`, plus the `telegram` bot-token shape. Files (diffs, outputs, transcripts) pass
+  through it too.
+- `protect_content` (no forwarding or saving) is a per-connection option; Telegram's auto-delete timer is
+  the user's own.
+- One-way providers (Teams Lite, webhooks) keep the Minimal / Standard / Full levels for their alerts.
 
 ## 10. The Telegram connector
 
 ### 10.1 Setup (about five minutes)
 
-1. In Telegram, @BotFather → `/newbot` → a name and a username ending in `bot` → copy the token. One bot
-   per install (release and dev each), never the homelab's bot.
-2. In the BotFather **Mini App**: My bots → the bot → Bot Settings → Threads Settings → **Threaded Mode**
-   on (topics in the private chat). Leave "users may create topics" ON when new topics should start new
-   sessions (D20).
-3. Cog → MESSAGING → Add → Telegram → paste the token → **Check** (`getMe`: the bot's name, and
-   `has_topics_enabled`; when false, the form says how to turn it on and the connection falls back to reply
-   chains).
-4. **Pair**: open the link or scan the QR → Start. The 📋 Fleet topic appears with "Paired with
-   Agentmaster (release) on ELI-PC"; the cog shows the owner.
-5. Pick the level, the events, the privacy level, the mirror level and the away rule; **Test** sends a
-   sample event.
+1. @BotFather → `/newbot` → copy the token (a bot per install; never the homelab's bot).
+2. The BotFather **Mini App** → My bots → the bot → Bot Settings → Threads Settings → **Threaded Mode**
+   on; "users may create topics" on when a new topic should start a session (D20).
+3. Cog → MESSAGING → Add → Telegram → paste → **Check** (`getMe`: the name; `has_topics_enabled`).
+4. **Pair** (link or QR) → 🔎 Search appears; pin it at the top in your Telegram client.
+5. The first sync creates a topic for each qualifying tab (§6.7 paces the backfill, Waiting-for-you and
+   Needs-approval sessions first).
 
-`setMyCommands` registers the 📋 Fleet commands (§7.1, filtered by the level) and, under them, Claude Code's
-common slash commands (`/compact`, `/clear`, `/model`, `/cost`, `/context`, …), so the Telegram "/" menu
-offers both; which one a `/…` means depends on the topic it is typed in (D22).
+### 10.2 Receiving
 
-### 10.2 One topic per session — the whole session in its topic
+- `getUpdates(offset, timeout=50, allowed_updates=["message","edited_message","callback_query",
+  "stopped_message_generation"])`; at start the backlog first. The offset is saved once FleetLink took or
+  refused each update (at least once; intents carry the update id, so repeats are dropped).
+- `message_thread_id` routes a message to its topic's session; a topic id the map does not know, with a
+  `forum_topic_created`, starts the new-session flow (§5.1).
+- Never a webhook for this provider; one poller per token (a machine-wide mutex named from the token's
+  hash; a 409 stops the loop and alerts — M7).
+- Callback queries are answered at once ("working…"); the message is edited when FleetLink returns.
 
-**The topics of the chat**
+### 10.3 Sending
 
-- **📋 Fleet** — created by the bot at pairing: the pinned board (§6.5), the coalesced "N need you"
-  messages, digests, `app.*` events, and every fleet command (§7.1).
-- **One topic per session** — named with the session's title (Rule #11), colored with the nearest of the
-  six topic colors to its tab color; created when the session first has something to say or when you
-  follow it.
-- **A topic you start** — a new session (D20).
-- **The main view** — in Threaded Mode a non-reply message sent from the main view starts a new topic by
-  itself (§3.1), so the main view is not a place for commands: a new topic whose first message is a fleet
-  command (`/board`, `/sessions`, …) is answered in 📋 Fleet and deleted; any other new topic is a new
-  session.
+HTML mode (`<`, `>`, `&` escaped); code and screens in `<pre>`; work logs and long replies in
+`<blockquote expandable>`; 4,096 characters per message, split on paragraphs, never inside a `<pre>`;
+past 4 chunks a file; buttons with `style` (`primary` for the safe action, `danger` for restart /
+deactivate / interrupt); `<tg-time unix=… format="r">` for times that stay current; reactions for a
+queued message's status; `disable_notification` on everything but a turn's final message.
 
-**What a session's topic holds**
+### 10.4 What a topic cannot do
 
-1. **The card** — the topic's pinned message, edited in place (at most every 30 s): the title; the state
-   and since when; folder · branch; model · effort; the runner mode and the queue (count + the next
-   prompt); context use; the unsent draft at the PC, if any ("✎ draft at the PC: …", the remembered
-   `pendingInput`). Its buttons: [Stop] [Runner: Auto / Paused] [Queue ▸] [Screen] [Transcript] [Follow]
-   [More ▸ Fork · Restart · Deactivate · Close]. A closed session's card reads Closed with [Resume].
-2. **The conversation**, by the topic's **mirror level** (D19):
-   - *needs-you* — only what needs you: questions, plans, errors, "waiting for you" with the reply excerpt;
-   - *turns* — every turn as ONE message: the prompt that started it, marked with its origin (⌨ typed at
-     the PC, ⚙ from the queue, 📱 from this chat), the tool calls folded into one expandable line ("▸ 6 tool
-     calls: Bash ×4, Edit ×2", HTML `blockquote expandable`), and the final reply; compactions, `/clear` and
-     rewinds as one-line markers;
-   - *live* — *turns* plus the running turn as a streamed draft with a stop button (§6.7).
-3. **The questions** — questions, plan approvals and permission prompts as buttons (§7.3), edited when
-   they are answered anywhere.
-
-**What you type in a session's topic**
-
-| You type | It becomes |
+| Limit | What stands in |
 |---|---|
-| Plain text | A prompt to the session (§7.2) |
-| `/compact`, `/model opus`, any `/…` | Claude Code's slash command, typed into the session (Steer level) |
-| `!stop`, `!queue <text>`, `!screen`, `!runner auto`, `!follow`, `!mirror turns` | Agentmaster's own verbs (D22), same as the card's buttons |
-| A reply to the bot's question message | The "Other" answer to that question (§7.3) |
-| A photo or a file | P7 (§7.7) |
+| The terminal's screen-only parts: spinners, the TUI's own pickers and panels, the input box | `/screen` (a text snapshot); menus as buttons (§7.4); the unsent draft on the card |
+| Keyboard-only actions: Shift+Tab (modes), double Esc (rewind), Ctrl+B | A few as measured key plans later; the rest at the PC |
+| Claude Code commands that leave no record | Refused (§7.2), the user's rule |
+| ~1 message per second for the whole chat | The work log + card + final message layout, adaptive pacing (§6.6) |
+| A deleted topic loses its messages; private-chat topics cannot be hidden or closed | Idle topics are deleted after a grace; a revived session's topic is rebuilt (§6.7) |
+| A topic's color is fixed at creation | Tab color changes do not follow |
+| No way to list topics or to learn that one was deleted | Agentmaster's topic map, written atomically with a previous copy |
+| Telegram checklists are business-only | The to-do list as a text checklist edited in place |
+| Nothing while Agentmaster is closed (D1) | 24 h of backlog, handled at the next start |
+| Merely reading a topic is invisible to a bot | Only actions mark a session read (§5.2) |
 
-**The lifecycle, both ways**
-
-| In Agentmaster | In the topic |
-|---|---|
-| A session first has something to say, or you follow it | Its topic is created and backfilled: the card, the last 3 turns, and the transcript as a `.md` file |
-| Renamed (Explorer, tab, F2) | `editForumTopic` renames the topic (P0-12: whether that posts a visible service message) |
-| `/clear` (same tab, a new conversation id) | The same topic continues, with a marker "— /clear: a new conversation —" (the tab's lineage keeps the topic) |
-| Forked | A new topic, "<title> (fork)" |
-| Closed (archived) | The card reads Closed with [Resume]; the topic stays (D21) |
-| Resumed (at the PC or from the topic) | The same topic continues |
-| **← A new topic started in Telegram** | A new session (D20): the folder from the first message (`in K:\source\proj: fix the flaky test`), else buttons of the recent folders and "Other path…"; launched with the first message as its first prompt; the topic is bound and renamed to the session's title (`is_name_implicit` asks the bot to name it) |
-| **← A message in a closed session's topic** | "Resume and send" (§7.2) |
-| **← The topic deleted in Telegram** | Nothing happens to the session; a new topic is made at its next event |
-| **← The topic renamed in Telegram** (if the client lets the user) | The session is renamed (Rule #11: one title) — P0-13 |
-
-**The budget** — about one message per second for the whole chat, edits included (§3.1). An estimate for
-30 open sessions, each ending a turn every 3 minutes: the mirrored turns of 10 followed sessions ~0.06/s;
-the cards, which change at least twice per turn (Running, then Waiting), ~0.33/s if all 30 have topics;
-needs-you messages while away ~0.17/s — about 0.55/s in all: inside the budget, with little room. So card
-edits are the first thing the outbox thins (one per session per 30 s; a state that flips back within the
-window is never sent), and a burst (ten sessions ending at once) waits a few seconds. *live* is meant for
-one or two followed sessions; what drafts count against the budget is P0-15.
-
-**Without Threaded Mode** — one chat; every session message starts `#3f9a · <title>`; a reply to it
-(swipe-reply) targets that session; no cards (the card is a message on demand: `show #3f9a`).
-
-**A forum supergroup** (alternative) — the same topic model in a group the bot administers
-(`can_manage_topics`), for an owner who wants a separate room; other members are ignored. A group allows
-20 bot messages per minute: no mirroring there.
-
-**Teams** has no topics in a 1:1 chat; its equivalent is a Team channel with one thread per session (the
-bot posts the card as the thread's first message, replies continue it) — a P5 option.
-
-### 10.3 What a topic cannot do
-
-| Limit | Why | What Agentmaster does |
-|---|---|---|
-| The terminal's screen-only parts: spinners and progress bars, the TUI's own pickers and panels (`/model` with no argument, `/config`, `/resume`, the transcript view), the input box itself | A topic carries messages, not a screen | `screen` sends a text snapshot; numbered menus become buttons (§7.3); the unsent draft shows on the card with a "Take the draft" button |
-| Keyboard-only actions: Shift+Tab (permission and plan mode), double-Esc (rewind), Ctrl+B (background a shell) | No key events in a chat | A few become card buttons through measured key plans (P0-1); the rest stay at the PC |
-| A big busy fleet mirrored live | One message per second per chat, all topics together | Mirror per turn, live only for followed sessions, the outbox paces (§6.4) |
-| 4,096 characters per message | Telegram's limit | Expandable quotes, the rest as a `.md` file, the full transcript on demand |
-| No list of topics; no event when a topic is deleted | Bot API | Agentmaster's topic map is the record (written atomically, §4.4); a send into a deleted topic fails → a new topic at the next event; deleting a topic never closes a session |
-| A private-chat topic cannot be closed, only deleted | `closeForumTopic` is for supergroups | A closed session keeps its topic; its card reads Closed |
-| Codex sessions, and claude sessions Agentmaster did not launch | Agentmaster cannot type into a Codex TUI yet (C4), nor into an unmanaged claude (Rule #13) | Read-only topics: card, mirror, no replies (D23) |
-| Anything while Agentmaster is closed | The bot runs inside Agentmaster (D1) | Telegram keeps messages 24 h; handled at the next start under the backlog rule (§4.3) |
-| Privacy | A mirrored topic sends every prompt and reply to Telegram's servers | Mirroring needs the Full level for that session; redaction always on (§9.6) |
-| Hundreds of topics | Client limits unknown | Topics only for sessions that have something to say or that you follow; P0-14 |
-
-### 10.4 Receiving
-
-- One thread per connection: `getUpdates(offset, timeout=50, allowed_updates=["message",
-  "callback_query","stopped_message_generation"])`; at start, the backlog first (§4.3). The offset is
-  persisted only after FleetLink accepted or refused each update (at least once; intents carry the update
-  id, so a repeat is dropped).
-- `message_thread_id` routes a message to its topic's session; a `forum_topic_created` with a thread id
-  unknown to the topic map starts the new-session flow (§10.2).
-- **Never a webhook** for this provider (it would disable `getUpdates`); `deleteWebhook` on setup if one
-  is set (with the user's OK: someone else may own it).
-- **One poller per token:** a machine-wide mutex named from the token's hash; a 409 from Telegram stops
-  the loop and raises "another program is reading this bot" (M7).
-- Callback queries are answered at once (`answerCallbackQuery` "working…"), the message is edited with the
-  outcome when FleetLink returns.
-
-### 10.5 Sending
-
-- HTML parse mode; text escaped (`<`, `>`, `&`); code and screens in `<pre>`; tool calls folded in
-  `<blockquote expandable>`; replies longer than the limit become an expandable quotation + the rest as a
-  `.md` document.
-- **Length:** 4,096 characters after entity parsing; chunks split on paragraph, then line boundaries,
-  never inside a `<pre>`; more than 3 chunks → a document instead.
-- **Buttons:** inline keyboards, `style` `primary` for the safe default, `danger` for Stop / Close.
-- **Times:** `<tg-time unix=… format="r">` shows "12 minutes ago" that stays right as time passes.
-- **Silent:** `disable_notification` for `info` severity (mirrored turns, card edits, digests).
-
-### 10.6 Failure modes
+### 10.5 Failure modes
 
 | Symptom | Handling |
 |---|---|
-| 401 (token revoked) | stop the connection, alert in the cog and with a Windows toast |
-| 403 (the user blocked the bot) | stop sending; status "blocked by the user" |
-| 409 | §10.4 |
-| 429 | wait `retry_after`, then resume in order |
-| A topic was deleted by the user | a new topic at the next event; the old binding is dropped |
-| The topic map was lost | old topics become orphans the bot cannot find again (no list method); new topics are made; the map is backed up with `state.json`'s previous copy |
-| Network down | backoff; the outbox keeps events, revalidated before sending |
+| 401 (token revoked) | stop, alert in the cog and with a Windows toast |
+| 403 (the user blocked the bot) | stop; status "blocked by the user" |
+| 409 | §10.2 |
+| 429 | wait `retry_after`; the pacing lowers its rate |
+| "message thread not found" (a deleted topic) | the topic is created again |
+| The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first |
 
-## 11. The Teams connector
+## 11. Microsoft Teams
 
-### 11.1 Two tiers
-
-| | **Teams Lite** | **Teams Bot** |
-|---|---|---|
-| Direction | one-way (alerts) | two-way |
-| Needs | Workflows in the tenant | a work tenant with **Upload custom apps**, an Azure Bot (single-tenant, free tier), a public HTTPS endpoint |
-| Looks like | cards from "Workflows" in a chat | cards from "Agentmaster" in a 1:1 chat (or a thread per session in a Team channel) |
-| Buttons | links only | everything in §7 |
-| Phase | P4 | P5 |
-
-### 11.2 Teams Lite (Workflows)
-
-- **Setup:** in Teams, Workflows → the template "Post to a chat when a webhook request is received" (the
-  trigger "When a Teams webhook request is received", then a card posted to a chat) → pick the chat → copy
-  the URL → cog → Add → Teams Lite → paste (stored in Credential Manager: the URL is a credential).
-- **Send:** `POST <url>` with `{"type":"message","attachments":[{"contentType":
-  "application/vnd.microsoft.card.adaptive","content":<card>}]}`; one card per event. The call returns no
-  reference to the posted message, so the sender cannot edit it (to confirm in P0-6) and `replaceKey`
-  degrades to "a new short message".
-- **Cannot:** receive anything, set the sender's name, edit or delete. A card's buttons can only open
-  links.
-- **P0:** whether the chosen chat alerts the phone, the trigger's current authentication options, and the
-  card schema version the Workflows card action accepts.
-
-### 11.3 Teams Bot — what the user creates
-
-1. An **Azure Bot** resource, type single-tenant (free F0 tier; the Teams channel is free; an Azure
-   account asks for a card) — or a bot registered in the Teams Developer Portal. Its app id, tenant id
-   and a client secret go into the cog (the secret into Credential Manager).
-2. The **messaging endpoint** = the public URL of §11.4 + `/teams/<connectionId>/api/messages`.
-3. **The Teams app:** the cog writes `<profile>\messaging\teams-app-<connectionId>.zip` (manifest with the
-   bot id, personal scope, the command list, two icons) → Teams → Apps → Manage your apps → Upload a
-   custom app.
-4. **Pair** (§9.2).
-
-### 11.4 The public endpoint (D12)
-
-| Option | How | For | Against |
-|---|---|---|---|
-| **Cloudflare Tunnel on the PC** (recommended) | `cloudflared tunnel run --token <T>`, started by Agentmaster as a child process (token in Credential Manager), a hostname on the user's own domain → `http://127.0.0.1:<port>` | free; a stable name; nothing listens beyond loopback; nothing else to run | a Cloudflare account and a domain on it |
-| Microsoft dev tunnel | `devtunnel host` with a persistent tunnel, anonymous access | Microsoft's own, used in Teams docs | meant for development; account login; usage limits |
-| ngrok | a static free domain | quick | account; free-tier limits |
-| A relay | a small public service receives, validates and holds the posts; Agentmaster dials out to collect them | holds messages while Agentmaster is closed; one URL for every push-in platform | an always-on component of its own, against N4 and the spirit of D1; the homelab has no public ingress today ("an internet caller needs a tunnel in front (not built)") |
-
-The listener (inside Agentmaster, H4): loopback only; `POST` only; 256 KB body cap; JWT checked before the
-body is parsed; one path per connection. Implementation choice (P0-8): the Windows HTTP Server API
-(kernel-side request parsing, if a loopback URL can be registered without admin) or a minimal bounded
-parser on a loopback socket.
-
-### 11.5 Receiving (the Bot Connector protocol)
-
-- Validate every request's JWT: the signing keys from the Bot Framework OpenID metadata, the issuer, the
-  audience (= the bot's app id), the expiry (5-minute skew), and the `serviceUrl` claim against the
-  activity's `serviceUrl` (RS256 checked with BCrypt). The exact issuer set for a single-tenant bot is a
-  P0 check against Microsoft's current "authenticate requests from the Bot Connector service" page.
-- `message` → command or reply (a 1:1 chat has no threads: replies come from the cards' inputs, §11.6, or a
-  picker); `invoke` `adaptiveCard/action` (Universal Actions, `Action.Execute`) → the token's intent,
-  answered within the invoke's time with a refreshed card; `installationUpdate` / `conversationUpdate` →
-  capture or drop the conversation reference.
-
-### 11.6 Sending
-
-- A token from `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token` (client credentials,
-  scope `https://api.botframework.com/.default`), cached until its expiry.
-- `POST {serviceUrl}/v3/conversations/{conversationId}/activities` with an Adaptive Card; the reply id is
-  kept for `PUT …/activities/{id}` (edits).
-- **Cards:** a header (title + state chip in the tab color), facts, the text blocks, an `Input.Text`
-  ("Reply to this session") with a **Send** `Action.Execute`, and the action buttons — so every card is its
-  own binding (§5.1).
-- **Size:** keep a card's JSON under 40 KB of UTF-8 (≈ 80 KB in UTF-16); longer text → a "Show more"
-  button that sends the rest.
-
-### 11.7 Limits and the live view
-
-7 sends per second per conversation, 60 per 30 s, 1,800 per hour; 50 requests per second per app per
-tenant; 100 KB per message; streaming 1:1 only, 1 request per second, 2 minutes per stream. The live
-view therefore edits one message every 3 s instead of streaming.
-
-### 11.8 Failure modes
-
-| Symptom | Handling |
-|---|---|
-| 401 / 403 from the connector | refresh the token once, then stop and alert |
-| 413 `MessageSizeTooBig` | not retryable: re-render at the next lower privacy level, then headline only |
-| 429 | wait `Retry-After` |
-| The tunnel is down | inbound fails in Teams ("the bot is not responding"); outbound still works; status degraded |
-| Agentmaster is closed | the same as a tunnel down: Teams shows the message as failed |
-| The app was removed from Teams | the conversation reference dies (403); status "uninstalled" |
+- **Teams Lite (P5):** a Workflows webhook ("Post to a chat when a webhook request is received"; the URL
+  is a credential) — one-way **alerts**: each listed session's final messages (§6.4), as Adaptive Cards
+  with links only; no edits (the call returns no message reference — P0-6). Appears as the Workflows bot.
+- **Teams Bot (P6):** needs a work tenant with **Upload custom apps**, a single-tenant Azure Bot (free
+  tier), an app package the cog generates, and a public HTTPS endpoint — **Cloudflare Tunnel on the PC**,
+  started by Agentmaster (`cloudflared tunnel run --token …`, loopback target; D12), or a dev tunnel or
+  ngrok. Receiving: JWT checked against the Bot Framework OpenID metadata (issuer set for a single-tenant
+  bot: P0-7); `message`, `invoke adaptiveCard/action` (Universal Actions). Sending: client-credentials
+  token from the tenant, `POST {serviceUrl}/v3/conversations/{id}/activities`, edits with `PUT`.
+- **The topic model on Teams:** a 1:1 chat has no threads; a Team channel does — one thread per listed
+  tab (the card as the thread's first post, edited; the turns as replies). Limits: 7 / 1 s, 60 / 30 s
+  per conversation; ~100 KB per message; streams die after 2 minutes (edit instead).
+- Agentmaster closed = the bot unreachable: Teams shows the message as failed (no backlog).
 
 ## 12. Any other messenger
 
-### 12.1 The Webhook connector (built in, one-way)
+### 12.1 Webhook (built in, one-way)
 
-`POST` (or `PUT`) to a URL with headers and a body template (`{{title}}`, `{{state}}`, `{{headline}}`,
-`{{text}}`, `{{ref}}`, `{{severity}}`, JSON-escaped). Presets for ntfy, Pushover, Gotify, Discord and Slack
-incoming webhooks, Home Assistant and n8n. The URL and any header marked secret go to Credential Manager.
+`POST` to a URL with a body template (`{{title}}`, `{{state}}`, `{{text}}`, `{{ref}}`, …): alerts from
+listed sessions' final messages. Presets: ntfy, Pushover, Gotify, Discord and Slack incoming webhooks,
+Home Assistant, n8n.
 
 ### 12.2 The external connector contract
 
-- **A connector is a folder** `<profile>\messaging\connectors\<id>\connector.json`:
-
-```json
-{ "id": "slack", "name": "Slack (Socket Mode)", "protocol": 1,
-  "command": "python", "args": ["-I", "am_slack.py"],
-  "settings": [ { "name": "channel", "label": "Channel id", "type": "text" } ],
-  "secrets":  [ { "name": "appToken", "label": "App-level token (xapp-…)" },
-                { "name": "botToken", "label": "Bot token (xoxb-…)" } ] }
-```
-
-  The cog renders the form from `settings` and `secrets`; secrets go to Credential Manager.
-- **The process** speaks JSON-RPC 2.0, one JSON object per line, on stdin / stdout (stderr = its log).
-  Agentmaster starts it as a child process in its kill-on-close job, restarts it with backoff when it
-  exits, and stops it with `shutdown`. The bot — the rules, the state, the decisions — stays in
-  Agentmaster (D1); a connector process only moves bytes for one platform.
-- **Agentmaster → connector:** `initialize {protocol, connection {id, name, settings}, secrets {…}}` →
-  `{capabilities}` (§5.2); `send {eventId, binding, render {plain, markdown, html, card}, buttons, silent}`
-  → `{ref, binding}`; `edit {ref, render}`; `delete {ref}`; `ensureThread {session, title, color}` →
-  `{binding}`; `stream {key, text, final}`; `ack {inboundId, outcome {ok, text}}`; `shutdown`.
-- **Connector → Agentmaster (notifications):** `inbound {id, user {id, name}, chat {id, kind}, binding?,
-  replyTo?, newThread?, text?, token?, stop?, sentAt}`, `status {state, detail}`, `log {level, text}`.
-- **Agentmaster keeps every rule** — authentication (the owner's platform id is stored at pairing, which
-  works through `inbound` like any other provider), authorization, tokens, pacing, redaction — so a
-  connector is only a transport. A connector that crashes three times in ten minutes is stopped and
-  reported (H5).
-- **Samples** (P6, in `tools/messaging-connectors/`): Slack Socket Mode (Python), Discord gateway (Node),
-  Matrix (Python), each under 300 lines.
+- A connector is a folder `<profile>\messaging\connectors\<id>\connector.json` (`command`, `args`,
+  `settings`, `secrets`) and a process Agentmaster starts as a child (kill-on-close job), speaking
+  JSON-RPC 2.0, one object per line, over stdio. The bot — rules, state, decisions — stays in Agentmaster.
+- Agentmaster → connector: `initialize {protocol, connection, secrets}` → `{capabilities}` (threads?
+  edits? buttons? drafts? silent sends? limits); `ensureThread {session, title, color}` → `{thread}`;
+  `renameThread`, `deleteThread`; `send {thread, render {plain, markdown, html, card}, buttons, silent}` →
+  `{ref}`; `edit`, `delete`, `react`, `draft`; `ack`; `shutdown`.
+- Connector → Agentmaster: `inbound {id, user, chat, thread?, replyTo?, newThread?, text?, edited?,
+  token?, stop?, sentAt}`, `status`, `log`.
+- A platform with threads (Slack threads, Discord forum channels, Matrix threads) gets the topic model; one
+  without gets alerts and reply chains.
+- Samples (P7): Slack Socket Mode (Python), Discord gateway (Node), Matrix (Python).
 
 ### 12.3 Push-in platforms
 
-WhatsApp, a Teams bot, LINE and other webhook-only platforms share Agentmaster's loopback listener and the
-tunnel of §11.4 (one path per connection); a connector for such a platform declares `inbound: pushIn` and
-receives its requests from Agentmaster as `inbound` notifications after the provider's signature check
-(the check is part of the connector).
+WhatsApp, a Teams bot and other webhook-only platforms share Agentmaster's loopback listener and the
+tunnel (one path per connection); the provider's signature check is part of its connector.
 
 ## 13. Settings and UI
 
-- **Cog → a new MESSAGING tab:** a master switch (default off); the connections list (provider, name,
-  owner, a status dot, last delivery, **Test**, **Edit**, **Remove**); **Add** (Telegram / Teams Lite /
-  Teams Bot / Webhook / External…).
-- **Per connection:** the provider form (§10.1, §11.2, §11.3, §12); pairing (code, link, QR); level and
-  drive PIN; events (the §6.1 table as checkboxes); privacy level; the default mirror level; away rule (when
-  away / always / never; idle minutes; escalate after minutes); quiet hours; routing (all sessions /
-  favorites / tags / folders); new topics start sessions (on/off); topic colors on/off.
-- **Global:** away detection (idle minutes, lock); the Remote Control presence file (D17).
-- **The Manager toolbar:** a status pill (📱 + a dot per connection: green, amber, red), its tooltip naming
-  each connection's state and last delivery; a click opens the tab.
-- **Tab menu:** Messaging ▸ Mirror (needs-you / turns / live) · Mute this session (1 h, today, until
-  unmuted) · Send its card now.
-- **Per-tab badge:** a small 📱 while the session's topic mirrors at *turns* or *live*.
+- **Cog → a new MESSAGING tab:** a master switch (default off); connections (status dot, last delivery,
+  **Test**, **Edit**, **Remove**); **Add** (Telegram / Teams Lite / Teams Bot / Webhook / External…).
+- **Per Telegram connection:** pairing (code, link, QR); level and drive PIN; **the message-type grid**
+  (a preset selector over the §6.3 table, Off / Default / Verbose per row); the idle grace (D25); the
+  backfill depth (D26); the window revived sessions open in (D27); "silent while I'm at the PC" (D6);
+  routing (all tabs / favorites / tags / folders); a new topic starts a session (D20); 🔎 Search's
+  thinking level (default high) and conversation (own / shared with the Sessions page, D24); the slash
+  command table (§7.2: view, edit, reset).
+- **Tab and board menus:** **Pin (never idle)** / **Unpin** beside Move to Waiting-for-you; a 📌 beside
+  the status dot of a pinned tab.
+- **Manager toolbar:** a status pill (📱 + a dot per connection), its tooltip naming states and the
+  number of listed topics.
 
 ## 14. Logs
 
-- **hooks.log:** `[msg] <conn> event <kind> <sid8> → sent|held(<why>)|dropped(<why>)`;
-  `[msg] <conn> intent <kind> <sid8> → <code>`; `[nav] remote <conn> <verb> <sid8> → <code>` (§9.5);
-  `[msg] <conn> started|stopped|backlog N updates (oldest <age>)|breaker open (<why>)`.
-- **messaging.log** (the connectors' transport log, through `AppendStateLog`): `[tg]`, `[teams]`,
-  `[hook]`, `[ext:<id>]` with HTTP status, latency, `retry_after`, poll gaps, connector restarts. Never a
-  message body or a token: ids, sizes and hashes only.
-- **Rule #18:** every `catch (...)` in FleetLink, the hub and the connectors reports through
-  `LogSwallowedException`, with the throw-site stack (H1).
+- hooks.log: `[msg] topic created|renamed|idle|deleted <sid8> (<why>)`; `[msg] <sid8> queued from topic
+  #<n> → sent|failed (<why>)`; `[msg] <sid8> refused /<command> (no record | leaves the tab)`;
+  `[msg] backlog N updates (oldest <age>)`; `[msg] pacing <rate>/s (budget <b>)`; `[nav] remote
+  <connection> <verb> <sid8> → <code>`.
+- messaging.log (the connectors' transport, via `AppendStateLog`): `[tg]`, `[teams]`, `[hook]`,
+  `[ext:<id>]` — HTTP status, latency, `retry_after`, poll gaps, restarts. Never a message body or a token.
+- Rule #18 everywhere (H1).
 
 ## 15. Testing
 
-- **m5 (pure):** the event decider (edges, holds, dedupe, unread, away, escalation, quiet hours, routing);
-  the backlog rule; `DecideRemoteReply`; the topic text router (plain / `/` / `!` / reply); the command
-  grammar and session references; levels, PIN windows and confirmations; the token table (bind checks,
-  single use, expiry); the redactor (a pattern table + false-positive fixtures); Telegram escaping and
-  chunking (UTF-16 counting, `<pre>` safety); the turn renderer (folded tools, origins, markers); the
-  Adaptive Card builder (goldens); the JWT check (RS256 with a test key); `MenuSnapshot` over captured
-  screens.
-- **Connector integration:** a fake Telegram server on loopback (the connector's base URL is a setting —
-  Telegram's self-hosted Bot API server uses the same knob), incl. topics, a backlog and 429s; a fake Bot
-  Connector with test-signed JWTs; a webhook echo; a fake external connector.
-- **Abuse:** a stranger, a group member, a replayed update id, an expired / reused / mismatched token, PIN
-  guessing, a 64 KB message, a malformed JSON update, deeply nested JSON, a 409 storm, a connector that
-  throws on every update (the breaker opens, the app stays up).
-- **Live (by hand):** a test bot and chat (`AgentmasterTestBot`), the claude-wrap-ConPTY driver for the
-  menu key plans, a Teams developer tenant, the cog on a disposable Windows desktop (claude-desktops).
+- **m5 (pure):** the topic sync decider (tabs × states × pins → creates / renames / deletes, the idle
+  grace); the pin rule (no decay, the hold in Waiting); the message-type renderer at every preset against
+  the TranscriptTurns fixtures (goldens); the work-log builder and its roll-over; the final-message
+  marker (exactly one sound per turn); the pacing scheduler (priorities, adaptive intervals); the backlog
+  rule; the remote queue item in `DecideAdvance` (Paused, Pause all, question guard, dormant); the slash
+  command router (Agentmaster / recorded / refused, `/cc`); the reaction state machine; tokens; the
+  redactor; Telegram escaping and chunking; `MenuSnapshot`.
+- **Connector integration:** a fake Telegram server on loopback (topics, drafts, reactions, edits, 429s,
+  a backlog, deleted topics).
+- **Abuse:** strangers, replayed updates, stale tokens, PIN guessing, huge and deeply nested JSON, a 409
+  storm, a connector that throws on every update.
+- **Live (by hand):** a test bot; the claude-wrap-ConPTY driver for the menu key plans and the command
+  table (P0-1, P0-19); the cog on a disposable Windows desktop (claude-desktops).
 
 ## 16. Proposed invariants (to join the Correctness rules when built)
 
-- **M1 — One send seam.** A remote reply goes through `SubmitPrompt` or the Prompt Queue; a remote key
-  press goes through the hosting window under the delivery gate. No connector writes to a ConPTY or calls
-  the registry: only FleetLink acts, through the Fleet Control API (extends Rules #3, #4, #13).
-- **M2 — Sender, not chat.** Every inbound message is checked against the connection's owner by the
-  platform's USER id (Telegram `from.id`; Teams `aadObjectId` + tenant id), before anything else reads it;
-  anything else is dropped.
-- **M3 — FleetLink authorizes.** FleetLink checks every intent against the connection's level in its own
-  read of `connections.json`; a connector's claim is not trusted for it.
-- **M4 — Never send a secret.** Redaction runs in the engine before any text reaches the hub; credentials
-  live in Credential Manager only; message bodies never reach a log.
-- **M5 — Never act on a stale button.** A token names exactly what it answers; a mismatch refuses and shows
-  the current state.
-- **M6 — Never guess a session.** A message that names no session gets a picker.
-- **M7 — One poller per token.** A machine-wide lock per bot token; a 409 stops polling and alerts.
-- **M8 — Revalidate before telling; follow up after.** An event is sent only if still true; when it stops
-  being true after it was sent, its message is updated.
-- **M9 — An old message never acts unasked.** A message from the backlog older than 10 minutes asks before
-  it sends; an Operate verb from the backlog never runs.
-- **M10 — The network never stalls the app.** No UI thread waits on a connector; no exception leaves a
-  connector thread (H1).
+- **M1 — One send seam.** A message from a topic goes through the Prompt Queue and `SubmitPrompt`; a key
+  press through the hosting window under the delivery gate; no connector touches a ConPTY or the registry.
+- **M2 — Sender, not chat.** Every inbound message is checked by the platform's user id before anything
+  else reads it.
+- **M3 — FleetLink authorizes**, in its own read of `connections.json`.
+- **M4 — Never send a secret.** Redaction in the engine before the hub; credentials in Credential Manager;
+  no message body in a log.
+- **M5 — Never act on a stale button.**
+- **M6 — Never guess a session.** A message outside a session's topic names no session; only 🔎 Search
+  and new topics take such messages.
+- **M7 — One poller per token.**
+- **M8 — Topics are the tabs.** A topic exists exactly for each Claude Code tab whose session is not Idle
+  (pinned ones never are), within the idle grace; Agentmaster creates, renames and deletes topics to keep
+  it so.
+- **M9 — An old message never acts unasked** (the backlog rule).
+- **M10 — The network never stalls the app** (H1).
+- **M11 — A message is a queued prompt.** Nothing typed in a topic reaches a running turn.
+- **M12 — One sound per turn.** Only a turn's final message is sent with sound; everything else is silent,
+  an edit or a draft.
+- **M13 — No hidden commands.** A Claude Code command that leaves no record in the session is never sent
+  from a topic.
 
 ## 17. Phases
 
 | Phase | Scope | Exit |
 |---|---|---|
-| **P0** | The measurements of §19; no product code | Every P0 row answered in this document |
-| **P1** — Telegram alerts | FleetLink's tracker (needs-you, question, error, runner paused, app restarted); the hub (outbox, pacing, tokens) + the Telegram connector inside the engine (H1–H5); the backlog rule; away detection; redactor + privacy levels; pairing + the 📋 Fleet topic; the MESSAGING tab (one Telegram connection); logs; m5 | A needs-you edge reaches the phone within 5 s while the PC is locked; nothing while present (until escalation); a stranger is dropped; no secret leaves (redactor tests); a message sent while Agentmaster was closed is handled at the next start under the backlog rule |
-| **P2** — Telegram two-way, a topic per session | Topics with cards; mirror levels *needs-you* and *turns*; replies (§7.2) with `PromptOrigin::Remote`; slash commands; `!` verbs; queue and runner verbs; read verbs; tokens and confirmations; the board; message follow-ups (§6.6); a new topic = a new session | From the phone: a new session started from a new topic; replies into sessions in four different states, each with the right outcome; a mirrored session's topic matches its transcript turn for turn; every action in `[nav] remote` |
-| **P3** — menus and stop | `pendingQuestion` capture; `ReadMenuSnapshot`; verified key plans; stop | 20 of 20 answers verified across the measured menu shapes in the ConPTY harness; stale tokens refused |
-| **P4** — Teams Lite + Webhook | The Workflows connector; the Webhook connector with presets | Alerts in a Teams chat and in ntfy |
-| **P5** — Teams Bot | App package generator; the loopback listener + `cloudflared`; JWT; Bot Connector client; cards with inputs; pairing; read and steer verbs; optionally a thread per session in a Team channel | Two-way from Teams in the user's tenant (or a developer tenant) |
-| **P6** — external connectors | The contract (§12.2); the three samples; the connector manager | A Slack and a Discord sample pass the integration suite |
-| **P7** — live and more | The live view (*live* mirror level); digests; the concierge (`ask …` answered by a harness conversation with the session database's tools); files and photos | |
+| **P0** | The measurements of §19 | Every P0 row answered here |
+| **P1** — topics = tabs | The hub and the Telegram connector in the engine (H1–H5); pairing; 🔎 Search (fleet commands, app notes; no agent yet); the topic sync with the idle grace; the card; the turn layout at the Default preset (prompts, work log, final message with sound); messages as remote queue items with reaction status; the backlog rule; pacing; the MESSAGING tab | The topic list equals the non-idle Claude tabs of every window, live; a session's turns appear as they happen; a message from a topic is sent at the turn's end and shows 👨‍💻; only final messages make a sound |
+| **P2** — act | Pin (engine + menus); the tab commands (§7.3); Claude Code's commands with the refusal table (P0-19); questions, plans and permission prompts as buttons (P0-1); `/interrupt` | Every §7.3 command works from a topic; a question answered from the phone, verified |
+| **P3** — the whole session, configurable | The full §6.3 grid, presets, `/show` and `/level`; verbose files; the activity draft; backfill options | A topic at Max matches the transcript; at Minimal only prompts and final replies |
+| **P4** — 🔎 Search | The Search agent (own conversation, high thinking); Wake, Resume, Fork (+📌) opening tabs without focus | An old session found from the phone and revived into a tab and a topic |
+| **P5** — Teams Lite + Webhook | Alerts from final messages | Alerts in a Teams chat and in ntfy |
+| **P6** — Teams Bot | Endpoint (cloudflared), JWT, cards, a thread per tab in a Team channel | Two-way in the user's tenant |
+| **P7** — external connectors | The contract; three samples | A Slack and a Discord sample pass the suite |
 
-## 18. Decisions for the user
+## 18. Decisions
+
+**Decided by the user** (2026-10-16):
+
+| # | Decision | The user's words |
+|---|---|---|
+| **D1** | The bot runs inside the running Agentmaster process; external connectors and `cloudflared` are child processes it starts | "The agentmaster process running is supposed to be the program running the bot." |
+| **D3** | Topics are synced to the tabs of all windows; idle tabs are the only ones not listed; 🔎 Search is the pinned top topic | "The topics are synced to the tabs in all our windows. Tabs idle are the only ones not listed." |
+| **D5** | Every message in a topic is silent (`disable_notification`) except the turn's final message | "Only the final turn's message are sending the notification with default" |
+| **D8** | A message sent in a topic is enqueued, never a steer | "Sending a message to the topic is enqueueing a message (not steer)." |
+| **D19** | A topic shows the whole session; every message type is configurable and can be disabled, default or verbose | "every kind of message or type of message is configurable extensively and can be disabled (supporting default or verbose)" |
+| **D21** | A closed tab's topic is deleted; an idle one leaves after the grace (follows from D3) | — |
+| **D22** | A message is exactly a prompt, Claude Code's commands included, except those that leave no record in the session; the tab menu's non-destructive actions (plus `/restartsession`) are `/commands` | "any messages are exactly like sending a prompt (to an exclusion of some /slash commands like /reload …)"; "We are able to run most of functions … of a tab through a /slash command, non destructive ones (but incl /restartsession)" |
+| **D23** | Claude Code only for now | "We only integrate with claude code for now." |
+| **D24** (part) | 🔎 Search runs the Sessions page's search agent, Sonnet 5.5 at high thinking; it searches, wakes, resumes and forks; a pin keeps a session from going idle | "a sonnet 5.5 agent high thinking (same one from the sessions page search) …" |
+
+**Open** (recommendation first):
 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
-| **D1** | Where the bot runs | **DECIDED by the user (2026-10-16): inside the running Agentmaster process** ("The agentmaster process running is supposed to be the program running the bot"); external connectors and `cloudflared` are child processes it starts | (Set aside: a separate per-profile service, the 2026-10-15 draft) |
-| **D2** | Messages that arrive while Agentmaster is closed (Telegram keeps them 24 h) | **Handle them at the next start**: older than 10 min → ask before sending; Operate verbs never run from the backlog | Drop the backlog; or act on everything |
-| **D3** | Telegram's chat shape | **A private chat with one topic per session** + the 📋 Fleet topic (reply chains when Threaded Mode is off) | One chat with reply chains only; a forum supergroup |
-| **D4** | A paired owner's default level | **Steer** (Operate off; the drive PIN offered, off) | Read; Operate |
-| **D5** | Default events | **Waiting, Needs approval, questions, plans, permissions, errors, runner paused, app restarted** | Also Idle and Done; also digests |
-| **D6** | When to send | **When away** (locked, or idle ≥ 5 min), **escalate** an unread needs-you after 10 min even when present | Always; only when away |
-| **D7** | Default privacy | **Standard** (prompt preview + a 600-character reply excerpt), redaction always on | Minimal; Full |
-| **D8** | A reply to a Running session | **Queued as next, sent when the turn ends even under Paused**, with a **Steer now** button | Always steer now; queue under the runner's own mode |
-| **D9** | Questions and plans from the chat | **Yes, by verified key plans** (§7.3) | Leave them to the terminal or Remote Control |
-| **D10** | The Teams route | **Teams Lite first** (P4), the bot when the tenant allows custom apps (P5) | The bot first; no Teams |
-| **D11** | Which Microsoft tenant | The user's call: the work tenant (its policy, its data rules) or a personal developer tenant | — |
-| **D12** | The public endpoint for push-in platforms | **Cloudflare Tunnel on the PC**, started by Agentmaster | A dev tunnel; ngrok; a relay service |
-| **D13** | Bots per install | **One bot for release, another for dev** (one poller per token) | Messaging in one install only |
-| **D14** | Built-in connectors' language | **C++** inside Agentmaster (WinHTTP, nlohmann-json, BCrypt), the house style | — (D1 rules out a .NET service) |
-| **D15** | The external contract | **JSON-RPC over stdio, one object per line**, the connector a child process | In-process plugins (DLLs) — they would share Agentmaster's memory |
-| **D16** | Claude Code channels | **Not in version 1**; delivery stays pluggable (§2.3) | Deliver through channels now, with the development flag |
-| **D17** | The Remote Control presence file | **Yes**: Agentmaster keeps it in step with "present" for managed launches | Leave Remote Control alone |
-| **D18** | The name in the UI | **Messaging** | Remote; Phone |
-| **D19** | What a session's topic shows by default | **needs-you**; *turns* for the sessions you follow, tag or set from the tab menu; *live* on demand | *turns* for every session; needs-you only |
-| **D20** | A topic started in Telegram | **Starts a new session** (the folder from the first message, else picked from buttons) | Ignored (sessions start only at the PC or with `/new`) |
-| **D21** | Topics of closed sessions | **Kept** (the history stays; the card says Closed) | Deleted after N days |
-| **D22** | Inside a session's topic | **Plain text and `/…` go to the session; Agentmaster's verbs are `!…` and the card's buttons** | Agentmaster's verbs take `/`, Claude Code's commands need a prefix |
-| **D23** | Codex sessions and unmanaged claude sessions | **Read-only topics** (card + mirror) | No topics |
+| **D2** | Messages sent while Agentmaster was closed (Telegram keeps them 24 h) | Handled at the next start; older than 10 min → asked before queueing; Operate never from the backlog | Drop them |
+| **D4** | A paired owner's level | **Operate** with confirmations on restart / deactivate / interrupt while running; the drive PIN offered, off | Steer |
+| **D6** | "Silent while I'm at the PC" (the final message too) | Offered, **off** (the rule as specified) | On by default |
+| **D9** | Answering questions and plans from a topic | Yes, by verified key plans (§7.4) | Leave them to the terminal |
+| **D10–D12** | Teams: route, tenant, endpoint | Teams Lite first; the tenant is the user's call; Cloudflare Tunnel on the PC for the bot | Bot first; dev tunnel / ngrok |
+| **D13** | Bots per install | One for release, one for dev | One install only |
+| **D15** | The external contract | JSON-RPC over stdio, a child process | In-process plugins |
+| **D16** | The route into a session | **The session link** (MOD_LINK.md) wherever a session has it; the typed path otherwise; Claude Code channels not used | Channels, with the development flag |
+| **D17** | The Remote Control presence file | Yes | No |
+| **D18** | The UI name | Messaging | Remote; Phone |
+| **D20** | A topic started in Telegram | Starts a new session (asks for the folder) | Ignored; `/newsession` in 🔎 Search only |
+| **D24** (rest) | 🔎 Search's conversation | Its own (the PC page keeps its own list) | Shared with the Sessions page |
+| **D25** | The idle grace before a topic is deleted | 10 minutes, with [📌 Pin] and [Wake] on the Idle card | 0 (at once); 1 hour |
+| **D26** | Backfill of a new topic for a session with history | The whole transcript as a file + the last 10 turns as messages | Every turn as messages, paced |
+| **D27** | Where a revived closed session opens | The most recently active window, without focus, dormant until its first message | A fixed window; the window it last lived in |
+| **D28** | `/rename` also renames Claude Code's own session name | Yes | Agentmaster's title only |
+| **D29** | `/interrupt` from a topic | Yes, Operate, with a confirmation | No |
+| **D30** | A topic message's place in the queue | Next, ahead of the runner's planned prompts; sent whatever the runner mode; not held by Pause all; past the question guard | Last in the queue, under the runner's mode |
+| **D31** | The default message-type preset | Default (like Copy ▸ Transcript ▸ Default) | Compact; Full |
+| **D32** | The pin's mark on the PC | A 📌 beside the tab's status dot | None |
 
 ## 19. P0 — measure before code
 
 | # | Question | How |
 |---|---|---|
-| P0-1 | The key plan of each menu: `AskUserQuestion` single-select, multi-select, several questions, "Other" with text; the plan approval menu; a permission prompt; Shift+Tab's mode cycle — on the Claude Code version in use | claude-wrap-ConPTY driver: provoke each, capture the screen, try keys, read the transcript's tool result |
-| P0-2 | Does `SubmitPrompt` (the draft swap) place a prompt into a RUNNING session's box, and how is it recorded (the `queued_command` attachment)? | the same driver, on a turn that runs a long tool |
-| P0-3 | How the transcript records `AskUserQuestion` input and answers (for `pendingQuestion`) | the corpus: `tool_use` / `tool_result` pairs of the last 30 days |
-| P0-4 | Telegram: `pinChatMessage` inside a topic (one pinned card per topic); icon colors on Android / iOS / Desktop | a test bot |
-| P0-5 | Telegram: drafts in a topic (`message_thread_id`) and the stop update end to end | a test bot |
-| P0-6 | Teams: is **Upload custom apps** allowed in the user's tenant? Is Workflows available? Does a Workflows post to a chat alert the phone? | the user's Teams; a developer tenant if the work tenant says no |
-| P0-7 | The Bot Connector's JWT issuers and endorsements for a single-tenant bot, today | Microsoft's page + one real request through the tunnel |
-| P0-8 | A loopback listener without admin: the HTTP Server API's URL registration rules | a probe exe |
-| P0-9 | The presence file: does `CLAUDE_CLIENT_PRESENCE_FILE` set at launch (spawn env) suppress Remote Control pushes as documented? | one session with Remote Control |
-| P0-10 | Channels later: does a channel event fire `UserPromptSubmit`, and how is it written to the transcript? | a fakechat session |
-| P0-11 | The user's clients in Threaded Mode (Android, iOS, Desktop): does a non-reply message from the main view always start a new topic, or is there now a way to write to the main thread (Telegram-iOS #2236)? Where do the bot's messages without a thread id appear? | a test bot on each client |
-| P0-12 | Does `editForumTopic` (rename, icon) post a visible `forum_topic_edited` message in a private chat, and does it notify? | a test bot |
-| P0-13 | Can the user rename or delete a topic in a bot's private chat, and what does the bot receive? | a test bot |
-| P0-14 | How the clients behave with 100+ topics (the list, search, unread counts); any limit on the number of topics | a test bot |
-| P0-15 | The real pacing: how many messages and edits per second the private chat takes across topics before a 429, and whether drafts count | a test bot |
+| P0-1 | The key plan of each menu: `AskUserQuestion` (single, multi, several questions, "Other"), plan approval, a permission prompt | claude-wrap-ConPTY driver |
+| P0-2 | `SubmitPrompt` right after a turn ends, and into a dormant tab that was just started | the same driver |
+| P0-3 | How the transcript records `AskUserQuestion` and its answer | the corpus |
+| P0-4 | Per-topic pinned messages (the card) on Android, iOS, Desktop | a test bot |
+| P0-6 | Teams: custom app upload, Workflows, phone alerts in the user's tenant | the user's Teams |
+| P0-7 | Bot Connector JWT issuers for a single-tenant bot | Microsoft's page + one real request |
+| P0-8 | A loopback listener without admin (HTTP Server API URL rules) | a probe |
+| P0-9 | `CLAUDE_CLIENT_PRESENCE_FILE` at launch suppresses Remote Control pushes | one session |
+| P0-11 | The clients in Threaded Mode: does a main-view message always start a topic (Telegram-iOS #2236)? Where do the bot's messages without a thread id appear? | a test bot on each client |
+| P0-12 | Does `editForumTopic` (a rename) post a visible message, and does it notify? | a test bot |
+| P0-13 | Can the user rename or delete a topic in a bot's chat, and what does the bot receive? | a test bot |
+| P0-14 | 100+ topics: the list, search, unread counts, any limit | a test bot |
+| P0-15 | The real pacing: messages and edits per second across topics before a 429; do drafts count? | a test bot |
+| P0-16 | Can the user pin 🔎 Search at the top? Do links to a private-chat topic work? | each client |
+| P0-17 | `setMessageReaction` on the user's messages in a private-chat topic | a test bot |
+| P0-18 | Drafts in a topic: notifications, a 10–20 s refresh for an hour, the stop update | a test bot |
+| P0-19 | Which Claude Code commands leave a record in the session (the §7.2 table) | every command in a scratch session + the user's own transcripts |
+| P0-20 | `edited_message` for a message in a private-chat topic | a test bot |
+| P0-21 | Topic creation and deletion: is the user notified, is a deletion instant on every client? | a test bot |
+
+| P0-22 | Through the session link: can a mod answer an open `AskUserQuestion` / plan / permission dialog, or only observe it (`$.prompt.fill` answers `isFilled: false` under a dialog)? | MOD_LINK's probes (its Q4, Q6) |
+
+(P0-5 and P0-10 of the earlier drafts are retired: drafts are P0-18; channels are not used, D16.)
 
 ## 20. Sources (read 2026-10-15/16)
 
-- Telegram: [the Bot API reference](https://core.telegram.org/bots/api) (incl. "Getting updates": the 24-hour retention), [the changelog](https://core.telegram.org/bots/api-changelog) (9.3 – 10.3), [the Bots FAQ](https://core.telegram.org/bots/faq) (limits), [Bot Features](https://core.telegram.org/bots/features) ("Topics in Private Chats", "Streaming Replies", "AI Agents"), [the October 2025 announcement](https://telegram.org/blog/comments-in-video-chats-threads-for-bots), [Telegram-iOS #2236](https://github.com/TelegramMessenger/Telegram-iOS/issues/2236) (new topics from the main view); Threaded Mode's location: [Hermes Agent's Telegram docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram) and [its fix PR #116803](https://github.com/NousResearch/hermes-agent/pull/116803).
-- Claude Code: [channels](https://code.claude.com/docs/en/channels), [the channels reference](https://code.claude.com/docs/en/channels-reference), [Remote Control](https://code.claude.com/docs/en/remote-control).
-- Teams bots: [what is the Bot Framework SDK](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-overview?view=azure-bot-service-4.0) (end of support), [the Teams SDK 2.1 announcement](https://microsoft.github.io/teams-sdk/blog/announcing-teams-sdk-dotnet-2-1/), [choosing an SDK](https://microsoft.github.io/teams-sdk/teams/choosing-an-sdk/), [create an Azure Bot resource](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart?view=azure-bot-service-4.0) (single-tenant), [rate limits](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/rate-limit), [message formatting and size](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages), [streaming](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux), [the two-minute stream limit PR](https://github.com/microsoft/teams-sdk/pull/2989), [developer prerequisites](https://learn.microsoft.com/en-us/microsoftteams/platform/toolkit/tools-prerequisites).
-- Microsoft Graph and Teams: [the Teams API overview](https://learn.microsoft.com/en-us/graph/api/resources/teams-api-overview?view=graph-rest-1.0) (polling once a day), [send a message in a chat](https://learn.microsoft.com/en-us/graph/api/chat-post-messages?view=graph-rest-1.0) (the "log file" rule), [list messages in a chat](https://learn.microsoft.com/en-us/graph/api/chat-list-messages?view=graph-rest-1.0), [change notifications for messages](https://learn.microsoft.com/en-us/graph/teams-changenotifications-chatmessage), the `48:notes` self chat ([a community article](https://dev.to/thecodewrapper/how-to-send-microsoft-teams-self-message-using-graph-sdk-1ojm)).
-- Workflows and the connectors' retirement: [Microsoft 365 Developer Blog](https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/), [MC1181996](https://mc.merill.net/message/MC1181996), [Office 365 IT Pros, 2026-09-18](https://office365itpros.com/2026/09/18/teams-workflows-updates/).
-- Others: [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Discord gateway](https://docs.discord.com/developers/events/gateway), [matterbridge releases](https://github.com/42wim/matterbridge/releases) and [its community fork](https://github.com/matterbridge-org/matterbridge).
-- The homelab's own Telegram bot and its "no public address" note: the `fastrun` skill (`~/.claude/skills/fastrun/SKILL.md`).
+- Telegram: [the Bot API](https://core.telegram.org/bots/api) (getting updates and the 24-hour retention, topics, drafts, reactions, copy buttons, checklists, chat actions), [the changelog](https://core.telegram.org/bots/api-changelog) (9.3 – 10.3), [the Bots FAQ](https://core.telegram.org/bots/faq), [Bot Features](https://core.telegram.org/bots/features), [the October 2025 announcement](https://telegram.org/blog/comments-in-video-chats-threads-for-bots), [Telegram-iOS #2236](https://github.com/TelegramMessenger/Telegram-iOS/issues/2236); Threaded Mode's location: [Hermes Agent's Telegram docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram), [its PR #116803](https://github.com/NousResearch/hermes-agent/pull/116803).
+- Claude Code: [Commands](https://code.claude.com/docs/en/commands) (the command list of §7.2), [channels](https://code.claude.com/docs/en/channels), [the channels reference](https://code.claude.com/docs/en/channels-reference), [Remote Control](https://code.claude.com/docs/en/remote-control).
+- Teams: [Bot Framework SDK status](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-overview?view=azure-bot-service-4.0), [Teams SDK 2.1](https://microsoft.github.io/teams-sdk/blog/announcing-teams-sdk-dotnet-2-1/), [Azure Bot resource](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart?view=azure-bot-service-4.0), [rate limits](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/rate-limit), [message size](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages), [streaming](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/streaming-ux), [prerequisites](https://learn.microsoft.com/en-us/microsoftteams/platform/toolkit/tools-prerequisites), [the Teams API overview](https://learn.microsoft.com/en-us/graph/api/resources/teams-api-overview?view=graph-rest-1.0), [send a chat message](https://learn.microsoft.com/en-us/graph/api/chat-post-messages?view=graph-rest-1.0), [the connectors' retirement](https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/), [MC1181996](https://mc.merill.net/message/MC1181996).
+- Others: [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Discord gateway](https://docs.discord.com/developers/events/gateway), [matterbridge releases](https://github.com/42wim/matterbridge/releases).
+- The homelab's Telegram bot: the `fastrun` skill (`~/.claude/skills/fastrun/SKILL.md`).
