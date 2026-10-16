@@ -872,6 +872,20 @@ void TestMessaging()
             const auto torn = SplitHistoryWindow(std::string_view{ all }.substr(0, all.size() - 5), 0, false);
             CHECK(torn.consumedTo == at[6] && torn.items.size() == 7, "a torn last line is never read");
             CHECK(SplitHistoryWindow(R"({"type":"user")", 0, false).needMore, "no complete line: the reader needs a bigger window");
+            // Each item knows its line, and the plan commits TURN BY TURN: a turn's last post carries where the next turn starts,
+            // so a stop midway re-sends at most the turn that was going out.
+            CHECK(whole.itemAt.size() == whole.items.size() && whole.itemAt.front() == at[0] && whole.itemAt.back() == at[7], "every item knows the line it came from");
+            int64_t planDay = 0;
+            const auto plan = PlanHistoryPosts(whole, planDay);
+            CHECK(plan.size() == 8, "turn 1: day + user + reply; turn 2: user + narrative + reply; turn 3: user + narrative");
+            if (plan.size() == 8)
+            {
+                CHECK(plan[0].commitTo == 0 && plan[1].commitTo == 0 && plan[2].commitTo == at[2] && plan[2].dayAfter == 20261016, "turn 1's reply commits up to turn 2's line, with its day");
+                CHECK(plan[3].commitTo == 0 && plan[4].commitTo == 0 && plan[5].commitTo == at[6] && plan[5].post.html.find(L"two") != std::wstring::npos, "turn 2's reply commits up to turn 3's line");
+                CHECK(plan[6].post.fromUser && plan[7].commitTo == static_cast<int64_t>(all.size()) && plan[7].post.html.find(L"\x2022 Bash: make") != std::wstring::npos,
+                      "the window's last turn commits the window's end");
+            }
+            CHECK(planDay == 20261016, "the plan hands the day on");
             // A fork's copied lines are its history too (the live mirror skips them).
             const std::string copied = R"({"type":"user","forkedFrom":{"sessionId":"src","messageUuid":"u0"},"message":{"role":"user","content":"the source's prompt"}})"
                                        "\n";
