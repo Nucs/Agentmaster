@@ -1013,11 +1013,10 @@ namespace
         SortKey k{};
         k.created = s.convCreatedUnixMs > 0 ? s.convCreatedUnixMs : INT64_MAX;
         k.last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
-        k.turn = (std::max)(s.turnStartUnixMs, s.turnEndUnixMs); // MOST RECENT: the newer turn boundary (hook push / tail pull / persisted — all monotonic)
-        if (k.turn == 0)
-        {
-            k.turn = s.lastActivityUnixMs; // no turn evidence yet (never prompted / pre-stamp record): the decay anchor, so it isn't stranded at the bottom
-        }
+        // MOST RECENT: the newer turn boundary (hook push / tail pull / persisted — all monotonic), else the decay
+        // anchor for a session with no turn evidence yet. ONE rule shared with the Telegram topic list (MESSAGING.md
+        // §21.8), so the two orders can never drift apart.
+        k.turn = ::Agentmaster::MostRecentSortKeyMs(s);
         k.active = (s.state == ::Agentmaster::SessionState::Running);
         k.title = s.title;
         k.pid = s.pid ? s.pid : UINT32_MAX; // managed: the claude pid (unique -> the most-active secondary rarely breaks ties)

@@ -851,6 +851,14 @@ namespace Agentmaster::Msg
         bool errorAnnounced{ false };
     };
 
+    /// <summary>
+    /// The topic LAYOUT this build makes topics under (§21.8). A state file whose topics were made under an older
+    /// layout gets them deleted and made again ONCE — the RECREATION — when the service starts: until layout 1 the
+    /// topics were created in session-id order (the topic list's order was random) and hold messages in the formats
+    /// §21.4–§21.6 replaced. Raise it only for a change that existing topics cannot follow.
+    /// </summary>
+    inline constexpr int kTopicLayoutVersion = 1;
+
     struct MessagingState
     {
         int64_t updateOffset{ 0 }; // Telegram's getUpdates offset: the next update id to ask for
@@ -881,8 +889,25 @@ namespace Agentmaster::Msg
         bool businessCanReply{ false };
         int businessMode{ 0 };
         std::wstring businessNote;
+        // The layout the session topics were made under (kTopicLayoutVersion; 0 = before §21.8, or a file without the key).
+        int topicLayout{ 0 };
+        // The RECREATION's old topics (thread ids) that still have to be deleted in Telegram (§21.8). Persisted, so a
+        // stop midway leaves no orphan behind: the next start finishes the deletes. While it is not empty, no new topic
+        // is made — the new list is built after the old one is gone.
+        std::vector<int64_t> orphanThreads;
         std::map<std::wstring, TopicRecord> topics; // session id -> its topic
     };
+
+    /// <summary>
+    /// Whether the state's session topics must be made again (§21.8): they were made under an older layout. A state with
+    /// no session topic never needs it (the service just records the current layout).
+    /// </summary>
+    /// <param name="s">The state.</param>
+    /// <returns>True when the RECREATION is due.</returns>
+    inline bool NeedsTopicRecreation(const MessagingState& s) noexcept
+    {
+        return s.topicLayout < kTopicLayoutVersion && !s.topics.empty();
+    }
 
     /// <summary>Serializes the connector's state file (messaging\telegram\state.json).</summary>
     /// <param name="s">The state.</param>
@@ -902,6 +927,13 @@ namespace Agentmaster::Msg
         o.Set(L"businessCanReply", json::Value::MkBool(s.businessCanReply));
         o.Set(L"businessMode", json::Value::MkNum(static_cast<double>(s.businessMode)));
         o.Set(L"businessNote", json::Value::MkStr(s.businessNote));
+        o.Set(L"topicLayout", json::Value::MkNum(static_cast<double>(s.topicLayout)));
+        auto orphans = json::Value::MkArr();
+        for (const int64_t thread : s.orphanThreads)
+        {
+            orphans.Push(json::Value::MkNum(static_cast<double>(thread)));
+        }
+        o.Set(L"orphanThreads", std::move(orphans));
         auto topics = json::Value::MkArr();
         for (const auto& [sid, t] : s.topics)
         {
@@ -950,6 +982,17 @@ namespace Agentmaster::Msg
         s.businessCanReply = v.BoolAt(L"businessCanReply", false);
         s.businessMode = static_cast<int>(v.I64At(L"businessMode", 0));
         s.businessNote = v.StrAt(L"businessNote");
+        s.topicLayout = static_cast<int>(v.I64At(L"topicLayout", 0)); // absent = topics made before §21.8
+        if (const auto* orphans = v.Find(L"orphanThreads"); orphans && orphans->type == json::Value::Type::Arr)
+        {
+            for (const auto& o : orphans->arr)
+            {
+                if (o.type == json::Value::Type::Num && o.num > 0)
+                {
+                    s.orphanThreads.push_back(static_cast<int64_t>(o.num));
+                }
+            }
+        }
         if (const auto* topics = v.Find(L"topics"); topics && topics->type == json::Value::Type::Arr)
         {
             for (const auto& to : topics->arr)
@@ -1007,6 +1050,8 @@ namespace Agentmaster::Msg
         // a /handover-here successor takes its origin's tab on a NEW connection (a new tabToken), so this is how its
         // topic follows the tab. "" = none.
         std::wstring continuedFromId;
+        // MostRecentSortKeyMs(session): the side panel's MOST RECENT key, which orders the topic list (§21.8).
+        int64_t mostRecentMs{ 0 };
     };
 
     /// <summary>
@@ -1073,6 +1118,7 @@ namespace Agentmaster::Msg
         std::wstring reason; // Delete: "closed" | "idle" | "not a claude tab"
         std::wstring title; // Create / Rename / Rekey: the title to use
         std::wstring colorHex; // Create: the tab color
+        int64_t mostRecentMs{ 0 }; // Create: the session's MOST RECENT key (the creates come oldest first, §21.8)
     };
 
     namespace detail
@@ -1088,6 +1134,46 @@ namespace Agentmaster::Msg
             }
             return k;
         }
+
+        // Ordinal, case-insensitive "a < b" over UPPER-cased code units — the side panel's title tiebreak
+        // (CompareStringOrdinal with ignoreCase, which upper-cases), mirrored without <windows.h>. Identical for
+        // ASCII titles; the C runtime's upper-casing of other letters can differ from the system table's.
+        inline bool TitleLessCi(std::wstring_view a, std::wstring_view b) noexcept
+        {
+            const size_t n = a.size() < b.size() ? a.size() : b.size();
+            for (size_t i = 0; i < n; ++i)
+            {
+                const wint_t ca = std::towupper(a[i]);
+                const wint_t cb = std::towupper(b[i]);
+                if (ca != cb)
+                {
+                    return ca < cb;
+                }
+            }
+            return a.size() < b.size();
+        }
+    }
+
+    /// <summary>
+    /// The TOPIC LIST's order (§21.8, the user's "ordered by MOST RECENT like the sidemenu does"): the side panel's
+    /// MOST RECENT order — `a` ranks ABOVE `b` when its key (MostRecentSortKeyMs, the session's newest turn boundary)
+    /// is larger, equal keys by the title, case-insensitive. Telegram lists a chat's topics by their LAST message,
+    /// newest on top, and a bot cannot reorder them; so the service places a topic by WHEN it posts in it: it creates
+    /// topics — and posts into several topics in one pass — in the REVERSE of this order (the lowest-ranked first), so
+    /// the highest-ranked lands on top.
+    /// </summary>
+    /// <param name="aKey">a's MOST RECENT key.</param>
+    /// <param name="aTitle">a's title.</param>
+    /// <param name="bKey">b's MOST RECENT key.</param>
+    /// <param name="bTitle">b's title.</param>
+    /// <returns>True when a is listed above b.</returns>
+    inline bool TopicRanksAbove(int64_t aKey, std::wstring_view aTitle, int64_t bKey, std::wstring_view bTitle) noexcept
+    {
+        if (aKey != bKey)
+        {
+            return aKey > bKey;
+        }
+        return detail::TitleLessCi(aTitle, bTitle);
     }
 
     /// <summary>
@@ -1099,7 +1185,8 @@ namespace Agentmaster::Msg
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleGraceMs">How long an Idle, untouched tab's topic stays before it is deleted (D25).</param>
     /// <returns>The ops, deterministic: per topic in session-id order a Rekey or a Delete or its card / title
-    /// changes, then the creates in session-id order.</returns>
+    /// changes, then the creates in the REVERSE of the topic list's order (TopicRanksAbove — the lowest-ranked first),
+    /// so that the newest topic, created last, lands on top (§21.8).</returns>
     /// <remarks>
     /// PER TAB (§21.6): a tab has at most one topic. When a topic's session is CLOSED and another live Claude
     /// session without a topic now holds the SAME tab (TopicRecord::tabToken == TabFact::tabToken — a /clear, a
@@ -1227,7 +1314,11 @@ namespace Agentmaster::Msg
                 ops.push_back(std::move(op));
             }
         }
-        // Creates, in session-id order (byId is a map).
+        // Creates, in the REVERSE of the topic list's order (§21.8): Telegram puts the topic that got a message last on
+        // top, and a new topic's first messages are its creation and its card, so the topic that ranks highest must be
+        // made last. The service takes them in this order across ticks (it makes a few per tick), so a list made from
+        // nothing — the first start, a recreation — comes out in MOST RECENT order.
+        std::vector<TopicSyncOp> creates;
         for (const auto& [sid, f] : byId)
         {
             if (topics.find(sid) != topics.end() || rekeyedTo.count(sid) || !QualifiesForTopic(*f, nowMs, idleGraceMs))
@@ -1243,6 +1334,14 @@ namespace Agentmaster::Msg
             op.sessionId = sid;
             op.title = f->title.empty() ? sid.substr(0, 8) : f->title;
             op.colorHex = f->colorHex;
+            op.mostRecentMs = f->mostRecentMs;
+            creates.push_back(std::move(op));
+        }
+        std::stable_sort(creates.begin(), creates.end(), [](const TopicSyncOp& x, const TopicSyncOp& y) {
+            return TopicRanksAbove(y.mostRecentMs, y.title, x.mostRecentMs, x.title); // x first when y ranks above it
+        });
+        for (auto& op : creates)
+        {
             ops.push_back(std::move(op));
         }
         return ops;
@@ -1274,7 +1373,7 @@ namespace Agentmaster::Msg
         L"moveidle", L"wake", L"favorite", L"unfavorite", L"tags", L"tag", L"untag", L"sessionid", L"path", L"gitbranch",
         L"draft", L"summary", L"transcript", L"screen", L"restartsession", L"deactivate", L"activate", L"forksession",
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
-        L"reactivate"
+        L"reactivate", L"recreate"
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at
@@ -1415,7 +1514,8 @@ namespace Agentmaster::Msg
     // kAgentmasterCommands is a session's command and is refused in the Search topic (SearchTopicVerb::SessionCommand);
     // a session's topic still forwards /idle, /board, /pauseall and /resumeall here (they work in any topic).
     inline constexpr std::wstring_view kSearchTopicFleetCommands[] = {
-        L"start", L"help", L"status", L"idle", L"board", L"newsession", L"pauseall", L"resumeall"
+        L"start", L"help", L"status", L"idle", L"board", L"newsession", L"pauseall", L"resumeall",
+        L"recreate" // §21.8: make the session topics again in MOST RECENT order (asks first)
     };
 
     // A message of the Search topic, classified.
