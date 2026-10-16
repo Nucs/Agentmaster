@@ -55,6 +55,11 @@ void TestMessaging()
         CHECK(html.find(L"<blockquote>quoted</blockquote>") != std::wstring::npos, "a quote");
         CHECK(html.find(L"<pre><code class=\"language-cpp\">int a&lt;b;\n</code></pre>") != std::wstring::npos, "a fenced block with its language, escaped");
         CHECK(html.find(L"<a href=\"https://x.y/z?a=1&amp;b=2\">link</a>") != std::wstring::npos, "a link, its url attribute-escaped");
+        // §21.9: parentheses inside a url balance (a Wikipedia link kept its last ')' cut off, and a stray one after it).
+        const std::wstring wiki = TgMarkdownToHtml(L"see [Jordan King (basketball)](https://en.wikipedia.org/wiki/Jordan_King_(basketball)) now");
+        CHECK(wiki.find(L"<a href=\"https://en.wikipedia.org/wiki/Jordan_King_(basketball)\">Jordan King (basketball)</a> now") != std::wstring::npos,
+              "a url with balanced parentheses keeps them, and nothing stray follows the link");
+        CHECK(TgMarkdownToHtml(L"[a](https://x.y/(unclosed").find(L"<a ") == std::wstring::npos, "an unbalanced url is not a link");
         CHECK(html.find(L"_") == std::wstring::npos || true, "(italic underscores are never converted)");
     }
     {
@@ -816,6 +821,30 @@ void TestMessaging()
             const auto stopped = RenderHistory({ item(TopicItemKind::Prompt, L"x", day1), tool(L"t5", L"Bash", L"Bash: long"), item(TopicItemKind::Interrupt, L"") }, false, lastDay);
             CHECK(stopped.size() == 2 && stopped[1].html.find(L"\x2022 Bash: long") != std::wstring::npos && stopped[1].html.find(L"interrupted") != std::wstring::npos,
                   "an interrupted turn: its tools and the mark, no reply");
+            // The user's answer to a question is the user's post, between the question and the reply.
+            const auto answered = RenderHistory({ item(TopicItemKind::Prompt, L"build it", day1), item(TopicItemKind::Question, L"Swap: Swap now?"),
+                                                  item(TopicItemKind::Answer, L"Swap now", day1), item(TopicItemKind::Text, L"Swapping.") },
+                                                false,
+                                                lastDay);
+            CHECK(answered.size() == 4 && answered[1].html.find(L"Swap: Swap now?") != std::wstring::npos && answered[2].fromUser && answered[2].userText == L"Swap now" &&
+                      answered[2].html.find(L"\x21A9 <b>Swap now</b>") != std::wstring::npos && answered[3].html.find(L"Swapping.") != std::wstring::npos,
+                  "the answer to a question is the user's post, between the question and the reply");
+        }
+
+        // The user's answer to an AskUserQuestion: Claude Code keeps it on the tool result's line (toolUseResult.answers).
+        {
+            const auto one = ClassifyTranscriptLine(ParseLine(
+                L"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"q1\",\"content\":\"Your questions have been answered\"}]},"
+                L"\"toolUseResult\":{\"questions\":[{\"question\":\"Swap now?\",\"header\":\"Swap\"}],\"answers\":{\"Swap now?\":\"Swap now\"}}}"));
+            CHECK(one.size() == 1 && one[0].kind == TopicItemKind::Answer && one[0].text == L"Swap now" && one[0].toolUseId == L"q1", "one answer reads as itself");
+            const auto two = ClassifyTranscriptLine(ParseLine(
+                L"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"q2\",\"content\":\"answered\"}]},"
+                L"\"toolUseResult\":{\"questions\":[{\"question\":\"A?\",\"header\":\"Swap\"},{\"question\":\"B?\",\"header\":\"Build\"}],\"answers\":{\"A?\":\"Swap now\",\"B?\":\"Later\"}}}"));
+            CHECK(two.size() == 1 && two[0].kind == TopicItemKind::Answer && two[0].text == L"Swap: Swap now\nBuild: Later", "several answers: one \"header: answer\" line each");
+            const auto plain = ClassifyTranscriptLine(ParseLine(
+                L"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t9\",\"content\":\"ok\"}]},\"toolUseResult\":{\"stdout\":\"ok\"}}"));
+            CHECK(plain.size() == 1 && plain[0].kind == TopicItemKind::ToolResult, "a tool result without answers stays a tool result");
+            CHECK(IsConversationItem(TopicItemKind::Answer), "an answer is a conversation message (it makes an older recap stale)");
         }
 
         // The packing keeps every message under the limit and loses no tool line.
