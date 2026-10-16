@@ -516,6 +516,13 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > prompt's first-step rule of 2026-10-13 (9.3) is in no build yet. The engine is tested live
 > against the real `claude.exe`. The engine under it is the agent harness:
 > [`SDK_HARNESS.md`](./SDK_HARNESS.md).
+>
+> **2026-10-17 (the user's choices; NOT BUILT yet, no live run): confirming every match** (9.12).
+> The model READS every session before it shows it (a new `read` tool: the compact transcript), can
+> GREP the conversations' full text (a new `grep` tool: each match in context, who wrote it, when),
+> gives every shown session a `why` (one line of evidence), and answers with a VERDICT sentence that
+> never names a screen. The table shows each `why` as a quote line under the row's title; the
+> Telegram Search topic shows one card per session with it (`MESSAGING.md` §21.10).
 
 ### 9.1 What the user sees
 
@@ -548,6 +555,11 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   - Off reads dim like the context size; a level that thinks reads brighter.
 - The **table shows exactly the sessions that the model picked**, best match first. The first
   row is selected, so its detail pane is there without a click.
+- **Each row carries the model's evidence** (9.12, 2026-10-17, NOT BUILT yet): a thin-barred
+  quote line under its title — the user's own words the model found in the session ("You asked:
+  …"), or Claude's, or what the session shows — and the detail pane shows that line in full under
+  the title. The strip's answer is a verdict: how many sessions were found and what they are
+  about ("Two sessions are about releasing Agentmaster.").
 - A **follow-up refines the list** ("only the open ones", "older than that"): the conversation
   keeps its context.
 - The **crossed circle** (⊘) right of the box throws the conversation away. The model forgets
@@ -582,15 +594,18 @@ agent, whose event repaints every window's strip.
 
 ### 9.3 Two tool servers, and the system prompt
 
-The model can do two things (`AgentMaster/SessionSearchTools.{h,cpp}`):
+The model can do four things (`AgentMaster/SessionSearchTools.{h,cpp}`; until 2026-10-17 only the
+first and the last):
 
 | Tool | What it does |
 |---|---|
-| `mcp__sessions__search` | Runs the page's own search over the session index: every word must match a title, a folder, a branch, a touched file or a typed prompt. Filters: `days` (default 90), `after`, `before`, `dir`, `branch`, `tag`, `favorite`, `open`; `deep` also reads the conversations' text; `sort`, `limit`. It changes nothing on the screen. |
-| `mcp__display__show` | Puts sessions on the screen, in the model's order: `ids` from search results, or `top: N` for the first N rows of the latest search. An empty list means "nothing fits". |
+| `mcp__sessions__search` | Runs the page's own search over the session index: every word must match a title, a folder, a branch, a touched file or a typed prompt. Filters: `days` (default 90), `after`, `before`, `dir`, `branch`, `tag`, `favorite`, `open`; `deep` also reads the conversations' text; `sort`, `limit`. It changes nothing the user sees. |
+| `mcp__sessions__grep` | (9.12) Finds a text, or an ECMAScript regex, in the conversations' full text and returns, per session, how many messages match and the first three matches in context, each with who wrote it (`user` / `claude`) and when. `ids` to look inside candidates, else the period (`days`, `after`, `before`) and `dir`; `in`: all / user / claude; `context` 40–400; `limit` 1–20. Bounded at 20 s; the result says when it stopped early. |
+| `mcp__sessions__read` | (9.12) Reads up to 8 sessions as the Copy ▸ Transcript Markdown — `minimal`, `compact` (the default) or `default` — without the fork chain and the subagents; a session past `chars` (default 6,000, 1,000–40,000) is cut to its first and last turns with a line for the ones left out. |
+| `mcp__display__show` | Shows sessions to the user, in the model's order: `ids` from any result, or `top: N` for the first N rows of the latest search, and (9.12) a `why` per id. An empty list means "nothing fits". |
 
-The split is the point. The search tool never changes what the user sees, so the model can look
-around freely. The show tool is the one place where the screen changes.
+The split is the point. Search, grep and read never change what the user sees, so the model can
+look around freely. The show tool is the one place where the result changes.
 
 - **Short ids.** The model reads and writes the first 8 characters of a session id. It must write
   every id that it wants shown, and output tokens are what a search waits for. A second session
@@ -598,7 +613,8 @@ around freely. The show tool is the one place where the screen changes.
 - **The result text** is compact JSON: the window, the counts, and one object per row (id, title,
   folder, branch, times, sizes, why it matched). Flags and lists appear only when they say
   something.
-- **The system prompt** has eight rules. The first is new (the user's request of 2026-10-13, in no
+- **The system prompt** has nine rules since 2026-10-17 (eight before; rules 4 to 6 are 9.12's:
+  read every candidate, a `why` each, a verdict sentence). The first is from 2026-10-13 (in no
   build yet; production 0.6.8.19 has the seven rules without it):
   - The model's first step, for every request, starts with a mention, in one or two short lines,
     of which kinds of tool calls it can use for the request, out of everything its two tools can do
@@ -611,11 +627,16 @@ around freely. The show tool is the one place where the screen changes.
     `result` line carries only the last message's text (checked live). The mention stays in the
     conversation record (`harness\sessions-search.json`) and in the live test's trace.
 
-  The other seven: act at once and never ask; one search is usually enough (1 to 3 distinctive
-  words, no `days` unless the user names a period); show only what fits; exactly one sentence under
-  25 words in the user's language, with an example of one, and the mention is not the reply; a
-  follow-up refers to the shown list; times are local; a result with an `indexing` field lacks
-  older sessions.
+  The other eight: act at once and never ask (then read the candidates, show once, reply); one
+  search is usually enough (1 to 3 distinctive words, no `days` unless the user names a period;
+  grep for words the user remembers); **4** read every session it intends to show, and leave out
+  the ones that are not about the request; **5** show only what fits (usually 1 to 8), each with a
+  `why` of under 120 characters — the user's own words when it has them; **6** exactly one verdict
+  sentence under 20 words in the user's language, with an example of one, never naming a screen
+  or a list, and the mention is not the reply; a follow-up refers to the shown list; times are
+  local; a result with an `indexing` field lacks older sessions.
+  Before 2026-10-17 the sentence was "what is on the screen and the title of the best match" (under
+  25 words), and the model showed what a search returned on its titles and snippets alone.
 - **The redesign** (2026-10-13, DESIGN ONLY): [`SESSIONS_AGENT.md`](SESSIONS_AGENT.md) — eleven tools
   (`search` with phrasings, scopes and folder exclusion, `grep`, `peek`, `read` at the transcript
   levels, `files`, `related`, `timeline`, `usage`, `sql`, `show` with reasons, `reveal`), a context
@@ -725,6 +746,21 @@ gather on scratch folders (a gather that stops early says how far it got; steps 
 forward; a refresh reads only what changed), and the system prompt (ASCII, the two tool names,
 rule 1 with every kind of call in it, eight rules).
 
+Since 2026-10-17 (9.12) the same suite also pins: the four tools (three read-only), every schema
+JSON and no description naming a screen; nine rules, rule 1 with grep and read, rules 4 to 6 (read
+every candidate, a `why` each, a verdict that never names a screen), and the database prompt's
+nine rules with its own read (`tests_sessiondb.cpp`); show's `why` (any case of an id, one line,
+the first wins, the cap); `GrepRequiredLiteral` (plain text, JSON escapes, groups, `|`, optional
+and repeated characters, POSIX and empty classes, lookahead, `{n,m}`), `MakeGrepExcerpt` (cuts,
+collapse, the quoted-match cap, surrogate pairs), `CutRenderedTranscript` (whole, first and last
+turns with the left-out line, a too-long turn, no turns, the minimum budget), and both parsers;
+and on scratch transcripts the real `grep` (who wrote each match and when, `in`, case, regexes with
+a literal, a word boundary and no useful literal, an invalid regex, one that matches empty text, a
+blank pattern, nothing found, ids with a pasted whole id and an unknown one, a cancel) and `read`
+(compact vs default, two sessions, a gone transcript, unknown ids, Reset). ripgrep was on PATH on
+the machine that ran it, so both paths ran (a literal of 3 or more characters through ripgrep, a
+shorter one and a regex with no literal through the in-process reader).
+
 ### 9.9 Measured, end to end
 
 `harness_live.exe --agent "<request>"`, on this machine's real sessions (1,506 in 90 days), Claude
@@ -832,8 +868,8 @@ above.
 - **A follow-up can widen the list instead of narrowing it** (seen twice, 2026-10-12). After a
   list of one or two sessions, "only the three newest of those" made the model search again
   (`sort: active, limit: 3`) and show three sessions, with sessions that were not on the screen
-  before. It said so in its sentence. Rule 6 of the system prompt (rule 5 before 2026-10-13: "a
-  follow-up refers to what you showed before") does not forbid it. Not changed: the wording of the
+  before. It said so in its sentence. Rule 7 of the system prompt (rule 6 from 2026-10-13, rule 5
+  before: "a follow-up refers to what you showed before") does not forbid it. Not changed: the wording of the
   rules is for the review. With the first-step rule, six runs of six that had a list on the screen
   answered the same follow-up from the earlier results, with no new search (9.9); one of them added
   a session of the earlier search to a list of two.
@@ -842,8 +878,109 @@ above.
   A call that the SDK queued behind a slow call of the same step starts only after the next request
   raised the number, reads the new one, and is never cancelled. Measured: a full-text scan of 365
   days ran 29 s after the follow-up was sent, and the follow-up reached the process only after it.
-  The fix and the reason are in `SESSIONS_AGENT.md` §7.6.
+  The fix and the reason are in `SESSIONS_AGENT.md` §7.6. The `grep` and `read` tools of 9.12 take
+  the generation the same way, so the same gap applies to them.
 - **One live compaction of the search conversation was not run** (`SDK_HARNESS.md` section 11).
+
+### 9.12 Confirming a match: read, grep and the evidence (2026-10-17)
+
+> Status: written 2026-10-17 (session cb14b056), NOT BUILT, no live run. The m5 suite covers the
+> tools, the cut, the literal reader and both surfaces' text (9.8 lists the tests).
+
+**What the user asked.** "Does the search agent read the compact transcript of every session it
+matches against? this really gives a confirming perspective if the search matches user's request."
+It did not: the model had `search` and `show` only, and a search row carries facts and at most two
+160-character snippets (and those only for content matches), so the model showed what matched by
+title or path without knowing what the session was about. The user's choices of that day:
+
+- **"Read every candidate but also be able to full-text/grep the transcripts"**: the `read` and
+  `grep` tools, and rule 4 (read every session before it is shown).
+- **The answer format "C · Evidence cards", variant "C1 · One quote per card"**: the model's one
+  verdict sentence, then per session its title, a facts line and ONE quote — the evidence the model
+  saw. Rule 5 asks for it (`why`, keyed by id, on `show`); rule 6 makes the sentence a verdict that
+  never names a screen.
+- **Scope "Telegram and Sessions page"**: both surfaces show the evidence (Telegram:
+  `MESSAGING.md` §21.10; the page: below).
+
+**`read`** (`SessionSearchToolset::Read`). Up to 8 ids (`kSessionReadMaxIds`; more are reported,
+not read). Each id resolves through the conversation's short ids — or, for a whole session id the
+user pasted, as itself — to its transcript: the path a search or grep row recorded
+(`KnownSession`), else `Callbacks::transcriptPath`, else `ResolveClaudeTranscriptPath`. Each is
+rendered by `RenderTranscriptTurnsFile` at the asked level with `chain` and `agents` OFF (the fork
+chain walk reads every older transcript of the folder; subagent transcripts can outweigh the
+session's own), on its own detached thread, under a 20 s budget (`kSessionReadBudgetMs`; renders
+measured 0.1 to 1.5 s for the copy menu, up to 7 s for the largest). `CutRenderedTranscript` keeps
+a transcript that fits `chars` (default 6,000: a median compact transcript is 6,277 characters,
+`SESSIONS_AGENT.md` §4.2) whole; a longer one keeps what comes before the first turn (at most a
+quarter of the budget), the first turns (two fifths of the rest: what the session was about) and
+the last turns (the remainder: how it ended), with `[... N turns left out here ...]` between, and a
+turn longer than its share cut with `[... cut ...]`. Each session is one `## Session <id> · <title>
+· active <when> · N turns` part.
+
+**`grep`** (`SessionSearchToolset::Grep` → `GrepTranscripts`, `SessionSearch.{h,cpp}`). It reads
+what the content search reads (`ClassifyTranscriptLine`): the user's REAL typed prompts, and
+Claude's side — text, thinking, each tool call's name and input JSON, each tool result, system
+lines — each message cut to 16,384 characters (`kGrepTextBudgetChars`). Case-insensitive; a literal
+is one contiguous piece of text, a regex is ECMAScript (`.` does not cross a line break). A regex
+that can match empty text is refused (it would match every message); `regex_error` on a message
+(MSVC's complexity limit) counts as no match and is reported as `too_complex`. Results: sessions
+where the USER typed the text first, then by matching messages, then newest; each row has `hits`,
+`user_hits` and up to three `matches` (`by`, `at`, `text`: the match with `context` characters on
+each side). Its rows get short ids like a search's (show and read take them); it is not a "latest
+search" (`top:N`) and previews nothing on the page.
+
+How it stays fast:
+
+- **The required literal** (`GrepRequiredLiteral`): the longest piece of text EVERY match contains
+  that a transcript's raw JSON line holds verbatim (no quote, backslash, control character or lone
+  surrogate — what JSON escapes; `Json.h` writes tool inputs with the same escapes, so the
+  in-process text and the raw line agree). For a regex, only top-level plain characters count: a
+  group, a class, `.`, an anchor or a class escape ends a run; a quantifier that allows zero ends
+  it before its character; a top-level `|` gives none; any construct the reader does not follow
+  gives none (it never guesses).
+- **ripgrep** (`rg -il` on the literal, when it has 3 or more non-space characters) filters the
+  files batch by batch (64 files or 256 MB), NEWEST first, and each batch's files are read before
+  the next batch is filtered — a grep that runs out of time has read the newest sessions. A batch
+  rg cannot do (spawn failure, timeout, exit 2 with no output) is read in full, and rg is not asked
+  again. The exit-2 rule is now `RgFilesWithMatches`' too, so the page's content search no longer
+  reads a pattern rg refused as "no file matched".
+- **The line reader** parses (JSON) only the lines whose raw bytes hold the literal's longest
+  printable-ASCII run (ASCII case folding, Boyer-Moore-Horspool): the parse is what a grep spends
+  its time on.
+- **The budget** (`kSessionGrepBudgetMs`, 20 s) and the request's cancel are checked between
+  files, every megabyte, and before every parsed line: MSVC's regex gives up on a catastrophic
+  pattern only after ~4 s per message in a debug build (measured, `(x+x+)+y` on 26 x's; 3.3 s on
+  20 x's without giving up), so a per-megabyte check could overrun by minutes. A stopped grep says
+  so (`stopped`: how many sessions were not read) and keeps what it found.
+
+Not read by `grep` (and not by the page's content search either): a message the user typed while
+Claude worked (a `queued_command` attachment), and the subagents' transcripts.
+
+**`show`'s `why`.** An object keyed by the ids as the model writes them (any case, short or whole),
+each resolved like an id; one line, cut to 300 characters (`kSessionWhyMaxChars`; the prompt asks
+for under 120); the first why written for a session wins; a why for an id that is not shown is
+dropped. `onShow(ids, note, whys)` passes them index-aligned; the agent stores them in the snapshot
+(`shownReasons`) and in the view file (`shownReasons`, still version 1: an older build ignores the
+key), and every Shown event carries them (`SessionSearchEvent::reasons`). hooks.log's `[ai-search]
+shown N session(s), M with a why` says whether the model followed rules 4 and 5.
+
+**The page.** A row of the AI list the model showed (never a search's preview: the model has read
+none of those) draws its why under the title as a quote: a 2 px gray bar on the left, 11 px text at
+72% opacity, one line ending in "…" (`SessAiReasonQuote`, `TerminalPage.AgentSessionsPage.cpp`).
+The detail pane shows the whole line under the title, wrapped. `_sessionsAiReasons` holds them
+(`_SessionsAiTakeReasons` on a Shown event and on adopting a snapshot; cleared with the list and on
+a preview); `_SessionsAiReasonFor` is the one reader.
+
+**The database mode** (`SESSIONS_DB.md` §8.2) gets the same `read` (as `mcp__agentmaster__read`,
+after the database's own tools) and the same rules 4 to 6; its own `grep` is the database's.
+
+**Cost.** One more model step per request (the read) and its input: up to 8 × 6,000 characters
+(~12,000 tokens) once per request, then cached; more output for the whys (~30 tokens a session).
+Not measured live yet.
+
+**Not done.** No live run (the m5 suite and `/Zs` only). `harness_live.cpp` prints each shown
+session's why and checks the four tools; the timing of a request with a read is unmeasured. The
+Sessions page's rows were not looked at on screen.
 
 ---
 

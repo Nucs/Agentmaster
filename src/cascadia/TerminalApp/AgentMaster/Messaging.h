@@ -75,6 +75,11 @@ namespace Agentmaster::Msg
         std::wstring title; // the best title the agent knows (live tab title, custom, ai, first prompt)
         std::wstring dir; // the session's working directory ("" when unknown)
         int64_t lastActivityMs{ 0 };
+        // §21.10 (the evidence cards): what a card and the pick menu show beyond the title.
+        std::wstring why; // the model's one line of evidence for this session ("" = it gave none)
+        std::wstring branch; // the git branch the session ran on ("" when unknown)
+        int64_t createdMs{ 0 }; // when the conversation started (0 when unknown)
+        int prompts{ 0 }; // the prompts the user typed in it
     };
 
     // What the Search agent reports back.

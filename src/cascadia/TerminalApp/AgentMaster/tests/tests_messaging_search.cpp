@@ -6,6 +6,8 @@
 //   1. the Search conversation is one for the whole app and can be CLEARED like the Sessions page's (/clear, /reset);
 //   2. it is not a session: nothing in the Search topic wakes, resumes, forks or pins it;
 //   3. an answer's buttons PICK a session, and a second menu asks Resume / Fork (no fork-and-pin).
+// And (§21.10) the user's answer format of 2026-10-17, "C1": the model's verdict, then one EVIDENCE CARD per session
+// with the model's why as its one quote, and the pick menu that repeats the card in full (section 5).
 // The agent itself (MessagingSearchBridge.cpp) is app-only (it needs the SDK unity file), so the bridge's
 // one-conversation lifetime is checked by review and live, not here.
 
@@ -119,5 +121,69 @@ void TestMessagingSearch()
         const std::wstring lines[] = { SearchPickStateLine(SearchPickState::Closed), SearchPickStateLine(SearchPickState::IdleTab), SearchPickStateLine(SearchPickState::Listed) };
         CHECK(!lines[0].empty() && lines[0] != lines[1] && lines[1] != lines[2] && lines[0] != lines[2], "each state has its own menu line");
         CHECK(lines[0].find(L"Resume") != std::wstring::npos && lines[1].find(L"Resume") != std::wstring::npos && lines[2].find(L"Resume") != std::wstring::npos, "every menu line says what Resume does there");
+    }
+
+    // ---- 5. the answer as EVIDENCE CARDS (§21.10, the user's "C1" of 2026-10-17) ----
+    {
+        // Local wall-clock instants, so the days and clock times below are the same on every machine.
+        const auto localMs = [](int year, int month, int day, int hour, int minute) {
+            std::tm t{};
+            t.tm_year = year - 1900;
+            t.tm_mon = month - 1;
+            t.tm_mday = day;
+            t.tm_hour = hour;
+            t.tm_min = minute;
+            t.tm_isdst = -1;
+            return static_cast<int64_t>(std::mktime(&t)) * 1000;
+        };
+        const int64_t now = localMs(2026, 10, 17, 12, 0);
+
+        // The day a card names, and when a menu says it ran.
+        CHECK(SearchDayText(localMs(2026, 10, 17, 9, 30), now) == L"today" && SearchDayText(localMs(2026, 10, 16, 23, 59), now) == L"yesterday", "card day: today, yesterday");
+        CHECK(SearchDayText(localMs(2026, 10, 11, 14, 2), now) == L"11 Oct" && SearchDayText(localMs(2025, 10, 11, 14, 2), now) == L"11 Oct 2025" && SearchDayText(0, now).empty(), "card day: day first, the year only when it is not this one, nothing when unknown");
+        CHECK(SearchDayText(localMs(2026, 1, 1, 10, 0), localMs(2026, 1, 2, 8, 0)) == L"yesterday" && SearchDayText(localMs(2025, 12, 31, 10, 0), localMs(2026, 1, 1, 8, 0)) == L"yesterday", "card day: yesterday across a month and a year");
+        CHECK(SearchSpanText(localMs(2026, 10, 11, 14, 2), localMs(2026, 10, 11, 16, 40), now) == L"11 Oct 14:02 \x2192 16:40", "menu span: one day names its date once");
+        CHECK(SearchSpanText(localMs(2026, 10, 10, 9, 0), localMs(2026, 10, 11, 16, 40), now) == L"10 Oct 09:00 \x2192 11 Oct 16:40", "menu span: across days, both dates");
+        CHECK(SearchSpanText(localMs(2026, 10, 17, 10, 0), localMs(2026, 10, 17, 11, 0), now) == L"10:00 \x2192 11:00", "menu span: today, clock times only");
+        CHECK(SearchSpanText(0, localMs(2026, 10, 11, 16, 40), now) == L"active 11 Oct 16:40" && SearchSpanText(localMs(2026, 10, 11, 14, 2), 0, now) == L"11 Oct 14:02" && SearchSpanText(0, 0, now).empty(), "menu span: what is known of it");
+
+        // The answer: the verdict, then one card per session — number, glyph, title; folder · day · prompts; the quote.
+        SearchCard release;
+        release.number = 1;
+        release.sessionId = L"a1a1a1a1-0000-4000-8000-000000000001";
+        release.title = L"Release v0.7.9";
+        release.dir = L"K:\\source\\Agentmaster\\";
+        release.branch = L"agentmaster";
+        release.createdMs = localMs(2026, 10, 11, 14, 2);
+        release.lastActivityMs = localMs(2026, 10, 11, 16, 40);
+        release.prompts = 14;
+        release.why = L"You asked: \"cut v0.7.9 as a pre-release\"";
+        release.state = SearchPickState::Closed;
+        SearchCard bare;
+        bare.number = 2;
+        bare.sessionId = L"b2b2b2b2-0000-4000-8000-000000000002";
+        bare.prompts = 1;
+        bare.state = SearchPickState::IdleTab;
+        const std::wstring answer = BuildSearchAnswerHtml(L"Two sessions are about <releasing> Agentmaster.", { release, bare }, 3, now);
+        CHECK(answer == L"Two sessions are about &lt;releasing&gt; Agentmaster.\n\n"
+                        L"<b>1</b> \U0001F4E6 <b>Release v0.7.9</b>\nAgentmaster \x00B7 11 Oct \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n\n"
+                        L"<b>2</b> \U0001F4A4 <b>b2b2b2b2</b>\n1 prompt\n\n"
+                        L"<i>(3 more not listed: ask to narrow it down.)</i>",
+              "answer: the verdict escaped, a card per session with its one quote, the short id for a session with no title, and the count not listed");
+        CHECK(BuildSearchAnswerHtml(L"", {}, 0, now) == L"Nothing found." && BuildSearchAnswerHtml(L"No session is about that.", {}, 0, now) == L"No session is about that.", "answer: nothing at all says so; a verdict alone is the answer");
+        SearchCard escaped = release;
+        escaped.title = L"a <b>bold</b> & title";
+        escaped.why = L"Claude: \"x < y & z\"";
+        const std::wstring escapedAnswer = BuildSearchAnswerHtml(L"", { escaped }, 0, now);
+        CHECK(escapedAnswer.find(L"a &lt;b&gt;bold&lt;/b&gt; &amp; title") != std::wstring::npos && escapedAnswer.find(L"x &lt; y &amp; z") != std::wstring::npos && escapedAnswer.rfind(L"<b>1</b>", 0) == 0,
+              "answer: a title and a quote are escaped (the model's text is never markup)");
+        CHECK(std::wstring{ SearchPickStateGlyph(SearchPickState::Closed) } != SearchPickStateGlyph(SearchPickState::IdleTab) && std::wstring{ SearchPickStateGlyph(SearchPickState::IdleTab) } != SearchPickStateGlyph(SearchPickState::Listed),
+              "answer: each state has its own glyph");
+
+        // The pick menu: the whole folder and the branch, when it ran, the quote, where it stands now.
+        CHECK(BuildSearchPickMenuHtml(release, now) == L"<b>1 \x00B7 Release v0.7.9</b>\nK:\\source\\Agentmaster\\ \x00B7 agentmaster\n11 Oct 14:02 \x2192 16:40 \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n"
+                                                L"<i>\U0001F4E6 Closed: Resume opens it in a background tab, and its topic appears.</i>",
+              "pick menu: the card's facts in full, its quote, and the state line");
+        CHECK(BuildSearchPickMenuHtml(bare, now) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Resume brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
     }
 }

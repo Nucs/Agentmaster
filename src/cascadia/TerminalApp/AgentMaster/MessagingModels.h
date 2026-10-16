@@ -2304,6 +2304,250 @@ namespace Agentmaster::Msg
         }
     }
 
+    // ===== the Search answer as EVIDENCE CARDS (§21.10, the user's choice "C1" of 2026-10-17) =============
+    //
+    // The answer is the model's one-sentence VERDICT, then one CARD per shown session: its number (the label of its
+    // pick button), a glyph for where it stands, its title; a line with its folder, the day it was last active and
+    // how many prompts it had; and ONE QUOTE — the model's `why`, the evidence it saw when it read the session
+    // (SESSIONS.md §9.12). A pick (the number) opens the session's menu: the whole folder and branch, when it ran,
+    // the same quote, where it stands now, then Resume / Resume 📌 / Fork / Cancel. Both texts are built here, pure,
+    // so the m5 suite pins them (TestMessagingSearch).
+
+    /// <summary>One session as the Search answer shows it (a card), and as its pick menu does.</summary>
+    struct SearchCard
+    {
+        size_t number{ 0 }; // the 1-based row number: the card's label and its pick button's
+        std::wstring sessionId;
+        std::wstring title; // "" = shown as the short id
+        std::wstring dir; // the working folder ("" = unknown)
+        std::wstring branch; // the git branch ("" = unknown)
+        int64_t createdMs{ 0 }; // when the conversation started (0 = unknown)
+        int64_t lastActivityMs{ 0 }; // its newest message (0 = unknown)
+        int prompts{ 0 }; // prompts the user typed in it
+        std::wstring why; // the model's one line of evidence ("" = it gave none)
+        SearchPickState state{ SearchPickState::Closed };
+    };
+
+    /// <summary>
+    /// The glyph a card and the pick menu show for where the session stands: 📦 closed, 💤 an idle tab, 💬 a topic of
+    /// its own. The menu's line (SearchPickStateLine) says in words what each means for Resume.
+    /// </summary>
+    /// <param name="state">The state.</param>
+    /// <returns>A static string; never null.</returns>
+    inline const wchar_t* SearchPickStateGlyph(SearchPickState state) noexcept
+    {
+        switch (state)
+        {
+        case SearchPickState::IdleTab:
+            return L"\U0001F4A4";
+        case SearchPickState::Listed:
+            return L"\U0001F4AC";
+        case SearchPickState::Closed:
+        default:
+            return L"\U0001F4E6";
+        }
+    }
+
+    namespace detail
+    {
+        /// <summary>The last segment of a folder path ("Agentmaster" for "K:\source\Agentmaster\"), the text itself when it has no separator.</summary>
+        /// <param name="dir">The folder.</param>
+        /// <returns>The segment.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring FolderLeaf(std::wstring_view dir)
+        {
+            while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/'))
+            {
+                dir.remove_suffix(1);
+            }
+            const size_t cut = dir.find_last_of(L"\\/");
+            return std::wstring{ cut == std::wstring_view::npos ? dir : dir.substr(cut + 1) };
+        }
+
+        /// <summary>A Unix ms instant as local broken-down time.</summary>
+        /// <param name="unixMs">The instant.</param>
+        /// <param name="out">Receives the local time.</param>
+        /// <returns>False when the C runtime cannot convert it (it then writes nothing).</returns>
+        inline bool LocalTmOf(int64_t unixMs, std::tm& out) noexcept
+        {
+            const time_t t = static_cast<time_t>(unixMs / 1000);
+            return localtime_s(&out, &t) == 0;
+        }
+
+        /// <summary>"1 prompt", "14 prompts"; empty for none (a card says nothing rather than "0 prompts").</summary>
+        /// <param name="prompts">The count.</param>
+        /// <returns>The words.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring PromptCountText(int prompts)
+        {
+            return prompts <= 0 ? std::wstring{} : std::to_wstring(prompts) + (prompts == 1 ? L" prompt" : L" prompts");
+        }
+    }
+
+    /// <summary>
+    /// The DAY a card names: "today", "yesterday", "11 Oct" in this year, "11 Oct 2025" before it — local time, day
+    /// first like TgClockText. "Yesterday" is the calendar day before today's (mktime normalizes the day, so a day of
+    /// 23 or 25 hours is still one day).
+    /// </summary>
+    /// <param name="unixMs">The instant; 0 or less = unknown.</param>
+    /// <param name="nowMs">The clock.</param>
+    /// <returns>The words; empty when the instant is unknown or cannot be converted.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring SearchDayText(int64_t unixMs, int64_t nowMs)
+    {
+        std::tm when{};
+        std::tm now{};
+        if (unixMs <= 0 || !detail::LocalTmOf(unixMs, when) || !detail::LocalTmOf(nowMs, now))
+        {
+            return {};
+        }
+        if (when.tm_year == now.tm_year && when.tm_yday == now.tm_yday)
+        {
+            return L"today";
+        }
+        std::tm previous = now;
+        previous.tm_mday -= 1;
+        previous.tm_isdst = -1;
+        if (std::mktime(&previous) != static_cast<time_t>(-1) && when.tm_year == previous.tm_year && when.tm_yday == previous.tm_yday)
+        {
+            return L"yesterday";
+        }
+        static constexpr const wchar_t* kMonths[] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun", L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
+        const int mon = when.tm_mon >= 0 && when.tm_mon < 12 ? when.tm_mon : 0;
+        std::wstring text = std::to_wstring(when.tm_mday) + L" " + kMonths[mon];
+        if (when.tm_year != now.tm_year)
+        {
+            text += L" " + std::to_wstring(when.tm_year + 1900);
+        }
+        return text;
+    }
+
+    /// <summary>
+    /// When a session ran, for its pick menu: "14:02 → 16:40" today, "11 Oct 14:02 → 16:40" within one day,
+    /// "10 Oct 09:00 → 11 Oct 16:40" across days (TgClockText's forms); one time when only one is known or both are
+    /// the same.
+    /// </summary>
+    /// <param name="createdMs">When the conversation started; 0 = unknown.</param>
+    /// <param name="lastActivityMs">Its newest message; 0 = unknown.</param>
+    /// <param name="nowMs">The clock.</param>
+    /// <returns>The words; empty when neither instant is known.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring SearchSpanText(int64_t createdMs, int64_t lastActivityMs, int64_t nowMs)
+    {
+        if (createdMs <= 0 && lastActivityMs <= 0)
+        {
+            return {};
+        }
+        if (createdMs <= 0)
+        {
+            return L"active " + TgClockText(lastActivityMs, nowMs);
+        }
+        std::wstring text = TgClockText(createdMs, nowMs);
+        if (lastActivityMs <= createdMs)
+        {
+            return text;
+        }
+        const std::wstring end = TgClockText(lastActivityMs, nowMs);
+        std::tm a{};
+        std::tm b{};
+        const bool sameDay = detail::LocalTmOf(createdMs, a) && detail::LocalTmOf(lastActivityMs, b) && a.tm_year == b.tm_year && a.tm_yday == b.tm_yday;
+        // One day: the end's clock alone (TgClockText ends with "HH:MM" in every form).
+        const size_t space = end.rfind(L' ');
+        return text + L" \x2192 " + (sameDay && space != std::wstring::npos ? end.substr(space + 1) : end);
+    }
+
+    /// <summary>
+    /// The Search answer (§21.10): the model's verdict, then one card per session — "<b>1</b> 📦 <b>title</b>", the line
+    /// "folder · day · N prompts", and the model's why as one quote — then how many shown sessions were not listed.
+    /// </summary>
+    /// <param name="verdict">The model's one sentence, plain text (escaped here); empty = none.</param>
+    /// <param name="cards">The listed sessions, in order (the caller cuts them to kSearchAnswerMaxRows).</param>
+    /// <param name="notListed">Shown sessions past the cut.</param>
+    /// <param name="nowMs">The clock (a parameter, so the days a test reads are its own).</param>
+    /// <returns>Telegram HTML, balanced; "Nothing found." when there is nothing at all.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring BuildSearchAnswerHtml(std::wstring_view verdict, const std::vector<SearchCard>& cards, size_t notListed, int64_t nowMs)
+    {
+        std::wstring html = TgEscapeHtml(verdict);
+        for (const auto& card : cards)
+        {
+            if (!html.empty())
+            {
+                html += L"\n\n";
+            }
+            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 100);
+            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" <b>" + TgEscapeHtml(title) + L"</b>";
+            std::wstring meta;
+            const auto add = [&meta](const std::wstring& part) {
+                if (!part.empty())
+                {
+                    meta += (meta.empty() ? L"" : L" \x00B7 ") + part;
+                }
+            };
+            add(detail::FolderLeaf(card.dir));
+            add(SearchDayText(card.lastActivityMs, nowMs));
+            add(detail::PromptCountText(card.prompts));
+            if (!meta.empty())
+            {
+                html += L"\n" + TgEscapeHtml(meta);
+            }
+            if (!card.why.empty())
+            {
+                // The quote opens right after a line break and closes before the next one (TgMarkdownToHtml's rule): a
+                // break inside the tag would show as an empty last line of the quote.
+                html += L"\n<blockquote>" + TgEscapeHtml(card.why) + L"</blockquote>";
+            }
+        }
+        if (notListed > 0)
+        {
+            html += (html.empty() ? L"" : L"\n\n") + std::wstring{ L"<i>(" } + std::to_wstring(notListed) + L" more not listed: ask to narrow it down.)</i>";
+        }
+        if (html.empty())
+        {
+            html = L"Nothing found.";
+        }
+        return html;
+    }
+
+    /// <summary>
+    /// A picked session's action menu (§21.10): "<b>1 · title</b>", the whole folder and the branch, when it ran and how
+    /// many prompts it had, the model's why as one quote, and where it stands now (glyph + SearchPickStateLine). The
+    /// buttons (Resume / Resume 📌 / Fork / Cancel) are the caller's.
+    /// </summary>
+    /// <param name="card">The session, as the answer listed it (or as the registry knows it).</param>
+    /// <param name="nowMs">The clock.</param>
+    /// <returns>Telegram HTML, balanced.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring BuildSearchPickMenuHtml(const SearchCard& card, int64_t nowMs)
+    {
+        const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 200);
+        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgEscapeHtml(title) + L"</b>";
+        std::wstring place = card.dir;
+        if (!card.branch.empty())
+        {
+            place += (place.empty() ? L"" : L" \x00B7 ") + card.branch;
+        }
+        if (!place.empty())
+        {
+            html += L"\n" + TgEscapeHtml(place);
+        }
+        std::wstring when = SearchSpanText(card.createdMs, card.lastActivityMs, nowMs);
+        if (const std::wstring prompts = detail::PromptCountText(card.prompts); !prompts.empty())
+        {
+            when += (when.empty() ? L"" : L" \x00B7 ") + prompts;
+        }
+        if (!when.empty())
+        {
+            html += L"\n" + TgEscapeHtml(when);
+        }
+        if (!card.why.empty())
+        {
+            html += L"\n<blockquote>" + TgEscapeHtml(card.why) + L"</blockquote>";
+        }
+        html += L"\n<i>" + std::wstring{ SearchPickStateGlyph(card.state) } + L" " + SearchPickStateLine(card.state) + L"</i>";
+        return html;
+    }
+
     // ===== the backlog rule (D2) ==============================================================
 
     // An update older than this when it is processed was sent while Agentmaster was closed (Telegram

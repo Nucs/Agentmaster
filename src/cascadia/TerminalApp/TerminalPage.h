@@ -1057,6 +1057,10 @@ namespace winrt::TerminalApp::implementation
         uint64_t _sessionsAiListTurn{ 0 }; // the request the list (or preview) belongs to: a preview never replaces the final list of its own request
         std::vector<std::wstring> _sessionsAiShownIds; // the listed sessions, full ids, in the model's order
         std::vector<::Agentmaster::SessionIndexEntry> _sessionsAiEntries; // their index entries as the agent sent them: the source of the rows outside the page's time window
+        // The model's evidence per listed session (SESSIONS.md §9.12): full id -> its `why`, the one line it saw when it
+        // read the session. Drawn as a quote line under the row's title and in full in the detail pane
+        // (_SessionsAiReasonFor). Empty for a search's preview, cleared with the list.
+        std::unordered_map<std::wstring, std::wstring> _sessionsAiReasons;
         // The table's sort when the list arrived. While the sort still is this one, the list keeps
         // the MODEL's order; a click on a column header changes the sort, and that column then
         // sorts the list like any other.
@@ -2194,6 +2198,8 @@ namespace winrt::TerminalApp::implementation
         void _OnSessionsAiEvent(const ::Agentmaster::SessionSearchEvent& e); // one agent event, on the UI thread: update the list, the strip, the table
         void _SessionsAiAdoptSnapshot(const ::Agentmaster::SessionSearchSnapshot& snapshot); // take the conversation's shown list as the page's list (AI mode on, a reset, an answer that ends a preview)
         void _SessionsAiMergeExtraRows(); // make _sessionsRows / _sessionsEntries hold exactly the extra rows the current AI list needs (aiExtra rows, at the end)
+        void _SessionsAiTakeReasons(const std::vector<std::wstring>& ids, const std::vector<std::wstring>& reasons); // _sessionsAiReasons := the model's whys of a shown list (index-aligned with ids; empty ones are not stored)
+        std::wstring _SessionsAiReasonFor(const std::wstring& sessionId) const; // the why a row of the AI list on screen carries, or "" (AI off, no list, or a preview)
         bool _SessionsAiApplyView(std::vector<const _SessionsRow*>& view, bool& keepOrder) const; // _RenderSessionsTable: replace the view with the AI list when one is active; false = no AI list, the view is untouched
         void _UpdateSessionsAiStrip(const ::Agentmaster::SessionSearchSnapshot& snapshot); // repaint the strip, the reset button and the placeholder from the conversation's state
         void _CycleSessionsAiThinking(); // the strip's thinking toggle was clicked: the next level (skipping levels the model lacks), persisted for every window, applied by the agent from the next request

@@ -37,6 +37,8 @@
 #include "../SessionSearchTools.h"
 
 #include <algorithm>
+#include <cstdio> // sprintf_s: the grep test's ISO timestamps
+#include <ctime> // _gmtime64_s
 #include <fstream>
 #include <map>
 #include <string>
@@ -757,6 +759,7 @@ void TestSessionSearchTools()
         std::vector<std::vector<std::wstring>> candidates;
         std::vector<std::vector<std::wstring>> shown;
         std::vector<std::wstring> notes;
+        std::vector<std::vector<std::wstring>> whys; // the evidence of each show call, aligned with `shown`
         SessionSearchToolset::Callbacks callbacks;
         callbacks.catalog = [&](int64_t since, const std::function<bool()>&) {
             askedSince = since;
@@ -765,9 +768,10 @@ void TestSessionSearchTools()
         callbacks.generation = [&generation] { return generation.load(); };
         callbacks.onSearching = [&searching](const std::wstring& summary) { searching.push_back(summary); };
         callbacks.onCandidates = [&candidates](const std::vector<std::wstring>& ids) { candidates.push_back(ids); };
-        callbacks.onShow = [&shown, &notes](const std::vector<std::wstring>& ids, const std::wstring& note) {
+        callbacks.onShow = [&shown, &notes, &whys](const std::vector<std::wstring>& ids, const std::wstring& note, const std::vector<std::wstring>& why) {
             shown.push_back(ids);
             notes.push_back(note);
+            whys.push_back(why);
         };
         callbacks.content = content;
         callbacks.now = [] { return kNow; };
@@ -787,17 +791,33 @@ void TestSessionSearchTools()
         CHECK(threw, "toolset: the catalog callback is required");
 
         const auto servers = toolset.Servers();
-        CHECK(servers.size() == 2 && servers[0].name == L"sessions" && servers[1].name == L"display", "toolset: two servers, one to search and one to show");
-        CHECK(servers[0].tools.size() == 1 && servers[0].tools[0].name == L"search" && servers[0].tools[0].readOnly && servers[1].tools.size() == 1 && servers[1].tools[0].name == L"show" && !servers[1].tools[0].readOnly, "toolset: search is read-only (may run in parallel), show is not");
-        CHECK(json::Parse(servers[0].tools[0].inputSchemaJson).has_value() && json::Parse(servers[1].tools[0].inputSchemaJson).has_value(), "toolset: both input schemas are JSON");
+        CHECK(servers.size() == 2 && servers[0].name == L"sessions" && servers[1].name == L"display", "toolset: two servers, one to look (search, grep, read) and one to show");
+        CHECK(servers[0].tools.size() == 3 && servers[0].tools[0].name == L"search" && servers[0].tools[1].name == L"grep" && servers[0].tools[2].name == L"read" &&
+                  servers[0].tools[0].readOnly && servers[0].tools[1].readOnly && servers[0].tools[2].readOnly &&
+                  servers[1].tools.size() == 1 && servers[1].tools[0].name == L"show" && !servers[1].tools[0].readOnly,
+              "toolset: search, grep and read only read (one step may run them in parallel), show is not read-only");
+        bool schemasParse = true;
+        for (const auto& server : servers)
+        {
+            for (const auto& tool : server.tools)
+            {
+                schemasParse = schemasParse && json::Parse(tool.inputSchemaJson).has_value() && tool.description.find(L"screen") == std::wstring::npos;
+            }
+        }
+        CHECK(schemasParse, "toolset: every input schema is JSON, and no description speaks of a screen (Telegram shows the same calls)");
         CHECK(servers[0].tools[0].inputSchemaJson.find(L"Default " + std::to_wstring(kSessionSearchDefaultDays)) != std::wstring::npos, "toolset: the schema states the real default period");
+        CHECK(servers[0].tools.size() == 3 && servers[0].tools[2].inputSchemaJson.find(L"1 to 8 ids") != std::wstring::npos && servers[0].tools[2].inputSchemaJson.find(L"Default 6000") != std::wstring::npos &&
+                  servers[1].tools[0].inputSchemaJson.find(L"\"why\"") != std::wstring::npos,
+              "toolset: read's schema states its real limits, and show takes a why");
         const std::wstring prompt = SessionSearchToolset::SystemPrompt();
         bool promptAscii = !prompt.empty();
         for (const wchar_t c : prompt)
         {
             promptAscii = promptAscii && (c == L'\n' || (c >= 0x20 && c < 0x7F));
         }
-        CHECK(promptAscii && prompt.find(L"mcp__sessions__search") != std::wstring::npos && prompt.find(L"mcp__display__show") != std::wstring::npos && prompt.find(L"indexing") != std::wstring::npos, "toolset: the system prompt is ASCII and names both tools and the indexing note");
+        CHECK(promptAscii && prompt.find(L"mcp__sessions__search") != std::wstring::npos && prompt.find(L"mcp__sessions__grep") != std::wstring::npos && prompt.find(L"mcp__sessions__read") != std::wstring::npos &&
+                  prompt.find(L"mcp__display__show") != std::wstring::npos && prompt.find(L"indexing") != std::wstring::npos,
+              "toolset: the system prompt is ASCII and names the four tools and the indexing note");
         // The user's rule of 2026-10-13: the FIRST step mentions which kinds of tool calls the request can
         // use, out of all the tools, and how in different ways. Pinned by its place (rule 1), its words,
         // and the rule count that SESSIONS.md 9.3 states.
@@ -807,7 +827,17 @@ void TestSessionSearchTools()
         const std::wstring ruleOneText = (ruleOne != std::wstring::npos && ruleTwo != std::wstring::npos && ruleOne < ruleTwo) ? prompt.substr(ruleOne, ruleTwo - ruleOne) : std::wstring{};
         CHECK(ruleOneText.find(L"kinds of tool calls") != std::wstring::npos && ruleOneText.find(L"out of everything your tools can do") != std::wstring::npos && ruleOneText.find(L"in different ways") != std::wstring::npos && ruleOneText.find(L"before your first tool call, in the same message") != std::wstring::npos, "toolset: rule 1 says to mention the kinds of tool calls, out of all the tools, and how in different ways - in the same message as the first calls (no extra model request)");
         CHECK(ruleOneText.find(L"deep:true") != std::wstring::npos && ruleOneText.find(L"top:N") != std::wstring::npos && ruleOneText.find(L"after or before") != std::wstring::npos, "toolset: rule 1 lists every kind of call (words, filters, period, full text, show) so the plan is chosen from all of them");
-        CHECK(prompt.find(L"\n8. ") != std::wstring::npos && prompt.find(L"\n9. ") == std::wstring::npos, "toolset: the system prompt has eight rules (the count SESSIONS.md 9.3 states)");
+        CHECK(ruleOneText.find(L"grep for exact words or a regex") != std::wstring::npos && ruleOneText.find(L"read to confirm") != std::wstring::npos, "toolset: rule 1 lists grep and read among the kinds of calls");
+        CHECK(prompt.find(L"\n9. ") != std::wstring::npos && prompt.find(L"\n10. ") == std::wstring::npos, "toolset: the system prompt has nine rules (the count SESSIONS.md 9.3 states)");
+        // The user's rules of 2026-10-17 (SESSIONS.md 9.12): read before show, a why per session, a verdict sentence.
+        const size_t ruleFour = prompt.find(L"\n4. Confirm before you show");
+        CHECK(ruleFour != std::wstring::npos && prompt.find(L"read every session you intend to show", ruleFour) != std::wstring::npos, "toolset: rule 4 makes the model read every session it shows");
+        CHECK(prompt.find(L"\n5. Show only what fits") != std::wstring::npos && prompt.find(L"Give each a `why`") != std::wstring::npos && prompt.find(L"You asked:") != std::wstring::npos, "toolset: rule 5 asks one line of evidence per shown session, the user's own words first");
+        CHECK(prompt.find(L"\n6. After show returns") != std::wstring::npos && prompt.find(L"Never mention a screen or a list") != std::wstring::npos && prompt.find(L"on the screen") == std::wstring::npos,
+              "toolset: rule 6's verdict never names a screen (the Telegram topic has none)");
+        const std::wstring dbPrompt = SessionSearchToolset::DatabaseSystemPrompt();
+        CHECK(dbPrompt.find(L"\n9. ") != std::wstring::npos && dbPrompt.find(L"\n10. ") == std::wstring::npos && dbPrompt.find(L"mcp__agentmaster__read") != std::wstring::npos && dbPrompt.find(L"on the screen") == std::wstring::npos,
+              "toolset: the database prompt has the same nine rules, with its own read");
         const auto& search = servers[0].tools[0].handler;
         const auto& show = servers[1].tools[0].handler;
 
@@ -831,6 +861,14 @@ void TestSessionSearchTools()
         const HarnessToolResult shownOk = show(J(LR"({"ids":["bbbb2222","aaaa1111","bbbb2222","nope1234"],"note":"  the drag\nsessions "})"));
         CHECK(!shownOk.isError && shown.size() == 1 && shown[0].size() == 2 && shown[0][0] == kIdTags && shown[0][1] == kIdDrag, "show: full ids, the model's order, each session once");
         CHECK(notes.back() == L"the drag sessions" && shownOk.text.find(L"Shown 2 sessions") != std::wstring::npos && shownOk.text.find(L"nope1234") != std::wstring::npos, "show: a one-line caption, and the unknown id is reported back");
+        CHECK(whys.back().size() == 2 && whys.back()[0].empty() && whys.back()[1].empty(), "show without a why: one empty why per shown session (aligned)");
+        // The evidence (SESSIONS.md 9.12): keyed by the ids as the model wrote them (any case), one line, aligned with
+        // what is shown; a why for an id that is not shown, or that names no session, is dropped.
+        const HarnessToolResult withWhy = show(J(LR"({"ids":["aaaa1111","bbbb2222"],"why":{"BBBB2222":"  Mentions tags\nonly in passing  ","aaaa1111":"You asked: \"fix the drag crash\"","nope1234":"ignored","bbbb2222":"second why for the same session"}})"));
+        CHECK(!withWhy.isError && whys.back().size() == 2 && whys.back()[0] == L"You asked: \"fix the drag crash\"" && whys.back()[1] == L"Mentions tags only in passing",
+              "show: each why lands on its own session, as one line; the first why written for a session wins");
+        const HarnessToolResult longWhy = show(J(L"{\"ids\":[\"aaaa1111\"],\"why\":{\"aaaa1111\":\"" + std::wstring(kSessionWhyMaxChars + 50, L'w') + L"\"}}"));
+        CHECK(!longWhy.isError && whys.back().size() == 1 && whys.back()[0].size() == kSessionWhyMaxChars && whys.back()[0].rfind(L"...") == kSessionWhyMaxChars - 3, "show: a why longer than the cap is cut, ending in ...");
         const HarnessToolResult top = show(J(LR"({"top":1})"));
         CHECK(!top.isError && shown.back().size() == 1 && shown.back()[0] == kIdDrag, "show top:N takes the first rows of the LATEST search");
         const HarnessToolResult nothing = show(J(LR"({"ids":[]})"));
@@ -969,6 +1007,253 @@ void TestSessionSearchTools()
             titled = titled || (e.sessionId == ids[1] && SessionSearchTitleOf(e) == L"my tab name");
         }
         CHECK(open->openIds.count(ids[1]) == 1 && titled, "an open session is marked open and shows its tab's title");
+        std::filesystem::remove_all(root, ec);
+    }
+
+    // ---- grep and read, the pure pieces (SESSIONS.md 9.12) ----
+    {
+        // The required literal: what ripgrep and the line reader may filter on (a raw JSON line holds it verbatim).
+        CHECK(GrepRequiredLiteral(L"tab drag", false) == L"tab drag", "literal: plain text is its own literal");
+        CHECK(GrepRequiredLiteral(L"C:\\source\\Agentmaster", false) == L"Agentmaster", "literal: JSON escapes a backslash, so the key is the longest piece without one");
+        CHECK(GrepRequiredLiteral(L"the \"tab drag\" crash", false) == L"tab drag", "literal: ... and without a quote");
+        CHECK(GrepRequiredLiteral(LR"(v0\.7\.\d+)", true) == L"v0.7.", "literal: an escaped dot is a plain dot; a class escape ends the run");
+        CHECK(GrepRequiredLiteral(L"fix(ed|es)? the crash", true) == L" the crash", "literal: a group is skipped whole, with the | inside it");
+        CHECK(GrepRequiredLiteral(L"tab|drag", true).empty() && GrepRequiredLiteral(LR"(\d+)", true).empty(), "literal: a top-level | or no plain text gives none (the grep then reads every line)");
+        CHECK(GrepRequiredLiteral(L"colou?r", true) == L"colo" && GrepRequiredLiteral(L"ab+c", true) == L"ab", "literal: a character that may be absent ends the run before it; a repeated one, after it");
+        CHECK(GrepRequiredLiteral(L"[[:alpha:]]+release", true) == L"release" && GrepRequiredLiteral(L"[]a]xyz", true).empty(), "literal: a POSIX class is skipped whole; an empty class gives no literal at all");
+        CHECK(GrepRequiredLiteral(L"(?=abc)def", true) == L"def" && GrepRequiredLiteral(L"x{0,3}yz", true) == L"yz" && GrepRequiredLiteral(L"x{2,}yz", true) == L"yz", "literal: a lookahead is skipped; {0,n} may be absent; {2,} keeps one copy");
+
+        // The excerpt: the match in its context, one line.
+        const std::wstring around = std::wstring(300, L'a') + L" MATCH " + std::wstring(300, L'b');
+        const std::wstring ex = MakeGrepExcerpt(around, 301, 5, 40);
+        CHECK(ex.find(L" MATCH ") != std::wstring::npos && ex.front() == L'\x2026' && ex.back() == L'\x2026' && ex.size() <= 40 + 5 + 40 + 2, "excerpt: the match with its context, cut on both sides with an ellipsis");
+        CHECK(MakeGrepExcerpt(L"MATCH  at the\nstart", 0, 5, 40) == L"MATCH at the start", "excerpt: a whole short text, whitespace collapsed, no ellipsis");
+        const std::wstring exLong = MakeGrepExcerpt(std::wstring(500, L'm'), 0, 500, 40);
+        CHECK(exLong.size() == kGrepMaxQuotedMatchChars + 1 && exLong.back() == L'\x2026', "excerpt: a long match is quoted up to the cap");
+        const std::wstring withEmoji = std::wstring(50, L'a') + L"\xD83D\xDE00" + std::wstring(10, L'b') + L"HIT";
+        CHECK(MakeGrepExcerpt(withEmoji, 62, 3, 11).find(L"\xD83D\xDE00") != std::wstring::npos, "excerpt: a cut never splits a surrogate pair");
+
+        // The read cut: the first and the last turns of a long session.
+        std::wstring md = L"legend line\n\n";
+        for (int t = 1; t <= 30; ++t)
+        {
+            md += L"### Turn " + std::to_wstring(t) + L" \x00B7 Oct 1 10:00\n\n**\x276F User**\n> question " + std::to_wstring(t) + L" " + std::wstring(400, L'q') + L"\n\n**\x25CF Claude**\n> answer " + std::to_wstring(t) + L"\n\n";
+        }
+        const SessionReadCut whole = CutRenderedTranscript(md, 1000000);
+        CHECK(whole.text == md && whole.turns == 30 && whole.omittedTurns == 0 && !whole.cutInside, "read cut: a transcript that fits is kept whole");
+        const SessionReadCut cut = CutRenderedTranscript(md, 4000);
+        CHECK(cut.turns == 30 && cut.omittedTurns > 0 && cut.text.find(L"### Turn 1 ") != std::wstring::npos && cut.text.find(L"### Turn 30 ") != std::wstring::npos && cut.text.find(L"turns left out here") != std::wstring::npos && cut.text.size() < 4200,
+              "read cut: the first turns, the last turns, and one line for the turns left out between them");
+        CHECK(cut.text.rfind(L"legend line", 0) == 0, "read cut: what comes before the first turn is kept");
+        const SessionReadCut first = CutRenderedTranscript(L"### Turn 1\n" + std::wstring(10000, L'x') + L"\n### Turn 2\nshort\n", 2000);
+        CHECK(first.cutInside && first.text.find(L"[... cut ...]") != std::wstring::npos && first.text.find(L"### Turn 2") != std::wstring::npos && first.text.size() < 2200, "read cut: a turn longer than its share is cut short, and the last turn still comes");
+        const SessionReadCut noTurns = CutRenderedTranscript(std::wstring(5000, L'z'), 1000);
+        CHECK(noTurns.turns == 0 && noTurns.cutInside && noTurns.text.size() < 1100, "read cut: a document with no turn is cut to the budget");
+        CHECK(CutRenderedTranscript(md, 10).text.size() < 1200, "read cut: a budget under 1,000 reads as 1,000");
+
+        // The arguments.
+        std::wstring err;
+        CHECK(!ParseSessionGrepParams(J(L"{}"), err) && err.find(L"pattern") != std::wstring::npos, "grep arguments: the pattern is required");
+        const auto gp = ParseSessionGrepParams(J(LR"({"pattern":"  v0.7.9  ","in":"user","context":5,"limit":99,"ids":["aaaa1111"," ",7]})"), err);
+        CHECK(gp && gp->pattern == L"v0.7.9" && gp->user && !gp->agent && gp->context == 40 && gp->limit == 20 && gp->ids.size() == 1, "grep arguments: plain text trimmed; in, context and limit clamped; blank and non-text ids dropped");
+        const auto gr = ParseSessionGrepParams(J(LR"({"pattern":" a b ","regex":true,"in":"claude","context":900,"days":7})"), err);
+        CHECK(gr && gr->pattern == L" a b " && gr->regex && !gr->user && gr->agent && gr->context == 400 && gr->days == 7, "grep arguments: a regex is kept as written; the period is the search's");
+        CHECK(!ParseSessionGrepParams(J(LR"({"pattern":"x","ids":"aaaa1111"})"), err) && err.find(L"ids") != std::wstring::npos, "grep arguments: ids must be an array");
+        CHECK(!ParseSessionGrepParams(J(LR"({"pattern":"x","after":"yesterday"})"), err) && err.find(L"YYYY-MM-DD") != std::wstring::npos, "grep arguments: the period's errors are the search's");
+        const auto rp = ParseSessionReadParams(J(LR"({"ids":["a1","b2","A1","c3","d4","e5","f6","g7","h8","i9","j10"],"level":"MINIMAL","chars":50})"), err);
+        CHECK(rp && rp->ids.size() == kSessionReadMaxIds && rp->extraIds == 2 && rp->level == SessionReadLevel::Minimal && rp->chars == 1000, "read arguments: each id once (any case), at most 8 (the rest counted), the level, chars clamped");
+        CHECK(!ParseSessionReadParams(J(LR"({"ids":[]})"), err) && !ParseSessionReadParams(J(L"{}"), err), "read arguments: ids are required");
+        const auto rd = ParseSessionReadParams(J(LR"({"ids":["x1"],"level":"nonsense","chars":100000})"), err);
+        CHECK(rd && rd->level == SessionReadLevel::Compact && rd->chars == 40000, "read arguments: an unknown level reads compact; chars clamped high");
+    }
+
+    // ---- grep and read over scratch transcripts (SESSIONS.md 9.12) ----
+    {
+        wchar_t temp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, temp);
+        const std::filesystem::path root = std::filesystem::path{ temp } / L"agentmaster-m5-grep";
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        const std::filesystem::path projects = root / L"projects" / L"K--proj";
+        const std::filesystem::path index = root / L"index";
+        std::filesystem::create_directories(projects, ec);
+        std::filesystem::create_directories(index, ec);
+        const int64_t wallNow = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        // A line's ISO timestamp `minutesAgo` minutes before now: the period filter reads the lines' own times, so they
+        // are relative to the clock (a fixed date would leave the 90-day period after a few months).
+        const auto iso = [wallNow](int minutesAgo) {
+            const __time64_t t = (wallNow - static_cast<int64_t>(minutesAgo) * 60000) / 1000;
+            struct tm g
+            {
+            };
+            _gmtime64_s(&g, &t);
+            char buf[40]{};
+            sprintf_s(buf, "%04d-%02d-%02dT%02d:%02d:%02d.000Z", g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+            return std::string{ buf };
+        };
+        // JSON string escaping for the test's own texts (quotes, backslashes, line breaks).
+        const auto esc = [](const std::string& s) {
+            std::string out;
+            for (const char c : s)
+            {
+                if (c == '"' || c == '\\')
+                {
+                    out += '\\';
+                    out += c;
+                }
+                else if (c == '\n')
+                {
+                    out += "\\n";
+                }
+                else
+                {
+                    out += c;
+                }
+            }
+            return out;
+        };
+        const auto tail = [&](const std::wstring& id, const std::string& uuid, const std::string& parent, int ago) {
+            return ",\"timestamp\":\"" + iso(ago) + "\",\"cwd\":\"K:\\\\proj\",\"sessionId\":\"" + HarnessToUtf8(id) + "\",\"uuid\":\"" + uuid + "\",\"parentUuid\":" + (parent.empty() ? std::string{ "null" } : "\"" + parent + "\"") + "}\n";
+        };
+        const auto userLine = [&](const std::wstring& id, const std::string& text, const std::string& uuid, const std::string& parent, int ago) {
+            return "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" + esc(text) + "\"}" + tail(id, uuid, parent, ago);
+        };
+        const auto claudeLine = [&](const std::wstring& id, const std::string& text, const std::string& command, const std::string& uuid, const std::string& parent, int ago) {
+            std::string content = "[{\"type\":\"text\",\"text\":\"" + esc(text) + "\"}";
+            if (!command.empty())
+            {
+                content += ",{\"type\":\"tool_use\",\"id\":\"tu1\",\"name\":\"Bash\",\"input\":{\"command\":\"" + esc(command) + "\",\"description\":\"Cut the release\"}}";
+            }
+            content += "]";
+            return "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":" + content + ",\"stop_reason\":\"" + (command.empty() ? "end_turn" : "tool_use") + "\"}" + tail(id, uuid, parent, ago);
+        };
+        const auto resultLine = [&](const std::wstring& id, const std::string& text, const std::string& uuid, const std::string& parent, int ago) {
+            return "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tu1\",\"content\":\"" + esc(text) + "\"}]}" + tail(id, uuid, parent, ago);
+        };
+        const std::wstring idRelease = L"a1a1a1a1-1111-4222-8333-444444444444";
+        const std::wstring idDrag = L"b2b2b2b2-1111-4222-8333-444444444444";
+        const std::wstring idOld = L"c3c3c3c3-1111-4222-8333-444444444444";
+        const std::string release = userLine(idRelease, "cut v0.7.9 as a pre-release and publish the draft", "r1", "", 120) +
+                                    claudeLine(idRelease, "Cutting v0.7.9 now.", "gh release create v0.7.9 --prerelease --draft", "r2", "r1", 119) +
+                                    resultLine(idRelease, "https://github.com/x/releases/tag/v0.7.9", "r3", "r2", 118) +
+                                    claudeLine(idRelease, "Done: the pre-release is published as a draft.", "", "r4", "r3", 117);
+        const std::string drag = userLine(idDrag, "fix the tab drag crash", "d1", "", 60) +
+                                 claudeLine(idDrag, "The crash was a null container in the drag code.", "", "d2", "d1", 59);
+        const std::string old = userLine(idOld, "polyfit for six bases\nthen plot it", "o1", "", 600) +
+                                claudeLine(idOld, "Polyfit works.", "", "o2", "o1", 599);
+        const bool wrote = WriteFileWithMtime(projects / (idRelease + L".jsonl"), release, wallNow - 117 * 60000) &&
+                           WriteFileWithMtime(projects / (idDrag + L".jsonl"), drag, wallNow - 59 * 60000) &&
+                           WriteFileWithMtime(projects / (idOld + L".jsonl"), old, wallNow - 599 * 60000);
+        CHECK(wrote, "grep: the scratch transcripts were written");
+
+        SessionCatalogSources sources;
+        sources.projectsDir = (root / L"projects").wstring();
+        sources.indexDir = index.wstring();
+        std::vector<std::vector<std::wstring>> shownIds;
+        std::vector<std::vector<std::wstring>> shownWhys;
+        std::vector<std::wstring> activity;
+        SessionSearchToolset::Callbacks cb;
+        cb.catalog = [&sources](int64_t since, const std::function<bool()>&) { return GatherSessionCatalog(since, sources); };
+        cb.onShow = [&shownIds, &shownWhys](const std::vector<std::wstring>& ids, const std::wstring&, const std::vector<std::wstring>& why) {
+            shownIds.push_back(ids);
+            shownWhys.push_back(why);
+        };
+        cb.onSearching = [&activity](const std::wstring& line) { activity.push_back(line); };
+        cb.transcriptPath = [&projects](const std::wstring& id) {
+            const std::filesystem::path p = projects / (id + L".jsonl");
+            std::error_code e;
+            return std::filesystem::exists(p, e) ? p.wstring() : std::wstring{};
+        };
+        cb.now = [wallNow] { return wallNow; };
+        SessionSearchToolset tools{ cb };
+        const auto servers = tools.Servers();
+        CHECK(servers.size() == 2 && servers[0].tools.size() == 3 && servers[1].tools.size() == 1, "grep: the toolset has its four tools");
+        if (servers.size() != 2 || servers[0].tools.size() != 3 || servers[1].tools.size() != 1)
+        {
+            std::filesystem::remove_all(root, ec);
+            return;
+        }
+        const auto& grep = servers[0].tools[1].handler;
+        const auto& read = servers[0].tools[2].handler;
+        const auto& show = servers[1].tools[0].handler;
+        const auto rowsOf = [](const json::Value& v) {
+            const auto* r = v.Find(L"sessions");
+            return (r && r->type == json::Value::Type::Arr) ? r->arr : std::vector<json::Value>{};
+        };
+
+        // A grep over the period: where the text is, who wrote it, when.
+        const HarnessToolResult g1 = grep(J(LR"({"pattern":"v0.7.9"})"));
+        const json::Value g1j = J(g1.text);
+        const auto g1rows = rowsOf(g1j);
+        CHECK(!g1.isError && g1rows.size() == 1 && g1rows[0].StrAt(L"id") == L"a1a1a1a1", "grep: finds the one session that holds the text, under a short id");
+        CHECK(g1rows.size() == 1 && g1rows[0].I64At(L"hits") == 3 && g1rows[0].I64At(L"user_hits") == 1, "grep: each matching message counts once (the prompt, the reply with its tool call, the tool output)");
+        const auto* g1m = g1rows.empty() ? nullptr : g1rows[0].Find(L"matches");
+        CHECK(g1m && g1m->arr.size() == 3 && g1m->arr[0].StrAt(L"by") == L"user" && g1m->arr[0].StrAt(L"text").find(L"cut v0.7.9 as a pre-release") != std::wstring::npos &&
+                  g1m->arr[1].StrAt(L"by") == L"claude" && !g1m->arr[0].StrAt(L"at").empty(),
+              "grep: the matches in file order, each with who wrote it and when");
+        CHECK(g1j.I64At(L"searched") == 3 && g1j.I64At(L"matched") == 1 && g1j.Find(L"stopped") == nullptr && g1rows.size() == 1 && g1rows[0].StrAt(L"title").find(L"cut v0.7.9") == 0,
+              "grep: what it searched and found, complete, and the row's title");
+        CHECK(!activity.empty() && activity.back().find(L"grep") == 0 && activity.back().find(L"v0.7.9") != std::wstring::npos, "grep: the page is told what is grepped");
+
+        // in: user / claude, case-insensitive.
+        const json::Value gUser = J(grep(J(LR"({"pattern":"v0.7.9","in":"user"})")).text);
+        CHECK(rowsOf(gUser).size() == 1 && rowsOf(gUser)[0].I64At(L"hits") == 1 && rowsOf(gUser)[0].I64At(L"user_hits") == 1, "grep in:user reads only what the user typed");
+        const json::Value gClaude = J(grep(J(LR"({"pattern":"V0.7.9","in":"claude"})")).text);
+        CHECK(rowsOf(gClaude).size() == 1 && rowsOf(gClaude)[0].I64At(L"hits") == 2 && rowsOf(gClaude)[0].Find(L"user_hits") == nullptr, "grep in:claude reads only Claude's side, case-insensitive");
+
+        // Regexes: with a literal (ripgrep may filter), a word boundary, and no useful literal (every line is read).
+        CHECK(rowsOf(J(grep(J(LR"({"pattern":"v0\\.7\\.\\d","regex":true})")).text)).size() == 1, "grep regex: matches like the literal it holds");
+        const json::Value gWord = J(grep(J(LR"({"pattern":"\\bdrag\\b","regex":true})")).text);
+        CHECK(rowsOf(gWord).size() == 1 && rowsOf(gWord)[0].StrAt(L"id") == L"b2b2b2b2" && rowsOf(gWord)[0].I64At(L"hits") == 2, "grep regex: a word boundary finds the drag session (its prompt and its reply)");
+        const json::Value gNoLit = J(grep(J(LR"({"pattern":"\\d+\\.\\d+\\.\\d+","regex":true})")).text);
+        CHECK(rowsOf(gNoLit).size() == 1 && rowsOf(gNoLit)[0].StrAt(L"id") == L"a1a1a1a1", "grep regex with no useful literal: every line is read, and it still finds the version");
+
+        // What it refuses, and what it says when nothing matches.
+        CHECK(grep(J(LR"({"pattern":"(unclosed","regex":true})")).isError, "grep: an invalid regex is an error result");
+        const HarnessToolResult gEmpty = grep(J(LR"({"pattern":"x*","regex":true})"));
+        CHECK(gEmpty.isError && gEmpty.text.find(L"empty text") != std::wstring::npos, "grep: a regex that can match empty text is refused, with what to do instead");
+        CHECK(grep(J(LR"({"pattern":"   "})")).isError, "grep: a blank pattern is an error");
+        const json::Value gNone = J(grep(J(LR"({"pattern":"no such words anywhere"})")).text);
+        CHECK(rowsOf(gNone).empty() && !gNone.StrAt(L"hint").empty() && gNone.Find(L"stopped") == nullptr, "grep: nothing found says so, with a hint");
+
+        // ids: a pasted whole id needs no search first; an id that names no session is reported.
+        const json::Value gIds = J(grep(J(L"{\"pattern\":\"crash\",\"ids\":[\"" + idDrag + L"\",\"zzzz9999\"]}")).text);
+        CHECK(rowsOf(gIds).size() == 1 && rowsOf(gIds)[0].StrAt(L"id") == L"b2b2b2b2" && gIds.StrAt(L"window").find(L"asked for") != std::wstring::npos, "grep with ids: only those sessions (a pasted whole id works)");
+        const auto* unknownIds = gIds.Find(L"unknown_ids");
+        CHECK(unknownIds && unknownIds->arr.size() == 1 && unknownIds->arr[0].str == L"zzzz9999", "grep with ids: an id that names no session is reported back");
+        CHECK(grep(J(LR"({"pattern":"crash","ids":["zzzz9999"]})")).isError, "grep with only unknown ids is an error");
+
+        // GrepTranscripts directly: a cancel before the first file reads nothing and says it is not complete.
+        TranscriptRef ref;
+        ref.sessionId = idRelease;
+        ref.path = (projects / (idRelease + L".jsonl")).wstring();
+        GrepOptions direct;
+        direct.pattern = L"v0.7.9";
+        const GrepOutcome cancelledGrep = GrepTranscripts({ ref }, direct, [] { return true; });
+        CHECK(!cancelledGrep.complete && cancelledGrep.scanned == 0 && cancelledGrep.sessions.empty(), "grep: a cancelled grep reads nothing more and is not complete");
+        const GrepOutcome directGrep = GrepTranscripts({ ref }, direct, {});
+        CHECK(directGrep.complete && directGrep.scanned == 1 && directGrep.sessions.size() == 1 && directGrep.sessions[0].hits == 3, "grep: GrepTranscripts reads the file to its end");
+
+        // read: the compact transcript of each session, under the short ids the results printed.
+        const HarnessToolResult r1 = read(J(LR"({"ids":["a1a1a1a1","b2b2b2b2"]})"));
+        CHECK(!r1.isError && r1.text.find(L"## Session a1a1a1a1") != std::wstring::npos && r1.text.find(L"## Session b2b2b2b2") != std::wstring::npos, "read: one part per session, under its short id");
+        CHECK(r1.text.find(L"cut v0.7.9 as a pre-release and publish the draft") != std::wstring::npos && r1.text.find(L"Done: the pre-release is published as a draft.") != std::wstring::npos &&
+                  r1.text.find(L"fix the tab drag crash") != std::wstring::npos,
+              "read: each session's request and Claude's final reply");
+        CHECK(r1.text.find(L"gh release create") == std::wstring::npos, "read at the compact level: no tool call lines");
+        CHECK(!activity.empty() && activity.back().find(L"reading 2 sessions") == 0, "read: the page is told that sessions are being read");
+        const HarnessToolResult rDefault = read(J(LR"({"ids":["a1a1a1a1"],"level":"default"})"));
+        CHECK(!rDefault.isError && rDefault.text.find(L"gh release create") != std::wstring::npos, "read at the default level: the tool calls too");
+        const HarnessToolResult rGone = read(J(LR"({"ids":["d4d4d4d4-1111-4222-8333-444444444444"]})"));
+        CHECK(!rGone.isError && rGone.text.find(L"Not read: its transcript is gone") != std::wstring::npos, "read: a pasted id whose transcript does not exist says so");
+        CHECK(read(J(LR"({"ids":["zzzz9999"]})")).isError, "read: only unknown ids is an error");
+
+        // show takes the ids grep and read printed, with a why each.
+        const HarnessToolResult shownGrep = show(J(LR"({"ids":["a1a1a1a1"],"why":{"a1a1a1a1":"You asked: \"cut v0.7.9 as a pre-release\""}})"));
+        CHECK(!shownGrep.isError && !shownIds.empty() && shownIds.back().size() == 1 && shownIds.back()[0] == idRelease && shownWhys.back().size() == 1 && shownWhys.back()[0] == L"You asked: \"cut v0.7.9 as a pre-release\"",
+              "show: an id from grep, with its why");
+        tools.Reset();
+        CHECK(read(J(LR"({"ids":["a1a1a1a1"]})")).isError, "Reset forgets the short ids grep printed");
         std::filesystem::remove_all(root, ec);
     }
 }

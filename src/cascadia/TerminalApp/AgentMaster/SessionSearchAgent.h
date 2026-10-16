@@ -84,9 +84,9 @@ namespace Agentmaster
     {
         StateChanged, // the conversation's state changed (starting, ready, ...)
         Asked, // a request was accepted: `text`
-        Searching, // the model runs a search: `text` describes it
+        Searching, // the model runs a search, a grep or a read: `text` describes it
         Candidates, // that search returned these sessions (a preview; the model may still narrow them)
-        Shown, // the model put these sessions on the screen: `sessionIds`, `entries`, `text` = the caption
+        Shown, // the model showed these sessions: `sessionIds`, `entries`, `reasons` (its why per session), `text` = the caption
         Answer, // the request is answered: `text` (also for an interrupted request, with its partial text)
         Failed, // the request or the start failed: `text` says why
         Compacting, // Claude Code compacts the conversation (the request pauses for seconds)
@@ -106,6 +106,10 @@ namespace Agentmaster
         // "nothing fits" (show an empty list), not "no result yet" (leave the list alone).
         bool hasShown{ false };
         std::vector<std::wstring> shownIds; // full session ids, in the model's order
+        // The model's `why` per shown session (SESSIONS.md §9.12): one line of evidence it saw in
+        // a read or a grep, index-aligned with shownIds; "" where it gave none. Saved with the
+        // shown list, so the evidence comes back after a restart too.
+        std::vector<std::wstring> shownReasons;
         std::wstring note; // the model's caption for the shown list
         std::wstring answer; // the newest reply, or the failure text
         bool answerIsError{ false };
@@ -128,6 +132,9 @@ namespace Agentmaster
         uint64_t turn{ 0 }; // the request it belongs to; 0 = none
         std::wstring text;
         std::vector<std::wstring> sessionIds; // Candidates / Shown: full ids, in order
+        // Shown: the model's `why` per session, index-aligned with sessionIds ("" = none given).
+        // Empty for every other kind (a search's candidates carry no evidence yet).
+        std::vector<std::wstring> reasons;
         // Candidates / Shown: the index entry of each id the agent knows, in the same order (an id
         // without an entry is left out). A page uses them for rows that are outside its own time
         // window. Their stats.pathsAccessed is EMPTY: only the row facts are carried.

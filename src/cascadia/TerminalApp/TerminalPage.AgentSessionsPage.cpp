@@ -84,6 +84,32 @@ using namespace std::chrono_literals;
 
 namespace winrt::TerminalApp::implementation
 {
+    namespace
+    {
+        // Agentmaster (SESSIONS.md §9.12): the AI search's evidence for a session — the model's `why`, the one line it
+        // saw when it read the session — drawn like the Telegram card's quote: a thin bar on the left, the text beside
+        // it. One trimmed line under a table row's title; the whole text, wrapped, in the detail pane.
+        //   why    — the model's line.
+        //   wrap   — true: the whole text, wrapped (the detail pane); false: one line ending in "…" (a table row).
+        //   throws — what XAML throws (hresult_error).
+        Border SessAiReasonQuote(const std::wstring& why, bool wrap)
+        {
+            auto text = SessText(winrt::hstring{ why }, wrap ? 12 : 11, false, wrap ? 0.9 : 0.72);
+            if (wrap)
+            {
+                text.TextWrapping(TextWrapping::Wrap);
+            }
+            Border quote;
+            quote.Child(text);
+            quote.BorderBrush(SessBrush(0xFF, 0x8A, 0x8A, 0x8A));
+            quote.BorderThickness(Thickness{ 2, 0, 0, 0 });
+            quote.Padding(Thickness{ 6, 0, 0, 0 });
+            quote.Margin(Thickness{ 0, wrap ? 4.0 : 2.0, 0, wrap ? 4.0 : 0.0 });
+            quote.HorizontalAlignment(HorizontalAlignment::Left);
+            return quote;
+        }
+    }
+
     void TerminalPage::_BuildSessionsPageShell()
     {
         if (_sessionsPageHost)
@@ -2116,9 +2142,27 @@ namespace winrt::TerminalApp::implementation
                 titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
                 titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
                 titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
-                Grid::SetColumn(titleWrap, 3); // Title column (now 3, after ★ + Tags + chip)
-                g.Children().Append(titleWrap);
-                titleCellEl = titleWrap; // the title column's bounds drive the rename gate (left edge..dir cell's left edge)
+                // Agentmaster (SESSIONS.md §9.12): a row of the AI list carries the model's evidence as one quote line
+                // under its title (the Telegram card's quote, on the page). The cell is then a stack of the two, and
+                // that stack is the title cell the rename gate measures (same left edge).
+                if (const std::wstring why = _SessionsAiReasonFor(r.id); !why.empty())
+                {
+                    StackPanel titleStack;
+                    titleStack.Orientation(Orientation::Vertical);
+                    titleStack.VerticalAlignment(VerticalAlignment::Center);
+                    titleStack.IsHitTestVisible(false); // clickthrough, like the title itself
+                    titleStack.Children().Append(titleWrap);
+                    titleStack.Children().Append(SessAiReasonQuote(why, /*wrap*/ false));
+                    Grid::SetColumn(titleStack, 3);
+                    g.Children().Append(titleStack);
+                    titleCellEl = titleStack;
+                }
+                else
+                {
+                    Grid::SetColumn(titleWrap, 3); // Title column (now 3, after ★ + Tags + chip)
+                    g.Children().Append(titleWrap);
+                    titleCellEl = titleWrap; // the title column's bounds drive the rename gate (left edge..dir cell's left edge)
+                }
             }
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
@@ -2691,6 +2735,14 @@ namespace winrt::TerminalApp::implementation
         const int64_t now = SessNowMs();
 
         _sessionsDetailHost.Children().Append(SessText(winrt::hstring{ row->title }, 15, true, 1.0));
+        // Agentmaster (SESSIONS.md §9.12): the AI search's evidence for this session, in full, right under its title —
+        // the line the table row trims. Only for a row of the AI list the model showed (not a preview, not a normal row).
+        if (const std::wstring why = _SessionsAiReasonFor(row->id); !why.empty())
+        {
+            auto quote = SessAiReasonQuote(why, /*wrap*/ true);
+            SessSetTip(quote, L"Why the AI search shows it", L"The evidence the AI search saw when it read this session: the user's own words in it, or Claude's, or what the session shows.");
+            _sessionsDetailHost.Children().Append(quote);
+        }
         const auto meta = [&](const std::wstring& k, const std::wstring& v) {
             if (v.empty())
             {

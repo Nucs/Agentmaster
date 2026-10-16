@@ -23,21 +23,37 @@ namespace Agentmaster::Msg
     {
         // The rows a Shown / Answer event carries, built from the agent's index entries (the same title
         // precedence the Sessions page shows: the live tab title, else custom > ai > summary > first prompt).
-        std::vector<SearchRow> RowsFrom(const std::vector<std::wstring>& ids, const std::vector<SessionIndexEntry>& entries)
+        //   ids     — the shown sessions, in the model's order.
+        //   entries — their index entries as the agent sent them (an id without one gets a row with no facts).
+        //   reasons — the model's why per session, index-aligned with `ids` (shorter = "" for the rest).
+        //   returns — one row per id, in order.
+        //   throws  — std::bad_alloc (ForwardAgentEvent catches and logs it).
+        std::vector<SearchRow> RowsFrom(const std::vector<std::wstring>& ids, const std::vector<SessionIndexEntry>& entries, const std::vector<std::wstring>& reasons)
         {
             std::vector<SearchRow> rows;
             rows.reserve(ids.size());
-            for (const auto& id : ids)
+            for (size_t i = 0; i < ids.size(); ++i)
             {
+                const auto& id = ids[i];
                 SearchRow r;
                 r.sessionId = id;
+                // §21.10: the model's evidence for this session, index-aligned with the ids ("" when it gave none).
+                r.why = i < reasons.size() ? reasons[i] : std::wstring{};
                 for (const auto& e : entries)
                 {
                     if (e.sessionId == id)
                     {
+                        // The title and the folder keep this bridge's own rules (no "(no prompt yet)" placeholder, no
+                        // project-folder fallback): a pick's Resume launches with them, and a launch must get "" (it then
+                        // derives a name / finds the folder in the transcript) rather than a placeholder or a lossy path.
                         r.title = !e.liveTitle.empty() ? e.liveTitle : PickDisplayTitle(e.stats.customTitle, e.stats.aiTitle, e.stats.summary, e.stats.firstUserPrompt);
                         r.dir = e.stats.cwd;
-                        r.lastActivityMs = e.stats.lastTimestampMs;
+                        // The times and the count are the Sessions page's own (SessionSearchTools.h): what a card says
+                        // matches the page's Active / Created / Msgs columns.
+                        r.lastActivityMs = SessionSearchLastActivityMs(e);
+                        r.createdMs = SessionSearchCreatedMs(e);
+                        r.branch = e.stats.gitBranch;
+                        r.prompts = e.stats.userPrompts;
                         break;
                     }
                 }
@@ -153,7 +169,7 @@ namespace Agentmaster::Msg
                 {
                     out.kind = SearchBridgeEvent::Kind::Shown;
                     out.text = e.text;
-                    out.rows = RowsFrom(e.sessionIds, e.entries);
+                    out.rows = RowsFrom(e.sessionIds, e.entries, e.reasons);
                     std::lock_guard lk{ st.mtx };
                     st.lastRows = out.rows;
                     break;

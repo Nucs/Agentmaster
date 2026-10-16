@@ -9,8 +9,9 @@ server's `tools/list`, waits until every server has listed its tools, then sends
 tools, and each tool. NO user message is sent, so no model request is made.
 
 Two configurations, both read from the repo:
-  shipped  - the system prompt and the two tools of SessionSearchTools.cpp (kSystemPrompt,
-             kSearchSchema, kShowSchema and the two descriptions), as the source holds them now
+  shipped  - the system prompt and the four tools of SessionSearchTools.cpp (kSystemPrompt,
+             kSearchSchema, kGrepSchema, kReadSchema, kShowSchema, the three server-code descriptions
+             and kShowDescription; two tools before 2026-10-17), as the source holds them now
   proposed - SESSIONS_AGENT.md section 8.6 (the prompt; the doc's line wrap undone) and
              SESSIONS_AGENT.tools.json (the tools)
 
@@ -104,13 +105,25 @@ def shipped_config() -> tuple:
     """
     src = open(os.path.join(REPO, "src", "cascadia", "TerminalApp", "AgentMaster", "SessionSearchTools.cpp"), encoding="utf-8").read()
     prompt = wide_concat(re.search(r"const wchar_t kSystemPrompt\[\] =(.*?);\n", src, re.S).group(1))
-    search_schema = json.loads(raw_concat(re.search(r"const wchar_t kSearchSchema\[\] =(.*?);\n", src, re.S).group(1)))
-    show_schema = json.loads(raw_concat(re.search(r"const wchar_t kShowSchema\[\] =(.*?);\n", src, re.S).group(1)))
-    search_desc = re.search(r'search\.description = L"((?:[^"\\]|\\.)*)"', src).group(1)
-    show_desc = re.search(r'show\.description = L"((?:[^"\\]|\\.)*)"', src).group(1)
+
+    def schema(name: str) -> dict:
+        """The JSON schema held by the raw-string array `name` (kSearchSchema, ...)."""
+        return json.loads(raw_concat(re.search(r"const wchar_t " + name + r"\[\] =(.*?);\n", src, re.S).group(1)))
+
+    def description(tool: str) -> str:
+        """The description the server code assigns to the variable `tool` (search, grep, read)."""
+        return re.search(tool + r'\.description = L"((?:[^"\\]|\\.)*)"', src).group(1)
+
+    # Since 2026-10-17 (SESSIONS.md 9.12) the sessions server has search, grep and read, and show's description is
+    # one constant shared by both modes (kShowDescription).
+    show_desc = wide_concat(re.search(r"const wchar_t kShowDescription\[\] =(.*?);\n", src, re.S).group(1))
     servers = {
-        "sessions": [{"name": "search", "description": search_desc, "inputSchema": search_schema, "annotations": {"readOnlyHint": True}}],
-        "display": [{"name": "show", "description": show_desc, "inputSchema": show_schema}],
+        "sessions": [
+            {"name": "search", "description": description("search"), "inputSchema": schema("kSearchSchema"), "annotations": {"readOnlyHint": True}},
+            {"name": "grep", "description": description("grep"), "inputSchema": schema("kGrepSchema"), "annotations": {"readOnlyHint": True}},
+            {"name": "read", "description": description("read"), "inputSchema": schema("kReadSchema"), "annotations": {"readOnlyHint": True}},
+        ],
+        "display": [{"name": "show", "description": show_desc, "inputSchema": schema("kShowSchema")}],
     }
     return prompt, servers
 

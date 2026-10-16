@@ -6,6 +6,19 @@
 > ([`SESSIONS_DB.md`](SESSIONS_DB.md)). Where this document and `SESSIONS_DB.md` §8.4.3 name different
 > tools, this document is the newer proposal. Every number is measured unless it says "estimate";
 > how to reproduce each is in §13.
+>
+> **2026-10-17: three pieces exist in a first form** (written, NOT BUILT; [`SESSIONS.md`](SESSIONS.md)
+> §9.12), on today's code — not this design's database phase:
+> - **`grep`** — a text or an ECMAScript regex over the period's (or the given ids') transcripts, the
+>   first three matches per session in context with `by` / `at`. Unlike §5 here: no refs, no scopes beyond
+>   `in` (all / user / claude), sessions ordered by the user's own hits first, a 20 s budget.
+> - **`read`** — up to 8 sessions at `minimal`, `compact` or `default` (no outline, full, max or raw; no
+>   paging by turns or refs): a session past `chars` keeps its first and last turns.
+> - **`show` with `why`** — one line of evidence per session (no `ref`). The system prompt gained the rules
+>   "read every candidate before you show it", "a `why` each" and a verdict sentence (nine rules).
+>
+> The rest of this design (`peek`, the zoom levels, refs, `files`, `related`, `timeline`, `reveal`, the
+> context line, the instant pass, redaction) is still unbuilt.
 
 ## 0. Summary
 
