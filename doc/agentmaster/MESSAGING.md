@@ -1160,10 +1160,75 @@ transport's failures and slow calls.
     ended 121 s after the start (the window's restore took 98 s this time, so the 120 s minimum governed), no
     topic deleted; the first `sendMessage` still met the remainder of the 19:24 penalty (`waiting 346 s`), so
     the first clean traffic line is the one after ~19:50.
-- **Open after the first live day:** (1) a session at rest in `Error` (a cut-off turn) is announced again at
-  EVERY start (`[msg] 61e3e3ff idle -> error` → `final message (error state)` at 19:30, 19:45): the registry
-  loads it as Idle and the scanner re-asserts Error, and the mirror's `lastState` is not persisted — persist
-  the last announced state in the `TopicRecord` so a restart announces nothing it already said. (2) The m5
-  scheduler timing checks ("the held prompt self-releases …", "woken tab: the queue resumes …") fail under
-  CPU contention (a concurrent msbuild) and pass on a quiet machine — widen their 3 s wait or mark them
-  load-sensitive. (3) Items 3–7 of §21.3 — the phone's side — are still unexercised.
+- **Open after the first live day:** (1) ~~a session at rest in `Error` is announced again at EVERY start~~ —
+  fixed in §21.5 (`TopicRecord::errorAnnounced`). (2) The m5 scheduler timing checks ("the held prompt
+  self-releases …", "woken tab: the queue resumes …") fail under CPU contention (a concurrent msbuild) and
+  pass on a quiet machine — widen their 3 s wait or mark them load-sensitive. (3) Items 3–7 of §21.3 — the
+  phone's side — are still unexercised.
+
+### 21.5 The user's first look from the phone (2026-10-16 evening) and what it changed
+
+The user's five points, verbatim in short: *"Secretary mode for the bot was enabled (allows sending messages
+by user as if the user did)"* · *"The buttons and active status message are useful but should be sticky as a
+last message … Add the recap if we have a fresh one in respect to its time of creation to other messages"* ·
+*"A thread of every session should actually be the messages of user and assistant including the message of
+why the bash is invoked"* · *"User should not care if a tab is activated or deactivated … 'Reactivate' …
+If I send a prompt and session is deactivated then activate and then send the message"* · *"Prompts of user
+should be also sent 'by' the user (via secretary mode)"*.
+
+- **The STICKY CARD.** The card is the LAST message of its topic. `TopicRecord::lastPostedMs` is stamped by
+  every post into the topic but the card's own (`_sendText`'s `movesCard`, at enqueue time) and by the user's
+  own messages (`_handleTopicMessage`); `cardPostedMs` when the card was sent. Once newer posts have been
+  quiet for `kCardStickyLagMs` (6 s — a reply and its remarks cost ONE re-post), `_refreshCard` deletes the
+  old card and sends a fresh one at the bottom (`_postCard`: `deleteMessage` + `sendMessage`, both at the
+  card's priority so the message that triggered them goes first; `cardMessageId` = -1 while in flight, 0 with
+  `cardPostedMs` = now on a refusal, retried after `kCardRepostAfterFailureMs` = 60 s, never every tick). The
+  card is NOT pinned any more (a pin per re-post would leave a "pinned a message" line each time; the old pins
+  go when their cards are deleted). The topic's setup posts its note BEFORE the card. A stop mid-send used to
+  leave -1 markers in the state file for good (the work log's too): `_start` clears them.
+- **The RECAP in the card.** `TopicRecord::recapPrompt` / `recapReply` / `recapAtMs` (the transcript moment,
+  shown as a clock time) / `recapSeenMs`: seeded once from the transcript's last 256 KB when the topic is
+  created (`_seedRecap`: the last prompt, and the last final reply after it, else the last assistant text),
+  then kept by the mirror (a prompt, a final). The card shows the block (`Recap · 19:42` / 👤 the prompt's
+  first line / 🤖 the reply's head, 240 chars) only while `recapSeenMs > lastPostedMs` — "fresh with respect
+  to the other messages": a topic that was just created mirrors from now on, so its first card says where the
+  conversation stands; once the reply itself sits above the card, repeating it would be noise.
+- **The thread is the conversation.** An assistant text that precedes a tool call ("why the bash is invoked")
+  is posted as ITS OWN silent message (`_postRemark`), no longer a `›` line in the work log; the work log so
+  far is closed with its final content, and the tools that follow start a new work-log message below the
+  remark — so a turn reads remark → tools → remark → tools → reply. A create of the closed segment that was
+  still in flight keeps its message (`Mirror::workLogGen`); the final reply still carries the sound; a
+  question's leading remark is posted the same way. Slash commands keep their one `<code>` line.
+- **Activated / deactivated is not the user's concern.** A message into a parked tab already started it
+  (`_queueRemotePrompt` → the `start` action) and is delivered when it is ready; the card no longer says
+  "parked" but `💤 not running — a message here or ▶ Reactivate resumes it`, and a session in Error reads
+  `▶ Reactivate restarts it (the same conversation goes on)`. **▶ Reactivate** (the card's first button when
+  the session is parked or in Error; `/reactivate`; `_reactivate`): a parked tab's claude is started in place
+  (with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` a cut-off turn goes on by itself), a session in Error whose
+  claude is up is restarted (the same conversation id, the same tab); a running one is left alone. A REMOTE
+  prompt is now also delivered into a session in `Error` (`DecideAdvance`: the user's message from the phone
+  IS the retry; the runner's own prompts still stop there). And an Error is announced ONCE per episode
+  (`TopicRecord::errorAnnounced`, cleared when the session runs again): a session at rest in Error read Idle
+  at every start until the scanner re-asserted Error, and the topic got the "Error" message each time.
+- **Secretary mode — prompts as the user's own messages.** Telegram Business lets a bot connected under
+  Settings → Business → Chatbots send ON BEHALF of the user (`sendMessage` with `business_connection_id`;
+  the right is `BusinessBotRights.can_reply`). The connection arrives ONLY as a `business_connection` update,
+  so the poll now asks for it (`allowed_updates`), `_handleBusinessConnection` keeps id / enabled / can_reply
+  in the state file (H3: the connecting user must be the owner), and every (re)connection runs the
+  **SECRETARY PROBE**: one send as the user into the 🔎 Search topic (`_sendAsUser`: `business_connection_id`,
+  `chat_id` = the bot's own id — from the business account's side its chat with the bot is "the private chat
+  with user <bot id>" — and the topic's `message_thread_id`). `businessMode` 1 = it works: a prompt typed at
+  the PC is sent as the user's own bubble (the ⚙/⌨ line only on a refusal; three refusals in a row turn the
+  mode off again); -1 = Telegram refused (`businessNote` holds why), prompts keep the ⌨ line, and the Search
+  topic says so. ⚠ The docs scope business sends to "private chats that had incoming messages in the last 24
+  hours" and call a business chat "independent from any potential bot chat" — the probe is how we learn
+  whether the user's chat with the bot itself is allowed; the first connection the user made (while the bot did
+  not listen for the update) is gone, so the entry must be toggled off and on once after this build.
+- **Cost:** a re-post is two calls per quiet burst per topic; a remark is one message (a turn with ten tool
+  calls and four remarks: four messages + up to five work-log messages + the reply + one re-post). The pace
+  (one call per ~1 s, §21.4) holds; the `[msg] traffic (10 min)` line is where to watch it.
+- **Tests:** the state round trip of the new fields, the card's recap shown / hidden and the two
+  Reactivate lines, `TgStripTags`, `/reactivate` as an Agentmaster command (`TestMessaging`).
+- **Live checks owed:** the sticky card after a reply; the recap on a fresh topic; a remark as a message; a
+  prompt into a parked tab; ▶ Reactivate on a session in Error; the probe's verdict in the Search topic after
+  the user re-toggles the Chatbots entry.

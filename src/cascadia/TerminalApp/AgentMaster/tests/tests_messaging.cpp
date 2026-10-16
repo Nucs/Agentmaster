@@ -297,6 +297,30 @@ void TestMessaging()
         legacyObj.Set(L"updateOffset", json::Value::MkNum(77));
         const auto legacy = StateFromJson(legacyObj);
         CHECK(legacy.has_value() && legacy->botId == 0 && legacy->updateOffset == 77, "an older state file without botId reads botId 0");
+        // §21.5: the business connection and the sticky-card / recap / errorAnnounced fields of a topic.
+        MessagingState b;
+        b.businessConnectionId = L"conn-1";
+        b.businessEnabled = true;
+        b.businessCanReply = true;
+        b.businessMode = -1;
+        b.businessNote = L"refused";
+        TopicRecord tr;
+        tr.sessionId = L"sid-2";
+        tr.threadId = 7;
+        tr.lastPostedMs = 11;
+        tr.cardPostedMs = 10;
+        tr.recapPrompt = L"p";
+        tr.recapReply = L"r";
+        tr.recapAtMs = 9;
+        tr.recapSeenMs = 12;
+        tr.errorAnnounced = true;
+        b.topics[L"sid-2"] = tr;
+        const auto bb = StateFromJson(StateToJson(b));
+        CHECK(bb.has_value() && bb->businessConnectionId == L"conn-1" && bb->businessEnabled && bb->businessCanReply && bb->businessMode == -1 && bb->businessNote == L"refused", "the business connection round-trips");
+        CHECK(bb.has_value() && bb->topics.at(L"sid-2").lastPostedMs == 11 && bb->topics.at(L"sid-2").cardPostedMs == 10 && bb->topics.at(L"sid-2").recapPrompt == L"p" && bb->topics.at(L"sid-2").recapReply == L"r" &&
+                  bb->topics.at(L"sid-2").recapAtMs == 9 && bb->topics.at(L"sid-2").recapSeenMs == 12 && bb->topics.at(L"sid-2").errorAnnounced,
+              "the sticky-card clocks, the recap and errorAnnounced round-trip");
+        CHECK(legacy->topics.empty() && !legacy->businessEnabled && legacy->businessMode == 0, "an older state file reads no business connection");
         CHECK(back.has_value() && back->topics.size() == 1 && back->topics.at(L"sid-1").threadId == 42 && back->topics.at(L"sid-1").cardMessageId == 100 &&
                   back->topics.at(L"sid-1").cursor == 4567 && back->topics.at(L"sid-1").transcriptPath == L"C:\\t.jsonl" && back->topics.at(L"sid-1").idleSinceMs == 123,
               "a topic record round-trips");
@@ -336,6 +360,29 @@ void TestMessaging()
         CHECK(card.find(L"unsent at the PC: \x201C" L"and then rebase onto &lt;main&gt;\x201D") != std::wstring::npos, "the unsent draft, escaped");
         CHECK(BuildCardText(s, 5000, 0, true).find(L"(Off globally)") != std::wstring::npos, "the global pause shows");
         CHECK(BuildCardText(s, 5000, 5000 + 90000, false).find(L"leaves the list at ") != std::wstring::npos, "the idle card names the clock time it leaves at (never a countdown)");
+        // §21.5: the recap block only when asked (the service asks while nothing newer than the recap is posted in
+        // the topic) — a clock time and the two lines; a parked tab and a session in Error carry the Reactivate lines.
+        CardExtras ex;
+        ex.recap = true;
+        ex.recapPrompt = L"fix the tests";
+        ex.recapReply = L"Done: 3 files changed";
+        ex.recapAtMs = 1700000000000;
+        const std::wstring withRecap = BuildCardText(s, 1700000000000 + 60000, 0, false, &ex);
+        CHECK(withRecap.find(L"<b>Recap</b> \x00B7 ") != std::wstring::npos && withRecap.find(L"\U0001F464 fix the tests") != std::wstring::npos && withRecap.find(L"\U0001F916 Done: 3 files changed") != std::wstring::npos, "the recap block: a clock time, the prompt and the reply");
+        ex.recap = false;
+        CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"Recap") == std::wstring::npos, "no recap block while something newer sits above the card");
+        SessionInfo parked = s;
+        parked.live = true;
+        parked.started = false;
+        parked.external = false;
+        CHECK(BuildCardText(parked, 5000, 0, false).find(L"not running \x2014 a message here or \x25B6 Reactivate resumes it") != std::wstring::npos, "a parked tab: the Reactivate line, never 'parked'");
+        SessionInfo failed = s;
+        failed.live = true;
+        failed.started = true;
+        failed.state = SessionState::Error;
+        CHECK(BuildCardText(failed, 5000, 0, false).find(L"\x25B6 Reactivate restarts it") != std::wstring::npos, "a session in Error: the Reactivate line");
+        CHECK(TgStripTags(L"<b>a &lt;T&gt;</b> &amp; <code>b</code>") == L"a <T> & b", "TgStripTags drops the tags and unescapes the three entities");
+        CHECK(ParseRemoteCommand(L"/reactivate").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/reactivate").name == L"reactivate", "/reactivate is an Agentmaster command");
     }
 
     // ---- the remote prompt's runner bypass (D30) ----

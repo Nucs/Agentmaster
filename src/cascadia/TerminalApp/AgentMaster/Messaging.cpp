@@ -55,6 +55,14 @@ namespace Agentmaster::Msg
         constexpr size_t kWorkLogRolloverChars = 3200;
         // The card is edited at most this often while the state does not change.
         constexpr int64_t kCardEditGapMs = 20 * 1000;
+        // The STICKY CARD (§21.5): a card with newer posts below it is deleted and sent again at the bottom once
+        // the posts have been quiet for this long (a reply and its remarks cost ONE re-post, two calls, not one
+        // each); a card whose post Telegram refused is tried again after kCardRepostAfterFailureMs, never every tick.
+        constexpr int64_t kCardStickyLagMs = 6 * 1000;
+        constexpr int64_t kCardRepostAfterFailureMs = 60 * 1000;
+        // The recap seed reads this much of the transcript's tail when a topic is created (the last prompt and
+        // the last reply are almost always within it; a longer final reply than this is rare).
+        constexpr int64_t kRecapSeedBytes = 256 * 1024;
         // How often the tick loop logs the outbound call census (`[msg] traffic (10 min): …`).
         constexpr int64_t kTrafficLogMs = 10 * 60 * 1000;
         // How much transcript a tick reads per session at most (a busy session writes kilobytes a second;
@@ -366,6 +374,26 @@ namespace Agentmaster::Msg
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path{ _stateFile }.parent_path(), ec);
             _loadState();
+            {
+                std::lock_guard lk{ _mtx };
+                for (auto& kv : _state.topics)
+                {
+                    // An "in flight" marker (-1) that a stop mid-send left in the file would wait for an answer that
+                    // never comes: no send is in flight at a start, so a card or work log marked so is simply absent.
+                    if (kv.second.cardMessageId < 0)
+                    {
+                        kv.second.cardMessageId = 0;
+                    }
+                    if (kv.second.workLogMessageId < 0)
+                    {
+                        kv.second.workLogMessageId = 0;
+                    }
+                }
+                // A business connection stored without a verdict (the app closed before the probe ran) is probed
+                // once the Search topic exists.
+                _probeWanted.store(_state.businessEnabled && _state.businessCanReply && _state.businessMode == 0 && !_state.businessConnectionId.empty());
+            }
+            _secretaryFailures.store(0);
             _stop.store(false);
             _api = std::make_unique<TelegramApi>(std::move(token));
             _topicsEnabled.store(false);
@@ -714,6 +742,9 @@ namespace Agentmaster::Msg
                 allowed.Push(json::Value::MkStr(L"message"));
                 allowed.Push(json::Value::MkStr(L"edited_message"));
                 allowed.Push(json::Value::MkStr(L"callback_query"));
+                // The user's "Secretary mode" (Telegram Business → Chatbots): the connection and its rights arrive
+                // ONLY as this update, when the user adds, edits or removes the bot there (§21.5).
+                allowed.Push(json::Value::MkStr(L"business_connection"));
                 params.Set(L"allowed_updates", std::move(allowed));
                 const TgResult r = _api->Call(L"getUpdates", params, kPollReceiveTimeoutMs);
                 if (_stop.load())
@@ -1033,6 +1064,19 @@ namespace Agentmaster::Msg
                 }
 
                 _ensureSearchTopic();
+                if (_probeWanted.load())
+                {
+                    int64_t search = 0;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        search = _state.searchThreadId;
+                    }
+                    if (search != 0)
+                    {
+                        _probeWanted.store(false);
+                        _probeSecretary();
+                    }
+                }
                 _syncTopics();
 
                 // The mirror and the cards, per topic. The topic set is copied under the lock; each
@@ -1092,10 +1136,16 @@ namespace Agentmaster::Msg
                         std::lock_guard lk{ _mtx };
                         if (const auto it = _state.topics.find(sid); it != _state.topics.end())
                         {
-                            // Keep the fields the mirror advanced; the sync may have changed the others.
+                            // Keep the fields the mirror advanced; the sync may have changed the others (never the
+                            // card clocks: _noteTopicPosted and the card's callbacks write those under the lock).
                             it->second.cursor = topic.cursor;
                             it->second.transcriptPath = topic.transcriptPath;
                             it->second.workLogMessageId = topic.workLogMessageId;
+                            it->second.recapPrompt = topic.recapPrompt;
+                            it->second.recapReply = topic.recapReply;
+                            it->second.recapAtMs = topic.recapAtMs;
+                            it->second.recapSeenMs = topic.recapSeenMs;
+                            it->second.errorAnnounced = topic.errorAnnounced;
                             _stateDirty = true;
                         }
                         _mirrors[sid] = mirror;
@@ -1220,7 +1270,7 @@ namespace Agentmaster::Msg
         return markup;
     }
 
-    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId)
+    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
     {
         // A text past Telegram's limit goes out as several messages; only the LAST carries the buttons
         // and the callback, and only the first the reply reference.
@@ -1314,6 +1364,91 @@ namespace Agentmaster::Msg
             };
             _enqueue(std::move(item));
         }
+        if (movesCard && threadId > 0)
+        {
+            _noteTopicPosted(threadId);
+        }
+    }
+
+    void MessagingService::_noteTopicPosted(int64_t threadId)
+    {
+        if (threadId <= 0)
+        {
+            return;
+        }
+        std::lock_guard lk{ _mtx };
+        for (auto& kv : _state.topics)
+        {
+            if (kv.second.threadId == threadId)
+            {
+                kv.second.lastPostedMs = WallMs();
+                _stateDirty = true;
+                return;
+            }
+        }
+    }
+
+    void MessagingService::_sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone)
+    {
+        std::wstring connection;
+        {
+            std::lock_guard lk{ _mtx };
+            connection = _state.businessConnectionId;
+        }
+        const int64_t botId = _botId.load();
+        if (connection.empty() || botId == 0)
+        {
+            TgResult none;
+            none.ok = false;
+            none.httpStatus = 0;
+            none.description = connection.empty() ? L"no business connection" : L"the bot's id is not known yet";
+            if (onDone)
+            {
+                onDone(none);
+            }
+            return;
+        }
+        // Plain text (the user's own words carry no markup), split at Telegram's limit on line ends.
+        std::vector<std::wstring> parts;
+        {
+            std::wstring rest = text;
+            constexpr size_t kPart = 4000;
+            while (rest.size() > kPart)
+            {
+                size_t cut = rest.rfind(L'\n', kPart);
+                if (cut == std::wstring::npos || cut < kPart / 2)
+                {
+                    cut = kPart;
+                }
+                parts.push_back(rest.substr(0, cut));
+                rest.erase(0, cut == kPart ? cut : cut + 1);
+            }
+            parts.push_back(rest);
+        }
+        for (size_t i = 0; i < parts.size(); ++i)
+        {
+            OutItem item;
+            item.prio = SendPriority::New;
+            item.method = L"sendMessage";
+            item.params = json::Value::MkObj();
+            item.params.Set(L"business_connection_id", json::Value::MkStr(connection));
+            // Seen from the business account (the user), its chat with this bot is "the private chat with user
+            // <bot id>": that is the chat_id a send on the user's behalf names. Whether Telegram allows the
+            // bot's own chat as a target is exactly what the probe establishes (§21.5).
+            item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(botId)));
+            if (threadId > 0)
+            {
+                item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
+            }
+            item.params.Set(L"text", json::Value::MkStr(parts[i]));
+            item.params.Set(L"disable_notification", json::Value::MkBool(true));
+            if (i + 1 == parts.size())
+            {
+                item.onDone = onDone;
+            }
+            _enqueue(std::move(item));
+        }
+        _noteTopicPosted(threadId);
     }
 
     void MessagingService::_editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup)
@@ -1396,16 +1531,23 @@ namespace Agentmaster::Msg
         _enqueue(std::move(item));
     }
 
-    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut) const
+    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut, bool reactivatable) const
     {
         // Card buttons use STABLE callback data ("c:<verb>:<session id>", 45 bytes of the 64 allowed):
         // each verb acts on the session's CURRENT state (a toggle reads it first), so a stale button
         // cannot do something old (M5 is about answers and queue items, which use tokens).
-        markupOut = _buttons({ { { mode == AutorunnerMode::Full ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", L"c:runner:" + sessionId },
-                                 { L"\U0001F4CB Queue", L"c:queue:" + sessionId } },
-                               { { pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", L"c:pin:" + sessionId },
-                                 { L"\U0001F4C4 Transcript", L"c:transcript:" + sessionId },
-                                 { L"\U0001F5A5 Screen", L"c:screen:" + sessionId } } });
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
+        if (reactivatable)
+        {
+            // A parked tab or a session in Error: the one action the user wants first (§21.5).
+            rows.push_back({ { L"\x25B6 Reactivate", L"c:reactivate:" + sessionId } });
+        }
+        rows.push_back({ { mode == AutorunnerMode::Full ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", L"c:runner:" + sessionId },
+                         { L"\U0001F4CB Queue", L"c:queue:" + sessionId } });
+        rows.push_back({ { pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", L"c:pin:" + sessionId },
+                         { L"\U0001F4C4 Transcript", L"c:transcript:" + sessionId },
+                         { L"\U0001F5A5 Screen", L"c:screen:" + sessionId } });
+        markupOut = _buttons(rows);
         return {};
     }
 
@@ -1463,6 +1605,7 @@ namespace Agentmaster::Msg
                 { L"restartsession", L"restart the session (asks while running)" },
                 { L"deactivate", L"park the tab (asks while running)" },
                 { L"activate", L"start a parked tab's claude" },
+                { L"reactivate", L"resume a parked tab or a cut-off / failed session" },
                 { L"forksession", L"fork into a new tab" },
                 { L"newsession", L"a new session in this folder (or <folder> in Search)" },
                 { L"interrupt", L"stop the running turn (asks first)" },
@@ -1740,6 +1883,9 @@ namespace Agentmaster::Msg
             int64_t size = 0;
             ReadTranscriptTail(t.transcriptPath, 0x7FFFFFFFFFFFFFFFll, size); // size only
             t.cursor = size > 0 ? size : 0;
+            // The recap (§21.5): the topic mirrors from here on, so its first card says where the conversation
+            // stands — the last prompt and the last reply, read once from the transcript's tail.
+            _seedRecap(t);
         }
         {
             std::lock_guard lk{ _mtx };
@@ -1748,43 +1894,165 @@ namespace Agentmaster::Msg
             _stateDirty = true;
         }
         _log(L"[msg] topic created " + ShortId(sessionId) + L" \x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L")");
-        // The card: sent, then pinned, then remembered; the sync's next tick keeps it current.
+        // The note first, the card LAST: the card is the STICKY bottom message of the topic (§21.5), so nothing
+        // of the topic's own setup may land after it (it would only make the card re-post itself). Neither moves
+        // the card's clocks. No pin any more: the card's place is the bottom, and a pin per re-post would leave a
+        // "pinned a message" line each time.
         const auto s = _session(sessionId);
+        if (s && !t.transcriptPath.empty() && t.cursor > 0)
+        {
+            _sendText(thread, L"<i>Mirroring from here on. /transcript sends the whole session as a file; /summary its summary.</i>", true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+        }
         json::Value markup;
-        std::wstring card = s ? BuildCardText(*s, WallMs(), 0, _scheduler ? _scheduler->GlobalPaused() : false) : L"\U0001F4CC " + TgEscapeHtml(name);
+        std::wstring card;
         if (s)
         {
-            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup);
+            CardExtras extras;
+            extras.recap = t.recapSeenMs > 0;
+            extras.recapPrompt = t.recapPrompt;
+            extras.recapReply = t.recapReply;
+            extras.recapAtMs = t.recapAtMs;
+            card = BuildCardText(*s, WallMs(), 0, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
+            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, s->live && ((!s->started && !s->external) || s->state == SessionState::Error));
+        }
+        else
+        {
+            card = L"\U0001F4CC " + TgEscapeHtml(name);
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            auto& m = _mirrors[sessionId];
+            m.lastCardText = card;
+            m.lastCardEditMs = WallMs();
+        }
+        _postCard(sessionId, thread, card, std::move(markup), 0);
+    }
+
+    void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst)
+    {
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+            {
+                it->second.cardMessageId = -1; // in flight: _refreshCard waits for the answer below
+                _stateDirty = true;
+            }
+        }
+        if (deleteFirst > 0)
+        {
+            // Same priority as the send that follows and queued first, so the old card is gone before the new
+            // one appears; a card already gone (the user deleted it) is a harmless 400.
+            OutItem del;
+            del.prio = SendPriority::CardEdit;
+            del.key = L"card-del:" + sessionId;
+            del.method = L"deleteMessage";
+            del.params = json::Value::MkObj();
+            del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(deleteFirst)));
+            _enqueue(std::move(del));
         }
         auto self = weak_from_this();
-        _sendText(thread, card, true, SendPriority::New, L"card-create:" + sessionId, markup, [self, sessionId, thread](const TgResult& r) {
+        _sendText(threadId, text, true, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId](const TgResult& r) {
             auto me = self.lock();
-            if (!me || !r.ok)
+            if (!me)
             {
                 return;
             }
-            const int64_t msgId = r.result.I64At(L"message_id", 0);
+            const int64_t id = r.ok ? r.result.I64At(L"message_id", 0) : 0;
             {
                 std::lock_guard lk{ me->_mtx };
-                if (const auto it = me->_state.topics.find(sessionId); it != me->_state.topics.end() && it->second.threadId == thread)
+                if (const auto it = me->_state.topics.find(sessionId); it != me->_state.topics.end() && it->second.threadId == threadId)
                 {
-                    it->second.cardMessageId = msgId;
+                    it->second.cardMessageId = id;
+                    it->second.cardPostedMs = WallMs(); // on a refusal too: the retry waits kCardRepostAfterFailureMs
                     me->_stateDirty = true;
                 }
             }
-            OutItem pin;
-            pin.prio = SendPriority::Backfill;
-            pin.method = L"pinChatMessage";
-            pin.paced = false;
-            pin.params = json::Value::MkObj();
-            pin.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(me->_ownerId)));
-            pin.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(msgId)));
-            pin.params.Set(L"disable_notification", json::Value::MkBool(true));
-            me->_enqueue(std::move(pin));
-        }, 0);
-        if (s && !t.transcriptPath.empty() && t.cursor > 0)
+            if (!r.ok)
+            {
+                me->_log(L"[msg] card post refused for " + ShortId(sessionId) + L": " + r.description);
+            }
+        }, 0, false);
+    }
+
+    void MessagingService::_seedRecap(TopicRecord& t)
+    {
+        try
         {
-            _sendText(thread, L"<i>Mirroring from here on. /transcript sends the whole session as a file; /summary its summary.</i>", true, SendPriority::New, L"", json::Value{}, nullptr);
+            if (t.transcriptPath.empty() || t.cursor <= 0)
+            {
+                return;
+            }
+            const int64_t from = t.cursor > kRecapSeedBytes ? t.cursor - kRecapSeedBytes : 0;
+            int64_t size = -1;
+            std::string bytes = ReadTranscriptTail(t.transcriptPath, from, size);
+            if (bytes.empty())
+            {
+                return;
+            }
+            if (from > 0)
+            {
+                // The window starts mid-line: drop the torn first line.
+                const size_t nl = bytes.find('\n');
+                if (nl == std::string::npos)
+                {
+                    return;
+                }
+                bytes.erase(0, nl + 1);
+            }
+            const auto lines = ParseTranscriptJsonl(std::move(bytes));
+            std::wstring lastPrompt;
+            int64_t lastPromptMs = 0;
+            std::wstring lastReply; // the last final reply, else the last assistant text
+            int64_t lastReplyMs = 0;
+            bool lastReplyFinal = false;
+            for (const auto& line : lines)
+            {
+                for (const auto& item : ClassifyTranscriptLine(line))
+                {
+                    if (item.kind == TopicItemKind::Prompt && !item.midTurn)
+                    {
+                        lastPrompt = TgFirstLine(item.text, 120);
+                        lastPromptMs = item.tsMs;
+                        lastReply.clear(); // a reply older than the newest prompt is not "where it stands"
+                        lastReplyMs = 0;
+                        lastReplyFinal = false;
+                    }
+                    else if (item.kind == TopicItemKind::Text && !item.text.empty())
+                    {
+                        if (item.turnEnds || !lastReplyFinal)
+                        {
+                            lastReply = item.text;
+                            lastReplyMs = item.tsMs;
+                            lastReplyFinal = item.turnEnds;
+                        }
+                    }
+                }
+            }
+            if (lastPrompt.empty() && lastReply.empty())
+            {
+                return;
+            }
+            std::wstring head = lastReply;
+            for (auto& c : head)
+            {
+                if (c == L'\n' || c == L'\r' || c == L'\t')
+                {
+                    c = L' ';
+                }
+            }
+            if (head.size() > 240)
+            {
+                head = head.substr(0, 239) + L"\x2026";
+            }
+            t.recapPrompt = lastPrompt;
+            t.recapReply = head;
+            t.recapAtMs = std::max(lastPromptMs, lastReplyMs);
+            t.recapSeenMs = WallMs();
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_seedRecap");
         }
     }
 
@@ -1872,23 +2140,50 @@ namespace Agentmaster::Msg
         {
             return;
         }
-        int64_t cardId = 0;
-        int64_t idleLeaves = 0;
+        TopicRecord topic;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
-            if (it == _state.topics.end() || it->second.cardMessageId == 0)
+            if (it == _state.topics.end() || it->second.threadId == 0)
             {
                 return;
             }
-            cardId = it->second.cardMessageId;
-            if (it->second.idleSinceMs != 0)
-            {
-                idleLeaves = it->second.idleSinceMs + _idleGraceMs.load();
-            }
+            topic = it->second;
+        }
+        if (topic.cardMessageId < 0)
+        {
+            return; // a post is in flight; its answer sets the id
         }
         const int64_t now = WallMs();
-        const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false);
+        if (topic.cardMessageId == 0 && now - topic.cardPostedMs < kCardRepostAfterFailureMs)
+        {
+            return; // Telegram refused the last post: not every tick
+        }
+        const int64_t idleLeaves = topic.idleSinceMs != 0 ? topic.idleSinceMs + _idleGraceMs.load() : 0;
+        CardExtras extras;
+        extras.recap = topic.recapSeenMs > 0 && topic.recapSeenMs > topic.lastPostedMs; // nothing newer below it
+        extras.recapPrompt = topic.recapPrompt;
+        extras.recapReply = topic.recapReply;
+        extras.recapAtMs = topic.recapAtMs;
+        const bool reactivatable = s->live && ((!s->started && !s->external) || s->state == SessionState::Error);
+        const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
+        json::Value markup;
+        _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, reactivatable);
+        // The STICKY CARD (§21.5): posts newer than the card push it down — once they have been quiet for
+        // kCardStickyLagMs the old card is deleted and a fresh one sent at the bottom (two calls per burst, not
+        // per message). A missing card (the first one, or a refused post a minute ago) is posted the same way.
+        const bool behind = topic.cardMessageId > 0 && topic.lastPostedMs > topic.cardPostedMs && now - topic.lastPostedMs >= kCardStickyLagMs;
+        if (topic.cardMessageId == 0 || behind)
+        {
+            {
+                std::lock_guard lk{ _mtx };
+                auto& m = _mirrors[sessionId];
+                m.lastCardText = text;
+                m.lastCardEditMs = now;
+            }
+            _postCard(sessionId, topic.threadId, text, std::move(markup), topic.cardMessageId > 0 ? topic.cardMessageId : 0);
+            return;
+        }
         bool send = false;
         {
             std::lock_guard lk{ _mtx };
@@ -1903,10 +2198,28 @@ namespace Agentmaster::Msg
         }
         if (send)
         {
-            json::Value markup;
-            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup);
-            _editText(cardId, text, SendPriority::CardEdit, L"card:" + sessionId, markup);
+            _editText(topic.cardMessageId, text, SendPriority::CardEdit, L"card:" + sessionId, markup);
         }
+    }
+
+    void MessagingService::_postRemark(const std::wstring& sessionId, TopicRecord& topic, Mirror& m)
+    {
+        if (m.pendingText.empty())
+        {
+            return;
+        }
+        // The thread is the conversation (§21.5): what the assistant said before it reached for a tool is a
+        // message of its own, silent. The work log so far is closed with its final content first, so the remark
+        // lands below it, and the tools that follow start a new work-log message below the remark.
+        _flushWorkLog(sessionId, topic, m, true);
+        _sendText(topic.threadId, TgMarkdownToHtml(m.pendingText), true, SendPriority::New, L"", json::Value{}, nullptr);
+        m.pendingText.clear();
+        m.workLog.clear();
+        m.workLogMessageId = 0;
+        m.workLogDirty = false;
+        ++m.workLogGen; // a create still in flight for the closed segment must not become the new segment's message
+        topic.workLogMessageId = 0;
+        m.turnOpen = true;
     }
 
     // ===== the mirror ========================================================================
@@ -1960,7 +2273,8 @@ namespace Agentmaster::Msg
             topic.workLogMessageId = -1; // in flight
             auto self = weak_from_this();
             const int64_t thread = topic.threadId;
-            _sendText(thread, html, true, SendPriority::New, L"", json::Value{}, [self, sessionId](const TgResult& r) {
+            const uint32_t gen = m.workLogGen;
+            _sendText(thread, html, true, SendPriority::New, L"", json::Value{}, [self, sessionId, gen](const TgResult& r) {
                 auto me = self.lock();
                 if (!me)
                 {
@@ -1968,11 +2282,15 @@ namespace Agentmaster::Msg
                 }
                 const int64_t id = r.ok ? r.result.I64At(L"message_id", 0) : 0;
                 std::lock_guard lk{ me->_mtx };
+                auto& mm = me->_mirrors[sessionId];
+                if (mm.workLogGen != gen)
+                {
+                    return; // the segment was closed (a remark, a new turn) while this create flew: its message stays as it is
+                }
                 if (const auto it = me->_state.topics.find(sessionId); it != me->_state.topics.end())
                 {
                     it->second.workLogMessageId = id;
                 }
-                auto& mm = me->_mirrors[sessionId];
                 mm.workLogMessageId = id;
                 if (id != 0)
                 {
@@ -1997,7 +2315,27 @@ namespace Agentmaster::Msg
         m.workLog.clear();
         m.workLogMessageId = 0;
         m.workLogDirty = false;
+        ++m.workLogGen;
         topic.workLogMessageId = 0;
+        // The recap's reply half (§21.5): the head of what was just said, plain. The card hides the recap while
+        // this very message sits above it, and shows it again once the card is the only thing on screen.
+        {
+            std::wstring head = TgStripTags(html);
+            for (auto& c : head)
+            {
+                if (c == L'\n' || c == L'\r' || c == L'\t')
+                {
+                    c = L' ';
+                }
+            }
+            if (head.size() > 240)
+            {
+                head = head.substr(0, 239) + L"\x2026";
+            }
+            topic.recapReply = head;
+            topic.recapAtMs = WallMs();
+            topic.recapSeenMs = WallMs();
+        }
         _log(L"[msg] " + ShortId(sessionId) + L" final message (" + why + L")");
     }
 
@@ -2094,10 +2432,15 @@ namespace Agentmaster::Msg
                         m.workLogMessageId = 0;
                         topic.workLogMessageId = 0;
                         m.workLogDirty = false;
+                        ++m.workLogGen;
                     }
                     m.toolNames.clear();
                     m.turnOpen = true;
                 }
+                // The recap's prompt half (§21.5), whatever the prompt's source.
+                topic.recapPrompt = TgFirstLine(it.text, 120);
+                topic.recapAtMs = it.tsMs > 0 ? it.tsMs : WallMs();
+                topic.recapSeenMs = WallMs();
                 // Its source: a prompt sent from this topic is the user's own message (not mirrored); one
                 // the runner sent reads ⚙; one typed at the PC reads ⌨.
                 const std::wstring key = NormalizePromptTextForCompare(it.text);
@@ -2126,7 +2469,47 @@ namespace Agentmaster::Msg
                 {
                     html += L"\n<blockquote expandable>" + TgEscapeHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text) + L"</blockquote>";
                 }
-                _sendText(topic.threadId, html, true, SendPriority::New, L"", json::Value{}, nullptr);
+                int businessMode = 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    businessMode = _state.businessMode;
+                }
+                if (businessMode == 1)
+                {
+                    // SECRETARY MODE (§21.5): the prompt is the user's own bubble in the topic, sent on the user's
+                    // behalf through the Telegram Business connection; a refused send falls back to the bot's line
+                    // above, and three refusals in a row turn the mode off (the user may have revoked the right).
+                    const int64_t thread = topic.threadId;
+                    const std::wstring fallback = html;
+                    const std::wstring plain = it.text;
+                    auto self = weak_from_this();
+                    _sendAsUser(thread, plain, [self, thread, fallback](const TgResult& r) {
+                        auto me = self.lock();
+                        if (!me)
+                        {
+                            return;
+                        }
+                        if (r.ok)
+                        {
+                            me->_secretaryFailures.store(0);
+                            return;
+                        }
+                        const int failures = me->_secretaryFailures.fetch_add(1) + 1;
+                        me->_log(L"[msg] secretary: a send as the user was refused (" + r.description + L"); the prompt goes out as the bot's line" + (failures >= 3 ? L"; secretary mode is off until the bot is connected again" : L""));
+                        if (failures >= 3)
+                        {
+                            std::lock_guard lk{ me->_mtx };
+                            me->_state.businessMode = -1;
+                            me->_state.businessNote = r.description;
+                            me->_stateDirty = true;
+                        }
+                        me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, nullptr);
+                    });
+                }
+                else
+                {
+                    _sendText(topic.threadId, html, true, SendPriority::New, L"", json::Value{}, nullptr);
+                }
                 break;
             }
             case TopicItemKind::Text:
@@ -2151,11 +2534,9 @@ namespace Agentmaster::Msg
                 }
                 break;
             case TopicItemKind::ToolCall:
-                if (!m.pendingText.empty())
-                {
-                    _appendWorkLog(m, L"\x203A " + TgFirstLine(m.pendingText, 200));
-                    m.pendingText.clear();
-                }
+                // What the assistant said before the tool call — "why the bash is invoked" — is a message of
+                // its own (§21.5), not a line in the work log.
+                _postRemark(sessionId, topic, m);
                 m.toolNames[it.toolUseId] = it.toolName;
                 _appendWorkLog(m, L"\x2022 " + it.summary);
                 break;
@@ -2172,11 +2553,7 @@ namespace Agentmaster::Msg
                 break;
             case TopicItemKind::Question:
             {
-                if (!m.pendingText.empty())
-                {
-                    _appendWorkLog(m, L"\x203A " + TgFirstLine(m.pendingText, 200));
-                    m.pendingText.clear();
-                }
+                _postRemark(sessionId, topic, m);
                 std::wstring html = L"\x2753 <b>" + TgEscapeHtml(it.text) + L"</b>";
                 if (!it.options.empty())
                 {
@@ -2236,6 +2613,10 @@ namespace Agentmaster::Msg
         m.lastState = s.state;
         m.lastStateMs = now;
         _log(L"[msg] " + ShortId(sessionId) + L" " + StateWord(from) + L" -> " + StateWord(s.state));
+        if (s.state == SessionState::Running)
+        {
+            topic.errorAnnounced = false; // a new turn: a later Error is news again
+        }
         // What the transcript did not say: a turn that ended without a terminal line (a recon synth), an
         // exit, an error the tail did not carry, a permission prompt (no AskUserQuestion line).
         const bool atRest = s.state == SessionState::WaitingForInput || s.state == SessionState::Idle;
@@ -2250,10 +2631,12 @@ namespace Agentmaster::Msg
         else if (s.state == SessionState::Error && from != SessionState::Error)
         {
             // An API error the mirror already posted leaves no pending text and a closed turn; otherwise
-            // (a cut-off turn, a scanner-derived error) say so.
-            if (m.turnOpen || !m.pendingText.empty() || !s.errorMessage.empty())
+            // (a cut-off turn, a scanner-derived error) say so — ONCE: a session at rest in Error reads Idle at
+            // every app start until the scanner re-asserts Error, and the topic was told the first time.
+            if (!topic.errorAnnounced && (m.turnOpen || !m.pendingText.empty() || !s.errorMessage.empty()))
             {
-                _postFinal(sessionId, topic, m, L"\x26A0 <b>Error</b>" + (s.errorMessage.empty() ? std::wstring{} : L": " + TgEscapeHtml(TgFirstLine(s.errorMessage, 300))), L"error state");
+                topic.errorAnnounced = true;
+                _postFinal(sessionId, topic, m, L"\x26A0 <b>Error</b>" + (s.errorMessage.empty() ? std::wstring{} : L": " + TgEscapeHtml(TgFirstLine(s.errorMessage, 300))) + L"\n<i>\x25B6 Reactivate on the card restarts the conversation; a message here is sent as its retry.</i>", L"error state");
             }
         }
         else if (s.state == SessionState::NeedsApproval && from == SessionState::Running && !m.turnOpen)
