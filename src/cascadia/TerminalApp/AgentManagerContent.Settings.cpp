@@ -1126,7 +1126,7 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setMsgEnabled, L"One Telegram topic per Claude Code tab of every window whose session is not Idle, each showing the session as it happens (the prompts, one work-log message per turn, the final reply with sound). A message typed in a topic is queued as the session's next prompt \x2014 never typed into a running turn. The pinned \x201C\U0001F50E Search\x201D topic finds old sessions and brings them back into tabs. Needs the token and your user id below; the bot is offline while Agentmaster is closed (Telegram keeps your messages 24 h). Default off.");
         panel.Children().Append(_setMsgEnabled);
         {
-            auto steps = Text(L"Setup: @BotFather \x2192 /newbot (or an existing bot of yours) \x2192 copy its token here. Then @BotFather \x2192 /mybots \x2192 the bot \x2192 Bot Settings \x2192 Threaded Mode \x2192 Turn on (topics). Your numeric user id: message @userinfobot. Save, then open the bot in Telegram and send /start.", 11, false, 0.75);
+            auto steps = Text(L"Setup: @BotFather \x2192 /newbot (or an existing bot of yours) \x2192 copy its token here. Then the BotFather MINI APP (search botfather, tap Open \x2014 the classic /mybots chat menu has no such setting) \x2192 My bots \x2192 the bot \x2192 Bot Settings \x2192 Threads Settings \x2192 Threaded Mode \x2192 Turn on (topics). Your numeric user id: message @userinfobot. Save, then open the bot in Telegram and send /start.", 11, false, 0.75);
             steps.TextWrapping(TextWrapping::Wrap);
             panel.Children().Append(steps);
         }
@@ -5979,7 +5979,7 @@ namespace winrt::TerminalApp::implementation
                                 return;
                             }
                             std::wstring text = L"Bot " + check.username + L": ";
-                            text += check.topicsEnabled ? L"topics are ON \x2014 ready." : L"topics are OFF \x2014 @BotFather \x2192 /mybots \x2192 " + check.username + L" \x2192 Bot Settings \x2192 Threaded Mode \x2192 Turn on, then Save here.";
+                            text += check.topicsEnabled ? L"topics are ON \x2014 ready." : L"topics are OFF \x2014 in the BotFather MINI APP (tap Open on @BotFather; the classic /mybots menu has no such setting): My bots \x2192 " + check.username + L" \x2192 Bot Settings \x2192 Threads Settings \x2192 Threaded Mode \x2192 Turn on, then Save here.";
                             self->_setMsgStatus.Text(winrt::hstring{ text });
                         }
                         catch (...)
