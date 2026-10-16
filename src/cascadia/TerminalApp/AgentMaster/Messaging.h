@@ -620,6 +620,7 @@ namespace Agentmaster::Msg
             int64_t startedMs{ 0 };
             size_t failed{ 0 }; // answers that were refusals (logged once per batch, with the first one's reason)
             std::wstring firstFailure;
+            int64_t lastAnswerMs{ 0 }; // the batch's newest answer (WallMs): the stall guard counts from it, not from the start
         };
         BackfillBatch _backfill;
         uint64_t _backfillSeq{ 0 };
@@ -683,6 +684,22 @@ namespace Agentmaster::Msg
         std::deque<OutItem> _outbox;
         uint64_t _outSeq{ 0 };
         int64_t _lastSendMs{ 0 };
+        /// <summary>
+        /// The CALL WINDOW (§21.9), under `_mtx`, GetTickCount64 ms: when each call into the chat of the last 60 s was made
+        /// (the send loop's items and the tick's direct calls alike). A HISTORY message goes only while it holds fewer than
+        /// kHistoryCallsPerMinute: Telegram's flood budget for this chat drains near the documented group limit of 20
+        /// messages a minute — the first replay, ~27 a minute for 11 minutes, earned a 429 (live, 2026-10-16 23:59:54).
+        /// </summary>
+        std::deque<int64_t> _recentCallsMs;
+        /// <summary>When the last 429 came (GetTickCount64 ms; 0 = none this run): history waits kHistoryFloodPauseMs after it, live traffic does not.</summary>
+        int64_t _floodAtMs{ 0 };
+        /// <summary>Records one call in the call window and drops what is older than a minute. Caller holds `_mtx`.</summary>
+        /// <param name="tickMs">GetTickCount64 at the call.</param>
+        void _noteCallLocked(int64_t tickMs);
+        /// <summary>A 429: the history replay pauses (logged once per 429). Takes `_mtx`.</summary>
+        /// <param name="method">The refused method (for the log line).</param>
+        /// <param name="retryAfterSec">Telegram's retry_after.</param>
+        void _noteFlood(const std::wstring& method, int retryAfterSec);
 
         std::unordered_map<std::wstring, Mirror> _mirrors;
         std::unordered_map<std::wstring, CardState> _cards; // session id -> its card's transient state (CardState)

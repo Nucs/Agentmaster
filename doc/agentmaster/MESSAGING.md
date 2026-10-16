@@ -1506,8 +1506,9 @@ the whole session as messages, not a file plus the last 10 turns.
   `⌨ HH:MM · <first line>` (⚙ for a prompt the runner sent, when the queue still holds it), the whole prompt in a folded
   quote when it is long. A refused send as the user puts the bot's line in its place at once (a higher priority than the
   rest of the batch, so the order holds); three refusals in a row turn secretary mode off, as for a live prompt. The echo
-  guard's entry for a history send lives 12 minutes instead of 2 (a history message can wait that long to go out), so an
-  old prompt of the history that Telegram hands back is never queued again. ⚠ On this machine secretary mode is NOT
+  guard's entry for a history send lives 90 minutes instead of 2 (`kHistoryEchoMs`: a history message can wait long
+  behind the live traffic and the flood budget), so an old prompt of the history that Telegram hands back is never
+  queued again. ⚠ On this machine secretary mode is NOT
   connected (no `business_connection` update has ever arrived): BotFather's "Secretary Mode" switch is only the bot's
   side; the user must also add the bot under Telegram Settings → Business → Chatbots (Telegram Premium). Until then the
   user's turns are the bot's ⌨ lines.
@@ -1517,13 +1518,23 @@ the whole session as messages, not a file plus the last 10 turns.
   longer than a window is cut and goes on in the next (its reply is found where it ends); a turn that ends exactly at a
   window's edge with no turn after it in the window shows its reply as narrative.
 - **Pacing and order.** History messages have their own, LOWEST send priority (`SendPriority::History`): the send loop
-  takes one only when nothing else is queued, and at most one per 2 s (`kBackfillGapMs`), so the live conversation of
-  every session always goes first and keeps half of the chat's ~1 call/s. The pump (`_pumpBackfill`, every tick) keeps
-  ONE batch (one window's messages) in the outbox at a time and commits the topic's position only when the batch's last
-  message was answered, so a stop midway re-sends at most one batch and never skips one; a batch with a send that never
-  answered (10 minutes) is dropped and sent again. The topics go most recent first (the highest-ranked in MOST RECENT
-  order with history pending), so the sessions the user cares about now get their history first; during a recreation
-  the pump waits for the new list (at most 5 minutes).
+  takes one only when nothing else is queued, at most one per 2 s (`kBackfillGapMs`), and only while the last minute
+  holds fewer than 18 calls of any kind (`kHistoryCallsPerMinute`, the CALL WINDOW `_recentCallsMs`, fed by the send loop
+  and the tick's direct calls) — so ~18 history messages a minute when nothing else runs, fewer while the live
+  traffic runs, which always goes first; after any 429 the replay pauses 5 minutes (`kHistoryFloodPauseMs`,
+  `_noteFlood`, logged `[msg] history replay paused …`), live messages go on. Measured in the first live run (before
+  the window): ~27 messages a minute for ~11 minutes earned a 429 (retry after 40 s) and then ran 5 more minutes without
+  one — Telegram's budget for this chat drains near the documented group limit of 20 a minute, not at the 1 a second of a
+  private chat. The pump (`_pumpBackfill`, every tick) keeps ONE batch (one window's messages) in the outbox at a time;
+  each TURN is committed as soon as its last message is answered (`PlanHistoryPosts`: the window rendered turn by turn,
+  the turn's last post carrying where the next turn starts), so a stop midway re-sends at most the turn that was going
+  out — the first build committed only whole windows, and its 00:07 restart repeated part of one window in b480b2d7's
+  topic. A batch is "stalled" only when all its messages left the outbox and none was answered for 30 minutes
+  (`kBackfillStallMs`; a batch held by the budget is never stalled); it is then dropped and read again. The topics go
+  most recent first (the highest-ranked in MOST RECENT order with history pending), so the sessions the user cares about
+  now get their history first; the pump waits for the start-up hold (the order keys come from the re-homed sessions —
+  the first build began an old session's replay at a restart) and, during a recreation, for the new list (at most 5
+  minutes).
 - **The card and the live mirror.** The card is posted first, above the history, with the line *"⏳ the session's history
   is being added below; the live conversation follows it"*; it does not chase each history message down (that would
   double the replay's calls) and is re-posted ONCE at the bottom, without the line, when the topic's history is in. For
@@ -1546,14 +1557,16 @@ the whole session as messages, not a file plus the last 10 turns.
   `[msg] history in for <sid8>: N message(s) from K KB of transcript, S s after the topic was made; …`,
   `[msg] history replay done: N message(s) into M topic(s); …`, `[msg] re-sort after the history replay: …` /
   `[msg] re-sort (the list drifted): …` / `[msg] re-sort skipped: …`, and on trouble `[msg] history of <sid8>: …`
-  (a batch dropped as unanswered, refused messages, a transcript gone or shorter). The traffic line counts the
-  replay's `sendMessage` calls with the rest.
+  (a batch dropped as unanswered, refused messages, a transcript gone or shorter), `[msg] history replay paused 5 min:
+  Telegram refused a <method> (429, …)`. The traffic line counts the replay's `sendMessage` calls with the rest.
 - **Tests** (`TestMessaging`): the day key and day text; `RenderHistory` — the day lines, the user's posts with the
   bot's line in their place, the packed narrative (folded tool lines, a labeled failure), the reply as its own message,
   a turn cut by the reader's window and its rest, a mid-turn message, a slash command, a runner prompt (⚙), an
   interrupted turn, and 200 tool lines packed under the limit with none lost; `SplitHistoryWindow` — the end reached,
   the cut at the last turn's start, a turn longer than the window, a torn last line, a window with no complete line, a
-  fork's copied prompt; `PlanTopicResort` — in order, reversed, a low-ranked topic on top, a swap in the middle, a topic
-  missing from the list; the record's round trip and `TopicBackfillPending`; layout 2; the replay's lowest priority;
-  the card's history line. m5, isolated on HEAD 5f4c8f608 + this change: 7214 checks, the 3 known TestTaskbarBadge
-  failures only.
+  fork's copied prompt, each item's line offset; `PlanHistoryPosts` — each turn's last post commits where the next turn
+  starts, the window's last turn its end, with the day; `PlanTopicResort` — in order, reversed, a low-ranked topic on
+  top, a swap in the middle, a topic missing from the list; the record's round trip and `TopicBackfillPending`; layout
+  2; the replay's lowest priority; the card's history line. m5, isolated on HEAD 5f4c8f608 + the first build: 7214
+  checks; on 3bc71b412 + the flood budget and the per-turn commits: 7220 checks — the 3 known TestTaskbarBadge failures
+  only, each time.

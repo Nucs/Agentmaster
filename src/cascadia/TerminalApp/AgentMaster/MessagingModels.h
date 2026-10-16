@@ -1079,6 +1079,9 @@ namespace Agentmaster::Msg
     {
         /// <summary>In transcript order (ClassifyTranscriptLine in history mode: a fork's copied lines included).</summary>
         std::vector<TopicItem> items;
+        /// <summary>The file offset of the line each item came from (parallel to `items`): where a turn starts, so a
+        /// turn's end — the next turn's first line — can be committed alone (PlanHistoryPosts).</summary>
+        std::vector<int64_t> itemAt;
         /// <summary>Where the window's use ended — the next window's start; -1 = nothing usable was read (the file shrank
         /// or is gone, or `needMore`).</summary>
         int64_t consumedTo{ -1 };
@@ -1158,6 +1161,7 @@ namespace Agentmaster::Msg
             for (auto& x : its)
             {
                 w.items.push_back(std::move(x));
+                w.itemAt.push_back(at);
             }
         }
         if (reachedEnd)
@@ -1174,6 +1178,62 @@ namespace Agentmaster::Msg
             w.turnContinues = true;
         }
         return w;
+    }
+
+    /// <summary>One post of a history window (PlanHistoryPosts) and what its answer commits.</summary>
+    struct HistoryPlanPost
+    {
+        HistoryPost post;
+        /// <summary>The last post of a turn: the offset where the NEXT turn starts (or the window's end) — once it is
+        /// answered, the turn is in the topic and the replay may go on from there. 0 on every other post.</summary>
+        int64_t commitTo{ 0 };
+        /// <summary>TgDayKey of the last turn rendered up to and including this post (committed with `commitTo`).</summary>
+        int64_t dayAfter{ 0 };
+    };
+
+    /// <summary>
+    /// A history window's posts (§21.9), rendered TURN BY TURN (RenderHistory per turn: its packing never crosses a turn)
+    /// so that each turn's last post carries the turn's end: the replay commits a turn as soon as its last post is
+    /// answered, and a stop midway re-sends at most the turn that was going out — not the whole window (the 00:07 restart
+    /// of the first live run would have repeated ~20 messages of one topic).
+    /// </summary>
+    /// <param name="w">The window (SplitHistoryWindow), with `itemAt`.</param>
+    /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered before the window.</param>
+    /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (RenderHistory's ⚙).</param>
+    /// <returns>The posts in order; a turn that renders nothing hands its end to the next turn's last post.</returns>
+    /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
+    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {})
+    {
+        std::vector<HistoryPlanPost> out;
+        const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
+        size_t begin = 0;
+        while (begin < w.items.size())
+        {
+            size_t end = begin + 1;
+            while (end < w.items.size() && !isTurnStart(w.items[end]))
+            {
+                ++end;
+            }
+            const bool lastGroup = end == w.items.size();
+            const std::vector<TopicItem> group(w.items.begin() + static_cast<std::ptrdiff_t>(begin), w.items.begin() + static_cast<std::ptrdiff_t>(end));
+            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, isRunnerPrompt);
+            // Where this turn ends: the next turn's first line, or the window's end. Without itemAt (a caller that did not
+            // fill it) only the window's end is known.
+            const int64_t commitTo = lastGroup ? w.consumedTo : (end < w.itemAt.size() ? w.itemAt[end] : 0);
+            for (size_t k = 0; k < rendered.size(); ++k)
+            {
+                HistoryPlanPost p;
+                p.post = std::move(rendered[k]);
+                if (k + 1 == rendered.size())
+                {
+                    p.commitTo = commitTo;
+                    p.dayAfter = lastDayKey;
+                }
+                out.push_back(std::move(p));
+            }
+            begin = end;
+        }
+        return out;
     }
 
     // ===== the connector's state file ========================================================

@@ -75,7 +75,20 @@ namespace Agentmaster::Msg
         constexpr int64_t kBackfillGapMs = 2000;
         constexpr int64_t kBackfillWindowBytes = 1024 * 1024;
         constexpr int64_t kBackfillWindowMaxBytes = 64 * 1024 * 1024;
-        constexpr int64_t kBackfillStallMs = 10 * 60 * 1000;
+        // A batch whose messages have all left the outbox and that got no answer for this long is dropped and read again
+        // (a throttled batch, still queued, is never "stalled").
+        constexpr int64_t kBackfillStallMs = 30 * 60 * 1000;
+        // The replay's share of the chat's flood limit: a history message goes only while the last minute holds fewer calls of
+        // any kind than this (so ~18 a minute when nothing else runs, less while the live traffic runs), and not for this
+        // long after a 429. Measured (§21.9's first run, dev, 2026-10-16): ~27 messages a minute held for ~11 minutes earned
+        // a 429 (retry after 40 s), then went on for 5 more without one — a budget that drains, near the documented group
+        // limit of 20 a minute rather than the 1 a second of a private chat.
+        constexpr size_t kHistoryCallsPerMinute = 18;
+        constexpr int64_t kHistoryFloodPauseMs = 5 * 60 * 1000;
+        constexpr int64_t kCallWindowMs = 60 * 1000;
+        // How long a history message sent AS THE USER is remembered by the echo guard: it may wait in the outbox behind the
+        // live traffic and the flood budget for a long time, and an old prompt Telegram hands back must never be queued.
+        constexpr int64_t kHistoryEchoMs = 90 * 60 * 1000;
         // The topic list's re-sort (§21.9): at most once a minute, only after half a minute with nothing posted anywhere,
         // and at most this many cards re-posted (a longer fix waits for a recreation or /recreate).
         constexpr int64_t kResortEveryMs = 60 * 1000;
@@ -1032,10 +1045,21 @@ namespace Agentmaster::Msg
                         }
                     }
                     const int64_t now = static_cast<int64_t>(::GetTickCount64());
-                    // A history message (§21.9) is only ever the best item when nothing else is queued, and it waits the
-                    // longer gap, so a replay never takes more than half of the chat's ~1 call/s.
-                    const int64_t gap = best->prio == SendPriority::History ? kBackfillGapMs : (best->paced ? kSendGapMs : kLightGapMs);
-                    if (_lastSendMs != 0 && now - _lastSendMs < gap)
+                    // A history message (§21.9) is only ever the best item when nothing else is queued; it waits the longer
+                    // gap, goes only while the last minute holds fewer than kHistoryCallsPerMinute calls (the chat's flood
+                    // limit is near 20 a minute, live traffic included), and not for kHistoryFloodPauseMs after a 429.
+                    const bool history = best->prio == SendPriority::History;
+                    const int64_t gap = history ? kBackfillGapMs : (best->paced ? kSendGapMs : kLightGapMs);
+                    _noteCallLocked(0); // prunes the window only
+                    if (history && _floodAtMs != 0 && now - _floodAtMs < kHistoryFloodPauseMs)
+                    {
+                        waitMs = kHistoryFloodPauseMs - (now - _floodAtMs);
+                    }
+                    else if (history && _recentCallsMs.size() >= kHistoryCallsPerMinute)
+                    {
+                        waitMs = std::max<int64_t>(1, _recentCallsMs.front() + kCallWindowMs - now);
+                    }
+                    else if (_lastSendMs != 0 && now - _lastSendMs < gap)
                     {
                         waitMs = gap - (now - _lastSendMs);
                     }
@@ -1044,6 +1068,7 @@ namespace Agentmaster::Msg
                         item = std::move(*best);
                         _outbox.erase(best);
                         _lastSendMs = now;
+                        _noteCallLocked(now);
                     }
                 }
                 if (waitMs > 0)
@@ -1075,9 +1100,15 @@ namespace Agentmaster::Msg
                     // Telegram's pacing verdict: wait what it says, then retry the same item once.
                     const int64_t wait = std::max<int64_t>(1, r.retryAfterSec) * 1000;
                     _log(L"[msg] pacing: 429 on " + item.method + L", waiting " + std::to_wstring(wait / 1000) + L" s");
+                    _noteFlood(item.method, r.retryAfterSec);
                     for (int64_t slept = 0; slept < wait && !_stop.load(); slept += 250)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    }
+                    {
+                        std::lock_guard lk{ _mtx };
+                        _lastSendMs = static_cast<int64_t>(::GetTickCount64());
+                        _noteCallLocked(_lastSendMs); // the retry is a call into the chat too
                     }
                     if (item.document)
                     {
@@ -1485,6 +1516,7 @@ namespace Agentmaster::Msg
                 if (_lastSendMs == 0 || now - _lastSendMs >= kSendGapMs)
                 {
                     _lastSendMs = now;
+                    _noteCallLocked(now); // the history replay's budget counts the direct calls too
                     ++_trafficByMethod[method];
                     return true;
                 }
@@ -1492,6 +1524,29 @@ namespace Agentmaster::Msg
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(waitMs, 1200)));
         }
+    }
+
+    void MessagingService::_noteCallLocked(int64_t tickMs)
+    {
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        while (!_recentCallsMs.empty() && now - _recentCallsMs.front() >= kCallWindowMs)
+        {
+            _recentCallsMs.pop_front();
+        }
+        if (tickMs > 0)
+        {
+            _recentCallsMs.push_back(tickMs);
+        }
+    }
+
+    void MessagingService::_noteFlood(const std::wstring& method, int retryAfterSec)
+    {
+        {
+            std::lock_guard lk{ _mtx };
+            _floodAtMs = static_cast<int64_t>(::GetTickCount64());
+        }
+        _log(L"[msg] history replay paused " + std::to_wstring(kHistoryFloodPauseMs / 60000) + L" min: Telegram refused a " + method + L" (429, retry after " +
+             std::to_wstring(retryAfterSec) + L" s); live messages go on");
     }
 
     // ===== the outbox ========================================================================
@@ -1708,12 +1763,12 @@ namespace Agentmaster::Msg
         {
             // The echo guard's memory (_takeSecretaryEcho): if Telegram hands the message back to the bot as a
             // message from the owner in this topic, it must never be queued as a new prompt. A HISTORY message (§21.9)
-            // may wait in the outbox for minutes behind the live traffic (a replay batch is dropped and sent again after
-            // kBackfillStallMs at most), so its echo is expected that much later — an old prompt of the history taken for
-            // a new one would be SENT to the session again.
+            // may wait in the outbox for a long time behind the live traffic and the flood budget, so its echo is expected
+            // that much later (kHistoryEchoMs) — an old prompt of the history taken for a new one would be SENT to the
+            // session again.
             std::lock_guard lk{ _mtx };
             const int64_t now = WallMs();
-            const int64_t expires = now + kSecretaryEchoMs + (prio == SendPriority::History ? kBackfillStallMs : 0);
+            const int64_t expires = now + (prio == SendPriority::History ? kHistoryEchoMs : kSecretaryEchoMs);
             std::erase_if(_secretaryEchoes, [now](const SecretaryEcho& e) { return e.expiresMs < now; });
             for (const auto& part : parts)
             {
@@ -2374,6 +2429,7 @@ namespace Agentmaster::Msg
             {
                 // Telegram's pacing verdict: wait what it says (stop-aware) and try the same topic again next tick.
                 _log(L"[msg] pacing: 429 on deleteForumTopic, waiting " + std::to_wstring((std::max)(1, r.retryAfterSec)) + L" s");
+                _noteFlood(L"deleteForumTopic", r.retryAfterSec);
                 const int64_t waitMs = static_cast<int64_t>((std::max)(1, r.retryAfterSec)) * 1000;
                 for (int64_t slept = 0; slept < waitMs && !_stop.load(); slept += 250)
                 {
@@ -2437,6 +2493,7 @@ namespace Agentmaster::Msg
         {
             if (r.httpStatus == 429)
             {
+                _noteFlood(L"createForumTopic", r.retryAfterSec);
                 std::this_thread::sleep_for(std::chrono::seconds(std::max(1, r.retryAfterSec)));
             }
             _log(L"[msg] topic create failed for " + ShortId(sessionId) + L": " + r.description);
@@ -2672,16 +2729,19 @@ namespace Agentmaster::Msg
                     {
                         if (_backfill.inFlight > 0)
                         {
-                            if (now - _backfill.startedMs < kBackfillStallMs)
-                            {
-                                return; // still going out
-                            }
-                            // Stalled (a send that never answered): dropped, with what of it is still queued, and read again
-                            // from the uncommitted position. At worst some of its messages show twice; none is lost.
+                            // Still going out while any of its messages is QUEUED (the flood budget and the live traffic
+                            // decide when) or an answer came lately; stalled only when every message left the outbox and
+                            // none was answered for kBackfillStallMs (a send that never answered).
                             const int64_t thread = _backfill.threadId;
-                            std::erase_if(_outbox, [thread](const OutItem& o) { return o.prio == SendPriority::History && ThreadIdOf(o.params) == thread; });
+                            const bool queued = std::any_of(_outbox.begin(), _outbox.end(), [thread](const OutItem& o) { return o.prio == SendPriority::History && ThreadIdOf(o.params) == thread; });
+                            if (queued || now - std::max(_backfill.startedMs, _backfill.lastAnswerMs) < kBackfillStallMs)
+                            {
+                                return;
+                            }
+                            // Dropped and read again from the uncommitted position: at worst some of its messages show twice;
+                            // none is lost.
                             note = L"[msg] history of " + ShortId(_backfill.sessionId) + L": a batch of " + std::to_wstring(_backfill.posts) + L" message(s) had " +
-                                   std::to_wstring(_backfill.inFlight) + L" unanswered after " + std::to_wstring(kBackfillStallMs / 60000) + L" min; it is sent again";
+                                   std::to_wstring(_backfill.inFlight) + L" unanswered for " + std::to_wstring(kBackfillStallMs / 60000) + L" min; it is sent again";
                             _backfill = BackfillBatch{};
                         }
                         else
@@ -2731,7 +2791,10 @@ namespace Agentmaster::Msg
                     std::lock_guard lk{ _mtx };
                     orphans = !_state.orphanThreads.empty();
                 }
-                if (orphans || (_recreating && now - _recreateStartedMs < kRecreateListWaitMs))
+                // ...and nothing while the START-UP HOLD lasts: the order keys come from the sessions the windows have
+                // re-homed, so before that every topic ranks the same and the replay would start anywhere (the 00:07
+                // restart of the first live run began with an old session).
+                if (orphans || (_recreating && now - _recreateStartedMs < kRecreateListWaitMs) || _startupHoldOpen)
                 {
                     return;
                 }
@@ -2795,7 +2858,7 @@ namespace Agentmaster::Msg
                     continue;
                 }
                 int64_t day = t.backfillDayKey;
-                std::vector<HistoryPost> posts;
+                std::vector<HistoryPlanPost> posts;
                 if (!w.items.empty())
                 {
                     // The ⚙ of a prompt the runner sent (in the bot's line): the session's queue knows the newest of them.
@@ -2810,7 +2873,7 @@ namespace Agentmaster::Msg
                             }
                         }
                     }
-                    posts = RenderHistory(w.items, w.turnContinues, day, [&runner](const std::wstring& text) {
+                    posts = PlanHistoryPosts(w, day, [&runner](const std::wstring& text) {
                         return !runner.empty() && runner.count(NormalizePromptTextForCompare(text)) > 0;
                     });
                 }
@@ -2856,36 +2919,54 @@ namespace Agentmaster::Msg
                 _replayPosts += posts.size();
                 auto self = weak_from_this();
                 const int64_t thread = t.threadId;
-                const std::function<void(const TgResult&)> answered = [self, seq](const TgResult& r) {
-                    auto me = self.lock();
-                    if (!me)
-                    {
-                        return;
-                    }
-                    bool last = false;
-                    {
-                        std::lock_guard lk{ me->_mtx };
-                        // An answer of a dropped batch (stalled, or its topic deleted or carried over) never counts down the next one.
-                        if (me->_backfill.active && me->_backfill.seq == seq && me->_backfill.inFlight > 0)
+                // Each post's answer counts the batch down; a turn's LAST post also commits the turn (its end and day), so a
+                // stop midway re-sends at most the turn that was going out. A refused post commits too: the replay goes on.
+                const auto answeredFor = [self, seq, thread, sid](int64_t commitTo, int64_t dayAfter) {
+                    return std::function<void(const TgResult&)>{ [self, seq, thread, sid, commitTo, dayAfter](const TgResult& r) {
+                        auto me = self.lock();
+                        if (!me)
                         {
-                            if (!r.ok && me->_backfill.failed++ == 0)
+                            return;
+                        }
+                        bool last = false;
+                        {
+                            std::lock_guard lk{ me->_mtx };
+                            // An answer of a dropped batch (stalled, or its topic deleted or carried over) never counts down the next one.
+                            if (me->_backfill.active && me->_backfill.seq == seq && me->_backfill.inFlight > 0)
                             {
-                                me->_backfill.firstFailure = r.description.empty() ? L"HTTP " + std::to_wstring(r.httpStatus) : r.description;
-                            }
-                            last = --me->_backfill.inFlight == 0;
-                            if (last)
-                            {
-                                me->_tickRequested = true; // the next window goes out without waiting for the tick's period
+                                const int64_t answeredAt = WallMs();
+                                me->_backfill.lastAnswerMs = answeredAt;
+                                if (!r.ok && me->_backfill.failed++ == 0)
+                                {
+                                    me->_backfill.firstFailure = r.description.empty() ? L"HTTP " + std::to_wstring(r.httpStatus) : r.description;
+                                }
+                                if (commitTo > 0)
+                                {
+                                    if (const auto it = me->_state.topics.find(sid); it != me->_state.topics.end() && it->second.threadId == thread)
+                                    {
+                                        it->second.backfillPos = std::max(it->second.backfillPos, std::min(commitTo, it->second.backfillEnd));
+                                        it->second.backfillDayKey = dayAfter;
+                                        it->second.lastPostedMs = std::max(it->second.lastPostedMs, answeredAt); // in the topic now (see the batch commit)
+                                        me->_stateDirty = true;
+                                    }
+                                }
+                                last = --me->_backfill.inFlight == 0;
+                                if (last)
+                                {
+                                    me->_tickRequested = true; // the next window goes out without waiting for the tick's period
+                                }
                             }
                         }
-                    }
-                    if (last)
-                    {
-                        me->_tickCv.notify_one();
-                    }
+                        if (last)
+                        {
+                            me->_tickCv.notify_one();
+                        }
+                    } };
                 };
-                for (const auto& p : posts)
+                for (const auto& planned : posts)
                 {
+                    const HistoryPost& p = planned.post;
+                    const std::function<void(const TgResult&)> answered = answeredFor(planned.commitTo, planned.dayAfter);
                     if (p.fromUser && asUser)
                     {
                         // SECRETARY MODE (§21.5): the user's turn is the user's own bubble, as it was in the conversation. A
