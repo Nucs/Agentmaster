@@ -1,0 +1,1 @@
+{ "name": "libprobe2", "version": "0.0.1", "description": "Throwaway probe: does a bare import specifier resolve from the plugin's own node_modules?" }

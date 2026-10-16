@@ -1,0 +1,1 @@
+{ "name": "libprobe", "version": "0.0.1", "description": "Throwaway probe: vendored third-party libraries (fflate, nanoid) imported by relative path, and which globals a mod's environment has." }

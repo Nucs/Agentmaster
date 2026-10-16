@@ -1,0 +1,1 @@
+{ "name": "libprobe4", "version": "0.0.1", "description": "Throwaway probe: do the setTimeout / setInterval globals of a mod environment actually fire?" }

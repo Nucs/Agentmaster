@@ -2,7 +2,9 @@
 
 > **Status: DESIGN (2026-10-16). Nothing is built.** The Phase 0 probes in §3 ran on this machine against
 > Claude Code 2.1.291; their tools are in `tools/mod-link-probe/`. The open measurements are §11, the
-> decisions for the user are §12.
+> decisions for the user are §12. F11–F14 (what a mod can import and which globals it has) were added the same
+> day, in answer to the user's "What language is the mod written in? can we use 3rd party libraries to
+> communicate to the agentmaster process".
 >
 > **The user's ask (2026-10-16):** "design a new integration between agentmaster to claude code sessions via
 > mods. Supporting 100+ sessions on a machine efficiently and low-cost. Features like queue and the status can
@@ -103,6 +105,10 @@ from an empty folder. The probes: `tools/mod-link-probe/`.
 | F8 | **Memory per claude.exe** (median private / working set over a steady 12 s window, 2–3 runs each): no mod 403–434 / 225–229 MB; one link-like mod 486–517 / 262–278 MB; the same mod with no network 489–509 / 278 MB; the user's 3 mods 535–538 / 292–294 MB; those 3 + the link-like mod 525–550 / 293–299 MB. | The mod runtime costs **~+85 MB private / +50 MB working set** on a process's first mod, network or not. One more mod is noise (+1 MB median). The user's sessions already pay it. |
 | F9 | **An open fetch holds a headless session's end until it answers.** In 5 of 5 runs with a 25 s long-poll the process exited ~13–14 s later (~52 s vs 35–40 s), and `session.end` arrived ~40 ms after a poll answered; the runs without a poll exited on time. `HttpInit` has no abort signal. | The held poll must be short and released by the server (§4.3). Whether an *interactive* exit is held too is Q1. |
 | F10 | A plugin's `$.store` is one JSON file per plugin id (`<name>@inline` for every `--plugin-dir` folder), shared machine-wide, 4 MiB in all. | The link keeps no per-session data in `$.store`; Agentmaster is the durable store. |
+| F11 | **Third-party code loads only as the plugin's own files.** Real npm packages vendored as ES-module files and imported by relative path work: fflate 0.8.2 gzipped 13,000 chars to 91 bytes and back (7.6 ms, first call); nanoid 3.3.11 drew an id from `crypto.getRandomValues`. A bare import (`from 'pkg'`, resolved from the plugin's own `node_modules`) is refused at load: *"a hooks module imports its own files by relative path and "claude-code", nothing else"*. | A dependency is bundled into the mod's files at build time (§5). |
+| F12 | **No network API of the mod's own:** `fetch`, `WebSocket`, `XMLHttpRequest` and `EventSource` are absent, and so are `Worker`, `MessageChannel`, `WebAssembly`, `ReadableStream`, `CompressionStream`, `Blob`, `SharedArrayBuffer`, `process`, `require`, `Bun`. Present: `crypto` (incl. `subtle.digest`), `TextEncoder`/`TextDecoder`, `URL`, `AbortController`, `structuredClone`, `performance`, `console`, `Intl`, `Uint8Array.fromBase64` / `toBase64`. | Every byte to Agentmaster goes through `$.http.fetch`. Client libraries that open their own sockets (gRPC, WebSocket, Socket.IO, SignalR, ZeroMQ, NATS, MQTT, Redis) cannot run in a mod. |
+| F13 | Code generation throws at run time (`EvalError: Code generation from strings disallowed for this context`, for `eval` and `new Function`). A module whose source merely contains them loads. | A library is usable only if the paths the mod calls never compile strings (schema compilers and template engines usually do). |
+| F14 | `setTimeout` / `setInterval` exist and fire (51 ms for a 50 ms timer; 3 ticks at 30 ms in 92 ms) although the API declares no timers. They are host stand-ins: their prototype is not `Function.prototype`, and converting one to a string throws `TypeError: No default value`. | Library code that debounces or retries works today, but this is undocumented: the mod's own waits use `$.clock`. |
 
 Verified earlier, live, by `prompt-queue` (SPEC §14, Claude Code 2.1.287 and 2.1.296):
 - `$.prompt.submit({ text, asUser: true })` starts a turn of its own after the running turn **and its Stop hooks**
@@ -194,6 +200,25 @@ survey.
 **Why not the pipe:** F3. **Why AF_UNIX first:** no port to allocate or scan, access by the profile folder's ACL, no
 firewall or AV surface. TCP is the fallback for a profile path over ~100 bytes (portable installs) and for a failed
 bind.
+
+**Why not gRPC, WebSockets or a message bus:** a mod has no socket of its own (F12). `$.http.fetch` is plain
+HTTP/1.1, request and response, with text bodies and no streaming. A binary encoding (MessagePack, protobuf) would
+ride in those bodies as base64. At this protocol's size it buys nothing: a state event is 100–300 bytes of JSON, a
+turn makes about ten of them, and a request costs 3–6 ms on the mod's side (F1, F2). The efficiency comes from the
+protocol's shape (batched events, one keep-alive connection, a held poll, an asynchronous server), not from a
+library.
+
+**The server side is Agentmaster's C++, where any library is allowed.** What 100+ sessions require is
+asynchronous I/O. Each session holds a keep-alive connection plus at times a held poll, so ~200 sockets that are
+idle almost always. That calls for I/O completion ports (Winsock IOCP; Boost.Asio / Beast do it), never a
+thread per connection: cpp-httplib's blocking thread pool would park one thread on every held poll. The Windows
+HTTP Server API (http.sys) is asynchronous but speaks TCP only, with no AF_UNIX. The engine already does overlapped
+I/O on its named pipe (`HooksBridge`) and on the SDK harness's pipes.
+
+**Why not a native sidecar per session** (any language, any library, started by the mod with
+`$.process.spawn`): it adds a process to every session, 100+ in all. And a spawned child's stdin is a single string
+handed over at start, so the mod could still reach the sidecar only through HTTP or files. It adds a hop and a
+failure mode and saves nothing.
 
 ### 4.4 Status from inside the session
 
@@ -337,6 +362,15 @@ runtime's ~90 MB (F8).
 
 ## 5. The mod
 
+- **Language and dependencies.** TypeScript (`.ts`), compiled by Claude Code's own runtime. The host's HTTP client
+  reports `Bun/1.4.3`; each plugin gets an environment of its own with no Node and no DOM (F11–F14).
+  - The source may use npm packages, but what ships is one bundle. Build it with esbuild or Bun
+    (`--bundle --format=esm --platform=neutral`, code splitting off, `claude-code` external as types only).
+  - The loader takes only relative imports (F11), and a module holding a dynamic `import()` does not load.
+  - Fit for the bundle: pure JavaScript with no Node built-ins, no sockets, and no run-time `eval` /
+    `new Function` on the paths the mod calls (F13).
+  - The link needs almost nothing of that kind: JSON encoding, an id generator and a small state reducer are a few
+    hundred lines of its own.
 - **One module, observe-only.** Hooks: `session.start`, `session.end`, `classic.SessionStart`, `classic.Stop`,
   `classic.StopFailure`, `classic.PermissionRequest`, `classic.PermissionDenied`, `classic.PostModelSwitch`,
   `prompt.submit`, `turn.start`, `turn.complete`, `session.compact`, `session.measure`, `command.run`, and
