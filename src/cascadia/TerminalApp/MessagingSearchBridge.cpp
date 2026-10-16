@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — MessagingSearchBridge (see the header): a SessionSearchAgent behind the service's seam.
+// Agentmaster — MessagingSearchBridge (see the header): the process's ONE telegram-search conversation, and the bridges
+// that attach the messaging service to it.
 
 #include "MessagingSearchBridge.h"
 
@@ -11,7 +12,7 @@
 #include "AgentMaster/AgentHarnessCore.h" // ParseHarnessThinkingLevel
 #include "AgentMaster/ClaudeSpawn.h" // AgentmasterStateDir, LogSwallowedException
 #include "AgentMaster/Engine.h" // SharedEngine (the registry's open sessions, claudeExePath)
-#include "AgentMaster/Persistence.h" // LoadAppSettings (the session database mode)
+#include "AgentMaster/Persistence.h" // LoadAppSettings (the session database mode, the start thinking level)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionSearchAgent.h"
 #include "AgentMaster/TranscriptStore.h" // PickDisplayTitle
@@ -45,29 +46,51 @@ namespace Agentmaster::Msg
             return rows;
         }
 
-        class Bridge final : public SearchBridge
+        /// <summary>The thinking level a word names; the Search topic's default (high, the user's rule D24) for an empty or unknown word.</summary>
+        /// <param name="word">"off" … "max" (AppSettings::messagingSearchThinking).</param>
+        /// <returns>The level.</returns>
+        HarnessThinkingLevel ThinkingLevelFromWord(std::wstring_view word) noexcept
         {
-        public:
-            Bridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord) :
-                _sink(std::move(sink))
+            if (const auto level = ParseHarnessThinkingLevel(word))
             {
+                return *level;
+            }
+            return HarnessThinkingLevel::High;
+        }
+
+        /// <summary>
+        /// The process's ONE telegram-search conversation (§21.7), made on the first call and never destroyed — the
+        /// Sessions page's SharedSessionSearchAgent() twin. Leaked on purpose for the same reason: the app ends with
+        /// TerminateProcess, and its claude.exe child is ended by the harness's kill-on-close job; a static destructor
+        /// would join threads at a moment the process may no longer run them. It persists its record and its last shown
+        /// list (<profile>\harness\telegram-search*.json), so it carries on after a stop of the bot, a park and an app
+        /// restart; Reset is the user's way to clear it.
+        /// </summary>
+        /// <returns>The conversation.</returns>
+        /// <exception cref="std::bad_alloc">If it cannot be allocated (first call only; a later call tries again).</exception>
+        /// <exception cref="std::system_error">If its worker thread cannot start (first call only; a later call tries again).</exception>
+        SessionSearchAgent& TelegramSearchAgent()
+        {
+            static SessionSearchAgent* const agent = [] {
                 SessionSearchAgentOptions options;
-                options.name = L"telegram-search"; // its own conversation: <profile>\harness\telegram-search.json (D24)
+                options.name = L"telegram-search"; // its own conversation, never the page's (D24)
                 options.persist = true;
                 options.thinkingLevel = HarnessThinkingLevel::High; // the user's rule for the Search topic
-                if (const auto level = ParseHarnessThinkingLevel(thinkingWord))
-                {
-                    options.thinkingLevel = *level;
-                }
                 try
                 {
-                    if (LoadAppSettings().sessionDbMode == SessionDbMode::On)
+                    // The start level the cog holds now (a bridge sets the level again, live); the session database's
+                    // tools when it is On, read once like the page's agent (SESSIONS_DB.md §8.2: a change of the mode
+                    // reaches the agent at the next start of the app).
+                    const AppSettings settings = LoadAppSettings();
+                    options.thinkingLevel = ThinkingLevelFromWord(settings.messagingSearchThinking);
+                    if (settings.sessionDbMode == SessionDbMode::On)
                     {
-                        options.sessionDbProfile = AgentmasterStateDir(); // SESSIONS_DB.md §8.2: the database's tools when it is On
+                        options.sessionDbProfile = AgentmasterStateDir();
                     }
                 }
                 catch (...)
                 {
+                    // Rule #18. Recovery: the conversation starts at high thinking on the page search.
                     LogSwallowedException(L"telegram-search: read the settings");
                 }
                 options.claudeExe = [] { return SharedEngine().claudeExePath; };
@@ -89,99 +112,143 @@ namespace Agentmaster::Msg
                     }
                     return open;
                 };
-                _agent = std::make_unique<SessionSearchAgent>(std::move(options));
-                _token = _agent->AddListener([this](const SessionSearchEvent& e) { _onEvent(e); });
+                return new SessionSearchAgent{ std::move(options) };
+            }();
+            return *agent;
+        }
+
+        /// <summary>
+        /// What one bridge shares with its listener: the service's sink and the rows of the request in flight. Owned by
+        /// the bridge through a shared_ptr that the listener captures WEAKLY, because the conversation outlives every
+        /// bridge and RemoveListener does not wait for a call that is already running: such a call holds the state alive
+        /// through its own lock(), and any later call finds it gone.
+        /// </summary>
+        struct BridgeState
+        {
+            std::function<void(const SearchBridgeEvent&)> sink;
+            std::mutex mtx; // guards lastRows
+            std::vector<SearchRow> lastRows; // the latest Shown of the request in flight; handed to its Answer, then cleared
+        };
+
+        /// <summary>
+        /// Maps one conversation event to the service's four: Searching, Shown (with its rows, remembered for the
+        /// Answer), Answer (with the request's last shown rows, or none when it showed nothing) and Failed. State changes,
+        /// candidates, compactions and resets show nothing in a topic.
+        /// </summary>
+        /// <param name="st">The bridge's state.</param>
+        /// <param name="e">The event, on the conversation's threads.</param>
+        void ForwardAgentEvent(BridgeState& st, const SessionSearchEvent& e) noexcept
+        {
+            try
+            {
+                SearchBridgeEvent out;
+                out.turn = e.turn;
+                switch (e.kind)
+                {
+                case SessionSearchEventKind::Searching:
+                    out.kind = SearchBridgeEvent::Kind::Searching;
+                    out.text = e.text;
+                    break;
+                case SessionSearchEventKind::Shown:
+                {
+                    out.kind = SearchBridgeEvent::Kind::Shown;
+                    out.text = e.text;
+                    out.rows = RowsFrom(e.sessionIds, e.entries);
+                    std::lock_guard lk{ st.mtx };
+                    st.lastRows = out.rows;
+                    break;
+                }
+                case SessionSearchEventKind::Answer:
+                {
+                    out.kind = SearchBridgeEvent::Kind::Answer;
+                    out.text = e.text;
+                    std::lock_guard lk{ st.mtx };
+                    out.rows = std::move(st.lastRows);
+                    st.lastRows.clear();
+                    break;
+                }
+                case SessionSearchEventKind::Failed:
+                    out.kind = SearchBridgeEvent::Kind::Failed;
+                    out.text = e.text;
+                    break;
+                default:
+                    return; // state changes, candidates, compactions, resets: nothing to show in a topic
+                }
+                if (st.sink)
+                {
+                    st.sink(out);
+                }
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"telegram-search: an agent event");
+            }
+        }
+
+        // A bridge: this start of the bot's attachment to the process's conversation (see the header).
+        class Bridge final : public SearchBridge
+        {
+        public:
+            Bridge(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord) :
+                _state(std::make_shared<BridgeState>())
+            {
+                _state->sink = std::move(sink);
+                SessionSearchAgent& agent = TelegramSearchAgent();
+                // The level the cog holds NOW: an earlier start of the bot may have made the conversation with another one.
+                // Before the listener, so the StateChanged event this raises reaches nobody.
+                agent.SetThinkingLevel(ThinkingLevelFromWord(thinkingWord));
+                std::weak_ptr<BridgeState> weak = _state;
+                _token = agent.AddListener([weak](const SessionSearchEvent& e) {
+                    if (const auto st = weak.lock())
+                    {
+                        ForwardAgentEvent(*st, e);
+                    }
+                });
             }
 
             ~Bridge() override
             {
                 try
                 {
-                    if (_agent)
-                    {
-                        _agent->RemoveListener(_token);
-                        _agent->Shutdown();
-                    }
+                    // Detach only: the conversation is the process's, and the next start of the bot attaches to it again.
+                    TelegramSearchAgent().RemoveListener(_token);
                 }
                 catch (...)
                 {
-                    LogSwallowedException(L"telegram-search: shutdown");
+                    LogSwallowedException(L"telegram-search: detach a bridge");
                 }
             }
 
             uint64_t Ask(std::wstring text) override
             {
-                _agent->Prewarm(true);
-                return _agent->Ask(std::move(text));
+                SessionSearchAgent& agent = TelegramSearchAgent();
+                agent.Prewarm(true); // the index and the process, if a park ended them
+                return agent.Ask(std::move(text));
             }
 
             void Reset() override
             {
-                _agent->Reset();
-                std::lock_guard lk{ _mtx };
-                _lastRows.clear();
+                TelegramSearchAgent().Reset();
+                std::lock_guard lk{ _state->mtx };
+                _state->lastRows.clear();
             }
 
             void Park(int64_t delayMs) override
             {
-                _agent->ReleaseCatalog();
-                _agent->ParkProcessAfter(delayMs);
+                SessionSearchAgent& agent = TelegramSearchAgent();
+                agent.ReleaseCatalog();
+                agent.ParkProcessAfter(delayMs);
+            }
+
+            void SetThinkingLevel(std::wstring word) noexcept override
+            {
+                // TelegramSearchAgent() cannot throw here: this bridge's constructor made the conversation.
+                TelegramSearchAgent().SetThinkingLevel(ThinkingLevelFromWord(word));
             }
 
         private:
-            void _onEvent(const SessionSearchEvent& e) noexcept
-            {
-                try
-                {
-                    SearchBridgeEvent out;
-                    out.turn = e.turn;
-                    switch (e.kind)
-                    {
-                    case SessionSearchEventKind::Searching:
-                        out.kind = SearchBridgeEvent::Kind::Searching;
-                        out.text = e.text;
-                        break;
-                    case SessionSearchEventKind::Shown:
-                    {
-                        out.kind = SearchBridgeEvent::Kind::Shown;
-                        out.text = e.text;
-                        out.rows = RowsFrom(e.sessionIds, e.entries);
-                        std::lock_guard lk{ _mtx };
-                        _lastRows = out.rows;
-                        break;
-                    }
-                    case SessionSearchEventKind::Answer:
-                    {
-                        out.kind = SearchBridgeEvent::Kind::Answer;
-                        out.text = e.text;
-                        std::lock_guard lk{ _mtx };
-                        out.rows = _lastRows;
-                        _lastRows.clear();
-                        break;
-                    }
-                    case SessionSearchEventKind::Failed:
-                        out.kind = SearchBridgeEvent::Kind::Failed;
-                        out.text = e.text;
-                        break;
-                    default:
-                        return; // state changes, compactions, resets: nothing to show in a topic
-                    }
-                    if (_sink)
-                    {
-                        _sink(out);
-                    }
-                }
-                catch (...)
-                {
-                    LogSwallowedException(L"telegram-search: an agent event");
-                }
-            }
-
-            std::function<void(const SearchBridgeEvent&)> _sink;
-            std::unique_ptr<SessionSearchAgent> _agent;
+            std::shared_ptr<BridgeState> _state;
             uint64_t _token{ 0 };
-            std::mutex _mtx;
-            std::vector<SearchRow> _lastRows;
         };
     }
 

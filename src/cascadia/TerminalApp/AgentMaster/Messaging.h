@@ -93,19 +93,28 @@ namespace Agentmaster::Msg
         std::vector<SearchRow> rows;
     };
 
-    // The agent as the service sees it. Every method may be called from the service's threads.
+    // The agent as the service sees it. Every method may be called from the service's threads. Behind it is the
+    // process's ONE telegram-search conversation (§21.7): a bridge only attaches the service's sink to it, so a stop and
+    // a start of the bot make a new bridge to the same conversation, and destroying a bridge never ends it.
     struct SearchBridge
     {
         virtual ~SearchBridge() = default;
         // Ask; the answer comes through the sink the factory was given. Returns the turn id (0 = ignored).
         virtual uint64_t Ask(std::wstring text) = 0;
-        // Throw the conversation away (the Search topic's /reset).
+        // Throw the conversation away (the Search topic's /clear, /reset and ⊘ Clear): the context, the record and the
+        // shown list; the next request starts a fresh conversation. Works on a parked conversation too.
         virtual void Reset() = 0;
-        // Free the index and end the idle process after `delayMs` (nothing was asked for a while).
+        // Free the index and end the idle process after `delayMs` (nothing was asked for a while). The conversation is
+        // kept: the next request continues it from its record.
         virtual void Park(int64_t delayMs) = 0;
+        // How much the model thinks from the next request on ("off" … "max"; an unknown word reads as high, the Search
+        // topic's default). It changes the RUNNING conversation (SessionSearchAgent::SetThinkingLevel), so the cog's
+        // level reaches the one process-wide conversation without throwing its context away. Never throws.
+        virtual void SetThinkingLevel(std::wstring word) noexcept = 0;
     };
 
-    // Makes the agent on first use. thinkingWord = "off" … "max" (AppSettings::messagingSearchThinking).
+    // Makes a bridge to the process's one Search conversation (the conversation itself is made on first use and never
+    // destroyed). thinkingWord = "off" … "max" (AppSettings::messagingSearchThinking), applied to the conversation.
     using SearchBridgeFactory = std::function<std::unique_ptr<SearchBridge>(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord)>;
 
     // ===== what the service needs from the app ================================================
@@ -423,7 +432,52 @@ namespace Agentmaster::Msg
         void _sweepRevives(const SessionInfo& s);
         void _askSearch(const std::wstring& text, int64_t threadId);
         void _onSearchEvent(const SearchBridgeEvent& ev) noexcept;
+        /// <summary>
+        /// Posts a Search answer (§21.7): the model's sentence, the sessions of THIS request as numbered rows (each with
+        /// where it stands now), one PICK button per row and a "⊘ Clear" button — with sound, the answer being the
+        /// request's final message. Every listed row is remembered for the picks (`_searchRowInfo`).
+        /// </summary>
+        /// <param name="ev">The Answer event; its rows are the request's last shown list (empty when it showed none).</param>
         void _postSearchResults(const SearchBridgeEvent& ev);
+        /// <summary>
+        /// Makes the bridge to the Search conversation when this start of the bot has none yet (the factory set by the app
+        /// at engine init). Poll thread (a message or a button); takes `_mtx`.
+        /// </summary>
+        /// <param name="threadId">Where to say so when there is no search in this build, or it could not start.</param>
+        /// <returns>True when `_search` exists now.</returns>
+        bool _ensureSearchBridge(int64_t threadId);
+        /// <summary>
+        /// CLEARS the Search conversation (the user's one action on it, §21.7 — the Sessions page's crossed circle): the
+        /// agent forgets the context and deletes its record and shown list, and a silent line in the topic marks where
+        /// the next request starts fresh. Works before any search of this run (the bridge is made for it, so a record left
+        /// by an earlier run is cleared too) and on a parked conversation. Poll thread.
+        /// </summary>
+        /// <param name="threadId">The Search topic (where the line goes).</param>
+        /// <param name="replyTo">The /clear message to answer, or 0 (a button).</param>
+        void _clearSearch(int64_t threadId, int64_t replyTo);
+        /// <summary>
+        /// A PICK of a Search answer's row (§21.7): posts the ACTION MENU of that session as a reply to the answer — its
+        /// title, folder and last activity as the answer listed them (else the registry's record, else the short id),
+        /// where it stands NOW, and ▶ Resume / ▶ Resume 📌 / ⑂ Fork / ✕ Cancel as single-use tokens (M5) that carry the
+        /// row number, folder and title. Silent (a menu is no final message). Poll thread.
+        /// </summary>
+        /// <param name="pick">The pick read from the button.</param>
+        /// <param name="threadId">The Search topic.</param>
+        /// <param name="answerMessageId">The answer message the pick button sits on (the menu replies to it); 0 = none.</param>
+        void _showSearchPick(const SearchPick& pick, int64_t threadId, int64_t answerMessageId);
+        /// <summary>
+        /// Carries out a tapped action of a Search pick's menu, on the session's CURRENT state (it may have changed since
+        /// the menu): Resume opens a closed session into a background tab, wakes an idle tab, and only says so for a session
+        /// that has its topic already (with 📌 it pins it); Fork forks it into a new tab, never pinned (no fork-and-pin, the
+        /// user's rule); Cancel deletes the menu. The menu message loses its buttons and keeps the choice (or, for an action
+        /// done at once, the outcome). Poll thread.
+        /// </summary>
+        /// <param name="kind">The token's kind: "pick-resume", "pick-resume-pin", "pick-fork" or "pick-cancel".</param>
+        /// <param name="sessionId">The picked session.</param>
+        /// <param name="payload">The token's payload: "&lt;row number&gt;\n&lt;folder&gt;\n&lt;title&gt;".</param>
+        /// <param name="threadId">The Search topic.</param>
+        /// <param name="menuMessageId">The menu message the button sits on (edited or deleted); 0 = none.</param>
+        void _onSearchPickAction(const std::wstring& kind, const std::wstring& sessionId, const std::wstring& payload, int64_t threadId, int64_t menuMessageId);
         void _appNote(const std::wstring& html, bool sound);
 
         // ----- data -----
@@ -542,7 +596,16 @@ namespace Agentmaster::Msg
 
         SearchBridgeFactory _searchFactory;
         std::unique_ptr<SearchBridge> _search;
-        std::vector<SearchRow> _searchRows; // the last Shown
+        /// <summary>
+        /// The rows the Search answers of this run listed, by session id (title, folder, last activity as the answer
+        /// showed them): what a stateless PICK opens its menu with, and the folder and title a Resume / Fork hands to the
+        /// launch (a session Agentmaster never managed has no other source for its title). `_searchRowOrder` is the
+        /// insertion order for the cap (kSearchRowMemory, the oldest go first). Not persisted: after a restart a pick
+        /// falls back to the registry's record, else the short id, and the launch reads the folder from the transcript.
+        /// Under `_mtx`.
+        /// </summary>
+        std::unordered_map<std::wstring, SearchRow> _searchRowInfo;
+        std::deque<std::wstring> _searchRowOrder;
         int64_t _searchLastUsedMs{ 0 };
         bool _searchParked{ true };
     };

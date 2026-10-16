@@ -278,6 +278,7 @@ void TestSessionSearchTools();
 // tests_sessiondb.cpp
 void TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts: protocol names + framing, the tool definitions, the settings clamps, the watcher's change set (D16), the facts epoch, the AI search's database mode
 void TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp): Telegram HTML escaping / Markdown conversion / chunking, the transcript-line classifier, the topics = tabs sync decider with the idle grace, the /command router with the refusal tables, the state file, the card, the remote prompt's runner bypass (D30) and the pin hold (§5.3)
+void TestMessagingSearch(); // MESSAGING.md §5.4 / §21.7 — the 🔎 Search topic's pure rules (tests_messaging_search.cpp): /clear and /reset clear the search conversation, a session's command is refused there (it is not a session), the pick buttons' stateless callback data, the pick keyboard, where a picked session stands
 // TabCloseSuccessor.h (FAVORITES.md §4a): the tab focused after the FOCUSED tab closes — upstream's pick
 // kept when it starts nothing; a DORMANT successor replaced by the nearest (in-order) / most recently
 // used (MRU) tab that starts nothing; right-first ties, the Manager fallback, hostile/empty inputs
