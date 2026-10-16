@@ -645,6 +645,13 @@ namespace Agentmaster::Msg
         bool _resortFull{ false };
         int64_t _lastResortMs{ 0 };
         bool _resortTooLongLogged{ false };
+        /// <summary>
+        /// Tick thread: the re-sort's re-posts still to make, lowest-ranked first. `_resortTick` releases ONE per tick, and
+        /// only while the call window has room for its two calls (the old card's delete and the new card's send): a full
+        /// re-sort is ~2 calls per topic, and all at once — ~60 calls a minute for 48 topics — is over the chat's flood
+        /// budget. A re-post queued later can never overtake one queued before it (one priority, the outbox's order).
+        /// </summary>
+        std::deque<std::wstring> _resortQueue;
         std::unordered_set<std::wstring> _runningIds; // tick thread: the sessions the last sync saw Running (no re-sort while any runs)
         /// <summary>
         /// The START-UP HOLD on "closed" topic deletes (MESSAGING.md §21.4). `_startedMs` is when this run's
