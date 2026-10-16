@@ -67,6 +67,23 @@ namespace Agentmaster::Msg
         // How long a text sent AS THE USER is remembered for the echo guard (_takeSecretaryEcho): Telegram
         // delivers such a message back, if it does, within seconds; two minutes covers a slow poll.
         constexpr int64_t kSecretaryEchoMs = 2 * 60 * 1000;
+        // The HISTORY replay (§21.9). Its messages go out at most one per kBackfillGapMs (half the chat's ~1 call/s, so
+        // live traffic — which always goes first — keeps the other half; the whole history of 49 sessions is ~1,175
+        // messages, ~40 minutes). It reads a transcript in windows of kBackfillWindowBytes (a window that holds no complete
+        // line grows up to kBackfillWindowMaxBytes — one line can be a pasted image); a batch that did not finish sending
+        // in kBackfillStallMs is dropped and sent again from its start.
+        constexpr int64_t kBackfillGapMs = 2000;
+        constexpr int64_t kBackfillWindowBytes = 1024 * 1024;
+        constexpr int64_t kBackfillWindowMaxBytes = 64 * 1024 * 1024;
+        constexpr int64_t kBackfillStallMs = 10 * 60 * 1000;
+        // The topic list's re-sort (§21.9): at most once a minute, only after half a minute with nothing posted anywhere,
+        // and at most this many cards re-posted (a longer fix waits for a recreation or /recreate).
+        constexpr int64_t kResortEveryMs = 60 * 1000;
+        constexpr int64_t kResortQuietMs = 30 * 1000;
+        constexpr size_t kResortMaxTopics = 24;
+        // The replay waits for a RECREATION's new list (the old topics deleted, the new ones made — a minute or two), but not
+        // longer than this after the recreation started: a topic Telegram keeps refusing to make must not hold every history.
+        constexpr int64_t kRecreateListWaitMs = 5 * 60 * 1000;
         // How often the tick loop logs the outbound call census (`[msg] traffic (10 min): …`).
         constexpr int64_t kTrafficLogMs = 10 * 60 * 1000;
         // How much transcript a tick reads per session at most (a busy session writes kilobytes a second;
@@ -228,6 +245,7 @@ namespace Agentmaster::Msg
             std::wstring recapText; // the newest away_summary in the window (FoldRecapFacts)
             int64_t recapAtMs{ 0 };
             int64_t lastMessageAtMs{ 0 }; // the newest conversation item's time in the window
+            int64_t completeTo{ -1 }; // where the last complete line read ends (-1 = none read): a line end, never inside a torn last line
         };
 
         // Reads the last `windowBytes` of a transcript and folds every COMPLETE line of it: the recap facts and the
@@ -285,7 +303,79 @@ namespace Agentmaster::Msg
                 }
                 FoldRecapFacts(items, scan.recapText, scan.recapAtMs, scan.lastMessageAtMs);
             }
+            scan.completeTo = from + static_cast<int64_t>(pos); // after the loop `pos` is the first byte not read as a complete line
             return scan;
+        }
+
+        // Reads exactly [from, to) of a file, or less when the file is shorter now. Throws std::bad_alloc only.
+        std::string ReadFileRange(const std::wstring& path, int64_t from, int64_t to)
+        {
+            std::string out;
+            if (to <= from)
+            {
+                return out;
+            }
+            HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return out;
+            }
+            LARGE_INTEGER pos{};
+            pos.QuadPart = from;
+            if (::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN))
+            {
+                out.resize(static_cast<size_t>(to - from));
+                size_t got = 0;
+                while (got < out.size())
+                {
+                    DWORD read = 0;
+                    const DWORD want = static_cast<DWORD>(std::min<size_t>(out.size() - got, 16u * 1024u * 1024u));
+                    if (!::ReadFile(h, out.data() + got, want, &read, nullptr) || read == 0)
+                    {
+                        break;
+                    }
+                    got += read;
+                }
+                out.resize(got);
+            }
+            ::CloseHandle(h);
+            return out;
+        }
+
+        // Reads the next window of a HISTORY replay (§21.9) from [pos, end) of a transcript and splits it
+        // (SplitHistoryWindow: complete turns only). A window without one complete line grows (1 -> 4 -> 16 -> 64 MB; a
+        // pasted image can make one line megabytes long); a line longer than the largest window is skipped (the next
+        // window starts inside it, and its torn rest is dropped as unparsable). consumedTo -1 = the file is gone or shorter
+        // than `pos`. Throws std::bad_alloc only (the caller contains it).
+        HistoryWindow ReadHistoryWindow(const std::wstring& path, int64_t pos, int64_t end)
+        {
+            for (int64_t want = kBackfillWindowBytes;; want *= 4)
+            {
+                const int64_t to = std::min(end, pos + want);
+                const std::string bytes = ReadFileRange(path, pos, to);
+                if (bytes.size() < static_cast<size_t>(to - pos))
+                {
+                    return HistoryWindow{}; // shrunk or gone
+                }
+                HistoryWindow w = SplitHistoryWindow(bytes, pos, to >= end);
+                if (!w.needMore)
+                {
+                    return w;
+                }
+                if (want >= kBackfillWindowMaxBytes)
+                {
+                    HistoryWindow skip;
+                    skip.consumedTo = to;
+                    return skip;
+                }
+            }
+        }
+
+        // The topic an outbox item posts into (its message_thread_id), 0 = none (the bot's General chat, or not a post).
+        int64_t ThreadIdOf(const json::Value& params) noexcept
+        {
+            const auto* th = params.Find(L"message_thread_id");
+            return th && th->type == json::Value::Type::Num ? static_cast<int64_t>(th->num) : 0;
         }
 
         // FNV-1a 32 of a text with its surrounding whitespace dropped: the identity the secretary echo guard
@@ -508,6 +598,23 @@ namespace Agentmaster::Msg
                 _dirty.clear();
                 _seenLive.clear();
                 _secretaryEchoes.clear();
+                // The HISTORY replay (§21.9): no batch is in flight at a start (the outbox is empty), so a batch of the last
+                // run that was not committed is read again. A replay found pending is finished — and, when it was a
+                // recreation's (or any replay: the list is in replay order then), the list is re-sorted after it.
+                _backfill = BackfillBatch{};
+                _backfillAfterRecreation = false;
+                for (const auto& kv : _state.topics)
+                {
+                    _backfillAfterRecreation = _backfillAfterRecreation || TopicBackfillPending(kv.second);
+                }
+                _backfillPostsBy.clear();
+                _replayPosts = 0;
+                _replayTopics = 0;
+                _resortFull = false;
+                _lastResortMs = 0;
+                _resortTooLongLogged = false;
+                _runningIds.clear();
+                _recreateStartedMs = 0;
             }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
@@ -925,7 +1032,9 @@ namespace Agentmaster::Msg
                         }
                     }
                     const int64_t now = static_cast<int64_t>(::GetTickCount64());
-                    const int64_t gap = best->paced ? kSendGapMs : kLightGapMs;
+                    // A history message (§21.9) is only ever the best item when nothing else is queued, and it waits the
+                    // longer gap, so a replay never takes more than half of the chat's ~1 call/s.
+                    const int64_t gap = best->prio == SendPriority::History ? kBackfillGapMs : (best->paced ? kSendGapMs : kLightGapMs);
                     if (_lastSendMs != 0 && now - _lastSendMs < gap)
                     {
                         waitMs = gap - (now - _lastSendMs);
@@ -1098,6 +1207,7 @@ namespace Agentmaster::Msg
                                     _mirrors.clear();
                                     _cards.clear();
                                     _reacted.clear();
+                                    _backfill = BackfillBatch{}; // its topics are the old bot's
                                     _stateDirty = true;
                                 }
                                 if (id != 0 && _state.botId != id)
@@ -1289,6 +1399,10 @@ namespace Agentmaster::Msg
                     }
                     _refreshCard(sid, false);
                 }
+                // The HISTORY replay's next batch (§21.9), then the list's re-sort: both after the per-topic pass, so the
+                // live posts of this tick are queued first (they go first anyway: the replay has the lowest priority).
+                _pumpBackfill();
+                _resortTick();
                 // Revives for sessions that have no topic yet (a resumed session that is still Idle).
                 {
                     std::vector<std::wstring> reviveIds;
@@ -1554,7 +1668,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone)
+    void MessagingService::_sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone, SendPriority prio)
     {
         std::wstring connection;
         {
@@ -1593,19 +1707,23 @@ namespace Agentmaster::Msg
         }
         {
             // The echo guard's memory (_takeSecretaryEcho): if Telegram hands the message back to the bot as a
-            // message from the owner in this topic, it must never be queued as a new prompt.
+            // message from the owner in this topic, it must never be queued as a new prompt. A HISTORY message (§21.9)
+            // may wait in the outbox for minutes behind the live traffic (a replay batch is dropped and sent again after
+            // kBackfillStallMs at most), so its echo is expected that much later — an old prompt of the history taken for
+            // a new one would be SENT to the session again.
             std::lock_guard lk{ _mtx };
             const int64_t now = WallMs();
+            const int64_t expires = now + kSecretaryEchoMs + (prio == SendPriority::History ? kBackfillStallMs : 0);
             std::erase_if(_secretaryEchoes, [now](const SecretaryEcho& e) { return e.expiresMs < now; });
             for (const auto& part : parts)
             {
-                _secretaryEchoes.push_back(SecretaryEcho{ threadId, EchoHash(part), now + kSecretaryEchoMs });
+                _secretaryEchoes.push_back(SecretaryEcho{ threadId, EchoHash(part), expires });
             }
         }
         for (size_t i = 0; i < parts.size(); ++i)
         {
             OutItem item;
-            item.prio = SendPriority::New;
+            item.prio = prio;
             item.method = L"sendMessage";
             item.params = json::Value::MkObj();
             item.params.Set(L"business_connection_id", json::Value::MkStr(connection));
@@ -1896,6 +2014,7 @@ namespace Agentmaster::Msg
         std::unordered_map<std::wstring, SessionInfo> byId;
         const TabColorMode colorMode = LoadAppSettings().tabColorMode;
         _orderKeys.clear();
+        _runningIds.clear(); // the quiet re-sort (§21.9) waits while any session runs
         for (auto& s : _registry->SnapshotLiveForCards())
         {
             TabFact f;
@@ -1911,6 +2030,10 @@ namespace Agentmaster::Msg
             f.continuedFromId = s.continuedFromId; // ...also to a /handover-here successor, which takes the tab on a new connection
             f.mostRecentMs = MostRecentSortKeyMs(s); // the side panel's MOST RECENT key: the creates' order (§21.8)
             _orderKeys[s.id] = { f.mostRecentMs, s.title }; // ...and the tick's posting order
+            if (s.state == SessionState::Running)
+            {
+                _runningIds.insert(s.id);
+            }
             facts.push_back(std::move(f));
             byId.emplace(s.id, std::move(s));
         }
@@ -1976,9 +2099,11 @@ namespace Agentmaster::Msg
             bool recreate = false;
             bool waitForHold = false;
             bool busy = false;
+            int oldLayout = kTopicLayoutVersion;
             {
                 std::lock_guard lk{ _mtx };
                 busy = _recreating || !_state.orphanThreads.empty();
+                oldLayout = _state.topicLayout;
                 if (_state.topicLayout < kTopicLayoutVersion)
                 {
                     if (!NeedsTopicRecreation(_state))
@@ -2002,7 +2127,10 @@ namespace Agentmaster::Msg
             }
             if (recreate)
             {
-                _recreateTopics(L"topics made before the MOST RECENT order (layout " + std::to_wstring(kTopicLayoutVersion) + L")");
+                // Layout 1 (§21.8) made the list in MOST RECENT order; layout 2 (§21.9) puts every session's whole history in
+                // its topic.
+                _recreateTopics(L"topics of layout " + std::to_wstring(oldLayout) + L", this build makes layout " + std::to_wstring(kTopicLayoutVersion) +
+                                L" (" + (oldLayout < 1 ? L"the MOST RECENT order and " : L"") + L"every session's whole history)");
             }
             else if (_recreateRequested.load() && !inStartupHold)
             {
@@ -2033,6 +2161,8 @@ namespace Agentmaster::Msg
                     // A recreation a stop interrupted: it goes on (and still reports when the new list is complete).
                     _recreating = true;
                     _recreatedCount = 0;
+                    _recreateStartedMs = nowMs;
+                    _backfillAfterRecreation = true; // the new list's history replay is re-sorted after it, as in the first run
                     _log(L"[msg] recreation resumed: old topics still to delete from the last run");
                 }
                 _deleteOrphanTopics(kTopicOpsPerTick);
@@ -2156,8 +2286,11 @@ namespace Agentmaster::Msg
             // Every tab that should have a topic has one again (a create Telegram refused is planned again, so this
             // line only comes once the whole list exists).
             _recreating = false;
-            _log(L"[msg] recreation done: " + std::to_wstring(_recreatedCount) + L" topic(s) made, the oldest first, so the list reads in MOST RECENT order");
-            _appNote(L"✅ <b>Topics made again</b> \x2014 " + std::to_wstring(_recreatedCount) + L", in MOST RECENT order (the most recent on top).", false);
+            _log(L"[msg] recreation done: " + std::to_wstring(_recreatedCount) + L" topic(s) made, the oldest first, so the list reads in MOST RECENT order; each session's history follows, the most recent first");
+            _appNote(L"✅ <b>Topics made again</b> \x2014 " + std::to_wstring(_recreatedCount) +
+                         L", in MOST RECENT order. Each session's whole history is added now, the most recent sessions first (one message every 2 s, after the live ones); "
+                         L"when all of it is in, the list is put back in MOST RECENT order.",
+                     false);
         }
     }
 
@@ -2179,6 +2312,7 @@ namespace Agentmaster::Msg
             _state.topicLayout = kTopicLayoutVersion;
             _mirrors.clear();
             _cards.clear();
+            _backfill = BackfillBatch{}; // a batch of an old topic is pointless (its queued posts go with the purge below)
             _stateDirty = true;
             // Queued work for the old topics is pointless: their cards' posts / edits / deletes and work-log edits (keyed
             // by a session id) and any message into one of their threads. The Search topic's items stay; a reaction on
@@ -2199,10 +2333,17 @@ namespace Agentmaster::Msg
         _saveStateIfDirty(true); // the orphan list must survive a crash in the next minute
         _recreating = true;
         _recreatedCount = 0;
+        _recreateStartedMs = WallMs();
+        _backfillAfterRecreation = true; // the new list's history replay ends with the full re-sort
+        _backfillPostsBy.clear();
+        _replayPosts = 0;
+        _replayTopics = 0;
+        _resortFull = false;
         _log(L"[msg] recreation (" + why + L"): " + std::to_wstring(count) + L" old topic(s) are deleted first; then the list is made again, the oldest first, so it reads in MOST RECENT order");
         LogNav(L"remote telegram recreate-topics old=" + std::to_wstring(count));
         _appNote(L"♻ <b>Making the topics again</b> in MOST RECENT order (like the side panel): the " + std::to_wstring(count) +
-                     L" old topic(s) are deleted first \x2014 their messages go with them; every conversation stays in its session \x2014 then one topic per open tab is made, the most recent last, so it is on top.",
+                     L" old topic(s) are deleted first \x2014 their messages go with them; every conversation stays in its session \x2014 then one topic per open tab is made, the most recent last, so it is on top, "
+                     L"and each gets its session's whole history.",
                  false);
     }
 
@@ -2410,6 +2551,11 @@ namespace Agentmaster::Msg
             t.recapText.clear();
             t.recapAtMs = 0;
             t.lastMessageAtMs = 0;
+            // The HISTORY replay (§21.9) is decided below: the conversation so far, up to where the live mirror starts.
+            t.backfillPath.clear();
+            t.backfillPos = 0;
+            t.backfillEnd = 0;
+            t.backfillDayKey = 0;
             // The recap facts come from the transcript the session SHOWS: its own, or — for a fork with no message of
             // its own yet — the one it was forked from (its conversation so far IS the source's). Never cached: the
             // fork's first message creates its own transcript, and the mirror reads that from its first line.
@@ -2428,16 +2574,25 @@ namespace Agentmaster::Msg
             }
             if (t.transcriptPath.empty())
             {
+                // A fork with no message of its own yet: its conversation so far IS the source's, so the source's transcript
+                // is its history (up to the last complete line now; the fork's own transcript, once it exists, is mirrored
+                // live from its first line — its copies of the source's lines are skipped there).
+                if (!recapPath.empty() && recapScan.completeTo > 0)
+                {
+                    t.backfillPath = recapPath;
+                    t.backfillEnd = recapScan.completeTo;
+                }
                 return;
             }
             // Its own transcript exists: the topic shows the session from now on — from the END of the file for a
             // session at rest, and from the start of the turn's own prompt line for one that is mid-turn (a resting tab
             // that the user prompts at the PC gets its topic a tick after the prompt line was written; starting at the
-            // end lost exactly that prompt — 2026-10-16). A turn longer than the window starts at the end.
+            // end lost exactly that prompt — 2026-10-16). A turn longer than the window starts at the end. The END is the
+            // last COMPLETE line's end when the scan read this file (a line still being written belongs to the mirror).
             int64_t size = -1;
             if (recapPath == t.transcriptPath)
             {
-                size = recapScan.size; // the scan above read this very file
+                size = recapScan.completeTo >= 0 ? recapScan.completeTo : recapScan.size; // the scan above read this very file
             }
             else
             {
@@ -2448,6 +2603,14 @@ namespace Agentmaster::Msg
             if (midTurn && recapPath == t.transcriptPath && recapScan.lastPromptLineAt >= 0 && recapScan.lastPromptLineAt < t.cursor)
             {
                 t.cursor = recapScan.lastPromptLineAt;
+            }
+            // Everything before the mirror's start is the session's HISTORY (§21.9, the user's "a thread is a reflection of
+            // the entire session"): the pump replays it first — a fork's copied lines included, so a fork's topic shows the
+            // conversation it was forked from — and the mirror waits for it, then goes on from exactly here.
+            if (t.cursor > 0)
+            {
+                t.backfillPath = t.transcriptPath;
+                t.backfillEnd = t.cursor;
             }
         }
         catch (...)
@@ -2467,6 +2630,419 @@ namespace Agentmaster::Msg
             {
                 LogSwallowedException(L"MessagingService::_seedFromTranscript (recovery)");
             }
+        }
+    }
+
+    void MessagingService::_pumpBackfill() noexcept
+    {
+        try
+        {
+            const int64_t now = WallMs();
+            // Ranks a topic above another the way the list is ordered (§21.8): the sync's MOST RECENT keys; a session the sync
+            // did not see ranks lowest.
+            const auto ranksAbove = [this](const std::wstring& a, const std::wstring& b) {
+                const auto ka = _orderKeys.find(a);
+                const auto kb = _orderKeys.find(b);
+                return TopicRanksAbove(ka == _orderKeys.end() ? 0 : ka->second.first, ka == _orderKeys.end() ? a : ka->second.second,
+                                       kb == _orderKeys.end() ? 0 : kb->second.first, kb == _orderKeys.end() ? b : kb->second.second);
+            };
+            // A topic whose history just came in: one line (its card moves to the bottom at its next refresh, once).
+            const auto reportDone = [this, now](const std::wstring& sid, int64_t bytes, int64_t createdMs) {
+                size_t posts = 0;
+                if (const auto it = _backfillPostsBy.find(sid); it != _backfillPostsBy.end())
+                {
+                    posts = it->second;
+                    _backfillPostsBy.erase(it);
+                }
+                ++_replayTopics;
+                _log(L"[msg] history in for " + ShortId(sid) + L": " + std::to_wstring(posts) + L" message(s) from " + std::to_wstring(bytes / 1024) + L" KB of transcript, " +
+                     std::to_wstring(createdMs > 0 ? std::max<int64_t>(0, now - createdMs) / 1000 : 0) + L" s after the topic was made; the live conversation follows");
+            };
+
+            // 1. The batch going out: ONE in the whole outbox at a time. Its window's end is committed to the topic only when
+            //    the last of its messages was answered, so a stop midway re-sends at most this batch and never skips one.
+            {
+                std::wstring doneSid;
+                int64_t doneBytes = 0;
+                int64_t doneCreatedMs = 0;
+                std::wstring note;
+                {
+                    std::lock_guard lk{ _mtx };
+                    if (_backfill.active)
+                    {
+                        if (_backfill.inFlight > 0)
+                        {
+                            if (now - _backfill.startedMs < kBackfillStallMs)
+                            {
+                                return; // still going out
+                            }
+                            // Stalled (a send that never answered): dropped, with what of it is still queued, and read again
+                            // from the uncommitted position. At worst some of its messages show twice; none is lost.
+                            const int64_t thread = _backfill.threadId;
+                            std::erase_if(_outbox, [thread](const OutItem& o) { return o.prio == SendPriority::History && ThreadIdOf(o.params) == thread; });
+                            note = L"[msg] history of " + ShortId(_backfill.sessionId) + L": a batch of " + std::to_wstring(_backfill.posts) + L" message(s) had " +
+                                   std::to_wstring(_backfill.inFlight) + L" unanswered after " + std::to_wstring(kBackfillStallMs / 60000) + L" min; it is sent again";
+                            _backfill = BackfillBatch{};
+                        }
+                        else
+                        {
+                            if (_backfill.failed > 0)
+                            {
+                                note = L"[msg] history of " + ShortId(_backfill.sessionId) + L": " + std::to_wstring(_backfill.failed) + L" of " + std::to_wstring(_backfill.posts) +
+                                       L" message(s) were refused (" + _backfill.firstFailure + L"); the replay goes on";
+                            }
+                            if (const auto it = _state.topics.find(_backfill.sessionId); it != _state.topics.end() && it->second.threadId == _backfill.threadId)
+                            {
+                                auto& rec = it->second;
+                                rec.backfillPos = std::min(_backfill.consumedTo, rec.backfillEnd);
+                                rec.backfillDayKey = _backfill.dayKey;
+                                // The batch's messages are IN the topic now: the topic's last post is now, not when they were
+                                // queued. A post is stamped at enqueue time and a card at its answer, so a history queued
+                                // before its card went out (a new topic: both in one tick) read as older than the card, and the
+                                // card never moved below the history (live, 2026-10-16 23:49).
+                                rec.lastPostedMs = std::max(rec.lastPostedMs, now);
+                                _stateDirty = true;
+                                if (!TopicBackfillPending(rec))
+                                {
+                                    doneSid = it->first;
+                                    doneBytes = rec.backfillEnd;
+                                    doneCreatedMs = rec.createdMs;
+                                }
+                            }
+                            _backfill = BackfillBatch{};
+                        }
+                    }
+                }
+                if (!note.empty())
+                {
+                    _log(note);
+                }
+                if (!doneSid.empty())
+                {
+                    reportDone(doneSid, doneBytes, doneCreatedMs);
+                }
+            }
+
+            // 2. Nothing is replayed while a RECREATION deletes the old topics or makes the new list (a minute or two; at most
+            //    kRecreateListWaitMs): the replay then goes most recent first over the whole list.
+            {
+                bool orphans = false;
+                {
+                    std::lock_guard lk{ _mtx };
+                    orphans = !_state.orphanThreads.empty();
+                }
+                if (orphans || (_recreating && now - _recreateStartedMs < kRecreateListWaitMs))
+                {
+                    return;
+                }
+            }
+
+            // 3. The next window: of the highest-ranked topic with history pending (the sessions the user cares about now). A
+            //    window with nothing to show is committed at once and the next one read, a few per tick.
+            for (int window = 0; window < 4 && !_stop.load(); ++window)
+            {
+                std::wstring sid;
+                TopicRecord t;
+                {
+                    std::lock_guard lk{ _mtx };
+                    for (const auto& [id, rec] : _state.topics)
+                    {
+                        if (rec.threadId > 0 && TopicBackfillPending(rec) && (sid.empty() || ranksAbove(id, sid)))
+                        {
+                            sid = id;
+                        }
+                    }
+                    if (!sid.empty())
+                    {
+                        t = _state.topics[sid];
+                    }
+                }
+                if (sid.empty())
+                {
+                    if (_backfillAfterRecreation)
+                    {
+                        // The recreation's replay is complete. The list is in REPLAY order (the most recent sessions went
+                        // first, so they sit lowest): the full re-sort puts it back in MOST RECENT order.
+                        _backfillAfterRecreation = false;
+                        _resortFull = true;
+                        _log(L"[msg] history replay done: " + std::to_wstring(_replayPosts) + L" message(s) into " + std::to_wstring(_replayTopics) +
+                             L" topic(s); the list is re-sorted in MOST RECENT order now");
+                    }
+                    return;
+                }
+                if (_backfillPostsBy.find(sid) == _backfillPostsBy.end())
+                {
+                    _log(L"[msg] history replay of " + ShortId(sid) + L" " + (t.backfillPos == 0 ? L"started" : L"goes on") + L": bytes " + std::to_wstring(t.backfillPos) +
+                         L" to " + std::to_wstring(t.backfillEnd) + L" of its transcript into thread " + std::to_wstring(t.threadId));
+                    _backfillPostsBy.emplace(sid, 0);
+                }
+                const HistoryWindow w = ReadHistoryWindow(t.backfillPath, t.backfillPos, t.backfillEnd);
+                if (w.consumedTo < 0)
+                {
+                    // The file is gone, or shorter than where the replay stands (replaced): what is left cannot be read, so the
+                    // replay of this topic ends here and the live mirror goes on from its own position.
+                    {
+                        std::lock_guard lk{ _mtx };
+                        if (const auto it = _state.topics.find(sid); it != _state.topics.end() && it->second.threadId == t.threadId)
+                        {
+                            it->second.backfillPos = it->second.backfillEnd;
+                            _stateDirty = true;
+                        }
+                    }
+                    _log(L"[msg] history of " + ShortId(sid) + L" stops at byte " + std::to_wstring(t.backfillPos) + L" of " + std::to_wstring(t.backfillEnd) +
+                         L": the transcript is gone or shorter now");
+                    reportDone(sid, t.backfillPos, t.createdMs);
+                    continue;
+                }
+                int64_t day = t.backfillDayKey;
+                std::vector<HistoryPost> posts;
+                if (!w.items.empty())
+                {
+                    // The ⚙ of a prompt the runner sent (in the bot's line): the session's queue knows the newest of them.
+                    std::unordered_set<std::wstring> runner;
+                    if (const auto s = _session(sid))
+                    {
+                        for (const auto& q : s->queue)
+                        {
+                            if (q.origin == PromptOrigin::Autorun && q.remoteSource.empty())
+                            {
+                                runner.insert(NormalizePromptTextForCompare(q.text));
+                            }
+                        }
+                    }
+                    posts = RenderHistory(w.items, w.turnContinues, day, [&runner](const std::wstring& text) {
+                        return !runner.empty() && runner.count(NormalizePromptTextForCompare(text)) > 0;
+                    });
+                }
+                if (posts.empty())
+                {
+                    bool done = false;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        if (const auto it = _state.topics.find(sid); it != _state.topics.end() && it->second.threadId == t.threadId)
+                        {
+                            it->second.backfillPos = std::min(w.consumedTo, it->second.backfillEnd);
+                            it->second.backfillDayKey = day;
+                            _stateDirty = true;
+                            done = !TopicBackfillPending(it->second);
+                        }
+                    }
+                    if (done)
+                    {
+                        reportDone(sid, t.backfillEnd, t.createdMs);
+                    }
+                    continue;
+                }
+                // The batch: every post queued now, in order, at the History priority; the answers count it down. The user's
+                // turns go as the user only while secretary mode works AND can send (a connection and the bot's id): a send
+                // that fails at once would put its bot line ahead of the batch's earlier posts.
+                bool asUser = false;
+                const uint64_t seq = ++_backfillSeq;
+                {
+                    std::lock_guard lk{ _mtx };
+                    asUser = _state.businessMode == 1 && !_state.businessConnectionId.empty() && _botId.load() != 0;
+                    _backfill = BackfillBatch{};
+                    _backfill.active = true;
+                    _backfill.seq = seq;
+                    _backfill.sessionId = sid;
+                    _backfill.threadId = t.threadId;
+                    _backfill.consumedTo = w.consumedTo;
+                    _backfill.dayKey = day;
+                    _backfill.inFlight = posts.size();
+                    _backfill.posts = posts.size();
+                    _backfill.startedMs = now;
+                }
+                _backfillPostsBy[sid] += posts.size();
+                _replayPosts += posts.size();
+                auto self = weak_from_this();
+                const int64_t thread = t.threadId;
+                const std::function<void(const TgResult&)> answered = [self, seq](const TgResult& r) {
+                    auto me = self.lock();
+                    if (!me)
+                    {
+                        return;
+                    }
+                    bool last = false;
+                    {
+                        std::lock_guard lk{ me->_mtx };
+                        // An answer of a dropped batch (stalled, or its topic deleted or carried over) never counts down the next one.
+                        if (me->_backfill.active && me->_backfill.seq == seq && me->_backfill.inFlight > 0)
+                        {
+                            if (!r.ok && me->_backfill.failed++ == 0)
+                            {
+                                me->_backfill.firstFailure = r.description.empty() ? L"HTTP " + std::to_wstring(r.httpStatus) : r.description;
+                            }
+                            last = --me->_backfill.inFlight == 0;
+                            if (last)
+                            {
+                                me->_tickRequested = true; // the next window goes out without waiting for the tick's period
+                            }
+                        }
+                    }
+                    if (last)
+                    {
+                        me->_tickCv.notify_one();
+                    }
+                };
+                for (const auto& p : posts)
+                {
+                    if (p.fromUser && asUser)
+                    {
+                        // SECRETARY MODE (§21.5): the user's turn is the user's own bubble, as it was in the conversation. A
+                        // refused send puts the bot's line in its place AT ONCE (the New priority goes before the rest of the
+                        // batch, so the order holds), and the batch counts the post when THAT is answered.
+                        const std::wstring fallback = p.html;
+                        _sendAsUser(
+                            thread,
+                            p.userText,
+                            [self, thread, fallback, answered](const TgResult& r) {
+                                auto me = self.lock();
+                                if (!me)
+                                {
+                                    return;
+                                }
+                                if (r.ok)
+                                {
+                                    me->_secretaryFailures.store(0);
+                                    answered(r);
+                                    return;
+                                }
+                                const int failures = me->_secretaryFailures.fetch_add(1) + 1;
+                                me->_log(L"[msg] secretary: a history turn could not be sent as the user (" + r.description + L"); the bot's line goes in its place" +
+                                         (failures >= 3 ? L"; secretary mode is off until the bot is connected again" : L""));
+                                if (failures >= 3)
+                                {
+                                    std::lock_guard lk{ me->_mtx };
+                                    me->_state.businessMode = -1;
+                                    me->_state.businessNote = r.description;
+                                    me->_stateDirty = true;
+                                }
+                                me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, answered, 0, true);
+                            },
+                            SendPriority::History);
+                    }
+                    else
+                    {
+                        _sendText(thread, p.html, true, SendPriority::History, L"", json::Value{}, answered, 0, true);
+                    }
+                }
+                return; // one batch at a time
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the batch state stays as it was (a batch already queued is committed when answered, or
+            // dropped by the stall guard); the next tick reads the window again.
+            LogSwallowedException(L"MessagingService::_pumpBackfill");
+        }
+    }
+
+    void MessagingService::_resortTick() noexcept
+    {
+        try
+        {
+            const int64_t now = WallMs();
+            const bool full = _resortFull;
+            if (_startupHoldOpen || _recreating)
+            {
+                return; // the order keys are incomplete until every window has re-homed its tabs, and a recreation orders the list itself
+            }
+            if (!full && (now - _lastResortMs < kResortEveryMs || !_runningIds.empty()))
+            {
+                return;
+            }
+            // The list as it stands: by each topic's last message (the card's post or the newest other post), newest on top,
+            // which is what Telegram orders by. Only topics with a card (one that cannot be re-posted cannot be moved) and whose
+            // session the sync saw (the order key).
+            std::vector<std::pair<int64_t, std::wstring>> last;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_backfill.active)
+                {
+                    return;
+                }
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    if (TopicBackfillPending(t))
+                    {
+                        return; // a replay is still running: its end asks for the re-sort
+                    }
+                }
+                if (!full && !_outbox.empty())
+                {
+                    return;
+                }
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    if (t.threadId <= 0 || t.cardMessageId <= 0 || _orderKeys.find(sid) == _orderKeys.end())
+                    {
+                        continue;
+                    }
+                    const int64_t lastMs = std::max(t.cardPostedMs, t.lastPostedMs);
+                    if (!full && now - lastMs < kResortQuietMs)
+                    {
+                        return; // something was posted in the last half minute: not quiet
+                    }
+                    last.emplace_back(lastMs, sid);
+                }
+            }
+            _lastResortMs = now;
+            _resortFull = false;
+            std::sort(last.begin(), last.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+            std::vector<std::wstring> current;
+            current.reserve(last.size());
+            for (const auto& entry : last)
+            {
+                current.push_back(entry.second);
+            }
+            std::vector<std::wstring> desired = current;
+            std::stable_sort(desired.begin(), desired.end(), [this](const std::wstring& a, const std::wstring& b) {
+                const auto& ka = _orderKeys.find(a)->second;
+                const auto& kb = _orderKeys.find(b)->second;
+                return TopicRanksAbove(ka.first, ka.second, kb.first, kb.second);
+            });
+            const auto plan = PlanTopicResort(current, desired);
+            if (plan.empty())
+            {
+                if (full)
+                {
+                    _log(L"[msg] re-sort after the history replay: the list is in MOST RECENT order already");
+                    _appNote(L"\x2705 <b>History added</b> to " + std::to_wstring(_replayTopics) + L" topic(s) (" + std::to_wstring(_replayPosts) +
+                                 L" message(s)); the list reads in MOST RECENT order.",
+                             false);
+                }
+                return;
+            }
+            if (!full && plan.size() > kResortMaxTopics)
+            {
+                if (!_resortTooLongLogged)
+                {
+                    _resortTooLongLogged = true;
+                    _log(L"[msg] re-sort skipped: putting the list back in MOST RECENT order would re-post " + std::to_wstring(plan.size()) + L" card(s) (more than " +
+                         std::to_wstring(kResortMaxTopics) + L"); /recreate in the Search topic makes it again in order");
+                }
+                return;
+            }
+            {
+                std::lock_guard lk{ _mtx };
+                for (const auto& sid : plan)
+                {
+                    _cards[sid].repostWanted = true;
+                }
+            }
+            _log(L"[msg] re-sort " + std::wstring{ full ? L"after the history replay" : L"(the list drifted)" } + L": " + std::to_wstring(plan.size()) + L" of " +
+                 std::to_wstring(current.size()) + L" card(s) re-posted, the lowest-ranked first, so the list reads in MOST RECENT order");
+            if (full)
+            {
+                _appNote(L"\x2705 <b>History added</b> to " + std::to_wstring(_replayTopics) + L" topic(s) (" + std::to_wstring(_replayPosts) + L" message(s)); " +
+                             std::to_wstring(plan.size()) + L" card(s) are re-posted now to put the list back in MOST RECENT order.",
+                         false);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no re-sort this time; the next quiet minute plans again.
+            LogSwallowedException(L"MessagingService::_resortTick");
         }
     }
 
@@ -2515,13 +3091,19 @@ namespace Agentmaster::Msg
             _cards.erase(toSessionId);
             _stateDirty = true;
             // Queued edits keyed by the old session (its work log, its card edit) belong to a conversation the topic no
-            // longer shows; a card post / delete in flight keeps going (its answer is matched by thread).
+            // longer shows, and so does the rest of its HISTORY replay (§21.9); a card post / delete in flight keeps going
+            // (its answer is matched by thread).
             for (auto o = _outbox.begin(); o != _outbox.end();)
             {
-                const bool old = o->key == L"wl:" + fromSessionId || o->key == L"card:" + fromSessionId;
+                const bool old = o->key == L"wl:" + fromSessionId || o->key == L"card:" + fromSessionId || (o->prio == SendPriority::History && ThreadIdOf(o->params) == t.threadId);
                 o = old ? _outbox.erase(o) : std::next(o);
             }
+            if (_backfill.active && _backfill.threadId == t.threadId)
+            {
+                _backfill = BackfillBatch{}; // the new conversation's history (seeded above) is read from its own start
+            }
         }
+        _backfillPostsBy.erase(fromSessionId);
         _log(L"[msg] topic carried over " + ShortId(fromSessionId) + L" -> " + ShortId(toSessionId) + L" (the same tab, thread " + std::to_wstring(t.threadId) + L"; " +
              (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + L")");
         LogNav(L"remote telegram topic-rekey " + ShortId(fromSessionId) + L" -> " + ShortId(toSessionId));
@@ -2565,13 +3147,18 @@ namespace Agentmaster::Msg
             _mirrors.erase(sessionId);
             _cards.erase(sessionId);
             _stateDirty = true;
-            // Queued edits for the dead topic are pointless.
+            // Queued edits and posts for the dead topic are pointless (a history post carries no session key: its thread).
             for (auto it = _outbox.begin(); it != _outbox.end();)
             {
-                const bool mine = it->key.find(sessionId) != std::wstring::npos;
+                const bool mine = it->key.find(sessionId) != std::wstring::npos || (thread > 0 && ThreadIdOf(it->params) == thread);
                 it = mine ? _outbox.erase(it) : std::next(it);
             }
+            if (_backfill.active && _backfill.threadId == thread)
+            {
+                _backfill = BackfillBatch{}; // its answers no longer count (the seq is gone)
+            }
         }
+        _backfillPostsBy.erase(sessionId);
         _log(L"[msg] topic deleted " + ShortId(sessionId) + L" (" + reason + L")");
     }
 
@@ -2630,6 +3217,7 @@ namespace Agentmaster::Msg
         }
         TopicRecord topic;
         bool pingWanted = false;
+        bool repostWanted = false;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
@@ -2644,6 +3232,7 @@ namespace Agentmaster::Msg
                 card.pingWanted = true; // kept until a post can carry it (below)
             }
             pingWanted = card.pingWanted;
+            repostWanted = card.repostWanted; // the list's re-sort (_resortTick), kept until a post can carry it
         }
         if (topic.cardMessageId < 0)
         {
@@ -2661,6 +3250,8 @@ namespace Agentmaster::Msg
         extras.recapFresh = RecapIsFresh(topic.recapText, topic.recapAtMs, topic.lastMessageAtMs);
         extras.recapText = topic.recapText;
         extras.recapAtMs = topic.recapAtMs;
+        const bool historyPending = TopicBackfillPending(topic);
+        extras.historyPending = historyPending;
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         json::Value markup;
         _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
@@ -2670,13 +3261,18 @@ namespace Agentmaster::Msg
         // kCardStickyLagMs the old card is deleted and a fresh one sent at the bottom (two calls per burst, not
         // per message). A missing card (the first one, or a refused post a minute ago) is posted the same way, and
         // so is a PING (§21.6): the card re-sent WITH SOUND is the notification for a state the user must know about.
-        const bool behind = topic.cardMessageId > 0 && topic.lastPostedMs > topic.cardPostedMs && now - topic.lastPostedMs >= kCardStickyLagMs;
-        if (topic.cardMessageId == 0 || behind || pingWanted)
+        // While the topic's HISTORY is being replayed (§21.9) the card stays where it is, above it — chasing every history
+        // message down would double the replay's calls; it moves to the bottom once, when the last part is in. A RE-SORT
+        // of the list (_resortTick) asks for a silent re-post: the re-post is what moves the topic up in Telegram's list.
+        const bool behind = !historyPending && topic.cardMessageId > 0 && topic.lastPostedMs > topic.cardPostedMs && now - topic.lastPostedMs >= kCardStickyLagMs;
+        const bool resort = !historyPending && repostWanted;
+        if (topic.cardMessageId == 0 || behind || pingWanted || resort)
         {
             {
                 std::lock_guard lk{ _mtx };
                 auto& card = _cards[sessionId];
                 card.pingWanted = false;
+                card.repostWanted = false;
                 card.lastEditMs = now;
                 card.lastState = s->state;
             }
@@ -2888,6 +3484,12 @@ namespace Agentmaster::Msg
 
     void MessagingService::_followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s)
     {
+        if (TopicBackfillPending(topic))
+        {
+            // The topic's HISTORY goes first (§21.9): the mirror waits, and its cursor is where the history ends, so it goes
+            // on from exactly there once the last part is sent — whatever the session did meanwhile follows, in order.
+            return;
+        }
         const int64_t now = WallMs();
         if (topic.transcriptPath.empty())
         {

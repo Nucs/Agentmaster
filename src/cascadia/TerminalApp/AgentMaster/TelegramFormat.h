@@ -664,12 +664,6 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// Formats a duration for a card line: "3m", "1h12m", "2d4h", "45s".
-    /// </summary>
-    /// <param name="ms">The span in milliseconds; a negative value reads as 0.</param>
-    /// <returns>The short text.</returns>
-    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-    /// <summary>
     /// A moment as a LOCAL clock time for a message that is edited in place: "19:04" when it falls on the same
     /// local calendar day as <paramref name="nowMs"/>, else "16 Oct 19:04". Use it, never a relative span, in
     /// any text the bot re-renders and compares (the topic card, an idle note): a span ("3m", "45s") changes
@@ -748,6 +742,13 @@ namespace Agentmaster::Msg
         return out;
     }
 
+    /// <summary>
+    /// Formats a duration for a one-shot reply line: "3m", "1h12m", "2d4h", "45s". Never in a text that is re-rendered
+    /// and compared (the card): a span changes every minute — use TgClockText there.
+    /// </summary>
+    /// <param name="ms">The span in milliseconds; a negative value reads as 0.</param>
+    /// <returns>The short text.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
     inline std::wstring TgShortSpan(int64_t ms)
     {
         if (ms < 0)
@@ -771,5 +772,45 @@ namespace Agentmaster::Msg
         }
         const int64_t d = h / 24;
         return std::to_wstring(d) + L"d" + (h % 24 ? std::to_wstring(h % 24) + L"h" : std::wstring{});
+    }
+
+    /// <summary>
+    /// The LOCAL calendar day of a moment as a number, yyyymmdd — what a history replay compares to put a day line
+    /// between turns of different days (MESSAGING.md §21.9).
+    /// </summary>
+    /// <param name="unixMs">The moment (Unix ms); &lt;= 0 = unknown.</param>
+    /// <returns>yyyymmdd; 0 when the moment is unknown or the CRT cannot convert it.</returns>
+    inline int64_t TgDayKey(int64_t unixMs) noexcept
+    {
+        if (unixMs <= 0)
+        {
+            return 0;
+        }
+        const time_t t = static_cast<time_t>(unixMs / 1000);
+        std::tm when{};
+        if (localtime_s(&when, &t) != 0) // the CRT's thread-safe form; it writes nothing on failure
+        {
+            return 0;
+        }
+        return static_cast<int64_t>(when.tm_year + 1900) * 10000 + static_cast<int64_t>(when.tm_mon + 1) * 100 + when.tm_mday;
+    }
+
+    /// <summary>A history replay's day line: the LOCAL day of a moment, "Fri 16 Oct 2026".</summary>
+    /// <param name="unixMs">The moment (Unix ms).</param>
+    /// <returns>The day; "?" when the CRT cannot convert the moment.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TgDayText(int64_t unixMs)
+    {
+        const time_t t = static_cast<time_t>(unixMs / 1000);
+        std::tm when{};
+        if (unixMs <= 0 || localtime_s(&when, &t) != 0)
+        {
+            return L"?";
+        }
+        static constexpr const wchar_t* kDays[] = { L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat" };
+        static constexpr const wchar_t* kMonths[] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun", L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
+        const int wday = when.tm_wday >= 0 && when.tm_wday < 7 ? when.tm_wday : 0;
+        const int mon = when.tm_mon >= 0 && when.tm_mon < 12 ? when.tm_mon : 0;
+        return std::wstring{ kDays[wday] } + L" " + std::to_wstring(when.tm_mday) + L" " + kMonths[mon] + L" " + std::to_wstring(when.tm_year + 1900);
     }
 }

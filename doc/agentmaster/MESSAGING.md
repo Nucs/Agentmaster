@@ -536,6 +536,9 @@ count).
 
 ### 6.7 Backfill: when a topic is created for a session with history (D26)
 
+> **Decided 2026-10-16 by the user: the whole session as messages** (the alternative below), packed so it fits the
+> budget, the user's turns sent as the user where secretary mode works. Built: §21.9.
+
 A topic must show the whole session, but a revived 300-turn session cannot be replayed message by message
 within the budget. Recommended:
 
@@ -975,7 +978,7 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D18** | The UI name | Messaging | Remote; Phone |
 | **D20** | A topic started in Telegram | Starts a new session (asks for the folder) | Ignored; `/newsession` in 🔎 Search only |
 | **D25** | The idle grace before a topic is deleted | 10 minutes, with [📌 Pin] and [Wake] on the Idle card | 0 (at once); 1 hour |
-| **D26** | Backfill of a new topic for a session with history | The whole transcript as a file + the last 10 turns as messages | Every turn as messages, paced |
+| **D26** | Backfill of a new topic for a session with history | The whole transcript as a file + the last 10 turns as messages | Every turn as messages, paced — **the user's decision, 2026-10-16** (packed; §21.9) |
 | **D27** | Where a revived closed session opens | The most recently active window, without focus, dormant until its first message | A fixed window; the window it last lived in |
 | **D28** | `/rename` also renames Claude Code's own session name | Yes | Agentmaster's title only |
 | **D29** | `/interrupt` from a topic | Yes, Operate, with a confirmation | No |
@@ -1475,3 +1478,82 @@ recreation"*.
   session the user was testing, 22:03 — last, so on top); no 429, no exception. Four session titles hold a line
   break (their `topic created` log lines split there; what Telegram made of such a topic name is not checked). Owed:
   the user's look at the list on the phone.
+
+### 21.9 Every topic carries its session's whole history (2026-10-16 night)
+
+The user, after §21.8: *"In here I described how a thread is a reflection of the entire session. Recreating all threads
+should produce bot messages as assistant message and user's turn messages as telegram user messages (via the secretary
+enabled). When you recreated all threads you did not recreate with history which is the expected."* §6.7's D26 is decided:
+the whole session as messages, not a file plus the last 10 turns.
+
+- **What a topic replays.** The session's transcript from its first line up to where the live mirror starts (§21.6's
+  seed: the end of the file, or a running turn's own prompt line), read in HISTORY mode: a fork's copied `forkedFrom`
+  lines are included, so a fork's topic shows the conversation it was forked from (the live mirror still skips them). A
+  fork with no message of its own yet replays its source's transcript. The range is persisted on the topic
+  (`TopicRecord::backfillPath / backfillPos / backfillEnd / backfillDayKey`); a topic made by a Rekey (a /resume in the
+  tab) replays the resumed conversation after its "a new conversation in this tab" line. Not replayed: subagent and
+  teammate transcripts (sidechain lines), and the sessions a conversation continues (a /clear predecessor, a plan-restart
+  parent), which are other sessions.
+- **How a turn reads** (`RenderHistory`, `MessagingModels.h`): a day line when the day changes
+  (`— Fri 16 Oct 2026 —`); the user's prompt; the assistant's narrative, PACKED into messages of at most 3,500
+  characters — each remark (the "why the bash is invoked") followed by the tool calls it led to in one folded quote, a
+  failed result labeled with its tool, and questions, plans, compactions, interrupts and API errors as blocks; and the
+  turn's final reply as its own message. A message typed while the turn ran and a slash command are the user's posts
+  between the assistant's. Measured on the dev fleet: 266 turns of 49 sessions come to 1,175 messages (2.4 M characters);
+  the live layout (one message per remark and per work-log segment) would have taken 6,581.
+- **The user's turns as the user.** With secretary mode working (the probe's `businessMode == 1` and a connection) a
+  prompt, a mid-turn message and a slash command are sent AS THE USER (`_sendAsUser`, plain text); otherwise the bot posts
+  `⌨ HH:MM · <first line>` (⚙ for a prompt the runner sent, when the queue still holds it), the whole prompt in a folded
+  quote when it is long. A refused send as the user puts the bot's line in its place at once (a higher priority than the
+  rest of the batch, so the order holds); three refusals in a row turn secretary mode off, as for a live prompt. The echo
+  guard's entry for a history send lives 12 minutes instead of 2 (a history message can wait that long to go out), so an
+  old prompt of the history that Telegram hands back is never queued again. ⚠ On this machine secretary mode is NOT
+  connected (no `business_connection` update has ever arrived): BotFather's "Secretary Mode" switch is only the bot's
+  side; the user must also add the bot under Telegram Settings → Business → Chatbots (Telegram Premium). Until then the
+  user's turns are the bot's ⌨ lines.
+- **The reader** (`SplitHistoryWindow`, `MessagingModels.h`; `ReadHistoryWindow`, `Messaging.cpp`): windows of 1 MB
+  (growing to 64 MB when a window holds no complete line — a pasted image can make a line megabytes long; a longer line
+  is skipped), cut at the start of the last turn begun inside, so every turn is rendered whole with its reply. A turn
+  longer than a window is cut and goes on in the next (its reply is found where it ends); a turn that ends exactly at a
+  window's edge with no turn after it in the window shows its reply as narrative.
+- **Pacing and order.** History messages have their own, LOWEST send priority (`SendPriority::History`): the send loop
+  takes one only when nothing else is queued, and at most one per 2 s (`kBackfillGapMs`), so the live conversation of
+  every session always goes first and keeps half of the chat's ~1 call/s. The pump (`_pumpBackfill`, every tick) keeps
+  ONE batch (one window's messages) in the outbox at a time and commits the topic's position only when the batch's last
+  message was answered, so a stop midway re-sends at most one batch and never skips one; a batch with a send that never
+  answered (10 minutes) is dropped and sent again. The topics go most recent first (the highest-ranked in MOST RECENT
+  order with history pending), so the sessions the user cares about now get their history first; during a recreation
+  the pump waits for the new list (at most 5 minutes).
+- **The card and the live mirror.** The card is posted first, above the history, with the line *"⏳ the session's history
+  is being added below; the live conversation follows it"*; it does not chase each history message down (that would
+  double the replay's calls) and is re-posted ONCE at the bottom, without the line, when the topic's history is in. For
+  that, a batch's commit stamps the topic's last post (`lastPostedMs`) with the commit time: a post is stamped when it is
+  QUEUED and a card when Telegram ANSWERS, so a history queued before its card went out (a new topic: both in one tick)
+  read as older than the card, and the card stayed above the history (the first live run's first topic, 23:49). The
+  live mirror of the topic waits meanwhile and then goes on from where the history ends, so whatever the session did in
+  between follows in order.
+- **The list's order after a replay** (`_resortTick`, `PlanTopicResort`). Telegram lists topics by their last message, so
+  a replay that goes most recent first leaves the list in REPLAY order (the most recent at the bottom). When a
+  recreation's replay is in, the list is RE-SORTED: the shortest set of card re-posts that puts it in MOST RECENT order
+  (the top part of the desired order, re-posted lowest-ranked first, the top one last — after a full replay, all but
+  one). Afterwards, at most once a minute and only when everything is quiet (nothing queued, no replay, no session
+  Running, nothing posted for 30 s), a list that drifted is fixed the same way when that takes at most 24 re-posts; a
+  longer fix is logged once and left to `/recreate` (it happens when an old session is resumed and not used: its
+  topic sits on top while its MOST RECENT key is old, and only re-posting every topic above its rank can move it down).
+- **Layout 2.** `kTopicLayoutVersion` is 2, so the first start of this build makes the topics again once (§21.8's
+  recreation), this time with their history; the notes in the 🔎 Search topic and `/recreate`'s question say so.
+- **Logs:** `[msg] history replay of <sid8> started|goes on: bytes A to B of its transcript into thread N`,
+  `[msg] history in for <sid8>: N message(s) from K KB of transcript, S s after the topic was made; …`,
+  `[msg] history replay done: N message(s) into M topic(s); …`, `[msg] re-sort after the history replay: …` /
+  `[msg] re-sort (the list drifted): …` / `[msg] re-sort skipped: …`, and on trouble `[msg] history of <sid8>: …`
+  (a batch dropped as unanswered, refused messages, a transcript gone or shorter). The traffic line counts the
+  replay's `sendMessage` calls with the rest.
+- **Tests** (`TestMessaging`): the day key and day text; `RenderHistory` — the day lines, the user's posts with the
+  bot's line in their place, the packed narrative (folded tool lines, a labeled failure), the reply as its own message,
+  a turn cut by the reader's window and its rest, a mid-turn message, a slash command, a runner prompt (⚙), an
+  interrupted turn, and 200 tool lines packed under the limit with none lost; `SplitHistoryWindow` — the end reached,
+  the cut at the last turn's start, a turn longer than the window, a torn last line, a window with no complete line, a
+  fork's copied prompt; `PlanTopicResort` — in order, reversed, a low-ranked topic on top, a swap in the middle, a topic
+  missing from the list; the record's round trip and `TopicBackfillPending`; layout 2; the replay's lowest priority;
+  the card's history line. m5, isolated on HEAD 5f4c8f608 + this change: 7214 checks, the 3 known TestTaskbarBadge
+  failures only.

@@ -17,10 +17,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "Json.h"
@@ -28,6 +30,7 @@
 #include "SessionModels.h"
 #include "TelegramFormat.h"
 #include "TranscriptStore.h" // IsNoiseUserPrompt, PickDisplayTitle
+#include "TranscriptTurns.h" // ParseTranscriptJsonl (SplitHistoryWindow)
 
 namespace Agentmaster::Msg
 {
@@ -402,6 +405,8 @@ namespace Agentmaster::Msg
     /// every complete line past its cursor.
     /// </summary>
     /// <param name="line">The parsed JSONL line (an object).</param>
+    /// <param name="includeForkCopies">True for a HISTORY replay (§21.9): a fork's copies of its source's lines are part of
+    /// the conversation the fork carries on, so its topic's history shows them. False (the live mirror): they are skipped.</param>
     /// <returns>The items, in block order; empty when the line shows nothing (bookkeeping lines, meta
     /// lines, sidechain lines, the synthetic resume placeholder, protocol noise).</returns>
     /// <remarks>
@@ -411,7 +416,7 @@ namespace Agentmaster::Msg
     /// runner, sent from the topic) is the service's too: it needs the session's queue.
     /// </remarks>
     /// <exception cref="std::bad_alloc">If the items cannot be allocated.</exception>
-    inline std::vector<TopicItem> ClassifyTranscriptLine(const json::Value& line)
+    inline std::vector<TopicItem> ClassifyTranscriptLine(const json::Value& line, bool includeForkCopies = false)
     {
         std::vector<TopicItem> items;
         if (line.type != json::Value::Type::Obj)
@@ -424,13 +429,13 @@ namespace Agentmaster::Msg
         {
             return items; // a subagent's inline lines (older Claude Code): the parent's view skips them
         }
-        if (line.Find(L"forkedFrom"))
+        if (!includeForkCopies && line.Find(L"forkedFrom"))
         {
             // A FORK's copy of its source's history: `claude --resume <src> --fork-session` writes the source's
             // lines into the fork's own transcript, each stamped `forkedFrom: {sessionId, messageUuid}`, ahead of
-            // the fork's own first message (measured: 958 copied lines, then the fork's own). The fork's topic
-            // mirrors from its creation on, so the copies are history, never news — a fork's first message must
-            // not replay the whole source conversation into its topic (§21.6).
+            // the fork's own first message (measured: 958 copied lines, then the fork's own). The LIVE mirror reads
+            // the fork's transcript from its first line once it appears, and its topic's history (§21.9) already
+            // showed the source's conversation — the copies must not be posted a second time (§21.6).
             return items;
         }
         if (type == L"user")
@@ -792,6 +797,385 @@ namespace Agentmaster::Msg
         return !recapText.empty() && recapAtMs > 0 && recapAtMs > lastMessageAtMs;
     }
 
+    // ===== the history replay (§21.9) ========================================================
+
+    // A history replay packs a turn's narrative — the assistant's remarks and the tool calls they led to — into
+    // messages of at most this many characters of Telegram HTML (Telegram's limit is 4096 after the tags).
+    inline constexpr size_t kHistoryPackChars = 3500;
+
+    /// <summary>
+    /// One message of a topic's HISTORY replay (§21.9), in order. A user's turn (`fromUser`) is sent AS THE USER through
+    /// the Telegram Business connection when the secretary probe found that this works (MessagingState::businessMode == 1),
+    /// so the topic reads like the live conversation it was; otherwise the bot posts `html`, a ⌨ line with the clock.
+    /// </summary>
+    struct HistoryPost
+    {
+        bool fromUser{ false };
+        std::wstring userText; // fromUser: the user's words as typed (plain text)
+        std::wstring html; // the bot's message (Telegram HTML); for fromUser, the line the bot posts in the user's place
+    };
+
+    /// <summary>
+    /// Renders transcript items (ClassifyTranscriptLine in history mode) into a topic's history (§21.9, the user's "a
+    /// thread is a reflection of the entire session"): per turn, a day line when the day changes; the user's prompt (a
+    /// HistoryPost from the user); the assistant's narrative — each remark ("why the bash is invoked") followed by the
+    /// tool calls it led to in one folded quote, compactions, interrupts, API errors, questions, plans and the user's
+    /// slash commands — packed into messages of at most kHistoryPackChars; and the turn's final reply as its own message.
+    /// The packing is what makes a whole session fit the chat's budget: 266 turns of 49 sessions came to 1,175 messages
+    /// (measured 2026-10-16), against 6,581 in the live layout (one message per remark and per work-log segment).
+    /// </summary>
+    /// <param name="items">The items in transcript order. They start at a turn's prompt — or, after a reader window
+    /// that split one long turn, inside a turn (those items render as narrative).</param>
+    /// <param name="lastTurnContinues">The last turn goes on past these items (the reader's window ended inside it):
+    /// its last text is narrative, not its final reply — the reply comes with the window where the turn ends.</param>
+    /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered; a turn on another day gets a day line first.</param>
+    /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (⚙ instead of ⌨ in the bot's line).</param>
+    /// <returns>The posts, in the order they are to be sent.</returns>
+    /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
+    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {})
+    {
+        std::vector<HistoryPost> out;
+        const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
+        const auto emitBot = [&](std::wstring html) {
+            if (!html.empty())
+            {
+                HistoryPost p;
+                p.html = std::move(html);
+                out.push_back(std::move(p));
+            }
+        };
+        const auto userLine = [&](const TopicItem& it, bool midTurn) {
+            HistoryPost p;
+            p.fromUser = true;
+            p.userText = it.text;
+            const bool runner = isRunnerPrompt && isRunnerPrompt(it.text);
+            p.html = std::wstring{ runner ? L"\x2699 " : L"\x2328 " } + (it.tsMs > 0 ? TgClockText(it.tsMs, it.tsMs) + L" \x00B7 " : std::wstring{}) +
+                     (midTurn ? L"(mid-turn) " : L"") + L"<b>" + TgEscapeHtml(TgFirstLine(it.text, 200)) + L"</b>";
+            if (it.text.find(L'\n') != std::wstring::npos || it.text.size() > 200)
+            {
+                p.html += L"\n<blockquote expandable>" + TgEscapeHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text) + L"</blockquote>";
+            }
+            return p;
+        };
+        std::unordered_map<std::wstring, std::wstring> toolNames; // tool_use id -> name, to label a failed result
+        size_t i = 0;
+        while (i < items.size())
+        {
+            const size_t start = i;
+            const bool hasPrompt = isTurnStart(items[start]);
+            size_t end = hasPrompt ? start + 1 : start;
+            while (end < items.size() && !isTurnStart(items[end]))
+            {
+                ++end;
+            }
+            const bool continues = lastTurnContinues && end == items.size();
+            // The user's turn.
+            if (hasPrompt)
+            {
+                const TopicItem& p = items[start];
+                if (const int64_t day = TgDayKey(p.tsMs); day != 0 && day != lastDayKey)
+                {
+                    emitBot(L"<i>\x2014 " + TgEscapeHtml(TgDayText(p.tsMs)) + L" \x2014</i>");
+                    lastDayKey = day;
+                }
+                out.push_back(userLine(p, false));
+            }
+            // The final reply: the turn's last text after which no tool call, question, plan or mid-turn message came
+            // (only for a turn that ends inside these items).
+            size_t replyIdx = static_cast<size_t>(-1);
+            if (!continues)
+            {
+                for (size_t k = end; k > (hasPrompt ? start + 1 : start);)
+                {
+                    --k;
+                    const TopicItemKind kind = items[k].kind;
+                    if (kind == TopicItemKind::Text)
+                    {
+                        replyIdx = k;
+                        break;
+                    }
+                    if (kind == TopicItemKind::ToolResult || kind == TopicItemKind::Recap || kind == TopicItemKind::Compaction)
+                    {
+                        continue; // bookkeeping after the reply
+                    }
+                    break; // the turn ended on a tool call, a question, a plan, an error, an interrupt, a command
+                }
+            }
+            // The narrative, packed.
+            std::wstring cur; // the message being packed (HTML)
+            std::wstring group; // the open folded group of tool lines (plain text)
+            const auto closeGroup = [&]() {
+                if (group.empty())
+                {
+                    return;
+                }
+                std::wstring g = L"<blockquote expandable>" + TgEscapeHtml(group) + L"</blockquote>";
+                group.clear();
+                if (!cur.empty() && cur.size() + 1 + g.size() > kHistoryPackChars)
+                {
+                    emitBot(std::move(cur));
+                    cur.clear();
+                }
+                if (!cur.empty())
+                {
+                    cur += L"\n";
+                }
+                cur += g;
+            };
+            const auto addLine = [&](const std::wstring& line) {
+                // A group that would no longer fit beside what the message holds is closed, and the message sent.
+                if (!group.empty() && cur.size() + group.size() + line.size() + 48 > kHistoryPackChars)
+                {
+                    closeGroup();
+                    emitBot(std::move(cur));
+                    cur.clear();
+                }
+                if (!group.empty())
+                {
+                    group += L"\n";
+                }
+                group += line;
+            };
+            const auto addBlock = [&](const std::wstring& html) {
+                closeGroup();
+                if (!cur.empty() && cur.size() + 2 + html.size() > kHistoryPackChars)
+                {
+                    emitBot(std::move(cur));
+                    cur.clear();
+                }
+                if (!cur.empty())
+                {
+                    cur += L"\n\n";
+                }
+                cur += html; // a block longer than the limit is a message of its own; the sender splits it
+            };
+            const auto flush = [&]() {
+                closeGroup();
+                emitBot(std::move(cur));
+                cur.clear();
+            };
+            for (size_t k = hasPrompt ? start + 1 : start; k < end; ++k)
+            {
+                const TopicItem& it = items[k];
+                if (k == replyIdx)
+                {
+                    flush();
+                    emitBot(TgMarkdownToHtml(it.text));
+                    continue;
+                }
+                switch (it.kind)
+                {
+                case TopicItemKind::Text:
+                    addBlock(TgMarkdownToHtml(it.text));
+                    break;
+                case TopicItemKind::ToolCall:
+                    toolNames[it.toolUseId] = it.toolName;
+                    addLine(L"\x2022 " + it.summary);
+                    break;
+                case TopicItemKind::ToolResult:
+                    if (it.isError)
+                    {
+                        const auto n = toolNames.find(it.toolUseId);
+                        addLine(L"\x2717 " + (n == toolNames.end() ? std::wstring{} : n->second + L": ") + it.text);
+                    }
+                    break;
+                case TopicItemKind::Question:
+                {
+                    std::wstring html = L"\x2753 <b>" + TgEscapeHtml(it.text) + L"</b>";
+                    for (size_t o = 0; o < it.options.size(); ++o)
+                    {
+                        html += L"\n" + std::to_wstring(o + 1) + L". " + TgEscapeHtml(it.options[o]);
+                    }
+                    addBlock(html);
+                    break;
+                }
+                case TopicItemKind::Plan:
+                    addBlock(L"\U0001F4CB <b>Plan</b>\n" + TgMarkdownToHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text));
+                    break;
+                case TopicItemKind::Compaction:
+                    addBlock(L"<i>\x2014 " + TgEscapeHtml(it.text) + L" \x2014</i>");
+                    break;
+                case TopicItemKind::Interrupt:
+                    addBlock(L"\x25A0 <i>interrupted</i>");
+                    break;
+                case TopicItemKind::ApiError:
+                    addBlock(L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text));
+                    break;
+                case TopicItemKind::Command:
+                {
+                    // The user's slash command is the user's turn too: sent as the user, or the bot's code line.
+                    flush();
+                    HistoryPost p;
+                    p.fromUser = true;
+                    p.userText = it.text;
+                    p.html = L"<code>" + TgEscapeHtml(it.text.size() > 300 ? it.text.substr(0, 300) : it.text) + L"</code>";
+                    out.push_back(std::move(p));
+                    break;
+                }
+                case TopicItemKind::Prompt:
+                    // A message typed while the turn ran (a queued_command): the user's, between the assistant's posts.
+                    flush();
+                    out.push_back(userLine(it, true));
+                    break;
+                default:
+                    break; // a Recap: the card shows the current one
+                }
+            }
+            flush();
+            i = end;
+        }
+        return out;
+    }
+
+    /// <summary>
+    /// The topics to RE-POST — each topic's sticky card sent again — so that Telegram's topic list (newest last message
+    /// on top) reads in the desired MOST RECENT order (§21.9). Re-posting moves a topic to the top, so the shortest fix
+    /// re-posts the desired order's top part and leaves the rest where it is: the longest tail of the desired order that
+    /// is already in the same relative order in the list stays, everything above it is re-posted, lowest-ranked first.
+    /// </summary>
+    /// <param name="currentTopFirst">The list as it stands, top first (by each topic's last message).</param>
+    /// <param name="desiredTopFirst">The desired order, top first (TopicRanksAbove). Ids missing from `currentTopFirst`
+    /// are ignored.</param>
+    /// <returns>The ids to re-post, in the order to post them (lowest-ranked first); empty when the list is in order.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::vector<std::wstring> PlanTopicResort(const std::vector<std::wstring>& currentTopFirst, const std::vector<std::wstring>& desiredTopFirst)
+    {
+        std::unordered_map<std::wstring, size_t> pos;
+        for (size_t p = 0; p < currentTopFirst.size(); ++p)
+        {
+            pos.emplace(currentTopFirst[p], p);
+        }
+        std::vector<std::wstring> desired;
+        for (const auto& id : desiredTopFirst)
+        {
+            if (pos.count(id))
+            {
+                desired.push_back(id);
+            }
+        }
+        if (desired.size() < 2)
+        {
+            return {};
+        }
+        // The kept tail: walk up from the bottom while each one sits above the one below it in the current list.
+        size_t keep = desired.size() - 1;
+        while (keep > 0 && pos[desired[keep - 1]] < pos[desired[keep]])
+        {
+            --keep;
+        }
+        std::vector<std::wstring> repost;
+        for (size_t k = keep; k > 0; --k)
+        {
+            repost.push_back(desired[k - 1]); // lowest-ranked of the re-posted part first: the top one is posted last
+        }
+        return repost;
+    }
+
+    /// <summary>
+    /// One window of a HISTORY replay's reader (§21.9, SplitHistoryWindow): the items of the turns it holds and where the
+    /// next window starts.
+    /// </summary>
+    struct HistoryWindow
+    {
+        /// <summary>In transcript order (ClassifyTranscriptLine in history mode: a fork's copied lines included).</summary>
+        std::vector<TopicItem> items;
+        /// <summary>Where the window's use ended — the next window's start; -1 = nothing usable was read (the file shrank
+        /// or is gone, or `needMore`).</summary>
+        int64_t consumedTo{ -1 };
+        /// <summary>The window ended inside one turn longer than it: RenderHistory's `lastTurnContinues`.</summary>
+        bool turnContinues{ false };
+        /// <summary>The window holds no complete line: the reader must read a bigger one.</summary>
+        bool needMore{ false };
+    };
+
+    /// <summary>
+    /// Splits one window of transcript bytes for the HISTORY replay (§21.9): every complete line is classified in history
+    /// mode (ClassifyTranscriptLine with the fork's copies — a fork's topic shows the conversation it was forked from too).
+    /// Unless the window reaches the replay's end, its use stops at the start of the LAST turn begun inside it, so every turn
+    /// is rendered whole, with its final reply as its own message — except one turn longer than the window, which is cut
+    /// (`turnContinues`; its reply is found in the window where it ends). A turn that ends exactly at a window's edge with
+    /// no turn after it in the window reads as cut too: its reply is then shown as narrative (the next line, which would
+    /// tell, is not read).
+    /// </summary>
+    /// <param name="bytes">The bytes [pos, pos + bytes.size()) of the transcript.</param>
+    /// <param name="pos">The file offset of `bytes[0]`, a line start.</param>
+    /// <param name="reachedEnd">The bytes end where the replay ends (a line end): every line of them is used.</param>
+    /// <returns>The window's items and where it ended.</returns>
+    /// <exception cref="std::bad_alloc">If the items cannot be allocated.</exception>
+    inline HistoryWindow SplitHistoryWindow(std::string_view bytes, int64_t pos, bool reachedEnd)
+    {
+        HistoryWindow w;
+        const size_t lastNl = bytes.rfind('\n');
+        if (!reachedEnd && lastNl == std::string_view::npos)
+        {
+            w.needMore = true; // not one complete line yet (a pasted image can make one line megabytes long)
+            return w;
+        }
+        const size_t usable = reachedEnd ? bytes.size() : lastNl + 1;
+        // Each line's offset is needed for the cut, so the lines are parsed one at a time.
+        std::vector<std::pair<int64_t, std::vector<TopicItem>>> lines;
+        size_t p = 0;
+        while (p < usable)
+        {
+            const size_t nl = bytes.find('\n', p);
+            const size_t lineEnd = (nl == std::string_view::npos || nl >= usable) ? usable : nl;
+            if (lineEnd > p)
+            {
+                auto parsed = ParseTranscriptJsonl(std::string{ bytes.substr(p, lineEnd - p) });
+                if (!parsed.empty())
+                {
+                    auto its = ClassifyTranscriptLine(parsed.front(), true);
+                    if (!its.empty())
+                    {
+                        lines.emplace_back(pos + static_cast<int64_t>(p), std::move(its));
+                    }
+                }
+            }
+            p = lineEnd + 1;
+        }
+        int64_t cut = -1;
+        if (!reachedEnd)
+        {
+            for (auto it = lines.rbegin(); it != lines.rend(); ++it)
+            {
+                const bool turnStart = std::any_of(it->second.begin(), it->second.end(), [](const TopicItem& x) { return x.kind == TopicItemKind::Prompt && !x.midTurn; });
+                if (turnStart)
+                {
+                    if (it->first > pos)
+                    {
+                        cut = it->first; // the last turn begun here is read whole by the next window
+                    }
+                    break;
+                }
+            }
+        }
+        for (auto& [at, its] : lines)
+        {
+            if (cut >= 0 && at >= cut)
+            {
+                break;
+            }
+            for (auto& x : its)
+            {
+                w.items.push_back(std::move(x));
+            }
+        }
+        if (reachedEnd)
+        {
+            w.consumedTo = pos + static_cast<int64_t>(bytes.size());
+        }
+        else if (cut >= 0)
+        {
+            w.consumedTo = cut;
+        }
+        else
+        {
+            w.consumedTo = pos + static_cast<int64_t>(usable); // one turn longer than the window: it goes on next time
+            w.turnContinues = true;
+        }
+        return w;
+    }
+
     // ===== the connector's state file ========================================================
 
     // One session's topic in the owner's chat: what the Bot API cannot tell us back (it lists no
@@ -849,15 +1233,37 @@ namespace Agentmaster::Msg
         /// re-asserts Error — an edge each time; measured 2026-10-16, 19:30 and 19:45).
         /// </summary>
         bool errorAnnounced{ false };
+        /// <summary>
+        /// The HISTORY replay (§21.9): a topic made for a session that already has a conversation replays it first —
+        /// `backfillPath` (the session's transcript, or a fresh fork's source), bytes [backfillPos, backfillEnd), oldest
+        /// first. `backfillPos` moves on only when a batch's messages were all sent (a stop midway re-sends at most one
+        /// batch, never loses one); `backfillDayKey` is the day of the last turn replayed (TgDayKey). While backfillPos
+        /// &lt; backfillEnd the live mirror of the topic waits (its cursor starts at backfillEnd, so nothing is lost) and
+        /// the sticky card is not re-posted. Empty path / equal positions = nothing to replay.
+        /// </summary>
+        std::wstring backfillPath;
+        int64_t backfillPos{ 0 };
+        int64_t backfillEnd{ 0 };
+        int64_t backfillDayKey{ 0 };
     };
+
+    /// <summary>Whether a topic's history replay (§21.9) still has to run (or finish).</summary>
+    /// <param name="t">The topic.</param>
+    /// <returns>True while part of the history is not sent yet.</returns>
+    inline bool TopicBackfillPending(const TopicRecord& t) noexcept
+    {
+        return !t.backfillPath.empty() && t.backfillPos < t.backfillEnd;
+    }
 
     /// <summary>
     /// The topic LAYOUT this build makes topics under (§21.8). A state file whose topics were made under an older
-    /// layout gets them deleted and made again ONCE — the RECREATION — when the service starts: until layout 1 the
-    /// topics were created in session-id order (the topic list's order was random) and hold messages in the formats
-    /// §21.4–§21.6 replaced. Raise it only for a change that existing topics cannot follow.
+    /// layout gets them deleted and made again ONCE — the RECREATION — when the service starts. Layout 1 (§21.8): the
+    /// topics in MOST RECENT order (before it they were created in session-id order, in the formats §21.4–§21.6
+    /// replaced). Layout 2 (§21.9): every topic carries its session's whole HISTORY (the user's "a thread is a
+    /// reflection of the entire session"; layout 1 topics showed the session only from their creation on). Raise it
+    /// only for a change that existing topics cannot follow.
     /// </summary>
-    inline constexpr int kTopicLayoutVersion = 1;
+    inline constexpr int kTopicLayoutVersion = 2;
 
     struct MessagingState
     {
@@ -955,6 +1361,10 @@ namespace Agentmaster::Msg
             to.Set(L"cardTextHash", json::Value::MkNum(static_cast<double>(t.cardTextHash)));
             to.Set(L"tabToken", json::Value::MkStr(t.tabToken));
             to.Set(L"errorAnnounced", json::Value::MkBool(t.errorAnnounced));
+            to.Set(L"backfillPath", json::Value::MkStr(t.backfillPath));
+            to.Set(L"backfillPos", json::Value::MkNum(static_cast<double>(t.backfillPos)));
+            to.Set(L"backfillEnd", json::Value::MkNum(static_cast<double>(t.backfillEnd)));
+            to.Set(L"backfillDayKey", json::Value::MkNum(static_cast<double>(t.backfillDayKey)));
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
@@ -1023,6 +1433,10 @@ namespace Agentmaster::Msg
                 t.cardTextHash = static_cast<uint32_t>(to.I64At(L"cardTextHash", 0));
                 t.tabToken = to.StrAt(L"tabToken");
                 t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);
+                t.backfillPath = to.StrAt(L"backfillPath"); // absent (an older file) = no history replay owed
+                t.backfillPos = to.I64At(L"backfillPos", 0);
+                t.backfillEnd = to.I64At(L"backfillEnd", 0);
+                t.backfillDayKey = to.I64At(L"backfillDayKey", 0);
                 s.topics[t.sessionId] = std::move(t);
             }
         }
@@ -1794,6 +2208,11 @@ namespace Agentmaster::Msg
         WorkLogEdit = 2,
         CardEdit = 3,
         Backfill = 4, // backfill, files, reactions, typing
+        /// <summary>
+        /// A topic's HISTORY replay (§21.9): last of all, and at most one message per kBackfillGapMs (Messaging.cpp), so
+        /// the live conversation of every session always goes first and keeps half of the chat's ~1 call/s budget.
+        /// </summary>
+        History = 5,
     };
 
     // ===== the card ========================================================================
@@ -1831,6 +2250,9 @@ namespace Agentmaster::Msg
         bool recapFresh{ false };
         std::wstring recapText; // NormalizeRecapText of the away_summary content
         int64_t recapAtMs{ 0 }; // the away_summary line's transcript time (a clock time in the card)
+        // §21.9: the topic's history replay is not done yet. The card says so; when the last part is in, the card is
+        // re-posted below it without the line (or, for a history with nothing to show, edited once).
+        bool historyPending{ false };
     };
 
     /// <summary>
@@ -1947,6 +2369,11 @@ namespace Agentmaster::Msg
         if (idleLeavesAtMs > 0)
         {
             out += L"\n\U0001F4A4 leaves the list at " + TgClockText(idleLeavesAtMs, nowMs) + L" (/pin keeps it, /wake brings it back)";
+        }
+        if (extras && extras->historyPending)
+        {
+            // No percentage: every change of this text is an edit on the chat's budget (§21.4).
+            out += L"\n⏳ the session's history is being added below; the live conversation follows it";
         }
         out += L"\n";
         // Place line: folder · branch · model · ctx.

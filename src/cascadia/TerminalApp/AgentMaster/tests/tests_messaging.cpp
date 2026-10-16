@@ -706,6 +706,225 @@ void TestMessaging()
         CHECK(ParseRemoteCommand(L"/recreate").kind == RemoteKind::AgentmasterCommand, "/recreate is never queued as a prompt");
     }
 
+    // ---- §21.9: the HISTORY replay (a topic shows its whole session) and the list's re-sort ----
+    {
+        // The day lines: noon UTC is the same local day in every zone from UTC-11 to UTC+11.
+        const int64_t day1 = 1792152000000ll; // 2026-10-16 12:00 UTC
+        const int64_t day2 = day1 + 24ll * 3600 * 1000;
+        CHECK(TgDayKey(day1) == 20261016 && TgDayKey(day2) == 20261017, "the local day as yyyymmdd");
+        CHECK(TgDayKey(0) == 0 && TgDayText(0) == L"?", "an unknown moment has no day");
+        CHECK(TgDayText(day1) == L"Fri 16 Oct 2026", "the day line's text");
+
+        const auto item = [](TopicItemKind kind, const wchar_t* text, int64_t ts = 0, bool midTurn = false) {
+            TopicItem it;
+            it.kind = kind;
+            it.text = text;
+            it.tsMs = ts;
+            it.midTurn = midTurn;
+            return it;
+        };
+        const auto tool = [](const wchar_t* id, const wchar_t* name, const wchar_t* summary) {
+            TopicItem it;
+            it.kind = TopicItemKind::ToolCall;
+            it.toolUseId = id;
+            it.toolName = name;
+            it.summary = summary;
+            return it;
+        };
+        const auto result = [](const wchar_t* id, bool isError, const wchar_t* text) {
+            TopicItem it;
+            it.kind = TopicItemKind::ToolResult;
+            it.toolUseId = id;
+            it.isError = isError;
+            it.text = text;
+            return it;
+        };
+
+        // Two turns on two days: the day lines, the user's turns, the narrative packed (remarks + folded tool lines, a
+        // failed result labeled with its tool), and each final reply as its own message.
+        {
+            const std::vector<TopicItem> items{
+                item(TopicItemKind::Prompt, L"fix the crash", day1),
+                item(TopicItemKind::Text, L"Looking at the stack first."),
+                tool(L"t1", L"Bash", L"Bash: Run the tests ($ npm test)"),
+                result(L"t1", true, L"exit 1"),
+                item(TopicItemKind::Text, L"Found it: a null tab."),
+                tool(L"t2", L"Edit", L"Edit: TabManagement.cpp"),
+                result(L"t2", false, L""),
+                item(TopicItemKind::Text, L"Fixed: the null tab is skipped."),
+                item(TopicItemKind::Prompt, L"ship it", day2),
+                item(TopicItemKind::Text, L"Shipped."),
+            };
+            int64_t lastDay = 0;
+            const auto posts = RenderHistory(items, false, lastDay);
+            CHECK(posts.size() == 7, "day, user, narrative, reply, day, user, reply");
+            if (posts.size() == 7)
+            {
+                CHECK(!posts[0].fromUser && posts[0].html.find(L"Fri 16 Oct 2026") != std::wstring::npos, "the first day line");
+                CHECK(posts[1].fromUser && posts[1].userText == L"fix the crash" && posts[1].html.rfind(L"\x2328 ", 0) == 0 && posts[1].html.find(L" \x00B7 <b>fix the crash</b>") != std::wstring::npos,
+                      "the user's turn: the words as typed, and the bot's line in its place (⌨ clock · first line)");
+                CHECK(posts[2].html.find(L"Looking at the stack first.") == 0, "the narrative opens with the first remark");
+                CHECK(posts[2].html.find(L"<blockquote expandable>\x2022 Bash: Run the tests ($ npm test)\n\x2717 Bash: exit 1</blockquote>") != std::wstring::npos,
+                      "the remark's tool calls in one folded quote, a failed result labeled with its tool");
+                CHECK(posts[2].html.find(L"Found it: a null tab.") != std::wstring::npos && posts[2].html.find(L"\x2022 Edit: TabManagement.cpp") != std::wstring::npos,
+                      "the next remark and its tool in the same packed message");
+                CHECK(posts[2].html.find(L"Fixed:") == std::wstring::npos, "the reply is not in the narrative");
+                CHECK(posts[3].html.find(L"Fixed: the null tab is skipped.") != std::wstring::npos && posts[3].html.find(L"blockquote") == std::wstring::npos, "the final reply is its own message");
+                CHECK(posts[4].html.find(L"Sat 17 Oct 2026") != std::wstring::npos, "a turn on another day gets a day line first");
+                CHECK(posts[5].fromUser && posts[5].userText == L"ship it", "the second turn's prompt");
+                CHECK(posts[6].html.find(L"Shipped.") != std::wstring::npos, "the second reply");
+            }
+            CHECK(lastDay == 20261017, "the day of the last turn is handed back (the next window continues from it)");
+            int64_t sameDay = 20261017;
+            const auto again = RenderHistory({ item(TopicItemKind::Prompt, L"more", day2), item(TopicItemKind::Text, L"ok") }, false, sameDay);
+            CHECK(again.size() == 2 && again[0].fromUser, "the same day as the window before: no day line");
+        }
+
+        // One turn longer than the reader's window: the first part has no reply (its last text is narrative); the part
+        // that ends the turn has the reply and no prompt.
+        {
+            int64_t lastDay = 20261016;
+            const auto first = RenderHistory({ item(TopicItemKind::Prompt, L"long job", day1), item(TopicItemKind::Text, L"Step one done."), tool(L"t3", L"Bash", L"Bash: step two"),
+                                               item(TopicItemKind::Text, L"Still going.") },
+                                             true,
+                                             lastDay);
+            CHECK(first.size() == 2 && first[0].fromUser && first[1].html.find(L"Still going.") != std::wstring::npos, "a cut turn: its last text stays in the narrative");
+            const auto rest = RenderHistory({ item(TopicItemKind::Text, L"Wrapped up.") }, false, lastDay);
+            CHECK(rest.size() == 1 && !rest[0].fromUser && rest[0].html.find(L"Wrapped up.") != std::wstring::npos, "its rest: the reply, with no prompt or day line");
+        }
+
+        // A message typed while the turn ran and a slash command are the user's posts between the assistant's; a runner
+        // prompt reads ⚙ in the bot's line; a turn that ended on a tool call (interrupted) has no reply.
+        {
+            int64_t lastDay = 20261016;
+            const auto posts = RenderHistory({ item(TopicItemKind::Prompt, L"go", day1), item(TopicItemKind::Text, L"Working."), tool(L"t4", L"Bash", L"Bash: build"),
+                                               item(TopicItemKind::Prompt, L"also the docs", day1, true), item(TopicItemKind::Command, L"/compact keep the plan"),
+                                               item(TopicItemKind::Text, L"Done.") },
+                                             false,
+                                             lastDay);
+            CHECK(posts.size() == 5, "user, narrative, mid-turn user, command, reply");
+            if (posts.size() == 5)
+            {
+                CHECK(posts[1].html.find(L"Working.") != std::wstring::npos && posts[1].html.find(L"\x2022 Bash: build") != std::wstring::npos, "the narrative before the mid-turn message");
+                CHECK(posts[2].fromUser && posts[2].userText == L"also the docs" && posts[2].html.find(L"(mid-turn)") != std::wstring::npos, "the mid-turn message is the user's");
+                CHECK(posts[3].fromUser && posts[3].userText == L"/compact keep the plan" && posts[3].html == L"<code>/compact keep the plan</code>", "the slash command is the user's");
+                CHECK(!posts[4].fromUser && posts[4].html.find(L"Done.") != std::wstring::npos, "the reply");
+            }
+            const auto runner = RenderHistory({ item(TopicItemKind::Prompt, L"run the suite", day1), item(TopicItemKind::Text, L"Green.") }, false, lastDay,
+                                              [](const std::wstring& text) { return text == L"run the suite"; });
+            CHECK(runner.size() == 2 && runner[0].fromUser && runner[0].html.rfind(L"\x2699 ", 0) == 0, "a prompt the runner sent: ⚙ in the bot's line");
+            const auto stopped = RenderHistory({ item(TopicItemKind::Prompt, L"x", day1), tool(L"t5", L"Bash", L"Bash: long"), item(TopicItemKind::Interrupt, L"") }, false, lastDay);
+            CHECK(stopped.size() == 2 && stopped[1].html.find(L"\x2022 Bash: long") != std::wstring::npos && stopped[1].html.find(L"interrupted") != std::wstring::npos,
+                  "an interrupted turn: its tools and the mark, no reply");
+        }
+
+        // The packing keeps every message under the limit and loses no tool line.
+        {
+            std::vector<TopicItem> items{ item(TopicItemKind::Prompt, L"big", day1), item(TopicItemKind::Text, L"Many steps.") };
+            for (int i = 0; i < 200; ++i)
+            {
+                items.push_back(tool(L"t", L"Bash", (L"Bash: step " + std::to_wstring(i) + L" of the release check (a line of about sixty chars)").c_str()));
+            }
+            items.push_back(item(TopicItemKind::Text, L"All done."));
+            int64_t lastDay = 20261016;
+            const auto posts = RenderHistory(items, false, lastDay);
+            size_t bullets = 0;
+            bool fits = true;
+            for (size_t i = 1; i + 1 < posts.size(); ++i)
+            {
+                bullets += CountOf(posts[i].html, L"\x2022 Bash: step ");
+                fits = fits && posts[i].html.size() <= kHistoryPackChars;
+            }
+            CHECK(posts.size() >= 5, "200 tool lines take several packed messages");
+            CHECK(fits, "every packed message stays under kHistoryPackChars");
+            CHECK(bullets == 200, "no tool line is lost or repeated");
+            CHECK(!posts.empty() && posts.back().html.find(L"All done.") != std::wstring::npos, "the reply comes last");
+        }
+
+        // The reader's window: complete turns only, cut at the start of the last turn begun in it.
+        {
+            const std::vector<std::string> lines{
+                R"({"type":"user","message":{"role":"user","content":"first"},"timestamp":"2026-10-16T12:00:00.000Z"})",
+                R"({"type":"assistant","message":{"id":"m1","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"one"}]}})",
+                R"({"type":"user","message":{"role":"user","content":"second"},"timestamp":"2026-10-16T12:01:00.000Z"})",
+                R"({"type":"assistant","message":{"id":"m2","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Checking."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}})",
+                R"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}})",
+                R"({"type":"assistant","message":{"id":"m3","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"two"}]}})",
+                R"({"type":"user","message":{"role":"user","content":"third"},"timestamp":"2026-10-16T12:02:00.000Z"})",
+                R"({"type":"assistant","message":{"id":"m4","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"partial"},{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"make"}}]}})",
+            };
+            std::string all;
+            std::vector<int64_t> at;
+            for (const auto& l : lines)
+            {
+                at.push_back(static_cast<int64_t>(all.size()));
+                all += l + "\n";
+            }
+            const auto whole = SplitHistoryWindow(all, 0, true);
+            CHECK(whole.consumedTo == static_cast<int64_t>(all.size()) && !whole.turnContinues && !whole.needMore, "reaching the replay's end: everything is used");
+            CHECK(whole.items.size() == 10 && whole.items.front().text == L"first" && whole.items.back().kind == TopicItemKind::ToolCall, "every line's items, in order");
+            const auto cut = SplitHistoryWindow(all, 0, false);
+            CHECK(cut.consumedTo == at[6] && !cut.turnContinues, "not the end: the window stops where its last turn begins");
+            CHECK(cut.items.size() == 7 && cut.items.back().text == L"two", "the window holds the complete turns before it");
+            const std::string tail = all.substr(static_cast<size_t>(at[6]));
+            const auto longTurn = SplitHistoryWindow(tail, at[6], false);
+            CHECK(longTurn.consumedTo == static_cast<int64_t>(all.size()) && longTurn.turnContinues && longTurn.items.size() == 3, "a turn longer than the window: cut, to go on in the next");
+            const auto torn = SplitHistoryWindow(std::string_view{ all }.substr(0, all.size() - 5), 0, false);
+            CHECK(torn.consumedTo == at[6] && torn.items.size() == 7, "a torn last line is never read");
+            CHECK(SplitHistoryWindow(R"({"type":"user")", 0, false).needMore, "no complete line: the reader needs a bigger window");
+            // A fork's copied lines are its history too (the live mirror skips them).
+            const std::string copied = R"({"type":"user","forkedFrom":{"sessionId":"src","messageUuid":"u0"},"message":{"role":"user","content":"the source's prompt"}})"
+                                       "\n";
+            const auto fork = SplitHistoryWindow(copied, 0, true);
+            CHECK(fork.items.size() == 1 && fork.items[0].kind == TopicItemKind::Prompt && fork.items[0].text == L"the source's prompt", "a fork's copied prompt is in its history");
+        }
+
+        // The re-sort: the shortest set of card re-posts that makes Telegram's list (newest last message on top) read in
+        // MOST RECENT order — the top part of the desired order, re-posted lowest-ranked first.
+        {
+            using V = std::vector<std::wstring>;
+            CHECK(PlanTopicResort({ L"a", L"b", L"c", L"d" }, { L"a", L"b", L"c", L"d" }).empty(), "in order: nothing to re-post");
+            CHECK((PlanTopicResort({ L"d", L"c", L"b", L"a" }, { L"a", L"b", L"c", L"d" }) == V{ L"c", L"b", L"a" }), "reversed (a replay's order): all but the lowest, the top one last");
+            CHECK((PlanTopicResort({ L"x", L"a", L"b", L"c" }, { L"a", L"b", L"c", L"x" }) == V{ L"c", L"b", L"a" }), "a low-ranked topic bumped to the top: everything above its rank");
+            CHECK((PlanTopicResort({ L"a", L"c", L"b", L"d" }, { L"a", L"b", L"c", L"d" }) == V{ L"b", L"a" }), "a swap in the middle: the part above it");
+            CHECK((PlanTopicResort({ L"b", L"a" }, { L"a", L"z", L"b" }) == V{ L"a" }), "a topic missing from the list is ignored");
+            CHECK(PlanTopicResort({ L"a" }, { L"a" }).empty(), "one topic: nothing to sort");
+        }
+
+        // The record: the replay's range round-trips; a file without the keys owes no replay; the card says it.
+        {
+            MessagingState st;
+            TopicRecord t;
+            t.sessionId = L"h1";
+            t.threadId = 7;
+            t.backfillPath = L"C:\\x\\h1.jsonl";
+            t.backfillPos = 10;
+            t.backfillEnd = 20;
+            t.backfillDayKey = 20261016;
+            CHECK(TopicBackfillPending(t), "pos < end: the replay still runs");
+            st.topics[L"h1"] = t;
+            const auto back = StateFromJson(StateToJson(st));
+            const bool same = back.has_value() && back->topics.count(L"h1") && back->topics.at(L"h1").backfillPath == t.backfillPath && back->topics.at(L"h1").backfillPos == 10 &&
+                              back->topics.at(L"h1").backfillEnd == 20 && back->topics.at(L"h1").backfillDayKey == 20261016;
+            CHECK(same, "the replay's range and day round-trip (a stop midway goes on at the next start)");
+            t.backfillPos = 20;
+            CHECK(!TopicBackfillPending(t), "pos == end: done");
+            TopicRecord none;
+            none.backfillEnd = 5;
+            CHECK(!TopicBackfillPending(none), "no path: nothing to replay");
+            CHECK(kTopicLayoutVersion == 2, "layout 2: the topics made before the history replay are made again once");
+            CHECK(static_cast<int>(SendPriority::History) > static_cast<int>(SendPriority::Backfill), "the replay has the lowest send priority");
+            SessionInfo s = MakeSession(L"h1");
+            s.live = true;
+            s.state = SessionState::WaitingForInput;
+            CardExtras ex;
+            ex.historyPending = true;
+            CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"history is being added below") != std::wstring::npos, "the card says the history is coming");
+            ex.historyPending = false;
+            CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"history is being added") == std::wstring::npos, "and stops saying it when it is in");
+        }
+    }
+
     // ---- the remote prompt's runner bypass (D30) ----
     {
         SessionInfo s = MakeSession(L"remote-1");
