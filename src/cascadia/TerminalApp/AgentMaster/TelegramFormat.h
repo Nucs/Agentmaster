@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <ctime>
 #include <cwctype>
 #include <string>
 #include <string_view>
@@ -668,6 +669,40 @@ namespace Agentmaster::Msg
     /// <param name="ms">The span in milliseconds; a negative value reads as 0.</param>
     /// <returns>The short text.</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    /// <summary>
+    /// A moment as a LOCAL clock time for a message that is edited in place: "19:04" when it falls on the same
+    /// local calendar day as <paramref name="nowMs"/>, else "16 Oct 19:04". Use it, never a relative span, in
+    /// any text the bot re-renders and compares (the topic card, an idle note): a span ("3m", "45s") changes
+    /// every minute or every render, so 47 cards re-edited themselves 47 times a minute and Telegram answered
+    /// with a 429 and a 21-minute `retry_after` (2026-10-16); a clock time changes once, at the next midnight.
+    /// </summary>
+    /// <param name="unixMs">The moment (Unix ms).</param>
+    /// <param name="nowMs">The clock the "same day" test is made against (Unix ms).</param>
+    /// <returns>"HH:MM" or "D Mon HH:MM" in local time; "?" when the CRT cannot convert the moment.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TgClockText(int64_t unixMs, int64_t nowMs)
+    {
+        const auto toLocal = [](int64_t ms, std::tm& out) noexcept -> bool {
+            const time_t t = static_cast<time_t>(ms / 1000);
+            return localtime_s(&out, &t) == 0; // the CRT's thread-safe form; it writes nothing on failure
+        };
+        std::tm when{};
+        std::tm now{};
+        if (!toLocal(unixMs, when))
+        {
+            return L"?";
+        }
+        const auto two = [](int v) { return (v < 10 ? L"0" : L"") + std::to_wstring(v); };
+        std::wstring clock = two(when.tm_hour) + L":" + two(when.tm_min);
+        if (toLocal(nowMs, now) && now.tm_year == when.tm_year && now.tm_yday == when.tm_yday)
+        {
+            return clock;
+        }
+        static constexpr const wchar_t* kMonths[] = { L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun", L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec" };
+        const int mon = when.tm_mon >= 0 && when.tm_mon < 12 ? when.tm_mon : 0;
+        return std::to_wstring(when.tm_mday) + L" " + kMonths[mon] + L" " + clock;
+    }
+
     inline std::wstring TgShortSpan(int64_t ms)
     {
         if (ms < 0)

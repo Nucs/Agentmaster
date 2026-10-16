@@ -46,6 +46,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "MessagingModels.h"
@@ -122,6 +123,10 @@ namespace Agentmaster::Msg
         std::function<void(const std::wstring& sessionId)> deactivateSession;
         // The app's version word for the start note ("dev 0.0.1.9"); "" = not shown.
         std::function<std::wstring()> versionWord;
+        // How many open windows have not finished their first-layout restore (Engine::WindowsStillRestoring).
+        // While it is above 0, a session that reads live=false may only be waiting for its tab to be re-homed,
+        // so the service holds its "closed" topic deletes (the START-UP HOLD, §21.4). Empty = 0.
+        std::function<size_t()> windowsRestoring;
     };
 
     // ===== the service ========================================================================
@@ -328,6 +333,13 @@ namespace Agentmaster::Msg
         std::wstring _searchThinkingWord{ L"high" };
         std::atomic<bool> _topicsEnabled{ false };
         int64_t _lastGetMeMs{ 0 };
+        /// <summary>
+        /// The bot's own Telegram user id, from getMe; 0 until the first getMe of this run has answered. It is the
+        /// poll loop's IDENTITY GATE (no getUpdates before the bot is known, so a state file written for ANOTHER
+        /// bot can be reset first — update ids are per bot) and the sender test that keeps the bot's own service
+        /// messages (the topics it creates, the cards it pins) out of the "not the paired owner" log.
+        /// </summary>
+        std::atomic<int64_t> _botId{ 0 };
         std::wstring _botUsername;
         std::wstring _status;
         std::wstring _stateFile;
@@ -338,6 +350,34 @@ namespace Agentmaster::Msg
         bool _tickRequested{ false };
         int64_t _lastMarkerMs{ 0 };
         bool _startNotePosted{ false };
+        /// <summary>
+        /// How many mirrored sessions have a turn open (counted by the tick loop each pass). The work log's edit
+        /// gap grows with it (`kWorkLogEditGapMs` × 1 at one turn, ~2 s × N at N turns), so N busy sessions never
+        /// ask for more than ~0.5 edit/s between them: the chat's whole budget is ~1 call/s (kSendGapMs).
+        /// </summary>
+        std::atomic<size_t> _openTurns{ 0 };
+        /// <summary>
+        /// Outbound API calls since the last traffic line, by method (plus "429" for pacing refusals), under `_mtx`;
+        /// the tick loop logs and clears them every `kTrafficLogMs` (`[msg] traffic (10 min): …`), the one place the
+        /// chat's real call rate can be read — Telegram's flood limit is per chat and its penalty was 21 minutes.
+        /// </summary>
+        std::map<std::wstring, uint32_t> _trafficByMethod;
+        int64_t _lastTrafficLogMs{ 0 };
+        /// <summary>
+        /// The START-UP HOLD on "closed" topic deletes (MESSAGING.md §21.4). `_startedMs` is when this run's
+        /// service started; while the start is younger than `kStartupCloseHoldMinMs`, and while any registered
+        /// window is still restoring (`ServiceHooks::windowsRestoring`, capped at `kStartupCloseHoldCapMs`), a topic
+        /// whose session has not yet been seen live in this run is kept, because at an app start every session
+        /// reads live=false until its window re-homes its tabs — without the hold the first tick after a swap
+        /// deleted all 47 topics and the next minute re-created 38; a fixed 120 s hold still churned the 16 tabs
+        /// re-homed after it (2026-10-16). `_seenLive` holds the ids seen live inside the hold (tick thread only,
+        /// cleared under `_mtx` at _start and dropped when the hold ends); `_startupHoldLogged` makes the "N
+        /// topic(s) kept" line one per start, `_startupHoldOpen` the "hold ended" line.
+        /// </summary>
+        int64_t _startedMs{ 0 };
+        std::unordered_set<std::wstring> _seenLive;
+        bool _startupHoldLogged{ false };
+        bool _startupHoldOpen{ false };
 
         std::deque<OutItem> _outbox;
         uint64_t _outSeq{ 0 };

@@ -44,13 +44,19 @@ namespace Agentmaster::Msg
         // the private chat shares it); calls that send no message (reactions, answers to buttons) are
         // spaced less.
         constexpr int64_t kSendGapMs = 1050;
-        constexpr int64_t kLightGapMs = 300;
+        // ⚠ Edits count against the same per-chat budget as messages: with a 300 ms gap here, the card
+        // refreshes of 47 topics (each card's "3m" becoming "4m") ran at ~1 edit/s for ten minutes and
+        // Telegram answered an editMessageText with 429 + retry_after 1526 s (2026-10-16). Every call now
+        // keeps the ~1/s per-chat pace; what makes it bearable is that nothing periodic edits any more.
+        constexpr int64_t kLightGapMs = 1050;
         // How often a work-log message is edited while the turn runs, and how long it may grow before it
         // rolls over into a new message.
         constexpr int64_t kWorkLogEditGapMs = 15 * 1000;
         constexpr size_t kWorkLogRolloverChars = 3200;
         // The card is edited at most this often while the state does not change.
         constexpr int64_t kCardEditGapMs = 20 * 1000;
+        // How often the tick loop logs the outbound call census (`[msg] traffic (10 min): …`).
+        constexpr int64_t kTrafficLogMs = 10 * 60 * 1000;
         // How much transcript a tick reads per session at most (a busy session writes kilobytes a second;
         // a catch-up after a pause must not stall the tick).
         constexpr size_t kMaxReadPerTick = 4u * 1024u * 1024u;
@@ -67,6 +73,19 @@ namespace Agentmaster::Msg
         constexpr int64_t kTokenTtlMs = 2 * 60 * 60 * 1000;
         // How many topics a tick creates or deletes at most (each is an API call on the tick thread).
         constexpr size_t kTopicOpsPerTick = 6;
+        // The START-UP HOLD on "closed" topic deletes (§21.4): at an app start every session reads live=false
+        // until its window re-homes its tabs (the registry loads sessions.json as archived; each reopened window
+        // flips its own tabs live, one by one, in its first layout; a second window registers only when the
+        // first one's restore has released the shared UI thread). A "closed" delete of a topic whose session
+        // has NOT been seen live in this run is held (a) for kStartupCloseHoldMinMs after the start — the
+        // windows that have not registered yet — and (b) while any registered window is still restoring
+        // (ServiceHooks::windowsRestoring, Engine::WindowsStillRestoring), up to kStartupCloseHoldCapMs so a
+        // restore that never ends cannot hold forever. Measured 2026-10-16 without it: the first tick after a
+        // dev swap deleted all 47 topics as "closed" and the next minute re-created 38; with a fixed 120 s
+        // hold, one 56-tab window took 72 s of fleet load + 68 s of re-home, and the 16 tabs re-homed after
+        // the hold churned again — a restart must never churn the chat.
+        constexpr int64_t kStartupCloseHoldMinMs = 120 * 1000;
+        constexpr int64_t kStartupCloseHoldCapMs = 30 * 60 * 1000;
 
         int64_t WallMs()
         {
@@ -350,14 +369,18 @@ namespace Agentmaster::Msg
             _stop.store(false);
             _api = std::make_unique<TelegramApi>(std::move(token));
             _topicsEnabled.store(false);
+            _botId.store(0); // re-arms the poll loop's identity gate: this token may name another bot than the last run's
             _lastGetMeMs = 0;
             _startNotePosted = false;
+            _startedMs = WallMs(); // the start-up hold on "closed" deletes counts from here
+            _startupHoldLogged = false;
             {
                 std::lock_guard lk{ _mtx };
                 _mirrors.clear();
                 _reacted.clear();
                 _outbox.clear();
                 _dirty.clear();
+                _seenLive.clear();
             }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
@@ -666,6 +689,15 @@ namespace Agentmaster::Msg
         {
             try
             {
+                // The IDENTITY GATE: no getUpdates before getMe has named the bot (the tick loop asks it first
+                // thing). Update ids are per bot, and an offset carried over from ANOTHER bot's state file
+                // would confirm — silently drop — every update of this bot below it, for good. The tick loop
+                // resets the state when the bot id changed and only then sets _botId, which opens this gate.
+                if (_botId.load() == 0)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    continue;
+                }
                 auto params = json::Value::MkObj();
                 int64_t offset = 0;
                 {
@@ -787,6 +819,16 @@ namespace Agentmaster::Msg
                 {
                     r = _api->Call(item.method, item.params, 30000);
                 }
+                {
+                    // The traffic census the tick loop logs every 10 minutes: one count per method, and the
+                    // pacing refusals under "429" — the chat's real call rate, which no other log shows.
+                    std::lock_guard lk{ _mtx };
+                    ++_trafficByMethod[item.document ? std::wstring{ L"sendDocument" } : item.method];
+                    if (!r.ok && r.httpStatus == 429)
+                    {
+                        ++_trafficByMethod[L"429"];
+                    }
+                }
                 if (!r.ok && r.httpStatus == 429)
                 {
                     // Telegram's pacing verdict: wait what it says, then retry the same item once.
@@ -860,6 +902,31 @@ namespace Agentmaster::Msg
                     WriteFileAtomic(marker, std::to_string(static_cast<long long>(now)));
                     _lastMarkerMs = now;
                 }
+                // The traffic census: every call the send loop made since the last line, by method. Written
+                // even when nothing was sent (a "quiet" line is evidence too); the first line comes 10 minutes
+                // after the start.
+                if (_lastTrafficLogMs == 0)
+                {
+                    _lastTrafficLogMs = now;
+                }
+                else if (now - _lastTrafficLogMs >= kTrafficLogMs)
+                {
+                    _lastTrafficLogMs = now;
+                    std::map<std::wstring, uint32_t> census;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        census.swap(_trafficByMethod);
+                    }
+                    std::wstring line = L"[msg] traffic (" + std::to_wstring(kTrafficLogMs / 60000) + L" min):";
+                    uint32_t total = 0;
+                    for (const auto& [method, count] : census)
+                    {
+                        line += L" " + method + L"=" + std::to_wstring(count);
+                        total += count;
+                    }
+                    line += census.empty() ? std::wstring{ L" nothing sent" } : L" (" + std::to_wstring(total) + L" calls)";
+                    _log(line);
+                }
                 // Threaded Mode: topics need it; until it is on, getMe is re-asked every minute and the owner
                 // gets one note with the switch's location.
                 if (!_topicsEnabled.load())
@@ -871,14 +938,46 @@ namespace Agentmaster::Msg
                         if (r.ok)
                         {
                             const std::wstring user = r.result.StrAt(L"username");
+                            const int64_t id = r.result.I64At(L"id", 0);
+                            std::wstring previousBot; // non-empty = the state file belonged to another bot
                             {
                                 std::lock_guard lk{ _mtx };
                                 _botUsername = user;
+                                // A DIFFERENT bot than the state file's (the token was replaced in the cog): the
+                                // update offset, the Search topic and the topic map are the OLD bot's — update ids
+                                // are per bot (a stale higher offset would drop every update of the new one), and
+                                // the thread ids name topics that exist only in the old bot's chat. The per-session
+                                // mirrors and reactions point into that chat too. The new bot starts from nothing.
+                                if (_state.botId != 0 && id != 0 && _state.botId != id)
+                                {
+                                    previousBot = _state.botUsername.empty() ? std::to_wstring(_state.botId) : _state.botUsername;
+                                    _state.updateOffset = 0;
+                                    _state.searchThreadId = 0;
+                                    _state.setupNoticeMs = 0;
+                                    _state.topics.clear();
+                                    _mirrors.clear();
+                                    _reacted.clear();
+                                    _stateDirty = true;
+                                }
+                                if (id != 0 && _state.botId != id)
+                                {
+                                    _state.botId = id;
+                                    _stateDirty = true;
+                                }
                                 if (_state.botUsername != user)
                                 {
                                     _state.botUsername = user;
                                     _stateDirty = true;
                                 }
+                            }
+                            if (!previousBot.empty())
+                            {
+                                _log(L"[msg] the bot changed (@" + previousBot + L" -> @" + user + L"): the update offset, the Search topic and the topic map of the old bot were reset");
+                            }
+                            // Opens the poll loop's identity gate — AFTER the reset above, never before it.
+                            if (id != 0)
+                            {
+                                _botId.store(id);
                             }
                             if (r.result.BoolAt(L"has_topics_enabled", false))
                             {
@@ -949,6 +1048,17 @@ namespace Agentmaster::Msg
                             ids.push_back(sid);
                         }
                     }
+                    // The open-turn count that stretches the work log's edit gap (_flushWorkLog): a pass-old
+                    // value is fine, the gap only has to follow the fleet's load, not each turn's edge.
+                    size_t open = 0;
+                    for (const auto& kv : _mirrors)
+                    {
+                        if (kv.second.turnOpen)
+                        {
+                            ++open;
+                        }
+                    }
+                    _openTurns.store(open);
                 }
                 for (const auto& sid : ids)
                 {
@@ -1455,12 +1565,55 @@ namespace Agentmaster::Msg
             facts.push_back(std::move(f));
             byId.emplace(s.id, std::move(s));
         }
+        // The start-up hold's evidence: a session seen live in this run has re-homed, so its topic follows the
+        // plan from then on (a tab the user closes 30 s after a start loses its topic at once). The set is
+        // only consulted inside the hold and is dropped when the hold ends.
+        const int64_t nowMs = WallMs();
+        const int64_t sinceStartMs = nowMs - _startedMs;
+        size_t restoring = 0;
+        if (_hooks.windowsRestoring && sinceStartMs < kStartupCloseHoldCapMs)
+        {
+            try
+            {
+                restoring = _hooks.windowsRestoring();
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"MessagingService::_syncTopics (windowsRestoring)");
+            }
+        }
+        const bool inStartupHold = sinceStartMs < kStartupCloseHoldMinMs || restoring > 0;
+        if (inStartupHold)
+        {
+            _startupHoldOpen = true;
+            for (const auto& f : facts)
+            {
+                if (f.live)
+                {
+                    _seenLive.insert(f.sessionId);
+                }
+            }
+        }
+        else
+        {
+            if (_startupHoldOpen)
+            {
+                // Once per start, the moment the last restoring window is done (or the cap ran out).
+                _startupHoldOpen = false;
+                _log(L"[msg] start-up hold ended " + std::to_wstring(sinceStartMs / 1000) + L" s after the start (" + (sinceStartMs < kStartupCloseHoldCapMs ? L"every window restored" : L"the cap ran out") + L")");
+            }
+            if (!_seenLive.empty())
+            {
+                _seenLive.clear();
+            }
+        }
         std::vector<TopicSyncOp> ops;
         {
             std::lock_guard lk{ _mtx };
-            ops = PlanTopicSync(facts, _state.topics, WallMs(), _idleGraceMs.load());
+            ops = PlanTopicSync(facts, _state.topics, nowMs, _idleGraceMs.load());
         }
         size_t apiOps = 0;
+        size_t heldCloses = 0;
         for (const auto& op : ops)
         {
             if (_stop.load())
@@ -1470,6 +1623,14 @@ namespace Agentmaster::Msg
             switch (op.kind)
             {
             case TopicSyncOp::Kind::Delete:
+                if (op.reason == L"closed" && inStartupHold && _seenLive.find(op.sessionId) == _seenLive.end())
+                {
+                    // The start-up hold: "closed" here most likely means "its window has not re-homed its tabs
+                    // yet". The plan re-emits the delete every tick; once the session comes back live the plan
+                    // stops asking, and a session still closed when the hold ends is deleted then.
+                    ++heldCloses;
+                    break;
+                }
                 if (apiOps++ < kTopicOpsPerTick)
                 {
                     _deleteTopic(op.sessionId, op.reason);
@@ -1523,6 +1684,12 @@ namespace Agentmaster::Msg
                 _refreshCard(op.sessionId, true);
                 break;
             }
+        }
+        if (heldCloses > 0 && !_startupHoldLogged)
+        {
+            // Once per start: the plan re-asks every tick, and the count only shrinks as the windows re-home.
+            _startupHoldLogged = true;
+            _log(L"[msg] start-up hold: " + std::to_wstring(heldCloses) + L" topic(s) kept until their sessions re-home (" + std::to_wstring(restoring) + L" window(s) still restoring; at least " + std::to_wstring(kStartupCloseHoldMinMs / 1000) + L" s after the start)");
         }
     }
 
@@ -1762,7 +1929,11 @@ namespace Agentmaster::Msg
             return;
         }
         const int64_t now = WallMs();
-        if (!force && m.workLogMessageId != 0 && now - m.workLogLastEditMs < kWorkLogEditGapMs)
+        // The gap grows with the number of turns open across the fleet (the tick loop counts them): one busy
+        // session edits every 15 s, twenty busy sessions every 40 s each — together never more than ~0.5
+        // edit/s, half of the chat's ~1 call/s budget (the other half is for messages and cards).
+        const int64_t gapMs = std::max<int64_t>(kWorkLogEditGapMs, static_cast<int64_t>(_openTurns.load()) * 2000);
+        if (!force && m.workLogMessageId != 0 && now - m.workLogLastEditMs < gapMs)
         {
             return;
         }
