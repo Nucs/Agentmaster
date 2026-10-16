@@ -1603,6 +1603,31 @@ the whole session as messages, not a file plus the last 10 turns.
   and one with unbalanced. m5, isolated on HEAD 5f4c8f608 + the first build: 7214 checks; on 3bc71b412 + the flood
   budget and the per-turn commits: 7220; on c5f4d0c6c + the answers and the link fix: 7230 — the 3 known
   TestTaskbarBadge failures only, each time.
+- **The live run** (dev, this machine, the owner's bot; 2026-10-16 23:44 → 2026-10-17 01:34):
+  - **0.0.1.18** (3bc71b412, `Q:\agentmaster-layouts\Debug`, swapped 23:44:11, downtime 8.0 s): the start-up hold ended
+    at 127 s; the layout-2 recreation deleted the 48 old topics in 60 s and made 48 new ones in 69 s (23:46:28 →
+    23:48:37), in MOST RECENT order; the replay began at once with ba1ee743 (the session under QA: 8 messages), then
+    9c3454bb (82 messages in 166 s — one per 2 s, as designed).
+  - 23:49 — the first topic's card stayed ABOVE its history (the commit-time stamp, above). 23:59:54 — a **429**
+    (retry after 40 s) after ~11 minutes at ~27 messages a minute: the flood budget (above).
+  - **0.0.1.19** (`Debug-B`, swapped 00:07:45, downtime 6.2 s): the call window at 18 a minute; no 429 after it — the
+    traffic lines read 180–185 calls per 10 minutes for the rest of the run. Its restart repeated part of one window in
+    b480b2d7's topic and began an old session's replay before the start-up hold ended (both fixed in c5f4d0c6c, live
+    from 0.0.1.20).
+  - **0.0.1.20** (d9464b038 — c5f4d0c6c, a6cd24078 and 982615a6e with the other session's committed Search work —
+    `Debug`, swapped 01:09:39, downtime 6.5 s, 20 s after a topic's history was in: the first messages of the next
+    topic, 3d7a87b8, repeat once): it waited for the start-up hold (120 s), went on by rank from each topic's committed
+    position, and from then on rendered the user's answers.
+  - **01:28:33 — the replay was done:** all 48 topics, 1,600 history messages (the offline estimate was 1,175: the real
+    renderer adds day lines and splits a narrative at its blocks), 1 h 40 min from the recreation. The re-sort released
+    47 of 48 card re-posts one at a time, 01:28:33 → 01:33:49, no 429; afterwards the list (by the posts' own stamps)
+    read in exactly the MOST RECENT order the recreation had logged — 0 of 1,128 topic pairs out of order, ba1ee743 on
+    top (it had run a turn at 00:32), the oldest session (18 Sep) at the bottom. No HTML refusal, no exception.
+  - **Open:** (1) the topics replayed before 0.0.1.20 do not show the user's answers to questions (a `/recreate` replays
+    everything with them, ~1 h 40 min); (2) every restart re-edits ~2–3 times per card (125 edits in the 10 minutes after
+    the 01:09 swap, 101 after the 23:44 one) — not the replay's, a cost to look into; (3) Markdown tables in replies stay
+    `|` rows; (4) secretary mode is not connected, so the user's turns are the bot's ⌨ lines; (5) the user's look at the
+    topics on the phone.
 
 ### 21.10 The Search answer as evidence cards, and an agent that reads before it shows (2026-10-17)
 
