@@ -1156,8 +1156,8 @@ namespace Agentmaster::Msg
         }
         if (name == L"recreate")
         {
-            // §21.8: make the session topics again in MOST RECENT order, the side panel's. It deletes every session topic
-            // and its messages, so it asks first (a single-use button, an hour).
+            // §21.8 / §21.9: make the session topics again in MOST RECENT order, the side panel's, each with its session's
+            // whole history. It deletes every session topic and its messages, so it asks first (a single-use button, an hour).
             size_t topics = 0;
             {
                 std::lock_guard lk{ _mtx };
@@ -1166,7 +1166,8 @@ namespace Agentmaster::Msg
             const std::wstring yes = _tokenFor(L"recreate-yes", L"", L"", kTokenTtlMsFor(1));
             const std::wstring no = _tokenFor(L"cancel", L"", L"", kTokenTtlMsFor(1));
             _reply(threadId,
-                   L"Delete the " + std::to_wstring(topics) + L" session topic(s) and make them again in MOST RECENT order (like the side panel)? Their messages in Telegram go with them; every conversation stays in its session.",
+                   L"Delete the " + std::to_wstring(topics) + L" session topic(s) and make them again in MOST RECENT order (like the side panel)? Their messages in Telegram go with them; "
+                   L"every conversation stays in its session, and each new topic gets its session's whole history again (one message every 2 s, after the live ones).",
                    false,
                    _buttons({ { { L"\x267B Recreate", yes }, { L"Cancel", no } } }));
             LogNav(L"remote telegram /recreate -> asked");
@@ -1715,7 +1716,7 @@ namespace Agentmaster::Msg
                     _tickRequested = true;
                 }
                 _tickCv.notify_all();
-                _reply(threadId, L"\x267B Making the topics again \x2014 the old ones go first, then the new list, the most recent on top.", false);
+                _reply(threadId, L"\x267B Making the topics again \x2014 the old ones go first, then the new list, the most recent on top, then each session's history.", false);
                 LogNav(L"remote telegram /recreate -> confirmed");
             }
             else if (k == L"backlog-drop")
@@ -2013,7 +2014,7 @@ namespace Agentmaster::Msg
         {
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent answers with numbered sessions. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/recreate \x2014 make the session topics again in MOST RECENT order (asks first)";
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history (asks first)";
         }
         else
         {

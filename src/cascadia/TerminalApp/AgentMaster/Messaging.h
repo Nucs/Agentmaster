@@ -269,9 +269,10 @@ namespace Agentmaster::Msg
         /// mode"; §21.5) — the way a prompt typed at the PC becomes the user's own bubble in the topic. Only valid
         /// once the SECRETARY PROBE found that Telegram accepts such a send into this chat (`businessMode == 1`), or
         /// as the probe itself. `onDone` gets Telegram's answer on the send thread (a refusal is the caller's cue to
-        /// fall back to the bot-rendered line).
+        /// fall back to the bot-rendered line). `prio` is the outbox priority: a live prompt goes New; a HISTORY replay's
+        /// turn (§21.9) goes History, and its echo-guard entry lives kBackfillStallMs longer (it may wait that long to go).
         /// </summary>
-        void _sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone);
+        void _sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone, SendPriority prio = SendPriority::New);
         /// <summary>
         /// The SECRETARY ECHO guard (§21.6): true (and the entry consumed) when an incoming message from the owner in
         /// `threadId` carries a text this service sent AS THE USER in the last two minutes. Such a message is the
@@ -347,6 +348,29 @@ namespace Agentmaster::Msg
         /// <returns>How many were attempted.</returns>
         size_t _deleteOrphanTopics(size_t budget);
         /// <summary>
+        /// The HISTORY replay's pump (§21.9), once per tick: while a batch is going out it only waits (ONE batch in the
+        /// whole outbox at a time — small memory, a strict order); when the batch's last message was answered it moves that
+        /// topic's backfillPos on (a stalled batch, kBackfillStallMs, is dropped and sent again from the old position);
+        /// then it picks the next topic with history pending — the highest-ranked in MOST RECENT order first, the sessions
+        /// the user cares about now — reads the next window of its transcript (complete turns only), renders it
+        /// (RenderHistory) and queues the posts at the History priority (sent only when nothing else is queued, one per
+        /// kBackfillGapMs), silent, the user's turns as the user when secretary mode works. It waits while a RECREATION is
+        /// still deleting the old topics or making the new list (5 minutes at most), so the replay goes most recent first over
+        /// the whole list. When no history is pending after a recreation, it asks for the full re-sort of the list. Tick
+        /// thread; never throws (Rule #18 inside).
+        /// </summary>
+        void _pumpBackfill() noexcept;
+        /// <summary>
+        /// Keeps Telegram's topic list in the side panel's MOST RECENT order (§21.9): after a recreation's history replay, all
+        /// cards are re-posted lowest-ranked first (the list was in replay order); otherwise, at most once a minute and only
+        /// when everything is quiet (nothing queued, no replay, no session running, no topic posted in the last half
+        /// minute), the shortest set of cards that puts the list back in order is re-posted (PlanTopicResort, at most
+        /// kResortMaxTopics; a longer fix is left to the next replay or /recreate). Never during the start-up hold or a
+        /// recreation (the order keys are incomplete then). The re-posts themselves run in the next tick's per-topic pass,
+        /// which goes lowest-ranked first. Tick thread; never throws (Rule #18 inside).
+        /// </summary>
+        void _resortTick() noexcept;
+        /// <summary>
         /// Takes the per-chat pacing slot that the send thread's outbox uses (kSendGapMs), waiting for it, before a
         /// DIRECT call of the tick thread (createForumTopic, deleteForumTopic, editForumTopic) — such calls counted
         /// against the chat's ~1 call/s budget without waiting for it before §21.8 (a recreation makes ~150 calls).
@@ -405,6 +429,7 @@ namespace Agentmaster::Msg
             int64_t lastEditMs{ 0 }; // when the card was last sent or edited (the edit gap counts from it)
             SessionState lastState{ SessionState::Idle }; // the state the card last showed (a change edits at once)
             bool pingWanted{ false }; // a re-post WITH SOUND is owed (see _refreshCard)
+            bool repostWanted{ false }; // a SILENT re-post is owed: the list's re-sort (§21.9) moves this topic up
         };
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
@@ -577,6 +602,49 @@ namespace Agentmaster::Msg
         /// RECREATION — after the start-up hold, never while one is under way.
         /// </summary>
         std::atomic<bool> _recreateRequested{ false };
+        /// <summary>
+        /// The history replay's batch in flight (§21.9), under `_mtx` (the send thread's answers count it down): the topic,
+        /// where its window ended (`consumedTo`, committed to the topic only when `inFlight` reached 0), the day of its last
+        /// turn, and a sequence number so an answer of a dropped batch never counts down the next one.
+        /// </summary>
+        struct BackfillBatch
+        {
+            bool active{ false };
+            uint64_t seq{ 0 };
+            std::wstring sessionId;
+            int64_t threadId{ 0 };
+            int64_t consumedTo{ 0 };
+            int64_t dayKey{ 0 };
+            size_t inFlight{ 0 };
+            size_t posts{ 0 };
+            int64_t startedMs{ 0 };
+            size_t failed{ 0 }; // answers that were refusals (logged once per batch, with the first one's reason)
+            std::wstring firstFailure;
+        };
+        BackfillBatch _backfill;
+        uint64_t _backfillSeq{ 0 };
+        /// <summary>
+        /// Tick thread: the history messages queued per topic (the "history in" line names the count; erased then), and for
+        /// the whole replay of this run (`_replayPosts` messages into `_replayTopics` topics — the summary after a
+        /// recreation).
+        /// </summary>
+        std::unordered_map<std::wstring, size_t> _backfillPostsBy;
+        size_t _replayPosts{ 0 };
+        size_t _replayTopics{ 0 };
+        /// <summary>
+        /// Tick thread: when the running RECREATION started (or resumed at a start). The replay waits for the recreation's
+        /// new list, but not past kRecreateListWaitMs — a topic Telegram keeps refusing to make must not hold every history.
+        /// </summary>
+        int64_t _recreateStartedMs{ 0 };
+        /// <summary>
+        /// Tick thread: a recreation's history replay is under way — when the last topic's history is in, the whole list is
+        /// re-sorted (`_resortFull`). Also set at a start that finds a replay pending (the recreation of the last run).
+        /// </summary>
+        bool _backfillAfterRecreation{ false };
+        bool _resortFull{ false };
+        int64_t _lastResortMs{ 0 };
+        bool _resortTooLongLogged{ false };
+        std::unordered_set<std::wstring> _runningIds; // tick thread: the sessions the last sync saw Running (no re-sort while any runs)
         /// <summary>
         /// The START-UP HOLD on "closed" topic deletes (MESSAGING.md §21.4). `_startedMs` is when this run's
         /// service started; while the start is younger than `kStartupCloseHoldMinMs`, and while any registered
