@@ -626,6 +626,7 @@ namespace Agentmaster::Msg
                 _resortFull = false;
                 _lastResortMs = 0;
                 _resortTooLongLogged = false;
+                _resortQueue.clear();
                 _runningIds.clear();
                 _recreateStartedMs = 0;
             }
@@ -2394,6 +2395,7 @@ namespace Agentmaster::Msg
         _replayPosts = 0;
         _replayTopics = 0;
         _resortFull = false;
+        _resortQueue.clear();
         _log(L"[msg] recreation (" + why + L"): " + std::to_wstring(count) + L" old topic(s) are deleted first; then the list is made again, the oldest first, so it reads in MOST RECENT order");
         LogNav(L"remote telegram recreate-topics old=" + std::to_wstring(count));
         _appNote(L"♻ <b>Making the topics again</b> in MOST RECENT order (like the side panel): the " + std::to_wstring(count) +
@@ -3028,6 +3030,33 @@ namespace Agentmaster::Msg
             {
                 return; // the order keys are incomplete until every window has re-homed its tabs, and a recreation orders the list itself
             }
+            // A re-sort in progress: its next re-post, one per tick, while the call window has room for its two calls (the
+            // old card's delete and the new card's send) under the history's share of the budget — the live traffic keeps
+            // the rest. The per-topic pass of the next tick carries it out (_refreshCard: a silent re-post).
+            if (!_resortQueue.empty())
+            {
+                bool room = false;
+                {
+                    std::lock_guard lk{ _mtx };
+                    _noteCallLocked(0);
+                    room = _recentCallsMs.size() + 2 <= kHistoryCallsPerMinute && !_backfill.active;
+                }
+                if (!room)
+                {
+                    return;
+                }
+                const std::wstring next = _resortQueue.front();
+                _resortQueue.pop_front();
+                {
+                    std::lock_guard lk{ _mtx };
+                    _cards[next].repostWanted = true;
+                }
+                if (_resortQueue.empty())
+                {
+                    _log(L"[msg] re-sort: the last card is re-posted now; the list reads in MOST RECENT order");
+                }
+                return;
+            }
             if (!full && (now - _lastResortMs < kResortEveryMs || !_runningIds.empty()))
             {
                 return;
@@ -3104,15 +3133,9 @@ namespace Agentmaster::Msg
                 }
                 return;
             }
-            {
-                std::lock_guard lk{ _mtx };
-                for (const auto& sid : plan)
-                {
-                    _cards[sid].repostWanted = true;
-                }
-            }
+            _resortQueue.assign(plan.begin(), plan.end());
             _log(L"[msg] re-sort " + std::wstring{ full ? L"after the history replay" : L"(the list drifted)" } + L": " + std::to_wstring(plan.size()) + L" of " +
-                 std::to_wstring(current.size()) + L" card(s) re-posted, the lowest-ranked first, so the list reads in MOST RECENT order");
+                 std::to_wstring(current.size()) + L" card(s) to re-post, the lowest-ranked first and one at a time within the flood budget, so the list reads in MOST RECENT order");
             if (full)
             {
                 _appNote(L"\x2705 <b>History added</b> to " + std::to_wstring(_replayTopics) + L" topic(s) (" + std::to_wstring(_replayPosts) + L" message(s)); " +

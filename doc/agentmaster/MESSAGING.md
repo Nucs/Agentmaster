@@ -1558,7 +1558,9 @@ the whole session as messages, not a file plus the last 10 turns.
   a replay that goes most recent first leaves the list in REPLAY order (the most recent at the bottom). When a
   recreation's replay is in, the list is RE-SORTED: the shortest set of card re-posts that puts it in MOST RECENT order
   (the top part of the desired order, re-posted lowest-ranked first, the top one last — after a full replay, all but
-  one). Afterwards, at most once a minute and only when everything is quiet (nothing queued, no replay, no session
+  one). The re-posts go out ONE per tick, and only while the call window has room for their two calls (the old card's
+  delete, the new card's send): all at once, 48 re-posts are ~60 calls a minute, over the chat's flood budget
+  (`_resortQueue`; the first build, 0.0.1.19 on dev, still marks them all at once). Afterwards, at most once a minute and only when everything is quiet (nothing queued, no replay, no session
   Running, nothing posted for 30 s), a list that drifted is fixed the same way when that takes at most 24 re-posts; a
   longer fix is logged once and left to `/recreate` (it happens when an old session is resumed and not used: its
   topic sits on top while its MOST RECENT key is old, and only re-posting every topic above its rank can move it down).
