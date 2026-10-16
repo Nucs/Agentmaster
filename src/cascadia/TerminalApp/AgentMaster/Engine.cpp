@@ -497,6 +497,7 @@ namespace Agentmaster
                 hooks.launch = [](const RemoteLaunchRequest& req) { return RequestLaunchInWindow(req); };
                 hooks.restartSession = [](const std::wstring& sid) { RestartSessionInOtherWindows(sid, L""); };
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
+                hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
                 e->messaging->Apply(LoadAppSettings());
             }
@@ -889,6 +890,9 @@ namespace Agentmaster
         }
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.insert(windowId);
+        // The window's first-layout restore starts after this registration (TerminalPage::_InitAgentmasterEngine
+        // runs before _RestoreWindowTabs in _OnFirstLayout); it leaves the set in NoteWindowRestoreDoneIn.
+        e.restoringWindowIds.insert(windowId);
         // A live window always has a record on disk (the page's autosave), so writing the manifest now
         // means even a single-window session (which never triggers a remove-with-remaining) is recorded
         // — so it reopens at its geometry/lens next run (the shipped Increment-2 behavior).
@@ -898,6 +902,32 @@ namespace Agentmaster
     void UnregisterLiveWindow(const std::wstring& windowId)
     {
         UnregisterLiveWindowIn(SharedEngine(), windowId);
+    }
+
+    void NoteWindowRestoreDone(const std::wstring& windowId)
+    {
+        NoteWindowRestoreDoneIn(SharedEngine(), windowId);
+    }
+
+    void NoteWindowRestoreDoneIn(Engine& e, const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        e.restoringWindowIds.erase(windowId); // unknown id / second call: nothing to erase, by design
+    }
+
+    size_t WindowsStillRestoring()
+    {
+        return WindowsStillRestoringIn(SharedEngine());
+    }
+
+    size_t WindowsStillRestoringIn(Engine& e)
+    {
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        return e.restoringWindowIds.size();
     }
 
     // ---- Agentmaster: UI-thread stall watchdog (hooks.log [ui-stall]) --------------------------
@@ -1294,6 +1324,7 @@ namespace Agentmaster
 
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.erase(windowId);
+        e.restoringWindowIds.erase(windowId); // a window closed mid-restore must not hold the bot's deletes forever
         // Agentmaster (discard Manager-only windows): clear any Manager-only self-close reservation this
         // window held, so the set never accumulates stale ids across the process lifetime.
         e.closingWindowIds.erase(windowId);

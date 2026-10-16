@@ -533,6 +533,19 @@ namespace winrt::TerminalApp::implementation
     // dispatcher); exact left-to-right interleave of the two kinds is a deferred refinement.
     void TerminalPage::_RestoreWindowTabs()
     {
+        // Whatever happens below — the early return of a fresh window, a throw mid-loop — this window's restore is
+        // OVER when this frame ends, and the engine's "windows still restoring" count (which the Telegram bot
+        // reads before it deletes a topic as "closed") must drop. The id entered the count at RegisterLiveWindow.
+        auto restoreDone = wil::scope_exit([this]() noexcept {
+            try
+            {
+                ::Agentmaster::NoteWindowRestoreDone(std::wstring{ _windowId });
+            }
+            catch (...)
+            {
+                ::Agentmaster::AgentLogCaughtException(L"_RestoreWindowTabs (NoteWindowRestoreDone)");
+            }
+        });
         if (!_windowRecordClaimed || _windowRecord.tabs.empty() || !_sessionRegistry)
         {
             return;

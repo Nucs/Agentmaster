@@ -1056,19 +1056,23 @@ transport's failures and slow calls.
 - **A topic the user starts in Telegram (D20) is not a new session**: the bot answers with the `/newsession`
   hint, and the topic can be deleted.
 - **The pin has no PC-side menu item or tab glyph yet (D32)**; `/pin` and the buttons set it.
-- **The run marker's crash note** reads the marker the previous run left (`messaging\run.marker.last` is
-  not produced yet — the note is wired for it, so today a crash leaves no note). Open: write `.last` at start.
+- **The run marker's crash note**: the tick loop rewrites `messaging\run.marker` every minute and `Stop`
+  deletes it; the FIRST marker write of a run copies a marker still on disk to `run.marker.last`, which the
+  Search topic's start note reads (and removes) — so a run that ended without a clean stop is named in the
+  next start's note.
 - **Teams, webhooks, external connectors (§11–§12): not built.**
 
-### 21.3 Check after the build (live, with `@SidKatrineBot`)
+### 21.3 Check after the build (live, with the owner's bot)
 
 1. Cog → Messaging: token pasted, user id set, Check bot → `topics are ON`. ⚠ Threaded Mode lives ONLY in
    the BotFather **Mini App** (search botfather → tap Open → My bots → the bot → Bot Settings → **Threads
    Settings** → Threaded Mode); the classic `/mybots` chat menu does not show it. On 2026-10-16 the user
    flipped "Secretary Mode" and the group rights in the chat menu first — `getMe` then showed
-   `can_connect_to_business: true` (the business-bot setting) while `has_topics_enabled` stayed `false`.
-   Save. hooks.log: `[msg] messaging started …`,
-   `[msg] connected as @SidKatrineBot (topics enabled)`, `[msg] topic created: Search`.
+   `can_connect_to_business: true` (the business-bot setting) while `has_topics_enabled` stayed `false`;
+   that first bot (`@SidKatrineBot`) never got the mode on, and the owner made a NEW bot
+   (`@ClaudeSessionsGateBot`, Threaded Mode on from the start — §21.4). Save (or replace the Credential
+   Manager entry and restart: the token is read ONCE, at `_start`). hooks.log: `[msg] messaging started …`,
+   `[msg] connected as @<bot> (topics enabled)`, `[msg] topic created: Search`.
 2. In Telegram: the 🔎 Search topic with its welcome; one topic per non-idle Claude tab of every window
    (`[msg] topic created <sid8> …`), each with a pinned card; no topic for idle tabs, Codex tabs or shells.
 3. Type a prompt in a topic: the ✍ reaction, the prompt queued (`[msg] <sid8> queued from topic`), delivered
@@ -1083,3 +1087,83 @@ transport's failures and slow calls.
 7. `/reload-plugins` is refused (no record); `/resume x` is refused (leaves the tab); `/cc /mycmd` passes.
 8. A second Agentmaster instance (dev + release) with the SAME token: the second one reports the poller
    mutex and does not start (one bot per install).
+
+### 21.4 The first live run (2026-10-16, dev) and what it changed
+
+- **18:49:59** `[msg] messaging started (owner …, idle grace 10 min)` — the token of `@ClaudeSessionsGateBot`
+  replaced the first bot's in Credential Manager and the dev GUI was restarted (the token is read once, at
+  `_start`; `Apply` on a running service only re-reads the settings). **18:50:00** `connected as
+  @ClaudeSessionsGateBot (topics enabled)`, `topic created: Search (thread 22371)` with the welcome, the start
+  note and `setMyCommands` (22 commands in the chat scope, read back with `getMyCommands`).
+- **18:50–18:52: 47 topics**, one per non-Idle Claude tab of the two dev windows — every one a restored,
+  dormant tab whose persisted state was Waiting for you / Needs approval (D3 lists them: they wait for the
+  user) — about 1.2 s apart (the outbox pacing: `createForumTopic`, the "Mirroring from here on" note, the
+  card, `pinChatMessage` per topic), `cardMessageId` set on all 47 in `state.json`, and not one `[tg]` line in
+  `messaging.log` (no 4xx, no 429). Items 3–7 of §21.3 (the phone's side) were not exercised in this run.
+- **Fixed from that run** (the commit after `d1d23a5ca`, swapped into dev the same evening):
+  - Every topic creation logged `[msg] dropped a message from a sender that is not the paired owner` (48
+    lines): the bot's OWN `forum_topic_created` service message comes back through `getUpdates` with the bot
+    as the sender. `_handleMessage` now returns silently for the bot's own id (`_botId`, from `getMe`) before
+    the foreign-sender test; H3's order (the sender is read first, nothing else before it) is unchanged.
+  - **The state file was keyed by nothing.** Replacing the token with ANOTHER bot's would have kept the old
+    bot's update offset, Search topic and topic map. Update ids are per bot, so an offset above the new bot's
+    ids confirms — drops — every one of its updates for good, and the thread ids name topics that exist only in
+    the old bot's chat. `MessagingState::botId` (JSON `botId`; 0 in an older file = adopt the first bot seen,
+    never a reset) is compared with `getMe`'s id at every start: a different bot resets the offset, the Search
+    topic, the topic map, the per-session mirrors and the reactions (`[msg] the bot changed (@old -> @new): …`).
+    The poll loop does not call `getUpdates` before that `getMe` has answered (the IDENTITY GATE on `_botId`,
+    re-armed at every `_start`), so the reset always precedes the first poll. On this machine the switch from
+    `@SidKatrineBot` happened with offset 0 and no topics, so nothing was lost — the trap was for the next time.
+  - **A restart churned the chat** (seen at the swap that carried the two fixes above, dev 0.0.1.11, 19:04): the
+    first tick after the start found every session `live=false` — the registry loads `sessions.json` as
+    archived and each reopened window flips its own tabs live only in its first layout — so `PlanTopicSync`
+    deleted all 47 topics as "closed" (19:04:28–29), and from 19:04:57 re-created 38 of them as the tabs came
+    back (9 had meanwhile read Idle). The topics' history in the chat was gone with them. A first fix, a fixed
+    120 s hold (dev 0.0.1.12, 19:10), kept the 47 at the start and still churned 16: that start's `[startup]`
+    lines read `restore-sessions 72625ms` (the fleet load, while an m5 run competed for the CPU) and
+    `restore-window-tabs 67765ms` (the re-home of 56 tabs, ~1.2 s each on the UI thread), so the last 16 tabs
+    came live after the hold had ended — the restore of ONE window can outlast any fixed number.
+    Now the hold follows the restore itself: `Engine::restoringWindowIds` holds every registered window until
+    the end of its `_RestoreWindowTabs` (a `scope_exit`, early returns included; a window closed mid-restore
+    leaves the set at `UnregisterLiveWindow`), the service reads the count through `ServiceHooks::windowsRestoring`,
+    and a "closed" delete of a topic whose session has not been seen live in this run (`_seenLive`, filled from
+    each tick's facts) is skipped while the start is younger than `kStartupCloseHoldMinMs` (120 s — the windows
+    that have not registered yet: the Emperor's second window registers only once the first one's restore has
+    released the shared UI thread) OR any window is still restoring, up to `kStartupCloseHoldCapMs` (30 min,
+    so a restore that never ends cannot hold forever). A session seen live and then closed loses its topic at
+    once; one still closed when the hold ends loses it then. Logged once per start: `[msg] start-up hold: N
+    topic(s) kept until their sessions re-home (W window(s) still restoring; …)`, and when it ends `[msg]
+    start-up hold ended S s after the start (every window restored | the cap ran out)`. Other delete reasons
+    ("idle" past its own grace, "not a claude tab", "left its tab") are not held. The engine half is in the m5
+    suite (`TestPersistence`: register → 1 restoring, done → 0, unregister clears); the service half is checked
+    on every swap's log — no `topic deleted … (closed)` before the "hold ended" line. **Checked at the swap to
+    dev 0.0.1.13 (19:28):** `start-up hold: 47 topic(s) kept … (1 window(s) still restoring …)` at 19:28:55,
+    `start-up hold ended 121 s after the start (every window restored)` at 19:30:55.233 — 0.1 s after that
+    window's `[rehome] … resumed=55` line (`restore-sessions 52 s` + `restore-window-tabs 69 s`) — and not one
+    `topic deleted`.
+  - **Telegram's 429 — and its real cause, the card.** At 19:24:34 an `editMessageText` answered `429` with
+    `retry_after 1526` (`messaging.log`); the 19:28 run's first `sendMessage` got the remainder, `1265 s`
+    (`[msg] pacing: 429 on sendMessage, waiting 1265 s` — the send loop waits it out, as Telegram requires: a
+    call inside the window extends it), so nothing the bot sent landed before ~19:50. The topic churn above
+    contributed (47 + 38 + 16 topics, four calls each), but the sustained load was the CARD: its state line
+    read `Running 3m` and the idle line `leaves the list in 7m` — relative spans, re-rendered every tick and
+    edited whenever the text changed, so every card changed every minute (every 20 s in its first minute),
+    47 cards made ~1 edit/s for ten minutes, and the outbox paced edits at 300 ms (`kLightGapMs`) on top.
+    Telegram's per-chat flood limit (~1 call/s, bursts tolerated, then a long penalty) counts edits. Fixed:
+    the card shows CLOCK times (`since 19:04`, `leaves the list at 19:54` — `TgClockText`, local, with the
+    date when not today; a card now changes only when a fact changes, plus once at midnight), every call
+    keeps the ~1 s per-chat pace (`kLightGapMs` = `kSendGapMs`), and the work log's edit gap grows with the
+    number of open turns (`_openTurns` × 2 s, 15 s at least), so N busy sessions never exceed ~0.5 edit/s
+    between them. A traffic line every 10 minutes (`[msg] traffic (10 min): sendMessage=N editMessageText=M …
+    429=K`) is where the chat's call rate can be read from now on. Expected steady state for a quiet fleet:
+    a handful of calls per 10 minutes. **Checked at the swap to dev 0.0.1.14 (19:44):** the hold kept 47 and
+    ended 121 s after the start (the window's restore took 98 s this time, so the 120 s minimum governed), no
+    topic deleted; the first `sendMessage` still met the remainder of the 19:24 penalty (`waiting 346 s`), so
+    the first clean traffic line is the one after ~19:50.
+- **Open after the first live day:** (1) a session at rest in `Error` (a cut-off turn) is announced again at
+  EVERY start (`[msg] 61e3e3ff idle -> error` → `final message (error state)` at 19:30, 19:45): the registry
+  loads it as Idle and the scanner re-asserts Error, and the mirror's `lastState` is not persisted — persist
+  the last announced state in the `TopicRecord` so a restart announces nothing it already said. (2) The m5
+  scheduler timing checks ("the held prompt self-releases …", "woken tab: the queue resumes …") fail under
+  CPU contention (a concurrent msbuild) and pass on a quiet machine — widen their 3 s wait or mark them
+  load-sensitive. (3) Items 3–7 of §21.3 — the phone's side — are still unexercised.

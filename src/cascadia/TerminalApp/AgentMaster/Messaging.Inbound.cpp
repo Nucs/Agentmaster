@@ -191,6 +191,14 @@ namespace Agentmaster::Msg
         {
             from = f->I64At(L"id", 0);
         }
+        if (from != 0 && from == _botId.load())
+        {
+            // The bot's OWN service messages come back through getUpdates with the bot as the sender: the
+            // forum_topic_created of every topic it makes, the pinned-message note of every card it pins
+            // (measured 2026-10-16: one per created topic). Nothing to do with them, and they are not the
+            // foreign sender the line below is about.
+            return;
+        }
         if (from == 0 || from != _ownerId)
         {
             _log(L"[msg] dropped a message from a sender that is not the paired owner");

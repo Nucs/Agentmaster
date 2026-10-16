@@ -1842,6 +1842,26 @@ void TestEngineWindowLifecycle()
         CHECK(has(m, idB), "skip-empty: the LAST unregister keeps the final open-at-exit snapshot");
     }
 
+    // --- the restoring-windows count behind the Telegram bot's start-up hold (MESSAGING.md §21.4): a window
+    //     counts from its registration until its first-layout restore is reported done; a close mid-restore
+    //     drops it too; an unknown id and a second "done" change nothing ---
+    {
+        Engine e;
+        CHECK(WindowsStillRestoringIn(e) == 0, "no window registered: nothing restoring");
+        RegisterLiveWindowIn(e, idA);
+        RegisterLiveWindowIn(e, idB);
+        CHECK(WindowsStillRestoringIn(e) == 2, "two registered windows are both restoring until they say otherwise");
+        NoteWindowRestoreDoneIn(e, idA);
+        CHECK(WindowsStillRestoringIn(e) == 1, "a window's restore-done leaves the count to the other");
+        NoteWindowRestoreDoneIn(e, idA);
+        NoteWindowRestoreDoneIn(e, L"__m5eng_never_registered__");
+        NoteWindowRestoreDoneIn(e, L"");
+        CHECK(WindowsStillRestoringIn(e) == 1, "a repeated / unknown / empty restore-done changes nothing");
+        UnregisterLiveWindowIn(e, idB); // closed before its restore ended
+        CHECK(WindowsStillRestoringIn(e) == 0, "a window closed mid-restore no longer counts (no hold forever)");
+        UnregisterLiveWindowIn(e, idA);
+    }
+
     // --- the reclaimable pool: a claimed-then-closed record re-claims BY ID (real id + lens);
     //     the no-arg front-pop NEVER draws from it (a plain "+ new window" must not adopt a
     //     closed window's layout); a double teardown pools exactly ONE copy ---

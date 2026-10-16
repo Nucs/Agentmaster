@@ -177,6 +177,15 @@ namespace Agentmaster
         // record-claim set; the two are touched at disjoint times so there is no re-entrancy).
         std::set<std::wstring> liveWindowIds;
 
+        // Agentmaster (messaging, MESSAGING.md §21.4): the live windows whose FIRST-LAYOUT RESTORE has not
+        // finished — every id enters with RegisterLiveWindow and leaves with NoteWindowRestoreDone (the end
+        // of TerminalPage::_RestoreWindowTabs, early returns included) or UnregisterLiveWindow. While a
+        // window is in here, a session that reads live=false may simply not have been re-homed yet (the
+        // fleet loads as archived; a window flips its own tabs live one by one, measured 72 s of fleet load
+        // + 68 s of re-home for 56 tabs on 2026-10-16), so the Telegram bot holds its "closed" topic
+        // deletes. Guarded by windowMutex.
+        std::set<std::wstring> restoringWindowIds;
+
         // Agentmaster (discard Manager-only windows): the windowIds that have RESERVED a Manager-only
         // self-close (ReserveManagerOnlyClose returned true for them) but haven't finished tearing down
         // yet. A window that ends up holding ONLY the pinned Manager tab self-closes UNLESS it is the
@@ -488,6 +497,25 @@ namespace Agentmaster
     void RegisterLiveWindow(const std::wstring& windowId);
     void UnregisterLiveWindow(const std::wstring& windowId);
     std::vector<std::wstring> LiveWindowIds();
+
+    /// <summary>
+    /// Marks a registered window's first-layout restore as FINISHED (TerminalPage::_RestoreWindowTabs calls it on
+    /// every exit, a fresh window with no record included). Until then the window counts in
+    /// <see cref="WindowsStillRestoring"/>, which the Telegram bot reads before it deletes a topic as "closed":
+    /// during a restore a session reads live=false only because its tab has not been re-homed yet. An unknown
+    /// or empty id is ignored; calling it twice is harmless.
+    /// </summary>
+    /// <param name="windowId">The window's id (the one it registered with).</param>
+    void NoteWindowRestoreDone(const std::wstring& windowId);
+    /// <summary>
+    /// How many live windows have not finished their first-layout restore yet (registered, not yet
+    /// <see cref="NoteWindowRestoreDone"/>). 0 once every open window has re-homed its tabs. A window that
+    /// opens LATER (the Emperor's second reopened window registers only when the first one's restore has
+    /// released the shared UI thread) is not counted before it registers — a caller that needs a floor
+    /// adds its own time minimum.
+    /// </summary>
+    /// <returns>The count; 0 when no window is restoring.</returns>
+    size_t WindowsStillRestoring();
 
     // Agentmaster: UI-thread stall WATCHDOG (the 2026-08-14 RDP freeze's observability gap — the UI
     // thread ground for 20+ minutes while every engine lane logged normally, so hooks.log contained
@@ -838,6 +866,8 @@ namespace Agentmaster
     void RegisterLiveWindowIn(Engine& e, const std::wstring& windowId);
     void UnregisterLiveWindowIn(Engine& e, const std::wstring& windowId);
     std::vector<std::wstring> LiveWindowIdsIn(Engine& e);
+    void NoteWindowRestoreDoneIn(Engine& e, const std::wstring& windowId);
+    size_t WindowsStillRestoringIn(Engine& e);
     bool ReserveManagerOnlyCloseIn(Engine& e, const std::wstring& windowId);
     std::vector<RecoverableWindow> RecoverableWindowsIn(Engine& e);
     // The taskbar unread census on a LOCAL Engine (tests_taskbar.cpp): same contracts as the SharedEngine() forms above.

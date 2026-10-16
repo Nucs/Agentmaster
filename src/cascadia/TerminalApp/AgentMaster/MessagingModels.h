@@ -683,6 +683,14 @@ namespace Agentmaster::Msg
         int64_t updateOffset{ 0 }; // Telegram's getUpdates offset: the next update id to ask for
         int64_t searchThreadId{ 0 }; // the pinned "Search" topic (0 until created)
         int64_t setupNoticeMs{ 0 }; // when the "turn Threaded Mode on" notice was last sent (0 = never)
+        /// <summary>
+        /// The bot this state belongs to (getMe's user id; 0 = written before the key existed, or never connected).
+        /// Everything else in the file is PER BOT — the update offset (ids are per bot: a stale higher offset
+        /// would confirm, i.e. drop, every update of a new bot below it), the Search topic and the topic map
+        /// (thread ids of the old bot's chat) — so a different id at connect time resets all of it. The username
+        /// cannot serve as the key: @BotFather renames a bot without changing its id.
+        /// </summary>
+        int64_t botId{ 0 };
         std::wstring botUsername; // from getMe, for the status line
         std::map<std::wstring, TopicRecord> topics; // session id -> its topic
     };
@@ -698,6 +706,7 @@ namespace Agentmaster::Msg
         o.Set(L"updateOffset", json::Value::MkNum(static_cast<double>(s.updateOffset)));
         o.Set(L"searchThreadId", json::Value::MkNum(static_cast<double>(s.searchThreadId)));
         o.Set(L"setupNoticeMs", json::Value::MkNum(static_cast<double>(s.setupNoticeMs)));
+        o.Set(L"botId", json::Value::MkNum(static_cast<double>(s.botId)));
         o.Set(L"botUsername", json::Value::MkStr(s.botUsername));
         auto topics = json::Value::MkArr();
         for (const auto& [sid, t] : s.topics)
@@ -732,6 +741,7 @@ namespace Agentmaster::Msg
         s.updateOffset = v.I64At(L"updateOffset", 0);
         s.searchThreadId = v.I64At(L"searchThreadId", 0);
         s.setupNoticeMs = v.I64At(L"setupNoticeMs", 0);
+        s.botId = v.I64At(L"botId", 0); // absent in a file written before the key: 0 = "take the first bot seen"
         s.botUsername = v.StrAt(L"botUsername");
         if (const auto* topics = v.Find(L"topics"); topics && topics->type == json::Value::Type::Arr)
         {
@@ -1096,8 +1106,9 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The topic's pinned card (MESSAGING.md §6.1), as Telegram HTML: the title, the state and since
-    /// when, folder · branch · model · context, the runner and the queue, the unsent draft, a parked
-    /// note. Pure, so the service compares two renders and edits only on a change.
+    /// when (a clock time), folder · branch · model · context, the runner and the queue, the unsent draft,
+    /// a parked note. Pure, so the service compares two renders and edits only on a change — which is why
+    /// nothing in it may be a relative span (see TgClockText): every change is an API call on the one chat.
     /// </summary>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
@@ -1111,9 +1122,13 @@ namespace Agentmaster::Msg
         out += L"\U0001F4CC <b>" + TgEscapeHtml(s.title.empty() ? s.id.substr(0, 8) : s.title) + L"</b>\n";
         // State line.
         out += StateLabel(s.state);
+        // CLOCK TIMES, never spans: the service edits the card whenever this text changes, so a "3m" that
+        // became "4m" re-edited every card every minute — 47 topics' cards made ~47 edits a minute and
+        // Telegram answered with a 429 whose retry_after was 21 minutes (2026-10-16). "since 19:04"
+        // changes once, at the next midnight.
         if (s.stateChangedAtUnixMs > 0 && nowMs > s.stateChangedAtUnixMs)
         {
-            out += L" " + TgShortSpan(nowMs - s.stateChangedAtUnixMs);
+            out += L" since " + TgClockText(s.stateChangedAtUnixMs, nowMs);
         }
         if (s.pinned)
         {
@@ -1125,7 +1140,7 @@ namespace Agentmaster::Msg
         }
         if (idleLeavesAtMs > 0)
         {
-            out += L"\n\U0001F4A4 leaves the list in " + TgShortSpan(idleLeavesAtMs - nowMs) + L" (/pin keeps it, /wake brings it back)";
+            out += L"\n\U0001F4A4 leaves the list at " + TgClockText(idleLeavesAtMs, nowMs) + L" (/pin keeps it, /wake brings it back)";
         }
         out += L"\n";
         // Place line: folder · branch · model · ctx.

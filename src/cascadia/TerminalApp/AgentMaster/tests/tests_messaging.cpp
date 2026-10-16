@@ -288,9 +288,15 @@ void TestMessaging()
         s.updateOffset = 77;
         s.searchThreadId = 5;
         s.botUsername = L"SidKatrineBot";
+        s.botId = 123456789012; // past 32 bits: Telegram ids are
         s.topics[L"sid-1"] = TopicRecord{ L"sid-1", 42, 100, 101, L"title", 123, 4567, L"C:\\t.jsonl", 9 };
         const auto back = StateFromJson(StateToJson(s));
-        CHECK(back.has_value() && back->updateOffset == 77 && back->searchThreadId == 5 && back->botUsername == L"SidKatrineBot", "the state's scalars round-trip");
+        CHECK(back.has_value() && back->updateOffset == 77 && back->searchThreadId == 5 && back->botUsername == L"SidKatrineBot" && back->botId == 123456789012, "the state's scalars round-trip (the bot id past 32 bits)");
+        // A file written before the key reads 0 = "the first bot seen is this state's", never a reset.
+        auto legacyObj = json::Value::MkObj();
+        legacyObj.Set(L"updateOffset", json::Value::MkNum(77));
+        const auto legacy = StateFromJson(legacyObj);
+        CHECK(legacy.has_value() && legacy->botId == 0 && legacy->updateOffset == 77, "an older state file without botId reads botId 0");
         CHECK(back.has_value() && back->topics.size() == 1 && back->topics.at(L"sid-1").threadId == 42 && back->topics.at(L"sid-1").cardMessageId == 100 &&
                   back->topics.at(L"sid-1").cursor == 4567 && back->topics.at(L"sid-1").transcriptPath == L"C:\\t.jsonl" && back->topics.at(L"sid-1").idleSinceMs == 123,
               "a topic record round-trips");
@@ -315,12 +321,21 @@ void TestMessaging()
         s.pendingInput = L"and then rebase onto <main>";
         const std::wstring card = BuildCardText(s, 1000 + 3 * 60 * 1000, 0, false);
         CHECK(card.find(L"<b>Agentmaster/feature</b>") != std::wstring::npos, "the card leads with the title");
-        CHECK(card.find(L"Running 3m") != std::wstring::npos, "the state and since when");
+        // The "since" is a LOCAL clock time ("HH:MM" — the same day in the test's epochs), never a span: the
+        // card is re-edited on every text change, and a span changed every minute on every topic.
+        const auto looksLikeClock = [](std::wstring_view t) {
+            return t.size() >= 5 && iswdigit(t[0]) && iswdigit(t[1]) && t[2] == L':' && iswdigit(t[3]) && iswdigit(t[4]);
+        };
+        const size_t sincePos = card.find(L"Running since ");
+        CHECK(sincePos != std::wstring::npos && looksLikeClock(std::wstring_view{ card }.substr(sincePos + 14)), "the state and since when, as a clock time");
+        CHECK(card.find(L"Running 3m") == std::wstring::npos, "no relative span in the card (it would re-edit every minute)");
+        CHECK(looksLikeClock(TgClockText(1700000000000, 1700000000000)) && TgClockText(1700000000000, 1700000000000).size() == 5, "TgClockText: the same day is HH:MM");
+        CHECK(TgClockText(1700000000000 - 3ll * 86400000, 1700000000000).size() > 5 && TgClockText(1700000000000 - 3ll * 86400000, 1700000000000).find(L' ') != std::wstring::npos, "TgClockText: another day adds the date");
         CHECK(card.find(L"agentmaster \x00B7 claude-opus-5-5 \x00B7 ctx 182K") != std::wstring::npos, "branch · model · ctx");
         CHECK(card.find(L"Runner Paused \x00B7 queue 1 \x2014 next: \x201C" L"also update the docs\x201D") != std::wstring::npos, "the runner and the next queued prompt");
         CHECK(card.find(L"unsent at the PC: \x201C" L"and then rebase onto &lt;main&gt;\x201D") != std::wstring::npos, "the unsent draft, escaped");
         CHECK(BuildCardText(s, 5000, 0, true).find(L"(Off globally)") != std::wstring::npos, "the global pause shows");
-        CHECK(BuildCardText(s, 5000, 5000 + 90000, false).find(L"leaves the list in 1m") != std::wstring::npos, "the idle card counts down");
+        CHECK(BuildCardText(s, 5000, 5000 + 90000, false).find(L"leaves the list at ") != std::wstring::npos, "the idle card names the clock time it leaves at (never a countdown)");
     }
 
     // ---- the remote prompt's runner bypass (D30) ----
