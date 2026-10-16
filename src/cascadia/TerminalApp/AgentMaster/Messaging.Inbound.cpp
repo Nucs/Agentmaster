@@ -293,13 +293,13 @@ namespace Agentmaster::Msg
         });
     }
 
-    void MessagingService::_reactivate(const std::wstring& sessionId, int64_t threadId)
+    std::wstring MessagingService::_reactivate(const std::wstring& sessionId)
     {
         const auto s = _registry->Get(sessionId);
         if (!s || !s->live)
         {
-            _reply(threadId, L"This session is closed. Resume it from the \U0001F50E Search topic.", false);
-            return;
+            LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> closed");
+            return L"This session is closed. Resume it from the \U0001F50E Search topic.";
         }
         if (!s->started && !s->external)
         {
@@ -316,14 +316,13 @@ namespace Agentmaster::Msg
                     LogSwallowedException(L"MessagingService::_reactivate (start)");
                 }
             }
-            _reply(threadId, L"\x25B6 Resuming the session in its tab. A cut-off turn goes on by itself; a message queued here is sent once it is ready.", false);
             LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> start");
-            return;
+            return L"\x25B6 Resuming it in its tab. A cut-off turn goes on by itself; a message sent here goes out once it is ready.";
         }
-        if (s->state == SessionState::Error)
+        if (s->state == SessionState::Error || s->state == SessionState::Done)
         {
-            // Its claude is up but the turn failed (an API error, a cut-off turn it did not resume): a restart
-            // resumes the same conversation id in the same tab.
+            // Its claude is up but the turn failed (an API error, a cut-off turn it did not resume), or claude exited
+            // and the tab holds a finished process: a restart resumes the same conversation id in the same tab.
             if (_hooks.restartSession)
             {
                 try
@@ -335,12 +334,11 @@ namespace Agentmaster::Msg
                     LogSwallowedException(L"MessagingService::_reactivate (restart)");
                 }
             }
-            _reply(threadId, L"\x25B6 Restarting the session \x2014 the same conversation resumes in its tab.", false);
-            LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> restart");
-            return;
+            LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> restart (" + (s->state == SessionState::Done ? std::wstring{ L"exited" } : std::wstring{ L"error" }) + L")");
+            return L"\x25B6 Restarting it \x2014 the same conversation resumes in its tab.";
         }
-        _reply(threadId, std::wstring{ L"It is running already (" } + StateLabel(s->state) + L").", false);
         LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> already running");
+        return std::wstring{ L"It is running already (" } + StateLabel(s->state) + L").";
     }
 
     void MessagingService::_handleMessage(const json::Value& msg, bool edited)
@@ -373,6 +371,15 @@ namespace Agentmaster::Msg
         {
             return; // a group the bot was added to: not this feature
         }
+        // The SECRETARY ECHO guard (§21.6): a message sent ON THE USER'S BEHALF through the business connection — our
+        // own send of a prompt typed at the PC, which shows as the user's bubble — is never a new prompt from the
+        // phone: queued, it would be sent to claude again and mirrored once more, a loop. Telegram marks what a
+        // business bot sent (sender_business_bot) and every message of a business chat (business_connection_id); a
+        // message with neither mark that repeats a text we just sent as the user in this topic is dropped below.
+        if (msg.Find(L"sender_business_bot") || !msg.StrAt(L"business_connection_id").empty())
+        {
+            return;
+        }
         const int64_t threadId = msg.I64At(L"message_thread_id", 0);
         int64_t searchThread = 0;
         std::wstring sessionId;
@@ -404,6 +411,11 @@ namespace Agentmaster::Msg
             {
                 _reply(threadId, L"Files, photos and voice notes are not taken yet (a later build). Text only for now.", false, json::Value{}, msg.I64At(L"message_id", 0));
             }
+            return;
+        }
+        if (!edited && threadId != 0 && _takeSecretaryEcho(threadId, text))
+        {
+            _log(L"[msg] secretary: our own send as the user came back as a message (thread " + std::to_wstring(threadId) + L"); ignored");
             return;
         }
         if (threadId != 0 && threadId == searchThread)
@@ -594,13 +606,13 @@ namespace Agentmaster::Msg
             int64_t idleLeaves = 0;
             {
                 std::lock_guard lk{ _mtx };
-                if (const auto it = _state.topics.find(sessionId); it != _state.topics.end() && it->second.idleSinceMs)
+                if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
                 {
-                    idleLeaves = it->second.idleSinceMs + _idleGraceMs.load();
+                    idleLeaves = IdleTopicLeavesAtMs(it->second.idleSinceMs, s->lastActivityUnixMs, _idleGraceMs.load());
                 }
             }
             json::Value markup;
-            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup);
+            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
             _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false), false, markup);
             done(L"ok");
             return;
@@ -977,7 +989,8 @@ namespace Agentmaster::Msg
         }
         if (name == L"reactivate")
         {
-            _reactivate(sessionId, threadId);
+            // A typed command gets its answer in the thread (the card's button answers with a toast instead).
+            _reply(threadId, TgEscapeHtml(_reactivate(sessionId)), false, json::Value{}, msgId);
             done(L"ok");
             return;
         }
@@ -1425,8 +1438,8 @@ namespace Agentmaster::Msg
             }
             else if (verb == L"reactivate")
             {
-                answer(L"");
-                _reactivate(sid, threadId);
+                // The outcome as the button's toast: nothing is posted in the thread, which is the conversation (§21.6).
+                answer(_reactivate(sid));
                 return;
             }
             else

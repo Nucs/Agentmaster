@@ -96,14 +96,23 @@ namespace Agentmaster
     // (Scheduler::SetStateSettleMs) is what DecideAdvance is handed; this constant is its default.
     inline constexpr int64_t kStateSettleMs = 40000;
 
+    // Agentmaster (MESSAGING.md §21.6): the settle window of a REMOTE prompt — a message the user typed in the
+    // session's Telegram topic (QueuedPrompt::remoteSource). It is the user's own message, like a Send now, so the
+    // 40 s that protects the runner's PLANNED prompts from a momentary "ready" would only make the phone wait: a
+    // message into a parked tab waited 40 s after its claude started, and 40 s after it was queued into a session
+    // that sat waiting anyway. 5 s still rides out a resumed tab's start-up flaps; the input-box gate (a NoBox read
+    // while claude draws its UI) and the ready-state gate hold the rest.
+    inline constexpr int64_t kRemotePromptSettleMs = 5000;
+
     // Agentmaster (the STATE SETTLE hold — DELIVERY.md §16): how much longer the settle hold keeps
     // `prompt` from being typed into `s`; 0 == it may go now. The anchor is the LATER of the session's
     // last status change and the prompt's queue time (both registry-stamped); an unstamped anchor (0 on
     // both — a hand-built record, an old test) holds nothing, and a FUTURE anchor (the system clock
     // stepped backwards) reads as settled rather than holding until the clock catches up — fail-open,
     // the send-spacing idiom, because a backward clock step must never park a plan for its whole size.
-    // Shared by DecideAdvance and the per-tab overlay's "settling" cue, so the two can never disagree
-    // about whether the queue is settling. PURE.
+    // A REMOTE prompt's window is at most kRemotePromptSettleMs. Shared by DecideAdvance and the
+    // per-tab overlay's "settling" cue, so the two can never disagree about whether the queue is
+    // settling. PURE.
     //   s         — the session snapshot.
     //   prompt    — the prompt DecideAdvance would fire next (the first Pending one).
     //   nowUnixMs — the current time (system-clock ms).
@@ -114,6 +123,10 @@ namespace Agentmaster
         if (settleMs <= 0)
         {
             return 0; // hold disabled
+        }
+        if (!prompt.remoteSource.empty() && settleMs > kRemotePromptSettleMs)
+        {
+            settleMs = kRemotePromptSettleMs; // the user's own message from the phone (see kRemotePromptSettleMs)
         }
         const int64_t anchor = s.stateChangedAtUnixMs > prompt.queuedAtUnixMs ? s.stateChangedAtUnixMs : prompt.queuedAtUnixMs;
         if (anchor == 0)
@@ -214,8 +227,9 @@ namespace Agentmaster
     // the user typed in the session's Telegram topic (QueuedPrompt::remoteSource)? Such a prompt is the user's
     // own message, like a Send now: it goes out whatever the runner's mode, past Pause all and past the
     // maxAutoSends budget. The other gates (the open + started test, the ready states, the delivery gate, the
-    // box state, the pickup guard, the settle hold, the spacing) still apply — they protect the session, not
-    // the runner's budget. PURE; shared by DecideAdvance and the scheduler's idle-start trigger.
+    // box state, the pickup guard, the settle hold — shortened to kRemotePromptSettleMs for it — and the
+    // spacing) still apply — they protect the session, not the runner's budget. PURE; shared by DecideAdvance
+    // and the scheduler's idle-start trigger.
     //   s       — the session (its queue read).
     //   returns — true when the first Pending prompt carries a remoteSource.
     inline bool NextPromptIsRemote(const SessionInfo& s) noexcept

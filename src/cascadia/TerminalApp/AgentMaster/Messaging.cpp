@@ -60,16 +60,24 @@ namespace Agentmaster::Msg
         // each); a card whose post Telegram refused is tried again after kCardRepostAfterFailureMs, never every tick.
         constexpr int64_t kCardStickyLagMs = 6 * 1000;
         constexpr int64_t kCardRepostAfterFailureMs = 60 * 1000;
-        // The recap seed reads this much of the transcript's tail when a topic is created (the last prompt and
-        // the last reply are almost always within it; a longer final reply than this is rare).
+        // A new topic reads this much of the transcript's tail (§21.6): the last away_summary and the newest message
+        // for the recap rule, and — for a session that is mid-turn — the start of the turn's own prompt line, where
+        // the mirror then begins (a turn longer than this starts mirroring from the file's end instead).
         constexpr int64_t kRecapSeedBytes = 256 * 1024;
+        // How long a text sent AS THE USER is remembered for the echo guard (_takeSecretaryEcho): Telegram
+        // delivers such a message back, if it does, within seconds; two minutes covers a slow poll.
+        constexpr int64_t kSecretaryEchoMs = 2 * 60 * 1000;
         // How often the tick loop logs the outbound call census (`[msg] traffic (10 min): …`).
         constexpr int64_t kTrafficLogMs = 10 * 60 * 1000;
         // How much transcript a tick reads per session at most (a busy session writes kilobytes a second;
         // a catch-up after a pause must not stall the tick).
         constexpr size_t kMaxReadPerTick = 4u * 1024u * 1024u;
-        // A transcript path that did not resolve is tried again this often.
+        // A transcript path that did not resolve is tried again this often — every ~2 s while the session is busy
+        // (a NEW session or fork has its topic before its first message, §21.6, and that first prompt is what the
+        // file starts with: found late, it would still be read from the start, but the thread would lag), and
+        // every 20 s while it rests (nothing will appear until the user types).
         constexpr int64_t kResolveRetryMs = 20 * 1000;
+        constexpr int64_t kResolveRetryBusyMs = 2 * 1000;
         // The run marker (§4.3) is rewritten this often; a marker found at start = the previous run ended
         // without a clean stop.
         constexpr int64_t kMarkerMs = 60 * 1000;
@@ -210,6 +218,87 @@ namespace Agentmaster::Msg
             }
             ::CloseHandle(h);
             return out;
+        }
+
+        // What a new topic learns from the tail of a transcript (§21.6, _seedFromTranscript).
+        struct TranscriptTailScan
+        {
+            int64_t size{ -1 }; // the file's size when read (-1 = unreadable / absent)
+            int64_t lastPromptLineAt{ -1 }; // where the newest turn-starting prompt's line begins (-1 = none in the window)
+            std::wstring recapText; // the newest away_summary in the window (FoldRecapFacts)
+            int64_t recapAtMs{ 0 };
+            int64_t lastMessageAtMs{ 0 }; // the newest conversation item's time in the window
+        };
+
+        // Reads the last `windowBytes` of a transcript and folds every COMPLETE line of it: the recap facts and the
+        // byte offset where the newest turn-starting prompt's line begins (a line torn by the window's start is
+        // dropped; a torn last line — still being written — is not read). Lines are parsed one at a time because the
+        // offset of each is needed. Throws std::bad_alloc only (the caller contains it).
+        TranscriptTailScan ScanTranscriptTail(const std::wstring& path, int64_t windowBytes)
+        {
+            TranscriptTailScan scan;
+            if (path.empty())
+            {
+                return scan;
+            }
+            int64_t size = -1;
+            ReadTranscriptTail(path, 0x7FFFFFFFFFFFFFFFll, size); // the size only
+            scan.size = size;
+            if (size <= 0)
+            {
+                return scan;
+            }
+            const int64_t from = size > windowBytes ? size - windowBytes : 0;
+            int64_t sizeNow = -1;
+            const std::string bytes = ReadTranscriptTail(path, from, sizeNow);
+            size_t pos = 0;
+            if (from > 0)
+            {
+                const size_t nl = bytes.find('\n');
+                if (nl == std::string::npos)
+                {
+                    return scan; // one line longer than the window: nothing complete to read
+                }
+                pos = nl + 1;
+            }
+            while (pos < bytes.size())
+            {
+                const size_t nl = bytes.find('\n', pos);
+                if (nl == std::string::npos)
+                {
+                    break; // the last line is still being written
+                }
+                const int64_t lineAt = from + static_cast<int64_t>(pos);
+                auto parsed = ParseTranscriptJsonl(bytes.substr(pos, nl - pos));
+                pos = nl + 1;
+                if (parsed.empty())
+                {
+                    continue;
+                }
+                const auto items = ClassifyTranscriptLine(parsed.front());
+                for (const auto& it : items)
+                {
+                    if (it.kind == TopicItemKind::Prompt && !it.midTurn)
+                    {
+                        scan.lastPromptLineAt = lineAt;
+                    }
+                }
+                FoldRecapFacts(items, scan.recapText, scan.recapAtMs, scan.lastMessageAtMs);
+            }
+            return scan;
+        }
+
+        // FNV-1a 32 of a text with its surrounding whitespace dropped: the identity the secretary echo guard
+        // compares (Telegram may trim what it stores).
+        uint32_t EchoHash(std::wstring_view text)
+        {
+            const size_t a = text.find_first_not_of(L" \t\r\n");
+            if (a == std::wstring_view::npos)
+            {
+                return CardTextHash(L"");
+            }
+            const size_t b = text.find_last_not_of(L" \t\r\n");
+            return CardTextHash(text.substr(a, b - a + 1));
         }
 
         std::wstring StateWord(SessionState s)
@@ -405,10 +494,12 @@ namespace Agentmaster::Msg
             {
                 std::lock_guard lk{ _mtx };
                 _mirrors.clear();
+                _cards.clear();
                 _reacted.clear();
                 _outbox.clear();
                 _dirty.clear();
                 _seenLive.clear();
+                _secretaryEchoes.clear();
             }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
@@ -986,7 +1077,16 @@ namespace Agentmaster::Msg
                                     _state.searchThreadId = 0;
                                     _state.setupNoticeMs = 0;
                                     _state.topics.clear();
+                                    // A business connection (secretary mode) is made to ONE bot: the new bot has none
+                                    // until the user adds it under Telegram Business → Chatbots.
+                                    _state.businessConnectionId.clear();
+                                    _state.businessEnabled = false;
+                                    _state.businessCanReply = false;
+                                    _state.businessMode = 0;
+                                    _state.businessNote.clear();
+                                    _probeWanted.store(false);
                                     _mirrors.clear();
+                                    _cards.clear();
                                     _reacted.clear();
                                     _stateDirty = true;
                                 }
@@ -1128,7 +1228,7 @@ namespace Agentmaster::Msg
                         mirror = _mirrors[sid];
                     }
                     _onStateEdge(sid, topic, mirror, *s);
-                    _followTranscript(sid, topic, mirror);
+                    _followTranscript(sid, topic, mirror, *s);
                     _flushWorkLog(sid, topic, mirror, false);
                     _syncReactions(*s);
                     _sweepRevives(*s);
@@ -1138,17 +1238,31 @@ namespace Agentmaster::Msg
                         {
                             // Keep the fields the mirror advanced; the sync may have changed the others (never the
                             // card clocks: _noteTopicPosted and the card's callbacks write those under the lock).
-                            it->second.cursor = topic.cursor;
-                            it->second.transcriptPath = topic.transcriptPath;
-                            it->second.workLogMessageId = topic.workLogMessageId;
-                            it->second.recapPrompt = topic.recapPrompt;
-                            it->second.recapReply = topic.recapReply;
-                            it->second.recapAtMs = topic.recapAtMs;
-                            it->second.recapSeenMs = topic.recapSeenMs;
-                            it->second.errorAnnounced = topic.errorAnnounced;
+                            auto& rec = it->second;
+                            rec.cursor = topic.cursor;
+                            rec.transcriptPath = topic.transcriptPath;
+                            // A work-log create whose answer landed while this session was processed: the copy still
+                            // says "in flight" (-1), the record already holds the answer (the new message's id, or 0
+                            // for a refusal; _flushWorkLog marks the record -1 when it sends) — keep it, or the next
+                            // tick waits for an answer that already came and the work log stops for the turn.
+                            const bool workLogAnswerLanded = topic.workLogMessageId < 0 && rec.workLogMessageId >= 0;
+                            if (!workLogAnswerLanded)
+                            {
+                                rec.workLogMessageId = topic.workLogMessageId;
+                            }
+                            rec.recapText = topic.recapText;
+                            rec.recapAtMs = topic.recapAtMs;
+                            rec.lastMessageAtMs = topic.lastMessageAtMs;
+                            rec.errorAnnounced = topic.errorAnnounced;
                             _stateDirty = true;
+                            auto& cur = _mirrors[sid];
+                            if (workLogAnswerLanded && cur.workLogGen == mirror.workLogGen && cur.workLogMessageId > 0)
+                            {
+                                mirror.workLogMessageId = cur.workLogMessageId;
+                                mirror.workLogDirty = true; // what arrived meanwhile goes out as an edit
+                            }
+                            cur = std::move(mirror);
                         }
-                        _mirrors[sid] = mirror;
                     }
                     _refreshCard(sid, false);
                 }
@@ -1425,6 +1539,17 @@ namespace Agentmaster::Msg
             }
             parts.push_back(rest);
         }
+        {
+            // The echo guard's memory (_takeSecretaryEcho): if Telegram hands the message back to the bot as a
+            // message from the owner in this topic, it must never be queued as a new prompt.
+            std::lock_guard lk{ _mtx };
+            const int64_t now = WallMs();
+            std::erase_if(_secretaryEchoes, [now](const SecretaryEcho& e) { return e.expiresMs < now; });
+            for (const auto& part : parts)
+            {
+                _secretaryEchoes.push_back(SecretaryEcho{ threadId, EchoHash(part), now + kSecretaryEchoMs });
+            }
+        }
         for (size_t i = 0; i < parts.size(); ++i)
         {
             OutItem item;
@@ -1451,7 +1576,23 @@ namespace Agentmaster::Msg
         _noteTopicPosted(threadId);
     }
 
-    void MessagingService::_editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup)
+    bool MessagingService::_takeSecretaryEcho(int64_t threadId, const std::wstring& text)
+    {
+        const uint32_t hash = EchoHash(text);
+        std::lock_guard lk{ _mtx };
+        const int64_t now = WallMs();
+        for (auto it = _secretaryEchoes.begin(); it != _secretaryEchoes.end(); ++it)
+        {
+            if (it->threadId == threadId && it->hash == hash && it->expiresMs >= now)
+            {
+                _secretaryEchoes.erase(it); // one echo per send: the same words typed again later are a new message
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void MessagingService::_editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone)
     {
         if (messageId <= 0)
         {
@@ -1481,6 +1622,7 @@ namespace Agentmaster::Msg
         {
             item.params.Set(L"reply_markup", replyMarkup);
         }
+        item.onDone = std::move(onDone);
         _enqueue(std::move(item));
     }
 
@@ -1705,8 +1847,24 @@ namespace Agentmaster::Msg
             f.inTab = !s.tabToken.empty();
             f.claude = (s.kind == AgentKind::Claude);
             f.pinned = s.pinned;
+            f.lastActivityMs = s.lastActivityUnixMs; // a new tab's creation instant: it is listed before its first message
+            f.tabToken = s.tabToken; // per tab: a topic follows its tab to the next conversation (Rekey)
+            f.continuedFromId = s.continuedFromId; // ...also to a /handover-here successor, which takes the tab on a new connection
             facts.push_back(std::move(f));
             byId.emplace(s.id, std::move(s));
+        }
+        {
+            // The tab each topic's session is in NOW (a restart gives every tab a new token, and the topic's tab is
+            // what a later Rekey matches): kept in step here, before the plan reads the records.
+            std::lock_guard lk{ _mtx };
+            for (auto& [sid, t] : _state.topics)
+            {
+                if (const auto it = byId.find(sid); it != byId.end() && it->second.live && !it->second.tabToken.empty() && it->second.tabToken != t.tabToken)
+                {
+                    t.tabToken = it->second.tabToken;
+                    _stateDirty = true;
+                }
+            }
         }
         // The start-up hold's evidence: a session seen live in this run has re-homed, so its topic follows the
         // plan from then on (a tab the user closes 30 s after a start loses its topic at once). The set is
@@ -1803,15 +1961,30 @@ namespace Agentmaster::Msg
                     _renameTopic(op.sessionId, op.title);
                 }
                 break;
+            case TopicSyncOp::Kind::Rekey:
+                // The tab's conversation changed (/clear, /resume, a handover in place): the topic follows the tab.
+                // A rename may be one API call; past the tick's budget the next tick plans it again.
+                if (apiOps++ < kTopicOpsPerTick)
+                {
+                    _rekeyTopic(op.fromSessionId, op.sessionId, op.title);
+                }
+                break;
             case TopicSyncOp::Kind::IdleCard:
             {
-                std::lock_guard lk{ _mtx };
-                if (const auto it = _state.topics.find(op.sessionId); it != _state.topics.end())
+                int64_t leavesAt = 0;
                 {
-                    it->second.idleSinceMs = WallMs();
-                    _stateDirty = true;
+                    std::lock_guard lk{ _mtx };
+                    if (const auto it = _state.topics.find(op.sessionId); it != _state.topics.end())
+                    {
+                        it->second.idleSinceMs = nowMs;
+                        _stateDirty = true;
+                    }
                 }
-                _log(L"[msg] topic idle " + ShortId(op.sessionId) + L" (leaves the list in " + std::to_wstring(_idleGraceMs.load() / 60000) + L" min unless pinned or woken)");
+                if (const auto it = byId.find(op.sessionId); it != byId.end())
+                {
+                    leavesAt = IdleTopicLeavesAtMs(nowMs, it->second.lastActivityUnixMs, _idleGraceMs.load());
+                }
+                _log(L"[msg] topic idle " + ShortId(op.sessionId) + L" (leaves the list in " + std::to_wstring(std::max<int64_t>(0, leavesAt - nowMs) / 60000) + L" min unless pinned or woken)");
             }
                 _refreshCard(op.sessionId, true);
                 break;
@@ -1870,71 +2043,48 @@ namespace Agentmaster::Msg
         {
             return;
         }
-        // The mirror starts at the END of the transcript: a topic shows the session from now on (the
-        // backfill of §6.7 is a later phase; /transcript sends the whole session as a file meanwhile).
+        // The topic shows the session from now on (the backfill of §6.7 is a later phase; /transcript sends the
+        // whole session as a file meanwhile): _seedFromTranscript decides where the mirror starts and what the
+        // first card's recap is. Nothing but the card is posted here — the thread is the conversation (§21.6).
+        const auto s = _session(sessionId);
         TopicRecord t;
         t.sessionId = sessionId;
         t.threadId = thread;
         t.title = name;
         t.createdMs = WallMs();
-        t.transcriptPath = ResolveClaudeTranscriptPath(sessionId);
-        if (!t.transcriptPath.empty())
+        if (s)
         {
-            int64_t size = 0;
-            ReadTranscriptTail(t.transcriptPath, 0x7FFFFFFFFFFFFFFFll, size); // size only
-            t.cursor = size > 0 ? size : 0;
-            // The recap (§21.5): the topic mirrors from here on, so its first card says where the conversation
-            // stands — the last prompt and the last reply, read once from the transcript's tail.
-            _seedRecap(t);
+            t.tabToken = s->tabToken;
+            _seedFromTranscript(t, *s);
         }
         {
             std::lock_guard lk{ _mtx };
             _state.topics[sessionId] = t;
             _mirrors.erase(sessionId);
+            _cards.erase(sessionId);
             _stateDirty = true;
         }
-        _log(L"[msg] topic created " + ShortId(sessionId) + L" \x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L")");
-        // The note first, the card LAST: the card is the STICKY bottom message of the topic (§21.5), so nothing
-        // of the topic's own setup may land after it (it would only make the card re-post itself). Neither moves
-        // the card's clocks. No pin any more: the card's place is the bottom, and a pin per re-post would leave a
-        // "pinned a message" line each time.
-        const auto s = _session(sessionId);
-        if (s && !t.transcriptPath.empty() && t.cursor > 0)
+        _log(L"[msg] topic created " + ShortId(sessionId) + L" \x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L", " +
+             (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet: mirrored from its first line" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + L")");
+        if (!s)
         {
-            _sendText(thread, L"<i>Mirroring from here on. /transcript sends the whole session as a file; /summary its summary.</i>", true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+            // The session left the registry between the plan and now: a bare card, the next sync deletes the topic.
+            _postCard(sessionId, thread, L"\U0001F4CC " + TgEscapeHtml(name), json::Value{}, 0, false, 0);
+            return;
         }
-        json::Value markup;
-        std::wstring card;
-        if (s)
-        {
-            CardExtras extras;
-            extras.recap = t.recapSeenMs > 0;
-            extras.recapPrompt = t.recapPrompt;
-            extras.recapReply = t.recapReply;
-            extras.recapAtMs = t.recapAtMs;
-            card = BuildCardText(*s, WallMs(), 0, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
-            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, s->live && ((!s->started && !s->external) || s->state == SessionState::Error));
-        }
-        else
-        {
-            card = L"\U0001F4CC " + TgEscapeHtml(name);
-        }
-        {
-            std::lock_guard lk{ _mtx };
-            auto& m = _mirrors[sessionId];
-            m.lastCardText = card;
-            m.lastCardEditMs = WallMs();
-        }
-        _postCard(sessionId, thread, card, std::move(markup), 0);
+        // The card is the STICKY bottom message of the topic (§21.5): _refreshCard posts the first one (cardMessageId
+        // is 0) with the recap rule, the buttons and the text hash, exactly as every later re-post.
+        _refreshCard(sessionId, true);
     }
 
-    void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst)
+    void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash)
     {
         {
             std::lock_guard lk{ _mtx };
             if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
             {
                 it->second.cardMessageId = -1; // in flight: _refreshCard waits for the answer below
+                it->second.cardTextHash = textHash; // what the topic will show (a refusal re-posts it anyway)
                 _stateDirty = true;
             }
         }
@@ -1952,7 +2102,8 @@ namespace Agentmaster::Msg
             _enqueue(std::move(del));
         }
         auto self = weak_from_this();
-        _sendText(threadId, text, true, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId](const TgResult& r) {
+        // `!ping` = silent: a card is a status message, and only a state the user must know about rings (§21.6).
+        _sendText(threadId, text, !ping, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId](const TgResult& r) {
             auto me = self.lock();
             if (!me)
             {
@@ -1960,12 +2111,18 @@ namespace Agentmaster::Msg
             }
             const int64_t id = r.ok ? r.result.I64At(L"message_id", 0) : 0;
             {
+                // By THREAD, not by session: a Rekey (§21.6) may have moved the topic to another session's key while
+                // this post flew, and the record must still learn its card (else it would wait for it forever).
                 std::lock_guard lk{ me->_mtx };
-                if (const auto it = me->_state.topics.find(sessionId); it != me->_state.topics.end() && it->second.threadId == threadId)
+                for (auto& [sid, t] : me->_state.topics)
                 {
-                    it->second.cardMessageId = id;
-                    it->second.cardPostedMs = WallMs(); // on a refusal too: the retry waits kCardRepostAfterFailureMs
-                    me->_stateDirty = true;
+                    if (t.threadId == threadId)
+                    {
+                        t.cardMessageId = id;
+                        t.cardPostedMs = WallMs(); // on a refusal too: the retry waits kCardRepostAfterFailureMs
+                        me->_stateDirty = true;
+                        break;
+                    }
                 }
             }
             if (!r.ok)
@@ -1975,85 +2132,138 @@ namespace Agentmaster::Msg
         }, 0, false);
     }
 
-    void MessagingService::_seedRecap(TopicRecord& t)
+    void MessagingService::_seedFromTranscript(TopicRecord& t, const SessionInfo& s) noexcept
     {
         try
         {
-            if (t.transcriptPath.empty() || t.cursor <= 0)
+            t.transcriptPath = ResolveClaudeTranscriptPath(s.id);
+            t.cursor = 0; // no transcript yet (a new session, a fork before its first message): its first line is news
+            t.recapText.clear();
+            t.recapAtMs = 0;
+            t.lastMessageAtMs = 0;
+            // The recap facts come from the transcript the session SHOWS: its own, or — for a fork with no message of
+            // its own yet — the one it was forked from (its conversation so far IS the source's). Never cached: the
+            // fork's first message creates its own transcript, and the mirror reads that from its first line.
+            std::wstring recapPath = t.transcriptPath;
+            if (recapPath.empty() && !s.forkParentId.empty())
+            {
+                recapPath = ResolveClaudeDisplayTranscript(s.id, s.forkParentId).path;
+            }
+            TranscriptTailScan recapScan;
+            if (!recapPath.empty())
+            {
+                recapScan = ScanTranscriptTail(recapPath, kRecapSeedBytes);
+                t.recapText = recapScan.recapText;
+                t.recapAtMs = recapScan.recapAtMs;
+                t.lastMessageAtMs = recapScan.lastMessageAtMs;
+            }
+            if (t.transcriptPath.empty())
             {
                 return;
             }
-            const int64_t from = t.cursor > kRecapSeedBytes ? t.cursor - kRecapSeedBytes : 0;
+            // Its own transcript exists: the topic shows the session from now on — from the END of the file for a
+            // session at rest, and from the start of the turn's own prompt line for one that is mid-turn (a resting tab
+            // that the user prompts at the PC gets its topic a tick after the prompt line was written; starting at the
+            // end lost exactly that prompt — 2026-10-16). A turn longer than the window starts at the end.
             int64_t size = -1;
-            std::string bytes = ReadTranscriptTail(t.transcriptPath, from, size);
-            if (bytes.empty())
+            if (recapPath == t.transcriptPath)
             {
-                return;
+                size = recapScan.size; // the scan above read this very file
             }
-            if (from > 0)
+            else
             {
-                // The window starts mid-line: drop the torn first line.
-                const size_t nl = bytes.find('\n');
-                if (nl == std::string::npos)
-                {
-                    return;
-                }
-                bytes.erase(0, nl + 1);
+                ReadTranscriptTail(t.transcriptPath, 0x7FFFFFFFFFFFFFFFll, size); // the size only
             }
-            const auto lines = ParseTranscriptJsonl(std::move(bytes));
-            std::wstring lastPrompt;
-            int64_t lastPromptMs = 0;
-            std::wstring lastReply; // the last final reply, else the last assistant text
-            int64_t lastReplyMs = 0;
-            bool lastReplyFinal = false;
-            for (const auto& line : lines)
+            t.cursor = size > 0 ? size : 0;
+            const bool midTurn = s.state == SessionState::Running || s.state == SessionState::NeedsApproval;
+            if (midTurn && recapPath == t.transcriptPath && recapScan.lastPromptLineAt >= 0 && recapScan.lastPromptLineAt < t.cursor)
             {
-                for (const auto& item : ClassifyTranscriptLine(line))
-                {
-                    if (item.kind == TopicItemKind::Prompt && !item.midTurn)
-                    {
-                        lastPrompt = TgFirstLine(item.text, 120);
-                        lastPromptMs = item.tsMs;
-                        lastReply.clear(); // a reply older than the newest prompt is not "where it stands"
-                        lastReplyMs = 0;
-                        lastReplyFinal = false;
-                    }
-                    else if (item.kind == TopicItemKind::Text && !item.text.empty())
-                    {
-                        if (item.turnEnds || !lastReplyFinal)
-                        {
-                            lastReply = item.text;
-                            lastReplyMs = item.tsMs;
-                            lastReplyFinal = item.turnEnds;
-                        }
-                    }
-                }
+                t.cursor = recapScan.lastPromptLineAt;
             }
-            if (lastPrompt.empty() && lastReply.empty())
-            {
-                return;
-            }
-            std::wstring head = lastReply;
-            for (auto& c : head)
-            {
-                if (c == L'\n' || c == L'\r' || c == L'\t')
-                {
-                    c = L' ';
-                }
-            }
-            if (head.size() > 240)
-            {
-                head = head.substr(0, 239) + L"\x2026";
-            }
-            t.recapPrompt = lastPrompt;
-            t.recapReply = head;
-            t.recapAtMs = std::max(lastPromptMs, lastReplyMs);
-            t.recapSeenMs = WallMs();
         }
         catch (...)
         {
-            LogSwallowedException(L"MessagingService::_seedRecap");
+            // Rule #18. Recovery: the mirror starts at the file's end (or waits for the file), the card has no recap.
+            LogSwallowedException(L"MessagingService::_seedFromTranscript");
+            try
+            {
+                int64_t size = -1;
+                if (!t.transcriptPath.empty())
+                {
+                    ReadTranscriptTail(t.transcriptPath, 0x7FFFFFFFFFFFFFFFll, size);
+                }
+                t.cursor = size > 0 ? size : 0;
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"MessagingService::_seedFromTranscript (recovery)");
+            }
         }
+    }
+
+    void MessagingService::_rekeyTopic(const std::wstring& fromSessionId, const std::wstring& toSessionId, const std::wstring& title)
+    {
+        const auto s = _session(toSessionId);
+        if (!s)
+        {
+            return; // gone between the plan and now: the next sync decides again
+        }
+        TopicRecord t;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _state.topics.find(fromSessionId);
+            if (it == _state.topics.end() || _state.topics.count(toSessionId))
+            {
+                return; // the plan is stale (deleted meanwhile, or the heir got a topic of its own)
+            }
+            t = it->second;
+        }
+        // Everything that belonged to the OLD conversation goes: its mirror position and transcript, its work log, its
+        // recap, its Error note. What belongs to the TOPIC stays: the thread, the card message, the sticky clocks.
+        t.sessionId = toSessionId;
+        t.tabToken = s->tabToken;
+        t.workLogMessageId = 0;
+        t.idleSinceMs = 0;
+        t.errorAnnounced = false;
+        t.cardTextHash = 0; // the card describes another session now: edited at once
+        _seedFromTranscript(t, *s);
+        const std::wstring oldTitle = t.title;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _state.topics.find(fromSessionId);
+            if (it == _state.topics.end() || _state.topics.count(toSessionId))
+            {
+                return;
+            }
+            t.cardMessageId = it->second.cardMessageId; // a card post may have answered while the seed read the file
+            t.cardPostedMs = it->second.cardPostedMs;
+            t.lastPostedMs = it->second.lastPostedMs;
+            _state.topics.erase(it);
+            _state.topics[toSessionId] = t;
+            _mirrors.erase(fromSessionId);
+            _mirrors.erase(toSessionId);
+            _cards.erase(fromSessionId);
+            _cards.erase(toSessionId);
+            _stateDirty = true;
+            // Queued edits keyed by the old session (its work log, its card edit) belong to a conversation the topic no
+            // longer shows; a card post / delete in flight keeps going (its answer is matched by thread).
+            for (auto o = _outbox.begin(); o != _outbox.end();)
+            {
+                const bool old = o->key == L"wl:" + fromSessionId || o->key == L"card:" + fromSessionId;
+                o = old ? _outbox.erase(o) : std::next(o);
+            }
+        }
+        _log(L"[msg] topic carried over " + ShortId(fromSessionId) + L" -> " + ShortId(toSessionId) + L" (the same tab, thread " + std::to_wstring(t.threadId) + L"; " +
+             (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + L")");
+        LogNav(L"remote telegram topic-rekey " + ShortId(fromSessionId) + L" -> " + ShortId(toSessionId));
+        // One silent line marks where the new conversation starts (the thread is the conversation, and this is its
+        // boundary: a /clear, a /resume or a handover the user ran at the PC).
+        _sendText(t.threadId, L"<i>\x2014 a new conversation in this tab (" + TgEscapeHtml(ShortId(toSessionId)) + L") \x2014</i>", true, SendPriority::New, L"", json::Value{}, nullptr);
+        if (!title.empty() && title != oldTitle)
+        {
+            _renameTopic(toSessionId, title); // refreshes the card on success
+        }
+        _refreshCard(toSessionId, true);
     }
 
     void MessagingService::_deleteTopic(const std::wstring& sessionId, const std::wstring& reason)
@@ -2080,6 +2290,7 @@ namespace Agentmaster::Msg
             std::lock_guard lk{ _mtx };
             _state.topics.erase(sessionId);
             _mirrors.erase(sessionId);
+            _cards.erase(sessionId);
             _stateDirty = true;
             // Queued edits for the dead topic are pointless.
             for (auto it = _outbox.begin(); it != _outbox.end();)
@@ -2133,7 +2344,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force)
+    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping)
     {
         const auto s = _session(sessionId);
         if (!s)
@@ -2141,6 +2352,7 @@ namespace Agentmaster::Msg
             return;
         }
         TopicRecord topic;
+        bool pingWanted = false;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
@@ -2149,56 +2361,111 @@ namespace Agentmaster::Msg
                 return;
             }
             topic = it->second;
+            auto& card = _cards[sessionId];
+            if (ping)
+            {
+                card.pingWanted = true; // kept until a post can carry it (below)
+            }
+            pingWanted = card.pingWanted;
         }
         if (topic.cardMessageId < 0)
         {
-            return; // a post is in flight; its answer sets the id
+            return; // a post is in flight; its answer sets the id (a wanted ping goes with the next post)
         }
         const int64_t now = WallMs();
         if (topic.cardMessageId == 0 && now - topic.cardPostedMs < kCardRepostAfterFailureMs)
         {
             return; // Telegram refused the last post: not every tick
         }
-        const int64_t idleLeaves = topic.idleSinceMs != 0 ? topic.idleSinceMs + _idleGraceMs.load() : 0;
+        // The idle line's clock comes from the persisted stamps (IdleTopicLeavesAtMs — the same rule the plan deletes
+        // by), so it only changes when the session is used: no periodic edit.
+        const int64_t idleLeaves = IdleTopicLeavesAtMs(topic.idleSinceMs, s->lastActivityUnixMs, _idleGraceMs.load());
         CardExtras extras;
-        extras.recap = topic.recapSeenMs > 0 && topic.recapSeenMs > topic.lastPostedMs; // nothing newer below it
-        extras.recapPrompt = topic.recapPrompt;
-        extras.recapReply = topic.recapReply;
+        extras.recapFresh = RecapIsFresh(topic.recapText, topic.recapAtMs, topic.lastMessageAtMs);
+        extras.recapText = topic.recapText;
         extras.recapAtMs = topic.recapAtMs;
-        const bool reactivatable = s->live && ((!s->started && !s->external) || s->state == SessionState::Error);
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         json::Value markup;
-        _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, reactivatable);
+        _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
+        // The text AND the buttons: a card whose text is unchanged but whose buttons differ is a change too.
+        const uint32_t hash = CardTextHash(text + L"\x1F" + json::Dump(markup));
         // The STICKY CARD (§21.5): posts newer than the card push it down — once they have been quiet for
         // kCardStickyLagMs the old card is deleted and a fresh one sent at the bottom (two calls per burst, not
-        // per message). A missing card (the first one, or a refused post a minute ago) is posted the same way.
+        // per message). A missing card (the first one, or a refused post a minute ago) is posted the same way, and
+        // so is a PING (§21.6): the card re-sent WITH SOUND is the notification for a state the user must know about.
         const bool behind = topic.cardMessageId > 0 && topic.lastPostedMs > topic.cardPostedMs && now - topic.lastPostedMs >= kCardStickyLagMs;
-        if (topic.cardMessageId == 0 || behind)
+        if (topic.cardMessageId == 0 || behind || pingWanted)
         {
             {
                 std::lock_guard lk{ _mtx };
-                auto& m = _mirrors[sessionId];
-                m.lastCardText = text;
-                m.lastCardEditMs = now;
+                auto& card = _cards[sessionId];
+                card.pingWanted = false;
+                card.lastEditMs = now;
+                card.lastState = s->state;
             }
-            _postCard(sessionId, topic.threadId, text, std::move(markup), topic.cardMessageId > 0 ? topic.cardMessageId : 0);
+            if (pingWanted)
+            {
+                _log(L"[msg] " + ShortId(sessionId) + L" card re-posted with sound (" + StateWord(s->state) + L")");
+            }
+            _postCard(sessionId, topic.threadId, text, std::move(markup), topic.cardMessageId > 0 ? topic.cardMessageId : 0, pingWanted, hash);
             return;
+        }
+        if (hash == topic.cardTextHash)
+        {
+            return; // the topic shows this very card already (also after a restart: the hash is persisted)
         }
         bool send = false;
         {
             std::lock_guard lk{ _mtx };
-            auto& m = _mirrors[sessionId];
-            const bool stateChanged = m.lastState != s->state;
-            if (text != m.lastCardText && (force || stateChanged || now - m.lastCardEditMs >= kCardEditGapMs))
+            auto& card = _cards[sessionId];
+            const bool stateChanged = card.lastState != s->state;
+            if (force || stateChanged || now - card.lastEditMs >= kCardEditGapMs)
             {
-                m.lastCardText = text;
-                m.lastCardEditMs = now;
+                card.lastEditMs = now;
+                card.lastState = s->state;
+                if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+                {
+                    it->second.cardTextHash = hash;
+                    _stateDirty = true;
+                }
                 send = true;
             }
         }
         if (send)
         {
-            _editText(topic.cardMessageId, text, SendPriority::CardEdit, L"card:" + sessionId, markup);
+            // A card the user deleted on the phone cannot be edited: the answer clears the record's card, and the next
+            // refresh posts a new one at the bottom (cardPostedMs 0 = no failure wait).
+            auto self = weak_from_this();
+            const int64_t thread = topic.threadId;
+            const int64_t cardId = topic.cardMessageId;
+            _editText(topic.cardMessageId, text, SendPriority::CardEdit, L"card:" + sessionId, markup, [self, thread, cardId](const TgResult& r) {
+                if (r.ok || r.NotModified() || r.httpStatus != 400 || r.description.find(L"message to edit not found") == std::wstring::npos)
+                {
+                    return;
+                }
+                auto me = self.lock();
+                if (!me)
+                {
+                    return;
+                }
+                {
+                    std::lock_guard lk{ me->_mtx };
+                    for (auto& [sid, t] : me->_state.topics)
+                    {
+                        if (t.threadId == thread && t.cardMessageId == cardId)
+                        {
+                            t.cardMessageId = 0;
+                            t.cardPostedMs = 0;
+                            t.cardTextHash = 0;
+                            me->_stateDirty = true;
+                            me->_tickRequested = true;
+                            break;
+                        }
+                    }
+                }
+                me->_log(L"[msg] a card was deleted in Telegram: a new one is posted (thread " + std::to_wstring(thread) + L")");
+                me->_tickCv.notify_one();
+            });
         }
     }
 
@@ -2271,6 +2538,15 @@ namespace Agentmaster::Msg
                 return; // a create is in flight; the next tick edits it
             }
             topic.workLogMessageId = -1; // in flight
+            {
+                // The shared record says "in flight" too, from now on: the tick's write-back then knows that a record
+                // no longer at -1 holds the create's ANSWER (a message id, or 0 for a refusal) and keeps it.
+                std::lock_guard lk{ _mtx };
+                if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+                {
+                    it->second.workLogMessageId = -1;
+                }
+            }
             auto self = weak_from_this();
             const int64_t thread = topic.threadId;
             const uint32_t gen = m.workLogGen;
@@ -2282,7 +2558,12 @@ namespace Agentmaster::Msg
                 }
                 const int64_t id = r.ok ? r.result.I64At(L"message_id", 0) : 0;
                 std::lock_guard lk{ me->_mtx };
-                auto& mm = me->_mirrors[sessionId];
+                const auto mit = me->_mirrors.find(sessionId);
+                if (mit == me->_mirrors.end())
+                {
+                    return; // the topic was deleted or carried over to another session meanwhile
+                }
+                auto& mm = mit->second;
                 if (mm.workLogGen != gen)
                 {
                     return; // the segment was closed (a remark, a new turn) while this create flew: its message stays as it is
@@ -2305,46 +2586,36 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why)
+    void MessagingService::_postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound)
     {
         _flushWorkLog(sessionId, topic, m, true);
-        // The ONE message of a turn with sound (D5 / M12).
-        _sendText(topic.threadId, html, false, SendPriority::Final, L"", json::Value{}, nullptr);
+        // The ONE message of a turn with sound (D5 / M12) — unless the caller rings something else for it (§21.6).
+        _sendText(topic.threadId, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr);
+        _endTurnQuietly(sessionId, topic, m);
+        _log(L"[msg] " + ShortId(sessionId) + L" final message (" + why + (sound ? L"" : L", silent") + L")");
+    }
+
+    void MessagingService::_endTurnQuietly(const std::wstring& sessionId, TopicRecord& topic, Mirror& m)
+    {
+        _flushWorkLog(sessionId, topic, m, true); // the work log's last lines (a no-op when nothing is pending)
         m.pendingText.clear();
         m.turnOpen = false;
         m.workLog.clear();
         m.workLogMessageId = 0;
         m.workLogDirty = false;
-        ++m.workLogGen;
+        ++m.workLogGen; // a create still in flight belongs to the closed turn
         topic.workLogMessageId = 0;
-        // The recap's reply half (§21.5): the head of what was just said, plain. The card hides the recap while
-        // this very message sits above it, and shows it again once the card is the only thing on screen.
-        {
-            std::wstring head = TgStripTags(html);
-            for (auto& c : head)
-            {
-                if (c == L'\n' || c == L'\r' || c == L'\t')
-                {
-                    c = L' ';
-                }
-            }
-            if (head.size() > 240)
-            {
-                head = head.substr(0, 239) + L"\x2026";
-            }
-            topic.recapReply = head;
-            topic.recapAtMs = WallMs();
-            topic.recapSeenMs = WallMs();
-        }
-        _log(L"[msg] " + ShortId(sessionId) + L" final message (" + why + L")");
     }
 
-    void MessagingService::_followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m)
+    void MessagingService::_followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s)
     {
         const int64_t now = WallMs();
         if (topic.transcriptPath.empty())
         {
-            if (now - m.lastResolveMs < kResolveRetryMs)
+            // A new session or fork has its topic before its transcript exists (§21.6): look often while it is busy (its
+            // first prompt is being written), seldom while it rests.
+            const bool busy = s.state != SessionState::Idle;
+            if (now - m.lastResolveMs < (busy ? kResolveRetryBusyMs : kResolveRetryMs))
             {
                 return;
             }
@@ -2359,9 +2630,10 @@ namespace Agentmaster::Msg
         std::string bytes = ReadTranscriptTail(topic.transcriptPath, topic.cursor, size);
         if (size < 0)
         {
-            // Gone (a /clear moved the tab to a new id; a sweep): forget the path, resolve again later.
+            // Gone or unreadable for a moment: forget the path and resolve again later, but KEEP the cursor — reset to 0
+            // it would replay the whole conversation into the topic when the same file is found again (a file that
+            // came back smaller is mirrored from its new end, below).
             topic.transcriptPath.clear();
-            topic.cursor = 0;
             return;
         }
         if (size < topic.cursor)
@@ -2381,11 +2653,6 @@ namespace Agentmaster::Msg
         }
         bytes.resize(lastNl + 1);
         topic.cursor += static_cast<int64_t>(bytes.size());
-        const auto s = _session(sessionId);
-        if (!s)
-        {
-            return;
-        }
         std::vector<TopicItem> items;
         try
         {
@@ -2406,12 +2673,16 @@ namespace Agentmaster::Msg
         }
         if (!items.empty())
         {
-            _applyItems(sessionId, topic, m, items, *s);
+            _applyItems(sessionId, topic, m, items, s);
         }
     }
 
     void MessagingService::_applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s)
     {
+        // The recap facts first (§21.6): Claude Code's away_summary, and the newest conversation message that makes an
+        // older one stale. The card reads them at its next refresh; a Recap item is nothing more in the thread.
+        FoldRecapFacts(items, topic.recapText, topic.recapAtMs, topic.lastMessageAtMs);
+        std::optional<SessionInfo> fresher; // a newer snapshot, fetched at most once, for a prompt the queue copy lacks
         for (const auto& it : items)
         {
             switch (it.kind)
@@ -2436,28 +2707,43 @@ namespace Agentmaster::Msg
                     }
                     m.toolNames.clear();
                     m.turnOpen = true;
+                    m.awaitingAnswer = false; // a new turn: its own question / permission prompt rings again
+                    m.approvalPinged = false;
                 }
-                // The recap's prompt half (§21.5), whatever the prompt's source.
-                topic.recapPrompt = TgFirstLine(it.text, 120);
-                topic.recapAtMs = it.tsMs > 0 ? it.tsMs : WallMs();
-                topic.recapSeenMs = WallMs();
                 // Its source: a prompt sent from this topic is the user's own message (not mirrored); one
                 // the runner sent reads ⚙; one typed at the PC reads ⌨.
                 const std::wstring key = NormalizePromptTextForCompare(it.text);
                 bool fromTopic = false;
                 bool fromQueue = false;
-                size_t looked = 0;
-                for (auto q = s.queue.rbegin(); q != s.queue.rend() && looked < 60; ++q, ++looked)
-                {
-                    if (q->status != PromptStatus::Sent && q->status != PromptStatus::Pending)
+                const auto matchQueue = [&](const SessionInfo& from) {
+                    size_t looked = 0;
+                    for (auto q = from.queue.rbegin(); q != from.queue.rend() && looked < 60; ++q, ++looked)
                     {
-                        continue;
+                        if (q->status != PromptStatus::Sent && q->status != PromptStatus::Pending)
+                        {
+                            continue;
+                        }
+                        if (NormalizePromptTextForCompare(q->text) == key)
+                        {
+                            fromTopic = !q->remoteSource.empty();
+                            fromQueue = q->remoteSource.empty() && q->origin == PromptOrigin::Autorun;
+                            return true;
+                        }
                     }
-                    if (NormalizePromptTextForCompare(q->text) == key)
+                    return false;
+                };
+                if (!matchQueue(s))
+                {
+                    // The tick's snapshot predates this line: the registry may have recorded the prompt since (a typed
+                    // row, or a remote prompt the snapshot missed). One fresh read decides — a phone message must never
+                    // come back as a ⌨ line.
+                    if (!fresher)
                     {
-                        fromTopic = !q->remoteSource.empty();
-                        fromQueue = q->remoteSource.empty() && q->origin == PromptOrigin::Autorun;
-                        break;
+                        fresher = _session(sessionId);
+                    }
+                    if (fresher)
+                    {
+                        matchQueue(*fresher);
                     }
                 }
                 if (fromTopic)
@@ -2564,7 +2850,10 @@ namespace Agentmaster::Msg
                     }
                     html += L"\n\n<i>Answer it at the PC (answering from here comes in a later build).</i>";
                 }
-                _postFinal(sessionId, topic, m, html, L"a question");
+                // ONE sound per "needs you": silent when the NeedsApproval edge already rang the card (§21.6).
+                const bool sound = !m.approvalPinged;
+                m.awaitingAnswer = true;
+                _postFinal(sessionId, topic, m, html, L"a question", sound);
                 break;
             }
             case TopicItemKind::Plan:
@@ -2574,18 +2863,31 @@ namespace Agentmaster::Msg
                 {
                     html += L"\n" + TgMarkdownToHtml(it.text.size() > 3500 ? it.text.substr(0, 3500) + L"\x2026" : it.text);
                 }
-                _postFinal(sessionId, topic, m, html, L"a plan");
+                const bool sound = !m.approvalPinged;
+                m.awaitingAnswer = true;
+                _postFinal(sessionId, topic, m, html, L"a plan", sound);
                 break;
             }
             case TopicItemKind::Compaction:
                 _appendWorkLog(m, L"\x2014 " + it.text + L" \x2014");
                 break;
             case TopicItemKind::Interrupt:
-                _postFinal(sessionId, topic, m, L"\x25A0 <b>interrupted</b>" + (m.pendingText.empty() ? std::wstring{} : L"\n" + TgMarkdownToHtml(m.pendingText)), L"interrupted");
+                // The user stopped the turn (Esc at the PC, or /interrupt here): what the assistant had said so far,
+                // then the mark — silent, the user did it. A stray marker with no turn shown posts nothing.
+                if (m.turnOpen || !m.pendingText.empty())
+                {
+                    _postFinal(sessionId, topic, m, (m.pendingText.empty() ? std::wstring{} : TgMarkdownToHtml(m.pendingText) + L"\n\n") + L"\x25A0 <i>interrupted</i>", L"interrupted", false);
+                }
                 break;
             case TopicItemKind::ApiError:
-                _postFinal(sessionId, topic, m, L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text), L"an API error");
+            {
+                // The turn died: an assistant line of the conversation (Claude Code writes it). It rings unless the
+                // Error edge already rang the card; either way the edge that follows rings nothing more.
+                const bool sound = !topic.errorAnnounced;
+                topic.errorAnnounced = true;
+                _postFinal(sessionId, topic, m, L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text), L"an API error", sound);
                 break;
+            }
             case TopicItemKind::Command:
                 _sendText(topic.threadId, L"<code>" + TgEscapeHtml(it.text.size() > 300 ? it.text.substr(0, 300) : it.text) + L"</code>", true, SendPriority::New, L"", json::Value{}, nullptr);
                 break;
@@ -2616,34 +2918,60 @@ namespace Agentmaster::Msg
         if (s.state == SessionState::Running)
         {
             topic.errorAnnounced = false; // a new turn: a later Error is news again
+            m.awaitingAnswer = false; // answered / approved: a later question or permission prompt rings again
+            m.approvalPinged = false;
         }
-        // What the transcript did not say: a turn that ended without a terminal line (a recon synth), an
-        // exit, an error the tail did not carry, a permission prompt (no AskUserQuestion line).
+        // What the transcript did not say: a turn that ended without a terminal line (a recon synth), an exit, an
+        // error the tail did not carry, a permission prompt (no AskUserQuestion line). The thread is the conversation
+        // (§21.6): a state is said by the CARD — re-sent at the bottom WITH SOUND (a ping) for the states the user
+        // must know about — never by a bot message of its own.
         const bool atRest = s.state == SessionState::WaitingForInput || s.state == SessionState::Idle;
+        bool ping = false;
         if (from == SessionState::Running && atRest && !m.pendingText.empty())
         {
+            // The turn's last words that no terminal line marked as final: the turn's message with sound.
             _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"the state left Running");
         }
-        else if (s.state == SessionState::Done)
+        else if (s.state == SessionState::Done && from != SessionState::Done)
         {
-            _postFinal(sessionId, topic, m, L"\x23F9 <b>claude exited</b>" + (m.pendingText.empty() ? std::wstring{} : L"\n" + TgMarkdownToHtml(m.pendingText)), L"exited");
+            // claude exited: what it said last closes the turn (silent), the card says it exited and rings.
+            if (!m.pendingText.empty())
+            {
+                _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"exited", false);
+            }
+            else
+            {
+                _endTurnQuietly(sessionId, topic, m);
+            }
+            ping = true;
         }
         else if (s.state == SessionState::Error && from != SessionState::Error)
         {
-            // An API error the mirror already posted leaves no pending text and a closed turn; otherwise
-            // (a cut-off turn, a scanner-derived error) say so — ONCE: a session at rest in Error reads Idle at
-            // every app start until the scanner re-asserts Error, and the topic was told the first time.
+            // An API error the mirror already posted set errorAnnounced; otherwise (a cut-off turn, a scanner-derived
+            // error) the card rings — ONCE per episode: a session at rest in Error reads Idle at every app start until
+            // the scanner re-asserts Error, and the topic was told the first time.
             if (!topic.errorAnnounced && (m.turnOpen || !m.pendingText.empty() || !s.errorMessage.empty()))
             {
                 topic.errorAnnounced = true;
-                _postFinal(sessionId, topic, m, L"\x26A0 <b>Error</b>" + (s.errorMessage.empty() ? std::wstring{} : L": " + TgEscapeHtml(TgFirstLine(s.errorMessage, 300))) + L"\n<i>\x25B6 Reactivate on the card restarts the conversation; a message here is sent as its retry.</i>", L"error state");
+                if (!m.pendingText.empty())
+                {
+                    _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"error state", false);
+                }
+                else
+                {
+                    _endTurnQuietly(sessionId, topic, m);
+                }
+                ping = true;
             }
         }
-        else if (s.state == SessionState::NeedsApproval && from == SessionState::Running && !m.turnOpen)
+        else if (s.state == SessionState::NeedsApproval && from == SessionState::Running && !m.awaitingAnswer)
         {
-            _sendText(topic.threadId, L"\U0001F7E0 <b>Needs your approval at the PC</b> (a permission prompt or a question).", false, SendPriority::Final, L"", json::Value{}, nullptr);
+            // A permission prompt — or a question whose line the mirror has not read yet: the card rings now, and the
+            // question posted after it goes out silent (approvalPinged).
+            m.approvalPinged = true;
+            ping = true;
         }
-        _refreshCard(sessionId, true);
+        _refreshCard(sessionId, true, ping);
     }
 
     void MessagingService::_syncReactions(const SessionInfo& s)

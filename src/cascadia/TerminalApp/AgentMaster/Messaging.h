@@ -6,13 +6,16 @@
 // one per process, created by SharedEngine() and driven by the Settings cog's MESSAGING tab.
 //
 // What it does, in one paragraph: it keeps one Telegram TOPIC in the bot's private chat for every
-// Claude Code tab of every window whose session is not Idle (a pinned session is never idle), with the
-// tab's title and color (§5); in each topic it shows the session as it happens — the prompts, ONE
-// work-log message per turn edited in place with the tool calls and remarks, the final reply with sound
-// and everything else silent (§6); a message typed in a topic is QUEUED as the session's next prompt,
-// never a steer, with its status as a reaction on the message (§7.1); `/commands` run the tab's actions
-// or go to Claude Code, except the ones that leave no record (§7.2–§7.3); a pinned "Search" topic hosts
-// the Sessions page's search agent and brings old sessions back into tabs (§5.4).
+// Claude Code TAB of every window whose session is not idle — a new tab (a fresh session, a fork) is
+// listed at once, before its first message, and a topic follows its tab to the next conversation (a
+// /clear, a /resume, a handover in place) (§5, §21.6) — with the tab's title and color; in each topic it
+// shows the conversation as it happens — the prompts, the assistant's remarks (why a tool runs), a
+// work-log message per stretch of tool calls, the final reply with sound and everything else silent —
+// under a STICKY card that stays the topic's last message and says the state, with Claude Code's own
+// recap while it is fresh (§6, §21.5, §21.6); a message typed in a topic is QUEUED as the session's next
+// prompt, never a steer, with its status as a reaction on the message (§7.1); `/commands` run the tab's
+// actions or go to Claude Code, except the ones that leave no record (§7.2–§7.3); a pinned "Search"
+// topic hosts the Sessions page's search agent and brings old sessions back into tabs (§5.4).
 //
 // Threads (H1 — nothing here ever runs on a UI thread):
 //   - the POLL thread: getUpdates long polls; every update is handled on it (the sender is checked
@@ -260,9 +263,20 @@ namespace Agentmaster::Msg
         /// fall back to the bot-rendered line).
         /// </summary>
         void _sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone);
+        /// <summary>
+        /// The SECRETARY ECHO guard (§21.6): true (and the entry consumed) when an incoming message from the owner in
+        /// `threadId` carries a text this service sent AS THE USER in the last two minutes. Such a message is the
+        /// user's own bubble in the chat, but it is our echo of a prompt typed at the PC — queued again, it would
+        /// be sent to claude a second time and come back once more: a loop. Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="threadId">The message's topic.</param>
+        /// <param name="text">The message's text.</param>
+        /// <returns>True when the message is our echo and must be ignored.</returns>
+        bool _takeSecretaryEcho(int64_t threadId, const std::wstring& text);
         /// <summary>Stamps the topic that owns `threadId` as "something newer than the card landed here" (the sticky card's trigger).</summary>
         void _noteTopicPosted(int64_t threadId);
-        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup);
+        /// <summary>Edits a message in place (an edit cannot be split: cut at Telegram's limit). `onDone` gets Telegram's answer on the send thread (may be empty).</summary>
+        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr);
         void _react(int64_t messageId, std::wstring_view emoji);
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
@@ -272,10 +286,33 @@ namespace Agentmaster::Msg
         /// Sends a fresh card at the bottom of the topic, deleting the old card message first when `deleteFirst` is
         /// a message id (the STICKY CARD, §21.5). Marks the record's card "in flight" (-1) until Telegram answers;
         /// a refused send leaves it 0 with `cardPostedMs` = now, and `_refreshCard` tries a new card a minute later.
+        /// `ping` sends it WITH SOUND — the notification for a state the user must know about (claude exited, an
+        /// Error, a permission prompt; §21.6), which the card itself now says instead of a bot message. `textHash`
+        /// (CardTextHash) is recorded as the text the topic shows. The answer is matched to its topic by THREAD,
+        /// so a topic carried over to another session meanwhile (a Rekey) still learns its card's message id.
         /// </summary>
-        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst);
-        /// <summary>Reads the transcript's tail once and fills the topic's recap (the last prompt line, the last reply head) — the catch-up a topic without backfill owes its first card.</summary>
-        void _seedRecap(TopicRecord& t);
+        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash);
+        /// <summary>
+        /// Fills a NEW topic record from the session's transcript (§21.6): the transcript path, where the mirror
+        /// starts (the end of the file for a session at rest — a topic shows the session from now on; the start of
+        /// the turn's own prompt line for one that is mid-turn, so the prompt that made the tab qualify is not lost;
+        /// 0 for a session with no transcript yet, whose first lines are all news), and the recap facts read from
+        /// the tail of the transcript the session SHOWS (its own, else a fresh fork's source — ResolveClaudeDisplayTranscript).
+        /// Reads at most kRecapSeedBytes; never throws (a failure is logged and leaves the mirror at the file's end).
+        /// </summary>
+        /// <param name="t">The record to fill (sessionId set).</param>
+        /// <param name="s">The session (its state picks the cursor; forkParentId the recap's source).</param>
+        void _seedFromTranscript(TopicRecord& t, const SessionInfo& s) noexcept;
+        /// <summary>
+        /// Carries a topic over to the session that now holds its tab (TopicSyncOp::Rekey, §21.6 — a /clear, a
+        /// /resume in the tab, a handover in place): the record moves to the new key with a fresh mirror seeded from
+        /// the new session's transcript, the topic is renamed when the title differs, one silent line marks the new
+        /// conversation, and the card is refreshed. Tick thread.
+        /// </summary>
+        /// <param name="fromSessionId">The closed session the topic belonged to.</param>
+        /// <param name="toSessionId">The session that holds the tab now.</param>
+        /// <param name="title">The new session's title.</param>
+        void _rekeyTopic(const std::wstring& fromSessionId, const std::wstring& toSessionId, const std::wstring& title);
 
         // ----- topics = tabs (Messaging.cpp) -----
         void _ensureSearchTopic();
@@ -283,7 +320,14 @@ namespace Agentmaster::Msg
         void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex);
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
         void _renameTopic(const std::wstring& sessionId, const std::wstring& title);
-        void _refreshCard(const std::wstring& sessionId, bool force);
+        /// <summary>
+        /// Brings the topic's STICKY card up to date (§21.5, §21.6): posts it when there is none, re-posts it at the
+        /// bottom once newer posts have settled, and otherwise edits it in place when its text changed — never when
+        /// the topic already shows that text (TopicRecord::cardTextHash, which survives a restart). `force` skips
+        /// the edit gap (a state change, a rename); `ping` asks for a re-post WITH SOUND, kept until it can be sent
+        /// (a card post still in flight, or a refused one waiting its minute).
+        /// </summary>
+        void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false);
         std::optional<SessionInfo> _session(const std::wstring& sessionId) const;
 
         // ----- the mirror (Messaging.cpp) -----
@@ -303,18 +347,42 @@ namespace Agentmaster::Msg
             bool turnOpen{ false };
             SessionState lastState{ SessionState::Idle };
             int64_t lastStateMs{ 0 };
-            std::wstring lastCardText;
-            int64_t lastCardEditMs{ 0 };
+            /// <summary>
+            /// One sound per "the session needs you" (§21.6): the turn's question or plan was posted (with sound) —
+            /// the NeedsApproval edge that follows rings nothing more; and the card was re-posted with sound for a
+            /// NeedsApproval edge (a permission prompt, or the edge seen before the question's line) — the question
+            /// posted after it goes out silent. Both clear when the turn runs on or a new one starts.
+            /// </summary>
+            bool awaitingAnswer{ false };
+            bool approvalPinged{ false };
             std::unordered_map<std::wstring, std::wstring> toolNames; // tool_use id -> name (to label a failed result)
             int64_t lastTranscriptCheckMs{ 0 };
             int64_t lastResolveMs{ 0 };
         };
-        void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
+        /// <summary>
+        /// The card's transient state per session, apart from the Mirror on purpose: the tick works on a COPY of a
+        /// session's mirror and writes it back, so anything _refreshCard records in the map during that window would
+        /// be overwritten (the old lastCardText / lastCardEditMs were, and a card was edited twice). Under `_mtx`.
+        /// </summary>
+        struct CardState
+        {
+            int64_t lastEditMs{ 0 }; // when the card was last sent or edited (the edit gap counts from it)
+            SessionState lastState{ SessionState::Idle }; // the state the card last showed (a change edits at once)
+            bool pingWanted{ false }; // a re-post WITH SOUND is owed (see _refreshCard)
+        };
+        void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
         void _flushWorkLog(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, bool force);
         /// <summary>Posts the assistant text gathered since the last tool call as ITS OWN silent message and rolls the work log, so the topic reads remark → tools → remark → … → reply (§21.5).</summary>
         void _postRemark(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
-        void _postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why);
+        /// <summary>
+        /// Closes the turn with a message: the work log is finished, `html` is posted — with sound unless `sound` is
+        /// false (D5 / M12: a turn's ONE message with sound; §21.6 posts an interrupt, or the text before an exit or an
+        /// Error whose card rings instead, silently) — and the turn's work-log state is reset.
+        /// </summary>
+        void _postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound = true);
+        /// <summary>Closes the turn WITHOUT a message (claude exited or failed with nothing more to say): the work log is finished and its state reset.</summary>
+        void _endTurnQuietly(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
         void _appendWorkLog(Mirror& m, const std::wstring& line);
         void _onStateEdge(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _syncReactions(const SessionInfo& s);
@@ -336,11 +404,15 @@ namespace Agentmaster::Msg
         void _sweepTokens();
         void _sendnow(const std::wstring& sessionId, int64_t threadId);
         /// <summary>
-        /// REACTIVATE (§21.5): a parked tab's claude is started in place; a session in Error whose claude still runs
-        /// is restarted (the same conversation resumes; with CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes
-        /// on by itself). A running session is left alone. The card's ▶ button and `/reactivate` both land here.
+        /// REACTIVATE (§21.5, §21.6): a parked tab's claude is started in place; a session in Error, or one whose
+        /// claude exited (Done), is restarted (the same conversation resumes in the same tab; with
+        /// CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes on by itself). A running session is left alone.
+        /// The card's ▶ button shows the outcome as the button's toast (nothing is posted in the thread, which is the
+        /// conversation); `/reactivate` replies with it.
         /// </summary>
-        void _reactivate(const std::wstring& sessionId, int64_t threadId);
+        /// <param name="sessionId">The session.</param>
+        /// <returns>The outcome, plain text (one sentence).</returns>
+        std::wstring _reactivate(const std::wstring& sessionId);
         /// <summary>A `business_connection` update: the user connected, edited or removed this bot under Telegram Business → Chatbots (H3: the connecting user must be the paired owner).</summary>
         void _handleBusinessConnection(const json::Value& bc);
         /// <summary>The SECRETARY PROBE: one send as the user into the Search topic; its answer decides `businessMode` and is reported there.</summary>
@@ -429,12 +501,24 @@ namespace Agentmaster::Msg
         /// </summary>
         std::atomic<bool> _probeWanted{ false };
         std::atomic<int> _secretaryFailures{ 0 };
+        /// <summary>
+        /// The texts sent AS THE USER (secretary mode) in the last two minutes, per topic: the echo guard's memory
+        /// (_takeSecretaryEcho). FNV-1a 32 of the trimmed text. Under `_mtx`.
+        /// </summary>
+        struct SecretaryEcho
+        {
+            int64_t threadId{ 0 };
+            uint32_t hash{ 0 };
+            int64_t expiresMs{ 0 };
+        };
+        std::vector<SecretaryEcho> _secretaryEchoes;
 
         std::deque<OutItem> _outbox;
         uint64_t _outSeq{ 0 };
         int64_t _lastSendMs{ 0 };
 
         std::unordered_map<std::wstring, Mirror> _mirrors;
+        std::unordered_map<std::wstring, CardState> _cards; // session id -> its card's transient state (CardState)
         std::unordered_map<std::wstring, PromptStatus> _reacted; // prompt id -> the status its Telegram message shows
         std::unordered_map<std::wstring, int64_t> _dirty; // session ids the registry notified since the last tick (-> ms)
 

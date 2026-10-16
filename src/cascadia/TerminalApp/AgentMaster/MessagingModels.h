@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "Json.h"
+#include "ProcessInspect.h" // NormalizeRecapText (the one away_summary normalizer every recap reader shares)
 #include "SessionModels.h"
 #include "TelegramFormat.h"
 #include "TranscriptStore.h" // IsNoiseUserPrompt, PickDisplayTitle
@@ -47,6 +48,7 @@ namespace Agentmaster::Msg
         Interrupt, // the "[Request interrupted by user…]" marker: the turn was stopped
         ApiError, // the synthetic isApiErrorMessage assistant line: the turn died
         Command, // a typed slash command's echo (<command-name>)
+        Recap, // Claude Code's idle recap (a system/away_summary line): shown in the sticky card while it is fresh
     };
 
     struct TopicItem
@@ -269,7 +271,26 @@ namespace Agentmaster::Msg
         std::wstring arg;
         if (name == L"Bash")
         {
-            arg = TgFirstLine(str(L"command"), kToolSummaryMaxChars);
+            // WHY the command runs comes first (§21.6, the user's "including the message of why the bash is
+            // invoked"): Claude Code's Bash input carries a short `description` written for exactly that; the
+            // command itself follows in parentheses, cut to fit. A call without a description shows the command.
+            const std::wstring description = TgFirstLine(str(L"description"), kToolSummaryMaxChars);
+            const std::wstring command = TgFirstLine(str(L"command"), kToolSummaryMaxChars);
+            if (description.empty())
+            {
+                arg = command;
+            }
+            else
+            {
+                arg = description;
+                // "Bash: " + description + " ($ " + command + ")" within the cap; the command is the part cut.
+                const size_t used = label.size() + 2 + description.size() + 4 + 1;
+                if (!command.empty() && used + 8 < kToolSummaryMaxChars)
+                {
+                    const size_t room = kToolSummaryMaxChars - used;
+                    arg += L" ($ " + (command.size() > room ? command.substr(0, room - 1) + L"\x2026" : command) + L")";
+                }
+            }
         }
         else if (name == L"Read" || name == L"Edit" || name == L"Write" || name == L"MultiEdit" || name == L"NotebookEdit")
         {
@@ -402,6 +423,15 @@ namespace Agentmaster::Msg
         if (line.BoolAt(L"isSidechain", false))
         {
             return items; // a subagent's inline lines (older Claude Code): the parent's view skips them
+        }
+        if (line.Find(L"forkedFrom"))
+        {
+            // A FORK's copy of its source's history: `claude --resume <src> --fork-session` writes the source's
+            // lines into the fork's own transcript, each stamped `forkedFrom: {sessionId, messageUuid}`, ahead of
+            // the fork's own first message (measured: 958 copied lines, then the fork's own). The fork's topic
+            // mirrors from its creation on, so the copies are history, never news — a fork's first message must
+            // not replay the whole source conversation into its topic (§21.6).
+            return items;
         }
         if (type == L"user")
         {
@@ -600,6 +630,21 @@ namespace Agentmaster::Msg
         }
         if (type == L"system")
         {
+            if (line.StrAt(L"subtype") == L"away_summary")
+            {
+                // Claude Code's idle RECAP: written a few minutes after a turn when the user is away
+                // ("... (disable recaps in /config)", the hint stripped by the shared normalizer). Not a message:
+                // the service shows it in the sticky card while no conversation line is newer (§21.6).
+                if (std::wstring text = NormalizeRecapText(line.StrAt(L"content")); !text.empty())
+                {
+                    TopicItem it;
+                    it.kind = TopicItemKind::Recap;
+                    it.text = std::move(text);
+                    it.tsMs = ts;
+                    items.push_back(std::move(it));
+                }
+                return items;
+            }
             if (line.StrAt(L"subtype") == L"compact_boundary")
             {
                 TopicItem it;
@@ -661,6 +706,92 @@ namespace Agentmaster::Msg
         return items;
     }
 
+    // ===== the recap's freshness =============================================================
+
+    /// <summary>
+    /// Whether an item is a CONVERSATION message for the recap's freshness rule (§21.6): something the user or
+    /// the assistant said or did — a prompt, an assistant text or tool call, a question, a plan, an API error, a
+    /// typed command, an interrupt. A tool's result follows its call (already counted), a compaction marker and the
+    /// recap itself describe the conversation without moving it on, so none of them makes a recap stale.
+    /// </summary>
+    /// <param name="kind">The item's kind.</param>
+    /// <returns>True when a recap older than this item no longer says where the conversation stands.</returns>
+    inline bool IsConversationItem(TopicItemKind kind) noexcept
+    {
+        switch (kind)
+        {
+        case TopicItemKind::Prompt:
+        case TopicItemKind::Text:
+        case TopicItemKind::ToolCall:
+        case TopicItemKind::Question:
+        case TopicItemKind::Plan:
+        case TopicItemKind::ApiError:
+        case TopicItemKind::Command:
+        case TopicItemKind::Interrupt:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Folds a batch of transcript items, in file order, into a topic's recap facts (TopicRecord::recapText /
+    /// recapAtMs / lastMessageAtMs): a Recap item (Claude Code's away_summary) replaces an older recap; a
+    /// conversation item (IsConversationItem) moves the newest-message time on. Shared by the topic's seed (a
+    /// read of the transcript's tail when the topic is made) and the mirror (every batch it reads), so the two
+    /// can never disagree about which recap is current.
+    /// </summary>
+    /// <param name="items">The items, in the order the transcript holds them.</param>
+    /// <param name="recapText">In/out: the current recap ("" = none).</param>
+    /// <param name="recapAtMs">In/out: its transcript time.</param>
+    /// <param name="lastMessageAtMs">In/out: the newest conversation item's transcript time.</param>
+    /// <remarks>
+    /// An item without a timestamp (Claude Code stamps every line; only a hand-made line lacks one) counts as
+    /// written after everything folded so far — file order is the transcript's time order. A recap OLDER than
+    /// the one held is ignored, so a re-read of an old window can never bring back a recap a newer one replaced.
+    /// </remarks>
+    /// <exception cref="std::bad_alloc">If the recap text cannot be copied.</exception>
+    inline void FoldRecapFacts(const std::vector<TopicItem>& items, std::wstring& recapText, int64_t& recapAtMs, int64_t& lastMessageAtMs)
+    {
+        for (const auto& it : items)
+        {
+            const bool recap = it.kind == TopicItemKind::Recap;
+            if (!recap && !IsConversationItem(it.kind))
+            {
+                continue;
+            }
+            // (std::max): a TU that includes <windows.h> without NOMINMAX before this header has a `max` macro.
+            const int64_t at = it.tsMs > 0 ? it.tsMs : (std::max)(recapAtMs, lastMessageAtMs) + 1;
+            if (recap)
+            {
+                if (!it.text.empty() && at >= recapAtMs)
+                {
+                    recapText = it.text;
+                    recapAtMs = at;
+                }
+            }
+            else if (at > lastMessageAtMs)
+            {
+                lastMessageAtMs = at;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The card's recap rule (§21.6, the user's "add the recap if we have a fresh one in respect to its time of
+    /// creation to other messages"): the recap is shown only while it is NEWER than every conversation message the
+    /// topic knows — it then says where things stand and repeats nothing the thread shows; the next message makes
+    /// it stale.
+    /// </summary>
+    /// <param name="recapText">TopicRecord::recapText.</param>
+    /// <param name="recapAtMs">TopicRecord::recapAtMs.</param>
+    /// <param name="lastMessageAtMs">TopicRecord::lastMessageAtMs.</param>
+    /// <returns>True when the card shows the recap.</returns>
+    inline bool RecapIsFresh(std::wstring_view recapText, int64_t recapAtMs, int64_t lastMessageAtMs) noexcept
+    {
+        return !recapText.empty() && recapAtMs > 0 && recapAtMs > lastMessageAtMs;
+    }
+
     // ===== the connector's state file ========================================================
 
     // One session's topic in the owner's chat: what the Bot API cannot tell us back (it lists no
@@ -685,17 +816,33 @@ namespace Agentmaster::Msg
         int64_t lastPostedMs{ 0 };
         int64_t cardPostedMs{ 0 };
         /// <summary>
-        /// The RECAP (§21.5): the last prompt's first line and the last reply's head, with the transcript moment
-        /// they are from (`recapAtMs`, shown as a clock time) and when the service learned them (`recapSeenMs`).
-        /// Seeded from the transcript tail when the topic is created — a topic mirrors from its creation on,
-        /// so without it the first card would sit over nothing — and kept by the mirror. The card shows it only
-        /// while it is newer than the newest post in the topic (`recapSeenMs > lastPostedMs`): once the reply
-        /// itself is right above the card, repeating it would be noise.
+        /// The RECAP (§21.6): Claude Code's OWN idle recap — the `{"type":"system","subtype":"away_summary"}` line
+        /// it writes a few minutes after a turn when the user is away — normalized (NormalizeRecapText), with its
+        /// transcript time (`recapAtMs`); and `lastMessageAtMs`, the transcript time of the newest conversation
+        /// line the topic knows (a prompt, an assistant text or tool call, a question, a plan, an API error, a
+        /// command). The card shows the recap only while it is FRESH — newer than every message (`recapAtMs >
+        /// lastMessageAtMs`), the user's "add the recap if we have a fresh one in respect to its time of creation
+        /// to other messages"; the next message makes it stale. Both seeded from the transcript's tail when the
+        /// topic is created, then kept by the mirror. (§21.5's first version synthesized a "last prompt + last
+        /// reply" block, which only repeated the reply right above the card; its keys are no longer read.)
         /// </summary>
-        std::wstring recapPrompt;
-        std::wstring recapReply;
+        std::wstring recapText;
         int64_t recapAtMs{ 0 };
-        int64_t recapSeenMs{ 0 };
+        int64_t lastMessageAtMs{ 0 };
+        /// <summary>
+        /// FNV-1a 32 of the card text last sent or edited (0 = none yet). A restart re-renders every card, and a
+        /// text the topic already shows is not sent again: before it, every start re-edited every card once
+        /// (117 edits in the first ten minutes of the 20:30 start, 2026-10-16) on the one chat's ~1 call/s budget.
+        /// </summary>
+        uint32_t cardTextHash{ 0 };
+        /// <summary>
+        /// The tab (WT_SESSION) that hosted the topic's session at the last sync. Topics are PER TAB (§21.6, the
+        /// user's "if we show per tab"): when the conversation in a tab changes (/clear, /resume, a handover in
+        /// place) the old session closes while a new one takes the SAME tab, and the topic follows the tab to it
+        /// instead of being deleted and created again. A token is unique per connection, so a stale one (after
+        /// an app restart every tab has a new token) can never match.
+        /// </summary>
+        std::wstring tabToken;
         /// <summary>
         /// The topic was told that the session is in Error; cleared when the session runs again. Without it a
         /// session at rest in Error was announced at EVERY app start (the registry loads it as Idle, the scanner
@@ -770,10 +917,11 @@ namespace Agentmaster::Msg
             to.Set(L"createdMs", json::Value::MkNum(static_cast<double>(t.createdMs)));
             to.Set(L"lastPostedMs", json::Value::MkNum(static_cast<double>(t.lastPostedMs)));
             to.Set(L"cardPostedMs", json::Value::MkNum(static_cast<double>(t.cardPostedMs)));
-            to.Set(L"recapPrompt", json::Value::MkStr(t.recapPrompt));
-            to.Set(L"recapReply", json::Value::MkStr(t.recapReply));
+            to.Set(L"recapText", json::Value::MkStr(t.recapText));
             to.Set(L"recapAtMs", json::Value::MkNum(static_cast<double>(t.recapAtMs)));
-            to.Set(L"recapSeenMs", json::Value::MkNum(static_cast<double>(t.recapSeenMs)));
+            to.Set(L"lastMessageAtMs", json::Value::MkNum(static_cast<double>(t.lastMessageAtMs)));
+            to.Set(L"cardTextHash", json::Value::MkNum(static_cast<double>(t.cardTextHash)));
+            to.Set(L"tabToken", json::Value::MkStr(t.tabToken));
             to.Set(L"errorAnnounced", json::Value::MkBool(t.errorAnnounced));
             topics.Push(std::move(to));
         }
@@ -826,10 +974,11 @@ namespace Agentmaster::Msg
                 t.createdMs = to.I64At(L"createdMs", 0);
                 t.lastPostedMs = to.I64At(L"lastPostedMs", 0);
                 t.cardPostedMs = to.I64At(L"cardPostedMs", 0);
-                t.recapPrompt = to.StrAt(L"recapPrompt");
-                t.recapReply = to.StrAt(L"recapReply");
-                t.recapAtMs = to.I64At(L"recapAtMs", 0);
-                t.recapSeenMs = to.I64At(L"recapSeenMs", 0);
+                t.recapText = to.StrAt(L"recapText"); // absent (a 0.0.1.15 file: recapPrompt / recapReply) = no recap
+                t.recapAtMs = to.StrAt(L"recapText").empty() ? 0 : to.I64At(L"recapAtMs", 0);
+                t.lastMessageAtMs = to.I64At(L"lastMessageAtMs", 0);
+                t.cardTextHash = static_cast<uint32_t>(to.I64At(L"cardTextHash", 0));
+                t.tabToken = to.StrAt(L"tabToken");
                 t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);
                 s.topics[t.sessionId] = std::move(t);
             }
@@ -850,18 +999,60 @@ namespace Agentmaster::Msg
         bool claude{ true }; // AgentKind::Claude (D23: Codex is never listed)
         bool pinned{ false }; // never idle (SessionInfo::pinned)
         std::wstring colorHex; // the tab color ("" = unknown)
+        // SessionInfo::lastActivityUnixMs (persisted): the newest hook / activity — and, for a NEW session or a
+        // fork, its creation instant (the launch seam stamps it). 0 = never.
+        int64_t lastActivityMs{ 0 };
+        std::wstring tabToken; // the hosting tab's WT_SESSION (SessionInfo::tabToken; "" = no tab)
+        // The conversation this one continues (SessionInfo::continuedFromId: a /clear predecessor, a /handover origin):
+        // a /handover-here successor takes its origin's tab on a NEW connection (a new tabToken), so this is how its
+        // topic follows the tab. "" = none.
+        std::wstring continuedFromId;
     };
 
     /// <summary>
-    /// The one rule behind "topics = tabs" (MESSAGING.md §5.1, D3): a topic exists for a Claude Code
-    /// session that has a tab, unless its state is Idle. A pinned session counts as listed whatever
-    /// its state (§5.3).
+    /// The one rule behind "topics = tabs" (MESSAGING.md §5.1, D3, revised in §21.6): a topic exists for a
+    /// Claude Code session that has a tab, unless the tab is IDLE — and "idle" means Idle AND untouched for the
+    /// idle grace. A NEW tab (a fresh session, a fork, a resumed or just-activated one: its last activity is
+    /// moments old) is listed at once, before it has any message — the user's "a new session/tab with no new
+    /// messages should appear on telegram". Before §21.6 a new tab, which reads Idle until its first prompt, got
+    /// its topic only at that prompt, and the prompt itself never reached the thread. A pinned session is listed
+    /// whatever its state (§5.3). Restored tabs at an app start keep their old last activity, so an idle one
+    /// still gets no topic.
     /// </summary>
     /// <param name="f">The session's facts.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="idleGraceMs">How long an untouched Idle tab stays listed (D25); &lt;= 0 = an Idle tab is never listed.</param>
     /// <returns>True when the session should have a topic.</returns>
-    inline bool QualifiesForTopic(const TabFact& f) noexcept
+    inline bool QualifiesForTopic(const TabFact& f, int64_t nowMs, int64_t idleGraceMs) noexcept
     {
-        return f.live && f.inTab && f.claude && (f.pinned || f.state != SessionState::Idle);
+        if (!(f.live && f.inTab && f.claude))
+        {
+            return false;
+        }
+        if (f.pinned || f.state != SessionState::Idle)
+        {
+            return true;
+        }
+        return idleGraceMs > 0 && f.lastActivityMs > 0 && nowMs - f.lastActivityMs < idleGraceMs;
+    }
+
+    /// <summary>
+    /// When an Idle topic leaves the list (D25): one idle grace after the LATER of the moment the topic first saw
+    /// the session Idle and the session's last activity — so a session that was just used (a resumed or activated
+    /// tab, a new one) keeps its topic for a whole grace, and one that decayed to Idle long after its last turn
+    /// still gets the full grace from the decay on.
+    /// </summary>
+    /// <param name="idleSinceMs">TopicRecord::idleSinceMs (0 = the topic has not seen it Idle yet).</param>
+    /// <param name="lastActivityMs">SessionInfo::lastActivityUnixMs (0 = never).</param>
+    /// <param name="idleGraceMs">The idle grace.</param>
+    /// <returns>The Unix ms when the topic leaves; 0 when the topic has not seen the session Idle.</returns>
+    inline int64_t IdleTopicLeavesAtMs(int64_t idleSinceMs, int64_t lastActivityMs, int64_t idleGraceMs) noexcept
+    {
+        if (idleSinceMs == 0)
+        {
+            return 0;
+        }
+        return (std::max)(idleSinceMs, lastActivityMs) + (std::max)(int64_t{ 0 }, idleGraceMs); // (std::max): the <windows.h> macro
     }
 
     // What the sync must do to make the topics equal the qualifying tabs.
@@ -874,24 +1065,50 @@ namespace Agentmaster::Msg
             Rename, // the tab's title changed
             IdleCard, // the session just went Idle: show the Idle card, start the grace clock
             UnidleCard, // the session left Idle within the grace: back to the normal card
+            Rekey, // the topic's session closed and ANOTHER session took its tab: the topic follows the tab (§21.6)
         };
         Kind kind{ Kind::Create };
-        std::wstring sessionId;
+        std::wstring sessionId; // Rekey: the session that now holds the tab (the topic's new key)
+        std::wstring fromSessionId; // Rekey: the closed session the topic belonged to
         std::wstring reason; // Delete: "closed" | "idle" | "not a claude tab"
-        std::wstring title; // Create / Rename: the title to use
+        std::wstring title; // Create / Rename / Rekey: the title to use
         std::wstring colorHex; // Create: the tab color
     };
 
+    namespace detail
+    {
+        // A WT_SESSION in a canonical form for map keys: lower-case (two sources may spell a GUID in different
+        // cases — SessionRegistry compares them with TabTokenEq, a case-insensitive compare).
+        inline std::wstring TabKey(std::wstring_view token)
+        {
+            std::wstring k{ token };
+            for (auto& c : k)
+            {
+                c = static_cast<wchar_t>(std::towlower(c));
+            }
+            return k;
+        }
+    }
+
     /// <summary>
-    /// Plans the topic edits that make the topic set equal the qualifying tabs (M8). Pure; the
-    /// service applies the ops and updates the records (IdleCard sets idleSinceMs, UnidleCard clears it).
+    /// Plans the topic edits that make the topic set equal the listed tabs (M8, §21.6). Pure; the service applies
+    /// the ops and updates the records (IdleCard sets idleSinceMs, UnidleCard clears it, Rekey moves the record).
     /// </summary>
     /// <param name="facts">Every LIVE session's facts (a session absent from the list is closed).</param>
     /// <param name="topics">The topics that exist (the state file).</param>
     /// <param name="nowMs">The clock.</param>
-    /// <param name="idleGraceMs">How long an Idle session's topic stays before it is deleted (D25).</param>
-    /// <returns>The ops, deterministic: deletes, then creates, then renames and card changes, each in
-    /// session-id order.</returns>
+    /// <param name="idleGraceMs">How long an Idle, untouched tab's topic stays before it is deleted (D25).</param>
+    /// <returns>The ops, deterministic: per topic in session-id order a Rekey or a Delete or its card / title
+    /// changes, then the creates in session-id order.</returns>
+    /// <remarks>
+    /// PER TAB (§21.6): a tab has at most one topic. When a topic's session is CLOSED and another live Claude
+    /// session without a topic now holds the SAME tab (TopicRecord::tabToken == TabFact::tabToken — a /clear, a
+    /// /resume in the tab), or CONTINUES the closed one (TabFact::continuedFromId — a /handover-here successor, which
+    /// takes the tab on a new connection), the topic is REKEYED to that session instead of deleted, and that session
+    /// gets no topic of its own (the tab match first). And while a topic's session still holds a tab, no other session
+    /// in that tab gets a new topic (the moment between a conversation switch and the old record closing): the next
+    /// sync, with the old session closed, carries the topic over.
+    /// </remarks>
     /// <exception cref="std::bad_alloc">If the ops cannot be allocated.</exception>
     inline std::vector<TopicSyncOp> PlanTopicSync(const std::vector<TabFact>& facts,
                                                   const std::map<std::wstring, TopicRecord>& topics,
@@ -904,13 +1121,64 @@ namespace Agentmaster::Msg
         {
             byId[f.sessionId] = &f;
         }
-        // Deletes first (topics is sorted by session id).
+        // The tabs the topics know, and the live tabs held by a session with no topic (the carry-over targets;
+        // the first in session-id order when — only in a moment of re-binding — two claim one tab).
+        std::map<std::wstring, std::wstring> heirByTab; // tab key -> session id
+        std::map<std::wstring, std::wstring> heirByOrigin; // the session it continues -> session id
+        for (const auto& [sid, f] : byId)
+        {
+            if (f->live && f->inTab && f->claude && topics.find(sid) == topics.end())
+            {
+                if (!f->tabToken.empty())
+                {
+                    heirByTab.emplace(detail::TabKey(f->tabToken), sid);
+                }
+                if (!f->continuedFromId.empty())
+                {
+                    heirByOrigin.emplace(f->continuedFromId, sid);
+                }
+            }
+        }
+        std::map<std::wstring, bool> tabsWithTopic; // tab key -> true: a live session in that tab has a topic
+        std::map<std::wstring, bool> rekeyedTo; // session id -> true: it received a topic this pass
         for (const auto& [sid, t] : topics)
         {
             const auto it = byId.find(sid);
             const TabFact* f = it == byId.end() ? nullptr : it->second;
             if (!f || !f->live || !f->inTab || !f->claude)
             {
+                if (!f || !f->live)
+                {
+                    // The heir: the session now in the topic's tab, else the one that continues the closed session.
+                    std::wstring heirId;
+                    if (!t.tabToken.empty())
+                    {
+                        if (const auto h = heirByTab.find(detail::TabKey(t.tabToken)); h != heirByTab.end() && !rekeyedTo.count(h->second))
+                        {
+                            heirId = h->second;
+                        }
+                    }
+                    if (heirId.empty())
+                    {
+                        if (const auto h = heirByOrigin.find(sid); h != heirByOrigin.end() && !rekeyedTo.count(h->second))
+                        {
+                            heirId = h->second;
+                        }
+                    }
+                    if (!heirId.empty())
+                    {
+                        const TabFact* heir = byId.at(heirId);
+                        TopicSyncOp op;
+                        op.kind = TopicSyncOp::Kind::Rekey;
+                        op.sessionId = heir->sessionId;
+                        op.fromSessionId = sid;
+                        op.title = heir->title.empty() ? heir->sessionId.substr(0, 8) : heir->title;
+                        op.colorHex = heir->colorHex;
+                        rekeyedTo[heir->sessionId] = true;
+                        ops.push_back(std::move(op));
+                        continue;
+                    }
+                }
                 TopicSyncOp op;
                 op.kind = TopicSyncOp::Kind::Delete;
                 op.sessionId = sid;
@@ -918,9 +1186,14 @@ namespace Agentmaster::Msg
                 ops.push_back(std::move(op));
                 continue;
             }
-            if (!QualifiesForTopic(*f))
+            if (!f->tabToken.empty())
             {
-                // Idle: the grace clock decides.
+                tabsWithTopic[detail::TabKey(f->tabToken)] = true;
+            }
+            const bool idle = !f->pinned && f->state == SessionState::Idle;
+            if (idle)
+            {
+                // Idle: the grace clock decides, counted from the later of "first seen Idle" and the last activity.
                 if (t.idleSinceMs == 0)
                 {
                     TopicSyncOp op;
@@ -928,17 +1201,17 @@ namespace Agentmaster::Msg
                     op.sessionId = sid;
                     ops.push_back(std::move(op));
                 }
-                else if (idleGraceMs <= 0 || nowMs - t.idleSinceMs >= idleGraceMs)
+                else if (idleGraceMs <= 0 || nowMs >= IdleTopicLeavesAtMs(t.idleSinceMs, f->lastActivityMs, idleGraceMs))
                 {
                     TopicSyncOp op;
                     op.kind = TopicSyncOp::Kind::Delete;
                     op.sessionId = sid;
                     op.reason = L"idle";
                     ops.push_back(std::move(op));
+                    continue;
                 }
-                continue;
             }
-            if (t.idleSinceMs != 0)
+            else if (t.idleSinceMs != 0)
             {
                 TopicSyncOp op;
                 op.kind = TopicSyncOp::Kind::UnidleCard;
@@ -957,9 +1230,13 @@ namespace Agentmaster::Msg
         // Creates, in session-id order (byId is a map).
         for (const auto& [sid, f] : byId)
         {
-            if (topics.find(sid) != topics.end() || !QualifiesForTopic(*f))
+            if (topics.find(sid) != topics.end() || rekeyedTo.count(sid) || !QualifiesForTopic(*f, nowMs, idleGraceMs))
             {
                 continue;
+            }
+            if (!f->tabToken.empty() && tabsWithTopic.count(detail::TabKey(f->tabToken)))
+            {
+                continue; // per tab: this tab's topic belongs to a session that still holds it (see remarks)
             }
             TopicSyncOp op;
             op.kind = TopicSyncOp::Kind::Create;
@@ -1172,25 +1449,86 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// What the card shows beyond the session record (§21.5): the RECAP — the last prompt's first line and the
-    /// last reply's head, with their transcript moment — shown only when `recap` is set (the service sets it
-    /// while nothing newer than the recap was posted in the topic, so the card never repeats the message right
-    /// above it).
+    /// What the card shows beyond the session record (§21.6): Claude Code's own RECAP (its away_summary) — shown
+    /// only when the service found it FRESH, newer than every conversation message (TopicRecord::recapAtMs &gt;
+    /// lastMessageAtMs).
     /// </summary>
     struct CardExtras
     {
-        bool recap{ false };
-        std::wstring recapPrompt; // plain text, the first line of the last prompt
-        std::wstring recapReply; // plain text, the head of the last reply
-        int64_t recapAtMs{ 0 }; // the transcript moment of the newer of the two (a clock time in the card)
+        bool recapFresh{ false };
+        std::wstring recapText; // NormalizeRecapText of the away_summary content
+        int64_t recapAtMs{ 0 }; // the away_summary line's transcript time (a clock time in the card)
     };
 
     /// <summary>
-    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5), as Telegram HTML: the title, the state and since
-    /// when (a clock time), a "not running / Reactivate" line for a parked tab or a session in Error, folder ·
-    /// branch · model · context, the runner and the queue, the unsent draft, and the recap when it is fresh.
-    /// Pure, so the service compares two renders and edits only on a change — which is why nothing in it may
-    /// be a relative span (see TgClockText): every change is an API call on the one chat.
+    /// The moment the card's "since" names, from PERSISTED stamps only: the turn's start while it runs (or waits
+    /// for an approval), else the newer turn boundary (a turn that ended, or one that was cut off), else the
+    /// session's last activity (a new session: its creation). SessionInfo::stateChangedAtUnixMs — what the card
+    /// read before §21.6 — is stamped when the registry LOADS a record, so after every app restart every card's
+    /// "since" changed and every card was edited again; it is only the last fallback here.
+    /// </summary>
+    /// <param name="s">The session.</param>
+    /// <returns>Unix ms, or 0 when nothing is known.</returns>
+    inline int64_t CardStateSinceMs(const SessionInfo& s) noexcept
+    {
+        int64_t since = 0;
+        if (s.state == SessionState::Running || s.state == SessionState::NeedsApproval)
+        {
+            since = s.turnStartUnixMs;
+        }
+        else
+        {
+            since = (std::max)(s.turnStartUnixMs, s.turnEndUnixMs); // (std::max): the <windows.h> macro
+        }
+        if (since == 0)
+        {
+            since = s.lastActivityUnixMs;
+        }
+        if (since == 0)
+        {
+            since = s.stateChangedAtUnixMs;
+        }
+        return since;
+    }
+
+    /// <summary>
+    /// The card text's identity for TopicRecord::cardTextHash: FNV-1a 32 over the UTF-16 code units, never 0
+    /// (0 means "no card text recorded"). A collision only costs one skipped edit of a card whose next change
+    /// re-edits it.
+    /// </summary>
+    /// <param name="text">The card's HTML.</param>
+    /// <returns>The hash, 1..2^32-1.</returns>
+    inline uint32_t CardTextHash(std::wstring_view text) noexcept
+    {
+        uint32_t h = 2166136261u;
+        for (const wchar_t c : text)
+        {
+            h ^= static_cast<uint32_t>(c);
+            h *= 16777619u;
+        }
+        return h == 0 ? 1u : h;
+    }
+
+    /// <summary>
+    /// Whether ▶ Reactivate has something to do for this session (the card's first button, `/reactivate`): its
+    /// tab is parked (restored, deactivated, cut off with the app — its claude is not running), or its claude ran
+    /// into an Error (a cut-off or failed turn), or claude exited (Done). A running or waiting session has nothing
+    /// to reactivate.
+    /// </summary>
+    /// <param name="s">The session.</param>
+    /// <returns>True when Reactivate applies.</returns>
+    inline bool SessionIsReactivatable(const SessionInfo& s) noexcept
+    {
+        return s.live && ((!s.started && !s.external) || s.state == SessionState::Error || s.state == SessionState::Done);
+    }
+
+    /// <summary>
+    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6), as Telegram HTML: the title, the state and since
+    /// when (a clock time from persisted stamps, CardStateSinceMs), a Reactivate line for a parked tab, a session
+    /// in Error or a claude that exited, folder · branch · model · context, the runner and the queue, the unsent
+    /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
+    /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
+    /// API call on the one chat.
     /// </summary>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
@@ -1208,10 +1546,10 @@ namespace Agentmaster::Msg
         // CLOCK TIMES, never spans: the service edits the card whenever this text changes, so a "3m" that
         // became "4m" re-edited every card every minute — 47 topics' cards made ~47 edits a minute and
         // Telegram answered with a 429 whose retry_after was 21 minutes (2026-10-16). "since 19:04"
-        // changes once, at the next midnight.
-        if (s.stateChangedAtUnixMs > 0 && nowMs > s.stateChangedAtUnixMs)
+        // changes once, at the next midnight — and it comes from persisted stamps, so a restart changes nothing.
+        if (const int64_t since = CardStateSinceMs(s); since > 0 && nowMs >= since)
         {
-            out += L" since " + TgClockText(s.stateChangedAtUnixMs, nowMs);
+            out += L" since " + TgClockText(since, nowMs);
         }
         if (s.pinned)
         {
@@ -1219,7 +1557,8 @@ namespace Agentmaster::Msg
         }
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
         // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand — also for a
-        // session in Error (a cut-off or failed turn), which a restart of the same conversation recovers.
+        // session in Error (a cut-off or failed turn) or a claude that exited, which a restart of the same
+        // conversation recovers.
         if (s.live && !s.started && !s.external)
         {
             out += L"\n\U0001F4A4 not running \x2014 a message here or \x25B6 Reactivate resumes it";
@@ -1227,6 +1566,10 @@ namespace Agentmaster::Msg
         else if (s.live && s.state == SessionState::Error)
         {
             out += L"\n\x25B6 Reactivate restarts it (the same conversation goes on)";
+        }
+        else if (s.live && s.state == SessionState::Done)
+        {
+            out += L"\n\x23F9 claude exited \x2014 \x25B6 Reactivate starts it again (the same conversation)";
         }
         if (idleLeavesAtMs > 0)
         {
@@ -1290,24 +1633,18 @@ namespace Agentmaster::Msg
         {
             out += L"\n⚠ " + TgEscapeHtml(TgFirstLine(s.errorMessage, 160));
         }
-        // The recap: where the conversation stands, for a card that sits over nothing newer (a topic that was
-        // just created mirrors from now on; a restart may have skipped nothing but the card is still the only
-        // thing on screen). Hidden the moment the reply itself is posted above the card.
-        if (extras && extras->recap && (!extras->recapPrompt.empty() || !extras->recapReply.empty()))
+        // Claude Code's own recap (its away_summary), while it is fresh: newer than every message of the
+        // conversation, so it says where things stand and repeats nothing the thread shows. Capped so the card
+        // stays a status message (a recap is a few sentences; the cap only guards a runaway one).
+        if (extras && extras->recapFresh && !extras->recapText.empty())
         {
-            out += L"\n\n<b>Recap</b>";
+            out += L"\n\n\U0001F4DD <b>Recap</b>";
             if (extras->recapAtMs > 0)
             {
                 out += L" \x00B7 " + TgClockText(extras->recapAtMs, nowMs);
             }
-            if (!extras->recapPrompt.empty())
-            {
-                out += L"\n\U0001F464 " + TgEscapeHtml(extras->recapPrompt);
-            }
-            if (!extras->recapReply.empty())
-            {
-                out += L"\n\U0001F916 " + TgEscapeHtml(extras->recapReply);
-            }
+            const std::wstring text = extras->recapText.size() > 1200 ? extras->recapText.substr(0, 1199) + L"\x2026" : extras->recapText;
+            out += L"\n<i>" + TgEscapeHtml(text) + L"</i>";
         }
         return out;
     }
