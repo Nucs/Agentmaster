@@ -1214,6 +1214,19 @@ namespace Agentmaster::Msg
                     }
                     _openTurns.store(open);
                 }
+                // The topic list's ORDER (§21.8): Telegram lists topics by their last message, newest on top, so the
+                // posts this pass queues (replies, card re-posts) go out lowest-ranked topic first — the topic that
+                // ranks highest in MOST RECENT order is posted last and stays on top. A session the sync did not see
+                // (closed) ranks lowest.
+                std::stable_sort(ids.begin(), ids.end(), [this](const std::wstring& a, const std::wstring& b) {
+                    const auto ka = _orderKeys.find(a);
+                    const auto kb = _orderKeys.find(b);
+                    const int64_t keyA = ka == _orderKeys.end() ? 0 : ka->second.first;
+                    const int64_t keyB = kb == _orderKeys.end() ? 0 : kb->second.first;
+                    const std::wstring& titleA = ka == _orderKeys.end() ? a : ka->second.second;
+                    const std::wstring& titleB = kb == _orderKeys.end() ? b : kb->second.second;
+                    return TopicRanksAbove(keyB, titleB, keyA, titleA); // a first when b ranks above it
+                });
                 for (const auto& sid : ids)
                 {
                     if (_stop.load())
@@ -1336,6 +1349,35 @@ namespace Agentmaster::Msg
     std::optional<SessionInfo> MessagingService::_session(const std::wstring& sessionId) const
     {
         return _registry->Get(sessionId);
+    }
+
+    bool MessagingService::_awaitCallSlot(const wchar_t* method)
+    {
+        // The SAME slot the send thread takes for every outbox item (_lastSendMs, GetTickCount64 ms): whoever calls
+        // next waits until kSendGapMs passed since the last call of either thread, so the two together keep the chat's
+        // ~1 call/s pace (§21.4's 429 cost 21 minutes).
+        for (;;)
+        {
+            if (_stop.load())
+            {
+                // Stop() aborts only the request in flight: a call started now would hold Stop's join for its whole
+                // timeout. The caller skips it.
+                return false;
+            }
+            int64_t waitMs = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                if (_lastSendMs == 0 || now - _lastSendMs >= kSendGapMs)
+                {
+                    _lastSendMs = now;
+                    ++_trafficByMethod[method];
+                    return true;
+                }
+                waitMs = kSendGapMs - (now - _lastSendMs);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(waitMs, 1200)));
+        }
     }
 
     // ===== the outbox ========================================================================
@@ -1741,56 +1783,61 @@ namespace Agentmaster::Msg
                       L"",
                       json::Value{},
                       nullptr);
-            // The chat's "/" menu: one list for the whole chat (setMyCommands with the chat scope).
-            auto cmds = json::Value::MkArr();
-            const std::pair<const wchar_t*, const wchar_t*> list[] = {
-                { L"queue", L"the queued prompts (session topic)" },
-                { L"sendnow", L"send the next queued prompt now" },
-                { L"runner", L"runner auto|paused" },
-                { L"pin", L"never idle: keep this topic" },
-                { L"unpin", L"let the session idle again" },
-                { L"wake", L"Idle -> Waiting for you" },
-                { L"transcript", L"the session as a .md file [minimal|compact|default|full|max]" },
-                { L"summary", L"the session's summary" },
-                { L"screen", L"the terminal's visible text" },
-                { L"status", L"the session's card / the fleet" },
-                { L"rename", L"rename the tab and the topic" },
-                { L"restartsession", L"restart the session (asks while running)" },
-                { L"deactivate", L"park the tab (asks while running)" },
-                { L"activate", L"start a parked tab's claude" },
-                { L"reactivate", L"resume a parked tab or a cut-off / failed session" },
-                { L"forksession", L"fork into a new tab" },
-                { L"newsession", L"a new session in this folder (or <folder> in Search)" },
-                { L"interrupt", L"stop the running turn (asks first)" },
-                { L"idle", L"Search: the idle tabs" },
-                { L"board", L"Search: counts per state" },
-                { L"pauseall", L"pause every runner" },
-                { L"resumeall", L"resume every runner" },
-                { L"help", L"what you can do here" },
-            };
-            for (const auto& [c, d] : list)
-            {
-                auto o = json::Value::MkObj();
-                o.Set(L"command", json::Value::MkStr(c));
-                o.Set(L"description", json::Value::MkStr(d));
-                cmds.Push(std::move(o));
-            }
-            auto sp = json::Value::MkObj();
-            sp.Set(L"commands", std::move(cmds));
-            auto scope = json::Value::MkObj();
-            scope.Set(L"type", json::Value::MkStr(L"chat"));
-            scope.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
-            sp.Set(L"scope", std::move(scope));
-            OutItem item;
-            item.prio = SendPriority::Backfill;
-            item.method = L"setMyCommands";
-            item.params = std::move(sp);
-            item.paced = false;
-            _enqueue(std::move(item));
         }
         if (!_startNotePosted)
         {
             _startNotePosted = true;
+            // The chat's "/" menu: one list for the whole chat (setMyCommands with the chat scope). Sent once per start
+            // (one call), not only when the Search topic is first made: a build that adds a command (§21.8's /recreate)
+            // must reach a chat whose menu an older build set.
+            {
+                auto cmds = json::Value::MkArr();
+                const std::pair<const wchar_t*, const wchar_t*> list[] = {
+                    { L"queue", L"the queued prompts (session topic)" },
+                    { L"sendnow", L"send the next queued prompt now" },
+                    { L"runner", L"runner auto|paused" },
+                    { L"pin", L"never idle: keep this topic" },
+                    { L"unpin", L"let the session idle again" },
+                    { L"wake", L"Idle -> Waiting for you" },
+                    { L"transcript", L"the session as a .md file [minimal|compact|default|full|max]" },
+                    { L"summary", L"the session's summary" },
+                    { L"screen", L"the terminal's visible text" },
+                    { L"status", L"the session's card / the fleet" },
+                    { L"rename", L"rename the tab and the topic" },
+                    { L"restartsession", L"restart the session (asks while running)" },
+                    { L"deactivate", L"park the tab (asks while running)" },
+                    { L"activate", L"start a parked tab's claude" },
+                    { L"reactivate", L"resume a parked tab or a cut-off / failed session" },
+                    { L"forksession", L"fork into a new tab" },
+                    { L"newsession", L"a new session in this folder (or <folder> in Search)" },
+                    { L"interrupt", L"stop the running turn (asks first)" },
+                    { L"idle", L"Search: the idle tabs" },
+                    { L"board", L"Search: counts per state" },
+                    { L"recreate", L"Search: make the topics again in MOST RECENT order" },
+                    { L"pauseall", L"pause every runner" },
+                    { L"resumeall", L"resume every runner" },
+                    { L"help", L"what you can do here" },
+                };
+                for (const auto& [c, d] : list)
+                {
+                    auto o = json::Value::MkObj();
+                    o.Set(L"command", json::Value::MkStr(c));
+                    o.Set(L"description", json::Value::MkStr(d));
+                    cmds.Push(std::move(o));
+                }
+                auto sp = json::Value::MkObj();
+                sp.Set(L"commands", std::move(cmds));
+                auto scope = json::Value::MkObj();
+                scope.Set(L"type", json::Value::MkStr(L"chat"));
+                scope.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                sp.Set(L"scope", std::move(scope));
+                OutItem item;
+                item.prio = SendPriority::Backfill;
+                item.method = L"setMyCommands";
+                item.params = std::move(sp);
+                item.paced = false;
+                _enqueue(std::move(item));
+            }
             // The previous run's marker, if any, means it ended without a clean stop (§4.3).
             const std::wstring marker = _profile + L"\\messaging\\run.marker";
             std::wstring crashed;
@@ -1848,6 +1895,7 @@ namespace Agentmaster::Msg
         std::vector<TabFact> facts;
         std::unordered_map<std::wstring, SessionInfo> byId;
         const TabColorMode colorMode = LoadAppSettings().tabColorMode;
+        _orderKeys.clear();
         for (auto& s : _registry->SnapshotLiveForCards())
         {
             TabFact f;
@@ -1861,6 +1909,8 @@ namespace Agentmaster::Msg
             f.lastActivityMs = s.lastActivityUnixMs; // a new tab's creation instant: it is listed before its first message
             f.tabToken = s.tabToken; // per tab: a topic follows its tab to the next conversation (Rekey)
             f.continuedFromId = s.continuedFromId; // ...also to a /handover-here successor, which takes the tab on a new connection
+            f.mostRecentMs = MostRecentSortKeyMs(s); // the side panel's MOST RECENT key: the creates' order (§21.8)
+            _orderKeys[s.id] = { f.mostRecentMs, s.title }; // ...and the tick's posting order
             facts.push_back(std::move(f));
             byId.emplace(s.id, std::move(s));
         }
@@ -1919,6 +1969,80 @@ namespace Agentmaster::Msg
                 _seenLive.clear();
             }
         }
+        // The RECREATION (§21.8): topics made under an older layout are made again ONCE, after the start-up hold — when
+        // every window has re-homed its tabs, so every tab that should have a topic is live and gets one. Until then the
+        // old topics are left as they are (no create, no delete); a state with no session topic just records the layout.
+        {
+            bool recreate = false;
+            bool waitForHold = false;
+            bool busy = false;
+            {
+                std::lock_guard lk{ _mtx };
+                busy = _recreating || !_state.orphanThreads.empty();
+                if (_state.topicLayout < kTopicLayoutVersion)
+                {
+                    if (!NeedsTopicRecreation(_state))
+                    {
+                        _state.topicLayout = kTopicLayoutVersion;
+                        _stateDirty = true;
+                    }
+                    else if (inStartupHold)
+                    {
+                        waitForHold = true;
+                    }
+                    else
+                    {
+                        recreate = true;
+                    }
+                }
+            }
+            if (waitForHold)
+            {
+                return;
+            }
+            if (recreate)
+            {
+                _recreateTopics(L"topics made before the MOST RECENT order (layout " + std::to_wstring(kTopicLayoutVersion) + L")");
+            }
+            else if (_recreateRequested.load() && !inStartupHold)
+            {
+                // The user's /recreate (confirmed in the Search topic). One under way already answers it.
+                _recreateRequested.store(false);
+                if (busy)
+                {
+                    _log(L"[msg] /recreate: a recreation is under way already");
+                }
+                else
+                {
+                    _recreateTopics(L"the user's /recreate");
+                }
+            }
+        }
+        // A recreation's old topics are deleted FIRST: no other topic change until they are all gone, so the new list is
+        // built from nothing and comes out in order (a stop midway resumes here at the next start: the list is persisted).
+        {
+            bool orphans = false;
+            {
+                std::lock_guard lk{ _mtx };
+                orphans = !_state.orphanThreads.empty();
+            }
+            if (orphans)
+            {
+                if (!_recreating)
+                {
+                    // A recreation a stop interrupted: it goes on (and still reports when the new list is complete).
+                    _recreating = true;
+                    _recreatedCount = 0;
+                    _log(L"[msg] recreation resumed: old topics still to delete from the last run");
+                }
+                _deleteOrphanTopics(kTopicOpsPerTick);
+                return;
+            }
+            if (_recreating && inStartupHold)
+            {
+                return; // a resumed recreation builds its new list after the hold too, when every tab is live
+            }
+        }
         std::vector<TopicSyncOp> ops;
         {
             std::lock_guard lk{ _mtx };
@@ -1926,6 +2050,7 @@ namespace Agentmaster::Msg
         }
         size_t apiOps = 0;
         size_t heldCloses = 0;
+        bool createsPlanned = false;
         for (const auto& op : ops)
         {
             if (_stop.load())
@@ -1949,6 +2074,9 @@ namespace Agentmaster::Msg
                 }
                 break;
             case TopicSyncOp::Kind::Create:
+                // The plan lists the creates lowest-ranked first (§21.8), so a tick's budget makes the oldest ones and
+                // the next tick goes on from there: the topic that ranks highest is made last and lands on top.
+                createsPlanned = true;
                 if (apiOps++ < kTopicOpsPerTick)
                 {
                     std::wstring color;
@@ -1964,6 +2092,11 @@ namespace Agentmaster::Msg
                         }
                     }
                     _createTopic(op.sessionId, op.title, color);
+                    if (_recreating)
+                    {
+                        std::lock_guard lk{ _mtx };
+                        _recreatedCount += _state.topics.count(op.sessionId);
+                    }
                 }
                 break;
             case TopicSyncOp::Kind::Rename:
@@ -2018,6 +2151,117 @@ namespace Agentmaster::Msg
             _startupHoldLogged = true;
             _log(L"[msg] start-up hold: " + std::to_wstring(heldCloses) + L" topic(s) kept until their sessions re-home (" + std::to_wstring(restoring) + L" window(s) still restoring; at least " + std::to_wstring(kStartupCloseHoldMinMs / 1000) + L" s after the start)");
         }
+        if (_recreating && !createsPlanned)
+        {
+            // Every tab that should have a topic has one again (a create Telegram refused is planned again, so this
+            // line only comes once the whole list exists).
+            _recreating = false;
+            _log(L"[msg] recreation done: " + std::to_wstring(_recreatedCount) + L" topic(s) made, the oldest first, so the list reads in MOST RECENT order");
+            _appNote(L"✅ <b>Topics made again</b> \x2014 " + std::to_wstring(_recreatedCount) + L", in MOST RECENT order (the most recent on top).", false);
+        }
+    }
+
+    void MessagingService::_recreateTopics(const std::wstring& why)
+    {
+        size_t count = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            std::unordered_set<int64_t> oldThreads;
+            for (const auto& [sid, t] : _state.topics)
+            {
+                if (t.threadId > 0 && oldThreads.insert(t.threadId).second)
+                {
+                    _state.orphanThreads.push_back(t.threadId);
+                }
+            }
+            count = oldThreads.size();
+            _state.topics.clear();
+            _state.topicLayout = kTopicLayoutVersion;
+            _mirrors.clear();
+            _cards.clear();
+            _stateDirty = true;
+            // Queued work for the old topics is pointless: their cards' posts / edits / deletes and work-log edits (keyed
+            // by a session id) and any message into one of their threads. The Search topic's items stay; a reaction on
+            // a message of an old topic fails harmlessly.
+            for (auto it = _outbox.begin(); it != _outbox.end();)
+            {
+                bool old = it->key.rfind(L"card", 0) == 0 || it->key.rfind(L"wl:", 0) == 0;
+                if (!old)
+                {
+                    if (const auto* th = it->params.Find(L"message_thread_id"); th && th->type == json::Value::Type::Num)
+                    {
+                        old = oldThreads.count(static_cast<int64_t>(th->num)) > 0;
+                    }
+                }
+                it = old ? _outbox.erase(it) : std::next(it);
+            }
+        }
+        _saveStateIfDirty(true); // the orphan list must survive a crash in the next minute
+        _recreating = true;
+        _recreatedCount = 0;
+        _log(L"[msg] recreation (" + why + L"): " + std::to_wstring(count) + L" old topic(s) are deleted first; then the list is made again, the oldest first, so it reads in MOST RECENT order");
+        LogNav(L"remote telegram recreate-topics old=" + std::to_wstring(count));
+        _appNote(L"♻ <b>Making the topics again</b> in MOST RECENT order (like the side panel): the " + std::to_wstring(count) +
+                     L" old topic(s) are deleted first \x2014 their messages go with them; every conversation stays in its session \x2014 then one topic per open tab is made, the most recent last, so it is on top.",
+                 false);
+    }
+
+    size_t MessagingService::_deleteOrphanTopics(size_t budget)
+    {
+        size_t done = 0;
+        bool emptied = false;
+        while (done < budget && !_stop.load())
+        {
+            int64_t thread = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_state.orphanThreads.empty())
+                {
+                    break;
+                }
+                thread = _state.orphanThreads.front();
+            }
+            if (!_awaitCallSlot(L"deleteForumTopic"))
+            {
+                break;
+            }
+            auto p = json::Value::MkObj();
+            p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
+            const TgResult r = _api->Call(L"deleteForumTopic", p, 20000);
+            if (!r.ok && r.httpStatus == 429)
+            {
+                // Telegram's pacing verdict: wait what it says (stop-aware) and try the same topic again next tick.
+                _log(L"[msg] pacing: 429 on deleteForumTopic, waiting " + std::to_wstring((std::max)(1, r.retryAfterSec)) + L" s");
+                const int64_t waitMs = static_cast<int64_t>((std::max)(1, r.retryAfterSec)) * 1000;
+                for (int64_t slept = 0; slept < waitMs && !_stop.load(); slept += 250)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                }
+                break;
+            }
+            if (!r.ok && !r.ThreadNotFound())
+            {
+                // Dropped from the list anyway: a topic Telegram will not delete would block the new list forever. The
+                // user can delete it by hand.
+                _log(L"[msg] recreation: an old topic could not be deleted (thread " + std::to_wstring(thread) + L"): " + r.description);
+            }
+            {
+                std::lock_guard lk{ _mtx };
+                if (!_state.orphanThreads.empty() && _state.orphanThreads.front() == thread)
+                {
+                    _state.orphanThreads.erase(_state.orphanThreads.begin());
+                }
+                emptied = _state.orphanThreads.empty();
+                _stateDirty = true;
+            }
+            ++done;
+        }
+        if (emptied)
+        {
+            _log(L"[msg] recreation: the old topics are deleted; the new list is made now, the oldest first");
+        }
+        return done;
     }
 
     void MessagingService::_createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex)
@@ -2031,6 +2275,10 @@ namespace Agentmaster::Msg
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"name", json::Value::MkStr(name));
         p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(TgTopicIconColor(colorHex))));
+        if (!_awaitCallSlot(L"createForumTopic"))
+        {
+            return; // stopping
+        }
         TgResult r = _api->Call(L"createForumTopic", p, 20000);
         if (!r.ok && r.httpStatus == 400 && r.description.find(L"icon") != std::wstring::npos)
         {
@@ -2038,6 +2286,10 @@ namespace Agentmaster::Msg
             auto p2 = json::Value::MkObj();
             p2.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
             p2.Set(L"name", json::Value::MkStr(name));
+            if (!_awaitCallSlot(L"createForumTopic"))
+            {
+                return;
+            }
             r = _api->Call(L"createForumTopic", p2, 20000);
         }
         if (!r.ok)
@@ -2075,8 +2327,14 @@ namespace Agentmaster::Msg
             _cards.erase(sessionId);
             _stateDirty = true;
         }
+        // The MOST RECENT key in the line (§21.8): a list made from nothing must log its creates oldest first.
+        std::wstring rank;
+        if (const auto ok = _orderKeys.find(sessionId); ok != _orderKeys.end() && ok->second.first > 0)
+        {
+            rank = L", most recent " + TgClockText(ok->second.first, WallMs());
+        }
         _log(L"[msg] topic created " + ShortId(sessionId) + L" \x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L", " +
-             (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet: mirrored from its first line" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + L")");
+             (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet: mirrored from its first line" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + rank + L")");
         if (!s)
         {
             // The session left the registry between the plan and now: a bare card, the next sync deletes the topic.
@@ -2292,6 +2550,10 @@ namespace Agentmaster::Msg
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
+        if (!_awaitCallSlot(L"deleteForumTopic"))
+        {
+            return; // stopping: the record stays, the next run deletes it
+        }
         const TgResult r = _api->Call(L"deleteForumTopic", p, 20000);
         if (!r.ok && !r.ThreadNotFound())
         {
@@ -2334,6 +2596,10 @@ namespace Agentmaster::Msg
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
         p.Set(L"name", json::Value::MkStr(name));
+        if (!_awaitCallSlot(L"editForumTopic"))
+        {
+            return; // stopping: the title is renamed by the next run's sync
+        }
         const TgResult r = _api->Call(L"editForumTopic", p, 20000);
         {
             std::lock_guard lk{ _mtx };
@@ -2561,7 +2827,7 @@ namespace Agentmaster::Msg
             auto self = weak_from_this();
             const int64_t thread = topic.threadId;
             const uint32_t gen = m.workLogGen;
-            _sendText(thread, html, true, SendPriority::New, L"", json::Value{}, [self, sessionId, gen](const TgResult& r) {
+            _sendText(thread, html, true, SendPriority::New, L"", json::Value{}, [self, sessionId, gen, thread](const TgResult& r) {
                 auto me = self.lock();
                 if (!me)
                 {
@@ -2579,10 +2845,12 @@ namespace Agentmaster::Msg
                 {
                     return; // the segment was closed (a remark, a new turn) while this create flew: its message stays as it is
                 }
-                if (const auto it = me->_state.topics.find(sessionId); it != me->_state.topics.end())
+                const auto it = me->_state.topics.find(sessionId);
+                if (it == me->_state.topics.end() || it->second.threadId != thread)
                 {
-                    it->second.workLogMessageId = id;
+                    return; // the session's topic was made again meanwhile (a recreation, §21.8): this message is the old topic's
                 }
+                it->second.workLogMessageId = id;
                 mm.workLogMessageId = id;
                 if (id != 0)
                 {

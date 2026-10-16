@@ -644,6 +644,68 @@ void TestMessaging()
         CHECK(ParseRemoteCommand(L"/reactivate").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/reactivate").name == L"reactivate", "/reactivate is an Agentmaster command");
     }
 
+    // ---- §21.8: the topic list in the side panel's MOST RECENT order, and the one-time recreation ----
+    {
+        // The ONE key the side panel (MakeSortKey) and the topic list share.
+        SessionInfo k = MakeSession(L"key-1");
+        CHECK(MostRecentSortKeyMs(k) == 0, "nothing known: key 0 (ranks last)");
+        k.lastActivityUnixMs = 500;
+        CHECK(MostRecentSortKeyMs(k) == 500, "no turn yet (a new session / fork): its last activity = its creation");
+        k.turnStartUnixMs = 300;
+        CHECK(MostRecentSortKeyMs(k) == 300, "a turn boundary wins over the activity, even an older one (the side panel's rule)");
+        k.turnEndUnixMs = 400;
+        CHECK(MostRecentSortKeyMs(k) == 400, "the newer of the two boundaries");
+
+        CHECK(TopicRanksAbove(2000, L"b", 1000, L"a") && !TopicRanksAbove(1000, L"a", 2000, L"b"), "the newer key ranks above");
+        CHECK(TopicRanksAbove(1000, L"alpha", 1000, L"Beta") && !TopicRanksAbove(1000, L"Beta", 1000, L"alpha"), "equal keys: the title, case-insensitive (alpha above Beta)");
+        CHECK(!TopicRanksAbove(1000, L"Same", 1000, L"same") && !TopicRanksAbove(1000, L"same", 1000, L"Same"), "the same key and title: neither ranks above");
+        CHECK(TopicRanksAbove(5, L"A_b", 5, L"aab") == false && TopicRanksAbove(5, L"aab", 5, L"A_b"), "upper-cased like CompareStringOrdinal: '_' (0x5F) sorts after 'A' (0x41)");
+
+        // PlanTopicSync makes the creates lowest-ranked first, so the topic that ranks highest is made last (on top).
+        const auto fact = [](const wchar_t* id, const wchar_t* title, int64_t key) {
+            TabFact f;
+            f.sessionId = id;
+            f.title = title;
+            f.state = SessionState::WaitingForInput;
+            f.live = true;
+            f.inTab = true;
+            f.claude = true;
+            f.tabToken = std::wstring{ L"tab-" } + id;
+            f.mostRecentMs = key;
+            return f;
+        };
+        std::map<std::wstring, TopicRecord> none;
+        const auto ops = PlanTopicSync({ fact(L"a", L"Old", 100), fact(L"b", L"Newest", 900), fact(L"c", L"Middle", 500), fact(L"d", L"Tie-b", 300), fact(L"e", L"tie-A", 300) }, none, 1000, 600000);
+        std::wstring order;
+        for (const auto& op : ops)
+        {
+            if (op.kind == TopicSyncOp::Kind::Create)
+            {
+                order += op.sessionId;
+            }
+        }
+        CHECK(order == L"adecb", "creates come lowest-ranked first: Old, Tie-b, tie-A, Middle, Newest (made last = on top; tie-A ranks above Tie-b)");
+
+        // The recreation: due for topics made under an older layout, never for a state without session topics.
+        MessagingState st;
+        CHECK(!NeedsTopicRecreation(st), "no topic: nothing to recreate (the layout is just recorded)");
+        st.topics[L"x"] = TopicRecord{ L"x", 9, 0, 0, L"t", 0, 0, L"", 0 };
+        CHECK(NeedsTopicRecreation(st), "a topic made before the layout: recreate");
+        st.topicLayout = kTopicLayoutVersion;
+        CHECK(!NeedsTopicRecreation(st), "made under the current layout: nothing to do");
+        st.orphanThreads = { 11, 22 };
+        const auto back = StateFromJson(StateToJson(st));
+        CHECK(back.has_value() && back->topicLayout == kTopicLayoutVersion && back->orphanThreads.size() == 2 && back->orphanThreads[0] == 11 && back->orphanThreads[1] == 22,
+              "the layout and the orphan list round-trip (a stop midway finishes the deletes at the next start)");
+        auto legacy = json::Value::MkObj();
+        legacy.Set(L"updateOffset", json::Value::MkNum(1));
+        const auto old = StateFromJson(legacy);
+        CHECK(old.has_value() && old->topicLayout == 0 && old->orphanThreads.empty(), "a file without the keys: layout 0, no orphan");
+        // /recreate is a command the Search topic RUNS (asked first there); in a session's topic it is Agentmaster's too.
+        CHECK(ClassifySearchTopicMessage(L"/recreate").verb == SearchTopicVerb::FleetCommand, "/recreate is a Search topic fleet command");
+        CHECK(ParseRemoteCommand(L"/recreate").kind == RemoteKind::AgentmasterCommand, "/recreate is never queued as a prompt");
+    }
+
     // ---- the remote prompt's runner bypass (D30) ----
     {
         SessionInfo s = MakeSession(L"remote-1");

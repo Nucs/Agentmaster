@@ -1420,3 +1420,58 @@ picking and then a second menu asks if to Resume, Fork (no fork and pin)"* (D24 
   listed one → "open already"; ⑂ Fork → a new tab, not pinned; ✕ Cancel → the menu is gone; an old answer's
   number after a restart still opens a menu; a cog change of the Search thinking level → `[ai-search] thinking ->
   <level>` at once.
+
+### 21.8 The topic list in MOST RECENT order, and the recreation (2026-10-16 night)
+
+The user, after §21.6: *"What of the existing threads on telegram? don't we need to recreate them all?"* and *"can
+you ensure that the threads are on the list are ordered by MOST RECENT like the sidemenu does, naturally and in the
+recreation"*.
+
+- **How Telegram orders topics.** A chat's topics are listed by their LAST message, newest on top (a topic the user
+  pins stays above them). The Bot API can neither reorder topics nor date a message, so the order is made by WHEN
+  the service posts into each topic.
+- **Why the list was out of order.** The first topics (dev, 2026-10-16 18:50) were created in session-id order — the
+  plan's map order — so the list started random, and only later activity moved single topics up.
+- **One key.** `MostRecentSortKeyMs` (`SessionModels.h`) — the newer turn boundary (`turnStartUnixMs` /
+  `turnEndUnixMs`), else the last activity (a new session's or fork's creation) — is the key of the side panel, the
+  board and the tree (`MakeSortKey` now calls it) and of the topic list; ties go by the title, case-insensitive
+  (`TopicRanksAbove`, upper-casing like the side panel's `CompareStringOrdinal`).
+- **Creation order.** `PlanTopicSync` lists the creates in the REVERSE of the list's order (lowest-ranked first,
+  `TabFact::mostRecentMs`); the service makes ~6 per tick in that order, so the topic that ranks highest is made —
+  and its card posted — last, and lands on top. A single new tab is the most recent anyway: on top.
+- **Posting order.** The tick works through the topics lowest-ranked first (`_orderKeys`, refreshed by every sync),
+  so the posts one pass queues (replies, card re-posts) leave the highest-ranked topic on top.
+- **The direct topic calls are paced.** `createForumTopic`, `deleteForumTopic` and `editForumTopic` (made on the tick
+  thread) now take the outbox's per-chat slot (`_awaitCallSlot`, counted in the traffic line); they ran unpaced, and a
+  recreation makes ~150 calls (§21.4's 429 cost 21 minutes).
+- **The RECREATION.** `kTopicLayoutVersion` = 1 and `MessagingState::topicLayout` (persisted; absent = 0). At the
+  first start of this build, the topics made under layout 0 are made again ONCE, after the start-up hold (every
+  window has re-homed its tabs, so every tab that should have a topic is live): `_recreateTopics` moves every session
+  topic's thread into `MessagingState::orphanThreads` (persisted — a stop midway finishes the deletes at the next
+  start), clears the topic map, the mirrors, the cards and the queued work for the old topics, and posts a silent note
+  in the 🔎 Search topic. The sync then deletes the orphans (paced, ~6 per tick) BEFORE it makes any topic, and builds
+  the list from nothing, oldest first. The Search topic stays. What goes: each old topic's messages in Telegram (the
+  conversations stay in their sessions); a new topic shows its session from now on (§21.6's seed: the end of the
+  transcript, or a running turn's own prompt), with Claude Code's recap while it is fresh. Logs: `[msg] recreation
+  (…)`, `[msg] recreation: the old topics are deleted …`, one `[msg] topic created … most recent HH:MM` per topic in
+  creation order, `[msg] recreation done: N topic(s) …`; `[nav] remote telegram recreate-topics old=N`.
+- **`/recreate`** (the 🔎 Search topic or any session's topic; it asks first, a single-use button) runs the same
+  recreation later. The chat's "/" menu is now sent once per start, so a command a build adds reaches an existing chat.
+- **What keeps the order "naturally", and where it cannot.** A session moves in MOST RECENT order only at a turn's
+  start (the prompt) and its end (the reply), and those are exactly the posts that move its topic up. Two things move
+  a topic that the side panel's MOST RECENT does not: (1) the assistant's remarks and work-log messages DURING a turn
+  (§21.5 made remarks messages of their own, and every message is its topic's newest), so a running session's topic
+  rises while it works and is back in line at the turn's end; (2) the card re-sent with sound for an exit, an Error or
+  an approval (a notification needs a new message). Exact parity during a turn would mean posting nothing new
+  mid-turn — remarks folded into one edited message per turn, or held until the turn ends — which is the user's
+  choice, not made here.
+- **Tests** (`TestMessaging`): `MostRecentSortKeyMs` (boundaries, the activity fallback); `TopicRanksAbove` (keys, the
+  case-insensitive title tie, the upper-casing); the creates' order (`adecb` — ties included); `NeedsTopicRecreation`;
+  the round trip of `topicLayout` + `orphanThreads` and a file without them; `/recreate` a Search fleet command, never a
+  prompt. m5, isolated on HEAD 4edb9f377 + this change: 7163 checks, the 3 known TestTaskbarBadge failures only.
+- **The live run** (dev 0.0.1.17, swapped 22:46:38, downtime 7.7 s): the start-up hold ended at 122 s with the window's
+  56 Claude tabs re-homed; the recreation deleted the 48 old topics in 57 s (22:48:40 → 22:49:37), then made 48 new
+  ones in 70 s, every `most recent` stamp in non-decreasing order (the oldest, 18 Sep 11:25, first; ba1ee743 — the
+  session the user was testing, 22:03 — last, so on top); no 429, no exception. Four session titles hold a line
+  break (their `topic created` log lines split there; what Telegram made of such a topic name is not checked). Owed:
+  the user's look at the list on the phone.

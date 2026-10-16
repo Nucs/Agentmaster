@@ -330,6 +330,33 @@ namespace Agentmaster::Msg
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
         void _renameTopic(const std::wstring& sessionId, const std::wstring& title);
         /// <summary>
+        /// Starts the RECREATION (§21.8): every session topic's thread moves to MessagingState::orphanThreads (persisted),
+        /// the topic map, the mirrors and the cards are cleared, queued work for the old topics is dropped, the layout is
+        /// recorded as current, and a silent note in the 🔎 Search topic says what happens. The sync then deletes the
+        /// orphans (paced, a few per tick) and, once they are all gone, makes the list again — oldest first, so it
+        /// comes out in MOST RECENT order. Tick thread only.
+        /// </summary>
+        /// <param name="why">Why (logged and named in the note).</param>
+        void _recreateTopics(const std::wstring& why);
+        /// <summary>
+        /// Deletes up to `budget` of the RECREATION's orphan threads (paced), removing each from the list whatever
+        /// Telegram answered (a topic already gone is fine; a refusal is logged — a later delete by hand is the user's).
+        /// Tick thread only.
+        /// </summary>
+        /// <param name="budget">At most this many deletes.</param>
+        /// <returns>How many were attempted.</returns>
+        size_t _deleteOrphanTopics(size_t budget);
+        /// <summary>
+        /// Takes the per-chat pacing slot that the send thread's outbox uses (kSendGapMs), waiting for it, before a
+        /// DIRECT call of the tick thread (createForumTopic, deleteForumTopic, editForumTopic) — such calls counted
+        /// against the chat's ~1 call/s budget without waiting for it before §21.8 (a recreation makes ~150 calls).
+        /// Counts the call in the traffic census.
+        /// </summary>
+        /// <param name="method">The Bot API method (the census key).</param>
+        /// <returns>True when the call may go; false when the service is stopping — the caller must not make it
+        /// (Stop aborts only the request in flight, so a call started now would hold Stop's join for its timeout).</returns>
+        bool _awaitCallSlot(const wchar_t* method);
+        /// <summary>
         /// Brings the topic's STICKY card up to date (§21.5, §21.6): posts it when there is none, re-posts it at the
         /// bottom once newer posts have settled, and otherwise edits it in place when its text changed — never when
         /// the topic already shows that text (TopicRecord::cardTextHash, which survives a restart). `force` skips
@@ -532,6 +559,24 @@ namespace Agentmaster::Msg
         /// </summary>
         std::map<std::wstring, uint32_t> _trafficByMethod;
         int64_t _lastTrafficLogMs{ 0 };
+        /// <summary>
+        /// The topic list's ORDER keys (§21.8), refreshed by every sync from the live sessions: session id ->
+        /// (MostRecentSortKeyMs, title). The tick works through the topics in the REVERSE of the list's order (the
+        /// lowest-ranked first), so posts queued in one pass — replies, card re-posts — leave the highest-ranked topic
+        /// on top. Tick thread only.
+        /// </summary>
+        std::unordered_map<std::wstring, std::pair<int64_t, std::wstring>> _orderKeys;
+        /// <summary>
+        /// A RECREATION is under way (tick thread only): set by _recreateTopics, cleared — with one summary line — when
+        /// the orphans are gone and the sync has no topic left to make. `_recreatedCount` counts the topics it made.
+        /// </summary>
+        bool _recreating{ false };
+        size_t _recreatedCount{ 0 };
+        /// <summary>
+        /// The user confirmed `/recreate` in the 🔎 Search topic (the poll thread sets it); the tick's next sync runs the
+        /// RECREATION — after the start-up hold, never while one is under way.
+        /// </summary>
+        std::atomic<bool> _recreateRequested{ false };
         /// <summary>
         /// The START-UP HOLD on "closed" topic deletes (MESSAGING.md §21.4). `_startedMs` is when this run's
         /// service started; while the start is younger than `kStartupCloseHoldMinMs`, and while any registered

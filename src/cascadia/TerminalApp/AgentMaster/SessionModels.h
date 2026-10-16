@@ -1796,6 +1796,23 @@ namespace Agentmaster
         AutorunnerState autorunner{};
     };
 
+    /// <summary>
+    /// The MOST RECENT sort key (ExplorerSort::MostRecent) of a session: its newest TURN BOUNDARY — the newer of
+    /// turnStartUnixMs (the user last sent a turn) and turnEndUnixMs (the assistant last finished one) — and, for a
+    /// session with no turn evidence yet (never prompted, or a record from before the stamps), the decay anchor
+    /// lastActivityUnixMs, which a NEW session or fork carries as its creation instant, so it ranks at the top until
+    /// another session's boundary overtakes it. ONE function for every surface that orders by it — the Manager's
+    /// tree and board and the side panel (MakeSortKey) and the Telegram topic list (MESSAGING.md §21.8) — so the
+    /// orders can never drift apart. A larger key ranks HIGHER; equal keys are broken by the title, case-insensitive.
+    /// </summary>
+    /// <param name="s">The session.</param>
+    /// <returns>Unix ms; 0 when nothing is known (it then ranks last).</returns>
+    inline int64_t MostRecentSortKeyMs(const SessionInfo& s) noexcept
+    {
+        const int64_t turn = s.turnStartUnixMs > s.turnEndUnixMs ? s.turnStartUnixMs : s.turnEndUnixMs;
+        return turn != 0 ? turn : s.lastActivityUnixMs;
+    }
+
     // Agentmaster (the ⚡ "still server-cached" hint — the Triage-Board card AND the tab strip's SPARK
     // CROWN, which share THIS ONE predicate so the two surfaces can never disagree) — PURE + unit-tested.
     // Claude's server-side prompt cache stays warm ~cacheMinutes after the last REAL API request, so a
