@@ -200,7 +200,32 @@ namespace Agentmaster::Msg
                     const size_t closeText = raw.find(L']', i + 1);
                     if (closeText != std::wstring_view::npos && closeText + 1 < raw.size() && raw[closeText + 1] == L'(')
                     {
-                        const size_t closeUrl = raw.find(L')', closeText + 2);
+                        // The url's closing ')' — parentheses INSIDE the url must balance (CommonMark's rule), or a
+                        // Wikipedia link like .../Jordan_King_(basketball) lost its last ')' and left a stray one after
+                        // the link (seen in the §21.9 history replay). A url has no whitespace: one ends the search.
+                        size_t closeUrl = std::wstring_view::npos;
+                        int depth = 0;
+                        for (size_t k = closeText + 2; k < raw.size(); ++k)
+                        {
+                            const wchar_t c = raw[k];
+                            if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n')
+                            {
+                                break;
+                            }
+                            if (c == L'(')
+                            {
+                                ++depth;
+                            }
+                            else if (c == L')')
+                            {
+                                if (depth == 0)
+                                {
+                                    closeUrl = k;
+                                    break;
+                                }
+                                --depth;
+                            }
+                        }
                         if (closeUrl != std::wstring_view::npos)
                         {
                             const std::wstring_view text = raw.substr(i + 1, closeText - i - 1);

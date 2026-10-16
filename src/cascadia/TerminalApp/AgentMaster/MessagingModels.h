@@ -52,6 +52,7 @@ namespace Agentmaster::Msg
         ApiError, // the synthetic isApiErrorMessage assistant line: the turn died
         Command, // a typed slash command's echo (<command-name>)
         Recap, // Claude Code's idle recap (a system/away_summary line): shown in the sticky card while it is fresh
+        Answer, // the user's answer to a question (an AskUserQuestion tool result with `toolUseResult.answers`): the user's message
     };
 
     struct TopicItem
@@ -469,6 +470,53 @@ namespace Agentmaster::Msg
                 }
                 if (anyResult)
                 {
+                    // The user's ANSWER to an AskUserQuestion (§21.9): Claude Code keeps the answers on the line
+                    // (`toolUseResult.answers`: question -> the chosen option's label, or the user's own words; the
+                    // `questions` array names each question's header). They are the user's message, not a tool's output:
+                    // one answer reads as itself, several as "header: answer" lines.
+                    const json::Value* tur = line.Find(L"toolUseResult");
+                    const json::Value* answers = (tur && tur->type == json::Value::Type::Obj) ? tur->Find(L"answers") : nullptr;
+                    if (items.size() == 1 && answers && answers->type == json::Value::Type::Obj && !answers->members.empty())
+                    {
+                        const json::Value* questions = tur->Find(L"questions");
+                        const auto headerOf = [questions](const std::wstring& question) {
+                            if (questions && questions->type == json::Value::Type::Arr)
+                            {
+                                for (const auto& q : questions->arr)
+                                {
+                                    if (q.type == json::Value::Type::Obj && q.StrAt(L"question") == question)
+                                    {
+                                        return q.StrAt(L"header");
+                                    }
+                                }
+                            }
+                            return std::wstring{};
+                        };
+                        std::wstring text;
+                        for (const auto& [question, answer] : answers->members)
+                        {
+                            const std::wstring value = answer.type == json::Value::Type::Str ? answer.str : std::wstring{};
+                            if (value.empty())
+                            {
+                                continue;
+                            }
+                            if (answers->members.size() > 1)
+                            {
+                                const std::wstring header = headerOf(question);
+                                text += (text.empty() ? L"" : L"\n") + (header.empty() ? std::wstring{} : header + L": ") + value;
+                            }
+                            else
+                            {
+                                text = value;
+                            }
+                        }
+                        if (!text.empty())
+                        {
+                            items[0].kind = TopicItemKind::Answer;
+                            items[0].text = std::move(text);
+                            items[0].isError = false;
+                        }
+                    }
                     return items;
                 }
             }
@@ -733,6 +781,7 @@ namespace Agentmaster::Msg
         case TopicItemKind::ApiError:
         case TopicItemKind::Command:
         case TopicItemKind::Interrupt:
+        case TopicItemKind::Answer:
             return true;
         default:
             return false;
@@ -1017,6 +1066,18 @@ namespace Agentmaster::Msg
                     flush();
                     out.push_back(userLine(it, true));
                     break;
+                case TopicItemKind::Answer:
+                {
+                    // The user's answer to the question above: the user's post, as it was in the conversation.
+                    flush();
+                    HistoryPost p;
+                    p.fromUser = true;
+                    p.userText = it.text;
+                    p.html = L"\x2328 " + (it.tsMs > 0 ? TgClockText(it.tsMs, it.tsMs) + L" \x00B7 " : std::wstring{}) + L"\x21A9 <b>" +
+                             TgEscapeHtml(it.text.size() > 1000 ? it.text.substr(0, 1000) + L"\x2026" : it.text) + L"</b>";
+                    out.push_back(std::move(p));
+                    break;
+                }
                 default:
                     break; // a Recap: the card shows the current one
                 }

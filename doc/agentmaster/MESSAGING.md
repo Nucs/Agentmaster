@@ -1498,9 +1498,20 @@ the whole session as messages, not a file plus the last 10 turns.
   (`— Fri 16 Oct 2026 —`); the user's prompt; the assistant's narrative, PACKED into messages of at most 3,500
   characters — each remark (the "why the bash is invoked") followed by the tool calls it led to in one folded quote, a
   failed result labeled with its tool, and questions, plans, compactions, interrupts and API errors as blocks; and the
-  turn's final reply as its own message. A message typed while the turn ran and a slash command are the user's posts
-  between the assistant's. Measured on the dev fleet: 266 turns of 49 sessions come to 1,175 messages (2.4 M characters);
-  the live layout (one message per remark and per work-log segment) would have taken 6,581.
+  turn's final reply as its own message. A message typed while the turn ran, a slash command and the user's ANSWER to a
+  question are the user's posts between the assistant's: Claude Code keeps an answer on the question's tool-result line
+  (`toolUseResult.answers`: the question → the chosen option's label or the user's own words), which the classifier
+  turns into an `Answer` item — one answer reads as itself, several as `header: answer` lines; the bot's line in its
+  place is `⌨ HH:MM · ↩ <answer>`. The LIVE mirror posts the answer the same way, under the question (before, both
+  showed the question and dropped the answer). Measured on the dev fleet: 266 turns of 49 sessions come to 1,175
+  messages (2.4 M characters); the live layout (one message per remark and per work-log segment) would have taken 6,581.
+- **Checked on real sessions, offline.** A small driver (`histdump`, the session's scratchpad; never committed) runs
+  `SplitHistoryWindow` + `PlanHistoryPosts` over a transcript and prints every post: ba1ee743 gives the 8 messages the
+  live run sent; 9c3454bb 82, and 92 once its 10 answers are posts. It found a bug of the live mirror too: a link whose
+  url holds parentheses (`https://en.wikipedia.org/wiki/Jordan_King_(basketball)`) lost its last `)` and left a stray
+  one after the link — `TgMarkdownToHtml` now balances parentheses inside a url (CommonMark's rule), and a url with
+  unbalanced ones is not a link. Still plain text in Telegram: Markdown TABLES (Telegram has no table), which Claude's
+  replies often hold — a reply's table shows as its `|` rows.
 - **The user's turns as the user.** With secretary mode working (the probe's `businessMode == 1` and a connection) a
   prompt, a mid-turn message and a slash command are sent AS THE USER (`_sendAsUser`, plain text); otherwise the bot posts
   `⌨ HH:MM · <first line>` (⚙ for a prompt the runner sent, when the queue still holds it), the whole prompt in a folded
@@ -1567,6 +1578,8 @@ the whole session as messages, not a file plus the last 10 turns.
   fork's copied prompt, each item's line offset; `PlanHistoryPosts` — each turn's last post commits where the next turn
   starts, the window's last turn its end, with the day; `PlanTopicResort` — in order, reversed, a low-ranked topic on
   top, a swap in the middle, a topic missing from the list; the record's round trip and `TopicBackfillPending`; layout
-  2; the replay's lowest priority; the card's history line. m5, isolated on HEAD 5f4c8f608 + the first build: 7214
-  checks; on 3bc71b412 + the flood budget and the per-turn commits: 7220 checks — the 3 known TestTaskbarBadge failures
-  only, each time.
+  2; the replay's lowest priority; the card's history line; the `Answer` item (one answer, several, a plain tool result
+  stays one, a conversation message) and its post between the question and the reply; a url with balanced parentheses,
+  and one with unbalanced. m5, isolated on HEAD 5f4c8f608 + the first build: 7214 checks; on 3bc71b412 + the flood
+  budget and the per-turn commits: 7220; on c5f4d0c6c + the answers and the link fix: 7230 — the 3 known
+  TestTaskbarBadge failures only, each time.

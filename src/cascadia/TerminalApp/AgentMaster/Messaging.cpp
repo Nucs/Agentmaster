@@ -3853,6 +3853,57 @@ namespace Agentmaster::Msg
             case TopicItemKind::Command:
                 _sendText(topic.threadId, L"<code>" + TgEscapeHtml(it.text.size() > 300 ? it.text.substr(0, 300) : it.text) + L"</code>", true, SendPriority::New, L"", json::Value{}, nullptr);
                 break;
+            case TopicItemKind::Answer:
+            {
+                // The user's answer to the question above (§21.9: the user's turns are the user's messages): the work log so
+                // far is closed first, so the answer lands under the question and the tools that follow start below it.
+                // As the user through secretary mode when it works, else the bot's ↩ line; silent (the user gave it).
+                _flushWorkLog(sessionId, topic, m, true);
+                m.workLog.clear();
+                m.workLogMessageId = 0;
+                topic.workLogMessageId = 0;
+                m.workLogDirty = false;
+                ++m.workLogGen;
+                m.awaitingAnswer = false;
+                const std::wstring html = L"\x2328 \x21A9 <b>" + TgEscapeHtml(it.text.size() > 1000 ? it.text.substr(0, 1000) + L"\x2026" : it.text) + L"</b>";
+                bool asUser = false;
+                {
+                    std::lock_guard lk{ _mtx };
+                    asUser = _state.businessMode == 1;
+                }
+                if (asUser)
+                {
+                    const int64_t thread = topic.threadId;
+                    auto self = weak_from_this();
+                    _sendAsUser(thread, it.text, [self, thread, html](const TgResult& r) {
+                        auto me = self.lock();
+                        if (!me || r.ok)
+                        {
+                            if (me)
+                            {
+                                me->_secretaryFailures.store(0);
+                            }
+                            return;
+                        }
+                        const int failures = me->_secretaryFailures.fetch_add(1) + 1;
+                        me->_log(L"[msg] secretary: an answer could not be sent as the user (" + r.description + L"); the bot's line goes in its place" +
+                                 (failures >= 3 ? L"; secretary mode is off until the bot is connected again" : L""));
+                        if (failures >= 3)
+                        {
+                            std::lock_guard lk{ me->_mtx };
+                            me->_state.businessMode = -1;
+                            me->_state.businessNote = r.description;
+                            me->_stateDirty = true;
+                        }
+                        me->_sendText(thread, html, true, SendPriority::New, L"", json::Value{}, nullptr);
+                    });
+                }
+                else
+                {
+                    _sendText(topic.threadId, html, true, SendPriority::New, L"", json::Value{}, nullptr);
+                }
+                break;
+            }
             default:
                 break;
             }
