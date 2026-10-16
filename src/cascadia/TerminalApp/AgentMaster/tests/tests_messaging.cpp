@@ -171,6 +171,66 @@ void TestMessaging()
         const auto items = ClassifyTranscriptLine(ParseLine(L"{\"type\":\"user\",\"isSidechain\":true,\"message\":{\"role\":\"user\",\"content\":\"subagent prompt\"}}"));
         CHECK(items.empty(), "a sidechain line is the subagent's, not the topic's");
     }
+    // §21.6: a FORK's copy of its source's history is never news (its topic would replay the source conversation).
+    {
+        const auto items = ClassifyTranscriptLine(ParseLine(L"{\"type\":\"user\",\"forkedFrom\":{\"sessionId\":\"src\",\"messageUuid\":\"u0\"},\"message\":{\"role\":\"user\",\"content\":\"the source's prompt\"},\"timestamp\":\"2026-10-16T07:00:00.000Z\"}"));
+        CHECK(items.empty(), "a fork's copied user line shows nothing");
+        const auto copiedReply = ClassifyTranscriptLine(ParseLine(L"{\"type\":\"assistant\",\"forkedFrom\":{\"sessionId\":\"src\",\"messageUuid\":\"u1\"},\"message\":{\"id\":\"m9\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"old reply\"}]}}"));
+        CHECK(copiedReply.empty(), "a fork's copied assistant line shows nothing");
+        const auto own = ClassifyTranscriptLine(ParseLine(L"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"the fork's own first prompt\"}}"));
+        CHECK(own.size() == 1 && own[0].kind == TopicItemKind::Prompt, "the fork's own first line is a prompt");
+    }
+    // §21.6: Claude Code's own recap (system/away_summary), its "(disable recaps in /config)" hint stripped.
+    {
+        const auto items = ClassifyTranscriptLine(ParseLine(L"{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Fixed the crash; next: deploy. (disable recaps in /config)\",\"timestamp\":\"2026-10-16T08:10:00.000Z\"}"));
+        CHECK(items.size() == 1 && items[0].kind == TopicItemKind::Recap && items[0].text == L"Fixed the crash; next: deploy." && items[0].tsMs > 0, "an away_summary line is a Recap item, normalized and timed");
+        CHECK(ClassifyTranscriptLine(ParseLine(L"{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"(disable recaps in /config)\"}")).empty(), "an empty recap shows nothing");
+    }
+    // §21.6: the WHY of a Bash call (its description) leads; the command follows, cut to fit.
+    {
+        const auto both = ParseLine(L"{\"command\":\"npm test -- --watch=false\",\"description\":\"Run the unit tests\"}");
+        CHECK(ToolCallSummary(L"Bash", &both) == L"Bash: Run the unit tests ($ npm test -- --watch=false)", "Bash: the description, then the command");
+        const auto bare = ParseLine(L"{\"command\":\"git status\"}");
+        CHECK(ToolCallSummary(L"Bash", &bare) == L"Bash: git status", "Bash without a description: the command");
+        std::wstring longCmd = L"{\"command\":\"";
+        for (int i = 0; i < 40; ++i)
+        {
+            longCmd += L"echo step" + std::to_wstring(i) + L" && ";
+        }
+        longCmd += L"true\",\"description\":\"Run every step of the release check\"}";
+        const auto longIn = ParseLine(longCmd.c_str());
+        const std::wstring cut = ToolCallSummary(L"Bash", &longIn);
+        CHECK(cut.size() <= kToolSummaryMaxChars && cut.rfind(L"Bash: Run every step of the release check ($ echo step0", 0) == 0 && cut.back() == L')', "a long command is the part cut; the description stays whole");
+    }
+    // §21.6: the recap's freshness — a recap newer than every conversation message is fresh; the next message makes it stale.
+    {
+        CHECK(IsConversationItem(TopicItemKind::Prompt) && IsConversationItem(TopicItemKind::Text) && IsConversationItem(TopicItemKind::ToolCall) && IsConversationItem(TopicItemKind::Command),
+              "prompts, replies, tool calls and commands are conversation messages");
+        CHECK(!IsConversationItem(TopicItemKind::Recap) && !IsConversationItem(TopicItemKind::Compaction) && !IsConversationItem(TopicItemKind::ToolResult),
+              "a recap, a compaction and a tool result are not");
+        const auto item = [](TopicItemKind k, int64_t ts, const wchar_t* text = L"x") {
+            TopicItem it;
+            it.kind = k;
+            it.tsMs = ts;
+            it.text = text;
+            return it;
+        };
+        std::wstring recap;
+        int64_t recapAt = 0, lastMsg = 0;
+        FoldRecapFacts({ item(TopicItemKind::Prompt, 100), item(TopicItemKind::Text, 200), item(TopicItemKind::Recap, 300, L"where it stands") }, recap, recapAt, lastMsg);
+        CHECK(recap == L"where it stands" && recapAt == 300 && lastMsg == 200 && RecapIsFresh(recap, recapAt, lastMsg), "a recap after the last reply is fresh");
+        FoldRecapFacts({ item(TopicItemKind::ToolResult, 400), item(TopicItemKind::Compaction, 400) }, recap, recapAt, lastMsg);
+        CHECK(RecapIsFresh(recap, recapAt, lastMsg), "a tool result or a compaction leaves it fresh");
+        FoldRecapFacts({ item(TopicItemKind::Prompt, 500) }, recap, recapAt, lastMsg);
+        CHECK(!RecapIsFresh(recap, recapAt, lastMsg) && recap == L"where it stands", "the next message makes it stale (the text is kept for the next recap to replace)");
+        FoldRecapFacts({ item(TopicItemKind::Recap, 250, L"older") }, recap, recapAt, lastMsg);
+        CHECK(recap == L"where it stands" && recapAt == 300, "an OLDER recap never replaces a newer one");
+        FoldRecapFacts({ item(TopicItemKind::Recap, 600, L"newer") }, recap, recapAt, lastMsg);
+        CHECK(recap == L"newer" && RecapIsFresh(recap, recapAt, lastMsg), "a newer recap is fresh again");
+        FoldRecapFacts({ item(TopicItemKind::Text, 0) }, recap, recapAt, lastMsg);
+        CHECK(!RecapIsFresh(recap, recapAt, lastMsg), "an untimed message counts as written after everything folded (file order)");
+        CHECK(!RecapIsFresh(L"", 10, 0) && !RecapIsFresh(L"r", 0, 0) && !RecapIsFresh(L"r", 5, 5), "no text, no time, or a tie: not fresh");
+    }
     {
         const auto editInput = ParseLine(L"{\"file_path\":\"K:\\\\source\\\\Agentmaster\\\\src\\\\cascadia\\\\TerminalApp\\\\AgentMaster\\\\Messaging.cpp\"}");
         CHECK(ToolCallSummary(L"Edit", &editInput) == L"Edit: \x2026/TerminalApp/AgentMaster/Messaging.cpp", "an Edit shows the path's tail");
@@ -248,7 +308,152 @@ void TestMessaging()
             rename = rename || (op.kind == TopicSyncOp::Kind::Rename && op.sessionId == L"b" && op.title == L"renamed");
         }
         CHECK(unidle && rename, "a session that left Idle gets its card back, and a new title renames the topic");
-        CHECK(QualifiesForTopic(fact(L"p", SessionState::Idle, true)) && !QualifiesForTopic(fact(L"q", SessionState::Idle)), "a pinned session always qualifies");
+        CHECK(QualifiesForTopic(fact(L"p", SessionState::Idle, true), 1000, 600000) && !QualifiesForTopic(fact(L"q", SessionState::Idle), 1000, 600000), "a pinned session always qualifies");
+    }
+
+    // ---- topics = tabs, §21.6: a NEW tab is listed before its first message; a topic follows its TAB ----
+    {
+        const int64_t grace = 10 * 60 * 1000;
+        const int64_t now = 1792135754217ll;
+        const auto fact = [&](const wchar_t* id, SessionState st, int64_t lastActivityMs, const wchar_t* tab) {
+            TabFact f;
+            f.sessionId = id;
+            f.title = std::wstring{ L"t-" } + id;
+            f.state = st;
+            f.live = true;
+            f.inTab = true;
+            f.claude = true;
+            f.lastActivityMs = lastActivityMs;
+            f.tabToken = tab;
+            return f;
+        };
+        // QualifiesForTopic: an Idle tab used within the grace (a new session / fork: its creation instant) qualifies;
+        // a restored tab whose last activity is old does not; a tab-less or closed session never does.
+        CHECK(QualifiesForTopic(fact(L"new", SessionState::Idle, now - 2000, L"T1"), now, grace), "a new Idle tab (created 2 s ago) qualifies");
+        CHECK(!QualifiesForTopic(fact(L"old", SessionState::Idle, now - grace - 1, L"T2"), now, grace), "a restored Idle tab untouched for longer than the grace does not");
+        CHECK(!QualifiesForTopic(fact(L"never", SessionState::Idle, 0, L"T3"), now, grace), "an Idle tab with no recorded activity does not");
+        CHECK(!QualifiesForTopic(fact(L"g0", SessionState::Idle, now - 1, L"T4"), now, 0), "a grace of 0 lists no Idle tab");
+        TabFact closed = fact(L"closed", SessionState::Running, now, L"T5");
+        closed.live = false;
+        CHECK(!QualifiesForTopic(closed, now, grace), "a closed session never qualifies");
+        // IdleTopicLeavesAtMs: one grace after the LATER of "first seen Idle" and the last activity; 0 when not idle.
+        CHECK(IdleTopicLeavesAtMs(0, now, grace) == 0, "not idle -> no leave time");
+        CHECK(IdleTopicLeavesAtMs(now, now - 5000, grace) == now + grace, "decayed long after its activity: a full grace from the decay");
+        CHECK(IdleTopicLeavesAtMs(now - 5000, now, grace) == now + grace, "used after it went idle: a full grace from the use");
+
+        // A brand-new tab gets a Create at once.
+        {
+            std::map<std::wstring, TopicRecord> topics;
+            const auto ops = PlanTopicSync({ fact(L"fresh", SessionState::Idle, now - 1500, L"T1") }, topics, now, grace);
+            CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Create && ops[0].sessionId == L"fresh", "a new Idle tab is created at once (the user's 'a new session/tab with no new messages should appear')");
+        }
+        // The plan's grace for an Idle topic counts from the later of idleSince and the last activity.
+        {
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"used";
+            t.threadId = 21;
+            t.title = L"t-used";
+            t.idleSinceMs = now - grace - 1000; // first seen Idle more than a grace ago...
+            t.tabToken = L"T6";
+            topics[L"used"] = t;
+            auto ops = PlanTopicSync({ fact(L"used", SessionState::Idle, now - 1000, L"T6") }, topics, now, grace); // ...but used a second ago
+            bool del = false;
+            for (const auto& op : ops)
+            {
+                del = del || op.kind == TopicSyncOp::Kind::Delete;
+            }
+            CHECK(!del, "an Idle topic whose session was used since it went idle stays a whole grace from the use");
+            ops = PlanTopicSync({ fact(L"used", SessionState::Idle, now - grace - 500, L"T6") }, topics, now, grace);
+            del = false;
+            for (const auto& op : ops)
+            {
+                del = del || (op.kind == TopicSyncOp::Kind::Delete && op.reason == L"idle");
+            }
+            CHECK(del, "an Idle topic untouched past the grace is deleted");
+        }
+        // REKEY: the topic's session closed and another session holds the SAME tab (a /clear, a /resume, a handover in
+        // place) — the topic follows the tab; the heir gets no topic of its own; the tab key compares case-insensitively.
+        {
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"before";
+            t.threadId = 31;
+            t.title = L"t-before";
+            t.tabToken = L"ABCD-EF01";
+            topics[L"before"] = t;
+            auto heir = fact(L"after", SessionState::Running, now, L"abcd-ef01");
+            heir.title = L"cleared conversation";
+            const auto ops = PlanTopicSync({ heir }, topics, now, grace);
+            CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Rekey && ops[0].sessionId == L"after" && ops[0].fromSessionId == L"before" && ops[0].title == L"cleared conversation",
+                  "a closed session's topic is carried over to the session now in its tab (one Rekey, no Delete, no Create)");
+        }
+        {
+            // No heir in that tab: the topic is deleted ("closed"); a heir in ANOTHER tab gets its own topic.
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"gone";
+            t.threadId = 41;
+            t.tabToken = L"T7";
+            topics[L"gone"] = t;
+            const auto ops = PlanTopicSync({ fact(L"other", SessionState::Running, now, L"T8") }, topics, now, grace);
+            bool deleted = false, created = false, rekeyed = false;
+            for (const auto& op : ops)
+            {
+                deleted = deleted || (op.kind == TopicSyncOp::Kind::Delete && op.sessionId == L"gone" && op.reason == L"closed");
+                created = created || (op.kind == TopicSyncOp::Kind::Create && op.sessionId == L"other");
+                rekeyed = rekeyed || op.kind == TopicSyncOp::Kind::Rekey;
+            }
+            CHECK(deleted && created && !rekeyed, "another tab's session is no heir: the old topic goes, the other tab gets its own");
+        }
+        {
+            // A /handover-here successor takes the tab on a NEW connection (a new token): it CONTINUES the closed session,
+            // so the topic follows it all the same.
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"origin";
+            t.threadId = 71;
+            t.tabToken = L"OLD-CONN";
+            topics[L"origin"] = t;
+            auto successor = fact(L"successor", SessionState::Running, now, L"NEW-CONN");
+            successor.continuedFromId = L"origin";
+            const auto ops = PlanTopicSync({ successor }, topics, now, grace);
+            CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Rekey && ops[0].sessionId == L"successor" && ops[0].fromSessionId == L"origin",
+                  "a handover-in-place successor (continuedFromId) inherits the topic");
+        }
+        {
+            // A topic with no recorded tab (written before §21.6) is never carried over.
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"legacy";
+            t.threadId = 51;
+            topics[L"legacy"] = t;
+            const auto ops = PlanTopicSync({ fact(L"heir", SessionState::Running, now, L"T9") }, topics, now, grace);
+            bool rekeyed = false;
+            for (const auto& op : ops)
+            {
+                rekeyed = rekeyed || op.kind == TopicSyncOp::Kind::Rekey;
+            }
+            CHECK(!rekeyed, "a topic without a recorded tab is not carried over");
+        }
+        {
+            // While the topic's own session still holds the tab, a second session in that tab (the moment of a
+            // conversation switch, before the old record closes) gets no topic: the next sync carries the topic over.
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord t;
+            t.sessionId = L"holder";
+            t.threadId = 61;
+            t.title = L"t-holder";
+            t.tabToken = L"TA";
+            topics[L"holder"] = t;
+            const auto ops = PlanTopicSync({ fact(L"holder", SessionState::Running, now, L"TA"), fact(L"second", SessionState::Running, now, L"ta") }, topics, now, grace);
+            bool createdSecond = false;
+            for (const auto& op : ops)
+            {
+                createdSecond = createdSecond || (op.kind == TopicSyncOp::Kind::Create && op.sessionId == L"second");
+            }
+            CHECK(!createdSecond, "per tab: a tab whose topic's session still holds it gets no second topic");
+        }
     }
 
     // ---- what a message in a topic is ----
@@ -309,18 +514,27 @@ void TestMessaging()
         tr.threadId = 7;
         tr.lastPostedMs = 11;
         tr.cardPostedMs = 10;
-        tr.recapPrompt = L"p";
-        tr.recapReply = L"r";
+        tr.recapText = L"Shipped the fix. Next: deploy.";
         tr.recapAtMs = 9;
-        tr.recapSeenMs = 12;
+        tr.lastMessageAtMs = 8;
+        tr.cardTextHash = 0xFEDCBA98u; // past 31 bits: the hash is unsigned
+        tr.tabToken = L"wt-1";
         tr.errorAnnounced = true;
         b.topics[L"sid-2"] = tr;
         const auto bb = StateFromJson(StateToJson(b));
         CHECK(bb.has_value() && bb->businessConnectionId == L"conn-1" && bb->businessEnabled && bb->businessCanReply && bb->businessMode == -1 && bb->businessNote == L"refused", "the business connection round-trips");
-        CHECK(bb.has_value() && bb->topics.at(L"sid-2").lastPostedMs == 11 && bb->topics.at(L"sid-2").cardPostedMs == 10 && bb->topics.at(L"sid-2").recapPrompt == L"p" && bb->topics.at(L"sid-2").recapReply == L"r" &&
-                  bb->topics.at(L"sid-2").recapAtMs == 9 && bb->topics.at(L"sid-2").recapSeenMs == 12 && bb->topics.at(L"sid-2").errorAnnounced,
-              "the sticky-card clocks, the recap and errorAnnounced round-trip");
+        CHECK(bb.has_value() && bb->topics.at(L"sid-2").lastPostedMs == 11 && bb->topics.at(L"sid-2").cardPostedMs == 10 && bb->topics.at(L"sid-2").recapText == L"Shipped the fix. Next: deploy." &&
+                  bb->topics.at(L"sid-2").recapAtMs == 9 && bb->topics.at(L"sid-2").lastMessageAtMs == 8 && bb->topics.at(L"sid-2").cardTextHash == 0xFEDCBA98u &&
+                  bb->topics.at(L"sid-2").tabToken == L"wt-1" && bb->topics.at(L"sid-2").errorAnnounced,
+              "the sticky-card clocks, the recap facts, the card hash, the tab and errorAnnounced round-trip");
         CHECK(legacy->topics.empty() && !legacy->businessEnabled && legacy->businessMode == 0, "an older state file reads no business connection");
+        // A 0.0.1.15 topic (recapPrompt / recapReply, no recapText) reads NO recap: the old synthesized block is gone.
+        {
+            const auto old = json::Parse(L"{\"topics\":[{\"sessionId\":\"s\",\"threadId\":3,\"recapPrompt\":\"p\",\"recapReply\":\"r\",\"recapAtMs\":5,\"recapSeenMs\":6}]}");
+            const auto st = old ? StateFromJson(*old) : std::nullopt;
+            CHECK(st.has_value() && st->topics.at(L"s").recapText.empty() && st->topics.at(L"s").recapAtMs == 0 && st->topics.at(L"s").tabToken.empty() && st->topics.at(L"s").cardTextHash == 0,
+                  "a 0.0.1.15 topic reads no recap, no tab and no card hash");
+        }
         CHECK(back.has_value() && back->topics.size() == 1 && back->topics.at(L"sid-1").threadId == 42 && back->topics.at(L"sid-1").cardMessageId == 100 &&
                   back->topics.at(L"sid-1").cursor == 4567 && back->topics.at(L"sid-1").transcriptPath == L"C:\\t.jsonl" && back->topics.at(L"sid-1").idleSinceMs == 123,
               "a topic record round-trips");
@@ -360,17 +574,62 @@ void TestMessaging()
         CHECK(card.find(L"unsent at the PC: \x201C" L"and then rebase onto &lt;main&gt;\x201D") != std::wstring::npos, "the unsent draft, escaped");
         CHECK(BuildCardText(s, 5000, 0, true).find(L"(Off globally)") != std::wstring::npos, "the global pause shows");
         CHECK(BuildCardText(s, 5000, 5000 + 90000, false).find(L"leaves the list at ") != std::wstring::npos, "the idle card names the clock time it leaves at (never a countdown)");
-        // §21.5: the recap block only when asked (the service asks while nothing newer than the recap is posted in
-        // the topic) — a clock time and the two lines; a parked tab and a session in Error carry the Reactivate lines.
+        // §21.6: Claude Code's own recap (its away_summary) only while it is fresh — a clock time and the text, escaped;
+        // a parked tab, a session in Error and a claude that exited carry the Reactivate lines.
         CardExtras ex;
-        ex.recap = true;
-        ex.recapPrompt = L"fix the tests";
-        ex.recapReply = L"Done: 3 files changed";
+        ex.recapFresh = true;
+        ex.recapText = L"Fixed the <drag> crash. Next: deploy.";
         ex.recapAtMs = 1700000000000;
         const std::wstring withRecap = BuildCardText(s, 1700000000000 + 60000, 0, false, &ex);
-        CHECK(withRecap.find(L"<b>Recap</b> \x00B7 ") != std::wstring::npos && withRecap.find(L"\U0001F464 fix the tests") != std::wstring::npos && withRecap.find(L"\U0001F916 Done: 3 files changed") != std::wstring::npos, "the recap block: a clock time, the prompt and the reply");
-        ex.recap = false;
-        CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"Recap") == std::wstring::npos, "no recap block while something newer sits above the card");
+        CHECK(withRecap.find(L"<b>Recap</b> \x00B7 ") != std::wstring::npos && withRecap.find(L"<i>Fixed the &lt;drag&gt; crash. Next: deploy.</i>") != std::wstring::npos, "the recap block: a clock time and the recap, escaped");
+        ex.recapFresh = false;
+        CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"Recap") == std::wstring::npos, "no recap block once a message is newer than the recap");
+        ex.recapFresh = true;
+        ex.recapText.clear();
+        CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"Recap") == std::wstring::npos, "no recap block without a recap");
+        SessionInfo exited = s;
+        exited.live = true;
+        exited.started = true;
+        exited.state = SessionState::Done;
+        CHECK(BuildCardText(exited, 5000, 0, false).find(L"claude exited \x2014 \x25B6 Reactivate starts it again") != std::wstring::npos, "a claude that exited: the Reactivate line");
+        // The card's "since" comes from persisted stamps, so a restart (which restamps stateChangedAtUnixMs) changes no card.
+        {
+            SessionInfo c = MakeSession(L"since-1", SessionState::Running);
+            c.turnStartUnixMs = 100;
+            c.turnEndUnixMs = 50;
+            c.lastActivityUnixMs = 300;
+            c.stateChangedAtUnixMs = 400;
+            CHECK(CardStateSinceMs(c) == 100, "Running: since the turn started");
+            c.state = SessionState::NeedsApproval;
+            CHECK(CardStateSinceMs(c) == 100, "NeedsApproval: since the turn started");
+            c.state = SessionState::WaitingForInput;
+            c.turnEndUnixMs = 200;
+            CHECK(CardStateSinceMs(c) == 200, "at rest: since the newer turn boundary");
+            c.turnStartUnixMs = 0;
+            c.turnEndUnixMs = 0;
+            CHECK(CardStateSinceMs(c) == 300, "no turn yet (a new session): since its last activity (its creation)");
+            c.lastActivityUnixMs = 0;
+            CHECK(CardStateSinceMs(c) == 400, "nothing else known: the state change (the last fallback)");
+        }
+        CHECK(CardTextHash(L"a") == CardTextHash(L"a") && CardTextHash(L"a") != CardTextHash(L"b") && CardTextHash(L"") != 0, "the card hash: stable, text-sensitive, never 0");
+        {
+            SessionInfo r = MakeSession(L"react-1", SessionState::WaitingForInput);
+            r.live = true;
+            r.started = true;
+            CHECK(!SessionIsReactivatable(r), "a waiting session has nothing to reactivate");
+            r.started = false;
+            CHECK(SessionIsReactivatable(r), "a parked tab is reactivatable");
+            r.external = true;
+            CHECK(!SessionIsReactivatable(r), "an adopted session's claude is running whatever `started` says");
+            r.external = false;
+            r.started = true;
+            r.state = SessionState::Error;
+            CHECK(SessionIsReactivatable(r), "a session in Error is reactivatable");
+            r.state = SessionState::Done;
+            CHECK(SessionIsReactivatable(r), "a claude that exited is reactivatable");
+            r.live = false;
+            CHECK(!SessionIsReactivatable(r), "a closed session is not (Search resumes it)");
+        }
         SessionInfo parked = s;
         parked.live = true;
         parked.started = false;
@@ -426,6 +685,31 @@ void TestMessaging()
         s.queue.insert(s.queue.begin(), plain);
         s.queue[1].remoteSource = L"telegram:6";
         CHECK(!NextPromptIsRemote(s), "only the NEXT prompt decides");
+    }
+
+    // ---- §21.6: a remote prompt settles kRemotePromptSettleMs, not the runner's 40 s ----
+    {
+        SessionInfo s = MakeSession(L"remote-settle");
+        s.live = true;
+        s.started = true;
+        s.state = SessionState::WaitingForInput;
+        s.stateChangedAtUnixMs = 10000; // e.g. a parked tab that just started
+        s.autorunner.mode = AutorunnerMode::Full;
+        QueuedPrompt q;
+        q.id = L"rs1";
+        q.text = L"from the phone";
+        q.origin = PromptOrigin::Autorun;
+        q.remoteSource = L"telegram:77";
+        q.queuedAtUnixMs = 9000;
+        s.queue.push_back(q);
+        CHECK(StateSettleRemainingMs(s, s.queue[0], 11000) == kRemotePromptSettleMs - 1000, "a remote prompt's window is kRemotePromptSettleMs");
+        const AdvancePlan held = DecideAdvance(s, 11000, 0, false);
+        CHECK(held.action == AdvanceAction::None && held.retryAfterMs == kRemotePromptSettleMs - 1000, "held only for the rest of the short window (a timed re-check)");
+        CHECK(DecideAdvance(s, 10000 + kRemotePromptSettleMs, 0, false).action == AdvanceAction::Send, "sent once the short window passed");
+        CHECK(StateSettleRemainingMs(s, s.queue[0], 11000, 0) == 0, "a disabled hold stays disabled for a remote prompt");
+        s.queue[0].remoteSource.clear();
+        CHECK(DecideAdvance(s, 10000 + kRemotePromptSettleMs, 0, false).action == AdvanceAction::None && StateSettleRemainingMs(s, s.queue[0], 10000 + kRemotePromptSettleMs) == kStateSettleMs - kRemotePromptSettleMs,
+              "the runner's own prompt still waits the whole 40 s");
     }
 
     // ---- the pin hold + its persistence ----

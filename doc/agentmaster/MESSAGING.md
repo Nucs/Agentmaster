@@ -1,9 +1,11 @@
 # Agentmaster — messaging: the fleet in Telegram, Microsoft Teams, and any other messenger
 
 > **Status: Telegram v1 IMPLEMENTED on 2026-10-16 (§21 says exactly what was built, where it differs from the
-> design below, and what is still open); designed 2026-10-15, revised twice on 2026-10-16.** The bot on this
-> machine is the user's `@SidKatrineBot` (the token in `K:\source\telegram\SidKatrineBot.env`, stored in
-> Windows Credential Manager by the cog — never in a profile file). Teams, webhooks and external connectors
+> design below, and what is still open; §21.6 = the topics per TAB, Claude Code's own recap, the card that
+> rings — dev 0.0.1.16, not production); designed 2026-10-15, revised twice on 2026-10-16.** The bot on this
+> machine is the user's `@ClaudeSessionsGateBot` since 2026-10-16 18:50 (the token in
+> `K:\source\telegram\ClaudeSessionsGateBot.env`, stored in Windows Credential Manager by the cog — never in a
+> profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on). Teams, webhooks and external connectors
 > are still design only. The user's ask: "We plan messaging apps abstract support for Telegram + Microsoft
 > Teams. We will support anything."
 > **The user's decisions so far** (quoted in §18): the bot runs inside the running Agentmaster process
@@ -1186,7 +1188,8 @@ should be also sent 'by' the user (via secretary mode)"*.
   card is NOT pinned any more (a pin per re-post would leave a "pinned a message" line each time; the old pins
   go when their cards are deleted). The topic's setup posts its note BEFORE the card. A stop mid-send used to
   leave -1 markers in the state file for good (the work log's too): `_start` clears them.
-- **The RECAP in the card.** `TopicRecord::recapPrompt` / `recapReply` / `recapAtMs` (the transcript moment,
+- **The RECAP in the card** (REPLACED in §21.6 by Claude Code's own recap: this block only repeated the reply
+  right above the card). `TopicRecord::recapPrompt` / `recapReply` / `recapAtMs` (the transcript moment,
   shown as a clock time) / `recapSeenMs`: seeded once from the transcript's last 256 KB when the topic is
   created (`_seedRecap`: the last prompt, and the last final reply after it, else the last assistant text),
   then kept by the mirror (a prompt, a final). The card shows the block (`Recap · 19:42` / 👤 the prompt's
@@ -1232,3 +1235,100 @@ should be also sent 'by' the user (via secretary mode)"*.
 - **Live checks owed:** the sticky card after a reply; the recap on a fresh topic; a remark as a message; a
   prompt into a parked tab; ▶ Reactivate on a session in Error; the probe's verdict in the Search topic after
   the user re-toggles the Chatbots entry.
+
+### 21.6 The user's manual QA on dev (2026-10-16 night) and what it changed
+
+The user QA'd session `ba1ee743` on dev 0.0.1.15 and restated four points of §21.5 (the sticky card, a FRESH
+recap, "the messages of user and assistant including the message of why the bash is invoked … unless I use a
+/slash command", Reactivate, prompts sent "by" the user), and added one: *"A new session/tab with no new
+messages should appear on telegram. If we show per tab, we will cleanly also support forked sessions."* What was
+found and what changed (dev 0.0.1.16, swapped 21:57:54):
+
+- **A new tab is listed at once, before its first message.** `QualifiesForTopic(f, now, grace)`: an Idle tab
+  qualifies when it was used within the idle grace — `TabFact::lastActivityMs` is `SessionInfo::lastActivityUnixMs`,
+  which the launch seam stamps with a NEW session's or a fork's creation instant (and every hook moves on), and
+  every launched tab carries its `tabToken` from the launch (stamped eagerly), a background one too. Before, a
+  new tab (Idle until its first prompt) got its topic only at that prompt — and the topic, mirroring from the
+  transcript's END, lost the prompt itself (seen live). Window-restored tabs keep their old last activity, so an
+  Idle one still gets no topic (no churn at a start). An Idle topic leaves one grace after the LATER of "first
+  seen Idle" and the last activity (`IdleTopicLeavesAtMs` — the plan and the card's "leaves the list at" share
+  it, so the clock only moves when the session is used).
+- **Forks.** A fork is a new tab, so it gets its own topic at once. Its transcript appears with its first message
+  and begins with the source's history copied line by line, each stamped `forkedFrom` (measured: 958 copied lines,
+  then the fork's own) — `ClassifyTranscriptLine` now skips those lines, so the fork's topic shows only its own
+  conversation. Its first card's recap is read from the source's transcript (`ResolveClaudeDisplayTranscript`).
+- **A topic follows its TAB (Rekey).** `TopicRecord::tabToken`, kept current by every sync (a restart or a park
+  gives a tab a new token). When a topic's session CLOSES and another live Claude session without a topic holds
+  the same tab (a /clear, a /resume in the tab), or continues the closed one (`SessionInfo::continuedFromId` — a
+  /handover-here successor, which takes the tab on a new connection), `PlanTopicSync` emits a `Rekey` instead of a
+  Delete; `_rekeyTopic` moves the record to the new key (a fresh mirror, seeded from the new transcript; the card
+  and the thread stay), posts one silent line `— a new conversation in this tab (<id8>) —`, renames the topic and
+  refreshes the card (`[msg] topic carried over <old8> -> <new8> (the same tab …)`). While a topic's session still
+  holds the tab, a second session in that tab gets no topic of its own. A topic with no recorded tab (written
+  before this build) is never carried over.
+- **Where a new topic's mirror starts** (`_seedFromTranscript`): no transcript yet (a new session, a fork) → its
+  first line; at rest → the file's end (the topic shows the session from now on); mid-turn (Running /
+  NeedsApproval) → the start of the turn's own prompt line within the last 256 KB, so the prompt that made the tab
+  qualify is in the thread. The "Mirroring from here on" note is gone (the thread is the conversation). A transcript
+  that cannot be read for a moment keeps its cursor (it was reset to 0, which would have replayed the whole
+  conversation once the file was found again); an unresolved transcript is looked up every 2 s while the session
+  is busy, every 20 s at rest.
+- **The recap is Claude Code's own.** The §21.5 block (last prompt + last reply) only repeated the reply sitting
+  right above the card. The card now shows Claude Code's idle recap — the `system/away_summary` line it writes a
+  few minutes after a turn when the user is away (`TopicItemKind::Recap`, `NormalizeRecapText`) — and only while
+  it is FRESH, newer than every conversation message (`RecapIsFresh`; `IsConversationItem` = a prompt, a reply,
+  a tool call, a question, a plan, an API error, a command, an interrupt). `TopicRecord::recapText / recapAtMs /
+  lastMessageAtMs`, folded by the one `FoldRecapFacts` for the seed (the transcript's tail when the topic is made)
+  and the mirror (every batch). A 0.0.1.15 topic's `recapPrompt` / `recapReply` keys are no longer read.
+- **Why the Bash runs.** `ToolCallSummary` puts a Bash call's `description` (Claude Code writes one per call)
+  first and the command after it, cut to fit: `Bash: Run the unit tests ($ npm test -- --watch=false)`.
+- **The thread is the conversation; a state rings the CARD.** The bot's own "⏹ claude exited", "⚠ Error …" and
+  "🟠 Needs your approval at the PC" messages are gone: the card says the state, and for those three it is re-sent
+  at the bottom WITH SOUND (a PING: `_refreshCard(…, ping)` → `_postCard(…, ping)`, kept until a post can carry it;
+  `[msg] <id8> card re-posted with sound (<state>)`); what the assistant had said before an exit or an Error closes
+  the turn silently. ONE sound per "needs you": a question or a plan posted with sound makes the NeedsApproval
+  edge that follows silent (`Mirror::awaitingAnswer`), and a NeedsApproval ping makes the question posted after it
+  silent (`approvalPinged`); an API error message rings unless the Error edge already rang (`errorAnnounced` both
+  ways). An interrupt posts what was said + `■ interrupted`, silently, and nothing for a stray marker.
+- **A card is never edited for nothing.** `TopicRecord::cardTextHash` (FNV-1a 32 of the card's text + buttons,
+  persisted): a text the topic already shows is not sent again — the 20:30 start had re-edited every card (117
+  edits in ten minutes). The card's "since" now reads persisted stamps (`CardStateSinceMs`: the turn's start while
+  it runs, the newer turn boundary at rest, then the last activity — `stateChangedAtUnixMs` is stamped at every
+  load, so every start changed every card). This build's first start edits each card once more (the hash is new
+  and the text changed). A card the user deleted on the phone comes back (the edit's "message to edit not found"
+  clears the record's card; the next refresh posts one).
+- **Reactivate** also restarts a session whose claude EXITED (Done; the card reads `⏹ claude exited — ▶ Reactivate
+  starts it again (the same conversation)`). The button answers with a toast — nothing is posted in the thread;
+  `/reactivate` answers in the thread.
+- **A message from the phone settles 5 s, not 40 s** (`kRemotePromptSettleMs`, applied inside
+  `StateSettleRemainingMs`, so the overlay's "settling" cue follows). The STATE SETTLE hold protects the runner's
+  PLANNED prompts from a momentary "ready"; for the user's own message it only made the phone wait — 40 s after a
+  parked tab's claude started, or 40 s after being queued into a session that sat waiting anyway. The input-box
+  gate (NoBox while claude draws its UI) and the ready-state gate still hold the rest.
+- **Secretary echo guard.** A message that carries `sender_business_bot` or `business_connection_id` is dropped
+  before anything reads it, and a text this service sent AS THE USER into a topic within the last two minutes is
+  consumed once if it comes back as the owner's message (`_takeSecretaryEcho`; `[msg] secretary: our own send as
+  the user came back as a message …`). Without it a prompt typed at the PC, mirrored as the user's own bubble,
+  could return as a new prompt from the phone — sent to claude again, mirrored again: a loop. A bot change also
+  resets the business connection (it is made to one bot).
+- **Two races of the tick fixed.** The tick works on a COPY of a session's mirror and topic and writes them back:
+  (1) a work-log create whose answer landed in between lost its message id — or, refused, left the record "in
+  flight" (-1) for the rest of the turn, so the work log stopped; `_flushWorkLog` now marks the shared record -1
+  when it sends, and the write-back keeps an answer that landed; (2) the card's transient state (`CardState`: the
+  last edit, the last state, a wanted ping) moved out of the Mirror, whose write-back overwrote it (a card could be
+  edited twice). The card post's answer is matched to its topic by THREAD, so a Rekey in flight never loses it.
+- **The live start** (dev 0.0.1.16, 21:57:54, downtime 6.5 s): 48 topics held by the start-up hold, one window
+  re-homed its 56 Claude tabs in 74 s, the hold ended at 124 s with every window restored, nothing was deleted.
+- **Tests** (`TestMessaging`): a new tab qualifies / a restored one does not; `IdleTopicLeavesAtMs`; a new tab is
+  created at once; the grace counted from the last use; Rekey by tab (case-insensitive) and by continuation; no
+  heir in another tab; no Rekey without a recorded tab; no second topic in a held tab; the fork's copied lines
+  skipped; the `away_summary` Recap item; the Bash description; `FoldRecapFacts` / `RecapIsFresh` /
+  `IsConversationItem`; the state round trip of the new fields and a 0.0.1.15 file; the fresh / stale / empty recap
+  block; the exited line; `CardStateSinceMs`; `CardTextHash`; `SessionIsReactivatable`; the 5 s remote settle
+  (`DecideAdvance`) beside the runner's 40 s. m5: 7068 checks, the 3 known TestTaskbarBadge failures only.
+- **Live checks owed (the user's side):** open a new tab and a fork → each gets its topic at once, the fork's
+  showing only its own messages; a /clear in a tab → the same topic, one "a new conversation" line; a Bash call's
+  line shows its reason; a fresh `Recap` block after a few idle minutes, gone at the next message; a session that
+  needs approval / exits / errs → the card comes back at the bottom with sound, and no bot line; a message into a
+  parked tab → delivered ~5 s after its claude is up; ▶ Reactivate → a toast; secretary mode → see §21.5 (the
+  Chatbots entry must be toggled once after a build that listens; `[msg] secretary:` lines say what Telegram said).
