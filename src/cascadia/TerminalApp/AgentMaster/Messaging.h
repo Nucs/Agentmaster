@@ -245,12 +245,37 @@ namespace Agentmaster::Msg
             std::function<void(const TgResult&)> onDone; // called on the send thread (may be empty)
         };
         void _enqueue(OutItem item);
-        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0);
+        /// <summary>
+        /// Posts HTML into a topic (chunked at Telegram's limit; the buttons and `onDone` ride the LAST chunk, the
+        /// reply reference the first; a refused HTML is re-sent as plain text). `movesCard` (default) stamps the
+        /// topic's `lastPostedMs`, which makes the sticky card re-post itself below the new message; the card's own
+        /// posts pass false, or the card would chase itself forever.
+        /// </summary>
+        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true);
+        /// <summary>
+        /// Sends plain text into a topic AS THE USER through the Telegram Business connection (the user's "Secretary
+        /// mode"; §21.5) — the way a prompt typed at the PC becomes the user's own bubble in the topic. Only valid
+        /// once the SECRETARY PROBE found that Telegram accepts such a send into this chat (`businessMode == 1`), or
+        /// as the probe itself. `onDone` gets Telegram's answer on the send thread (a refusal is the caller's cue to
+        /// fall back to the bot-rendered line).
+        /// </summary>
+        void _sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone);
+        /// <summary>Stamps the topic that owns `threadId` as "something newer than the card landed here" (the sticky card's trigger).</summary>
+        void _noteTopicPosted(int64_t threadId);
         void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup);
         void _react(int64_t messageId, std::wstring_view emoji);
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
-        std::wstring _cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut) const;
+        /// <summary>The card's buttons; `reactivatable` adds a leading ▶ Reactivate row (a parked tab, a cut-off or failed turn).</summary>
+        std::wstring _cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut, bool reactivatable = false) const;
+        /// <summary>
+        /// Sends a fresh card at the bottom of the topic, deleting the old card message first when `deleteFirst` is
+        /// a message id (the STICKY CARD, §21.5). Marks the record's card "in flight" (-1) until Telegram answers;
+        /// a refused send leaves it 0 with `cardPostedMs` = now, and `_refreshCard` tries a new card a minute later.
+        /// </summary>
+        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst);
+        /// <summary>Reads the transcript's tail once and fills the topic's recap (the last prompt line, the last reply head) — the catch-up a topic without backfill owes its first card.</summary>
+        void _seedRecap(TopicRecord& t);
 
         // ----- topics = tabs (Messaging.cpp) -----
         void _ensureSearchTopic();
@@ -269,6 +294,12 @@ namespace Agentmaster::Msg
             int64_t workLogMessageId{ 0 };
             int64_t workLogLastEditMs{ 0 };
             bool workLogDirty{ false };
+            /// <summary>
+            /// The work-log SEGMENT number: a remark posted as its own message closes the segment (the tools that
+            /// follow start a new work-log message below the remark, §21.5), and a create that was in flight for
+            /// the closed segment must not hand its message id to the new one — its callback compares this.
+            /// </summary>
+            uint32_t workLogGen{ 0 };
             bool turnOpen{ false };
             SessionState lastState{ SessionState::Idle };
             int64_t lastStateMs{ 0 };
@@ -281,6 +312,8 @@ namespace Agentmaster::Msg
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
         void _flushWorkLog(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, bool force);
+        /// <summary>Posts the assistant text gathered since the last tool call as ITS OWN silent message and rolls the work log, so the topic reads remark → tools → remark → … → reply (§21.5).</summary>
+        void _postRemark(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
         void _postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why);
         void _appendWorkLog(Mirror& m, const std::wstring& line);
         void _onStateEdge(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
@@ -302,6 +335,16 @@ namespace Agentmaster::Msg
         static int64_t kTokenTtlMsFor(int hours) noexcept;
         void _sweepTokens();
         void _sendnow(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>
+        /// REACTIVATE (§21.5): a parked tab's claude is started in place; a session in Error whose claude still runs
+        /// is restarted (the same conversation resumes; with CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes
+        /// on by itself). A running session is left alone. The card's ▶ button and `/reactivate` both land here.
+        /// </summary>
+        void _reactivate(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>A `business_connection` update: the user connected, edited or removed this bot under Telegram Business → Chatbots (H3: the connecting user must be the paired owner).</summary>
+        void _handleBusinessConnection(const json::Value& bc);
+        /// <summary>The SECRETARY PROBE: one send as the user into the Search topic; its answer decides `businessMode` and is reported there.</summary>
+        void _probeSecretary();
         void _wake(const std::wstring& sessionId, bool pin);
         void _setPinned(const std::wstring& sessionId, bool pinned);
         void _requestLaunch(RemoteLaunchRequest req, int64_t threadId);
@@ -378,6 +421,14 @@ namespace Agentmaster::Msg
         std::unordered_set<std::wstring> _seenLive;
         bool _startupHoldLogged{ false };
         bool _startupHoldOpen{ false };
+        /// <summary>
+        /// The SECRETARY PROBE is due (a business connection arrived, or one was stored with no verdict yet) and
+        /// waits for the Search topic to exist; the tick loop runs it. `_secretaryFailures` counts consecutive
+        /// refused sends as the user once the probe said yes — three in a row turn the mode off again (-1), so a
+        /// permission the user revoked does not cost a refused call per prompt.
+        /// </summary>
+        std::atomic<bool> _probeWanted{ false };
+        std::atomic<int> _secretaryFailures{ 0 };
 
         std::deque<OutItem> _outbox;
         uint64_t _outSeq{ 0 };

@@ -283,7 +283,12 @@ namespace Agentmaster
         // emits a Stop, so gating on WaitingForInput alone would leave a queued plan + autorunner
         // waiting forever; allowing Idle lets the plan START. Running / NeedsApproval / Error /
         // Done are NOT ready (mid-turn, awaiting you, or ended).
-        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
+        // MESSAGING.md §21.5: a REMOTE prompt is also sent into a session in Error — the user's message from the
+        // phone IS the retry of a failed turn (an API error leaves claude at its input box; a cut-off turn's tab
+        // is dormant and the gate above holds until it is started again). Never an automatic prompt: Error means
+        // "stop and tell the user" for the runner's own plan (stopOnError).
+        const bool remoteRetry = remoteNext && s.state == SessionState::Error;
+        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle && !remoteRetry)
         {
             plan.reason = L"not ready (mid-turn / needs-approval / ended)";
             return plan;

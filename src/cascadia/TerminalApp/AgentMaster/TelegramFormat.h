@@ -703,6 +703,51 @@ namespace Agentmaster::Msg
         return std::to_wstring(when.tm_mday) + L" " + kMonths[mon] + L" " + clock;
     }
 
+    /// <summary>
+    /// Telegram HTML back to plain text: the tags this header emits are dropped and the three entities
+    /// `TgEscapeHtml` writes are turned back. For text that is REUSED as data — the recap's "last reply" head
+    /// taken from a message already rendered for Telegram — never for display (a `<pre>` block loses its line
+    /// structure only in the sense that nothing marks it any more).
+    /// </summary>
+    /// <param name="html">Telegram HTML as this header produces it.</param>
+    /// <returns>The text without tags, entities unescaped.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgStripTags(std::wstring_view html)
+    {
+        std::wstring out;
+        out.reserve(html.size());
+        bool inTag = false;
+        for (size_t i = 0; i < html.size(); ++i)
+        {
+            const wchar_t c = html[i];
+            if (c == L'<')
+            {
+                inTag = true;
+            }
+            else if (c == L'>' && inTag)
+            {
+                inTag = false;
+            }
+            else if (!inTag)
+            {
+                out += c;
+            }
+        }
+        // The entities, longest first so "&amp;lt;" (an escaped "&lt;") comes back as "&lt;", not "<".
+        const auto replaceAll = [&out](std::wstring_view from, std::wstring_view to) {
+            size_t pos = 0;
+            while ((pos = out.find(from, pos)) != std::wstring::npos)
+            {
+                out.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        };
+        replaceAll(L"&lt;", L"<");
+        replaceAll(L"&gt;", L">");
+        replaceAll(L"&amp;", L"&");
+        return out;
+    }
+
     inline std::wstring TgShortSpan(int64_t ms)
     {
         if (ms < 0)

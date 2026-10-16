@@ -676,6 +676,32 @@ namespace Agentmaster::Msg
         int64_t cursor{ 0 }; // the transcript byte offset the mirror has consumed
         std::wstring transcriptPath; // the transcript the cursor refers to ("" until resolved)
         int64_t createdMs{ 0 }; // when the topic was created
+        /// <summary>
+        /// The STICKY CARD's clocks (§21.5): `lastPostedMs` is when anything but the card last landed in the topic
+        /// (the bot's prompts, remarks, replies and answers at enqueue time; the user's own messages when read),
+        /// `cardPostedMs` when the current card message was sent. A card older than the newest post is deleted
+        /// and sent again at the bottom, so the buttons and the state are always the last message.
+        /// </summary>
+        int64_t lastPostedMs{ 0 };
+        int64_t cardPostedMs{ 0 };
+        /// <summary>
+        /// The RECAP (§21.5): the last prompt's first line and the last reply's head, with the transcript moment
+        /// they are from (`recapAtMs`, shown as a clock time) and when the service learned them (`recapSeenMs`).
+        /// Seeded from the transcript tail when the topic is created — a topic mirrors from its creation on,
+        /// so without it the first card would sit over nothing — and kept by the mirror. The card shows it only
+        /// while it is newer than the newest post in the topic (`recapSeenMs > lastPostedMs`): once the reply
+        /// itself is right above the card, repeating it would be noise.
+        /// </summary>
+        std::wstring recapPrompt;
+        std::wstring recapReply;
+        int64_t recapAtMs{ 0 };
+        int64_t recapSeenMs{ 0 };
+        /// <summary>
+        /// The topic was told that the session is in Error; cleared when the session runs again. Without it a
+        /// session at rest in Error was announced at EVERY app start (the registry loads it as Idle, the scanner
+        /// re-asserts Error — an edge each time; measured 2026-10-16, 19:30 and 19:45).
+        /// </summary>
+        bool errorAnnounced{ false };
     };
 
     struct MessagingState
@@ -692,6 +718,22 @@ namespace Agentmaster::Msg
         /// </summary>
         int64_t botId{ 0 };
         std::wstring botUsername; // from getMe, for the status line
+        /// <summary>
+        /// The Telegram Business connection — what the user calls "Secretary mode": the bot added under
+        /// Settings → Telegram Business → Chatbots (§21.5). `businessConnectionId` arrives in a
+        /// `business_connection` update (never by any other call; an update sent before the bot listened for it
+        /// is gone, so the user re-toggles the entry); `businessEnabled` / `businessCanReply` are that update's
+        /// `is_enabled` and `rights.can_reply`. `businessMode` is the SECRETARY PROBE's verdict: 0 not tried yet,
+        /// 1 a send on the user's behalf into this chat's topics works (prompts typed at the PC then appear as
+        /// the user's own messages), -1 Telegram refused it (`businessNote` holds the description; prompts keep
+        /// the ⌨ line). Telegram documents business sends for "private chats that had incoming messages in the
+        /// last 24 hours"; whether the user's chat with the bot itself counts is what the probe finds out.
+        /// </summary>
+        std::wstring businessConnectionId;
+        bool businessEnabled{ false };
+        bool businessCanReply{ false };
+        int businessMode{ 0 };
+        std::wstring businessNote;
         std::map<std::wstring, TopicRecord> topics; // session id -> its topic
     };
 
@@ -708,6 +750,11 @@ namespace Agentmaster::Msg
         o.Set(L"setupNoticeMs", json::Value::MkNum(static_cast<double>(s.setupNoticeMs)));
         o.Set(L"botId", json::Value::MkNum(static_cast<double>(s.botId)));
         o.Set(L"botUsername", json::Value::MkStr(s.botUsername));
+        o.Set(L"businessConnectionId", json::Value::MkStr(s.businessConnectionId));
+        o.Set(L"businessEnabled", json::Value::MkBool(s.businessEnabled));
+        o.Set(L"businessCanReply", json::Value::MkBool(s.businessCanReply));
+        o.Set(L"businessMode", json::Value::MkNum(static_cast<double>(s.businessMode)));
+        o.Set(L"businessNote", json::Value::MkStr(s.businessNote));
         auto topics = json::Value::MkArr();
         for (const auto& [sid, t] : s.topics)
         {
@@ -721,6 +768,13 @@ namespace Agentmaster::Msg
             to.Set(L"cursor", json::Value::MkNum(static_cast<double>(t.cursor)));
             to.Set(L"transcriptPath", json::Value::MkStr(t.transcriptPath));
             to.Set(L"createdMs", json::Value::MkNum(static_cast<double>(t.createdMs)));
+            to.Set(L"lastPostedMs", json::Value::MkNum(static_cast<double>(t.lastPostedMs)));
+            to.Set(L"cardPostedMs", json::Value::MkNum(static_cast<double>(t.cardPostedMs)));
+            to.Set(L"recapPrompt", json::Value::MkStr(t.recapPrompt));
+            to.Set(L"recapReply", json::Value::MkStr(t.recapReply));
+            to.Set(L"recapAtMs", json::Value::MkNum(static_cast<double>(t.recapAtMs)));
+            to.Set(L"recapSeenMs", json::Value::MkNum(static_cast<double>(t.recapSeenMs)));
+            to.Set(L"errorAnnounced", json::Value::MkBool(t.errorAnnounced));
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
@@ -743,6 +797,11 @@ namespace Agentmaster::Msg
         s.setupNoticeMs = v.I64At(L"setupNoticeMs", 0);
         s.botId = v.I64At(L"botId", 0); // absent in a file written before the key: 0 = "take the first bot seen"
         s.botUsername = v.StrAt(L"botUsername");
+        s.businessConnectionId = v.StrAt(L"businessConnectionId");
+        s.businessEnabled = v.BoolAt(L"businessEnabled", false);
+        s.businessCanReply = v.BoolAt(L"businessCanReply", false);
+        s.businessMode = static_cast<int>(v.I64At(L"businessMode", 0));
+        s.businessNote = v.StrAt(L"businessNote");
         if (const auto* topics = v.Find(L"topics"); topics && topics->type == json::Value::Type::Arr)
         {
             for (const auto& to : topics->arr)
@@ -765,6 +824,13 @@ namespace Agentmaster::Msg
                 t.cursor = to.I64At(L"cursor", 0);
                 t.transcriptPath = to.StrAt(L"transcriptPath");
                 t.createdMs = to.I64At(L"createdMs", 0);
+                t.lastPostedMs = to.I64At(L"lastPostedMs", 0);
+                t.cardPostedMs = to.I64At(L"cardPostedMs", 0);
+                t.recapPrompt = to.StrAt(L"recapPrompt");
+                t.recapReply = to.StrAt(L"recapReply");
+                t.recapAtMs = to.I64At(L"recapAtMs", 0);
+                t.recapSeenMs = to.I64At(L"recapSeenMs", 0);
+                t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);
                 s.topics[t.sessionId] = std::move(t);
             }
         }
@@ -930,7 +996,8 @@ namespace Agentmaster::Msg
         L"start", L"help", L"queue", L"sendnow", L"unqueue", L"runner", L"pin", L"unpin", L"rename", L"markunread",
         L"moveidle", L"wake", L"favorite", L"unfavorite", L"tags", L"tag", L"untag", L"sessionid", L"path", L"gitbranch",
         L"draft", L"summary", L"transcript", L"screen", L"restartsession", L"deactivate", L"activate", L"forksession",
-        L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card"
+        L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
+        L"reactivate"
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at
@@ -1105,18 +1172,34 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The topic's pinned card (MESSAGING.md §6.1), as Telegram HTML: the title, the state and since
-    /// when (a clock time), folder · branch · model · context, the runner and the queue, the unsent draft,
-    /// a parked note. Pure, so the service compares two renders and edits only on a change — which is why
-    /// nothing in it may be a relative span (see TgClockText): every change is an API call on the one chat.
+    /// What the card shows beyond the session record (§21.5): the RECAP — the last prompt's first line and the
+    /// last reply's head, with their transcript moment — shown only when `recap` is set (the service sets it
+    /// while nothing newer than the recap was posted in the topic, so the card never repeats the message right
+    /// above it).
+    /// </summary>
+    struct CardExtras
+    {
+        bool recap{ false };
+        std::wstring recapPrompt; // plain text, the first line of the last prompt
+        std::wstring recapReply; // plain text, the head of the last reply
+        int64_t recapAtMs{ 0 }; // the transcript moment of the newer of the two (a clock time in the card)
+    };
+
+    /// <summary>
+    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5), as Telegram HTML: the title, the state and since
+    /// when (a clock time), a "not running / Reactivate" line for a parked tab or a session in Error, folder ·
+    /// branch · model · context, the runner and the queue, the unsent draft, and the recap when it is fresh.
+    /// Pure, so the service compares two renders and edits only on a change — which is why nothing in it may
+    /// be a relative span (see TgClockText): every change is an API call on the one chat.
     /// </summary>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleLeavesAtMs">When an Idle topic leaves the list (0 = not idle).</param>
     /// <param name="globalPause">The runner's process-wide pause.</param>
+    /// <param name="extras">The recap and its freshness (CardExtras); null = no recap block.</param>
     /// <returns>The HTML text.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-    inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause)
+    inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause, const CardExtras* extras = nullptr)
     {
         std::wstring out;
         out += L"\U0001F4CC <b>" + TgEscapeHtml(s.title.empty() ? s.id.substr(0, 8) : s.title) + L"</b>\n";
@@ -1134,9 +1217,16 @@ namespace Agentmaster::Msg
         {
             out += L" \U0001F4CC";
         }
+        // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
+        // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand — also for a
+        // session in Error (a cut-off or failed turn), which a restart of the same conversation recovers.
         if (s.live && !s.started && !s.external)
         {
-            out += L"\n⏸ parked: a queued message starts it";
+            out += L"\n\U0001F4A4 not running \x2014 a message here or \x25B6 Reactivate resumes it";
+        }
+        else if (s.live && s.state == SessionState::Error)
+        {
+            out += L"\n\x25B6 Reactivate restarts it (the same conversation goes on)";
         }
         if (idleLeavesAtMs > 0)
         {
@@ -1199,6 +1289,25 @@ namespace Agentmaster::Msg
         if (s.state == SessionState::Error && !s.errorMessage.empty())
         {
             out += L"\n⚠ " + TgEscapeHtml(TgFirstLine(s.errorMessage, 160));
+        }
+        // The recap: where the conversation stands, for a card that sits over nothing newer (a topic that was
+        // just created mirrors from now on; a restart may have skipped nothing but the card is still the only
+        // thing on screen). Hidden the moment the reply itself is posted above the card.
+        if (extras && extras->recap && (!extras->recapPrompt.empty() || !extras->recapReply.empty()))
+        {
+            out += L"\n\n<b>Recap</b>";
+            if (extras->recapAtMs > 0)
+            {
+                out += L" \x00B7 " + TgClockText(extras->recapAtMs, nowMs);
+            }
+            if (!extras->recapPrompt.empty())
+            {
+                out += L"\n\U0001F464 " + TgEscapeHtml(extras->recapPrompt);
+            }
+            if (!extras->recapReply.empty())
+            {
+                out += L"\n\U0001F916 " + TgEscapeHtml(extras->recapReply);
+            }
         }
         return out;
     }

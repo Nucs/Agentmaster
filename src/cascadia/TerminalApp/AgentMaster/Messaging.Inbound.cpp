@@ -176,11 +176,171 @@ namespace Agentmaster::Msg
             {
                 _handleCallback(*cq);
             }
+            else if (const auto* bc = update.Find(L"business_connection"); bc && bc->type == json::Value::Type::Obj)
+            {
+                _handleBusinessConnection(*bc);
+            }
         }
         catch (...)
         {
             LogSwallowedException(L"MessagingService::_handleUpdate");
         }
+    }
+
+    void MessagingService::_handleBusinessConnection(const json::Value& bc)
+    {
+        // H3 again: the connecting user first. A business connection from anyone else is not ours to use.
+        int64_t user = 0;
+        if (const auto* u = bc.Find(L"user"); u && u->type == json::Value::Type::Obj)
+        {
+            user = u->I64At(L"id", 0);
+        }
+        if (user == 0 || user != _ownerId)
+        {
+            _log(L"[msg] secretary: a business connection from a user who is not the paired owner was ignored");
+            return;
+        }
+        const std::wstring id = bc.StrAt(L"id");
+        const bool enabled = bc.BoolAt(L"is_enabled", false);
+        bool canReply = bc.BoolAt(L"can_reply", false); // the pre-9.0 shape
+        if (const auto* rights = bc.Find(L"rights"); rights && rights->type == json::Value::Type::Obj)
+        {
+            canReply = rights->BoolAt(L"can_reply", false);
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            _state.businessConnectionId = id;
+            _state.businessEnabled = enabled;
+            _state.businessCanReply = canReply;
+            _state.businessMode = 0; // every (re)connection is probed afresh
+            _state.businessNote.clear();
+            _stateDirty = true;
+        }
+        _secretaryFailures.store(0);
+        _log(std::wstring{ L"[msg] secretary: business connection " } + (enabled ? L"enabled" : L"disabled") + L" (can reply: " + (canReply ? L"yes" : L"no") + L")");
+        if (enabled && canReply)
+        {
+            _probeWanted.store(true);
+            {
+                std::lock_guard lk{ _mtx };
+                _tickRequested = true;
+            }
+            _tickCv.notify_one();
+            return;
+        }
+        int64_t search = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            search = _state.searchThreadId;
+        }
+        if (search != 0)
+        {
+            _sendText(search,
+                      enabled ? L"\x26A0 <b>Secretary mode</b>: the bot is connected to your Telegram Business account, but without the right to reply. In Telegram \x2192 Settings \x2192 Business \x2192 Chatbots \x2192 this bot, allow <b>Reply to messages</b>; prompts keep the \x2328 line until then." :
+                                L"<b>Secretary mode</b> is off (the bot was disconnected from your Telegram Business account): prompts typed at the PC show as the bot's \x2328 line again.",
+                      true,
+                      SendPriority::Final,
+                      L"secretary-note",
+                      json::Value{},
+                      nullptr);
+        }
+    }
+
+    void MessagingService::_probeSecretary()
+    {
+        int64_t search = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            search = _state.searchThreadId;
+        }
+        if (search == 0)
+        {
+            _probeWanted.store(true); // the tick runs it once the Search topic exists
+            return;
+        }
+        _log(L"[msg] secretary: probing one send as the user into the Search topic");
+        auto self = weak_from_this();
+        _sendAsUser(search, L"Agentmaster \x2014 secretary check: this message was sent as you. Prompts typed at the PC will appear in their topics like this.", [self, search](const TgResult& r) {
+            auto me = self.lock();
+            if (!me)
+            {
+                return;
+            }
+            {
+                std::lock_guard lk{ me->_mtx };
+                me->_state.businessMode = r.ok ? 1 : -1;
+                me->_state.businessNote = r.ok ? std::wstring{} : r.description;
+                me->_stateDirty = true;
+            }
+            me->_secretaryFailures.store(0);
+            if (r.ok)
+            {
+                me->_log(L"[msg] secretary: works - prompts typed at the PC now appear as the user's own messages");
+                me->_sendText(search, L"\x2705 <b>Secretary mode works</b>: from now on a prompt typed at the PC appears in its topic as your own message, and the bot's messages read as the replies.", true, SendPriority::Final, L"secretary-note", json::Value{}, nullptr);
+            }
+            else
+            {
+                me->_log(L"[msg] secretary: Telegram refused a send as the user (" + r.description + L"); prompts keep the bot's line");
+                me->_sendText(search,
+                              L"\x26A0 <b>Secretary mode</b>: the bot is connected to your Telegram Business account, but Telegram refused to send into this chat on your behalf (<code>" + TgEscapeHtml(r.description) + L"</code>). "
+                              L"Business sends reach your chats with other people; this chat is your chat with the bot itself. Prompts keep the \x2328 line. (Reconnect the bot under Settings \x2192 Business \x2192 Chatbots to try again.)",
+                              true,
+                              SendPriority::Final,
+                              L"secretary-note",
+                              json::Value{},
+                              nullptr);
+            }
+        });
+    }
+
+    void MessagingService::_reactivate(const std::wstring& sessionId, int64_t threadId)
+    {
+        const auto s = _registry->Get(sessionId);
+        if (!s || !s->live)
+        {
+            _reply(threadId, L"This session is closed. Resume it from the \U0001F50E Search topic.", false);
+            return;
+        }
+        if (!s->started && !s->external)
+        {
+            // A parked tab (restored, parked, revived, or cut off with the app): its claude starts in place and
+            // resumes the conversation; with CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes on by itself.
+            if (_hooks.sessionAction)
+            {
+                try
+                {
+                    _hooks.sessionAction(sessionId, L"start", L"", nullptr);
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"MessagingService::_reactivate (start)");
+                }
+            }
+            _reply(threadId, L"\x25B6 Resuming the session in its tab. A cut-off turn goes on by itself; a message queued here is sent once it is ready.", false);
+            LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> start");
+            return;
+        }
+        if (s->state == SessionState::Error)
+        {
+            // Its claude is up but the turn failed (an API error, a cut-off turn it did not resume): a restart
+            // resumes the same conversation id in the same tab.
+            if (_hooks.restartSession)
+            {
+                try
+                {
+                    _hooks.restartSession(sessionId);
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"MessagingService::_reactivate (restart)");
+                }
+            }
+            _reply(threadId, L"\x25B6 Restarting the session \x2014 the same conversation resumes in its tab.", false);
+            LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> restart");
+            return;
+        }
+        _reply(threadId, std::wstring{ L"It is running already (" } + StateLabel(s->state) + L").", false);
+        LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> already running");
     }
 
     void MessagingService::_handleMessage(const json::Value& msg, bool edited)
@@ -305,6 +465,8 @@ namespace Agentmaster::Msg
         // Any action in a topic marks the session READ on the PC (the Waiting -> Idle decay then works for a
         // session handled only from the phone).
         _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
+        // The user's own message is now the bottom of the topic: the sticky card follows it (§21.5).
+        _noteTopicPosted(threadId);
 
         const RemoteCommand cmd = ParseRemoteCommand(text);
         switch (cmd.kind)
@@ -813,6 +975,12 @@ namespace Agentmaster::Msg
             done(L"ok");
             return;
         }
+        if (name == L"reactivate")
+        {
+            _reactivate(sessionId, threadId);
+            done(L"ok");
+            return;
+        }
         if (name == L"activate")
         {
             if (s->started)
@@ -1254,6 +1422,12 @@ namespace Agentmaster::Msg
             else if (verb == L"queue" || verb == L"transcript" || verb == L"screen" || verb == L"sendnow")
             {
                 cmd.name = verb;
+            }
+            else if (verb == L"reactivate")
+            {
+                answer(L"");
+                _reactivate(sid, threadId);
+                return;
             }
             else
             {
