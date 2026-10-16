@@ -399,6 +399,14 @@ namespace Agentmaster::Msg
                 std::lock_guard lk{ _mtx };
                 _ownerId = owner;
                 _searchThinkingWord = settings.messagingSearchThinking.empty() ? L"high" : settings.messagingSearchThinking;
+                // The Search conversation is the process's (§21.7): made once, it is never made again with a new
+                // level, so a Save must reach it live. Under `_mtx`, which also orders it after the poll thread's
+                // creation of the bridge; the agent calls no listener back into this service for it (its StateChanged
+                // event is ignored by the bridge), so holding the lock is safe.
+                if (_search)
+                {
+                    _search->SetThinkingLevel(_searchThinkingWord);
+                }
             }
             if (!settings.messagingEnabled)
             {
@@ -575,6 +583,8 @@ namespace Agentmaster::Msg
                 {
                     _search->Park(0);
                 }
+                // Detaches this start's sink only: the Search conversation is the process's and lives on (parked), so
+                // the next start of the bot continues it (§21.7).
                 _search.reset();
             }
             _api.reset();
@@ -1722,7 +1732,8 @@ namespace Agentmaster::Msg
             }
             _log(L"[msg] topic created: Search (thread " + std::to_wstring(thread) + L")");
             _sendText(thread,
-                      L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it; the results carry buttons to wake, resume or fork it into a tab.\n\n"
+                      L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it. Tap a result's number to pick it, then Resume or Fork it into a tab.\n\n"
+                      L"This is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n\n"
                       L"Fleet commands: /idle (idle tabs), /board (counts), /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.\n\n"
                       L"Pin this topic at the top of the list (Telegram has no way for a bot to do it).",
                       true,

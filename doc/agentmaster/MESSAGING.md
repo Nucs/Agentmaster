@@ -369,23 +369,37 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 
 - **The agent:** the Sessions page's search agent — `SessionSearchAgent` on the agent harness, Sonnet 5.5,
   its tools (`search`, `show`; the session database's tools when that is On) and system prompt — at
-  **high** thinking (the harness's live thinking level). Its own conversation by default
-  (`harness\telegram-search.json`), so a search from the phone does not move the PC page's list; sharing
-  the page's one conversation is the alternative (D24). Parked after 10 idle minutes like the page's.
+  **high** thinking (the harness's live thinking level, set in the cog and applied to the running
+  conversation). Its own conversation (`harness\telegram-search.json`), so a search from the phone does not
+  move the PC page's list (D24, decided). Parked after 10 idle minutes like the page's.
+- **One conversation for the whole app, which the user can only clear** (the user's rules, D24 and D33,
+  2026-10-16): like the page's `sessions-search`, `telegram-search` is ONE conversation per process, made
+  on first use and kept for the process; a stop and a start of the bot reattach to it, and its record makes
+  it carry on after an app restart. It is **not a session** (no transcript, `--no-session-persistence`): it
+  is never a search result, and nothing wakes, resumes, forks or pins it — a session's `/commands` sent in
+  🔎 Search are refused with that explanation. **Clearing it** is `/clear` or `/reset` (in this topic only:
+  in a session's topic they stay Claude Code's own commands for that session) or the **⊘ Clear** button
+  under every answer — the page's crossed circle.
 - **A message in 🔎 Search is a request** ("the session where I fixed the tab drag crash"); follow-ups
   refine it, as on the page. The agent's answer — one sentence and the sessions it shows — arrives as one
-  message (the final message: it makes a sound), each session on a line with its state and its buttons:
+  message (the final message: it makes a sound), each session on a numbered line with where it stands
+  (closed / idle tab / has a topic). Its buttons **pick a session** (D34): one number per row (at most 10;
+  a longer list says how many more), then ⊘ Clear. A pick opens a second message, the session's **action
+  menu**, which asks what to do:
 
-| The session is | Buttons |
-|---|---|
-| Listed (it has a topic) | [→ Topic] (a link if private-chat topic links work, P0-16; else its name) |
-| In a tab but Idle | [Wake] [Wake 📌] — the tab's **Move to Waiting-for-you** (+ pin); its topic appears |
-| Closed (on disk only) | [Resume] [Resume 📌] [Fork] [Fork 📌] — opened into a tab without taking focus (the window: D27), held in Waiting for you so its topic appears; the tab stays dormant until its first queued message starts it |
-| Any | [Details] — the summary card (folder, branch, dates, prompts) |
+| Button | Closed (on disk only) | In a tab but Idle | Listed (it has a topic) |
+|---|---|---|---|
+| [▶ Resume] | opened into a tab without taking focus (the window: D27), held in Waiting for you so its topic appears; the tab stays dormant until its first queued message starts it | woken (the tab's **Move to Waiting-for-you**); its topic appears | nothing to open: says so |
+| [▶ Resume 📌] | the same, then pinned (never idle) | the same, pinned | pinned |
+| [⑂ Fork] | a fork in a new tab (and so a new topic) — never pinned: **no fork-and-pin** (the user's rule) | the same | the same |
+| [✕ Cancel] | the menu goes | the menu goes | the menu goes |
 
+  The state is read again at the tap, so a session that changed since the answer does what it does now.
+  A pick is stateless (it opens a fresh menu, also after a restart); the menu's actions are single-use and
+  expire (M5).
 - **Fleet commands in 🔎 Search:** `/idle` (the idle tabs, each with [Wake]), `/board` (counts per
   state), `/newsession <folder> [model] [-- first prompt]` (a new tab + topic), `/pauseall`,
-  `/resumeall`, `/help`.
+  `/resumeall`, `/status`, `/clear`, `/help`.
 - **App notes** land here: started, the previous run ended unexpectedly, updated, closed (§4.3).
 
 ## 6. Inside a session's topic: the whole session
@@ -941,6 +955,9 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D22** | A message is exactly a prompt, Claude Code's commands included, except those that leave no record in the session; the tab menu's non-destructive actions (plus `/restartsession`) are `/commands` | "any messages are exactly like sending a prompt (to an exclusion of some /slash commands like /reload …)"; "We are able to run most of functions … of a tab through a /slash command, non destructive ones (but incl /restartsession)" |
 | **D23** | Claude Code only for now | "We only integrate with claude code for now." |
 | **D24** (part) | 🔎 Search runs the Sessions page's search agent, Sonnet 5.5 at high thinking; it searches, wakes, resumes and forks; a pin keeps a session from going idle | "a sonnet 5.5 agent high thinking (same one from the sessions page search) …" |
+| **D24** (rest) | 🔎 Search's conversation is its own (`telegram-search`), ONE for the whole process like the page's `sessions-search`, and it can be cleared like the page's | "the telegram-search should be a single session shared by all windows that can be cleared like sessions-search can." |
+| **D33** | The Search conversation is not a session: it is never woken, resumed or forked; it carries on after a restart by itself; the user's one action on it is to clear it | "You can't fork/resume/wake a telegram-search. it does persist throughout restarts by resuming the session but user can only really clear the session." |
+| **D34** | A Search answer's buttons pick a session; a second menu then asks Resume or Fork; there is no fork-and-pin | "The buttons of a search result should be the session picking and then a second menu asks if to Resume, Fork (no fork and pin)" |
 
 **Open** (recommendation first):
 
@@ -957,7 +974,6 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D17** | The Remote Control presence file | Yes | No |
 | **D18** | The UI name | Messaging | Remote; Phone |
 | **D20** | A topic started in Telegram | Starts a new session (asks for the folder) | Ignored; `/newsession` in 🔎 Search only |
-| **D24** (rest) | 🔎 Search's conversation | Its own (the PC page keeps its own list) | Shared with the Sessions page |
 | **D25** | The idle grace before a topic is deleted | 10 minutes, with [📌 Pin] and [Wake] on the Idle card | 0 (at once); 1 hour |
 | **D26** | Backfill of a new topic for a session with history | The whole transcript as a file + the last 10 turns as messages | Every turn as messages, paced |
 | **D27** | Where a revived closed session opens | The most recently active window, without focus, dormant until its first message | A fixed window; the window it last lived in |
@@ -1017,7 +1033,7 @@ section is the record of what the code does today, where it differs from §4–�
 | The pure core | `AgentMaster/MessagingModels.h` | What a transcript line means for a topic (`ClassifyTranscriptLine` → `TopicItem`: prompt / mid-turn prompt / text with `turnEnds` / tool call with a one-line summary / failed result / question with its options / plan / compaction / interrupt / API error / command echo; noise, meta, sidechain and the resume placeholder skipped); `PlanTopicSync` (topics = tabs, M8: creates, deletes, renames, the Idle card and the grace); `ParseRemoteCommand` (Agentmaster's `/commands`, Claude Code's commands, the no-record and leaves-the-tab refusal tables, `/cc`); the state file (`MessagingState` ⇄ JSON); the backlog rule (`IsBacklogUpdate`, 10 min); the card (`BuildCardText`). |
 | The HTTPS client | `AgentMaster/TelegramApi.{h,cpp}` | WinHTTP POSTs with a JSON body, the error body read (`retry_after`, `description`), `sendDocument` as multipart, an `Abort` another thread can call (the long poll returns at once). The token lives only in this object. |
 | The service | `AgentMaster/Messaging.{h,cpp}` + `Messaging.Inbound.cpp` | `MessagingService`, one per process, created by `SharedEngine()` (`Engine.messaging`): the three threads (poll / send / tick), the token in Credential Manager, the one-poller-per-token machine mutex (M7), the state file (`<profile>\messaging\telegram\state.json` + `.prev`), the outbox with priorities and the ~1 s pacing, Threaded-Mode detection with a one-a-day setup notice, the Search topic, the topic sync, the transcript mirror (prompts, ONE work-log message per turn edited in place, the final message with sound), the cards, reactions, the inbound half (updates, `/commands`, buttons, tokens, the backlog question, remote prompts, revives). |
-| The Search agent | `MessagingSearchBridge.{h,cpp}` (TerminalApp-only) | A `SessionSearchAgent` named `telegram-search` (its own conversation, `<profile>\harness\telegram-search*.json`), high thinking by default, behind the service's `SearchBridge` seam. |
+| The Search agent | `MessagingSearchBridge.{h,cpp}` (TerminalApp-only) | The process's ONE `SessionSearchAgent` named `telegram-search` (its own conversation, `<profile>\harness\telegram-search*.json`, made on first use and kept for the process like the page's `SharedSessionSearchAgent()`), high thinking by default; each start of the bot attaches a bridge to it behind the service's `SearchBridge` seam (§21.7). |
 | The window half | `TerminalPage.AgentMessaging.cpp` + two engine sinks (`Engine.h`: `RegisterWindowSessionActionHandler` / `RequestSessionActionInWindows`, `RegisterWindowLaunchHandler` / `RequestLaunchInWindow`, `NoteWindowActivated`) | `_RemoteSessionAction` (start a dormant tab, read the screen, mark unread, rename, repaint tags / favorite — only the hosting window acts) and `_RemoteLaunch` (resume / fork / new session as a BACKGROUND tab of the most recently activated window, D27). Restart and park reuse the existing cross-window seams. |
 | The engine rules | `Scheduler.h` (`NextPromptIsRemote`, in `DecideAdvance` and `_wantsIdleStart`), `SessionModels.h` (`QueuedPrompt::remoteSource`, `SessionInfo::pinned`, `ApplyPinHold`), `SessionRegistry.cpp` (the pin hold in Upsert / Update / OnHookEvent), `SessionScanner.cpp` (the decay refuses a pinned session), `Persistence.cpp` (both keys) | D30: a remote prompt is sent whatever the runner's mode, past Pause all and the send budget, and past the question guard (it IS the answer); every other gate holds. §5.3: a pinned live session is held in Waiting for you wherever it would land in Idle. |
 | The settings | `AppSettings::messagingEnabled` / `messagingTelegramOwnerId` / `messagingIdleGraceMinutes` / `messagingSearchThinking`; the cog's **Messaging** tab (`AgentManagerContent.Settings.cpp`: the switch, the token box, the owner id, Check bot, Forget token, the grace, the thinking level, a status line) | Save stores the token in Credential Manager FIRST (`MessagingService::StoreToken`, target `Agentmaster:messaging:telegram:<profile leaf>`), then the page's handler calls `messaging->Apply(settings)`. |
@@ -1052,9 +1068,11 @@ transport's failures and slow calls.
 - **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
   is the `/commands`.
 - **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
-  it; the user pins it). Its results carry [Wake] [Wake 📌] for idle tabs and [Resume] [Resume 📌] [Fork] for
-  closed sessions; a revived session is held in Waiting for you once it is live (its topic then appears),
-  pinned when asked. `/newsession <folder> [model]` in Search opens a new session in a folder on this PC.
+  it; the user pins it). Its answers carry one pick button per listed session and ⊘ Clear; a pick opens the
+  session's action menu — [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel], no fork-and-pin (§5.4, §21.7); a
+  revived session is held in Waiting for you once it is live (its topic then appears), pinned when asked.
+  `/newsession <folder> [model]` in Search opens a new session in a folder on this PC. The design's
+  [→ Topic] and [Details] buttons are not built (a listed session's menu says it has its topic).
 - **A topic the user starts in Telegram (D20) is not a new session**: the bot answers with the `/newsession`
   hint, and the topic can be deleted.
 - **The pin has no PC-side menu item or tab glyph yet (D32)**; `/pin` and the buttons set it.
@@ -1084,8 +1102,10 @@ transport's failures and slow calls.
    (a `.md` file), `/summary`, `/screen`, `/rename x` (the tab, the topic and the saved title), `/status`.
 5. A session that goes Idle: the Idle card with the countdown; after the grace the topic is deleted
    (`[msg] topic deleted <sid8> (idle)`); `/wake` from Search's `/idle` list brings a new topic.
-6. Search: a request in plain words → the agent's sentence + rows with buttons; [Resume] opens a background
-   tab in the most recently used window, and the topic appears once the session is live.
+6. Search: a request in plain words → the agent's sentence + numbered rows, a number button per row and
+   ⊘ Clear; a number opens the session's menu as a reply; [▶ Resume] on a closed session opens a background
+   tab in the most recently used window, and the topic appears once the session is live (the checks of
+   §21.7 cover the rest).
 7. `/reload-plugins` is refused (no record); `/resume x` is refused (leaves the tab); `/cc /mycmd` passes.
 8. A second Agentmaster instance (dev + release) with the SAME token: the second one reports the poller
    mutex and does not start (one bot per install).
@@ -1332,3 +1352,71 @@ found and what changed (dev 0.0.1.16, swapped 21:57:54):
   needs approval / exits / errs → the card comes back at the bottom with sound, and no bot line; a message into a
   parked tab → delivered ~5 s after its claude is up; ▶ Reactivate → a toast; secretary mode → see §21.5 (the
   Chatbots entry must be toggled once after a build that listens; `[msg] secretary:` lines say what Telegram said).
+
+### 21.7 The Search topic's conversation and buttons (2026-10-16 night)
+
+The user's directions, after a review that compared the Search topic with the Sessions page's AI search:
+*"the telegram-search should be a single session shared by all windows that can be cleared like sessions-search
+can"* · *"You can't fork/resume/wake a telegram-search. it does persist throughout restarts by resuming the
+session but user can only really clear the session"* · *"The buttons of a search result should be the session
+picking and then a second menu asks if to Resume, Fork (no fork and pin)"* (D24 rest, D33, D34 in §18).
+
+- **One conversation for the process** (`MessagingSearchBridge.cpp`): the `telegram-search` `SessionSearchAgent`
+  is a function-local static made on first use and leaked like the page's `SharedSessionSearchAgent()`. A
+  bridge only attaches the service's sink (`AddListener`, a weak capture of the bridge's state, since
+  `RemoveListener` does not wait for a call already running) and detaches it when destroyed. Before, each
+  start of the bot built and shut down its own agent object (the record made it look like one conversation).
+- **The cog's thinking level reaches it live**: `SearchBridge::SetThinkingLevel` → `SessionSearchAgent::
+  SetThinkingLevel`, called by `Apply` on every Save and by each new bridge. Before, the level was read only
+  when the bridge was made (the first search after a start of the bot), and parking kept that bridge, so a
+  Save did nothing until messaging was switched off and on — against the cog tooltip's "the next Search process".
+- **Clearing** (`ClassifySearchTopicMessage` → `MessagingService::_clearSearch`): `/clear` and `/reset` in the
+  Search topic, and the **⊘ Clear** button under every answer (stateless `s:clear`). It makes the bridge when
+  this start of the bot has none, so a record left by an earlier run is cleared too, then calls `Reset` (the
+  context, the record and the view file go; a running request is interrupted) and posts one silent line.
+  Backlog rule: a `/clear` older than 10 minutes is answered, not carried out. In a session's topic `/clear`
+  and `/reset` stay Claude Code's own commands for that session.
+  - **Before, the Search conversation could not be cleared from Telegram at all**: `/reset` is not one of
+    `kAgentmasterCommands`, so `ParseRemoteCommand` read it as a Claude Code command and the topic answered
+    "Claude Code commands go in a session's topic" — while `/help` advertised it. The unreachable branch behind
+    it would also have frozen the bot: it replied while holding `_mtx`, which `_enqueue` takes again
+    (`std::mutex` is not recursive). `_askSearch`'s "Search is not available" reply had the same self-deadlock
+    (only in a build with no factory); `_ensureSearchBridge` now replies after releasing the lock.
+- **Not a session** (`SearchTopicVerb::SessionCommand`): a session's command in the Search topic (`/wake`,
+  `/pin`, `/forksession`, `/reactivate`, `/transcript`, `/cc`, …) is refused with "This conversation is not a
+  session: it cannot be woken, resumed, forked or pinned — it carries on by itself after a restart, and /clear
+  starts it over". The commands the topic runs are `kSearchTopicFleetCommands`.
+- **Pick, then the menu** (`MessagingService::_postSearchResults`, `_showSearchPick`, `_onSearchPickAction`):
+  an answer lists at most 10 rows of THIS request (an answer whose request showed nothing lists nothing; before,
+  it re-posted the previous request's rows) with one number button each, five to a row, and "N more not
+  listed" past ten. A number is the stateless callback `p:<n>:<session id>` (`SearchPickCallbackData`, ≤ 41
+  bytes; `ParseSearchPickCallbackData` checks the prefix, a 1–2 digit number and an id of 8–40 hex digits and
+  dashes). It opens the menu as a silent reply to the answer: the title, folder and last activity as the answer
+  listed them (`_searchRowInfo`, the last 200 rows of this run; else the registry's record, else the short id),
+  the line for where the session stands now (`ClassifySearchPickState`, `SearchPickStateLine`), and four
+  single-use tokens of 2 hours (`pick-resume`, `pick-resume-pin`, `pick-fork`, `pick-cancel`; the old
+  `resume` / `resume-pin` / `fork` tokens are gone, `wake` stays for `/idle`). An action re-reads the state:
+  Resume on a closed session launches a background resume (`_requestLaunch`), on an idle tab wakes it, on a
+  listed session says it is open (📌 pins it); Fork forks, never pinned; Cancel deletes the menu. The menu loses
+  its buttons and keeps the choice or the outcome. The launch gets an empty title when nothing knew one, so it
+  derives one from the folder, not the short id.
+- **Not changed (open from the review):** the agent's system prompt still says "Sessions browser" and "on the
+  screen", so the model writes "…are on the screen…" in Telegram; the Search topic does not prewarm the index
+  before a request (the first live use on 2026-10-16 21:21 searched 3, then 13–17 sessions, while ~70 stale
+  sidecar files were re-parsed); `RowsFrom` keeps its own title / folder / time rules; the bridge reads
+  `SharedEngine().claudeExePath` on the agent's thread; the `[ai-search]` log lines do not name the agent.
+- **Tests:** `tests_messaging_search.cpp` (`TestMessagingSearch`): the verbs (`/clear`, `/reset`, a bot suffix,
+  `/clearance`, the fleet commands, every refused session verb, `/cc /clear`, Claude Code's commands), the pick
+  data round trip and every malformed form, the keyboard layout, the pick states and their lines. The bridge's
+  lifetime is app-only (the SDK) and checked by review. m5 on an isolated copy: 7147 checks, the 3 known
+  TestTaskbarBadge failures only; `cl /Zs` with the app's recorded lines (warnings as errors) of
+  `MessagingSearchBridge.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`, `Engine.cpp`,
+  `TerminalPage.AgentEngine.cpp` and `AgentManagerContent.Settings.cpp`, each plain unit with a negative control.
+  NOT BUILT into the app.
+- **Live checks owed:** two searches, then a dev restart, then a follow-up → it continues the conversation;
+  `/clear` (and ⊘ Clear) → the cleared line, and the next request starts fresh (`[ai-search] reset` in
+  hooks.log); `/wake` in Search → the refusal; tap a number → the menu replies to the answer, tap it again → a
+  second menu; ▶ Resume on a closed session → the background tab and its topic; on an idle tab → woken; on a
+  listed one → "open already"; ⑂ Fork → a new tab, not pinned; ✕ Cancel → the menu is gone; an old answer's
+  number after a restart still opens a menu; a cog change of the Search thinking level → `[ai-search] thinking ->
+  <level>` at once.

@@ -154,6 +154,7 @@ int wmain()
     TestSessionSearchTools(); // SESSIONS.md section 9 — the AI search's tools: arguments, one search, result text, handlers, the stepwise gather (tests_harness.cpp)
     TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts (tests_sessiondb.cpp)
     TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp)
+    TestMessagingSearch(); // MESSAGING.md §5.4 / §21.7 — the Search topic's verbs, pick buttons and pick states (tests_messaging_search.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)

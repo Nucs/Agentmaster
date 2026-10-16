@@ -40,6 +40,8 @@ REM two engine rules it leans on. Messaging.cpp + Messaging.Inbound.cpp + Telegr
 REM (the service is created at engine init); the suite never calls the network (winhttp.lib comes in through TelegramApi.cpp's
 REM pragma, advapi32 through Messaging.cpp's). The Search topic's agent (MessagingSearchBridge.cpp, TerminalApp-only) stays out:
 REM it wraps SessionSearchAgent, which needs the SDK unity file this suite does not build.
+REM tests_messaging_search.cpp: MESSAGING.md 5.4 / 21.7 - the Search topic's pure rules in MessagingModels.h (its verbs:
+REM /clear, the refused session commands; the stateless pick buttons; where a picked session stands). Header-only: no .cpp joins.
 REM tests_markdown.cpp + MarkdownBlocks.cpp: the transcript overlay's Markdown flattener, which parses with cmark. The
 REM harness takes cmark from the vcpkg tree a full msbuild installs (obj\x64\vcpkg, static CRT like this /MT build);
 REM without that tree MarkdownBlocks.cpp is left out and AM_HAVE_CMARK stays undefined, so TestMarkdownBlocks
@@ -51,7 +53,7 @@ if exist "%AM_VCPKG%\include\cmark.h" if exist "%AM_VCPKG%\lib\cmark.lib" (
   set "AM_MD_SRC=..\MarkdownBlocks.cpp %AM_VCPKG%\lib\cmark.lib"
   set "AM_MD_FLAGS=/DAM_HAVE_CMARK /I%AM_VCPKG%\include"
 )
-cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE %AM_MD_FLAGS% /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp tests_invisible.cpp tests_taskbar.cpp tests_turns.cpp tests_markdown.cpp tests_sidepanel.cpp tests_presets.cpp tests_harness.cpp tests_sessiondb.cpp tests_messaging.cpp %AM_MD_SRC% ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\Messaging.cpp ..\Messaging.Inbound.cpp ..\TelegramApi.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ..\AgentHarnessCore.cpp ..\SessionSearchTools.cpp ole32.lib user32.lib oleaut32.lib icu.lib
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE %AM_MD_FLAGS% /Fe:m5_tests.exe m5_tests.cpp tests_state.cpp tests_spawn_sched.cpp tests_persistence.cpp tests_transcript.cpp tests_summary_anchor.cpp tests_commands.cpp tests_tabdrag.cpp tests_invisible.cpp tests_taskbar.cpp tests_turns.cpp tests_markdown.cpp tests_sidepanel.cpp tests_presets.cpp tests_harness.cpp tests_sessiondb.cpp tests_messaging.cpp tests_messaging_search.cpp %AM_MD_SRC% ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\Messaging.cpp ..\Messaging.Inbound.cpp ..\TelegramApi.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ..\AgentHarnessCore.cpp ..\SessionSearchTools.cpp ole32.lib user32.lib oleaut32.lib icu.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

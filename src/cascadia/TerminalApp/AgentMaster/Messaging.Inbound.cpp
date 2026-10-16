@@ -147,6 +147,15 @@ namespace Agentmaster::Msg
             }
             return out.empty() ? std::wstring{ L"session" } : out;
         }
+
+        // How many listed Search rows the service remembers for the picks (MessagingService::_searchRowInfo): about twenty
+        // answers of ten rows. A pick of a row that fell out (or of an answer from before a restart) still works: its
+        // menu then reads the registry's record, else the short id.
+        constexpr size_t kSearchRowMemory = 200;
+
+        // How long a pick menu's action buttons live: the action tokens' lifetime (the pick itself never expires, so a
+        // tap on it opens a fresh menu).
+        constexpr int kSearchActionTtlHours = 2;
     }
 
     // ===== updates ===========================================================================
@@ -1084,24 +1093,43 @@ namespace Agentmaster::Msg
     void MessagingService::_handleSearchMessage(const json::Value& msg, int64_t threadId)
     {
         const std::wstring text = msg.StrAt(L"text");
-        const RemoteCommand cmd = ParseRemoteCommand(text);
-        if (cmd.kind == RemoteKind::AgentmasterCommand)
-        {
-            _runSearchCommand(cmd, msg, threadId);
-            return;
-        }
-        if (cmd.kind != RemoteKind::Text)
-        {
-            _reply(threadId, L"Claude Code commands go in a session's topic. Here: a search in plain words, or /help.", false);
-            return;
-        }
+        const int64_t msgId = msg.I64At(L"message_id", 0);
+        // The Search topic's own reading (§21.7): /clear and /reset clear THIS conversation, a session's command is
+        // refused because this conversation is not a session, and Claude Code's commands have no session here.
+        const SearchTopicMessage m = ClassifySearchTopicMessage(text);
+        // The backlog rule (D2, M9) for what acts on the conversation: a request or a clear sent while Agentmaster was
+        // closed is answered, never carried out unasked.
         const int64_t dateMs = msg.I64At(L"date", 0) * 1000;
-        if (IsBacklogUpdate(dateMs, WallMs()))
+        const bool backlog = IsBacklogUpdate(dateMs, WallMs());
+        switch (m.verb)
         {
-            _reply(threadId, L"(sent " + TgShortSpan(WallMs() - dateMs) + L" ago, while Agentmaster was closed \x2014 ask again if you still want it)", false, json::Value{}, msg.I64At(L"message_id", 0));
+        case SearchTopicVerb::Clear:
+            if (backlog)
+            {
+                _reply(threadId, L"(sent " + TgShortSpan(WallMs() - dateMs) + L" ago, while Agentmaster was closed \x2014 send /clear again to clear the search conversation)", false, json::Value{}, msgId);
+                return;
+            }
+            _clearSearch(threadId, msgId);
+            return;
+        case SearchTopicVerb::FleetCommand:
+            _runSearchCommand(m.cmd, msg, threadId);
+            return;
+        case SearchTopicVerb::SessionCommand:
+            _reply(threadId, L"<code>/" + TgEscapeHtml(m.cmd.name) + L"</code> works in a session's topic. This conversation is not a session: it cannot be woken, resumed, forked or pinned \x2014 it carries on by itself after a restart, and /clear starts it over.", false, json::Value{}, msgId);
+            return;
+        case SearchTopicVerb::ClaudeCommand:
+            _reply(threadId, L"Claude Code commands go in a session's topic. Here: a search in plain words, /clear, or /help.", false, json::Value{}, msgId);
+            return;
+        case SearchTopicVerb::Request:
+        default:
+            break;
+        }
+        if (backlog)
+        {
+            _reply(threadId, L"(sent " + TgShortSpan(WallMs() - dateMs) + L" ago, while Agentmaster was closed \x2014 ask again if you still want it)", false, json::Value{}, msgId);
             return;
         }
-        _askSearch(cmd.text, threadId);
+        _askSearch(m.cmd.text, threadId);
     }
 
     void MessagingService::_runSearchCommand(const RemoteCommand& cmd, const json::Value& /*msg*/, int64_t threadId)
@@ -1217,58 +1245,88 @@ namespace Agentmaster::Msg
             _requestLaunch(req, threadId);
             return;
         }
-        if (name == L"reset")
-        {
-            std::lock_guard lk{ _mtx };
-            if (_search)
-            {
-                _search->Reset();
-                _searchRows.clear();
-            }
-            _reply(threadId, L"The search conversation was reset.", false);
-            return;
-        }
         if (name == L"cc")
         {
             _reply(threadId, L"/cc works in a session's topic.", false);
             return;
         }
-        _reply(threadId, L"Here: a search in plain words, or /idle, /board, /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.", false);
+        _reply(threadId, L"Here: a search in plain words, or /clear, /idle, /board, /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.", false);
     }
 
-    void MessagingService::_askSearch(const std::wstring& text, int64_t threadId)
+    bool MessagingService::_ensureSearchBridge(int64_t threadId)
     {
-        std::unique_ptr<SearchBridge> made;
+        bool noFactory = false;
         {
             std::lock_guard lk{ _mtx };
-            if (!_search)
+            if (_search)
             {
-                if (!_searchFactory)
-                {
-                    _reply(threadId, L"Search is not available in this build.", false);
-                    return;
-                }
+                return true;
+            }
+            if (!_searchFactory)
+            {
+                noFactory = true; // the test harness: no agent in this build
+            }
+            else
+            {
+                // The factory attaches this start's sink to the process's one Search conversation (it is made on the
+                // first use of the process and outlives every bridge). It may throw (the agent could not be made): the
+                // caller's update handler logs it (Rule #18), and the next message tries again.
                 auto self = weak_from_this();
-                made = _searchFactory([self](const SearchBridgeEvent& ev) {
+                _search = _searchFactory([self](const SearchBridgeEvent& ev) {
                     if (auto me = self.lock())
                     {
                         me->_onSearchEvent(ev);
                     }
                 },
-                                      _searchThinkingWord);
-                _search = std::move(made);
+                                         _searchThinkingWord);
+                if (_search)
+                {
+                    return true;
+                }
             }
+        }
+        // Outside `_mtx`: a reply takes it (_enqueue), and std::mutex is not recursive.
+        _reply(threadId, noFactory ? L"Search is not available in this build." : L"Search could not start (see hooks.log).", false);
+        return false;
+    }
+
+    void MessagingService::_askSearch(const std::wstring& text, int64_t threadId)
+    {
+        if (!_ensureSearchBridge(threadId))
+        {
+            return;
+        }
+        {
+            std::lock_guard lk{ _mtx };
             _searchLastUsedMs = WallMs();
             _searchParked = false;
         }
-        if (!_search)
-        {
-            _reply(threadId, L"Search could not start (see hooks.log).", false);
-            return;
-        }
+        // `_search` is read outside `_mtx`: it is created and used only on this (the poll) thread, and Stop() resets it
+        // only after it has joined this thread.
         const uint64_t turn = _search->Ask(text);
         LogNav(L"remote telegram search turn=" + std::to_wstring(turn) + L" chars=" + std::to_wstring(text.size()));
         _reply(threadId, L"<i>Searching\x2026</i>", false);
+    }
+
+    void MessagingService::_clearSearch(int64_t threadId, int64_t replyTo)
+    {
+        // The bridge is made for a clear too: a record that an earlier run left would otherwise survive a /clear sent
+        // before this run's first request, and the next request would continue it.
+        if (!_ensureSearchBridge(threadId))
+        {
+            return;
+        }
+        // Outside `_mtx`, like Ask (the poll thread owns `_search`): Reset ends a running request, deletes the record and
+        // the view file, and restarts the process when one was up.
+        _search->Reset();
+        {
+            std::lock_guard lk{ _mtx };
+            // Kept: `_searchRowInfo`. The answers above this line stay in the chat, and their picks still open a menu.
+            _searchLastUsedMs = WallMs();
+            _searchParked = false;
+        }
+        LogNav(L"remote telegram search clear");
+        _reply(threadId, L"\x2298 <b>Search conversation cleared.</b> The next request starts fresh.", false, json::Value{}, replyTo);
     }
 
     void MessagingService::_onSearchEvent(const SearchBridgeEvent& ev) noexcept
@@ -1280,17 +1338,13 @@ namespace Agentmaster::Msg
                 std::lock_guard lk{ _mtx };
                 thread = _state.searchThreadId;
                 _searchLastUsedMs = WallMs();
-                if (ev.kind == SearchBridgeEvent::Kind::Shown || (ev.kind == SearchBridgeEvent::Kind::Answer && !ev.rows.empty()))
-                {
-                    _searchRows = ev.rows;
-                }
             }
             switch (ev.kind)
             {
             case SearchBridgeEvent::Kind::Searching:
                 break; // quiet: the final answer carries the rows
             case SearchBridgeEvent::Kind::Shown:
-                break;
+                break; // the bridge hands the shown rows to the request's Answer
             case SearchBridgeEvent::Kind::Answer:
                 _postSearchResults(ev);
                 break;
@@ -1307,48 +1361,37 @@ namespace Agentmaster::Msg
 
     void MessagingService::_postSearchResults(const SearchBridgeEvent& ev)
     {
+        // THIS request's rows only (the bridge clears them after each answer): an answer whose request showed nothing
+        // lists nothing, rather than the previous request's rows under a sentence about something else.
+        const std::vector<SearchRow>& rows = ev.rows;
+        const size_t listed = (std::min)(rows.size(), kSearchAnswerMaxRows);
         int64_t thread = 0;
-        std::vector<SearchRow> rows;
         {
             std::lock_guard lk{ _mtx };
             thread = _state.searchThreadId;
-            rows = _searchRows;
+            // Remember the listed rows for their picks (the newest listing of a session wins), within the cap.
+            for (size_t i = 0; i < listed; ++i)
+            {
+                const auto& row = rows[i];
+                if (_searchRowInfo.insert_or_assign(row.sessionId, row).second)
+                {
+                    _searchRowOrder.push_back(row.sessionId);
+                }
+            }
+            while (_searchRowOrder.size() > kSearchRowMemory)
+            {
+                _searchRowInfo.erase(_searchRowOrder.front());
+                _searchRowOrder.pop_front();
+            }
         }
         std::wstring html = ev.text.empty() ? std::wstring{} : TgEscapeHtml(ev.text);
-        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> buttons;
-        size_t n = 0;
-        for (const auto& row : rows)
+        for (size_t i = 0; i < listed; ++i)
         {
-            if (n >= 10)
-            {
-                break;
-            }
-            ++n;
+            const auto& row = rows[i];
+            // Where the session stands NOW (the word only; the menu reads it again at the tap).
             const auto s = _registry->Get(row.sessionId);
-            std::wstring state;
-            std::vector<std::pair<std::wstring, std::wstring>> line;
-            const std::wstring payload = row.dir + L"\n" + row.title;
-            if (s && s->live && !s->tabToken.empty())
-            {
-                if (s->state == SessionState::Idle && !s->pinned)
-                {
-                    state = L"idle tab";
-                    line.push_back({ L"Wake " + std::to_wstring(n), _tokenFor(L"wake", row.sessionId, L"", kTokenTtlMsFor(2)) });
-                    line.push_back({ L"Wake \U0001F4CC " + std::to_wstring(n), _tokenFor(L"wake-pin", row.sessionId, L"", kTokenTtlMsFor(2)) });
-                }
-                else
-                {
-                    state = L"has a topic";
-                }
-            }
-            else
-            {
-                state = L"closed";
-                line.push_back({ L"Resume " + std::to_wstring(n), _tokenFor(L"resume", row.sessionId, payload, kTokenTtlMsFor(2)) });
-                line.push_back({ L"Resume \U0001F4CC " + std::to_wstring(n), _tokenFor(L"resume-pin", row.sessionId, payload, kTokenTtlMsFor(2)) });
-                line.push_back({ L"Fork " + std::to_wstring(n), _tokenFor(L"fork", row.sessionId, payload, kTokenTtlMsFor(2)) });
-            }
-            html += L"\n<b>" + std::to_wstring(n) + L".</b> " + TgEscapeHtml(row.title.empty() ? ShortId(row.sessionId) : row.title) + L" <i>(" + state + L")</i>";
+            const SearchPickState state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+            html += L"\n<b>" + std::to_wstring(i + 1) + L".</b> " + TgEscapeHtml(row.title.empty() ? ShortId(row.sessionId) : row.title) + L" <i>(" + SearchPickStateWord(state) + L")</i>";
             if (!row.dir.empty())
             {
                 html += L"\n    " + TgEscapeHtml(detail::ShortPath(row.dir, 2));
@@ -1357,16 +1400,169 @@ namespace Agentmaster::Msg
             {
                 html += L" \x00B7 " + TgShortSpan(WallMs() - row.lastActivityMs) + L" ago";
             }
-            if (!line.empty())
-            {
-                buttons.push_back(std::move(line));
-            }
+        }
+        if (rows.size() > listed)
+        {
+            html += L"\n<i>(" + std::to_wstring(rows.size() - listed) + L" more not listed: ask to narrow it down.)</i>";
         }
         if (rows.empty() && html.empty())
         {
             html = L"Nothing found.";
         }
-        _reply(thread, html, true, buttons.empty() ? json::Value{} : _buttons(buttons));
+        // The keyboard: one PICK per listed row, by its number (§21.7: pick the session, then its menu asks what to do),
+        // then "⊘ Clear" — the Sessions page's crossed circle, on every answer so the newest one always has it.
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> buttons;
+        for (const auto& line : SearchPickKeyboardLayout(listed))
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> picks;
+            for (const size_t n : line)
+            {
+                if (std::wstring data = SearchPickCallbackData(n, rows[n - 1].sessionId); !data.empty())
+                {
+                    picks.push_back({ std::to_wstring(n), std::move(data) });
+                }
+            }
+            if (!picks.empty())
+            {
+                buttons.push_back(std::move(picks));
+            }
+        }
+        buttons.push_back({ { L"\x2298 Clear", std::wstring{ kSearchClearCallbackData } } });
+        // With sound: the answer is the request's final message (D5).
+        _reply(thread, html, true, _buttons(buttons));
+    }
+
+    void MessagingService::_showSearchPick(const SearchPick& pick, int64_t threadId, int64_t answerMessageId)
+    {
+        // The row as the answer listed it (this run), else the registry's record (a session Agentmaster knows), else the
+        // short id; the launch finds a missing folder in the transcript (_requestLaunch).
+        SearchRow row;
+        bool remembered = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _searchRowInfo.find(pick.sessionId); it != _searchRowInfo.end())
+            {
+                row = it->second;
+                remembered = true;
+            }
+        }
+        const auto s = _registry->Get(pick.sessionId);
+        // The title a launch is given: "" when nothing knows one, so the launch derives it from the folder (a short id
+        // would become the resumed tab's title). The menu shows the short id instead.
+        std::wstring title = remembered ? row.title : std::wstring{};
+        if (title.empty() && s)
+        {
+            title = s->title;
+        }
+        const std::wstring shownTitle = title.empty() ? ShortId(pick.sessionId) : title;
+        std::wstring dir = remembered ? row.dir : std::wstring{};
+        if (dir.empty() && s)
+        {
+            dir = s->workingDir;
+        }
+        const SearchPickState state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+        std::wstring html = L"<b>" + std::to_wstring(pick.number) + L". " + TgEscapeHtml(shownTitle) + L"</b>";
+        std::wstring facts;
+        if (!dir.empty())
+        {
+            facts = TgEscapeHtml(detail::ShortPath(dir, 2));
+        }
+        if (remembered && row.lastActivityMs > 0)
+        {
+            facts += (facts.empty() ? L"" : L" \x00B7 ") + std::wstring{ L"active " } + TgShortSpan(WallMs() - row.lastActivityMs) + L" ago";
+        }
+        if (!facts.empty())
+        {
+            html += L"\n" + facts;
+        }
+        html += L"\n<i>" + std::wstring{ SearchPickStateLine(state) } + L"</i>\nResume or fork it?";
+        // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need. Each acts on
+        // the session's state at the tap (_onSearchPickAction), which may differ from the line above.
+        const std::wstring payload = std::to_wstring(pick.number) + L"\n" + dir + L"\n" + title;
+        const int64_t ttl = kTokenTtlMsFor(kSearchActionTtlHours);
+        const std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows = {
+            { { L"\x25B6 Resume", _tokenFor(L"pick-resume", pick.sessionId, payload, ttl) }, { L"\x25B6 Resume \U0001F4CC", _tokenFor(L"pick-resume-pin", pick.sessionId, payload, ttl) } },
+            { { L"\x2442 Fork", _tokenFor(L"pick-fork", pick.sessionId, payload, ttl) }, { L"\x2715 Cancel", _tokenFor(L"pick-cancel", pick.sessionId, payload, ttl) } },
+        };
+        LogNav(L"remote telegram search pick " + std::to_wstring(pick.number) + L" " + ShortId(pick.sessionId) + L" (" + SearchPickStateWord(state) + L")");
+        _reply(threadId, html, false, _buttons(rows), answerMessageId);
+    }
+
+    void MessagingService::_onSearchPickAction(const std::wstring& kind, const std::wstring& sessionId, const std::wstring& payload, int64_t threadId, int64_t menuMessageId)
+    {
+        // The payload: "<row number>\n<folder>\n<title>" (_showSearchPick); the title is "" when nothing knew one.
+        const size_t nl1 = payload.find(L'\n');
+        const size_t nl2 = nl1 == std::wstring::npos ? std::wstring::npos : payload.find(L'\n', nl1 + 1);
+        const std::wstring number = payload.substr(0, nl1);
+        const std::wstring dir = nl1 == std::wstring::npos ? std::wstring{} : payload.substr(nl1 + 1, nl2 == std::wstring::npos ? std::wstring::npos : nl2 - nl1 - 1);
+        const std::wstring title = nl2 == std::wstring::npos ? std::wstring{} : payload.substr(nl2 + 1);
+        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TgEscapeHtml(title.empty() ? ShortId(sessionId) : title) + L"</b>";
+        if (kind == L"pick-cancel")
+        {
+            // The menu goes; the answer above it keeps its pick buttons. A menu already gone (the user deleted it) is a
+            // harmless 400.
+            if (menuMessageId > 0)
+            {
+                OutItem del;
+                del.prio = SendPriority::Final;
+                del.method = L"deleteMessage";
+                del.params = json::Value::MkObj();
+                del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(menuMessageId)));
+                _enqueue(std::move(del));
+            }
+            LogNav(L"remote telegram search pick-cancel " + ShortId(sessionId));
+            return;
+        }
+        if (kind == L"pick-fork")
+        {
+            // Never pinned: there is no fork-and-pin (the user's rule, §21.7).
+            _editText(menuMessageId, head + L"\n\x2192 \x2442 Fork", SendPriority::Final, L"", json::Value{});
+            RemoteLaunchRequest req;
+            req.kind = RemoteLaunchRequest::Kind::Fork;
+            req.sessionId = sessionId;
+            req.dir = dir;
+            req.title = title;
+            _requestLaunch(req, threadId); // it says how the fork goes (and why not, when it cannot open)
+            return;
+        }
+        // Resume / Resume 📌, on the session's state NOW.
+        const bool pin = kind == L"pick-resume-pin";
+        const std::wstring choice = pin ? L"\x25B6 Resume \U0001F4CC" : L"\x25B6 Resume";
+        const auto s = _registry->Get(sessionId);
+        switch (ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned))
+        {
+        case SearchPickState::IdleTab:
+            // Its tab is open: waking it (Waiting for you) is all a resume needs, and its topic appears at the next sync.
+            _wake(sessionId, pin);
+            _editText(menuMessageId, head + L"\n\x2192 " + choice + L": woken, its topic appears in a moment.", SendPriority::Final, L"", json::Value{});
+            return;
+        case SearchPickState::Listed:
+        {
+            // Open with its topic already: nothing to open. 📌 still pins it (never idle).
+            const bool newlyPinned = pin && s && !s->pinned;
+            if (newlyPinned)
+            {
+                _setPinned(sessionId, true);
+            }
+            _editText(menuMessageId, head + L"\n\x2192 " + choice + L": it is open already, with its own topic." + (newlyPinned ? L" Pinned \U0001F4CC." : L""), SendPriority::Final, L"", json::Value{});
+            LogNav(L"remote telegram search resume " + ShortId(sessionId) + L" -> already listed" + (newlyPinned ? L" (pinned)" : L""));
+            return;
+        }
+        case SearchPickState::Closed:
+        default:
+        {
+            _editText(menuMessageId, head + L"\n\x2192 " + choice, SendPriority::Final, L"", json::Value{});
+            RemoteLaunchRequest req;
+            req.kind = RemoteLaunchRequest::Kind::Resume;
+            req.sessionId = sessionId;
+            req.dir = dir;
+            req.title = title;
+            req.pin = pin;
+            _requestLaunch(req, threadId); // it says how the resume goes; the revive sweep pins it once it is live
+            return;
+        }
+        }
     }
 
     // ===== buttons ===========================================================================
@@ -1399,9 +1595,25 @@ namespace Agentmaster::Msg
         }
         const std::wstring data = cq.StrAt(L"data");
         int64_t threadId = 0;
+        int64_t messageId = 0; // the message the button sits on: a Search answer for a pick, a pick's menu for its actions
         if (const auto* m = cq.Find(L"message"); m && m->type == json::Value::Type::Obj)
         {
             threadId = m->I64At(L"message_thread_id", 0);
+            messageId = m->I64At(L"message_id", 0);
+        }
+        // The Search topic's STATELESS buttons (§21.7): "⊘ Clear" and the PICK of an answer's row. They carry no token,
+        // so they work again and after a restart; a pick only opens the action menu, whose buttons are tokens.
+        if (data == kSearchClearCallbackData)
+        {
+            answer(L"");
+            _clearSearch(threadId, 0);
+            return;
+        }
+        if (const auto pick = ParseSearchPickCallbackData(data))
+        {
+            answer(L"");
+            _showSearchPick(*pick, threadId, messageId);
+            return;
         }
         if (data.rfind(L"c:", 0) == 0)
         {
@@ -1540,16 +1752,11 @@ namespace Agentmaster::Msg
                 _wake(tok.sessionId, k == L"wake-pin");
                 _reply(threadId, L"Woken: its topic appears in a moment.", false);
             }
-            else if (k == L"resume" || k == L"resume-pin" || k == L"fork")
+            else if (k == L"pick-resume" || k == L"pick-resume-pin" || k == L"pick-fork" || k == L"pick-cancel")
             {
-                RemoteLaunchRequest req;
-                req.kind = k == L"fork" ? RemoteLaunchRequest::Kind::Fork : RemoteLaunchRequest::Kind::Resume;
-                req.sessionId = tok.sessionId;
-                const size_t nl = tok.payload.find(L'\n');
-                req.dir = nl == std::wstring::npos ? tok.payload : tok.payload.substr(0, nl);
-                req.title = nl == std::wstring::npos ? std::wstring{} : tok.payload.substr(nl + 1);
-                req.pin = k == L"resume-pin";
-                _requestLaunch(req, threadId);
+                // A Search pick's action menu (_showSearchPick): it acts on the session's state NOW, and edits or deletes
+                // the menu it sits on.
+                _onSearchPickAction(k, tok.sessionId, tok.payload, threadId, messageId);
             }
             return;
         }
@@ -1774,8 +1981,9 @@ namespace Agentmaster::Msg
         std::wstring html;
         if (searchTopic)
         {
-            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent answers with sessions and buttons to wake / resume / fork them.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/reset \x2014 forget the search conversation";
+            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent answers with numbered sessions. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
+                   L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation";
         }
         else
         {

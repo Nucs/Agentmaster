@@ -1396,6 +1396,279 @@ namespace Agentmaster::Msg
         return r;
     }
 
+    // ===== the Search topic (§5.4; the user's rules of 2026-10-16 night, §21.7) ==============
+
+    // The Search topic's conversation is NOT a session (the user's rule, §21.7): it has no transcript, so it is never a
+    // search result, and nothing in this topic can wake, resume, fork or pin it. It carries on by itself after a restart
+    // (the agent harness keeps its record), and the user can only CLEAR it. What a message typed in the Search topic is:
+    enum class SearchTopicVerb
+    {
+        Request, // plain words: a request for the search agent (a follow-up refines the previous answer)
+        Clear, // /clear or /reset: throw the search conversation away (the Sessions page's crossed circle); the next request starts fresh
+        FleetCommand, // a command the Search topic RUNS (kSearchTopicFleetCommands): /help, /status, /idle, /board, /newsession, …
+        SessionCommand, // a SESSION topic's command (/wake, /pin, /forksession, /transcript, /cc, …): refused here,
+                        // because the Search conversation is not a session (the refusal says what it can do instead)
+        ClaudeCommand, // any other /command, i.e. Claude Code's: refused here, it belongs in a session's topic
+    };
+
+    // The Agentmaster commands the Search topic RUNS (MessagingService::_runSearchCommand). Every other name of
+    // kAgentmasterCommands is a session's command and is refused in the Search topic (SearchTopicVerb::SessionCommand);
+    // a session's topic still forwards /idle, /board, /pauseall and /resumeall here (they work in any topic).
+    inline constexpr std::wstring_view kSearchTopicFleetCommands[] = {
+        L"start", L"help", L"status", L"idle", L"board", L"newsession", L"pauseall", L"resumeall"
+    };
+
+    // A message of the Search topic, classified.
+    struct SearchTopicMessage
+    {
+        SearchTopicVerb verb{ SearchTopicVerb::Request };
+        // ParseRemoteCommand's reading of the same text: the request's words are `cmd.text`; a command's word and
+        // arguments are `cmd.name` / `cmd.args`. For `/cc …` the name is set to "cc" (the word that was typed), so the
+        // refusal names it — ParseRemoteCommand itself reads the forwarded command there.
+        RemoteCommand cmd;
+    };
+
+    /// <summary>
+    /// Decides what a message typed in the 🔎 Search topic is (§5.4, §21.7: the Search conversation is never woken,
+    /// resumed or forked; the user can only clear it). ParseRemoteCommand reads the text first; then two words mean
+    /// something else HERE: `/clear` and `/reset` (Claude Code's own "start this conversation over", queued as prompts
+    /// in a session's topic, where they clear THAT session) clear the SEARCH conversation. They are read from the raw
+    /// text's first word, so a forced `/cc /clear` stays what `/cc` is: a session's command, which has no session to go
+    /// to in this topic. Everything Claude Code's (recorded, no-record and leaves-the-tab alike) is refused here.
+    /// </summary>
+    /// <param name="text">The message text.</param>
+    /// <returns>The verb, with ParseRemoteCommand's reading.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline SearchTopicMessage ClassifySearchTopicMessage(std::wstring_view text)
+    {
+        SearchTopicMessage m;
+        m.cmd = ParseRemoteCommand(text);
+        // The raw first word, read the way ParseRemoteCommand reads one ("/Clear@MyBot" -> "clear"); empty for plain words.
+        const std::wstring whole = detail::Trim(text);
+        std::wstring word;
+        if (!whole.empty() && whole.front() == L'/')
+        {
+            const size_t ws = whole.find_first_of(L" \t\r\n");
+            word = whole.substr(1, ws == std::wstring::npos ? std::wstring::npos : ws - 1);
+            if (const size_t at = word.find(L'@'); at != std::wstring::npos)
+            {
+                word = word.substr(0, at);
+            }
+            word = detail::Lower(word);
+        }
+        if (word == L"clear" || word == L"reset")
+        {
+            m.verb = SearchTopicVerb::Clear;
+            return m;
+        }
+        if (word == L"cc")
+        {
+            // ParseRemoteCommand turns "/cc /x" into the command x and "/cc words" into plain words: neither may become
+            // a search request or a refusal that names the wrong command.
+            m.verb = SearchTopicVerb::SessionCommand;
+            m.cmd.name = L"cc";
+            return m;
+        }
+        switch (m.cmd.kind)
+        {
+        case RemoteKind::Text:
+            m.verb = SearchTopicVerb::Request;
+            break;
+        case RemoteKind::AgentmasterCommand:
+            m.verb = detail::InList(m.cmd.name, std::begin(kSearchTopicFleetCommands), std::end(kSearchTopicFleetCommands)) ? SearchTopicVerb::FleetCommand : SearchTopicVerb::SessionCommand;
+            break;
+        default:
+            m.verb = SearchTopicVerb::ClaudeCommand; // there is no Claude Code session in this topic to queue it for
+            break;
+        }
+        return m;
+    }
+
+    // A Search answer lists its sessions as numbered rows with ONE PICK button per row (the user's rule, §21.7): a pick
+    // opens a second message, the ACTION MENU of that session (▶ Resume, ▶ Resume 📌, ⑂ Fork — no fork-and-pin — and
+    // ✕ Cancel). A pick's callback data is "p:<row number>:<session id>": STATELESS on purpose, unlike the single-use
+    // action tokens (M5). A pick does nothing but open the menu, so it may be tapped again, and an answer's picks still
+    // work after the bot or the app restarted, like the conversation they belong to. Telegram caps callback data at 64
+    // bytes; a Claude session id (36 characters) makes 41 at most.
+    inline constexpr std::wstring_view kSearchPickPrefix = L"p:";
+    // The callback data of the "⊘ Clear" button every Search answer carries: stateless like a pick; it clears the
+    // conversation that exists when it is pressed, whichever answer carried it.
+    inline constexpr std::wstring_view kSearchClearCallbackData = L"s:clear";
+    // How many sessions one answer lists with a pick button (a model that shows more gets a "N more" line), and how
+    // many pick buttons share one row of the keyboard.
+    inline constexpr size_t kSearchAnswerMaxRows = 10;
+    inline constexpr size_t kSearchPickButtonsPerRow = 5;
+
+    // A pick, read back from its button.
+    struct SearchPick
+    {
+        size_t number{ 0 }; // the row number the answer showed (1-based; only the menu's title uses it)
+        std::wstring sessionId; // the session the row listed
+    };
+
+    namespace detail
+    {
+        /// <summary>
+        /// Whether a pick button may carry `id`: 8 to 40 hex digits and dashes (a Claude session id is a UUID). The bound
+        /// keeps the callback data under Telegram's 64 bytes; the charset keeps a forged callback (any client can send
+        /// any bytes) from carrying anything else into the menu, a token or a launch.
+        /// </summary>
+        /// <param name="id">The id to check.</param>
+        /// <returns>True when it can be carried.</returns>
+        inline bool IsPickableSessionId(std::wstring_view id) noexcept
+        {
+            if (id.size() < 8 || id.size() > 40)
+            {
+                return false;
+            }
+            for (const wchar_t c : id)
+            {
+                const bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+                if (!hex && c != L'-')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /// <summary>Builds a pick button's callback data ("p:&lt;number&gt;:&lt;session id&gt;", see kSearchPickPrefix).</summary>
+    /// <param name="number">The row number the answer shows (1 … 99).</param>
+    /// <param name="sessionId">The session the row lists.</param>
+    /// <returns>The data, or "" when the number or the id cannot be carried (that row then gets no button).</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring SearchPickCallbackData(size_t number, std::wstring_view sessionId)
+    {
+        if (number < 1 || number > 99 || !detail::IsPickableSessionId(sessionId))
+        {
+            return {};
+        }
+        return std::wstring{ kSearchPickPrefix } + std::to_wstring(number) + L":" + std::wstring{ sessionId };
+    }
+
+    /// <summary>
+    /// Reads a pick button's callback data back. The data comes from Telegram, so all of it is checked: the prefix, a
+    /// row number of 1 … 99 written in one or two digits, and a pickable session id.
+    /// </summary>
+    /// <param name="data">The callback query's data.</param>
+    /// <returns>The pick, or nullopt for anything else (another button's data, or a malformed one).</returns>
+    /// <exception cref="std::bad_alloc">If the id cannot be copied.</exception>
+    inline std::optional<SearchPick> ParseSearchPickCallbackData(std::wstring_view data)
+    {
+        if (data.substr(0, kSearchPickPrefix.size()) != kSearchPickPrefix)
+        {
+            return std::nullopt;
+        }
+        const std::wstring_view rest = data.substr(kSearchPickPrefix.size());
+        const size_t colon = rest.find(L':');
+        if (colon == std::wstring_view::npos || colon == 0 || colon > 2)
+        {
+            return std::nullopt;
+        }
+        size_t number = 0;
+        for (size_t i = 0; i < colon; ++i)
+        {
+            const wchar_t c = rest[i];
+            if (c < L'0' || c > L'9')
+            {
+                return std::nullopt;
+            }
+            number = number * 10 + static_cast<size_t>(c - L'0');
+        }
+        const std::wstring_view id = rest.substr(colon + 1);
+        if (number < 1 || !detail::IsPickableSessionId(id))
+        {
+            return std::nullopt;
+        }
+        return SearchPick{ number, std::wstring{ id } };
+    }
+
+    /// <summary>
+    /// Lays out an answer's pick buttons: the row numbers 1 … count (at most kSearchAnswerMaxRows),
+    /// kSearchPickButtonsPerRow to a row of the keyboard, in order.
+    /// </summary>
+    /// <param name="count">How many sessions the answer lists.</param>
+    /// <returns>The keyboard's rows of row numbers; empty for 0.</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<size_t>> SearchPickKeyboardLayout(size_t count)
+    {
+        std::vector<std::vector<size_t>> rows;
+        const size_t n = (std::min)(count, kSearchAnswerMaxRows);
+        for (size_t i = 1; i <= n; ++i)
+        {
+            if ((i - 1) % kSearchPickButtonsPerRow == 0)
+            {
+                rows.emplace_back();
+            }
+            rows.back().push_back(i);
+        }
+        return rows;
+    }
+
+    // Where a session that a Search answer listed stands NOW. It is read when the answer is posted (the row's word) and
+    // again at every tap (the menu's line, and what its Resume does): never cached, because a session changes state
+    // between an answer and a tap (M5).
+    enum class SearchPickState
+    {
+        Closed, // not open in any tab (archived, never managed, or a live record without a tab): Resume opens it into a background tab
+        IdleTab, // open in a tab but Idle and not pinned, so it has no topic: Resume wakes it (Waiting for you) and its topic appears
+        Listed, // open in a tab and not Idle (or pinned, which never idles): it has its own topic already, Resume has nothing to open
+    };
+
+    /// <summary>
+    /// Classifies where a picked session stands, the split the answer's words have always used: a live session with a
+    /// tab is IdleTab when its state is Idle and it is not pinned (§5.3), else Listed; anything else is Closed.
+    /// </summary>
+    /// <param name="known">Whether the registry knows the session (a session never opened in Agentmaster is not known).</param>
+    /// <param name="live">SessionInfo::live.</param>
+    /// <param name="hasTab">Whether the record names a tab (a non-empty SessionInfo::tabToken).</param>
+    /// <param name="state">SessionInfo::state.</param>
+    /// <param name="pinned">SessionInfo::pinned.</param>
+    /// <returns>The state.</returns>
+    inline SearchPickState ClassifySearchPickState(bool known, bool live, bool hasTab, SessionState state, bool pinned) noexcept
+    {
+        if (!known || !live || !hasTab)
+        {
+            return SearchPickState::Closed;
+        }
+        return state == SessionState::Idle && !pinned ? SearchPickState::IdleTab : SearchPickState::Listed;
+    }
+
+    /// <summary>The word an answer's row shows for a state ("closed", "idle tab", "has a topic").</summary>
+    /// <param name="state">The state.</param>
+    /// <returns>A static string; never null.</returns>
+    inline const wchar_t* SearchPickStateWord(SearchPickState state) noexcept
+    {
+        switch (state)
+        {
+        case SearchPickState::IdleTab:
+            return L"idle tab";
+        case SearchPickState::Listed:
+            return L"has a topic";
+        case SearchPickState::Closed:
+        default:
+            return L"closed";
+        }
+    }
+
+    /// <summary>The action menu's line for a state: where the session is and what its Resume does there.</summary>
+    /// <param name="state">The state.</param>
+    /// <returns>A static string; never null.</returns>
+    inline const wchar_t* SearchPickStateLine(SearchPickState state) noexcept
+    {
+        switch (state)
+        {
+        case SearchPickState::IdleTab:
+            return L"Open in a tab, idle: Resume brings its topic back.";
+        case SearchPickState::Listed:
+            return L"Open, with its own topic: Resume has nothing to open.";
+        case SearchPickState::Closed:
+        default:
+            return L"Closed: Resume opens it in a background tab, and its topic appears.";
+        }
+    }
+
     // ===== the backlog rule (D2) ==============================================================
 
     // An update older than this when it is processed was sent while Agentmaster was closed (Telegram
