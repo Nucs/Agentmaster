@@ -314,7 +314,7 @@ namespace
         bool bumpDuringCall = false;
 
         SessionSearchToolset::Callbacks cb;
-        cb.onShow = [&](const std::vector<std::wstring>& ids, const std::wstring&) { shown = ids; };
+        cb.onShow = [&](const std::vector<std::wstring>& ids, const std::wstring&, const std::vector<std::wstring>&) { shown = ids; };
         cb.onCandidates = [&](const std::vector<std::wstring>& ids) { candidates = ids; };
         cb.onSearching = [&](const std::wstring& s) { searching = s; };
         cb.generation = [&] { return generation.load(); };
@@ -350,7 +350,8 @@ namespace
 
         const auto servers = toolset.Servers();
         CHECK(servers.size() == 2 && servers[0].name == L"agentmaster" && servers[1].name == L"display", "the servers: agentmaster and display");
-        CHECK(servers.size() == 2 && servers[0].tools.size() == SessionDbToolDefs::kToolCount, "every database tool is offered");
+        CHECK(servers.size() == 2 && servers[0].tools.size() == SessionDbToolDefs::kToolCount + 1 && servers[0].tools.back().name == L"read",
+              "every database tool is offered, and the toolset's own read after them (SESSIONS.md 9.12)");
         CHECK(FindHarnessTool(servers, L"sessions", L"search") == nullptr, "the page search is not offered beside the database");
         bool allReadOnly = !servers.empty();
         for (const auto& t : servers[0].tools)
@@ -367,7 +368,7 @@ namespace
             return;
         }
 
-        // The database prompt: eight rules, every database tool named as the model calls it.
+        // The database prompt: nine rules, every database tool named as the model calls it.
         const std::wstring prompt = SessionSearchToolset::DatabaseSystemPrompt();
         int rules = 0;
         for (int r = 1; r <= 12; ++r)
@@ -377,7 +378,8 @@ namespace
                 ++rules;
             }
         }
-        CHECK(rules == 8, "the database prompt has eight rules");
+        CHECK(rules == 9, "the database prompt has nine rules");
+        CHECK(prompt.find(L"mcp__agentmaster__read") != std::wstring::npos && prompt.find(L"read every session you intend to show") != std::wstring::npos, "the database prompt confirms candidates with its read");
         bool allNamed = true;
         for (const auto& t : SessionDbToolDefs::kTools)
         {
@@ -441,7 +443,7 @@ namespace
 
         // Without the database, the catalog is required.
         SessionSearchToolset::Callbacks none;
-        none.onShow = [](const std::vector<std::wstring>&, const std::wstring&) {};
+        none.onShow = [](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>&) {};
         bool threw = false;
         try
         {

@@ -368,7 +368,8 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 ### 5.4 🔎 Search: find, wake, revive (D24)
 
 - **The agent:** the Sessions page's search agent — `SessionSearchAgent` on the agent harness, Sonnet 5.5,
-  its tools (`search`, `show`; the session database's tools when that is On) and system prompt — at
+  its tools (`search`, `grep`, `read`, `show` since 2026-10-17; the session database's tools and `read`
+  when that is On) and system prompt — at
   **high** thinking (the harness's live thinking level, set in the cog and applied to the running
   conversation). Its own conversation (`harness\telegram-search.json`), so a search from the phone does not
   move the PC page's list (D24, decided). Parked after 10 idle minutes like the page's.
@@ -381,11 +382,27 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
   in a session's topic they stay Claude Code's own commands for that session) or the **⊘ Clear** button
   under every answer — the page's crossed circle.
 - **A message in 🔎 Search is a request** ("the session where I fixed the tab drag crash"); follow-ups
-  refine it, as on the page. The agent's answer — one sentence and the sessions it shows — arrives as one
-  message (the final message: it makes a sound), each session on a numbered line with where it stands
-  (closed / idle tab / has a topic). Its buttons **pick a session** (D34): one number per row (at most 10;
-  a longer list says how many more), then ⊘ Clear. A pick opens a second message, the session's **action
-  menu**, which asks what to do:
+  refine it, as on the page. The agent READS every session before it shows it, and can grep the
+  conversations' full text (the user's choice of 2026-10-17; `SESSIONS.md` §9.12). Its answer arrives as one
+  message (the final message: it makes a sound) in the user's **evidence-card** format ("C1", §21.10): the
+  agent's one VERDICT sentence ("Two sessions are about releasing Agentmaster."), then one **card** per
+  session — its number, a glyph for where it stands (📦 closed · 💤 idle tab · 💬 has a topic) and its title;
+  a line with its folder, the day it was last active and how many prompts it had; and **one quote**, the
+  evidence the agent saw when it read it (its `why`: "You asked: …", or Claude's words, or what the session
+  shows):
+
+  ```
+  Two sessions are about releasing Agentmaster.
+
+  1 📦 Release v0.7.9
+  Agentmaster · 11 Oct · 14 prompts
+  ┃ You asked: "cut v0.7.9 as a pre-release and publish the draft"
+  ```
+
+  Its buttons **pick a session** (D34): one number per card (at most 10; a longer list says how many more),
+  then ⊘ Clear. A pick opens a second message, the session's **action menu**: the card in full — the whole
+  folder and the branch, when it ran ("11 Oct 14:02 → 16:40") and its prompts, the same quote, where it
+  stands now in words — and what to do:
 
 | Button | Closed (on disk only) | In a tab but Idle | Listed (it has a topic) |
 |---|---|---|---|
@@ -961,6 +978,7 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D24** (rest) | 🔎 Search's conversation is its own (`telegram-search`), ONE for the whole process like the page's `sessions-search`, and it can be cleared like the page's | "the telegram-search should be a single session shared by all windows that can be cleared like sessions-search can." |
 | **D33** | The Search conversation is not a session: it is never woken, resumed or forked; it carries on after a restart by itself; the user's one action on it is to clear it | "You can't fork/resume/wake a telegram-search. it does persist throughout restarts by resuming the session but user can only really clear the session." |
 | **D34** | A Search answer's buttons pick a session; a second menu then asks Resume or Fork; there is no fork-and-pin | "The buttons of a search result should be the session picking and then a second menu asks if to Resume, Fork (no fork and pin)" |
+| **D35** | The Search answer is EVIDENCE CARDS (variant C1: a verdict sentence, then per session its title, a facts line and ONE quote of what the agent saw); the agent reads every candidate before it shows it and can grep the transcripts; on Telegram and on the Sessions page (§21.10, `SESSIONS.md` §9.12) | 2026-10-17: the choices "C · Evidence cards" ("This is the lead, produce 3 variants"), then "C1 · One quote per card"; "Read every candidate but also be able to full-text/grep the transcripts"; "Telegram and Sessions page" |
 
 **Open** (recommendation first):
 
@@ -1585,3 +1603,38 @@ the whole session as messages, not a file plus the last 10 turns.
   and one with unbalanced. m5, isolated on HEAD 5f4c8f608 + the first build: 7214 checks; on 3bc71b412 + the flood
   budget and the per-turn commits: 7220; on c5f4d0c6c + the answers and the link fix: 7230 — the 3 known
   TestTaskbarBadge failures only, each time.
+
+### 21.10 The Search answer as evidence cards, and an agent that reads before it shows (2026-10-17)
+
+> Status: written 2026-10-17 (session cb14b056), NOT BUILT, no live run. The agent's half is `SESSIONS.md` §9.12.
+
+**The user's choices** (after "Kindly work on the answering format better, show me 3 variations to choose from" and
+"Does the search agent read the compact transcript of every session it matches against?"): the format **"C · Evidence
+cards"**, variant **"C1 · One quote per card"**; the agent must **read every candidate and be able to grep the
+transcripts**; both **Telegram and the Sessions page**. Before, the answer was one sentence ("…are on the screen…",
+seen live) and a numbered line per session (title, state word, folder, "5m ago"), and the agent showed what a search
+matched by title or path without reading it.
+
+- **The answer** (`BuildSearchAnswerHtml`, MessagingModels.h, pure): the agent's verdict (escaped), then per listed
+  session `<b>N</b> <glyph> <b>title</b>` (the short id when nothing knows a title; the title's first line, ≤ 100
+  characters), a facts line `folder · day · N prompts` (the folder's last segment; `SearchDayText`: today / yesterday
+  / "11 Oct" / "11 Oct 2025", local time, day first like `TgClockText`; parts that are unknown are left out), and the
+  agent's `why` as one `<blockquote>` (left out when it gave none), then "(N more not listed …)". "Nothing found." when
+  there is nothing at all. A long answer is split by `_sendText` (the buttons stay on the last part).
+- **The glyphs** (`SearchPickStateGlyph`): 📦 closed, 💤 an idle tab, 💬 a topic of its own — the old row words
+  ("closed", "idle tab", "has a topic") stay in the log line of a pick.
+- **The pick menu** (`BuildSearchPickMenuHtml`): `<b>N · title</b>`, the whole folder and the branch, when it ran
+  (`SearchSpanText`: "11 Oct 14:02 → 16:40", one date for one day, both across days, clock times today) and its
+  prompts, the same quote, and `<i><glyph> <the state line></i>`; the buttons are unchanged (§21.7). The old closing
+  question "Resume or fork it?" is gone: the buttons ask it. A pick of a session this run did not list (after a
+  restart) shows what the registry knows (`branch`, `convCreatedUnixMs`, `convLastActivityUnixMs`), with no quote.
+- **The row** (`SearchRow`, Messaging.h) gained `why`, `branch`, `createdMs`, `prompts`. The bridge fills them
+  (`RowsFrom`): the why from the Shown event (`SessionSearchEvent::reasons`, index-aligned), the times and the count by
+  the Sessions page's own rules (`SessionSearchLastActivityMs`, `SessionSearchCreatedMs`, `stats.userPrompts`); the
+  title and the folder keep the bridge's rules on purpose (no "(no prompt yet)" placeholder, no project-folder
+  fallback), because a pick's Resume launches with them.
+- **The help text** of the topic says the agent reads the sessions it finds and quotes the evidence it saw.
+- **Tests** (`TestMessagingSearch` §5): the day words (today, yesterday across a month and a year, this year, an
+  older year, unknown), the menu spans, the whole answer of two cards (a quote, a session known only by its id, the
+  count not listed), "Nothing found.", the escaping of a title and a quote, distinct glyphs, and both menus.
+- **Not done:** no live run; the answer's look on a phone (the blockquotes' spacing) is unverified.

@@ -1403,31 +1403,29 @@ namespace Agentmaster::Msg
                 _searchRowOrder.pop_front();
             }
         }
-        std::wstring html = ev.text.empty() ? std::wstring{} : TgEscapeHtml(ev.text);
+        // §21.10, the EVIDENCE CARDS (the user's "C1" of 2026-10-17): the model's verdict, then one card per listed
+        // session — number, glyph, title; folder · day · prompts; the model's why as its one quote (BuildSearchAnswerHtml).
+        // Where each session stands is read NOW (the glyph only; the menu reads it again at the tap).
+        std::vector<SearchCard> cards;
+        cards.reserve(listed);
         for (size_t i = 0; i < listed; ++i)
         {
             const auto& row = rows[i];
-            // Where the session stands NOW (the word only; the menu reads it again at the tap).
             const auto s = _registry->Get(row.sessionId);
-            const SearchPickState state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
-            html += L"\n<b>" + std::to_wstring(i + 1) + L".</b> " + TgEscapeHtml(row.title.empty() ? ShortId(row.sessionId) : row.title) + L" <i>(" + SearchPickStateWord(state) + L")</i>";
-            if (!row.dir.empty())
-            {
-                html += L"\n    " + TgEscapeHtml(detail::ShortPath(row.dir, 2));
-            }
-            if (row.lastActivityMs > 0)
-            {
-                html += L" \x00B7 " + TgShortSpan(WallMs() - row.lastActivityMs) + L" ago";
-            }
+            SearchCard card;
+            card.number = i + 1;
+            card.sessionId = row.sessionId;
+            card.title = row.title;
+            card.dir = row.dir;
+            card.branch = row.branch;
+            card.createdMs = row.createdMs;
+            card.lastActivityMs = row.lastActivityMs;
+            card.prompts = row.prompts;
+            card.why = row.why;
+            card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+            cards.push_back(std::move(card));
         }
-        if (rows.size() > listed)
-        {
-            html += L"\n<i>(" + std::to_wstring(rows.size() - listed) + L" more not listed: ask to narrow it down.)</i>";
-        }
-        if (rows.empty() && html.empty())
-        {
-            html = L"Nothing found.";
-        }
+        const std::wstring html = BuildSearchAnswerHtml(ev.text, cards, rows.size() - listed, WallMs());
         // The keyboard: one PICK per listed row, by its number (§21.7: pick the session, then its menu asks what to do),
         // then "⊘ Clear" — the Sessions page's crossed circle, on every answer so the newest one always has it.
         std::vector<std::vector<std::pair<std::wstring, std::wstring>>> buttons;
@@ -1473,28 +1471,27 @@ namespace Agentmaster::Msg
         {
             title = s->title;
         }
-        const std::wstring shownTitle = title.empty() ? ShortId(pick.sessionId) : title;
         std::wstring dir = remembered ? row.dir : std::wstring{};
         if (dir.empty() && s)
         {
             dir = s->workingDir;
         }
         const SearchPickState state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
-        std::wstring html = L"<b>" + std::to_wstring(pick.number) + L". " + TgEscapeHtml(shownTitle) + L"</b>";
-        std::wstring facts;
-        if (!dir.empty())
-        {
-            facts = TgEscapeHtml(detail::ShortPath(dir, 2));
-        }
-        if (remembered && row.lastActivityMs > 0)
-        {
-            facts += (facts.empty() ? L"" : L" \x00B7 ") + std::wstring{ L"active " } + TgShortSpan(WallMs() - row.lastActivityMs) + L" ago";
-        }
-        if (!facts.empty())
-        {
-            html += L"\n" + facts;
-        }
-        html += L"\n<i>" + std::wstring{ SearchPickStateLine(state) } + L"</i>\nResume or fork it?";
+        // §21.10: the menu repeats the card's facts in full (the whole folder, the branch, when it ran) and its quote,
+        // then where the session stands now (BuildSearchPickMenuHtml). A session the answer did not list this run (a
+        // pick after a restart) shows what the registry knows: no quote, the transcript's own times.
+        SearchCard card;
+        card.number = pick.number;
+        card.sessionId = pick.sessionId;
+        card.title = title; // "" = the menu shows the short id
+        card.dir = dir;
+        card.branch = remembered && !row.branch.empty() ? row.branch : (s ? s->branch : std::wstring{});
+        card.createdMs = remembered && row.createdMs > 0 ? row.createdMs : (s ? s->convCreatedUnixMs : 0);
+        card.lastActivityMs = remembered && row.lastActivityMs > 0 ? row.lastActivityMs : (s ? s->convLastActivityUnixMs : 0);
+        card.prompts = remembered ? row.prompts : 0;
+        card.why = remembered ? row.why : std::wstring{};
+        card.state = state;
+        const std::wstring html = BuildSearchPickMenuHtml(card, WallMs());
         // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need. Each acts on
         // the session's state at the tap (_onSearchPickAction), which may differ from the line above.
         const std::wstring payload = std::to_wstring(pick.number) + L"\n" + dir + L"\n" + title;
@@ -2012,7 +2009,7 @@ namespace Agentmaster::Msg
         std::wstring html;
         if (searchTopic)
         {
-            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent answers with numbered sessions. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
+            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
                    L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history (asks first)";
         }

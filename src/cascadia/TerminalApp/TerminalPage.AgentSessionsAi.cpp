@@ -550,6 +550,7 @@ namespace winrt::TerminalApp::implementation
                 _sessionsAiListTurn = 0;
                 _sessionsAiShownIds.clear();
                 _sessionsAiEntries.clear();
+                _sessionsAiReasons.clear(); // no AI list: no evidence lines under the titles
                 _SessionsAiMergeExtraRows(); // removes the list's extra rows
             }
             _UpdateSessionsAiStrip(snapshot);
@@ -799,6 +800,7 @@ namespace winrt::TerminalApp::implementation
                 _sessionsAiListTurn = e.turn;
                 _sessionsAiShownIds = e.sessionIds;
                 _sessionsAiEntries = e.entries;
+                _sessionsAiReasons.clear(); // a search's rows: the model has read none of them yet, so no evidence
                 _sessionsAiSortColumn = _sessionsSortColumn;
                 _sessionsAiSortAscending = _sessionsSortAscending;
                 _SessionsAiMergeExtraRows();
@@ -811,6 +813,7 @@ namespace winrt::TerminalApp::implementation
             _sessionsAiListTurn = e.turn;
             _sessionsAiShownIds = e.sessionIds;
             _sessionsAiEntries = e.entries;
+            _SessionsAiTakeReasons(e.sessionIds, e.reasons);
             _sessionsAiSortColumn = _sessionsSortColumn;
             _sessionsAiSortAscending = _sessionsSortAscending;
             _SessionsAiMergeExtraRows();
@@ -871,6 +874,7 @@ namespace winrt::TerminalApp::implementation
         // it can be. A preview of that request is then not shown over it, one of a later is.
         _sessionsAiListTurn = snapshot.hasShown ? snapshot.turns : 0;
         _sessionsAiShownIds = snapshot.shownIds;
+        _SessionsAiTakeReasons(snapshot.shownIds, snapshot.shownReasons);
         _sessionsAiEntries.clear();
         if (snapshot.hasShown && !snapshot.shownIds.empty())
         {
@@ -879,6 +883,35 @@ namespace winrt::TerminalApp::implementation
         _sessionsAiSortColumn = _sessionsSortColumn;
         _sessionsAiSortAscending = _sessionsSortAscending;
         _SessionsAiMergeExtraRows();
+    }
+
+    // Take the model's evidence for a shown list (SESSIONS.md §9.12): `reasons` is index-aligned
+    // with `ids` (a shorter list leaves the rest without one); an empty why is not stored, so a
+    // row with no evidence draws no quote line.
+    //   throws — std::bad_alloc.
+    void TerminalPage::_SessionsAiTakeReasons(const std::vector<std::wstring>& ids, const std::vector<std::wstring>& reasons)
+    {
+        _sessionsAiReasons.clear();
+        for (size_t i = 0; i < ids.size() && i < reasons.size(); ++i)
+        {
+            if (!reasons[i].empty())
+            {
+                _sessionsAiReasons.insert_or_assign(ids[i], reasons[i]);
+            }
+        }
+    }
+
+    // The model's why for a row of the AI list on screen, or "" — none while the AI search is off,
+    // shows no list, or shows a search's preview (the model has read none of those rows yet).
+    //   throws — std::bad_alloc.
+    std::wstring TerminalPage::_SessionsAiReasonFor(const std::wstring& sessionId) const
+    {
+        if (!_sessionsAiMode || !_sessionsAiHasShown || _sessionsAiPreview)
+        {
+            return {};
+        }
+        const auto it = _sessionsAiReasons.find(sessionId);
+        return it != _sessionsAiReasons.end() ? it->second : std::wstring{};
     }
 
     // Make _sessionsRows / _sessionsEntries hold exactly the extra rows the current AI list

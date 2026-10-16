@@ -230,6 +230,14 @@ namespace
             ids.Push(Value::MkStr(id));
         }
         root.Set(L"shownIds", std::move(ids));
+        // The evidence per shown session (SESSIONS.md 9.12), index-aligned with shownIds. Still version 1: an older
+        // build reads the file and ignores the key; a file an older build wrote has none, and its rows show no why.
+        Value reasons = Value::MkArr();
+        for (size_t i = 0; i < s.shownIds.size(); ++i)
+        {
+            reasons.Push(Value::MkStr(i < s.shownReasons.size() ? s.shownReasons[i] : std::wstring{}));
+        }
+        root.Set(L"shownReasons", std::move(reasons));
         return json::Dump(root);
     }
 
@@ -247,13 +255,21 @@ namespace
         s.answerIsError = parsed->BoolAt(L"answerIsError");
         s.hasShown = parsed->BoolAt(L"hasShown");
         s.shownIds.clear();
+        s.shownReasons.clear();
+        const auto* reasons = parsed->Find(L"shownReasons");
+        const bool hasReasons = reasons && reasons->type == json::Value::Type::Arr;
         if (const auto* ids = parsed->Find(L"shownIds"); ids && ids->type == json::Value::Type::Arr)
         {
-            for (const auto& id : ids->arr)
+            for (size_t i = 0; i < ids->arr.size(); ++i)
             {
+                const auto& id = ids->arr[i];
                 if (id.type == json::Value::Type::Str && !id.str.empty())
                 {
                     s.shownIds.push_back(id.str);
+                    // Lined up with its id by position (SerializeView writes one entry per id; a skipped empty id
+                    // skips its reason with it).
+                    const bool reason = hasReasons && i < reasons->arr.size() && reasons->arr[i].type == json::Value::Type::Str;
+                    s.shownReasons.push_back(reason ? reasons->arr[i].str : std::wstring{});
                 }
             }
         }
@@ -780,22 +796,32 @@ namespace Agentmaster
             Notify(std::move(e));
         }
 
-        void OnShow(const std::vector<std::wstring>& ids, const std::wstring& note)
+        void OnShow(const std::vector<std::wstring>& ids, const std::wstring& note, const std::vector<std::wstring>& whys)
         {
             SessionSearchEvent e;
             e.kind = SessionSearchEventKind::Shown;
             e.text = note;
             e.sessionIds = ids;
+            e.reasons = whys;
+            e.reasons.resize(ids.size()); // index-aligned whatever the toolset passed
             e.entries = EntriesFor(ids);
+            size_t withWhy = 0;
+            for (const auto& why : e.reasons)
+            {
+                withWhy += why.empty() ? 0 : 1;
+            }
             {
                 std::lock_guard lock{ mutex };
                 snapshot.hasShown = true;
                 snapshot.shownIds = ids;
+                snapshot.shownReasons = e.reasons;
                 snapshot.note = note;
                 snapshot.activity.clear();
                 e.turn = latestTurn;
             }
-            LogAgent(L"shown " + std::to_wstring(ids.size()) + L" session(s)" + (note.empty() ? std::wstring{} : (L": " + note)));
+            // How many shown sessions came with evidence: a request answered with none is one where the model did
+            // not follow rules 4 and 5 (read, then a why each) — the log is where a review of that starts.
+            LogAgent(L"shown " + std::to_wstring(ids.size()) + L" session(s), " + std::to_wstring(withWhy) + L" with a why" + (note.empty() ? std::wstring{} : (L": " + note)));
             SaveView();
             Notify(std::move(e));
         }
@@ -922,7 +948,7 @@ namespace Agentmaster
         callbacks.generation = [impl] { return impl->requestGeneration.load(); };
         callbacks.onSearching = [impl](const std::wstring& summary) { impl->OnSearching(summary); };
         callbacks.onCandidates = [impl](const std::vector<std::wstring>& ids) { impl->OnCandidates(ids); };
-        callbacks.onShow = [impl](const std::vector<std::wstring>& ids, const std::wstring& note) { impl->OnShow(ids, note); };
+        callbacks.onShow = [impl](const std::vector<std::wstring>& ids, const std::wstring& note, const std::vector<std::wstring>& whys) { impl->OnShow(ids, note, whys); };
         const bool database = !impl->options.sessionDbProfile.empty();
         if (database)
         {
@@ -950,8 +976,10 @@ namespace Agentmaster
         h.toolServers = impl->toolset->Servers();
         h.autoCompactTokens = impl->options.autoCompactTokens;
         h.persistRecord = impl->options.persist;
-        // One request = search (maybe a few) + show + one sentence. A model that keeps searching
-        // is stopped here, with whatever it showed so far.
+        // One request = search (maybe a few) + read the candidates (and a grep for the user's own
+        // words) + show + one sentence: about five model steps since the read-before-show rule of
+        // 2026-10-17 (SESSIONS.md 9.12). A model that keeps searching is stopped here, with
+        // whatever it showed so far.
         h.maxTurnsPerMessage = 12;
         h.apiMaxRetries = 2;
         h.turnSilenceTimeoutMs = 90000;

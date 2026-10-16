@@ -30,6 +30,9 @@
 //   matching (cwd + 📁) is slash-INSENSITIVE — '/' and '\' are equivalent (MatchesPathQuery) — so
 //   a path term finds a session regardless of which separator the user or the stored cwd uses.
 //
+// Plus GrepTranscripts — not a page phase but the AI search's evidence finder (its `grep` tool):
+// WHERE a pattern occurs, with context, who wrote it and when (the grep section below).
+//
 // Plain C++ + Win32, no WinRT (PCH NotUsing; links into the standalone harness). The matchers /
 // regex builder / snippet maker are PURE; only the rg invocation + history scan touch the OS.
 
@@ -176,4 +179,118 @@ namespace Agentmaster
     // one message scope ON (title/dir/file matching is phase 1's job). `cancelled` is polled
     // between files — the UI cancels a stale search on re-type.
     std::vector<SessionHit> SearchTranscriptsSlow(const std::vector<TranscriptRef>& refs, const SessionQuery& q, size_t maxSnippetsPerSession, const std::function<bool()>& cancelled);
+
+    // ===== grep: WHERE a pattern occurs (the AI search's evidence, SESSIONS.md §9.12) =========
+    //
+    // SearchTranscriptsSlow answers WHICH sessions hold some words; GrepTranscripts answers WHERE:
+    // per session, how many messages match and the first few matches in their context, with whose
+    // words they are (the user's or Claude's) and when they were written. The Sessions AI search's
+    // `grep` tool runs it (SessionSearchTools.cpp) to find evidence that a session is the one the
+    // user asks about: words the user remembers, an error text, a version, a file name.
+    //
+    // What it reads is the content search's text (ClassifyTranscriptLine): the user's REAL typed
+    // prompts on one side; Claude's text and thinking, every tool call (its name and its input as
+    // JSON), every tool result and the system lines on the other — each message cut to
+    // kGrepTextBudgetChars. Not read: a message the user typed while Claude worked (Claude Code
+    // records it as a queued_command attachment, which the content search does not read either),
+    // and the subagents' own transcripts.
+    //
+    // Matching is case-insensitive. A literal pattern matches as one contiguous piece of text. A
+    // regex is ECMAScript (std::wregex, icase): `.` does not cross a line break and `[\s\S]` does;
+    // `^` and `$` are the start and the end of one message's text.
+    //
+    // Speed: ripgrep first drops the files that cannot match, and the reader then parses only the
+    // lines that hold a REQUIRED LITERAL of the pattern (GrepRequiredLiteral). A pattern with no
+    // such literal (a regex like `\d+`) skips both, so every candidate is parsed line by line —
+    // the deep search's cost. A time budget bounds a call; the outcome says when it ran out.
+
+    // How much of one message's text a grep reads, in UTF-16 units: the head of a long tool result
+    // or file read. 16K was measured cheap for std::wregex on MSVC (a 64K-character message took
+    // under 31 ms for every probe pattern, with no stack-depth error), and it is four times the
+    // content search's per-message head.
+    inline constexpr size_t kGrepTextBudgetChars = 16384;
+
+    // At most this much of a match is quoted in an excerpt (a `[\s\S]*` regex can match a whole
+    // message): the excerpt then ends with "…" inside the match.
+    inline constexpr size_t kGrepMaxQuotedMatchChars = 200;
+
+    // What a grep looks for, and how much it brings back.
+    struct GrepOptions
+    {
+        std::wstring pattern; // the text (or regex) to find; must not be empty
+        bool regex{}; // false: `pattern` is literal text; true: an ECMAScript regex (RegexUtil.h's caps: 512 characters)
+        bool user{ true }; // read the user's typed prompts
+        bool agent{ true }; // read Claude's side: its text, thinking, tool calls and results, the system lines
+        size_t contextChars{ 120 }; // characters kept on each side of a match in an excerpt
+        size_t maxExcerpts{ 3 }; // excerpts kept per session (every match still counts)
+        // 0 = no time limit. Else stop reading files this many milliseconds after the call
+        // started: the outcome then has complete == false and the sessions read so far.
+        int64_t budgetMs{};
+    };
+
+    // One match, as the model reads it.
+    struct GrepExcerpt
+    {
+        bool user{}; // true: in a prompt the user typed; false: on Claude's side
+        int64_t timestampMs{}; // the message's own time; 0 when its line carries none
+        std::wstring text; // one line: the match with its context, "…" where the message goes on
+    };
+
+    // One session's matches.
+    struct GrepSessionHit
+    {
+        std::wstring sessionId;
+        int hits{}; // matching messages (each message counts once, however often it matches)
+        int userHits{}; // of those, prompts the user typed
+        std::vector<GrepExcerpt> excerpts; // the first GrepOptions::maxExcerpts matches, in file order
+    };
+
+    // What a grep found, and how much of the work it did.
+    struct GrepOutcome
+    {
+        std::vector<GrepSessionHit> sessions; // the sessions with at least one match, in the order of the refs
+        size_t candidates{}; // refs left after ripgrep's file filter (all of them without one), of the batches it reached
+        size_t scanned{}; // of those, read to their end (a file deleted since the listing is not)
+        size_t notReached{}; // refs of the batches it never got to (neither filtered nor read) when it stopped early
+        bool complete{ true }; // false: the budget ran out, or the caller cancelled, before every candidate was read
+        bool prefiltered{}; // ripgrep filtered the files (on the required literal)
+        int tooComplex{}; // messages where the regex gave up (std::regex_error: complexity / stack); they count as no match
+        std::wstring error; // non-empty: the pattern cannot be used (empty, too long, or not a valid regex); nothing was read
+    };
+
+    // The longest piece of text that EVERY match of `pattern` contains and that a transcript's raw
+    // JSON line holds verbatim whenever a message's decoded text does: no quote, no backslash, no
+    // control character, no unpaired surrogate (the characters JSON escapes). The prefilter key of
+    // ripgrep and of the line reader. Empty when there is none — a regex whose matches share no
+    // literal (`\d+`, `a|b`), or a construct this reader does not follow; the grep then reads
+    // every candidate in full, which is slow but never misses a match.
+    //   pattern — the grep's pattern.
+    //   regex   — true: an ECMAScript regex. Only top-level plain characters count: a group, a
+    //             class, `.`, an anchor or a class escape ends a run; a quantifier that allows
+    //             zero ends it before its character; a top-level `|` gives no literal at all.
+    //   returns — the literal (original case), or empty.
+    //   throws  — std::bad_alloc.
+    std::wstring GrepRequiredLiteral(std::wstring_view pattern, bool regex);
+
+    // One excerpt: `contextChars` of `text` on each side of the match at [matchPos, matchPos +
+    // matchLen), whitespace collapsed to single spaces, "…" where `text` goes on; a match longer
+    // than kGrepMaxQuotedMatchChars is quoted up to that length. Never splits a surrogate pair.
+    // Pure.
+    //   text      — the message's text (original case).
+    //   matchPos  — where the match starts (clamped to the text).
+    //   matchLen  — its length.
+    //   throws    — std::bad_alloc.
+    std::wstring MakeGrepExcerpt(std::wstring_view text, size_t matchPos, size_t matchLen, size_t contextChars);
+
+    // Grep the transcripts of `refs`, in their order (a caller that wants the newest sessions
+    // first when the budget runs out passes them newest first).
+    //   refs      — the transcripts to read.
+    //   options   — the pattern and the limits.
+    //   cancelled — empty = never; else asked between files and every megabyte read: true ends
+    //               the grep with what it found (complete == false).
+    //   returns   — the outcome; `error` set (and nothing read) for an unusable pattern.
+    //   throws    — std::bad_alloc. A file that cannot be opened is skipped (it was deleted after
+    //               the listing); ripgrep that cannot start, times out or fails is replaced by
+    //               reading every file of its batch.
+    GrepOutcome GrepTranscripts(const std::vector<TranscriptRef>& refs, const GrepOptions& options, const std::function<bool()>& cancelled);
 }

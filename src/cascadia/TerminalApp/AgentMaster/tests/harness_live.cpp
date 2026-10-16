@@ -1089,10 +1089,12 @@ namespace
         {
             Say(L"  " + label + L": the first tool call came " + std::to_wstring(firstCallAt - userAt) + L" ms after the request reached the process");
         }
-        // Rule 5 asks for ONE sentence under 25 words. Printed, not checked: it is the model's style,
-        // and the first run with rule 1 drifted to two or three sentences (the reason rule 5 now says
-        // that the mention is not the reply). A sentence ends at '.', '!' or '?' followed by a space and
-        // an upper-case letter or a quote — so a title such as "v0.7.9" does not count as an end.
+        // The one-sentence rule (rule 6 since 2026-10-17, rule 5 before; one verdict sentence under 20
+        // words, under 25 before). Printed, not checked: it is the model's style, and the first run with
+        // rule 1 drifted to two or three sentences (the reason the rule says that the mention is not the
+        // reply). A sentence ends at '.', '!' or '?' followed by a space and an upper-case letter or a
+        // quote — so a title such as "v0.7.9" does not count as an end. The answer must not name a screen
+        // any more (the Telegram topic has none): printed too.
         int sentences = answer.empty() ? 0 : 1;
         int words = 0;
         bool inWord = false;
@@ -1108,7 +1110,8 @@ namespace
                 sentences += ((next >= L'A' && next <= L'Z') || next == L'"' || next == L'\x201C') ? 1 : 0;
             }
         }
-        Say(L"  " + label + L": the answer has " + std::to_wstring(sentences) + L" sentence(s), " + std::to_wstring(words) + L" word(s) (rule 5: one sentence, under 25 words)");
+        Say(L"  " + label + L": the answer has " + std::to_wstring(sentences) + L" sentence(s), " + std::to_wstring(words) + L" word(s) (rule 6: one sentence, under 20 words)" +
+            (answer.find(L"screen") != std::wstring::npos ? std::wstring{ L"; it NAMES A SCREEN (rule 6 forbids it)" } : std::wstring{}));
     }
 
     // Print what the search agent's model is GIVEN before any request: the command line of its
@@ -1146,7 +1149,7 @@ namespace
         // A toolset of its own, only to list what it declares: its handlers are never called.
         SessionSearchToolset::Callbacks listOnly;
         listOnly.catalog = [](int64_t, const std::function<bool()>&) { return std::shared_ptr<const SessionCatalog>{}; };
-        listOnly.onShow = [](const std::vector<std::wstring>&, const std::wstring&) {};
+        listOnly.onShow = [](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>&) {};
         SessionSearchToolset toolset{ std::move(listOnly) };
         for (const auto& server : toolset.Servers())
         {
@@ -1189,12 +1192,25 @@ namespace
                 Say(L"  agent candidates: " + std::to_wstring(e.sessionIds.size()));
                 break;
             case SessionSearchEventKind::Shown:
+            {
                 Say(L"  agent SHOWN " + std::to_wstring(e.sessionIds.size()) + L" session(s): " + Short(e.text));
                 for (size_t i = 0; i < e.entries.size() && i < 8; ++i)
                 {
                     Say(L"      " + e.entries[i].sessionId.substr(0, 8) + L"  " + Short(SessionSearchTitleOf(e.entries[i]), 90));
                 }
+                // The evidence of rules 4-5 (SESSIONS.md 9.12): printed, not checked — it is the model's own words.
+                size_t withWhy = 0;
+                for (size_t i = 0; i < e.sessionIds.size() && i < e.reasons.size(); ++i)
+                {
+                    if (!e.reasons[i].empty())
+                    {
+                        ++withWhy;
+                        Say(L"      why " + e.sessionIds[i].substr(0, 8) + L": " + Short(e.reasons[i], 200));
+                    }
+                }
+                Say(L"      " + std::to_wstring(withWhy) + L" of " + std::to_wstring(e.sessionIds.size()) + L" shown session(s) came with a why");
                 break;
+            }
             case SessionSearchEventKind::Answer:
                 Say(L"  agent answer: " + Short(e.text, 300));
                 break;
@@ -1263,12 +1279,13 @@ namespace
         const HarnessInventory inventory = agent.Inventory();
         SayInventory(inventory);
         Check(inventory.complete && inventory.permissionMode == L"bypassPermissions", L"the agent's process runs with bypass permissions (" + inventory.permissionMode + L")");
-        bool onlySearchTools = inventory.tools.size() == 2;
+        // Since 2026-10-17 (SESSIONS.md 9.12) the page search has four tools: search, grep and read to look, show to present.
+        bool onlySearchTools = inventory.tools.size() == 4;
         for (const auto& tool : inventory.tools)
         {
-            onlySearchTools = onlySearchTools && (tool == L"mcp__sessions__search" || tool == L"mcp__display__show");
+            onlySearchTools = onlySearchTools && (tool == L"mcp__sessions__search" || tool == L"mcp__sessions__grep" || tool == L"mcp__sessions__read" || tool == L"mcp__display__show");
         }
-        Check(onlySearchTools, L"its model has exactly two tools: " + Join(inventory.tools));
+        Check(onlySearchTools, L"its model has exactly its four tools: " + Join(inventory.tools));
         Say(L"  --- usage so far: context " + std::to_wstring(snapshot.usage.contextTokens) + L" of " + std::to_wstring(snapshot.usage.contextWindow) + L" tokens; input " + std::to_wstring(snapshot.usage.inputTokens) + L", output " + std::to_wstring(snapshot.usage.outputTokens) + L", cache read " + std::to_wstring(snapshot.usage.cacheReadTokens) + L", cache write " + std::to_wstring(snapshot.usage.cacheCreationTokens) + L" ---");
         Say(L"  --- the harness's own log lines of this run ---");
         SayHarnessLogSince(logMark);

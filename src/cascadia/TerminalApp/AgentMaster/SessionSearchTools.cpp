@@ -5,17 +5,20 @@
 // The Sessions AI search's tools; see SessionSearchTools.h, SESSIONS.md §9 and SDK_HARNESS.md §7.
 #include "SessionSearchTools.h"
 
-#include "ClaudeSpawn.h" // ClaudeProjectsDir, LogSwallowedException
+#include "ClaudeSpawn.h" // ClaudeProjectsDir, LogSwallowedException, ResolveClaudeTranscriptPath
 #include "SessionDbToolDefs.h" // the session database's tools (the database mode's server)
 #include "SessionStore.h" // stored titles, tags, favorites
+#include "TranscriptTurns.h" // RenderTranscriptTurnsFile: the read tool's compact transcript
 
 #include <windows.h>
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <cwchar>
 #include <stdexcept>
+#include <thread>
 
 namespace
 {
@@ -154,6 +157,15 @@ namespace
         return std::to_wstring(s / (365LL * 86400)) + L"y";
     }
 
+    // "2026-10-12 01:08 (5m ago)", "... (now)" within the last minute, the bare time when no age can be
+    // said: the `active` field of a search row (FormatSessionSearchResult writes the same form inline),
+    // for grep's rows and read's headers.
+    std::wstring ActiveWithAgo(int64_t activeUnixMs, int64_t nowUnixMs)
+    {
+        const std::wstring ago = AgoText(activeUnixMs, nowUnixMs);
+        return LocalDateTimeText(activeUnixMs) + (ago.empty() ? std::wstring{} : (ago == L"now" ? std::wstring{ L" (now)" } : (L" (" + ago + L" ago)")));
+    }
+
     // A local calendar date "YYYY-MM-DD" -> the Unix ms of its local midnight (endOfDay: of its
     // last millisecond). 0 when the text is not such a date. DST-safe: the C runtime resolves the
     // offset of that local wall-clock time (tm_isdst -1).
@@ -277,12 +289,46 @@ namespace
     // The schema above and the system prompt below say "90" in words the model reads.
     static_assert(kSessionSearchDefaultDays == 90, "kSearchSchema and kSystemPrompt state the default period: change their text too");
 
+    // The grep tool (SESSIONS.md §9.12): GrepTranscripts with the search's period and folder filters.
+    // `context` and `limit` say their bounds in words the model reads; ParseSessionGrepParams clamps
+    // to the same numbers.
+    const wchar_t kGrepSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("pattern":{"type":"string","description":"The text to find, case-insensitive: words the user remembers, an error message, a version, a file name. Plain text unless regex is true."},)"
+        LR"("regex":{"type":"boolean","description":"true: pattern is a regular expression (ECMAScript; . does not cross a line break, [\\s\\S] does). Keep a plain word in it: a pattern with a literal piece is much faster."},)"
+        LR"("ids":{"type":"array","items":{"type":"string"},"description":"Only these sessions: ids from search or grep results. Leave it out to grep every session of the period."},)"
+        LR"("days":{"type":"integer","description":"Without ids: only sessions active in the last N days. Default 90."},)"
+        LR"("after":{"type":"string","description":"Without ids: only sessions active on or after this local date, YYYY-MM-DD. Overrides days."},)"
+        LR"("before":{"type":"string","description":"Without ids: only sessions active on or before this local date, YYYY-MM-DD."},)"
+        LR"("dir":{"type":"string","description":"Without ids: part of the working folder's path."},)"
+        LR"("in":{"type":"string","enum":["all","user","claude"],"description":"all (default); user: only what the user typed; claude: only Claude's side (its replies and thinking, tool calls and their output)."},)"
+        LR"("context":{"type":"integer","description":"Characters shown on each side of a match, 40 to 400. Default 120."},)"
+        LR"("limit":{"type":"integer","description":"Sessions to return, 1 to 20. Default 10. Sessions where the user typed the text come first."})"
+        LR"(},"required":["pattern"]})";
+
+    // The read tool (SESSIONS.md §9.12): the Copy ▸ Transcript levels a confirming read needs.
+    // The numbers are kSessionReadMaxIds / kSessionReadDefaultChars and the clamp of `chars`.
+    const wchar_t kReadSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("ids":{"type":"array","items":{"type":"string"},"description":"1 to 8 ids from search or grep results: the sessions to read."},)"
+        LR"("level":{"type":"string","enum":["minimal","compact","default"],"description":"minimal: each turn's user message and Claude's final reply. compact (default): also compactions, the user's answers and slash commands. default: also every tool call on one line."},)"
+        LR"("chars":{"type":"integer","description":"Characters per session, 1000 to 40000. Default 6000. A longer session is cut to its first and last turns."})"
+        LR"(},"required":["ids"]})";
+    static_assert(kSessionReadMaxIds == 8 && kSessionReadDefaultChars == 6000, "kReadSchema and the system prompts state these numbers: change their text too");
+
     const wchar_t kShowSchema[] =
         LR"({"type":"object","properties":{)"
-        LR"("ids":{"type":"array","items":{"type":"string"},"description":"The ids of the sessions to show, best match first, exactly as search returned them. An empty list shows nothing: use it when nothing fits."},)"
+        LR"("ids":{"type":"array","items":{"type":"string"},"description":"The ids of the sessions to show, best match first, exactly as a result returned them. An empty list shows nothing: use it when nothing fits."},)"
         LR"("top":{"type":"integer","description":"Instead of ids: show the first N rows of your latest search, in its order."},)"
-        LR"("note":{"type":"string","description":"A caption of a few words for the list, in the user's language."})"
+        LR"("note":{"type":"string","description":"A caption of a few words for the list, in the user's language."},)"
+        LR"("why":{"type":"object","additionalProperties":{"type":"string"},"description":"For each shown id (the key, written as you pass it): one line of evidence you saw in read or grep, under 120 characters, in the user's language. The user's own words when you have them (You asked: \"...\"), else Claude's (Claude: \"...\"), else what the session shows; for a weak match, say so."})"
         LR"(},"required":[]})";
+
+    // show's description, the same in both modes. Surface-neutral since 2026-10-17: the Telegram Search topic shows the
+    // same call as one card per session (MESSAGING.md 5.4), so "the screen" / "the list" would be wrong there.
+    const wchar_t kShowDescription[] =
+        L"Show sessions to the user, in the given order, each with its why: the Sessions browser lists them, a phone gets "
+        L"one card each. Replaces what was shown before. Call it once per request, after reading the candidates.";
 
     // ASCII on purpose: it travels through a file and the API unchanged whatever the code page.
     //
@@ -297,56 +343,81 @@ namespace
     //     the last message's text — checked live). It stays in the conversation record (HarnessRecord, the
     //     review's source) and in the live test's trace.
     //   - ⚠ It made the final reply wordier: in the first live run after it, both answers had two or three
-    //     sentences, against rule 5 (every answer before it had one). Rule 5 therefore says that the mention
-    //     is not the reply, that a second sentence is not wanted, and shows one answer as an example
-    //     (the wording alone still left 3 of 5 answers with two sentences; with the example, 1 of 6 — an
-    //     answer to a question about content, with one caveat sentence; SESSIONS.md 9.9).
+    //     sentences, against the one-sentence rule (every answer before it had one). That rule (rule 6 since
+    //     2026-10-17, rule 5 before) therefore says that the mention is not the reply, that a second sentence is
+    //     not wanted, and shows one answer as an example (the wording alone still left 3 of 5 answers with two
+    //     sentences; with the example, 1 of 6 — an answer to a question about content, with one caveat sentence;
+    //     SESSIONS.md 9.9).
+    //
+    // Rules 4 to 6 are the user's (2026-10-17; SESSIONS.md 9.12): READ every candidate before it is shown (and grep
+    // for the user's own words), give each shown session a `why` — one line of evidence the model saw — and answer
+    // with a VERDICT sentence that says what was found. Before, the model showed what a search returned on its
+    // titles and snippets alone, and its sentence named the screen and the best match's title ("Three sessions are
+    // on the screen; ..."): wrong for the Telegram Search topic, which has no screen, and a repeat of the title the
+    // list already shows. The verdict's example keeps the measured lesson above: one sentence, shown.
     // ⚠ The m5 suite pins rule 1 and the rule count (tests_harness.cpp); SESSIONS.md 9.3 lists the rules.
     const wchar_t kSystemPrompt[] =
-        L"You are the search assistant inside the Sessions browser of Agentmaster, an app that manages Claude Code sessions. "
-        L"The user looks for past Claude Code sessions (conversations) on this computer. You find them with one tool and put them "
-        L"on the screen with another. The user sees the list on the screen and your one-sentence reply. The user does not see "
-        L"your tool calls or their results.\n"
+        L"You are the search assistant of Agentmaster, an app that manages Claude Code sessions. The user looks for past "
+        L"Claude Code sessions (conversations) on this computer, from the Sessions browser or from a phone. You find them, "
+        L"confirm them by reading them, and show them with one line of evidence each. The user sees the sessions you show, "
+        L"the evidence you give each one, and your one-sentence answer. The user does not see your tool calls or their "
+        L"results.\n"
         L"\n"
         L"Tools:\n"
         L"- mcp__sessions__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, "
         L"branch, the paths of files it touched, or a prompt the user typed. Filters narrow it: days, after, before, dir, "
         L"branch, tag, favorite, open. It returns rows with a short id.\n"
-        L"- mcp__display__show puts sessions on the screen, in your order, and replaces what was there. Give it the short ids "
-        L"from search results, best match first, or top:N to show the first N rows of your latest search as they are.\n"
+        L"- mcp__sessions__grep finds exact text, or a regex, in the conversations' full text (the user's prompts, Claude's "
+        L"replies, tool calls and their output) and returns each match in its context, with who wrote it and when. Give it "
+        L"ids to look inside your candidates, or a period and dir to look everywhere.\n"
+        L"- mcp__sessions__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final reply. "
+        L"A long session is cut to its first and last turns.\n"
+        L"- mcp__display__show shows sessions to the user, in your order, and replaces what was shown before. Give it the "
+        L"short ids from results, best match first, or top:N to show the first N rows of your latest search as they are, and "
+        L"a `why` for each.\n"
         L"\n"
         L"Rules:\n"
         L"1. Your first step, for every request: before your first tool call, in the same message, mention in one or two short "
         L"lines which kinds of tool calls you can use for this request, out of everything your tools can do (search by words; "
-        L"by folder, branch, tag, favorite or open; by a period with days, after or before; the full text with deep:true; sort "
-        L"and limit; show by ids or top:N), and how you will use them in different ways (the words or phrasings you will try, "
-        L"the filters, a longer period, deep:true last). Then make the calls of that step at once.\n"
+        L"by folder, branch, tag, favorite or open; by a period with days, after or before; the full text with deep:true; grep "
+        L"for exact words or a regex; read to confirm; sort and limit; show by ids or top:N), and how you will use them in "
+        L"different ways (the words or phrasings you will try, the filters, a longer period, grep for the user's own words, "
+        L"deep:true last). Then make the calls of that step at once.\n"
         L"2. Act at once. Never ask a question before you search. For every request: the first step of rule 1 (its mention and "
-        L"its searches), then call show exactly once, then reply.\n"
+        L"its searches), then read the candidates, then call show exactly once, then reply.\n"
         L"3. Be fast. One search is usually enough: 1 to 3 distinctive words, no filler words. Leave `days` out (a search then "
         L"covers the last 90 days) unless the user names a period. If a search finds nothing useful, try again with other or "
-        L"fewer words, then a longer period (days:365), then deep:true. Make independent searches in one step.\n"
-        L"4. Show only what fits the request, best first: usually 1 to 15 sessions. When nothing fits, call show with an empty "
-        L"ids list.\n"
-        L"5. After show returns, reply with exactly ONE short sentence, under 25 words, in the user's language: what is on "
-        L"the screen and the title of the best match, for example: Three sessions are on the screen; the best match is "
-        L"\"Fix tab drag crash\". The mention of rule 1 is not your reply: no second sentence, no list, no markdown, no ids.\n"
-        L"6. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
-        L"7. Times in the results are local time. Each result gives the current local time as `now`.\n"
-        L"8. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
+        L"fewer words, then a longer period (days:365), then grep or deep:true. When the user remembers exact words, an error "
+        L"or a version, grep for them. Make independent calls in one step.\n"
+        L"4. Confirm before you show: read every session you intend to show (one read call, up to 8 ids), and leave out the "
+        L"ones that are not about the request. Grep with ids when you need the exact place.\n"
+        L"5. Show only what fits the request, best first: usually 1 to 8 sessions. Give each a `why`: one line of evidence you "
+        L"saw in read or grep, under 120 characters, in the user's language. The user's own words when you have them (You "
+        L"asked: \"...\"), else Claude's (Claude: \"...\"), else what the session shows; for a weak match say so (Mentions a "
+        L"release only in passing). When nothing fits, call show with an empty ids list.\n"
+        L"6. After show returns, reply with exactly ONE short sentence, under 20 words, in the user's language, that answers "
+        L"the request: how many sessions you found and what they are about, for example: Two sessions are about releasing "
+        L"Agentmaster. Never mention a screen or a list. The mention of rule 1 is not your reply: no second sentence, no "
+        L"markdown, no ids.\n"
+        L"7. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
+        L"8. Times in the results are local time. Each result gives the current local time as `now`.\n"
+        L"9. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
         L"fits, and say in your sentence that older sessions are still being indexed.\n";
 
     // The same role and rules for the SESSION DATABASE's tools (SESSIONS_DB.md §8.2): rule 1 lists the database's
     // kinds of calls, rule 3 widens with `scopes` (the database's content search is cheap, so a longer period comes
-    // before more scopes) and lets the model check a doubtful candidate before it shows it. Rules 2 and 4-8 are the
-    // page search's, word for word (rule 8 reads the same `indexing` field, which the database adds while its first
-    // build runs). ASCII on purpose, like kSystemPrompt.
-    // ⚠ The m5 suite pins its rule count and that it names every tool of SessionDbToolDefs.h.
+    // before more scopes), rule 4 confirms with this toolset's own `read` (or the database's messages around a
+    // ref). Rules 2 and 5-9 are the page search's, word for word (rule 9 reads the same `indexing` field, which the
+    // database adds while its first build runs). ASCII on purpose, like kSystemPrompt. Since 2026-10-17 the old
+    // "check a doubtful candidate with session or messages" of rule 3 is rule 4's "read every candidate".
+    // ⚠ The m5 suite pins its rule count, that it names every tool of SessionDbToolDefs.h, and that it never says
+    //   `deep` (the database has scopes instead).
     const wchar_t kDatabaseSystemPrompt[] =
-        L"You are the search assistant inside the Sessions browser of Agentmaster, an app that manages Claude Code sessions. "
-        L"The user looks for past Claude Code sessions (conversations) on this computer. You find them with the tools of the "
-        L"session database and put them on the screen with another tool. The user sees the list on the screen and your "
-        L"one-sentence reply. The user does not see your tool calls or their results.\n"
+        L"You are the search assistant of Agentmaster, an app that manages Claude Code sessions. The user looks for past "
+        L"Claude Code sessions (conversations) on this computer, from the Sessions browser or from a phone. You find them "
+        L"with the tools of the session database, confirm them by reading them, and show them with one line of evidence "
+        L"each. The user sees the sessions you show, the evidence you give each one, and your one-sentence answer. The user "
+        L"does not see your tool calls or their results.\n"
         L"\n"
         L"Tools:\n"
         L"- mcp__agentmaster__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, "
@@ -358,30 +429,38 @@ namespace
         L"mcp__agentmaster__session gives one session's facts; mcp__agentmaster__messages reads its conversation (around a ref); "
         L"mcp__agentmaster__files lists the files it touched; mcp__agentmaster__related finds its forks and relatives; "
         L"mcp__agentmaster__usage counts tokens; mcp__agentmaster__sql runs one read-only query.\n"
-        L"- mcp__display__show puts sessions on the screen, in your order, and replaces what was there. Give it the short ids "
-        L"from any result, best match first, or top:N to show the first N rows of your latest search as they are.\n"
+        L"- mcp__agentmaster__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final "
+        L"reply. A long session is cut to its first and last turns.\n"
+        L"- mcp__display__show shows sessions to the user, in your order, and replaces what was shown before. Give it the "
+        L"short ids from any result, best match first, or top:N to show the first N rows of your latest search as they are, "
+        L"and a `why` for each.\n"
         L"\n"
         L"Rules:\n"
         L"1. Your first step, for every request: before your first tool call, in the same message, mention in one or two short "
         L"lines which kinds of tool calls you can use for this request, out of everything your tools can do (search by words "
         L"and scopes; by folder, branch, tag, favorite or open; by a period with days, after or before; grep for exact text; "
-        L"who_touched for a file; timeline for a period; session or messages to check a candidate; show by ids or top:N), and "
-        L"how you will use them in different ways (the words or phrasings you will try, the filters, a longer period, more "
-        L"scopes). Then make the calls of that step at once.\n"
+        L"who_touched for a file; timeline for a period; read, session or messages to check a candidate; show by ids or "
+        L"top:N), and how you will use them in different ways (the words or phrasings you will try, the filters, a longer "
+        L"period, more scopes). Then make the calls of that step at once.\n"
         L"2. Act at once. Never ask a question before you search. For every request: the first step of rule 1 (its mention and "
-        L"its searches), then call show exactly once, then reply.\n"
+        L"its searches), then read the candidates, then call show exactly once, then reply.\n"
         L"3. Be fast. One search is usually enough: 1 to 3 distinctive words, no filler words. Leave `days` out (a search then "
         L"covers the last 90 days) unless the user names a period. If a search finds nothing useful, try again with other or "
-        L"fewer words, then a longer period (days:365), then more scopes (tool). Make independent calls in one step. Check a "
-        L"doubtful candidate with session or messages before you show it.\n"
-        L"4. Show only what fits the request, best first: usually 1 to 15 sessions. When nothing fits, call show with an empty "
-        L"ids list.\n"
-        L"5. After show returns, reply with exactly ONE short sentence, under 25 words, in the user's language: what is on "
-        L"the screen and the title of the best match, for example: Three sessions are on the screen; the best match is "
-        L"\"Fix tab drag crash\". The mention of rule 1 is not your reply: no second sentence, no list, no markdown, no ids.\n"
-        L"6. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
-        L"7. Times in the results are local time. Each result gives the current local time as `now`.\n"
-        L"8. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
+        L"fewer words, then a longer period (days:365), then more scopes (tool). When the user remembers exact words, an "
+        L"error or a version, grep for them. Make independent calls in one step.\n"
+        L"4. Confirm before you show: read every session you intend to show (one read call, up to 8 ids), and leave out the "
+        L"ones that are not about the request. Use grep, or messages around a ref, when you need the exact place.\n"
+        L"5. Show only what fits the request, best first: usually 1 to 8 sessions. Give each a `why`: one line of evidence you "
+        L"saw in read or grep, under 120 characters, in the user's language. The user's own words when you have them (You "
+        L"asked: \"...\"), else Claude's (Claude: \"...\"), else what the session shows; for a weak match say so (Mentions a "
+        L"release only in passing). When nothing fits, call show with an empty ids list.\n"
+        L"6. After show returns, reply with exactly ONE short sentence, under 20 words, in the user's language, that answers "
+        L"the request: how many sessions you found and what they are about, for example: Two sessions are about releasing "
+        L"Agentmaster. Never mention a screen or a list. The mention of rule 1 is not your reply: no second sentence, no "
+        L"markdown, no ids.\n"
+        L"7. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
+        L"8. Times in the results are local time. Each result gives the current local time as `now`.\n"
+        L"9. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
         L"fits, and say in your sentence that older sessions are still being indexed.\n";
 
     // `ascii` (a SessionDbToolDefs.h string: ASCII by its contract) as a wide string; a byte above 0x7F becomes '?'
@@ -1011,6 +1090,202 @@ namespace Agentmaster
         return json::Dump(root);
     }
 
+    // ===== grep and read =====================================================================
+
+    std::optional<SessionGrepParams> ParseSessionGrepParams(const json::Value& arguments, std::wstring& error)
+    {
+        using Type = json::Value::Type;
+        SessionGrepParams p;
+        error.clear();
+        const auto* pattern = arguments.Find(L"pattern");
+        if (!pattern || pattern->type != Type::Str || Trim(pattern->str).empty())
+        {
+            error = L"The argument \"pattern\" is required: the text to find (or a regex with \"regex\": true).";
+            return std::nullopt;
+        }
+        p.regex = arguments.BoolAt(L"regex");
+        // Plain text is trimmed (an outer space only narrows what matches, and the model adds none on purpose);
+        // a regex is taken as written, its spaces may be part of what it means.
+        p.pattern = p.regex ? pattern->str : Trim(pattern->str);
+        if (const auto* ids = arguments.Find(L"ids"); ids && ids->type != Type::Null)
+        {
+            if (ids->type != Type::Arr)
+            {
+                error = L"The argument \"ids\" must be an array of ids from search or grep results.";
+                return std::nullopt;
+            }
+            for (const auto& v : ids->arr)
+            {
+                if (v.type == Type::Str && !Trim(v.str).empty() && p.ids.size() < 20)
+                {
+                    p.ids.push_back(Trim(v.str));
+                }
+            }
+        }
+        // The period and the folder are the search's arguments under the same names: one parser, one set of rules
+        // and messages (a wrong type names the argument; after/before are local dates).
+        const auto period = ParseSessionSearchParams(arguments, 0, error);
+        if (!period)
+        {
+            return std::nullopt;
+        }
+        p.days = period->days;
+        p.afterUnixMs = period->afterUnixMs;
+        p.beforeUnixMs = period->beforeUnixMs;
+        p.dir = period->dir;
+        const std::wstring in = FoldLower(Trim(arguments.StrAt(L"in")));
+        p.user = in != L"claude";
+        p.agent = in != L"user";
+        if (const auto* v = arguments.Find(L"context"); v && v->type == Type::Num)
+        {
+            p.context = static_cast<int>(std::clamp<int64_t>(v->AsI64(), 40, 400));
+        }
+        if (const auto* v = arguments.Find(L"limit"); v && v->type == Type::Num)
+        {
+            p.limit = static_cast<int>(std::clamp<int64_t>(v->AsI64(), 1, 20));
+        }
+        return p;
+    }
+
+    std::optional<SessionReadParams> ParseSessionReadParams(const json::Value& arguments, std::wstring& error)
+    {
+        using Type = json::Value::Type;
+        SessionReadParams p;
+        error.clear();
+        const auto* ids = arguments.Find(L"ids");
+        if (!ids || ids->type != Type::Arr)
+        {
+            error = L"Pass \"ids\": an array of 1 to " + std::to_wstring(kSessionReadMaxIds) + L" ids from search or grep results.";
+            return std::nullopt;
+        }
+        std::unordered_set<std::wstring> seen;
+        for (const auto& v : ids->arr)
+        {
+            if (v.type != Type::Str)
+            {
+                continue;
+            }
+            std::wstring id = Trim(v.str);
+            if (id.empty() || !seen.insert(FoldLower(id)).second)
+            {
+                continue; // a blank entry, or one the model wrote twice
+            }
+            if (p.ids.size() < kSessionReadMaxIds)
+            {
+                p.ids.push_back(std::move(id));
+            }
+            else
+            {
+                ++p.extraIds;
+            }
+        }
+        if (p.ids.empty())
+        {
+            error = L"\"ids\" names no session: pass 1 to " + std::to_wstring(kSessionReadMaxIds) + L" ids from search or grep results.";
+            return std::nullopt;
+        }
+        const std::wstring level = FoldLower(Trim(arguments.StrAt(L"level")));
+        p.level = level == L"minimal" ? SessionReadLevel::Minimal : (level == L"default" ? SessionReadLevel::Default : SessionReadLevel::Compact);
+        if (const auto* v = arguments.Find(L"chars"); v && v->type == Type::Num)
+        {
+            p.chars = static_cast<size_t>(std::clamp<int64_t>(v->AsI64(), 1000, 40000));
+        }
+        return p;
+    }
+
+    SessionReadCut CutRenderedTranscript(std::wstring_view markdown, size_t budgetChars)
+    {
+        SessionReadCut cut;
+        const size_t budget = (std::max)(budgetChars, size_t{ 1000 });
+        // The turns: every line that starts with "### " (TranscriptTurns' turn heading, and "### Work before the
+        // first prompt"). A message's own Markdown never starts such a line: the renderer quotes it ("> ...").
+        std::vector<size_t> starts;
+        for (size_t p = markdown.find(L"### "); p != std::wstring_view::npos; p = markdown.find(L"### ", p + 4))
+        {
+            if (p == 0 || markdown[p - 1] == L'\n')
+            {
+                starts.push_back(p);
+            }
+        }
+        cut.turns = starts.size();
+        if (markdown.size() <= budget)
+        {
+            cut.text.assign(markdown);
+            return cut;
+        }
+        // Appends `piece`, or its first `room` characters and a cut marker (never splitting a surrogate pair).
+        const auto append = [&](std::wstring_view piece, size_t room) {
+            if (piece.size() <= room)
+            {
+                cut.text.append(piece);
+                return;
+            }
+            size_t keep = room;
+            if (keep > 0 && piece[keep - 1] >= 0xD800 && piece[keep - 1] <= 0xDBFF)
+            {
+                --keep;
+            }
+            cut.text.append(piece.substr(0, keep));
+            cut.text.append(L"\n[... cut ...]\n\n");
+            cut.cutInside = true;
+        };
+        if (starts.empty())
+        {
+            append(markdown, budget); // no turn to keep whole: the document's head
+            return cut;
+        }
+        const auto turnAt = [&](size_t k) {
+            const size_t from = starts[k];
+            const size_t to = k + 1 < starts.size() ? starts[k + 1] : markdown.size();
+            return markdown.substr(from, to - from);
+        };
+        // What comes before the first turn (a legend, a note): at most a quarter of the budget.
+        append(markdown.substr(0, starts[0]), budget / 4);
+        const size_t room = budget > cut.text.size() ? budget - cut.text.size() : 0;
+        const size_t frontRoom = room * 2 / 5; // the first turns: what the session was about
+        const size_t backRoom = room - frontRoom; // the last turns: how it ended
+        // The front: the first turn always (cut if it alone is too long), then more while they fit.
+        size_t frontEnd = 0;
+        size_t frontUsed = 0;
+        while (frontEnd < starts.size())
+        {
+            const size_t len = turnAt(frontEnd).size();
+            if (frontEnd > 0 && frontUsed + len > frontRoom)
+            {
+                break;
+            }
+            frontUsed += len;
+            ++frontEnd;
+        }
+        // The back: the last turn always (when it is not a front turn), then earlier ones while they fit.
+        size_t backBegin = starts.size();
+        size_t backUsed = 0;
+        while (backBegin > frontEnd)
+        {
+            const size_t len = turnAt(backBegin - 1).size();
+            if (backBegin < starts.size() && backUsed + len > backRoom)
+            {
+                break;
+            }
+            backUsed += len;
+            --backBegin;
+        }
+        for (size_t k = 0; k < frontEnd; ++k)
+        {
+            append(turnAt(k), k == 0 ? frontRoom : turnAt(k).size()); // only the first can be cut; the rest fit
+        }
+        cut.omittedTurns = backBegin - frontEnd;
+        if (cut.omittedTurns > 0)
+        {
+            cut.text.append(L"[... " + std::to_wstring(cut.omittedTurns) + (cut.omittedTurns == 1 ? L" turn" : L" turns") + L" left out here ...]\n\n");
+        }
+        for (size_t k = backBegin; k < starts.size(); ++k)
+        {
+            append(turnAt(k), k == starts.size() - 1 && backBegin == k ? backRoom : turnAt(k).size()); // a lone last turn can be cut
+        }
+        return cut;
+    }
+
     // ===== the tool servers =================================================================
 
     SessionSearchToolset::SessionSearchToolset(Callbacks callbacks) :
@@ -1192,6 +1467,95 @@ namespace Agentmaster
         std::lock_guard lock{ _mutex };
         _handles.clear();
         _lastSearchIds.clear();
+        _known.clear();
+    }
+
+    std::wstring SessionSearchToolset::AssignHandleLocked(const std::wstring& id)
+    {
+        // The short id is the first 8 characters. When another session of this
+        // conversation already has it, this one gets a longer prefix, until it is unique.
+        std::wstring handle;
+        for (size_t len = 8; len <= id.size(); len += 5)
+        {
+            handle = FoldLower(id.substr(0, len));
+            const auto it = _handles.find(handle);
+            if (it == _handles.end() || it->second == id)
+            {
+                break;
+            }
+            handle.clear();
+        }
+        if (handle.empty())
+        {
+            handle = FoldLower(id);
+        }
+        _handles[handle] = id;
+        return handle;
+    }
+
+    std::vector<std::wstring> SessionSearchToolset::ResolveWrittenIds(const std::vector<std::wstring>& written, std::vector<std::wstring>& unknown)
+    {
+        if (_callbacks.database.resolve)
+        {
+            // The database's own tools print short ids no search of this conversation recorded (show's rule).
+            std::vector<std::wstring> missing;
+            for (const auto& w : written)
+            {
+                if (ResolveHandle(w).empty())
+                {
+                    missing.push_back(Trim(w));
+                }
+            }
+            if (!missing.empty())
+            {
+                RememberHandles(missing, _callbacks.database.resolve(missing));
+            }
+        }
+        std::vector<std::wstring> out;
+        std::unordered_set<std::wstring> seen;
+        for (const auto& w : written)
+        {
+            std::wstring full = ResolveHandle(w);
+            if (full.empty())
+            {
+                const std::wstring text = Trim(w);
+                if (IsGuidToken(text))
+                {
+                    // A whole session id that no result printed (the user pasted one): taken as it is, and given a
+                    // short id so `show` takes it too. TranscriptPathOf finds its file, or the reader says it is gone.
+                    full = FoldLower(text.front() == L'{' ? text.substr(1, text.size() - 2) : text);
+                    std::lock_guard lock{ _mutex };
+                    AssignHandleLocked(full);
+                }
+            }
+            if (full.empty())
+            {
+                if (unknown.size() < 5)
+                {
+                    unknown.push_back(Cut(Trim(w), 40));
+                }
+                continue;
+            }
+            if (seen.insert(full).second)
+            {
+                out.push_back(full);
+            }
+        }
+        return out;
+    }
+
+    std::wstring SessionSearchToolset::TranscriptPathOf(const std::wstring& sessionId) const
+    {
+        {
+            std::lock_guard lock{ _mutex };
+            if (const auto it = _known.find(sessionId); it != _known.end() && !it->second.path.empty())
+            {
+                return it->second.path;
+            }
+        }
+        // Not from a result of this conversation (the database mode, an id the model typed whole): where Claude
+        // keeps it — or the test's scratch folder.
+        return _callbacks.transcriptPath ? _callbacks.transcriptPath(sessionId) : ResolveClaudeTranscriptPath(sessionId);
     }
 
     std::wstring SessionSearchToolset::ResolveHandle(const std::wstring& handle) const
@@ -1277,27 +1641,12 @@ namespace Agentmaster
             std::lock_guard lock{ _mutex };
             for (const auto& row : outcome.rows)
             {
-                const std::wstring& id = catalog->entries[row.entryIndex].sessionId;
+                const SessionIndexEntry& entry = catalog->entries[row.entryIndex];
+                const std::wstring& id = entry.sessionId;
                 ids.push_back(id);
-                // The short id is the first 8 characters. When another session of this
-                // conversation already has it, this one gets a longer prefix, until it is unique.
-                std::wstring handle;
-                for (size_t len = 8; len <= id.size(); len += 5)
-                {
-                    handle = FoldLower(id.substr(0, len));
-                    const auto it = _handles.find(handle);
-                    if (it == _handles.end() || it->second == id)
-                    {
-                        break;
-                    }
-                    handle.clear();
-                }
-                if (handle.empty())
-                {
-                    handle = FoldLower(id);
-                }
-                _handles[handle] = id;
-                handleById[id] = handle;
+                handleById[id] = AssignHandleLocked(id);
+                // Where its transcript is: `read` and a `grep` with ids open it without a new catalog.
+                _known[id] = KnownSession{ entry.path, Cut(OneLine(SessionSearchTitleOf(entry)), 120), SessionSearchLastActivityMs(entry), entry.sizeBytes };
             }
             _lastSearchIds = ids;
         }
@@ -1310,6 +1659,496 @@ namespace Agentmaster
             return it != handleById.end() ? it->second : SessionSearchHandleOf(id);
         };
         return { FormatSessionSearchResult(*catalog, *params, outcome, now, handleOf), false };
+    }
+
+    HarnessToolResult SessionSearchToolset::Grep(const json::Value& arguments)
+    {
+        using json::Value;
+        const int64_t now = Now();
+        std::wstring error;
+        const auto params = ParseSessionGrepParams(arguments, error);
+        if (!params)
+        {
+            return { error, true };
+        }
+        // "Is this grep still wanted?" (Search's rule: the handler blocks the SDK's reader thread, so a replaced
+        // request must stop it, and must leave no trace.)
+        std::function<bool()> cancelled;
+        if (_callbacks.generation)
+        {
+            const uint64_t startGeneration = _callbacks.generation();
+            cancelled = [this, startGeneration] { return _callbacks.generation() != startGeneration; };
+        }
+        const auto cancelledResult = [] {
+            return HarnessToolResult{ L"The grep was cancelled: the request was stopped or replaced.", true };
+        };
+        // The period and the folder, by the search's own rules.
+        SessionSearchParams period;
+        period.days = params->days;
+        period.afterUnixMs = params->afterUnixMs;
+        period.beforeUnixMs = params->beforeUnixMs;
+        period.dir = params->dir;
+        const int64_t since = SessionSearchSinceMs(period, now);
+        std::wstring window;
+        if (params->ids.empty())
+        {
+            window = params->afterUnixMs != 0 ? (L"from " + LocalDateText(params->afterUnixMs)) : (L"last " + std::to_wstring(params->days) + L" days");
+            if (params->beforeUnixMs != 0)
+            {
+                window += L" until " + LocalDateText(params->beforeUnixMs);
+            }
+            if (!params->dir.empty())
+            {
+                window += L" in " + params->dir;
+            }
+        }
+        else
+        {
+            window = std::to_wstring(params->ids.size()) + (params->ids.size() == 1 ? L" session asked for" : L" sessions asked for");
+        }
+        if (_callbacks.onSearching)
+        {
+            _callbacks.onSearching(L"grep \x201C" + Cut(OneLine(params->pattern), 60) + L"\x201D \x00B7 " + window);
+        }
+
+        // The transcripts to read, and what each one's row says (title, activity): the ids' (what a result of this
+        // conversation recorded), or the catalog's of the period, NEWEST first so a grep that runs out of time has
+        // read the newest sessions.
+        std::vector<std::wstring> unknown;
+        std::vector<TranscriptRef> refs;
+        std::unordered_map<std::wstring, KnownSession> facts;
+        std::shared_ptr<const SessionCatalog> catalog; // the period's (no ids), kept for the matching rows' facts
+        bool partial = false;
+        int64_t coveredSince = 0;
+        if (!params->ids.empty())
+        {
+            const std::vector<std::wstring> ids = ResolveWrittenIds(params->ids, unknown);
+            if (ids.empty())
+            {
+                std::wstring text = L"None of these ids is from a result of this conversation:";
+                for (const auto& u : unknown)
+                {
+                    text += L" " + u;
+                }
+                text += L". Search first, then pass the ids exactly as a result printed them.";
+                return { text, true };
+            }
+            for (const auto& id : ids)
+            {
+                KnownSession known;
+                {
+                    std::lock_guard lock{ _mutex };
+                    if (const auto it = _known.find(id); it != _known.end())
+                    {
+                        known = it->second;
+                    }
+                }
+                if (known.path.empty())
+                {
+                    known.path = TranscriptPathOf(id); // takes _mutex itself: outside the lock above
+                }
+                if (known.path.empty())
+                {
+                    if (unknown.size() < 5)
+                    {
+                        unknown.push_back(SessionSearchHandleOf(id) + L" (its transcript is gone)");
+                    }
+                    continue;
+                }
+                TranscriptRef ref;
+                ref.sessionId = id;
+                ref.path = known.path;
+                ref.sizeBytes = known.sizeBytes;
+                refs.push_back(std::move(ref));
+                facts.emplace(id, std::move(known));
+            }
+        }
+        else
+        {
+            catalog = _callbacks.catalog ? _callbacks.catalog(since, cancelled) : std::shared_ptr<const SessionCatalog>{};
+            if (cancelled && cancelled())
+            {
+                return cancelledResult();
+            }
+            if (!catalog)
+            {
+                // No index at all yet (Search's message): the model must not read "no match" as "no such session".
+                return { L"The session index is still being read, so the grep could not run over a period. Grep the ids of a search instead, or reply that the session index is still being read.", true };
+            }
+            const std::wstring dirLower = FoldLower(params->dir);
+            for (const auto& e : catalog->entries)
+            {
+                const int64_t active = SessionSearchLastActivityMs(e);
+                if (active < since || (params->beforeUnixMs != 0 && active > params->beforeUnixMs))
+                {
+                    continue;
+                }
+                if (!dirLower.empty() && !MatchesPathQuery(FoldLower(SessionSearchDirOf(e)), dirLower, false))
+                {
+                    continue;
+                }
+                TranscriptRef ref;
+                ref.sessionId = e.sessionId;
+                ref.path = e.path;
+                ref.sizeBytes = e.sizeBytes;
+                ref.mtimeMs = e.mtimeMs;
+                ref.birthMs = e.birthMs;
+                refs.push_back(std::move(ref));
+            }
+            partial = catalog->coveredSinceUnixMs > since;
+            coveredSince = catalog->coveredSinceUnixMs;
+        }
+
+        GrepOptions options;
+        options.pattern = params->pattern;
+        options.regex = params->regex;
+        options.user = params->user;
+        options.agent = params->agent;
+        options.contextChars = static_cast<size_t>(params->context);
+        options.budgetMs = kSessionGrepBudgetMs;
+        GrepOutcome outcome = GrepTranscripts(refs, options, cancelled);
+        if (catalog)
+        {
+            // The rows' facts, for the sessions that matched only (a period holds thousands that did not).
+            std::unordered_map<std::wstring, size_t> byId;
+            byId.reserve(catalog->entries.size());
+            for (size_t i = 0; i < catalog->entries.size(); ++i)
+            {
+                byId.emplace(catalog->entries[i].sessionId, i);
+            }
+            for (const auto& s : outcome.sessions)
+            {
+                if (const auto it = byId.find(s.sessionId); it != byId.end())
+                {
+                    const SessionIndexEntry& e = catalog->entries[it->second];
+                    facts.emplace(s.sessionId, KnownSession{ e.path, Cut(OneLine(SessionSearchTitleOf(e)), 120), SessionSearchLastActivityMs(e), e.sizeBytes });
+                }
+            }
+        }
+        return FinishGrep(*params, std::move(outcome), refs.size(), window, partial, coveredSince, unknown, facts, now, cancelled);
+    }
+
+    HarnessToolResult SessionSearchToolset::FinishGrep(const SessionGrepParams& params, GrepOutcome outcome, size_t searched, const std::wstring& window, bool partial, int64_t coveredSince, const std::vector<std::wstring>& unknown, const std::unordered_map<std::wstring, KnownSession>& facts, int64_t now, const std::function<bool()>& cancelled)
+    {
+        using json::Value;
+        if (cancelled && cancelled())
+        {
+            // Before the short ids are recorded: a cancelled grep must leave no trace (Search's rule).
+            return { L"The grep was cancelled: the request was stopped or replaced.", true };
+        }
+        if (!outcome.error.empty())
+        {
+            return { outcome.error, true };
+        }
+        // The order the model reads: sessions where the USER typed the text first (a person remembers a session by
+        // their own words), then by matching messages; the refs' order (newest first) breaks the ties.
+        std::vector<const GrepSessionHit*> order;
+        order.reserve(outcome.sessions.size());
+        for (const auto& s : outcome.sessions)
+        {
+            order.push_back(&s);
+        }
+        std::stable_sort(order.begin(), order.end(), [](const GrepSessionHit* a, const GrepSessionHit* b) {
+            if ((a->userHits > 0) != (b->userHits > 0))
+            {
+                return a->userHits > 0;
+            }
+            return a->hits > b->hits;
+        });
+        if (order.size() > static_cast<size_t>(params.limit))
+        {
+            order.resize(static_cast<size_t>(params.limit));
+        }
+
+        Value root = Value::MkObj();
+        root.Set(L"now", Value::MkStr(LocalDateTimeText(now)));
+        root.Set(L"pattern", Value::MkStr(params.pattern));
+        if (params.regex)
+        {
+            root.Set(L"regex", Value::MkBool(true));
+        }
+        root.Set(L"in", Value::MkStr(params.user && params.agent ? L"all" : (params.user ? L"user" : L"claude")));
+        root.Set(L"window", Value::MkStr(window));
+        root.Set(L"searched", Value::MkNum(static_cast<double>(searched)));
+        root.Set(L"read", Value::MkNum(static_cast<double>(outcome.scanned)));
+        root.Set(L"matched", Value::MkNum(static_cast<double>(outcome.sessions.size())));
+        root.Set(L"returned", Value::MkNum(static_cast<double>(order.size())));
+        if (!outcome.complete)
+        {
+            // The budget ran out: the model must not read "matched N" as all there is.
+            const size_t notRead = (outcome.candidates > outcome.scanned ? outcome.candidates - outcome.scanned : 0) + outcome.notReached;
+            root.Set(L"stopped", Value::MkStr(L"Out of time after " + std::to_wstring(kSessionGrepBudgetMs / 1000) + L" s: up to " + std::to_wstring(notRead) +
+                                              (params.ids.empty() ? L" of the oldest sessions of the period" : L" of the sessions asked for") +
+                                              L" were not read, so more sessions may match. Narrow it with ids, dir or a shorter period to read them."));
+        }
+        if (partial)
+        {
+            root.Set(L"indexing", Value::MkStr(L"Sessions last active before " + LocalDateTimeText(coveredSince) + L" are not in this result: they are still being indexed. A grep a little later has them."));
+        }
+        if (outcome.tooComplex > 0)
+        {
+            root.Set(L"too_complex", Value::MkStr(std::to_wstring(outcome.tooComplex) + L" messages were too long or too complex for this regex and count as no match: make it simpler."));
+        }
+        if (!unknown.empty())
+        {
+            Value names = Value::MkArr();
+            for (const auto& u : unknown)
+            {
+                names.Push(Value::MkStr(u));
+            }
+            root.Set(L"unknown_ids", std::move(names));
+        }
+        if (outcome.sessions.empty() && outcome.complete)
+        {
+            root.Set(L"hint", Value::MkStr(params.regex ? L"No message holds it. Try a simpler regex, other words, or a longer period (days)." : L"No message holds it. Try fewer or other words, a longer period (days), or a regex."));
+        }
+        // The rows' facts first (no lock held), then the short ids and the transcript places (under _mutex).
+        std::vector<KnownSession> rowFacts;
+        rowFacts.reserve(order.size());
+        for (const auto* s : order)
+        {
+            const auto it = facts.find(s->sessionId);
+            rowFacts.push_back(it != facts.end() ? it->second : KnownSession{});
+        }
+        Value sessions = Value::MkArr();
+        {
+            std::lock_guard lock{ _mutex };
+            for (size_t i = 0; i < order.size(); ++i)
+            {
+                const GrepSessionHit& s = *order[i];
+                const KnownSession& f = rowFacts[i];
+                Value o = Value::MkObj();
+                o.Set(L"id", Value::MkStr(AssignHandleLocked(s.sessionId)));
+                if (!f.path.empty())
+                {
+                    _known[s.sessionId] = f; // `read` and a later grep with ids open it from here
+                }
+                if (!f.title.empty())
+                {
+                    o.Set(L"title", Value::MkStr(f.title));
+                }
+                if (f.activeMs > 0)
+                {
+                    o.Set(L"active", Value::MkStr(ActiveWithAgo(f.activeMs, now)));
+                }
+                o.Set(L"hits", Value::MkNum(s.hits));
+                if (s.userHits > 0)
+                {
+                    o.Set(L"user_hits", Value::MkNum(s.userHits));
+                }
+                Value matches = Value::MkArr();
+                for (const auto& x : s.excerpts)
+                {
+                    Value m = Value::MkObj();
+                    m.Set(L"by", Value::MkStr(x.user ? L"user" : L"claude"));
+                    if (x.timestampMs > 0)
+                    {
+                        m.Set(L"at", Value::MkStr(LocalDateTimeText(x.timestampMs)));
+                    }
+                    m.Set(L"text", Value::MkStr(x.text));
+                    matches.Push(std::move(m));
+                }
+                o.Set(L"matches", std::move(matches));
+                sessions.Push(std::move(o));
+            }
+        }
+        root.Set(L"sessions", std::move(sessions));
+        return { json::Dump(root), false };
+    }
+
+    HarnessToolResult SessionSearchToolset::Read(const json::Value& arguments)
+    {
+        const int64_t now = Now();
+        std::wstring error;
+        const auto params = ParseSessionReadParams(arguments, error);
+        if (!params)
+        {
+            return { error, true };
+        }
+        std::function<bool()> cancelled;
+        if (_callbacks.generation)
+        {
+            const uint64_t startGeneration = _callbacks.generation();
+            cancelled = [this, startGeneration] { return _callbacks.generation() != startGeneration; };
+        }
+        std::vector<std::wstring> unknown;
+        const std::vector<std::wstring> ids = ResolveWrittenIds(params->ids, unknown);
+        if (ids.empty())
+        {
+            std::wstring text = L"None of these ids is from a result of this conversation:";
+            for (const auto& u : unknown)
+            {
+                text += L" " + u;
+            }
+            text += L". Search first, then pass the ids exactly as a result printed them.";
+            return { text, true };
+        }
+        if (_callbacks.onSearching)
+        {
+            _callbacks.onSearching(L"reading " + (ids.size() == 1 ? std::wstring{ L"1 session" } : std::to_wstring(ids.size()) + L" sessions"));
+        }
+
+        TurnsOptions opts = TurnsOptionsForLevel(params->level == SessionReadLevel::Minimal ? TurnsLevel::Minimal : (params->level == SessionReadLevel::Default ? TurnsLevel::Default : TurnsLevel::Compact));
+        // ONE session as it is: not the sessions it was forked from (the chain walk reads every older transcript of
+        // its project folder) and not its subagents' work (their transcripts can outweigh the session's own). A
+        // confirming read needs what the user asked and what Claude answered.
+        opts.chain = false;
+        opts.agents = false;
+
+        std::vector<KnownSession> facts(ids.size());
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            {
+                std::lock_guard lock{ _mutex };
+                if (const auto it = _known.find(ids[i]); it != _known.end())
+                {
+                    facts[i] = it->second;
+                }
+            }
+            if (facts[i].path.empty())
+            {
+                facts[i].path = TranscriptPathOf(ids[i]); // takes _mutex itself: outside the lock above
+            }
+        }
+
+        // The renders run in parallel, one thread each (a render reads and parses the whole transcript: 0.1 to 1.5 s
+        // measured for the copy menu, seconds for the largest). The threads are DETACHED and share only `renders`:
+        // a call that stops waiting (its budget, or the request was replaced) returns at once, and a late render
+        // finishes into a state nobody reads any more, which the last thread frees.
+        struct Renders
+        {
+            std::mutex m;
+            std::condition_variable cv;
+            size_t done{};
+            std::vector<std::optional<std::wstring>> texts;
+            std::vector<char> finished;
+        };
+        const auto renders = std::make_shared<Renders>();
+        renders->texts.resize(ids.size());
+        renders->finished.assign(ids.size(), 0);
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            if (facts[i].path.empty())
+            {
+                std::lock_guard lk{ renders->m };
+                renders->finished[i] = 1; // no transcript: nothing to render (the result says it is gone)
+                ++renders->done;
+                continue;
+            }
+            const auto renderOne = [renders, i, path = facts[i].path, opts]() {
+                try
+                {
+                    std::optional<std::wstring> text = RenderTranscriptTurnsFile(std::filesystem::path{ path }, opts, /*utc*/ false);
+                    {
+                        std::lock_guard lk{ renders->m };
+                        renders->texts[i] = std::move(text);
+                        renders->finished[i] = 1;
+                        ++renders->done;
+                    }
+                    renders->cv.notify_all();
+                }
+                catch (...)
+                {
+                    // A render thread must never let an exception out (std::terminate). Its session then reads
+                    // "not read in time" when the call's budget ends.
+                    LogSwallowedException(L"SessionSearchToolset::Read: a render thread");
+                }
+            };
+            try
+            {
+                std::thread{ renderOne }.detach();
+            }
+            catch (...)
+            {
+                // No thread for it (std::system_error: the process is out of threads): rendered here, in the call.
+                LogSwallowedException(L"SessionSearchToolset::Read: starting a render thread");
+                renderOne();
+            }
+        }
+        std::vector<std::optional<std::wstring>> texts(ids.size());
+        std::vector<char> finished(ids.size(), 0);
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{ kSessionReadBudgetMs };
+            std::unique_lock lk{ renders->m };
+            while (renders->done < ids.size() && std::chrono::steady_clock::now() < deadline && !(cancelled && cancelled()))
+            {
+                renders->cv.wait_for(lk, std::chrono::milliseconds{ 100 });
+            }
+            for (size_t i = 0; i < ids.size(); ++i)
+            {
+                if (renders->finished[i])
+                {
+                    finished[i] = 1;
+                    texts[i] = std::move(renders->texts[i]); // a finished render's slot is never written again
+                }
+            }
+        }
+        if (cancelled && cancelled())
+        {
+            return { L"The read was cancelled: the request was stopped or replaced.", true };
+        }
+
+        std::wstring out;
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            std::wstring handle;
+            {
+                std::lock_guard lock{ _mutex };
+                handle = AssignHandleLocked(ids[i]);
+            }
+            std::wstring header = L"## Session " + handle;
+            if (!facts[i].title.empty())
+            {
+                header += L" \x00B7 " + facts[i].title;
+            }
+            if (facts[i].activeMs > 0)
+            {
+                header += L" \x00B7 active " + ActiveWithAgo(facts[i].activeMs, now);
+            }
+            if (!finished[i])
+            {
+                out += header + L"\nNot read: rendering it took longer than " + std::to_wstring(kSessionReadBudgetMs / 1000) + L" s. Read it alone, or at level minimal.\n\n";
+                continue;
+            }
+            if (!texts[i] || texts[i]->empty())
+            {
+                out += header + L"\nNot read: its transcript is gone or could not be read.\n\n";
+                continue;
+            }
+            const SessionReadCut cut = CutRenderedTranscript(*texts[i], params->chars);
+            if (cut.turns == 0)
+            {
+                header += L" \x00B7 no conversation yet";
+            }
+            else
+            {
+                header += L" \x00B7 " + std::to_wstring(cut.turns) + (cut.turns == 1 ? L" turn" : L" turns");
+                if (cut.omittedTurns > 0)
+                {
+                    header += L", " + std::to_wstring(cut.omittedTurns) + L" left out in the middle (read it alone with a larger chars to see them)";
+                }
+            }
+            out += header + L"\n\n" + cut.text;
+            if (!out.empty() && out.back() != L'\n')
+            {
+                out += L'\n';
+            }
+            out += L'\n';
+        }
+        if (!unknown.empty())
+        {
+            out += L"Unknown ids (no result of this conversation printed them):";
+            for (const auto& u : unknown)
+            {
+                out += L" " + u;
+            }
+            out += L".\n";
+        }
+        if (params->extraIds > 0)
+        {
+            out += L"Only the first " + std::to_wstring(kSessionReadMaxIds) + L" ids were read: read the other " + std::to_wstring(params->extraIds) + L" in another call.\n";
+        }
+        return { out, false };
     }
 
     HarnessToolResult SessionSearchToolset::Show(const json::Value& arguments)
@@ -1385,7 +2224,35 @@ namespace Agentmaster
             return { text, true };
         }
         const std::wstring note = Cut(OneLine(arguments.StrAt(L"note")), 160);
-        _callbacks.onShow(resolved, note);
+        // The evidence per session (SESSIONS.md 9.12): `why` is keyed by the ids as the model wrote them (any case,
+        // short or whole); each is resolved like an id and lined up with what is shown. A why for a session that is
+        // not shown is dropped; a shown session without one gets "" (the surface shows no evidence line for it).
+        std::vector<std::wstring> whys(resolved.size());
+        if (const auto* why = arguments.Find(L"why"); why && why->type == Type::Obj)
+        {
+            std::unordered_map<std::wstring, std::wstring> byId;
+            for (const auto& [key, value] : why->members)
+            {
+                if (value.type != Type::Str)
+                {
+                    continue;
+                }
+                const std::wstring full = ResolveHandle(key);
+                std::wstring text = Cut(OneLine(value.str), kSessionWhyMaxChars);
+                if (!full.empty() && !text.empty())
+                {
+                    byId.emplace(full, std::move(text)); // the first why written for a session wins
+                }
+            }
+            for (size_t i = 0; i < resolved.size(); ++i)
+            {
+                if (const auto it = byId.find(resolved[i]); it != byId.end())
+                {
+                    whys[i] = it->second;
+                }
+            }
+        }
+        _callbacks.onShow(resolved, note, whys);
 
         std::wstring text = L"Shown " + std::to_wstring(resolved.size()) + (resolved.size() == 1 ? L" session." : L" sessions.");
         if (!unknown.empty())
@@ -1399,6 +2266,17 @@ namespace Agentmaster
         }
         text += L" Now reply to the user with one short sentence.";
         return { text, false };
+    }
+
+    HarnessTool SessionSearchToolset::MakeReadTool()
+    {
+        HarnessTool read;
+        read.name = kReadTool;
+        read.description = L"Read up to 8 sessions as compact Markdown: each turn's user message and Claude's final reply (more with level). A long session is cut to its first and last turns. Read every session you intend to show, to confirm that it is about the request. Changes nothing the user sees.";
+        read.inputSchemaJson = kReadSchema;
+        read.readOnly = true; // it only reads; one model step may run it beside a search
+        read.handler = [this](const json::Value& arguments) { return Read(arguments); };
+        return read;
     }
 
     std::vector<HarnessToolServer> SessionSearchToolset::Servers()
@@ -1419,9 +2297,12 @@ namespace Agentmaster
                 t.handler = [this, name = std::string{ def.name }](const json::Value& arguments) { return DatabaseCall(name, arguments); };
                 db.tools.push_back(std::move(t));
             }
+            // This toolset's own `read` beside them (SESSIONS.md 9.12): a candidate is confirmed the same way in both
+            // modes. The database has no tool of that name (SessionDbToolDefs.h), so mcp__agentmaster__read is ours.
+            db.tools.push_back(MakeReadTool());
             HarnessTool show;
             show.name = kDisplayTool;
-            show.description = L"Show sessions to the user in the Sessions browser, in the given order. Replaces what the list shows. Call it once per request, after searching.";
+            show.description = kShowDescription;
             show.inputSchemaJson = kShowSchema;
             show.handler = [this](const json::Value& arguments) { return Show(arguments); };
             HarnessToolServer display;
@@ -1435,20 +2316,29 @@ namespace Agentmaster
 
         HarnessTool search;
         search.name = kSearchTool;
-        search.description = L"Find Claude Code sessions on this computer. Returns matching sessions as JSON rows (id, title, dir, branch, active, created, msgs, tools, match), best match first. Changes nothing on the screen.";
+        search.description = L"Find Claude Code sessions on this computer. Returns matching sessions as JSON rows (id, title, dir, branch, active, created, msgs, tools, match), best match first. Changes nothing the user sees.";
         search.inputSchemaJson = kSearchSchema;
         search.readOnly = true; // several searches of one model step may run at the same time
         search.handler = [this](const json::Value& arguments) { return Search(arguments); };
 
+        HarnessTool grep;
+        grep.name = kGrepTool;
+        grep.description = L"Find exact text, or a regex, in the conversations' full text: the user's prompts, Claude's replies and thinking, tool calls and their output. Returns, per session, how many messages match and the first matches in context, each with who wrote it (user or claude) and when. Use it for evidence: words the user remembers, an error, a version. Changes nothing the user sees.";
+        grep.inputSchemaJson = kGrepSchema;
+        grep.readOnly = true; // it only reads; one model step may run it beside a search
+        grep.handler = [this](const json::Value& arguments) { return Grep(arguments); };
+
         HarnessTool show;
         show.name = kDisplayTool;
-        show.description = L"Show sessions to the user in the Sessions browser, in the given order. Replaces what the list shows. Call it once per request, after searching.";
+        show.description = kShowDescription;
         show.inputSchemaJson = kShowSchema;
         show.handler = [this](const json::Value& arguments) { return Show(arguments); };
 
         HarnessToolServer sessions;
         sessions.name = kSearchServer;
         sessions.tools.push_back(std::move(search));
+        sessions.tools.push_back(std::move(grep));
+        sessions.tools.push_back(MakeReadTool());
         HarnessToolServer display;
         display.name = kDisplayServer;
         display.tools.push_back(std::move(show));
