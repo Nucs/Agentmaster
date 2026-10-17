@@ -164,7 +164,7 @@ void TestMessagingSearch()
         bare.sessionId = L"b2b2b2b2-0000-4000-8000-000000000002";
         bare.prompts = 1;
         bare.state = SearchPickState::IdleTab;
-        const std::wstring answer = BuildSearchAnswerHtml(L"Two sessions are about <releasing> Agentmaster.", { release, bare }, 3, now);
+        const std::wstring answer = TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"Two sessions are about <releasing> Agentmaster.", { release, bare }, 3, now)); // §21.15: the classic render
         CHECK(answer == L"Two sessions are about &lt;releasing&gt; Agentmaster.\n\n"
                         L"<b>1</b> \U0001F4E6 <b>Release v0.7.9</b>\nAgentmaster \x00B7 11 Oct \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n\n"
                         L"<b>2</b> \U0001F4A4 <b>b2b2b2b2</b>\n1 prompt\n\n"
@@ -174,23 +174,32 @@ void TestMessagingSearch()
         SearchCard escaped = release;
         escaped.title = L"a <b>bold</b> & title";
         escaped.why = L"Claude: \"x < y & z\"";
-        const std::wstring escapedAnswer = BuildSearchAnswerHtml(L"", { escaped }, 0, now);
+        const std::wstring escapedAnswer = TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"", { escaped }, 0, now));
         CHECK(escapedAnswer.find(L"a &lt;b&gt;bold&lt;/b&gt; &amp; title") != std::wstring::npos && escapedAnswer.find(L"x &lt; y &amp; z") != std::wstring::npos && escapedAnswer.rfind(L"<b>1</b>", 0) == 0,
               "answer: a title and a quote are escaped (the model's text is never markup)");
         CHECK(std::wstring{ SearchPickStateGlyph(SearchPickState::Closed) } != SearchPickStateGlyph(SearchPickState::IdleTab) && std::wstring{ SearchPickStateGlyph(SearchPickState::IdleTab) } != SearchPickStateGlyph(SearchPickState::Listed),
               "answer: each state has its own glyph");
 
         // The pick menu: the whole folder and the branch, when it ran, the quote, where it stands now.
-        CHECK(BuildSearchPickMenuHtml(release, now) == L"<b>1 \x00B7 Release v0.7.9</b>\nK:\\source\\Agentmaster\\ \x00B7 agentmaster\n11 Oct 14:02 \x2192 16:40 \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n"
+        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(release, now)) == L"<b>1 \x00B7 Release v0.7.9</b>\nK:\\source\\Agentmaster\\ \x00B7 agentmaster\n11 Oct 14:02 \x2192 16:40 \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n"
                                                 L"<i>\U0001F4E6 Closed: Resume opens it in a background tab, and its topic appears.</i>",
               "pick menu: the card's facts in full, its quote, and the state line");
-        CHECK(BuildSearchPickMenuHtml(bare, now) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Resume brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
+        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(bare, now)) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Resume brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
 
         // §21.13: a card and a menu name the session with its tab's color square, like every title mention ("State, then
         // color" on the card, as in the topic names); a session with no color reads as above.
         SearchCard colored = release;
         colored.colorSquare = L"\U0001F7E6";
-        CHECK(BuildSearchAnswerHtml(L"", { colored }, 0, now).rfind(L"<b>1</b> \U0001F4E6 \U0001F7E6 <b>Release v0.7.9</b>\n", 0) == 0, "answer: the glyph, then the color square, then the title");
-        CHECK(BuildSearchPickMenuHtml(colored, now).rfind(L"<b>1 \x00B7 \U0001F7E6 Release v0.7.9</b>\n", 0) == 0, "pick menu: the color square before the title");
+        CHECK(TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"", { colored }, 0, now)).rfind(L"<b>1</b> \U0001F4E6 \U0001F7E6 <b>Release v0.7.9</b>\n", 0) == 0, "answer: the glyph, then the color square, then the title");
+        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(colored, now)).rfind(L"<b>1 \x00B7 \U0001F7E6 Release v0.7.9</b>\n", 0) == 0, "pick menu: the color square before the title");
+
+        // §21.15: in a rich answer the title is a chip in the tab's look and the quote stays a block; the menu's head keeps its
+        // number in bold, then the chip.
+        CHECK(TgRichHtmlFromClassic(BuildSearchAnswerHtml(L"", { colored }, 0, now)) ==
+                  L"<p><b>1</b> \U0001F4E6 <tg-button type=\"copy_text\" style=\"primary\" text=\"Release v0.7.9\">\U0001F7E6 Release v0.7.9</tg-button><br>Agentmaster \x00B7 11 Oct \x00B7 14 prompts</p>"
+                  L"<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>",
+              "answer, rich: the number, the glyph, the chip; the folder line; the quote as a block");
+        CHECK(TgRichHtmlFromClassic(BuildSearchPickMenuHtml(colored, now)).rfind(L"<p><b>1 \x00B7 </b><tg-button type=\"copy_text\" style=\"primary\" text=\"Release v0.7.9\">\U0001F7E6 Release v0.7.9</tg-button><br>", 0) == 0,
+              "pick menu, rich: the number in bold, then the chip");
     }
 }

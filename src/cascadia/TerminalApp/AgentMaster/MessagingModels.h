@@ -1723,8 +1723,18 @@ namespace Agentmaster::Msg
         /// FNV-1a 32 of the card text last sent or edited (0 = none yet). A restart re-renders every card, and a
         /// text the topic already shows is not sent again: before it, every start re-edited every card once
         /// (117 edits in the first ten minutes of the 20:30 start, 2026-10-16) on the one chat's ~1 call/s budget.
+        /// Since §21.15 the hash is taken over the card's CLASSIC render (its title tokens as the §21.13 square and title), so it
+        /// does not depend on the form the card is shown in, and a card that did not change keeps its hash across the upgrade.
         /// </summary>
         uint32_t cardTextHash{ 0 };
+        /// <summary>
+        /// The FORM the topic's card is shown in (§21.15): true = a rich message whose title is a chip, false = a classic HTML
+        /// message (every card posted before the chips, and every card while rich messages are off). Taken from Telegram's own
+        /// answer to the post or edit (the Message carries `rich_message` or `text`), so a rich send that fell back to HTML
+        /// records false. A card whose text is unchanged but whose form differs from the wanted one is re-edited slowly — one card
+        /// at a time (MessagingService::_takeCardFormatSlot) — never in a burst.
+        /// </summary>
+        bool cardRich{ false };
         /// <summary>
         /// The tab (WT_SESSION) that hosted the topic's session at the last sync. Topics are PER TAB (§21.6, the
         /// user's "if we show per tab"): when the conversation in a tab changes (/clear, /resume, a handover in
@@ -1930,6 +1940,7 @@ namespace Agentmaster::Msg
             to.Set(L"recapAtMs", json::Value::MkNum(static_cast<double>(t.recapAtMs)));
             to.Set(L"lastMessageAtMs", json::Value::MkNum(static_cast<double>(t.lastMessageAtMs)));
             to.Set(L"cardTextHash", json::Value::MkNum(static_cast<double>(t.cardTextHash)));
+            to.Set(L"cardRich", json::Value::MkBool(t.cardRich)); // §21.15: the card's form (a rich card with a title chip)
             to.Set(L"tabToken", json::Value::MkStr(t.tabToken));
             to.Set(L"errorAnnounced", json::Value::MkBool(t.errorAnnounced));
             to.Set(L"backfillPath", json::Value::MkStr(t.backfillPath));
@@ -2022,6 +2033,8 @@ namespace Agentmaster::Msg
                 t.recapAtMs = to.StrAt(L"recapText").empty() ? 0 : to.I64At(L"recapAtMs", 0);
                 t.lastMessageAtMs = to.I64At(L"lastMessageAtMs", 0);
                 t.cardTextHash = static_cast<uint32_t>(to.I64At(L"cardTextHash", 0));
+                // §21.15 (absent in an older file: every card posted before the chips is a classic message).
+                t.cardRich = to.BoolAt(L"cardRich", false);
                 t.tabToken = to.StrAt(L"tabToken");
                 t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);
                 t.backfillPath = to.StrAt(L"backfillPath"); // absent (an older file) = no history replay owed
@@ -2464,9 +2477,10 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// A title MENTION with the tab's color (§21.13): the color square, a space, the escaped title — what every message that
-    /// names a session prints (the card, the Search answer, the replies, the change line), so a title reads the same color
-    /// in every place. No square = the escaped title alone.
+    /// A title MENTION with the tab's color (§21.13): the color square, a space, the escaped title — what a message that names
+    /// a session shows in its classic (HTML) form, so a title reads the same color in every place. No square = the escaped
+    /// title alone. Since §21.15 the builders write a title TOKEN instead (TgTitleToken, TgTitleForm::Plain), which renders to
+    /// exactly this text in a classic message and to a CHIP in a rich one (TgRenderTitleTokensClassic / TgRichHtmlFromClassic).
     /// </summary>
     /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
     /// <param name="title">The title as is (escaped here).</param>
@@ -2484,19 +2498,24 @@ namespace Agentmaster::Msg
     /// changed at the same time shows in the two squares), or `“🟦 title” changed the color to 🟩` when only the color
     /// changed. Italic: a line about the topic, not a message of the conversation. Telegram's own "topic renamed" notice is
     /// deleted by the service — it names no old title and shows no color.
+    /// The titles are title TOKENS (§21.15): the classic render is the text above, byte for byte; a rich message shows each
+    /// title as a CHIP in its color (the quotes give way to the button), and the color line shows the new color as a chip too
+    /// — `[🟦 tab] changed the color to [🟩 tab]` — where the classic line has the bare square.
     /// </summary>
     /// <param name="oldTitle">The title the topic's name showed ("" = unknown: the line names the new title only).</param>
     /// <param name="oldSquare">The color square the name showed ("" = none).</param>
     /// <param name="newTitle">The title the topic's name shows now.</param>
     /// <param name="newSquare">The color square the name shows now ("" = none).</param>
-    /// <returns>Telegram HTML; "" when no title changed and the color did not change from one square to another (a square
-    /// that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a change worth a line).</returns>
+    /// <returns>Telegram HTML with title tokens; "" when no title changed and the color did not change from one square to another
+    /// (a square that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a change worth a
+    /// line).</returns>
     /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
     inline std::wstring BuildTopicChangeNoticeHtml(std::wstring_view oldTitle, std::wstring_view oldSquare, std::wstring_view newTitle, std::wstring_view newSquare)
     {
-        // A mention is cut like the Search answer's titles (TgFirstLine: the first line, an ellipsis past 200 units).
+        // A mention is cut like the Search answer's titles (TgFirstLine: the first line, an ellipsis past 200 units); classic, it
+        // reads “🟦 title” (TgTitleForm::Quoted).
         const auto mention = [](std::wstring_view square, std::wstring_view title) {
-            return L"\x201C" + TitleMentionHtml(square, TgFirstLine(title, 200)) + L"\x201D";
+            return TgTitleToken(TgTitleForm::Quoted, square, TgFirstLine(title, 200));
         };
         if (!newTitle.empty() && oldTitle != newTitle)
         {
@@ -2508,7 +2527,10 @@ namespace Agentmaster::Msg
         }
         if (!oldSquare.empty() && !newSquare.empty() && oldSquare != newSquare)
         {
-            return L"<i>" + mention(oldSquare, newTitle.empty() ? oldTitle : newTitle) + L" changed the color to " + std::wstring{ newSquare } + L"</i>";
+            // The new color: the bare square in a classic line, the title as a chip of the new color in a rich one
+            // (TgTitleForm::Square).
+            const std::wstring_view title = newTitle.empty() ? oldTitle : newTitle;
+            return L"<i>" + mention(oldSquare, title) + L" changed the color to " + TgTitleToken(TgTitleForm::Square, newSquare, TgFirstLine(title, 200)) + L"</i>";
         }
         return {};
     }
@@ -3453,13 +3475,14 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The Search answer (§21.10): the model's verdict, then one card per session — "<b>1</b> 📦 <b>title</b>", the line
-    /// "folder · day · N prompts", and the model's why as one quote — then how many shown sessions were not listed.
+    /// "folder · day · N prompts", and the model's why as one quote — then how many shown sessions were not listed. Each title
+    /// is a title token (§21.15): its classic render is the text above, a rich answer shows a chip.
     /// </summary>
     /// <param name="verdict">The model's one sentence, plain text (escaped here); empty = none.</param>
     /// <param name="cards">The listed sessions, in order (the caller cuts them to kSearchAnswerMaxRows).</param>
     /// <param name="notListed">Shown sessions past the cut.</param>
     /// <param name="nowMs">The clock (a parameter, so the days a test reads are its own).</param>
-    /// <returns>Telegram HTML, balanced; "Nothing found." when there is nothing at all.</returns>
+    /// <returns>Telegram HTML with title tokens, balanced; "Nothing found." when there is nothing at all.</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
     inline std::wstring BuildSearchAnswerHtml(std::wstring_view verdict, const std::vector<SearchCard>& cards, size_t notListed, int64_t nowMs)
     {
@@ -3471,9 +3494,9 @@ namespace Agentmaster::Msg
                 html += L"\n\n";
             }
             const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 100);
-            // The glyph for where it stands, then the tab's color square (§21.13: "State, then color", like the topic names).
-            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + (card.colorSquare.empty() ? std::wstring{} : card.colorSquare + L" ") +
-                    L"<b>" + TgEscapeHtml(title) + L"</b>";
+            // The glyph for where it stands, then the tab's color square (§21.13: "State, then color", like the topic names);
+            // §21.15: the square and the title as a title token — "🟦 <b>title</b>" classic, a chip in a rich answer.
+            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + TgTitleToken(TgTitleForm::Bold, card.colorSquare, title);
             std::wstring meta;
             const auto add = [&meta](const std::wstring& part) {
                 if (!part.empty())
@@ -3509,16 +3532,18 @@ namespace Agentmaster::Msg
     /// <summary>
     /// A picked session's action menu (§21.10): "<b>1 · title</b>", the whole folder and the branch, when it ran and how
     /// many prompts it had, the model's why as one quote, and where it stands now (glyph + SearchPickStateLine). The
-    /// buttons (Resume / Resume 📌 / Fork / Cancel) are the caller's.
+    /// buttons (Resume / Resume 📌 / Fork / Cancel) are the caller's. The title is a title token (§21.15): "🟦 title" inside the
+    /// bold head in a classic menu, a chip after "1 ·" in a rich one.
     /// </summary>
     /// <param name="card">The session, as the answer listed it (or as the registry knows it).</param>
     /// <param name="nowMs">The clock.</param>
-    /// <returns>Telegram HTML, balanced.</returns>
+    /// <returns>Telegram HTML with a title token, balanced.</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
     inline std::wstring BuildSearchPickMenuHtml(const SearchCard& card, int64_t nowMs)
     {
         const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 200);
-        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TitleMentionHtml(card.colorSquare, title) + L"</b>"; // §21.13: the color square first
+        // §21.13: the color square first; §21.15: square and title as a title token (TitleMentionHtml's text when classic).
+        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgTitleToken(TgTitleForm::Plain, card.colorSquare, title) + L"</b>";
         std::wstring place = card.dir;
         if (!card.branch.empty())
         {
@@ -3617,7 +3642,7 @@ namespace Agentmaster::Msg
         bool historyPending{ false };
         // §21.13: the color square before the card's title — the square the topic's NAME shows (TopicRecord::nameColor), so
         // the card and the topic list always agree, and a color change edits the card in the same step as the name (the
-        // rename refreshes the card). "" = none.
+        // rename refreshes the card). "" = none. §21.15: in a rich card it also picks the title chip's look (TgTitleChipStyle).
         std::wstring colorSquare;
     };
 
@@ -3689,25 +3714,25 @@ namespace Agentmaster::Msg
     /// in Error or a claude that exited, folder · branch · model · context, the runner and the queue, the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
     /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
-    /// API call on the one chat.
+    /// API call on the one chat. The title is a title TOKEN (§21.15, TgTitleForm::Bold): the classic render reads
+    /// "📌 🟦 <b>title</b>" exactly as before (the hash the service compares is taken over that render), a rich message shows
+    /// the title as a chip.
     /// </summary>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleLeavesAtMs">When an Idle topic leaves the list (0 = not idle).</param>
     /// <param name="globalPause">The runner's process-wide pause.</param>
     /// <param name="extras">The recap and its freshness, the history line, the title's color square (CardExtras); null = none of them.</param>
-    /// <returns>The HTML text.</returns>
+    /// <returns>The HTML text, with the title as a title token.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause, const CardExtras* extras = nullptr)
     {
         std::wstring out;
-        // §21.13: the title with the tab's color square before it (the square the topic's name shows; none without extras).
+        // §21.13: the title with the tab's color square before it (the square the topic's name shows; none without extras);
+        // §21.15: as a title token — "🟦 <b>title</b>" in a classic card, a chip in a rich one.
         out += L"\U0001F4CC ";
-        if (extras && !extras->colorSquare.empty())
-        {
-            out += extras->colorSquare + L" ";
-        }
-        out += L"<b>" + TgEscapeHtml(s.title.empty() ? s.id.substr(0, 8) : s.title) + L"</b>\n";
+        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title);
+        out += L"\n";
         // State line.
         out += StateLabel(s.state);
         // CLOCK TIMES, never spans: the service edits the card whenever this text changes, so a "3m" that

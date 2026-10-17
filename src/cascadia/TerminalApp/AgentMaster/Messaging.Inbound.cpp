@@ -848,7 +848,7 @@ namespace Agentmaster::Msg
                 _registry->Update(sessionId, [&](SessionInfo& ss) { ss.title = title; });
             }
             // §21.13: the new title with the tab's color square (the topic's name, and a line saying what changed, follow).
-            _reply(threadId, L"Renamed to <b>" + TitleMentionHtml(_titleSquare(&*s), title) + L"</b> (the topic follows in a moment).", false);
+            _reply(threadId, L"Renamed to <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title) + L"</b> (the topic follows in a moment).", false); // §21.15: a chip in a rich reply
             done(L"ok");
             return;
         }
@@ -955,7 +955,7 @@ namespace Agentmaster::Msg
                 return;
             }
             const auto a = AnalyzeSessionTranscript(path, 0);
-            std::wstring html = L"<b>" + TitleMentionHtml(_titleSquare(&*s), s->title) + L"</b>\n"; // §21.13: with the tab's color square
+            std::wstring html = L"<b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title) + L"</b>\n"; // §21.13: with the tab's color square; §21.15: a chip when rich
             html += TgEscapeHtml(s->workingDir) + (a.branch.empty() ? L"" : L" \x00B7 " + TgEscapeHtml(a.branch)) + L"\n";
             if (!a.firstTs.empty() && !a.lastTs.empty())
             {
@@ -1093,7 +1093,7 @@ namespace Agentmaster::Msg
                     return;
                 }
                 const std::wstring token = _tokenFor(L"confirm-" + name, sessionId, L"", kTokenTtlMsFor(1));
-                _reply(threadId, verb + L" <b>" + TitleMentionHtml(_titleSquare(&*s), s->title) + L"</b> while a turn is running? The turn is cut off.", false,
+                _reply(threadId, verb + L" <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title) + L"</b> while a turn is running? The turn is cut off.", false,
                        _buttons({ { { verb + L" now", token }, { L"Cancel", _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1)) } } }));
                 done(L"asked");
                 return;
@@ -1309,7 +1309,7 @@ namespace Agentmaster::Msg
             for (const auto& [id, title, square] : idle)
             {
                 ++n;
-                html += L"\n" + std::to_wstring(n) + L". " + TitleMentionHtml(square, title);
+                html += L"\n" + std::to_wstring(n) + L". " + TgTitleToken(TgTitleForm::Plain, square, title); // §21.15: a chip when rich
                 if (n <= 10)
                 {
                     rows.push_back({ { L"Wake " + std::to_wstring(n), _tokenFor(L"wake", id, L"", kTokenTtlMsFor(2)) },
@@ -1612,9 +1612,10 @@ namespace Agentmaster::Msg
         const std::wstring dir = nl1 == std::wstring::npos ? std::wstring{} : payload.substr(nl1 + 1, nl2 == std::wstring::npos ? std::wstring::npos : nl2 - nl1 - 1);
         const std::wstring title = nl2 == std::wstring::npos ? std::wstring{} : payload.substr(nl2 + 1);
         // §21.13: the head line names the session with its tab's color square (its folder's for a session Agentmaster does not
-        // know), read lean here: the resume below reads the full record again, on the state of that moment.
+        // know), read lean here: the resume below reads the full record again, on the state of that moment. §21.15: a title token —
+        // the menu is edited in the form chips want (_editText), so the head is a chip in a rich menu.
         const auto known = _registry->GetWithoutQueue(sessionId);
-        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TitleMentionHtml(_titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title) + L"</b>";
+        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TgTitleToken(TgTitleForm::Plain, _titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title) + L"</b>";
         if (kind == L"pick-cancel")
         {
             // The menu goes; the answer above it keeps its pick buttons. A menu already gone (the user deleted it) is a
@@ -2136,7 +2137,7 @@ namespace Agentmaster::Msg
                     ss.readUnixMs = 0;
                 }
             });
-            _reply(rv.threadId, L"Opened <b>" + TitleMentionHtml(_titleSquare(&s), s.title.empty() ? ShortId(s.id) : s.title) + L"</b> \x2014 its topic is coming up." + (rv.req.pin ? L" \U0001F4CC" : L""), false);
+            _reply(rv.threadId, L"Opened <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), s.title.empty() ? ShortId(s.id) : s.title) + L"</b> \x2014 its topic is coming up." + (rv.req.pin ? L" \U0001F4CC" : L""), false); // §21.15: a chip when rich
             _log(L"[msg] revive done " + ShortId(s.id));
         }
     }
