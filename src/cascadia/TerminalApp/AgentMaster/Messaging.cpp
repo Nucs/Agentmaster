@@ -1677,7 +1677,7 @@ namespace Agentmaster::Msg
                     }
                 }
                 _syncTopics();
-                _stateNameTick(); // §21.11: at most one topic name follows its session's state per tick, within the budget
+                _stateNameTick(); // §21.11 + §21.13: at most one topic name follows its session's state and color per tick, within the budget
 
                 // The mirror and the cards, per topic. The topic set is copied under the lock; each
                 // session's work reads the registry and the transcript outside it.
@@ -2599,6 +2599,28 @@ namespace Agentmaster::Msg
         std::vector<TabFact> facts;
         std::unordered_map<std::wstring, SessionInfo> byId;
         const TabColorMode colorMode = LoadAppSettings().tabColorMode;
+        // §21.13: the colors the topic names, cards and title mentions show — resolved like the tab, from ONE dir-colors.json
+        // snapshot for the pass (the per-session form stats the file and copies its map per call). A mode switch is stamped:
+        // the re-colors it causes change the topics quietly for kColorModeSettleMs (NoticeOldSquare).
+        const int64_t colorNowMs = WallMs();
+        if (_colorModeSeen >= 0 && _colorModeSeen != static_cast<int>(colorMode))
+        {
+            _colorModeChangedMs = colorNowMs;
+            _log(L"[msg] tab color mode changed (" + std::to_wstring(_colorModeSeen) + L" -> " + std::to_wstring(static_cast<int>(colorMode)) +
+                 L"): the topic names take the new colors quietly");
+        }
+        _colorModeSeen = static_cast<int>(colorMode);
+        _colorMode.store(_colorModeSeen);
+        DirColorIndex dirColors;
+        try
+        {
+            dirColors = LoadDirColorIndex();
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: an empty index — every folder resolves to its automatic color this pass.
+            LogSwallowedException(L"MessagingService::_syncTopics (dir colors)");
+        }
         _orderKeys.clear();
         _runningIds.clear(); // the quiet re-sort (§21.9) waits while any session runs
         for (auto& s : _registry->SnapshotLiveForCards())
@@ -2616,6 +2638,31 @@ namespace Agentmaster::Msg
             f.continuedFromId = s.continuedFromId; // ...also to a /handover-here successor, which takes the tab on a new connection
             f.mostRecentMs = MostRecentSortKeyMs(s); // the side panel's MOST RECENT key: the creates' order (§21.8)
             f.stateSinceMs = s.stateChangedAtUnixMs; // how long the state has held: the topic name's glyph waits for it (§21.11)
+            try
+            {
+                f.colorHex = ResolveSessionColorHex(colorMode, s, dirColors); // §21.13: the tab's color, as the tab resolves it
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the color the last pass resolved (none on a first sight), so a failed resolve never
+                // reads as a change of the tab's color.
+                LogSwallowedException(L"MessagingService::_syncTopics (color)");
+                if (const auto c = _colorSince.find(s.id); c != _colorSince.end())
+                {
+                    f.colorHex = c->second.first;
+                }
+            }
+            // Since when the color holds: a first sight in this run is settled (0); a change restarts the clock, so a name
+            // follows a color only once it has held (an inferred folder that flips back and forth renames nothing).
+            if (const auto c = _colorSince.find(s.id); c == _colorSince.end())
+            {
+                _colorSince.emplace(s.id, std::make_pair(f.colorHex, int64_t{ 0 }));
+            }
+            else if (c->second.first != f.colorHex)
+            {
+                c->second = { f.colorHex, colorNowMs };
+            }
+            f.colorSinceMs = _colorSince[s.id].second;
             _orderKeys[s.id] = { f.mostRecentMs, s.title }; // ...and the tick's posting order
             if (s.state == SessionState::Running)
             {
@@ -2625,6 +2672,12 @@ namespace Agentmaster::Msg
             byId.emplace(s.id, std::move(s));
         }
         _lastFacts = facts; // the state glyph renames read them after the sync (_stateNameTick)
+        // §21.13: a session that left the live set forgets its color clock (it starts settled when it comes back).
+        for (auto c = _colorSince.begin(); c != _colorSince.end();)
+        {
+            c = byId.count(c->first) ? std::next(c) : _colorSince.erase(c);
+        }
+        const bool colorModeSettled = _colorModeChangedMs <= 0 || colorNowMs - _colorModeChangedMs >= kColorModeSettleMs;
         {
             // The tab each topic's session is in NOW (a restart gives every tab a new token, and the topic's tab is
             // what a later Rekey matches): kept in step here, before the plan reads the records.
@@ -2634,6 +2687,17 @@ namespace Agentmaster::Msg
                 if (const auto it = byId.find(sid); it != byId.end() && it->second.live && !it->second.tabToken.empty() && it->second.tabToken != t.tabToken)
                 {
                     t.tabToken = it->second.tabToken;
+                    _stateDirty = true;
+                }
+                // §21.13: a name whose square already IS the tab's, recorded under another mode (a topic named before the
+                // square in the "Remove colors" mode, a mode switch that left its color as it was), takes the mode SILENTLY —
+                // no rename is needed. Only once the mode and the color have held: an Individual switch deals new colors
+                // moments after it, and a topic stamped before the deal would tell the deal as the user's recolor.
+                const auto c = _colorSince.find(sid);
+                if (c != _colorSince.end() && colorModeSettled && t.nameColorMode != static_cast<int>(colorMode) &&
+                    (c->second.second <= 0 || colorNowMs - c->second.second >= kNameStateSettleMs) && t.nameColor == TgTitleColorSquare(c->second.first))
+                {
+                    t.nameColorMode = static_cast<int>(colorMode);
                     _stateDirty = true;
                 }
             }
@@ -3014,10 +3078,11 @@ namespace Agentmaster::Msg
 
     void MessagingService::_createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose)
     {
-        // The name carries the state glyph first (§21.11); the record keeps the bare title, which the sync compares with
-        // the tab's (a long title is cut in the name only).
+        // The name carries the state glyph first (§21.11), then the tab color's square (§21.13); the record keeps the bare
+        // title, which the sync compares with the tab's (a long title is cut in the name only), and the square.
         const std::wstring bare = title.empty() ? ShortId(sessionId) : title;
-        const std::wstring name = TopicDisplayName(state, bare);
+        const std::wstring square = TgTitleColorSquare(colorHex);
+        const std::wstring name = TopicDisplayName(state, square, bare);
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"name", json::Value::MkStr(name));
@@ -3065,6 +3130,8 @@ namespace Agentmaster::Msg
         t.createdMs = WallMs();
         t.nameState = static_cast<int>(state);
         t.nameSetMs = t.createdMs;
+        t.nameColor = square; // §21.13: the square the name shows, and the mode it was resolved under
+        t.nameColorMode = static_cast<int>(_currentColorMode());
         t.verbose = verbose; // §21.11: -1 follows the default; a topic recreated in a mode keeps that mode
         if (s)
         {
@@ -3874,6 +3941,7 @@ namespace Agentmaster::Msg
     void MessagingService::_renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state)
     {
         int64_t thread = 0;
+        TopicRecord before; // §21.13: the name as it was (its title and square), for the change line
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
@@ -3882,8 +3950,13 @@ namespace Agentmaster::Msg
                 return;
             }
             thread = it->second.threadId;
+            before = it->second;
         }
-        const std::wstring name = TopicDisplayName(state, title); // the state glyph first (§21.11)
+        // The state glyph first (§21.11), then the tab color's square once that color has held (§21.13: a rename for the
+        // state or the title never carries a color that is still changing; ChooseNameColor keeps the old square then).
+        const int64_t now = WallMs();
+        const NameColorChoice color = ChooseNameColor(_lastFact(sessionId), before, now, _currentColorMode());
+        const std::wstring name = TopicDisplayName(state, color.square, title);
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
@@ -3901,12 +3974,32 @@ namespace Agentmaster::Msg
                 it->second.title = title;
                 it->second.nameState = static_cast<int>(state);
                 it->second.nameSetMs = WallMs();
+                it->second.nameColor = color.square; // §21.13: and the square, with the mode it stands for
+                it->second.nameColorMode = color.mode;
                 _stateDirty = true;
             }
         }
         if (r.ok)
         {
             _log(L"[msg] topic renamed " + ShortId(sessionId) + L" \x2192 \x201C" + name + L"\x201D");
+            // §21.13, the CHANGE LINE (the user's "a message like whatsapp does for group chat name changed"): a new title, or
+            // the tab's color changed from one square to another under a settled mode. Silent, and it does not move the sticky
+            // card (one call, not three: the next real post moves the card below it). Telegram's own "topic renamed" notice is
+            // deleted when it arrives (_handleMessage). None while the topic's history is being replayed: it would land among
+            // the old turns, and the name shows the change anyway.
+            const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs), title, color.square);
+            if (!notice.empty())
+            {
+                if (TopicBackfillPending(before))
+                {
+                    _log(L"[msg] topic " + ShortId(sessionId) + L" changed (" + (before.title != title ? L"title" : L"color") + L"): no line while its history is being added");
+                }
+                else
+                {
+                    _sendText(thread, notice, true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+                    _log(L"[msg] topic " + ShortId(sessionId) + L" told: its " + (before.title != title ? L"title" : L"color") + L" changed");
+                }
+            }
             _refreshCard(sessionId, true);
         }
         else if (!r.NotModified())
@@ -3937,7 +4030,9 @@ namespace Agentmaster::Msg
                 {
                     return;
                 }
-                sid = PickStateRename(_lastFacts, _state.topics, WallMs());
+                // §21.13: the state glyph AND the color square (PickNameRename: PickStateRename's rule, then the tabs whose
+                // color changed, then the quiet re-squares of topics named before the square or under another mode).
+                sid = PickNameRename(_lastFacts, _state.topics, WallMs(), _currentColorMode()).sessionId;
             }
             if (sid.empty())
             {
@@ -3963,6 +4058,64 @@ namespace Agentmaster::Msg
         {
             // Rule #18. Recovery: no rename this tick; the next tick picks again.
             LogSwallowedException(L"MessagingService::_stateNameTick");
+        }
+    }
+
+    const TabFact* MessagingService::_lastFact(const std::wstring& sessionId) const noexcept
+    {
+        // A linear search: one per rename, and a rename is rare (the name tick's budget allows a few a minute).
+        for (const auto& f : _lastFacts)
+        {
+            if (f.sessionId == sessionId)
+            {
+                return &f;
+            }
+        }
+        return nullptr;
+    }
+
+    TabColorMode MessagingService::_currentColorMode() const noexcept
+    {
+        if (const int mode = _colorMode.load(); mode >= 0 && mode <= static_cast<int>(TabColorMode::NoColor))
+        {
+            return static_cast<TabColorMode>(mode);
+        }
+        try
+        {
+            return LoadAppSettings().tabColorMode; // before the first sync: the settings' own (a reply that comes that early)
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the default mode (one shared color per working directory).
+            LogSwallowedException(L"MessagingService::_currentColorMode");
+            return TabColorMode::WorkingDirectory;
+        }
+    }
+
+    std::wstring MessagingService::_titleSquare(const SessionInfo* s, const std::wstring& dirFallback) const noexcept
+    {
+        try
+        {
+            const TabColorMode mode = _currentColorMode();
+            if (s)
+            {
+                return TgTitleColorSquare(ResolveSessionColorHex(mode, *s));
+            }
+            if (dirFallback.empty())
+            {
+                return {};
+            }
+            // A session the registry does not know: its folder's color, like the Sessions page's chip of an on-disk session
+            // (the per-folder precedence; in the Individual mode such a session has no color of its own to wear).
+            SessionInfo folderOnly;
+            folderOnly.workingDir = dirFallback;
+            return TgTitleColorSquare(ResolveSessionColorHex(mode, folderOnly));
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no square on this mention (the title alone).
+            LogSwallowedException(L"MessagingService::_titleSquare");
+            return {};
         }
     }
 
@@ -4119,6 +4272,9 @@ namespace Agentmaster::Msg
         extras.recapAtMs = topic.recapAtMs;
         const bool historyPending = TopicBackfillPending(topic);
         extras.historyPending = historyPending;
+        // §21.13: the square the topic's NAME shows, not the tab's color of this instant: the card and the list always agree,
+        // and a color change edits the card in the rename's own refresh (a topic named before the square gets it then too).
+        extras.colorSquare = topic.nameColor;
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         json::Value markup;
         _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));

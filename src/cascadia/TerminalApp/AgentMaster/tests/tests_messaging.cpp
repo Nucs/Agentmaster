@@ -114,6 +114,36 @@ void TestMessaging()
     CHECK(TgTopicIconColor(L"#2E8B57") == 0x8EEE98u, "a green tab picks the green topic color");
     CHECK(TgTopicIconColor(L"#FF1E90FF") == 0x6FB9F0u, "a blue tab (with alpha) picks the blue topic color");
     CHECK(TgTopicIconColor(L"") == kTelegramTopicColors[0] && TgTopicIconColor(L"nope") == kTelegramTopicColors[0], "no / bad color -> the first");
+    // §21.13 — the title's COLOR SQUARE: by hue, so the pastel tab palette lands on the squares of its color families (a
+    // distance pick made its reds and corals brown); greys go by lightness, a dark warm color is brown, and a malformed color
+    // has no square at all (never a guess).
+    {
+        const std::pair<const wchar_t*, const wchar_t*> palette[] = {
+            { L"#E06C75", L"\U0001F7E5" }, { L"#E5C07B", L"\U0001F7E8" }, { L"#98C379", L"\U0001F7E9" }, { L"#56B6C2", L"\U0001F7E6" },
+            { L"#61AFEF", L"\U0001F7E6" }, { L"#C678DD", L"\U0001F7EA" }, { L"#D19A66", L"\U0001F7E7" }, { L"#BE5046", L"\U0001F7E5" },
+            { L"#528BFF", L"\U0001F7E6" }, { L"#7FD962", L"\U0001F7E9" }, { L"#FF9E64", L"\U0001F7E7" }, { L"#2BBAC5", L"\U0001F7E6" },
+            { L"#B267E6", L"\U0001F7EA" }, { L"#F78C6C", L"\U0001F7E7" },
+        };
+        bool paletteOk = true;
+        for (const auto& [hex, want] : palette)
+        {
+            paletteOk = paletteOk && std::wstring{ TgTitleColorSquare(hex) } == want;
+        }
+        CHECK(paletteOk, "the 14 automatic tab colors land on the squares of their families (red, yellow, green, blue, purple, orange)");
+        CHECK(std::wstring{ TgTitleColorSquare(L"#FF61AFEF") } == L"\U0001F7E6" && std::wstring{ TgTitleColorSquare(L"#8B4513") } == L"\U0001F7EB",
+              "an alpha byte is ignored; a dark warm color is brown");
+        CHECK(std::wstring{ TgTitleColorSquare(L"#000000") } == L"\x2B1B" && std::wstring{ TgTitleColorSquare(L"#FFFFFF") } == L"\x2B1C" &&
+                  std::wstring{ TgTitleColorSquare(L"#404040") } == L"\x2B1B" && std::wstring{ TgTitleColorSquare(L"#C0C0C0") } == L"\x2B1C",
+              "black, white, and a grey by its lightness");
+        CHECK(*TgTitleColorSquare(L"") == 0 && *TgTitleColorSquare(L"nope") == 0 && *TgTitleColorSquare(L"#12345") == 0 && *TgTitleColorSquare(L"#GGGGGG") == 0,
+              "no color (the \"Remove colors\" mode) or a malformed one: no square");
+        uint32_t rgb = 7;
+        const bool lower = TgParseRgbHex(L"#61afef", rgb) && rgb == 0x61AFEFu;
+        const bool alpha = TgParseRgbHex(L"#FF528BFF", rgb) && rgb == 0x528BFFu;
+        const bool refused = !TgParseRgbHex(L"61AFEF", rgb) && rgb == 0x528BFFu;
+        CHECK(lower && alpha && refused, "the parse: either case, the alpha byte dropped, a refused text leaves the value alone");
+        CHECK(TgTitleColorPrefix(L"#61AFEF") == L"\U0001F7E6 " && TgTitleColorPrefix(L"").empty(), "the prefix: the square and a space, or nothing");
+    }
     CHECK(TgShortSpan(45 * 1000) == L"45s" && TgShortSpan(3 * 60 * 1000) == L"3m" && TgShortSpan(72 * 60 * 1000) == L"1h12m" && TgShortSpan(28 * 3600 * 1000ll) == L"1d4h", "short spans");
 
     // ---- the transcript classifier ----
@@ -1172,6 +1202,124 @@ void TestMessaging()
             fresh.title = L"New tab";
             const auto ops = PlanTopicSync({ fresh }, {}, now, 600000);
             CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Create && ops[0].state == SessionState::NeedsApproval, "a create carries the state its name's glyph shows");
+        }
+
+        // §21.13 — the title's COLOR: the square after the state glyph in the name ("State, then color"), the same square in
+        // every title mention, a line in the topic when the title or the tab's color changes, and the quiet re-squares.
+        {
+            const std::wstring blue = L"\U0001F7E6";
+            const std::wstring green = L"\U0001F7E9";
+            CHECK(TopicDisplayName(SessionState::WaitingForInput, blue, L"agent manager tab") == L"\U0001F7E1 \U0001F7E6 agent manager tab",
+                  "the name: the state glyph, then the color square, then the title");
+            CHECK(TopicDisplayName(SessionState::Idle, L"\x2B1B", L"x") == L"\x26AA \x2B1B x" && TopicDisplayName(SessionState::Running, L"", L"x") == TopicDisplayName(SessionState::Running, L"x"),
+                  "a one-unit glyph takes the square right after it too; no square is the name without one");
+            const std::wstring longName = TopicDisplayName(SessionState::Running, blue, std::wstring(200, L'a'));
+            CHECK(longName.size() <= 128 && longName.back() == L'\x2026' && longName.rfind(L"\U0001F535 \U0001F7E6 ", 0) == 0, "a long title is cut within Telegram's 128 characters, the square kept");
+            CHECK(TitleMentionHtml(blue, L"a <b>") == L"\U0001F7E6 a &lt;b&gt;" && TitleMentionHtml(L"", L"a & b") == L"a &amp; b", "a mention: the square, a space, the escaped title");
+
+            // The change line, in the user's words: "<from>" changed the title to "<to>".
+            CHECK(BuildTopicChangeNoticeHtml(L"old", blue, L"new", blue) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E6 new\x201D</i>", "a new title: the old one quoted with its square, then the new one");
+            CHECK(BuildTopicChangeNoticeHtml(L"old", blue, L"new", green) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E9 new\x201D</i>", "a new title and a new color: one line, the squares show both");
+            CHECK(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", green) == L"<i>\x201C\U0001F7E6 tab\x201D changed the color to \U0001F7E9</i>", "the color alone");
+            CHECK(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", blue).empty() && BuildTopicChangeNoticeHtml(L"tab", L"", L"tab", blue).empty() && BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", L"").empty(),
+                  "no line when nothing changed, or a square only appears or goes (a topic named before the square, the \"Remove colors\" mode)");
+            CHECK(BuildTopicChangeNoticeHtml(L"a<b", L"", L"c&d", L"") == L"<i>\x201C" L"a&lt;b\x201D changed the title to \x201C" L"c&amp;d\x201D</i>", "the titles are escaped");
+            CHECK(BuildTopicChangeNoticeHtml(L"", L"", L"new", blue) == L"<i>The title is now \x201C\U0001F7E6 new\x201D</i>", "no old title known: the new one alone");
+
+            // Which name changes next: the states that need the user, then a tab's color change, then the quiet re-squares.
+            const int64_t now = 2000000;
+            const auto fact = [](const wchar_t* id, SessionState st, const wchar_t* hex, int64_t colorSince) {
+                TabFact f;
+                f.sessionId = id;
+                f.state = st;
+                f.live = true;
+                f.inTab = true;
+                f.claude = true;
+                f.colorHex = hex;
+                f.colorSinceMs = colorSince;
+                return f;
+            };
+            const auto topic = [](const wchar_t* id, int64_t thread, SessionState st, const std::wstring& square, int mode) {
+                TopicRecord t;
+                t.sessionId = id;
+                t.threadId = thread;
+                t.nameState = static_cast<int>(st);
+                t.nameColor = square;
+                t.nameColorMode = mode;
+                return t;
+            };
+            const int dirMode = static_cast<int>(TabColorMode::WorkingDirectory);
+            std::map<std::wstring, TopicRecord> topics;
+            topics[L"a"] = topic(L"a", 1, SessionState::Running, blue, dirMode);
+            topics[L"b"] = topic(L"b", 2, SessionState::Running, L"", -1); // named before §21.13
+            std::vector<TabFact> facts{ fact(L"a", SessionState::Running, L"#61AFEF", 0), fact(L"b", SessionState::Running, L"#61AFEF", 0) };
+            auto pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory);
+            CHECK(pick.sessionId == L"b" && pick.color && !pick.state, "a topic named before the square gets it (a quiet re-square)");
+            facts[0].colorHex = L"#98C379";
+            facts[0].colorSinceMs = now - 2000;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory).sessionId == L"b", "a color younger than kNameStateSettleMs waits (an inferred folder that flips renames nothing)");
+            facts[0].colorSinceMs = now - 20000;
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory);
+            CHECK(pick.sessionId == L"a" && pick.color && !pick.state, "a tab's color change that has held goes before the quiet re-squares");
+            facts[0].state = SessionState::WaitingForInput;
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory);
+            CHECK(pick.sessionId == L"a" && pick.color && pick.state, "a state and a color due together: one rename");
+            facts.push_back(fact(L"c", SessionState::NeedsApproval, L"#61AFEF", 0));
+            topics[L"c"] = topic(L"c", 3, SessionState::Running, blue, dirMode);
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory).sessionId == L"c", "a state that needs the user goes first");
+            topics[L"c"].nameSetMs = now - 5000;
+            topics[L"a"].nameSetMs = now - 5000;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory).sessionId == L"b", "a topic renamed lately waits kNameRenameGapMs");
+            facts[1].live = false;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory).sessionId.empty(), "a session that is not live in a tab is not renamed");
+            topics[L"b"].nameColor = blue;
+            facts[1].live = true;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory).sessionId.empty(), "a name whose square is the tab's is left alone, whatever mode it was recorded under");
+
+            // What a rename puts in the name: the tab's square once it has held, else the one the name shows.
+            const TabFact settled = fact(L"a", SessionState::Running, L"#98C379", 0);
+            TabFact moving = settled;
+            moving.colorSinceMs = now - 2000;
+            const TopicRecord named = topic(L"a", 1, SessionState::Running, blue, dirMode);
+            const auto took = ChooseNameColor(&settled, named, now, TabColorMode::Individual);
+            const auto kept = ChooseNameColor(&moving, named, now, TabColorMode::Individual);
+            const auto none = ChooseNameColor(nullptr, named, now, TabColorMode::Individual);
+            CHECK(took.square == green && took.mode == static_cast<int>(TabColorMode::Individual), "a color that has held: its square, under the mode now");
+            CHECK(kept.square == blue && kept.mode == dirMode && none.square == blue && none.mode == dirMode, "a color still changing, or no facts: the name keeps its square and its mode");
+
+            // Whether the line tells the color: a change under one settled mode is the tab's; a mode switch's is quiet.
+            NameColorChoice after;
+            after.square = green;
+            after.mode = dirMode;
+            CHECK(NoticeOldSquare(named, after, now, 0, kColorModeSettleMs) == blue, "the same mode, settled: the old square, so the line tells the color");
+            CHECK(NoticeOldSquare(named, after, now, now - 10000, kColorModeSettleMs) == green, "a mode switch moments ago: the new square, so the line says nothing of the color");
+            after.mode = static_cast<int>(TabColorMode::InferredWorkingDirectory);
+            CHECK(NoticeOldSquare(named, after, now, 0, kColorModeSettleMs) == green, "another mode: quiet");
+            after.mode = dirMode;
+            CHECK(NoticeOldSquare(topic(L"o", 1, SessionState::Running, L"", -1), after, now, 0, kColorModeSettleMs) == green, "a topic named before the square: quiet");
+            TopicRecord young = named;
+            young.createdMs = now - 10000;
+            CHECK(NoticeOldSquare(young, after, now, 0, kColorModeSettleMs) == green, "a topic made moments ago takes its first colors quietly (an Individual deal, an inferred folder)");
+            young.createdMs = now - 120000;
+            CHECK(NoticeOldSquare(young, after, now, 0, kColorModeSettleMs) == blue, "...and tells them once it is older");
+
+            // The state file keeps the square and its mode; an older file reads as "no square, mode unknown".
+            MessagingState st;
+            st.topics[L"a"] = named;
+            const auto back = StateFromJson(StateToJson(st));
+            CHECK(back && back->topics.count(L"a") && back->topics.at(L"a").nameColor == blue && back->topics.at(L"a").nameColorMode == dirMode, "the name's square and its mode round-trip");
+            const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(old && old->topics.count(L"o") && old->topics.at(L"o").nameColor.empty() && old->topics.at(L"o").nameColorMode == -1, "an older file: no square, the mode unknown (re-squared once, quietly)");
+
+            // The card's title wears the square the name shows.
+            SessionInfo s;
+            s.id = L"card-session";
+            s.title = L"agent manager tab";
+            s.live = true;
+            CardExtras ex;
+            ex.colorSquare = blue;
+            CHECK(BuildCardText(s, 5000, 0, false, &ex).rfind(L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>\n", 0) == 0, "the card: the pin, the square, the title");
+            CHECK(BuildCardText(s, 5000, 0, false).rfind(L"\U0001F4CC <b>agent manager tab</b>\n", 0) == 0, "no square: the card as before");
         }
 
         // §21.11 — the state file: a topic's mode and its name's state, and the secretary bot's facts, round-trip; an older

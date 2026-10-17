@@ -1964,6 +1964,116 @@ of telegram. The one used by debug should move to the release agentmaster … Th
   ~12:25 (the estimate was 411), the history replay begun most recent first; no 429 at ~40–50 calls a minute
   (`[msg] traffic (10 min): createForumTopic=235 … sendMessage=249 … (496 calls)` at 12:21).
 
+### 21.13 The title wears the tab's color, and a line tells a new title or color (2026-10-17)
+
+> Status: written 2026-10-17 (session 13e76a66), NOT BUILT yet.
+
+**The user's request** (2026-10-17): "Can the title have a color background in all places we print title, that matches and
+also detect change and change according / Also when title edited, can we send a message like whatsapp does for group chat
+name changed (agentmaster on tab title change or color change should report to the bot and edit the title mentions,
+efficiently)". Their answers: the topic name **"State, then color"** (`🟡 🟦 agent manager tab`, the card
+`📌 🟦 agent manager tab`), with "Can we check if we can using markdown or html or whatever works"; the line **"Telegram's
+own line"**, worded `"<from>" changed the title to "<to>"`.
+
+#### 21.13.1 What Telegram can show (read and measured 2026-10-17)
+
+- **The Bot API** (10.3, the reference read 2026-10-17): a topic's `icon_color` is one of six (0x6FB9F0, 0xFFD67E, 0xCB86DB,
+  0x8EEE98, 0xFF93B2, 0xFB6F5F) and is set only by `createForumTopic`; `editForumTopic` changes the name and
+  `icon_custom_emoji_id`, never the color; `getForumTopicIconStickers` lists 112 icons, none a color swatch; a custom emoji
+  needs a Premium owner (or a Fragment username). A topic NAME is plain text.
+- **A live test in the dev chat** (scratchpad `colortest.py`, its test topic — thread 26785 — left there for the user to
+  see): (1) a square emoji — kept; (2) HTML `<span style="background-color">` — refused ("Tag span must have class
+  tg-spoiler"); (3) HTML `<mark>` — refused; (4) a rich message's `==marked==` — kept, as a "marked" highlight the CLIENT
+  paints in its own color; (5) a rich `<mark>` — the same; (6) a rich `<span style>` — the style dropped; (7) a custom-emoji
+  entity — dropped (no Premium); (8) colored buttons (`InlineKeyboardButton.style`: danger red, success green, primary
+  blue) — kept, but a button is no title.
+- **So a colored SQUARE emoji** is the one marker that shows in a topic name and in every message, in the tab's color
+  family, and that an edit can change. Telegram's own "topic renamed" notice is fixed text that names no old title and
+  carries no color, so the line is ours, in the user's words.
+
+#### 21.13.2 The square, and where it shows
+
+- **`TgTitleColorSquare`** (TelegramFormat.h, pure; `TgParseRgbHex`, `TgTitleColorPrefix`): the tab color by HUE (HSL),
+  not by distance — the palette is pastel (One Dark), and an RGB or Lab distance to the vivid emoji made its reds and
+  corals brown: very dark ⬛, very light ⬜, unsaturated ⬛ / ⬜ by lightness, a dark warm hue 🟫, then red [330°, 12°) 🟥 ·
+  orange [12°, 35°) 🟧 · yellow [35°, 70°) 🟨 · green [70°, 165°) 🟩 · blue [165°, 255°) 🟦 (cyan joins blue) · purple 🟪.
+  The 14 automatic colors land on six squares: #E06C75 🟥 · #E5C07B 🟨 · #98C379 🟩 · #56B6C2 🟦 · #61AFEF 🟦 · #C678DD 🟪 ·
+  #D19A66 🟧 · #BE5046 🟥 · #528BFF 🟦 · #7FD962 🟩 · #FF9E64 🟧 · #2BBAC5 🟦 · #B267E6 🟪 · #F78C6C 🟧. Two folders can
+  share a square: it marks a color family, it is not unique. "Remove colors" (or no color) = no square anywhere.
+- **The color** is resolved like the tab's: the sync fills `TabFact::colorHex` for every live session with
+  `ResolveSessionColorHex(mode, session, LoadDirColorIndex())` — ONE dir-colors.json snapshot per pass — so the topics follow
+  the same tab-color mode, git-worktree rule and inferred folder as the tabs, the board and the side panel.
+- **Where it shows**: the topic NAME — `TopicDisplayName(state, square, title)`, the glyph, the square, the title (within
+  Telegram's 128 characters); the CARD's title — `📌 🟦 <b>title</b>`, the square the NAME shows (`CardExtras::colorSquare` =
+  `TopicRecord::nameColor`), so the card and the list always agree; the Search answer's cards (`<b>1</b> 📦 🟦 <b>title</b>`:
+  "State, then color") and the pick menu (`<b>1 · 🟦 title</b>`) and its action line; every reply that names a session —
+  `/rename`, `/summary`, `/status` (the card), the confirm of `/restartsession` / `/deactivate` / `/interrupt`, `/idle`,
+  "Opened … — its topic is coming up" (`TitleMentionHtml`, `MessagingService::_titleSquare`). A session the registry does not
+  know (an old one the Search found) wears its folder's color, like the Sessions page's chip of an on-disk session.
+- **Not changed**: the topic's ICON color stays the creation-time pick of the six (`TgTopicIconColor`; Telegram cannot
+  change it later). Messages already sent keep the square they were sent with: the name and the card are what is edited.
+
+#### 21.13.3 Following a change
+
+- **A new title**: the sync's Rename (`PlanTopicSync`, at once, as before), now with the square.
+- **A new color** (`PickNameRename`, pure, replaces `PickStateRename` in `_stateNameTick`; the state-only rule stays the
+  first part of it): a name whose square differs from the tab's is due once that color has held `kNameStateSettleMs`
+  (8 s, `TabFact::colorSinceMs` — the service's own clock, a first sight in the run reads as settled), so an inferred folder
+  that flips back and forth renames nothing. The order: a state that needs the user (as before), then a real color change
+  of a tab, then the QUIET re-squares (a topic named before §21.13, or under another mode). Still at most one rename per
+  tick, only while the last minute holds fewer than 12 calls and no 429 pause runs, never in the start-up hold or a
+  recreation (§21.11.3). Each rename sets the whole name, so one call fixes the glyph and the square.
+- **A rename for another reason** never carries a color that is still changing (`ChooseNameColor`: the tab's square once it
+  has held, else the one the name shows, with its mode).
+- **`TopicRecord::nameColor` + `nameColorMode`** (persisted: `nameColor`, `nameColorMode`; absent = "" and -1): the square the
+  name shows and the tab-color mode it stands for. A square that changes under the SAME mode is a change of the tab's
+  color; one recorded under another mode (or -1) is re-squared quietly. A name whose square already IS the tab's takes the
+  current mode silently, without a call — once the mode and the color have held.
+- **A mode switch** (the cog's Tab coloring): the sync logs `[msg] tab color mode changed (a -> b): the topic names take the
+  new colors quietly`; for `kColorModeSettleMs` (60 s) after it a color change is the switch's doing (the Individual mode
+  deals new colors moments after the switch), so no line tells it (`NoticeOldSquare`). The same 60 s hold covers a topic
+  just made: a new tab's Individual color is dealt at its first paint, a home-folder launch finds its inferred folder later.
+- **The first start of this build**: every existing topic has no square yet; the name tick re-squares them quietly, one at a
+  time — three calls each (the edit, the delete of Telegram's notice, the card's edit), about four a minute while the chat
+  is otherwise quiet. Production's ~413 topics take roughly 1 h 45 min, and only once the history replay is done (the
+  replay keeps the minute near 18 calls; the name tick waits for fewer than 12). Nothing else changes for them meanwhile:
+  the card shows the square the name shows, so no card is edited before its name.
+
+#### 21.13.4 The line in the topic
+
+- **`BuildTopicChangeNoticeHtml`** (pure), italic, in the user's words: `“🟦 old” changed the title to “🟩 new”` (a color that
+  changed at the same time shows in the two squares) · `“🟦 tab” changed the color to 🟩` · `The title is now “🟦 new”` (no old
+  title known). The titles are escaped and cut like the Search answer's (200 units).
+- **Sent** by `_renameTopic` after a rename Telegram took: silent, at the New priority, and it does NOT move the sticky card
+  (one call, not three: the next real post moves the card below it). Telegram's own `forum_topic_edited` notice is still
+  deleted when it arrives (§21.11.3).
+- **No line** for a state-only rename, a quiet re-square (a topic named before §21.13, a mode switch, "Remove colors", a topic
+  younger than 60 s), a refused rename, or a topic whose history is still being replayed (it would land among the old turns;
+  logged `[msg] topic <id> changed (title|color): no line while its history is being added`). A sent one logs
+  `[msg] topic <id> told: its title|color changed`.
+- **With other lines**: a `/rename` from the topic gets its reply (`Renamed to 🟦 new …`) and then the line; a topic carried
+  over to the next conversation in its tab (a Rekey, §21.6) with a new title gets "— a new conversation in this tab —" and
+  then the line.
+- **Cost**: a title change = the rename (1) + Telegram's notice deleted (1) + the line (1) + the card's edit (1); a color
+  change the same, paced by the name tick; a quiet re-square 3.
+
+#### 21.13.5 Tests and what is open
+
+- **Tests**: `TestMessaging` — the 14 automatic colors' squares, alpha, brown, greys, black, white, malformed colors, the
+  parse, the prefix; the name with the square (a one-unit glyph too, the cut within 128, no square = the old name); the
+  mention; the line (a new title, a new title and color, the color alone, nothing changed, a square that only appears or
+  goes, escaping, no old title); `PickNameRename` (a quiet re-square, the color settle, a real change before quiet ones, a
+  state and a color together, a needs-you state first, the gap, not live, a square already right); `ChooseNameColor`;
+  `NoticeOldSquare` (the same settled mode, a mode switch moments ago, another mode, a topic named before the square, a
+  young topic and an older one); the state file's new keys and an older file; the card with and without the square.
+  `TestMessagingSearch` — the answer's card and the pick menu with a square. The isolated m5 run (HEAD + this work): 7,460
+  checks, the 3 known TestTaskbarBadge failures only. Two earlier runs of the work had one more failure each, a different
+  Scheduler integration check each time ("question cleared: the queued prompt fires", then "the held prompt self-releases
+  once the status held for the full window") — timing checks on a machine busy with production's history replay; nothing
+  here touches the scheduler. `/Zs /W4` of Messaging.cpp + Messaging.Inbound.cpp: clean.
+- **Open** (live): the squares on the phone and the desktop app; one tab's recolor, a rename from the PC and from the topic,
+  a mode switch (quiet), and the quiet re-square of the existing topics.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

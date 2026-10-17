@@ -185,5 +185,12 @@ void TestMessagingSearch()
                                                 L"<i>\U0001F4E6 Closed: Resume opens it in a background tab, and its topic appears.</i>",
               "pick menu: the card's facts in full, its quote, and the state line");
         CHECK(BuildSearchPickMenuHtml(bare, now) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Resume brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
+
+        // §21.13: a card and a menu name the session with its tab's color square, like every title mention ("State, then
+        // color" on the card, as in the topic names); a session with no color reads as above.
+        SearchCard colored = release;
+        colored.colorSquare = L"\U0001F7E6";
+        CHECK(BuildSearchAnswerHtml(L"", { colored }, 0, now).rfind(L"<b>1</b> \U0001F4E6 \U0001F7E6 <b>Release v0.7.9</b>\n", 0) == 0, "answer: the glyph, then the color square, then the title");
+        CHECK(BuildSearchPickMenuHtml(colored, now).rfind(L"<b>1 \x00B7 \U0001F7E6 Release v0.7.9</b>\n", 0) == 0, "pick menu: the color square before the title");
     }
 }

@@ -439,24 +439,54 @@ namespace Agentmaster::Msg
         void _ensureSearchTopic();
         void _syncTopics();
         /// <summary>
-        /// Makes a session's topic: named TopicDisplayName(state, title) (the state glyph first, §21.11), colored like the
-        /// tab, seeded from the transcript (its history replayed first, §21.9), its card posted. `verbose` is the new topic's
-        /// TopicRecord::verbose (-1 = the default for all; a topic recreated in a mode passes 0 or 1). Tick thread.
+        /// Makes a session's topic: named TopicDisplayName(state, square, title) (the state glyph, then the tab color's square:
+        /// §21.11, §21.13), its icon colored like the tab, seeded from the transcript (its history replayed first, §21.9), its
+        /// card posted. The record keeps the square and the tab-color mode it stands for (TopicRecord::nameColor /
+        /// nameColorMode). `verbose` is the new topic's TopicRecord::verbose (-1 = the default for all; a topic recreated in a
+        /// mode passes 0 or 1). Tick thread.
         /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="title">Its tab title ("" = the short id).</param>
+        /// <param name="colorHex">Its tab color (ResolveSessionColorHex; "" = none: no icon color, no square).</param>
+        /// <param name="state">Its state (the name's glyph).</param>
+        /// <param name="verbose">The topic's own verbose mode.</param>
         void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose = -1);
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
         /// <summary>
-        /// Renames a session's topic to TopicDisplayName(state, title) and records both (a refused rename is recorded too,
-        /// so it is not retried every tick). Tick thread (a direct call, paced by _awaitCallSlot).
+        /// Renames a session's topic to TopicDisplayName(state, square, title) and records all three (a refused rename is
+        /// recorded too, so it is not retried every tick). The square is ChooseNameColor's: the tab's color once it has held,
+        /// else the one the name shows. When the TITLE changed, or the tab's COLOR changed from one square to another under a
+        /// settled mode, a silent line in the topic says so (BuildTopicChangeNoticeHtml — the user's "a message like whatsapp
+        /// does for group chat name changed", §21.13); a state-only rename, a quiet re-square and a topic whose history is
+        /// still being replayed get none. The card is refreshed after a rename Telegram took. Tick thread (a direct call,
+        /// paced by _awaitCallSlot).
         /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="title">The title the name shows from now on.</param>
+        /// <param name="state">The state its glyph shows.</param>
         void _renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state);
         /// <summary>
-        /// The topic names' STATE GLYPHS (§21.11), once per tick after the sync: at most one rename (PickStateRename over the
-        /// sync's facts) and only while the last minute's calls leave room (kNameRenameCallsPerMinute), no 429 pause runs,
-        /// the start-up hold is over and no recreation is under way — a name follows its session's state with a lag rather
-        /// than spend the chat's budget. Tick thread; never throws (Rule #18 inside).
+        /// The topic NAMES' state glyphs and color squares (§21.11, §21.13), once per tick after the sync: at most one rename
+        /// (PickNameRename over the sync's facts: the states that need the user, then a tab's color change, then the quiet
+        /// re-squares) and only while the last minute's calls leave room (kNameRenameCallsPerMinute), no 429 pause runs, the
+        /// start-up hold is over and no recreation is under way — a name follows its session's state and color with a lag
+        /// rather than spend the chat's budget. Tick thread; never throws (Rule #18 inside).
         /// </summary>
         void _stateNameTick() noexcept;
+        /// <summary>The last sync's facts of one session (tick thread; null when the sync did not list it).</summary>
+        const TabFact* _lastFact(const std::wstring& sessionId) const noexcept;
+        /// <summary>The tab-color mode the last sync resolved the colors under (the settings' before the first sync). Any thread.</summary>
+        TabColorMode _currentColorMode() const noexcept;
+        /// <summary>
+        /// The color square for a session's title in a message (§21.13, every place a title is printed): TgTitleColorSquare
+        /// of its tab color, resolved like the tab (ResolveSessionColorHex under _currentColorMode); a session the registry does
+        /// not know (an old one the Search found) wears its folder's color, `dirFallback`, like the Sessions page's chip. Any
+        /// thread: it reads dir-colors.json through its cache. Never throws: a failure is logged (Rule #18) and gives "".
+        /// </summary>
+        /// <param name="s">The session (null = the registry does not know it).</param>
+        /// <param name="dirFallback">The working folder of a session the registry does not know ("" = no square).</param>
+        /// <returns>The square, or "" (the "Remove colors" mode, nothing known).</returns>
+        std::wstring _titleSquare(const SessionInfo* s, const std::wstring& dirFallback = {}) const noexcept;
         /// <summary>
         /// Recreates ONE session's topic in a mode (§21.11, /recreate in the topic): the topic is deleted with its messages and
         /// made again at once with its session's whole history, rendered verbose or not (TopicRecord::verbose = `verbose`).
@@ -753,6 +783,18 @@ namespace Agentmaster::Msg
         /// </summary>
         std::vector<TabFact> _lastFacts;
         std::atomic<int> _renameNoticeFailures{ 0 };
+        /// <summary>
+        /// §21.13, the tab colors the topic names follow. Tick thread: `_colorSince` is each live session's color as the last
+        /// sync resolved it and since when it holds (0 = since its first sight in this run, which reads as settled) — the
+        /// TabFact::colorSinceMs the name renames wait on; `_colorModeSeen` is the tab-color mode of the last sync (-1 = no sync
+        /// yet) and `_colorModeChangedMs` when a sync saw it change (0 = not in this run), which keeps the re-colors of a mode
+        /// switch quiet (NoticeOldSquare, kColorModeSettleMs). `_colorMode` is the same mode for the poll thread's replies
+        /// (_titleSquare; -1 = no sync yet: they read the settings).
+        /// </summary>
+        std::unordered_map<std::wstring, std::pair<std::wstring, int64_t>> _colorSince;
+        int _colorModeSeen{ -1 };
+        int64_t _colorModeChangedMs{ 0 };
+        std::atomic<int> _colorMode{ -1 };
         /// <summary>
         /// The single-topic recreations the user confirmed (§21.11; the poll thread queues, the tick runs them): session id
         /// and mode (0 the conversation only, 1 verbose). Under `_mtx`.

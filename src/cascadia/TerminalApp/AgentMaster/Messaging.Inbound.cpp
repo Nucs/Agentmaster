@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <tuple> // the /idle list's (id, title, color square) rows (§21.13)
 
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException
 #include "Persistence.h" // DeriveSessionTitle
@@ -681,7 +682,9 @@ namespace Agentmaster::Msg
             }
             json::Value markup;
             _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
-            _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false), false, markup);
+            CardExtras extras;
+            extras.colorSquare = _titleSquare(&*s); // §21.13: the title with the tab's color, as the tab shows it now
+            _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras), false, markup);
             done(L"ok");
             return;
         }
@@ -844,7 +847,8 @@ namespace Agentmaster::Msg
             {
                 _registry->Update(sessionId, [&](SessionInfo& ss) { ss.title = title; });
             }
-            _reply(threadId, L"Renamed to <b>" + TgEscapeHtml(title) + L"</b> (the topic follows in a moment).", false);
+            // §21.13: the new title with the tab's color square (the topic's name, and a line saying what changed, follow).
+            _reply(threadId, L"Renamed to <b>" + TitleMentionHtml(_titleSquare(&*s), title) + L"</b> (the topic follows in a moment).", false);
             done(L"ok");
             return;
         }
@@ -951,7 +955,7 @@ namespace Agentmaster::Msg
                 return;
             }
             const auto a = AnalyzeSessionTranscript(path, 0);
-            std::wstring html = L"<b>" + TgEscapeHtml(s->title) + L"</b>\n";
+            std::wstring html = L"<b>" + TitleMentionHtml(_titleSquare(&*s), s->title) + L"</b>\n"; // §21.13: with the tab's color square
             html += TgEscapeHtml(s->workingDir) + (a.branch.empty() ? L"" : L" \x00B7 " + TgEscapeHtml(a.branch)) + L"\n";
             if (!a.firstTs.empty() && !a.lastTs.empty())
             {
@@ -1089,7 +1093,7 @@ namespace Agentmaster::Msg
                     return;
                 }
                 const std::wstring token = _tokenFor(L"confirm-" + name, sessionId, L"", kTokenTtlMsFor(1));
-                _reply(threadId, verb + L" <b>" + TgEscapeHtml(s->title) + L"</b> while a turn is running? The turn is cut off.", false,
+                _reply(threadId, verb + L" <b>" + TitleMentionHtml(_titleSquare(&*s), s->title) + L"</b> while a turn is running? The turn is cut off.", false,
                        _buttons({ { { verb + L" now", token }, { L"Cancel", _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1)) } } }));
                 done(L"asked");
                 return;
@@ -1269,7 +1273,7 @@ namespace Agentmaster::Msg
         if (name == L"idle" || name == L"board")
         {
             size_t counts[6] = { 0, 0, 0, 0, 0, 0 };
-            std::vector<std::pair<std::wstring, std::wstring>> idle;
+            std::vector<std::tuple<std::wstring, std::wstring, std::wstring>> idle; // id, title, its tab color's square (§21.13)
             for (const auto& s : _registry->SnapshotLiveForCards())
             {
                 if (s.kind != AgentKind::Claude || s.tabToken.empty())
@@ -1279,7 +1283,7 @@ namespace Agentmaster::Msg
                 counts[static_cast<int>(s.state)]++;
                 if (s.state == SessionState::Idle)
                 {
-                    idle.emplace_back(s.id, s.title.empty() ? ShortId(s.id) : s.title);
+                    idle.emplace_back(s.id, s.title.empty() ? ShortId(s.id) : s.title, _titleSquare(&s));
                 }
             }
             if (name == L"board")
@@ -1302,10 +1306,10 @@ namespace Agentmaster::Msg
             std::wstring html = L"<b>Idle tabs</b> (" + std::to_wstring(idle.size()) + L")";
             std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
             size_t n = 0;
-            for (const auto& [id, title] : idle)
+            for (const auto& [id, title, square] : idle)
             {
                 ++n;
-                html += L"\n" + std::to_wstring(n) + L". " + TgEscapeHtml(title);
+                html += L"\n" + std::to_wstring(n) + L". " + TitleMentionHtml(square, title);
                 if (n <= 10)
                 {
                     rows.push_back({ { L"Wake " + std::to_wstring(n), _tokenFor(L"wake", id, L"", kTokenTtlMsFor(2)) },
@@ -1515,6 +1519,7 @@ namespace Agentmaster::Msg
             card.lastActivityMs = row.lastActivityMs;
             card.prompts = row.prompts;
             card.why = row.why;
+            card.colorSquare = _titleSquare(s ? &*s : nullptr, row.dir); // §21.13: its tab's color, else its folder's
             card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
             cards.push_back(std::move(card));
         }
@@ -1583,6 +1588,7 @@ namespace Agentmaster::Msg
         card.lastActivityMs = remembered && row.lastActivityMs > 0 ? row.lastActivityMs : (s ? s->convLastActivityUnixMs : 0);
         card.prompts = remembered ? row.prompts : 0;
         card.why = remembered ? row.why : std::wstring{};
+        card.colorSquare = _titleSquare(s ? &*s : nullptr, dir); // §21.13: its tab's color, else its folder's
         card.state = state;
         const std::wstring html = BuildSearchPickMenuHtml(card, WallMs());
         // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need. Each acts on
@@ -1605,7 +1611,10 @@ namespace Agentmaster::Msg
         const std::wstring number = payload.substr(0, nl1);
         const std::wstring dir = nl1 == std::wstring::npos ? std::wstring{} : payload.substr(nl1 + 1, nl2 == std::wstring::npos ? std::wstring::npos : nl2 - nl1 - 1);
         const std::wstring title = nl2 == std::wstring::npos ? std::wstring{} : payload.substr(nl2 + 1);
-        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TgEscapeHtml(title.empty() ? ShortId(sessionId) : title) + L"</b>";
+        // §21.13: the head line names the session with its tab's color square (its folder's for a session Agentmaster does not
+        // know), read lean here: the resume below reads the full record again, on the state of that moment.
+        const auto known = _registry->GetWithoutQueue(sessionId);
+        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TitleMentionHtml(_titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title) + L"</b>";
         if (kind == L"pick-cancel")
         {
             // The menu goes; the answer above it keeps its pick buttons. A menu already gone (the user deleted it) is a
@@ -2127,7 +2136,7 @@ namespace Agentmaster::Msg
                     ss.readUnixMs = 0;
                 }
             });
-            _reply(rv.threadId, L"Opened <b>" + TgEscapeHtml(s.title.empty() ? ShortId(s.id) : s.title) + L"</b> \x2014 its topic is coming up." + (rv.req.pin ? L" \U0001F4CC" : L""), false);
+            _reply(rv.threadId, L"Opened <b>" + TitleMentionHtml(_titleSquare(&s), s.title.empty() ? ShortId(s.id) : s.title) + L"</b> \x2014 its topic is coming up." + (rv.req.pin ? L" \U0001F4CC" : L""), false);
             _log(L"[msg] revive done " + ShortId(s.id));
         }
     }
