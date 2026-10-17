@@ -109,7 +109,8 @@ void TestMessagingDirectory()
         CHECK(tags.size() == 3 && tags[0].tabs.size() == 2 && tags[0].tabs[0].sessionId == L"s1" && tags[0].tabs[1].sessionId == L"s2",
               "a tab is listed under its tag case-insensitively, once even when its list repeats the tag");
         CHECK(tags.size() == 3 && tags[1].tabs.size() == 1 && tags[1].tabs[0].sessionId == L"s1", "a tab is listed under each of its tags");
-        CHECK(tags.size() == 3 && tags[2].name == L"empty" && tags[2].tabs.empty(), "a tag no open tab carries is kept, with no tabs");
+        CHECK(tags.size() == 3 && tags[2].name == L"empty" && tags[2].tabs.empty(),
+              "the JOIN keeps a tag no open tab carries, with no tabs (the render leaves it out and counts it)");
         // The pure fold must stay the tag store's identity (the join and the store must agree on what one tag is).
         bool foldOk = true;
         for (const wchar_t* n : { L"Bug", L"RELEASE", L"Tag With Spaces", L"\x00C9\x0043OLE", L"mIxEd-42" })
@@ -193,12 +194,24 @@ void TestMessagingDirectory()
     }
     // The tags: by name, case-insensitively; each tab under its tag by title, its state glyph first, its chip in its color's look.
     {
-        const size_t alphaAt = r.rich.find(L"<b>\U0001F7EA Alpha</b>");
         const size_t betaAt = r.rich.find(L"<b>\U0001F7E5 beta</b>");
         const size_t releaseAt = r.rich.find(L"<b>\U0001F7E8 release</b>");
-        CHECK(alphaAt != std::wstring::npos && betaAt != std::wstring::npos && releaseAt != std::wstring::npos && alphaAt < betaAt && betaAt < releaseAt,
-              "the tags in case-insensitive order of their names, each with its color square");
-        CHECK(r.rich.find(L"<p><b>\U0001F7EA Alpha</b> \x00B7 <i>no open tab</i></p>") != std::wstring::npos, "a tag no open tab carries says so");
+        CHECK(betaAt != std::wstring::npos && releaseAt != std::wstring::npos && betaAt < releaseAt, "the tags in order of their names, each with its color square");
+        {
+            // "Zulu" sorts AFTER "release" case-insensitively; an ordinal sort ('Z' < 'b') would put it first.
+            DirectoryModel cased = m;
+            DirectoryTag zulu;
+            zulu.name = L"Zulu";
+            zulu.colorHex = L"#61AFEF";
+            zulu.tabs.push_back(DirTab(L"eeee6666", L"z tab", SessionState::Idle, L"#61AFEF", 60));
+            cased.tags.push_back(zulu);
+            const DirectoryRender c = RenderDirectory(cased, updatedAt, updatedAt);
+            const size_t cRelease = c.rich.find(L"<b>\U0001F7E8 release</b>");
+            const size_t cZulu = c.rich.find(L"<b>\U0001F7E6 Zulu</b>");
+            CHECK(cRelease != std::wstring::npos && cZulu != std::wstring::npos && cRelease < cZulu, "the tag order is case-insensitive");
+        }
+        CHECK(r.rich.find(L"Alpha") == std::wstring::npos && r.classic.find(L"Alpha") == std::wstring::npos && r.rich.find(L"no open tab") == std::wstring::npos,
+              "a tag no open tab carries is not shown at all (the user's \"Tags with 0 tabs should not be shown\")");
         CHECK(r.rich.find(L"<b>\U0001F7E8 release</b> \x00B7 4 tabs<br>") != std::wstring::npos && r.rich.find(L"\U0001F7E5 beta</b> \x00B7 1 tab<br>") != std::wstring::npos,
               "a tag's count of open tabs, singular and plural");
         const std::wstring agentmaster = L"<br>\U0001F535 <tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</tg-button>";
@@ -219,7 +232,9 @@ void TestMessagingDirectory()
         CHECK(r.classic.find(L"\n\U0001F535 <a href=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</a>") != std::wstring::npos &&
                   r.classic.find(L"\n\x26AA \U0001F7E9 idle tab") != std::wstring::npos,
               "the classic render: a link per tab, the bare label for one with no topic");
-        CHECK(r.tagsShown == 3 && r.tagsHidden == 0 && r.tabsShown == 5, "the truncation counts of a render that fits");
+        CHECK(r.tagsShown == 2 && r.tagsHidden == 0 && r.tagsWithoutTabs == 1 && r.tabsShown == 5,
+              "the counts of a render that fits: 2 tags listed, the one no open tab carries counted apart");
+        CHECK(DescribeDirectoryRender(r) == L"2 tag(s), 5 tab chip(s), 1 tag(s) on no open tab not listed", "the log's words for a render");
     }
     // The footer: the relative date-time entity, apps keep it current; the PC's clock time is its text.
     {
@@ -236,8 +251,17 @@ void TestMessagingDirectory()
     {
         DirectoryModel noTags = m;
         noTags.tags.clear();
-        CHECK(RenderDirectory(noTags, updatedAt, updatedAt).rich.find(L"<p><i>No tags yet. A tab's right-click menu \x25B8 Tags adds one.</i></p>") != std::wstring::npos,
-              "no tag at all: the line says where tags are made");
+        const DirectoryRender nt = RenderDirectory(noTags, updatedAt, updatedAt);
+        CHECK(nt.rich.find(L"<h3>\U0001F3F7\xFE0F Tags</h3><p><i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i></p>") != std::wstring::npos &&
+                  nt.classic.find(L"<b>\U0001F3F7\xFE0F Tags</b>\n<i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i>") != std::wstring::npos,
+              "no tag at all: one line says how a tab gets one");
+        DirectoryModel onlyEmpty = m;
+        onlyEmpty.tags = { m.tags[1] }; // "Alpha": no open tab carries it
+        const DirectoryRender oe = RenderDirectory(onlyEmpty, updatedAt, updatedAt);
+        CHECK(oe.rich == nt.rich && oe.hash == nt.hash && oe.tagsShown == 0 && oe.tagsWithoutTabs == 1,
+              "tags that no open tab carries render exactly like no tag at all: the same line, the same hash");
+        CHECK(DescribeDirectoryRender(oe) == L"0 tag(s), 0 tab chip(s), 1 tag(s) on no open tab not listed" && DescribeDirectoryRender(nt) == L"0 tag(s), 0 tab chip(s)",
+              "the log's words count the tags left out, and say nothing of them when there are none");
     }
     // The hash: the content, never the clock.
     {
@@ -252,6 +276,21 @@ void TestMessagingDirectory()
         std::reverse(reordered.tags.begin(), reordered.tags.end());
         std::reverse(reordered.tags[2].tabs.begin(), reordered.tags[2].tabs.end());
         CHECK(RenderDirectory(reordered, updatedAt, updatedAt).hash == r.hash, "the model's order does not matter: the render sorts");
+        // A tag nobody sees here never edits the message: one added, renamed or recolored with no open tab keeps the hash.
+        DirectoryModel ghosted = m;
+        DirectoryTag ghost;
+        ghost.name = L"ghost";
+        ghost.colorHex = L"#E06C75";
+        ghosted.tags.push_back(ghost);
+        ghosted.tags[1].name = L"Alpha renamed";
+        ghosted.tags[1].colorHex = L"#61AFEF";
+        CHECK(RenderDirectory(ghosted, updatedAt, updatedAt).hash == r.hash, "a tag no open tab carries - added, renamed or recolored - does not change the hash");
+        // Its first open tab makes it appear.
+        DirectoryModel carried = m;
+        carried.tags[1].tabs.push_back(DirTab(L"ffff7777", L"alpha tab", SessionState::Running, L"#61AFEF", 70));
+        const DirectoryRender cr = RenderDirectory(carried, updatedAt, updatedAt);
+        CHECK(cr.hash != r.hash && cr.tagsShown == 3 && cr.tagsWithoutTabs == 0 && cr.rich.find(L"<p><b>\U0001F7EA Alpha</b> \x00B7 1 tab<br>") != std::wstring::npos,
+              "a tag's first open tab makes it appear, and changes the hash");
     }
     // The limits: many tabs under one tag, and more tags than the message holds.
     {
@@ -285,8 +324,9 @@ void TestMessagingDirectory()
         }
         const DirectoryRender hr = RenderDirectory(huge, updatedAt, updatedAt);
         CHECK(hr.rich.size() <= kDirectoryRichMaxChars, "a model past the rich limit still renders within it");
-        CHECK(hr.tagsHidden > 0 && hr.tagsShown + hr.tagsHidden == 60 && hr.rich.find(L" more tags (the message is full)</i></p>") != std::wstring::npos,
+        CHECK(hr.tagsHidden > 0 && hr.tagsShown + hr.tagsHidden == 60 && hr.tagsWithoutTabs == 0 && hr.rich.find(L" more tags (the message is full)</i></p>") != std::wstring::npos,
               "the tags that do not fit are counted in one line");
+        CHECK(DescribeDirectoryRender(hr).find(L" tag(s) left out: the message is full") != std::wstring::npos, "the log's words count the tags the full message left out");
         CHECK(hr.rich.find(L"<b>\U0001F7E6 tag100</b>") != std::wstring::npos && hr.rich.find(L"<b>\U0001F7E6 tag159</b>") == std::wstring::npos,
               "the tags in name order until the message is full: the first are shown, the last are counted");
         CHECK(hr.classic.size() <= kDirectoryClassicMaxChars + kDirectoryTailReserveChars && TgChunkHtml(hr.classic).size() == 1 &&

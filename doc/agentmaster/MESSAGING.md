@@ -2378,16 +2378,18 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
   later to show them; a title Telegram's entity detection might find something in (a URL, a /command) inside a button label —
   if Telegram refuses such a message, it goes as HTML with the square (logged).
 
-### 21.16 The pinned directory — the dedicated topics and every tag with its tabs, in one message of the main view (2026-10-17)
+### 21.16 The pinned directory — the dedicated topics and every tag on an open tab with its tabs, in one message of the main view (2026-10-17)
 
 > Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev 0.0.1.26 since 20:40
 > (`Q:\agentmaster-layouts\Debug`, the build of 19c6b7d1b); not in production (0.6.8.21 is the build of 46e3aad42) — a
-> production build and swap need the user's word.
+> production build and swap need the user's word. The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was
+> written the same evening, after the user saw the first directory; NOT BUILT yet.
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
 topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
 the message shows titles with coloring and when clicked jumps to the topic. This way we have builtin + tags of agentmaster
-covered. Also a two rows of stats "5 running 15 waiting 300 idle" and second row you decide".
+covered. Also a two rows of stats "5 running 15 waiting 300 idle" and second row you decide". Once the first directory was
+up (it listed six of dev's seven tags as "no open tab"): "Tags with 0 tabs should not be shown".
 
 #### 21.16.1 What it shows
 
@@ -2404,9 +2406,10 @@ One rich message (§21.11) in the chat's main view, "All" — the General topic 
 🔵 [🟦 Agentmaster]
 🟡 [🟩 docs]
 ⚪ [🟦 an idle tab]          a chip that opens nothing: the tab has no topic
-🟪 research · no open tab
 updated 5 minutes ago
 ```
+
+(A tag that no open tab carries — `research` above, say, carried only by closed sessions — has no line at all.)
 
 - **The stats come first**, because a pinned message's bar shows the start of its text: the counts read at the top of the chat.
   Row 1 is the user's own example. Row 2 (the user left it to me) holds the states row 1 leaves out — Needs approval, Error,
@@ -2416,15 +2419,21 @@ updated 5 minutes ago
 - **Dedicated topics:** 🔎 Search today, as a chip in the look of its icon color (blue: primary); a chip that opens nothing
   until the topic is made. The list is `_directoryTopics()`: a new dedicated topic adds one entry there (label, thread, icon
   color), and the directory lists it from the next check on.
-- **Tags:** every tag of Agentmaster — the tags any session carries, an archived one's too, and the known-tag registry's
-  0-carrier ones (`CollectGlobalTags` over `LoadAllSessionTags` and `LoadKnownTags`, the Tags panel's universe) — in
-  case-insensitive order of their names, each head in bold with its color square (`ResolveTagDisplayHex`: the picked color,
-  else the palette's, §21.16.5) and its count of open tabs ("no open tab" when none). Under it, the OPEN tabs that carry it
-  (live in a tab, any agent) in case-insensitive order of their titles: the state glyph of the topic names (§21.11), then the
-  tab's chip — a URL button to its topic, in the look of the tab color's square (§21.15: 🟦 primary, 🟩 success, 🟥 danger,
-  else the plain button), the square and the title in its label. A tab with no topic (Idle and not pinned, a Codex tab) gets a
-  DISABLED chip in the same look: the title shows, a tap does nothing. Orders that do not move while the fleet works, so the
-  content changes only when a count, a state, a title or a tag does. With no tag at all, one line says where tags are made.
+- **Tags:** every tag of Agentmaster that at least one OPEN tab carries. The model joins the Tags panel's universe — the
+  tags any session carries, an archived one's too, and the known-tag registry's 0-carrier ones (`CollectGlobalTags` over
+  `LoadAllSessionTags` and `LoadKnownTags`, which also picks each tag's display casing) — with the open tabs (`JoinDirectoryTags`),
+  and the render leaves out every tag with no open tab: one only closed sessions carry, or a 0-carrier tag the registry keeps
+  for re-use (Rule #17) — the user's "Tags with 0 tabs should not be shown". Such a tag changes neither the message nor its
+  hash, so adding, renaming, recoloring or deleting it never edits the directory; its first open tab makes it appear.
+  `DirectoryRender::tagsWithoutTabs` counts the left-out tags for the log. The listed tags go in case-insensitive order of
+  their names, each head in bold with its color square (`ResolveTagDisplayHex`: the picked color, else the palette's,
+  §21.16.5) and its count of open tabs. Under it, the OPEN tabs that carry it (live in a tab, any agent) in case-insensitive
+  order of their titles: the state glyph of the topic names (§21.11), then the tab's chip — a URL button to its topic, in
+  the look of the tab color's square (§21.15: 🟦 primary, 🟩 success, 🟥 danger, else the plain button), the square and the
+  title in its label. A tab with no topic (Idle and not pinned, a Codex tab) gets a DISABLED chip in the same look: the title
+  shows, a tap does nothing. Orders that do not move while the fleet works, so the content changes only when a count, a
+  state, a title or a listed tag does. When no tag is listed (no tag at all, or none on an open tab — one line for both, so
+  a tag nobody sees cannot change it): "No open tab carries a tag. A tab's right-click menu ▸ Tags adds one."
 - **The footer:** `updated <tg-time … format="r">19:04</tg-time>` — a date-time entity in the RELATIVE format, which every app
   renders and keeps current by itself ("5 minutes ago"); the clock time inside is shown by an app that does not know the
   entity. So the clock never costs an edit.
@@ -2481,9 +2490,12 @@ updated 5 minutes ago
 - **One send at a time** (`_directoryInFlight`); a send with no answer for 15 minutes is forgotten (`kDirectoryStallMs`): every
   directory send carries a key, so the next replaces a queued twin, and a post that still lands after it is deleted — the chat
   never holds two directories.
-- **Logs:** `[msg] directory: posting it in the chat's main view (N tag(s), M tab chip(s), rich)`, `[msg] directory posted
-  (message …); pinning it`, `[msg] directory pinned (message …)`, the run's first `[msg] directory edited (…)`, and every
-  refusal. The traffic census counts its edits as `edits(directory=N)` (`EditKindOfKey`, key `dir:edit`).
+- **Logs:** `[msg] directory: posting it in the chat's main view (N tag(s), M tab chip(s)[, K tag(s) on no open tab not
+  listed][, H tag(s) left out: the message is full], rich)`, `[msg] directory posted (message …); pinning it`, `[msg]
+  directory pinned (message …)`, the run's first `[msg] directory edited (message …, rich: N tag(s), M tab chip(s)[, …]);
+  later edits are logged only when one fails` (the words are `DescribeDirectoryRender`'s, the one place on the PC where the
+  content of a sent directory can be read back), and every refusal. The traffic census counts its edits as
+  `edits(directory=N)` (`EditKindOfKey`, key `dir:edit`).
 
 #### 21.16.5 One tag palette for the app and the bot (Rule #17)
 
@@ -2496,7 +2508,8 @@ updated 5 minutes ago
 #### 21.16.6 The code, the tests, what is open
 
 - **The code:** `AgentMaster/MessagingDirectory.h` (pure, header-only: the model, `RenderDirectory`, `JoinDirectoryTags`,
-  `CountDirectoryStats`, `DirectoryTopicUrl`, `DecideDirectoryAction`, `DirectoryEditFoundNoMessage`); Messaging.cpp
+  `CountDirectoryStats`, `DirectoryTopicUrl`, `DescribeDirectoryRender`, `DecideDirectoryAction`,
+  `DirectoryEditFoundNoMessage`); Messaging.cpp
   (`_directoryTick` after the name tick, `_directoryTopics`, `_onDirectoryPosted`, `_editDirectory`, `_onDirectoryEdited`,
   `_pinDirectory`); Messaging.Inbound.cpp (the pin's note); MessagingModels.h (the four state fields, the census kind).
 - **Tests:** `TestMessagingDirectory` (tests_messaging_directory.cpp) — the links; the counts' population; the join (case,
@@ -2523,6 +2536,17 @@ updated 5 minutes ago
   `directoryMessageId` 916, `directoryRich` and `directoryPinned` true. The first census (20:47:58): `pinChatMessage=1
   sendRichMessage=1 deleteMessage=2` — the pin's note and the notice of the one topic rename (`editForumTopic=1`) — no 429,
   and no directory edit (nothing it shows changed). No `[tg]` failure in messaging.log after the swap, no swallowed exception.
+- **The 0-tab rule** (the same evening, after the user saw the first directory: "Tags with 0 tabs should not be shown"):
+  `RenderDirectory` lists only the tags an open tab carries. The join still holds every tag (it keeps the display casing
+  `CollectGlobalTags` picks); the render counts the rest in `tagsWithoutTabs`, and its one empty-state line covers "no tag at
+  all" and "no tag on an open tab" alike, so a tag nobody sees changes neither the message nor its hash. The log lines read
+  a render through `DescribeDirectoryRender`, and the run's first edit now says what it lists. The first start of a build with
+  it EDITS the directory (the hash moves: dev's six tags with no open tab go). Tests: the tag left out of both renders and
+  counted; "only 0-tab tags" renders and hashes exactly like "no tag at all"; a 0-tab tag added, renamed or recolored keeps the
+  hash, and its first open tab makes it appear; the tag order case-insensitive against an ordinal one ("Zulu" after
+  "release"); the log's words. The isolated m5 run (HEAD 19c6b7d1b + this work): 7,652 checks, only the 3 known
+  TestTaskbarBadge failures. `cl /Zs` with the last Debug build's flags of Messaging.cpp and Messaging.Inbound.cpp: clean,
+  and a negative control (a `static_assert` on `DirectoryRender` appended to a copy of Messaging.cpp) failed as it must.
 - **Open:** the look on the user's phone and Desktop (the chips' looks, the disabled chips, the pinned bar's first line, a
   tap); whether a pin in a bot forum's General shows in every topic's pinned bar or only in "All" (not documented); the first
   edit (it comes with the first change of a count, a state or a tag); a production build and swap need the user's word.
