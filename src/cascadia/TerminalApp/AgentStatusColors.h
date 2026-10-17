@@ -185,28 +185,16 @@ namespace winrt::TerminalApp::implementation
         return winrt::Windows::UI::ColorHelper::FromArgb(0xFF, c[0], c[1], c[2]);
     }
 
-    // Agentmaster (bookmark tags): the fixed tag mini-palette. Hoisted out of TagColorFor so the tag
-    // editor's color PICKER offers exactly these swatches (and its random pre-pick draws from them),
-    // keeping hash-colored and picker-colored tags in one distinguishable family. Deliberately avoids
-    // plain gray (the "observed-only" status-dot color) so a bookmark never reads as an unmanaged dot.
-    inline constexpr uint8_t kTagPalette[][3] = {
-        { 0x4F, 0xC3, 0xF7 }, // light blue
-        { 0xAB, 0x47, 0xBC }, // purple
-        { 0xFF, 0x70, 0x43 }, // deep orange
-        { 0x9C, 0xCC, 0x65 }, // light green
-        { 0xFF, 0xCA, 0x28 }, // amber
-        { 0x26, 0xA6, 0x9A }, // teal
-        { 0xEC, 0x40, 0x7A }, // pink
-        { 0x7E, 0x57, 0xC2 }, // deep purple
-        { 0x66, 0xBB, 0x6A }, // green
-        { 0xFF, 0xA7, 0x26 }, // orange
-        { 0x29, 0xB6, 0xF6 }, // blue
-        { 0xEF, 0x53, 0x50 }, // soft red
-    };
-    inline constexpr size_t kTagPaletteSize = sizeof(kTagPalette) / sizeof(kTagPalette[0]);
+    // Agentmaster (bookmark tags): the fixed tag mini-palette — the tag editor's color PICKER offers exactly
+    // these swatches (and its random pre-pick draws from them), keeping hash-colored and picker-colored tags
+    // in one distinguishable family. The TABLE lives in the engine since 2026-10-17
+    // (AgentMaster/SessionStore.h kTagPaletteRgb), because the plain-C++ Telegram directory paints tags too
+    // (MESSAGING.md §21.16): one table, so one tag can never wear two colors (Rule #17). These two wrappers
+    // only turn an entry into a winrt Color; the entries and their order are unchanged.
+    inline constexpr size_t kTagPaletteSize = ::Agentmaster::kTagPaletteRgbCount;
     inline winrt::Windows::UI::Color TagPaletteColor(size_t i)
     {
-        const auto& p = kTagPalette[i % kTagPaletteSize];
+        const auto& p = ::Agentmaster::kTagPaletteRgb[i % kTagPaletteSize];
         return winrt::Windows::UI::ColorHelper::FromArgb(0xFF, p[0], p[1], p[2]);
     }
 
@@ -214,17 +202,12 @@ namespace winrt::TerminalApp::implementation
     // the tag name picks from the palette, so a tag with NO user-picked color (tag-colors.json, the
     // editor's picker) still wears the same color on every tab / panel, across windows and restarts,
     // with no persisted state. A user-picked color overrides this at the spec producer
-    // (TerminalPage::_SetTabAgentTags) and the direct renderers (editor list / hover panel).
+    // (TerminalPage::_SetTabAgentTags) and the direct renderers (editor list / hover panel). The hash
+    // is the engine's TagPaletteIndexFor (moved there with the table, byte for byte the one this
+    // function computed), so the Telegram directory picks the same entry.
     inline winrt::Windows::UI::Color TagColorFor(std::wstring_view name)
     {
-        uint32_t h = 2166136261u; // FNV-1a over the case-folded UTF-16 code units
-        for (const wchar_t c : name)
-        {
-            const auto folded = static_cast<uint32_t>(std::towlower(c));
-            h = (h ^ (folded & 0xFF)) * 16777619u;
-            h = (h ^ ((folded >> 8) & 0xFF)) * 16777619u;
-        }
-        return TagPaletteColor(h % kTagPaletteSize);
+        return TagPaletteColor(::Agentmaster::TagPaletteIndexFor(name));
     }
 
     // Agentmaster (bookmark tags): a tag's DISPLAY color — the user-picked stored color

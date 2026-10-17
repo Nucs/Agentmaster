@@ -362,7 +362,9 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
       Android that label needs `isForum`, which is false for a bot chat.
   - **What can be built from that (nothing built yet, nothing tried on a device):**
     - A **URL button** `https://t.me/<bot>?topic=<searchThreadId>` on a message in "All" (or anywhere). Telegram
-      Desktop's code opens Search from it; Android and iOS open the bot chat only.
+      Desktop's code opens Search from it; Android and iOS open the bot chat only. BUILT since §21.16: the pinned
+      directory's chips are such buttons, in the form `https://t.me/<bot>/<id>?topic=<id>`. ⚠ Read again for it:
+      Android does not even open the chat — for the bot chat that is open already it only calls `setBotUser`.
     - A **`/search`** command, or a card button, that makes the bot post one line IN Search. It does three
       things. That line becomes the chat's last message, so Android's "All" view puts "Continue last thread ›"
       under it, one tap into Search. This lasts only while it stays the chat's newest message: the next post in
@@ -2375,6 +2377,135 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 - **Open** (the user's, live): the chips on the phone (the looks, a tap copying the title); Telegram Desktop needs 7.1 or
   later to show them; a title Telegram's entity detection might find something in (a URL, a /command) inside a button label —
   if Telegram refuses such a message, it goes as HTML with the square (logged).
+
+### 21.16 The pinned directory — the dedicated topics and every tag with its tabs, in one message of the main view (2026-10-17)
+
+> Status: written 2026-10-17 (session 0b1f8635); not built yet.
+
+**The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
+topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
+the message shows titles with coloring and when clicked jumps to the topic. This way we have builtin + tags of agentmaster
+covered. Also a two rows of stats "5 running 15 waiting 300 idle" and second row you decide".
+
+#### 21.16.1 What it shows
+
+One rich message (§21.11) in the chat's main view, "All" — the General topic of a bot forum, where a message with no
+`message_thread_id` lands (`api/forum`: "topic-less messages … end up in the "General" topic"):
+
+```
+🔵 5 running · 🟡 15 waiting · ⚪ 300 idle
+🟠 2 need approval · 🔴 1 error · 🟢 3 done · ⏳ 12 queued
+🧭 Dedicated topics
+[🔎 Search]
+🏷️ Tags
+🟨 release · 3 tabs
+🔵 [🟦 Agentmaster]
+🟡 [🟩 docs]
+⚪ [🟦 an idle tab]          a chip that opens nothing: the tab has no topic
+🟪 research · no open tab
+updated 5 minutes ago
+```
+
+- **The stats come first**, because a pinned message's bar shows the start of its text: the counts read at the top of the chat.
+  Row 1 is the user's own example. Row 2 (the user left it to me) holds the states row 1 leaves out — Needs approval, Error,
+  Done (claude exited) —, the Pending prompts of those tabs (the Prompt Queue Runner's backlog), and `· ⏸ runner paused` while
+  the Manager's global pause is on. Counted over the Claude sessions in a tab, the population of the 🔎 Search topic's
+  `/board` (Codex tabs have no topic, D23). Every number is bold; "1 needs approval" / "2 need approval", "1 error" / "2 errors".
+- **Dedicated topics:** 🔎 Search today, as a chip in the look of its icon color (blue: primary); a chip that opens nothing
+  until the topic is made. The list is `_directoryTopics()`: a new dedicated topic adds one entry there (label, thread, icon
+  color), and the directory lists it from the next check on.
+- **Tags:** every tag of Agentmaster — the tags any session carries, an archived one's too, and the known-tag registry's
+  0-carrier ones (`CollectGlobalTags` over `LoadAllSessionTags` and `LoadKnownTags`, the Tags panel's universe) — in
+  case-insensitive order of their names, each head in bold with its color square (`ResolveTagDisplayHex`: the picked color,
+  else the palette's, §21.16.5) and its count of open tabs ("no open tab" when none). Under it, the OPEN tabs that carry it
+  (live in a tab, any agent) in case-insensitive order of their titles: the state glyph of the topic names (§21.11), then the
+  tab's chip — a URL button to its topic, in the look of the tab color's square (§21.15: 🟦 primary, 🟩 success, 🟥 danger,
+  else the plain button), the square and the title in its label. A tab with no topic (Idle and not pinned, a Codex tab) gets a
+  DISABLED chip in the same look: the title shows, a tap does nothing. Orders that do not move while the fleet works, so the
+  content changes only when a count, a state, a title or a tag does. With no tag at all, one line says where tags are made.
+- **The footer:** `updated <tg-time … format="r">19:04</tg-time>` — a date-time entity in the RELATIVE format, which every app
+  renders and keeps current by itself ("5 minutes ago"); the clock time inside is shown by an app that does not know the
+  entity. So the clock never costs an edit.
+- **Limits:** a tag lists at most 20 tabs (`… and 4 more`); the rich render stays under 32,000 characters and the classic one
+  under 3,800 + its tail, so it is ONE message; tags that do not fit are counted in one line (`… and 3 more tags (the message is
+  full)`); at most 100 tag sections (a rich message takes 500 blocks).
+- **The classic fallback** (rich messages off, or Telegram refused the rich one): the same text, each chip a link
+  (`<a href="…">🟦 Agentmaster</a>`), a tab without a topic its bare label.
+
+#### 21.16.2 Where it lives, and the pin
+
+- **Posted once** in the main view (no thread), silent, at the Backfill priority, keyed `dir:post`; then **pinned**
+  (`pinChatMessage`, silent, keyed `dir:pin`) — in a private chat every non-service message can be pinned, and a pin never
+  notifies there. A refused pin is logged and tried again at the next start.
+- **The pin's note** ("… pinned «🔵 5 running …»") comes back through `getUpdates` as the bot's own service message; when it
+  names the directory it is deleted, so it never sits above every new message of the main view. A pin the user makes leaves no
+  bot note.
+- **Persisted** in `state.json`: `directoryMessageId`, `directoryHash` (what it shows), `directoryRich` (its form),
+  `directoryPinned`. A state file of another bot resets them with the rest (the message is in the old bot's chat).
+- **The first start of a build with it** (dev and production alike) posts and pins one directory; nothing else migrates.
+
+#### 21.16.3 What a tap does (read from the clients' sources; nothing tried on a device)
+
+- **The link:** `https://t.me/<bot>/<topic>?topic=<topic>` — the deep-link spec's topic form ("the topic ID is actually the ID
+  of the service message that created the topic, so whenever the client resolves a message link that points to a
+  messageActionTopicCreate service message, it should open the topic") plus the `topic` parameter Telegram Desktop's link code
+  reads (§5.1). The topic id is the user-space id the Bot API hands out, so the number is right.
+- **Telegram Desktop** opens the topic: `t.me/<bot>/<id>?topic=<id>` becomes `tg://resolve?domain=<bot>&post=<id>&topic=<id>`,
+  and for a non-channel peer the `post` is ignored (`showPeerByLinkResolved` opens it at the unread message). ⚠ Buttons inside a
+  rich message need Desktop 7.1 or later (§21.15.1); the user's Desktop is 7.0.5 (last started 2026-09-25).
+- ⚠ **Telegram Android does NOTHING** for a link to the bot chat that is open already: `LaunchActivity`, for a bot whose chat
+  is the current fragment (`isBot && sameDialogId`), only calls `setBotUser(…)` — the message id and the topic are dropped.
+  **iOS** reads the link as a plain message link into the chat. So on the phone the directory shows the colors, the states and
+  the counts, and its chips do not move the view.
+- **What would make the phone jump (not built, the user's call):** a chip that is a callback instead of a link, whose tap makes
+  the bot RE-POST that topic's sticky card. The card then is the chat's newest message, so Android's "All" view adds its own
+  "Continue last thread ›" button under it, and the topic moves to the top of the topic list. It costs two calls per tap (the
+  card's delete and its send), and a callback chip opens nothing on Desktop — one chip cannot be both.
+
+#### 21.16.4 When it changes
+
+- **A check every 15 s** (`kDirectoryCheckMs`) builds the model — the sync's facts, the session store's cached tag reads (one
+  directory listing, one stat per small file), one lean registry copy for the queues — and renders it. An EDIT goes only when
+  the content hash (`DirectoryRender::hash`, everything but the footer) or the form is not what the message shows, and at
+  most once per **2 minutes** (`kDirectoryEditGapMs`): at most ~30 edits an hour on a busy fleet, ~0.5 call a minute of the
+  chat's flood budget. A quiet fleet costs no call. The decision is the pure `DecideDirectoryAction`.
+- **Not during** the start-up hold or a recreation (the facts are incomplete), before the session store's start-up warm-up is
+  done (its first whole read opens every record file), before getMe gave the bot's username, for 5 minutes after a 429, or
+  while a long 429 parks `editMessageText`, `sendRichMessage` or `sendMessage`.
+- **A refusal** backs off 5 minutes (`kDirectoryRetryMs`); a rich form Telegram refused is not tried again for the same content.
+  **The message gone** ("message to edit not found", `MESSAGE_ID_INVALID`, "message can't be edited" — the user deleted it) is
+  forgotten, and a new one is posted and pinned **30 minutes** later (`kDirectoryRepostGapMs`), so a deletion is not answered at
+  once.
+- **One send at a time** (`_directoryInFlight`); a send with no answer for 15 minutes is forgotten (`kDirectoryStallMs`): every
+  directory send carries a key, so the next replaces a queued twin, and a post that still lands after it is deleted — the chat
+  never holds two directories.
+- **Logs:** `[msg] directory: posting it in the chat's main view (N tag(s), M tab chip(s), rich)`, `[msg] directory posted
+  (message …); pinning it`, `[msg] directory pinned (message …)`, the run's first `[msg] directory edited (…)`, and every
+  refusal. The traffic census counts its edits as `edits(directory=N)` (`EditKindOfKey`, key `dir:edit`).
+
+#### 21.16.5 One tag palette for the app and the bot (Rule #17)
+
+- The tag palette (12 colors) and the name hash that picks a tag's entry moved from `AgentStatusColors.h` (WinRT, the UI only)
+  into the engine: `SessionStore.h` `kTagPaletteRgb`, `TagPaletteIndexFor`, `TagPaletteHex`, and `ResolveTagDisplayHex` (the
+  text twin of `ResolveTagDisplayColor`: a picked, well-formed color, else the palette's). `TagColorFor` / `TagPaletteColor`
+  build their winrt Colors from it. The table and the hash are unchanged byte for byte, so every tag keeps its color, and the
+  directory can never paint a tag differently from its ribbons.
+
+#### 21.16.6 The code, the tests, what is open
+
+- **The code:** `AgentMaster/MessagingDirectory.h` (pure, header-only: the model, `RenderDirectory`, `JoinDirectoryTags`,
+  `CountDirectoryStats`, `DirectoryTopicUrl`, `DecideDirectoryAction`, `DirectoryEditFoundNoMessage`); Messaging.cpp
+  (`_directoryTick` after the name tick, `_directoryTopics`, `_onDirectoryPosted`, `_editDirectory`, `_onDirectoryEdited`,
+  `_pinDirectory`); Messaging.Inbound.cpp (the pin's note); MessagingModels.h (the four state fields, the census kind).
+- **Tests:** `TestMessagingDirectory` (tests_messaging_directory.cpp) — the links; the counts' population; the join (case,
+  repeats, a 0-carrier tag, the fold equal to `FoldTagName`); both renders (the user's row 1 at the very start, row 2's words
+  and the pause, the Search chip and its disabled form, the tag and tab order, every chip look, a disabled chip, escaping, the
+  footer, balanced elements, no title token, one classic message); the hash (the clock out, a count or a state in, the model's
+  order out); the limits (20 tabs a tag, 60 big tags against both caps); the decision (post, in flight, back-off, gap, form,
+  a refused rich form); the "gone" answers; the state fields' round trip; the census kind; the palette pinned against an
+  independent FNV-1a. The isolated m5 run (HEAD + this work): 7,582 checks, only the 3 known TestTaskbarBadge failures.
+- **Open:** the build and the live check on the dev bot; the look on the phone; whether a pin in a bot forum's General shows in
+  every topic's pinned bar or only in "All" (not documented); a production build and swap need the user's word.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

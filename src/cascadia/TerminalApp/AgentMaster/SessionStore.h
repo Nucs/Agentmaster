@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view> // TagPaletteIndexFor
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -342,6 +343,60 @@ namespace Agentmaster
     std::map<std::wstring, std::wstring> LoadAllTagColors();
     std::wstring GetTagColor(const std::wstring& tag);
     bool SetTagColor(const std::wstring& tag, const std::wstring& hex);
+
+    // ===== the TAG PALETTE: the one copy of a tag's fallback color (Rule #17) =================
+    //
+    // The fixed mini-palette a tag with NO user-picked color (tag-colors.json) is painted from, and the
+    // stable name hash that picks its entry. It lives HERE, in the engine, because two kinds of code paint
+    // tags: the XAML surfaces (AgentStatusColors.h TagColorFor / TagPaletteColor / ResolveTagDisplayColor
+    // build winrt Colors from this table) and the plain-C++ Telegram directory (MESSAGING.md §21.16, which
+    // shows a tag's color square). Moved out of AgentStatusColors.h on 2026-10-17 so the two can never
+    // disagree: a second copy of the table or of the hash would let one tag wear two colors, which Rule #17
+    // forbids. The table and the hash are unchanged, so every tag keeps the color it had.
+    // Deliberately no plain gray (the "observed-only" status-dot color): a bookmark never reads as an
+    // unmanaged dot. The tag editor's color picker offers exactly these swatches, so hash-colored and
+    // picker-colored tags stay one distinguishable family.
+    inline constexpr uint8_t kTagPaletteRgb[][3] = {
+        { 0x4F, 0xC3, 0xF7 }, // light blue
+        { 0xAB, 0x47, 0xBC }, // purple
+        { 0xFF, 0x70, 0x43 }, // deep orange
+        { 0x9C, 0xCC, 0x65 }, // light green
+        { 0xFF, 0xCA, 0x28 }, // amber
+        { 0x26, 0xA6, 0x9A }, // teal
+        { 0xEC, 0x40, 0x7A }, // pink
+        { 0x7E, 0x57, 0xC2 }, // deep purple
+        { 0x66, 0xBB, 0x6A }, // green
+        { 0xFF, 0xA7, 0x26 }, // orange
+        { 0x29, 0xB6, 0xF6 }, // blue
+        { 0xEF, 0x53, 0x50 }, // soft red
+    };
+    inline constexpr size_t kTagPaletteRgbCount = sizeof(kTagPaletteRgb) / sizeof(kTagPaletteRgb[0]);
+
+    // The palette entry of a tag that has no picked color: a case-insensitive FNV-1a over the UTF-16 code
+    // units of the name (each unit lower-cased with towlower, then its low byte and its high byte), modulo the
+    // palette size — so the same tag gets the same color on every tab and panel, in every window and run,
+    // with no persisted state. The exact hash AgentStatusColors.h's TagColorFor always used.
+    //   name    — the tag name as displayed (any casing: "Bug" and "bug" hash alike).
+    //   returns — an index into kTagPaletteRgb, always below kTagPaletteRgbCount.
+    //   throws  — nothing.
+    size_t TagPaletteIndexFor(std::wstring_view name) noexcept;
+
+    // A palette entry as "#FFRRGGBB" (opaque, upper-case hex), the form tag-colors.json stores a picked color in.
+    //   index   — any value; it is taken modulo kTagPaletteRgbCount.
+    //   returns — the color text.
+    //   throws  — std::bad_alloc.
+    std::wstring TagPaletteHex(size_t index);
+
+    // A tag's DISPLAY color as text, for code that is not XAML (the Telegram directory): the user-picked color
+    // when `storedByFoldedName` holds a well-formed one for the tag ("#RRGGBB" / "#AARRGGBB", as stored), else
+    // the palette entry of the name hash (TagPaletteHex(TagPaletteIndexFor(name))). The text twin of
+    // AgentStatusColors.h ResolveTagDisplayColor, with the same precedence and the same fallback for a
+    // malformed stored value — so a tag shows one color on every surface.
+    //   name               — the tag name (any casing; folded with FoldTagName for the lookup).
+    //   storedByFoldedName — one LoadAllTagColors() the caller did (folded name -> color).
+    //   returns            — the color text, never empty.
+    //   throws             — std::bad_alloc.
+    std::wstring ResolveTagDisplayHex(const std::wstring& name, const std::map<std::wstring, std::wstring>& storedByFoldedName);
 
     // ===== the TAG-CHANGE EPOCH (SIDE_PANEL.md §2c) ===========================================
     //
