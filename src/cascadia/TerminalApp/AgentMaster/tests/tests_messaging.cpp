@@ -8,6 +8,9 @@
 
 #include "m5_tests.h"
 
+#include <cstdint> // SIZE_MAX (the rename-budget model's low-water mark)
+#include <deque> // the rename-budget model's call window
+
 #include "../MessagingModels.h"
 #include "../TelegramFormat.h"
 
@@ -1202,6 +1205,101 @@ void TestMessaging()
             fresh.title = L"New tab";
             const auto ops = PlanTopicSync({ fresh }, {}, now, 600000);
             CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Create && ops[0].state == SessionState::NeedsApproval, "a create carries the state its name's glyph shows");
+        }
+
+        // 2026-10-17 — a rename goes BEFORE the history replay. The replay holds the call window at its cap (18 a minute) for
+        // hours; the old rule (a rename only below 12 calls a minute) made 1 rename in five hours on production, every Running
+        // and Error topic stayed 🟡. The budget rule, the replay's hold, and a minute of the two together.
+        {
+            CHECK(NameRenameFits(0, 18) && NameRenameFits(16, 18), "a rename fits while the window leaves room for its two calls (the edit, the notice's delete)");
+            CHECK(!NameRenameFits(17, 18) && !NameRenameFits(18, 18) && !NameRenameFits(25, 18), "no room: one call short, the replay's steady level, the live traffic over the budget");
+            CHECK(!HistoryYieldsToRename(0, 5000), "no rename waits: the replay goes");
+            CHECK(HistoryYieldsToRename(4000, 5000) && HistoryYieldsToRename(5000, 5000), "a rename waits: the replay holds");
+            CHECK(HistoryYieldsToRename(100000, 100000 + kNameRenameHoldMaxMs - 1) && !HistoryYieldsToRename(100000, 100000 + kNameRenameHoldMaxMs),
+                  "the hold ends after kNameRenameHoldMaxMs (the live traffic alone keeps the window full)");
+            CHECK(!HistoryYieldsToRename(6000, 5000), "a stamp from the future holds nothing");
+
+            // A model of the send loop and the name tick over two minutes: the replay sends whenever it may (under 18 in the
+            // window, one a second at most, not while a rename waits); a rename falls due at t = 30 s; the tick looks every
+            // 1.5 s. The rename must be made within seconds, and the replay must go on after it.
+            std::deque<int64_t> window;
+            const auto prune = [&window](int64_t t) {
+                while (!window.empty() && t - window.front() >= 60000)
+                {
+                    window.pop_front();
+                }
+            };
+            for (int64_t t = 0; t < 60000; t += 3400)
+            {
+                window.push_back(t); // the replay's first minute: ~18 calls, the window at its cap
+            }
+            int64_t waitingSince = 0;
+            int64_t renamedAt = -1;
+            int64_t lastSend = 0;
+            int historyAfterRename = 0;
+            size_t smallestFreeWindow = SIZE_MAX; // the window's low point while the replay runs with no rename due
+            for (int64_t t = 60000; t < 180000; t += 100)
+            {
+                prune(t);
+                if (t < 90000)
+                {
+                    smallestFreeWindow = (std::min)(smallestFreeWindow, window.size());
+                }
+                const bool due = t >= 90000 && renamedAt < 0;
+                if (due && t % 1500 == 0)
+                {
+                    if (NameRenameFits(window.size(), 18))
+                    {
+                        window.push_back(t);
+                        window.push_back(t); // the edit, and the delete of Telegram's notice
+                        renamedAt = t;
+                        waitingSince = 0;
+                    }
+                    else if (waitingSince == 0)
+                    {
+                        waitingSince = t;
+                    }
+                }
+                if (!HistoryYieldsToRename(waitingSince, t) && window.size() < 18 && t - lastSend >= 2000)
+                {
+                    window.push_back(t);
+                    lastSend = t;
+                    historyAfterRename += renamedAt >= 0 ? 1 : 0;
+                }
+            }
+            CHECK(renamedAt >= 90000 && renamedAt - 90000 <= 10000, "the replay holding the window at its cap, a due rename is made within seconds (it was never made)");
+            CHECK(historyAfterRename > 10, "the replay goes on after the rename");
+            CHECK(smallestFreeWindow >= 12, "the rule it replaces (a rename only under 12 calls a minute) finds no moment while the replay runs");
+        }
+
+        // 2026-10-17 — a long 429 parks the refused METHOD (FloodParking): Telegram answered one editMessageText with
+        // retry_after 6542 s and the send loop slept it out, the whole bot silent for 1 h 49 min.
+        {
+            FloodParking p;
+            const int64_t t0 = 1000000;
+            CHECK(FloodParkedUntil(p, L"sendMessage", t0) == 0, "nothing is parked at first");
+            CHECK(!ParkForFlood(p, L"editMessageText", 6542, t0), "the first long 429 parks its method only");
+            CHECK(FloodParkedUntil(p, L"editMessageText", t0 + 1000) == t0 + 6542000, "the refused method waits until its deadline");
+            CHECK(FloodParkedUntil(p, L"sendMessage", t0 + 1000) == 0 && FloodParkedUntil(p, L"editForumTopic", t0 + 1000) == 0, "every other method goes on");
+            CHECK(!ParkForFlood(p, L"editMessageText", 100, t0 + 2000) && FloodParkedUntil(p, L"editMessageText", t0 + 3000) == t0 + 6542000,
+                  "the same method refused again: no escalation, the later deadline stays");
+            CHECK(ParkForFlood(p, L"sendMessage", 120, t0 + 5000), "a second method refused while one is parked: the whole chat is held");
+            CHECK(FloodParkedUntil(p, L"sendRichMessage", t0 + 6000) == t0 + 6542000 && FloodParkedUntil(p, L"deleteMessage", t0 + 6000) == t0 + 6542000,
+                  "every method then waits for the latest deadline");
+            CHECK(FloodParkedUntil(p, L"sendMessage", t0 + 6542000) == 0, "after the deadline everything may go");
+
+            FloodParking q;
+            CHECK(!ParkForFlood(q, L"editMessageText", 100, t0) && !ParkForFlood(q, L"sendMessage", 100, t0 + 200000),
+                  "a parking that expired does not escalate the next one (it is dropped on the way)");
+            CHECK(q.methodUntilMs.size() == 1 && q.methodUntilMs.count(L"sendMessage") == 1, "only the live entry is kept");
+            FloodParking z;
+            ParkForFlood(z, L"editMessageText", 0, t0);
+            CHECK(FloodParkedUntil(z, L"editMessageText", t0) == t0 + 1000, "a retry_after under one second counts as one");
+
+            CHECK(std::wstring{ EditKindOfKey(L"card:abc") } == L"card" && std::wstring{ EditKindOfKey(L"pl:4711") } == L"prompt" &&
+                      std::wstring{ EditKindOfKey(L"wl:abc") } == L"worklog",
+                  "the census names what an edit edits: a card, a prompt status, a work log");
+            CHECK(std::wstring{ EditKindOfKey(L"") } == L"other" && std::wstring{ EditKindOfKey(L"setup-notice") } == L"other", "anything else is \"other\"");
         }
 
         // §21.13 — the title's COLOR: the square after the state glyph in the name ("State, then color"), the same square in

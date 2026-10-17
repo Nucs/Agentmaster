@@ -2094,6 +2094,73 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
   to 🟩` about 8 s later); a rename at the PC and with `/rename` in the topic (the line at once); a mode switch in the cog
   (quiet, `[msg] tab color mode changed`); the Search answers' squares.
 
+### 21.14 A topic's name follows its session during the history replay; a long 429 holds one method, not the bot (2026-10-17)
+
+> Status: written 2026-10-17 (session 0b1f8635); NOT BUILT yet — production 0.6.8.21 (the build of 46e3aad42) still has the
+> rename gate that the replay starves and the 429 sleep that silences the bot.
+
+**The user's request** (2026-10-17 ~17:00, after five hours of production's topics): "Can we rename topic when the topic has
+a running session (blue circle) instead of the yellow one or as red when error".
+
+#### 21.14.1 What was wrong (production 0.6.8.21, 12:01 → 17:03)
+
+- **No rename could happen.** The glyph rule of §21.11 and its picker were right (Needs approval, Error, Waiting for you
+  first; a state renames once it has held 8 s; a topic at most every 30 s). But `_stateNameTick` renamed only while the
+  chat's call window held FEWER THAN 12 calls, and from 12:16 on the history replay of the 413 new topics held that window
+  at its cap of 18 a minute (every `[msg] traffic (10 min)` line: 180–186 calls). Result: **one rename in five hours** (a
+  title change, `topic renamed 0b1f8635 → “🟡 teams/telegram integrationforum”` at 13:38). A topic made 🟡 stayed 🟡 while its
+  session ran (`e7fe1323 waiting -> running` 16:19:33, no rename) or failed.
+- **A second fault, in the same log.** At 17:00:59 Telegram answered one editMessageText with 429 and `retry_after 6542 s`.
+  The send loop slept a 429's whole retry_after before retrying the same item, so from then on NOTHING was posted —
+  replies, prompt lines, cards, history — until about 18:50, while `_noteFlood`'s line said "live messages go on". The
+  tick's topic calls had the same sleep, and createForumTopic's did not even end for Stop (a quit could hang that long).
+  Which edits piled up is not in the log: the census counted every editMessageText as one number (36–57 per 10 minutes all
+  afternoon). One fact found reading for it: the card shows the unsent draft (`✎ unsent at the PC: “…”`), so typing in a tab
+  re-edits that topic's card every 20 s while the first line changes.
+
+#### 21.14.2 A rename goes before the replay
+
+- A due rename (PickNameRename, unchanged) is made when the window leaves room for its two calls (the edit, and the delete of
+  Telegram's "topic renamed" notice) under the replay's budget: `NameRenameFits(calls, kHistoryCallsPerMinute)`, i.e.
+  calls + 2 ≤ 18. With no room it stamps `_renameWaitingSinceMs`, and the send loop holds HISTORY items while the stamp is
+  younger than `kNameRenameHoldMaxMs` (90 s; `HistoryYieldsToRename`): the window drains a call every few seconds, the next
+  name tick (every 1.5 s) makes the rename, and the replay goes on. The live traffic still goes first (it never checks the
+  window); the 90 s bound only matters when the live traffic alone keeps the window full.
+- **A rename refused by the flood control stays due.** The record took the new state "either way", so a 429'd rename kept
+  the old glyph until the session's next change; now it is made again after the pause. Any other refusal is still recorded
+  (a name Telegram will not take must not be retried every tick).
+- The m5 suite models two minutes of the replay at its cap: the due rename is made within seconds (the old rule found no
+  moment in the whole run), and the replay goes on after it.
+
+#### 21.14.3 A long 429 parks the refused method
+
+- **`FloodParking`** (MessagingModels.h, pure): a 429 whose retry_after is above `kFloodParkAfterSec` (60 s) parks only the
+  refused METHOD until its deadline. Its items stay queued in their places (an edit that a newer edit of the same message
+  replaced meanwhile is dropped), and every other method goes on. A long 429 on ANOTHER method while one is parked means
+  Telegram holds the whole chat: every method parks until the later deadline. A shorter wait is still slept through by the
+  thread that met it (the outbox keeps its order). Log: `[msg] pacing: 429 on editMessageText (retry after 6542 s):
+  editMessageText waits until 18:50; the other calls go on`, or `… a second method refused — every call waits until …`.
+- **The tick's topic calls** (create, delete, rename) skip a parked method: `_awaitCallSlot` returns false and the work is
+  left for a later tick. Their own 429s go through `_handleTickFlood`: a long one parks, a short one is waited out
+  stop-aware. A closed session's topic delete refused this way keeps its record (it used to drop it and leave the topic in
+  the chat).
+- The secretary bot's sends park separately (`_secretaryFloodParking`: its flood control is that bot's own).
+- **Not known:** whether Telegram's 6542 s hold covered edits only or the whole chat. If the whole chat, the first message
+  after the edit's refusal gets its own 429 and everything parks — one more refused call than before, and the same silence.
+- **The census says what was edited:** `[msg] traffic (10 min): … editMessageText=57 … edits(card=40 prompt=12 other=5)`
+  (`EditKindOfKey`: `card:` → card, `pl:` → prompt, `wl:` → worklog, else other).
+
+#### 21.14.4 Checked
+
+- **m5, isolated** (HEAD 9dbff4afc + these files only): 7,482 checks, only the 3 known `TestTaskbarBadge` failures. The new
+  blocks: the budget rule (room for two calls under 18), the replay's hold and its 90 s bound, a two-minute model of the
+  replay at its cap with a rename falling due (made within 10 s; the old rule found no moment; the replay goes on), and the
+  flood parking (one method parked, the others free; a second method escalates to all until the latest deadline; an
+  expired entry neither holds nor escalates; a retry_after under a second counts as one), plus the census kinds.
+- `/Zs /W4` of `Messaging.cpp` + `Messaging.Inbound.cpp`: clean.
+- **Not checked live yet:** a rename during a replay, and a long 429 with the other methods going on — production is where
+  both happen (its replay runs for hours; its 6542 s edit wait ends ~18:50).
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

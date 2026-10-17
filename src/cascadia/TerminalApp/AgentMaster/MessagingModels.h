@@ -2516,9 +2516,153 @@ namespace Agentmaster::Msg
     // A state the topic name follows must have held this long (a Running ↔ Waiting flicker of a short turn renames nothing),
     // and two renames of one topic are this far apart at least. Each rename costs two calls in the chat (the edit, and the
     // delete of the "topic renamed" notice Telegram posts), so the names follow the fleet with a lag rather than spend the
-    // chat's budget (the service also renames only while the last minute's calls leave room).
+    // chat's budget (the service renames only while the last minute's calls leave room for both: NameRenameFits).
     inline constexpr int64_t kNameStateSettleMs = 8 * 1000;
     inline constexpr int64_t kNameRenameGapMs = 30 * 1000;
+
+    /// <summary>
+    /// What one topic RENAME costs in the chat's call window: the editForumTopic call, and the deleteMessage of the "topic
+    /// renamed" notice Telegram posts into the topic (the poll thread removes it when it arrives).
+    /// </summary>
+    inline constexpr size_t kNameRenameCallCost = 2;
+
+    /// <summary>
+    /// How long the HISTORY REPLAY holds its next message for a rename that is due but finds no room, at most (2026-10-17).
+    /// Why the replay holds at all: it keeps the chat's call window at its cap for hours (§21.9 — ~18 calls a minute while
+    /// ~2,000 turns of ~411 topics replay), and a rename that waited for "room" behind it never went. Production renamed 1 of
+    /// ~411 topics in five hours, so a session that ran or failed kept its topic at 🟡 all afternoon (the user's report: "rename
+    /// topic when the topic has a running session (blue circle) instead of the yellow one or as red when error"). The window
+    /// frees a call every few seconds, so the hold normally lasts seconds; the bound only matters when the LIVE traffic alone
+    /// keeps the window full (it never checks the window), and then the replay goes on after this long.
+    /// </summary>
+    inline constexpr int64_t kNameRenameHoldMaxMs = 90 * 1000;
+
+    /// <summary>
+    /// Whether a due rename fits the chat's call window now: the calls of the last minute plus the rename's own
+    /// (kNameRenameCallCost) stay within the budget the history replay is held to. Renames go BEFORE the replay (the replay
+    /// waits for them, HistoryYieldsToRename) and after the live traffic (which goes first by itself).
+    /// </summary>
+    /// <param name="callsInLastMinute">The call window's size: calls into the chat in the last 60 s, any method.</param>
+    /// <param name="budgetPerMinute">The window's budget (the service's kHistoryCallsPerMinute).</param>
+    /// <returns>True when the rename may be made now.</returns>
+    inline constexpr bool NameRenameFits(size_t callsInLastMinute, size_t budgetPerMinute) noexcept
+    {
+        return callsInLastMinute + kNameRenameCallCost <= budgetPerMinute;
+    }
+
+    /// <summary>
+    /// Whether the history replay holds its next message for a waiting rename: a rename has been due without room since
+    /// `renameWaitingSinceMs`, less than kNameRenameHoldMaxMs ago. The service sets the stamp when a due rename finds the window
+    /// full and clears it when the rename was made or none is due, so the replay never holds for a rename that is gone.
+    /// </summary>
+    /// <param name="renameWaitingSinceMs">When the due rename first found no room (GetTickCount64 ms; 0 = no rename waits).</param>
+    /// <param name="nowMs">The same clock, now.</param>
+    /// <returns>True while the replay must leave the next free call to the rename.</returns>
+    inline constexpr bool HistoryYieldsToRename(int64_t renameWaitingSinceMs, int64_t nowMs) noexcept
+    {
+        return renameWaitingSinceMs > 0 && nowMs >= renameWaitingSinceMs && nowMs - renameWaitingSinceMs < kNameRenameHoldMaxMs;
+    }
+
+    /// <summary>
+    /// A 429 whose retry_after is longer than this PARKS the refused method instead of holding every call of the bot
+    /// (FloodParking). A shorter wait is still slept through by the thread that met it, which keeps the outbox's order.
+    /// </summary>
+    inline constexpr int kFloodParkAfterSec = 60;
+
+    /// <summary>
+    /// The LONG-FLOOD PARKING (2026-10-17): which methods Telegram's flood control holds, and until when. Telegram answers a call
+    /// over the chat's budget with 429 and a retry_after, and the send loop used to sleep that whole time — every call, every
+    /// topic — while its log line said "live messages go on". One editMessageText answered with retry_after 6542 s (production,
+    /// 2026-10-17 17:00:59) and the bot posted nothing for an hour and 49 minutes. Now a long wait parks only the refused
+    /// METHOD (its queued items go after the deadline; every other method goes on), and a long 429 on ANOTHER method while one
+    /// is parked means the whole chat is held: every method parks until the later deadline (ParkForFlood). Clocks are
+    /// GetTickCount64 ms. The service keeps one under its mutex; the rules are pure so the m5 suite pins them.
+    /// </summary>
+    struct FloodParking
+    {
+        std::map<std::wstring, int64_t> methodUntilMs; // a parked method -> its deadline
+        int64_t allUntilMs{ 0 }; // every method is parked until then (0 = none)
+    };
+
+    /// <summary>The deadline that holds `method` now: the chat-wide one, else the method's own; 0 when it may be called.</summary>
+    /// <param name="p">The parking.</param>
+    /// <param name="method">The Bot API method about to be called ("sendDocument" for a document upload).</param>
+    /// <param name="nowMs">The clock (GetTickCount64 ms).</param>
+    /// <returns>The later deadline that holds the method, or 0.</returns>
+    inline int64_t FloodParkedUntil(const FloodParking& p, const std::wstring& method, int64_t nowMs)
+    {
+        if (p.allUntilMs > nowMs)
+        {
+            return p.allUntilMs;
+        }
+        if (const auto it = p.methodUntilMs.find(method); it != p.methodUntilMs.end() && it->second > nowMs)
+        {
+            return it->second;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Records a long 429 (retry_after above kFloodParkAfterSec): parks `method` until now + retry_after, or — when another
+    /// method is parked still — every method until the latest of the deadlines (Telegram holds the whole chat, not one method:
+    /// calling on would only collect more refusals). Expired entries are dropped on the way.
+    /// </summary>
+    /// <param name="p">The parking to update.</param>
+    /// <param name="method">The method Telegram refused.</param>
+    /// <param name="retryAfterSec">Telegram's retry_after (seconds; values below 1 count as 1).</param>
+    /// <param name="nowMs">The clock (GetTickCount64 ms).</param>
+    /// <returns>True when the parking now holds every method.</returns>
+    /// <exception cref="std::bad_alloc">If the map cannot grow.</exception>
+    inline bool ParkForFlood(FloodParking& p, const std::wstring& method, int retryAfterSec, int64_t nowMs)
+    {
+        const int64_t until = nowMs + static_cast<int64_t>((std::max)(1, retryAfterSec)) * 1000; // (std::max): the <windows.h> macro
+        int64_t otherUntil = 0;
+        for (auto it = p.methodUntilMs.begin(); it != p.methodUntilMs.end();)
+        {
+            if (it->second <= nowMs)
+            {
+                it = p.methodUntilMs.erase(it); // expired: it holds nothing any more
+                continue;
+            }
+            if (it->first != method)
+            {
+                otherUntil = (std::max)(otherUntil, it->second);
+            }
+            ++it;
+        }
+        if (otherUntil > 0 || p.allUntilMs > nowMs)
+        {
+            p.allUntilMs = (std::max)({ p.allUntilMs, until, otherUntil });
+            return true;
+        }
+        auto& mine = p.methodUntilMs[method];
+        mine = (std::max)(mine, until);
+        return false;
+    }
+
+    /// <summary>
+    /// What an editMessageText edits, from its outbox key, for the traffic census's `edits(…)` part: "card" (a topic card,
+    /// key "card:&lt;session&gt;"), "prompt" (a §21.12 prompt status, "pl:&lt;message&gt;"), "worklog" (a verbose topic's
+    /// work log, "wl:&lt;session&gt;"), else "other" (an edit with no key, or a key of a kind added later).
+    /// </summary>
+    /// <param name="key">The outbox item's key ("" = none).</param>
+    /// <returns>The kind's census name.</returns>
+    inline const wchar_t* EditKindOfKey(std::wstring_view key) noexcept
+    {
+        if (key.starts_with(L"card:"))
+        {
+            return L"card";
+        }
+        if (key.starts_with(L"pl:"))
+        {
+            return L"prompt";
+        }
+        if (key.starts_with(L"wl:"))
+        {
+            return L"worklog";
+        }
+        return L"other";
+    }
     // §21.13: a switch of the tab-color mode re-colors every tab, and the Individual mode deals new colors moments after it.
     // A color change this soon after the service saw the mode change — or this soon after the topic was made (a new tab's
     // first colors) — is not the user's recolor of a tab, so its topic changes square QUIETLY (NoticeOldSquare), and only a
