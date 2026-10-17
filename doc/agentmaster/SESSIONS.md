@@ -667,7 +667,8 @@ result. A search takes the newest published catalog.
   not as far as the search asked, the result has an **`indexing`** field, and the model tells the
   user that older sessions are still being indexed.
 - A search waits at most 2 s for a catalog that covers its period, and only the first search of a
-  request waits.
+  request waits. ⚠ After the index was freed (9.6), this is what makes a request answer "nothing
+  found, still being indexed" from the first step's few sessions (9.13, NOT FIXED).
 - **The session store is not waited for either.** The stored titles, the tags and the favorites
   come from `session-store\`, whose first read of a process opens every record file (16 s were
   measured for 2,181 files that Windows had not cached; this read, not the sidecar files, once
@@ -981,6 +982,71 @@ Not measured live yet.
 **Not done.** No live run (the m5 suite and `/Zs` only). `harness_live.cpp` prints each shown
 session's why and checks the four tools; the timing of a request with a read is unmeasured. The
 Sessions page's rows were not looked at on screen.
+
+### 9.13 Empty "still being indexed" answers (seen 2026-10-17, NOT FIXED)
+
+> Status: found 2026-10-17 in the dev bot's 🔎 Search topic (session d1d47b98). Nothing is changed
+> yet; the fix at the end is a proposal.
+
+**What the user sees.** A request made after a pause comes back with no session and a sentence like
+"I found no sessions ending in an API error, but indexing is still running, so try again shortly."
+Asked why it does not wait, the model answered that it cannot: every search returns at once with
+what is indexed, and its instructions tell it not to search again.
+
+**The evidence** (dev's `harness\telegram-search.json` and hooks.log; 7 requests, 2026-10-16/17):
+
+| Request | What its calls searched | Shown | The index was complete |
+|---|---|---|---|
+| 2 · "find session of numsharp benchmarking" (05:50) | 34 sessions, then a 365-day search reached 3,652 | 8 | 53 s after the request |
+| 3 · "same but perf in agentmaster" (11:05) | 1 and 5 sessions; the grep 1 | 0 | 25 s after |
+| 7 · "session ending in an api error" (19:07) | 4 sessions; the grep read 0 of its 3 in its 20 s | 0 | 102 s after |
+
+Production 0.6.8.21 holds the same code; its Search topic had not been used yet.
+
+**Four causes that add up:**
+
+1. **The index is thrown away when idle.** The bot parks its agent after 10 idle minutes
+   (`Messaging.cpp`, `kSearchParkMs`), and `Park` calls `ReleaseCatalog()` before it ends the
+   process (`MessagingSearchBridge.cpp`). The page frees the index the moment the last page stops
+   showing the AI search (9.6). So nearly every request after a pause starts with no index, and the
+   page's agent and the bot's agent each build their own.
+2. **A rebuild from nothing is slow.** It reads one sidecar file per session (3,671 files, 10 MB,
+   on this machine). hooks.log's `the session index is complete` lines: production (Release) 90
+   days in 11.5 to 13.2 s cold and 1.0 s warm; dev (Debug) 90 days in 5 to 102 s, 365 days in 20
+   to 200 s.
+3. **A search waits about 2.4 s, then searches a sliver.** `CatalogFor` waits up to 15 s
+   (`kCatalogFirstWaitMs`) only while NO catalog exists. The keeper's first step publishes after
+   the listing of every transcript plus 400 ms of reads (`kCatalogFirstStepBudgetMs`; 5 s after the
+   request in request 7), holding the newest 1 to 34 sessions; from then on the limit is
+   `kCatalogSearchWaitMs` (2 s), counted from the search's start. Once one search ran out of its
+   wait, the request's later calls do not wait at all (`waitedGeneration`). `grep` takes its list
+   of transcripts from the same catalog, so it is just as blind.
+4. **Rule 9 makes the model give up.** "A result with an `indexing` field does not have the older
+   sessions yet. Do not search again for them: show what fits, and say in your sentence that older
+   sessions are still being indexed." Over a catalog of 1 to 5 sessions, what fits is nothing.
+
+9.4 made the never-wait choice on purpose, for a page where the user watches the list arrive; the
+Telegram topic took it over unchanged.
+
+Not explained: why request 7's grep (a regex with no common literal, so no ripgrep prefilter) read
+none of its 3 sessions in its 20 s.
+
+**The fix proposed** (none built):
+
+1. **One index for the process, always loaded.** Move the index keeper out of `SessionSearchAgent`
+   into one keeper that both agents read; build it in the background when the app starts, for
+   every session rather than 90 days; never free it on a park or a page hide (a park keeps ending
+   only the idle `claude.exe`, the ~400 MB part). The 3,671 sidecar files hold 8.3 million
+   characters of text: about 25 MB in memory (an estimate, not measured in the app). A refresh of a
+   loaded index costs the listing plus the changed sessions (0.1 s in 9.4).
+2. **A search waits for the index it needs.** `CatalogFor` waits until the catalog covers the
+   period asked (a cap of about 60 s) while the topic and the page show the progress, and every
+   call of the request may wait. At the cap the tool returns an error ("the index is not ready yet;
+   call again"), never a partial list, and rule 9 says that an unready index is never "no match".
+   With 1, this matters only in the first seconds after a start.
+3. **Later: a cold start of about a second.** The first item of 9.11's "a cold index is slow": the
+   catalog saved as one file and checked against each transcript's size and modification time, as
+   a refresh does, so that a start reads one file instead of 3,671.
 
 ---
 
