@@ -196,7 +196,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_handleBusinessConnection(const json::Value& bc)
+    void MessagingService::_handleBusinessConnection(const json::Value& bc, bool viaSecretary)
     {
         // H3 again: the connecting user first. A business connection from anyone else is not ours to use.
         int64_t user = 0;
@@ -216,17 +216,39 @@ namespace Agentmaster::Msg
         {
             canReply = rights->BoolAt(L"can_reply", false);
         }
+        // Which bot this update came to (§21.11): the SECRETARY bot (a second bot), or the topics bot itself.
+        const int64_t thisBot = viaSecretary ? _secretaryBotId.load() : _botId.load();
+        const wchar_t* who = viaSecretary ? L"the secretary bot" : L"the topics bot";
+        bool ignored = false;
         {
             std::lock_guard lk{ _mtx };
-            _state.businessConnectionId = id;
-            _state.businessEnabled = enabled;
-            _state.businessCanReply = canReply;
-            _state.businessMode = 0; // every (re)connection is probed afresh
-            _state.businessNote.clear();
-            _stateDirty = true;
+            // Telegram allows ONE business bot per account: moving the connection from one of our bots to the other sends
+            // the old one a disconnect and the new one a connect, in any order. A disconnect of the bot that does not hold
+            // the stored connection must not wipe the new one.
+            const bool holdsIt = _state.businessConnectionId.empty() || _state.businessConnectionId == id || _state.businessBotId == thisBot ||
+                                 (_state.businessBotId == 0 && !viaSecretary);
+            if (!enabled && !holdsIt)
+            {
+                ignored = true;
+            }
+            else
+            {
+                _state.businessConnectionId = id;
+                _state.businessEnabled = enabled;
+                _state.businessCanReply = canReply;
+                _state.businessBotId = thisBot;
+                _state.businessMode = 0; // every (re)connection is probed afresh
+                _state.businessNote.clear();
+                _stateDirty = true;
+            }
+        }
+        if (ignored)
+        {
+            _log(std::wstring{ L"[msg] secretary: " } + who + L" was disconnected; the connection stays with the other bot");
+            return;
         }
         _secretaryFailures.store(0);
-        _log(std::wstring{ L"[msg] secretary: business connection " } + (enabled ? L"enabled" : L"disabled") + L" (can reply: " + (canReply ? L"yes" : L"no") + L")");
+        _log(std::wstring{ L"[msg] secretary: business connection to " } + who + L" " + (enabled ? L"enabled" : L"disabled") + L" (can reply: " + (canReply ? L"yes" : L"no") + L")");
         if (enabled && canReply)
         {
             _probeWanted.store(true);
@@ -245,8 +267,8 @@ namespace Agentmaster::Msg
         if (search != 0)
         {
             _sendText(search,
-                      enabled ? L"\x26A0 <b>Secretary mode</b>: the bot is connected to your Telegram Business account, but without the right to reply. In Telegram \x2192 Settings \x2192 Business \x2192 Chatbots \x2192 this bot, allow <b>Reply to messages</b>; prompts keep the \x2328 line until then." :
-                                L"<b>Secretary mode</b> is off (the bot was disconnected from your Telegram Business account): prompts typed at the PC show as the bot's \x2328 line again.",
+                      enabled ? L"\x26A0 <b>Secretary mode</b>: the bot is connected to your account, but without the right to reply. In Telegram \x2192 Settings \x2192 <b>Chat Automation</b> \x2192 the bot, allow it to <b>reply to messages</b>; prompts keep the \x2328 line until then." :
+                                L"<b>Secretary mode</b> is off (the bot was disconnected under Settings \x2192 Chat Automation): prompts typed at the PC show as the bot's \x2328 line again.",
                       true,
                       SendPriority::Final,
                       L"secretary-note",
@@ -291,8 +313,8 @@ namespace Agentmaster::Msg
             {
                 me->_log(L"[msg] secretary: Telegram refused a send as the user (" + r.description + L"); prompts keep the bot's line");
                 me->_sendText(search,
-                              L"\x26A0 <b>Secretary mode</b>: the bot is connected to your Telegram Business account, but Telegram refused to send into this chat on your behalf (<code>" + TgEscapeHtml(r.description) + L"</code>). "
-                              L"Business sends reach your chats with other people; this chat is your chat with the bot itself. Prompts keep the \x2328 line. (Reconnect the bot under Settings \x2192 Business \x2192 Chatbots to try again.)",
+                              L"\x26A0 <b>Secretary mode</b>: the bot is connected to your account, but Telegram refused to send into this chat on your behalf (<code>" + TgEscapeHtml(r.description) + L"</code>). Prompts keep the \x2328 line.\n\n"
+                              L"Telegram documents a connected bot sending to your chats with OTHER bots \x2014 so the way that works is a <b>second bot</b> as the secretary: create one in @BotFather, turn on its <b>Secretary Mode</b> and <b>Bot-to-Bot Communication</b>, paste its token in Agentmaster \x2192 Settings \x2192 Messaging \x2192 Secretary bot, and connect IT under Telegram \x2192 Settings \x2192 Chat Automation instead of this bot.",
                               true,
                               SendPriority::Final,
                               L"secretary-note",
@@ -363,7 +385,40 @@ namespace Agentmaster::Msg
             // The bot's OWN service messages come back through getUpdates with the bot as the sender: the
             // forum_topic_created of every topic it makes, the pinned-message note of every card it pins
             // (measured 2026-10-16: one per created topic). Nothing to do with them, and they are not the
-            // foreign sender the line below is about.
+            // foreign sender the line below is about — except the "topic renamed" notice of a state glyph rename
+            // (§21.11), which is deleted: every state change would otherwise leave a line in the topic. Three refused
+            // deletes in a row stop the deletes (they would only cost calls).
+            if (msg.Find(L"forum_topic_edited") && _renameNoticeFailures.load() < 3)
+            {
+                const int64_t noticeId = msg.I64At(L"message_id", 0);
+                if (noticeId > 0)
+                {
+                    OutItem del;
+                    del.prio = SendPriority::Backfill;
+                    del.method = L"deleteMessage";
+                    del.params = json::Value::MkObj();
+                    del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                    del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(noticeId)));
+                    auto self = weak_from_this();
+                    del.onDone = [self](const TgResult& r) {
+                        auto me = self.lock();
+                        if (!me)
+                        {
+                            return;
+                        }
+                        if (r.ok)
+                        {
+                            me->_renameNoticeFailures.store(0);
+                            return;
+                        }
+                        if (me->_renameNoticeFailures.fetch_add(1) + 1 == 3)
+                        {
+                            me->_log(L"[msg] the \u201Ctopic renamed\u201D notices cannot be deleted (" + r.description + L"); they are left in the topics from now on");
+                        }
+                    };
+                    _enqueue(std::move(del));
+                }
+            }
             return;
         }
         if (from == 0 || from != _ownerId)
@@ -1080,7 +1135,33 @@ namespace Agentmaster::Msg
             done(L"ok");
             return;
         }
-        if (name == L"idle" || name == L"board" || name == L"pauseall" || name == L"resumeall" || name == L"cc" || name == L"recreate")
+        if (name == L"verbose")
+        {
+            _runVerboseCommand(sessionId, cmd.args, threadId);
+            return;
+        }
+        if (name == L"recreate")
+        {
+            // §21.11: THIS topic again in a mode, or every topic (which makes the mode the default). It deletes messages, so
+            // it asks first (single-use buttons, an hour).
+            const std::wstring oneOn = _tokenFor(L"recreate-one", sessionId, L"1", kTokenTtlMsFor(1));
+            const std::wstring oneOff = _tokenFor(L"recreate-one", sessionId, L"0", kTokenTtlMsFor(1));
+            const std::wstring allOn = _tokenFor(L"recreate-all", L"", L"1", kTokenTtlMsFor(1));
+            const std::wstring allOff = _tokenFor(L"recreate-all", L"", L"0", kTokenTtlMsFor(1));
+            const std::wstring no = _tokenFor(L"cancel", L"", L"", kTokenTtlMsFor(1));
+            _reply(threadId,
+                   L"Make this topic again with the session's whole history? Its messages in Telegram go with it; the conversation stays in its session.\n\n"
+                   L"<b>Verbose</b> shows the work: what Claude says before each tool and the tool calls (Bash commands and more). "
+                   L"<b>Conversation</b> shows your messages and each turn's last answer \x2014 you, Claude, you, Claude.\n"
+                   L"<b>All topics</b> makes every topic again and the mode the default.",
+                   false,
+                   _buttons({ { { L"\x267B This topic \u00B7 verbose", oneOn }, { L"\x267B This topic \u00B7 conversation", oneOff } },
+                              { { L"\x267B All topics \u00B7 verbose", allOn }, { L"\x267B All topics \u00B7 conversation", allOff } },
+                              { { L"Cancel", no } } }));
+            done(L"asked");
+            return;
+        }
+        if (name == L"idle" || name == L"board" || name == L"pauseall" || name == L"resumeall" || name == L"cc")
         {
             _runSearchCommand(cmd, msg, threadId); // the fleet commands work in any topic
             return;
@@ -1163,14 +1244,22 @@ namespace Agentmaster::Msg
                 std::lock_guard lk{ _mtx };
                 topics = _state.topics.size();
             }
-            const std::wstring yes = _tokenFor(L"recreate-yes", L"", L"", kTokenTtlMsFor(1));
+            // §21.11: in a mode — which becomes the default for all topics (the per-topic modes go with the old topics).
+            const std::wstring allOn = _tokenFor(L"recreate-all", L"", L"1", kTokenTtlMsFor(1));
+            const std::wstring allOff = _tokenFor(L"recreate-all", L"", L"0", kTokenTtlMsFor(1));
             const std::wstring no = _tokenFor(L"cancel", L"", L"", kTokenTtlMsFor(1));
             _reply(threadId,
                    L"Delete the " + std::to_wstring(topics) + L" session topic(s) and make them again in MOST RECENT order (like the side panel)? Their messages in Telegram go with them; "
-                   L"every conversation stays in its session, and each new topic gets its session's whole history again (one message every 2 s, after the live ones).",
+                   L"every conversation stays in its session, and each new topic gets its session's whole history again (after the live messages, within Telegram's flood limit).\n\n"
+                   L"<b>Verbose</b> shows the work (Claude's remarks, the tool calls); <b>conversation</b> shows your messages and each turn's last answer. The choice becomes the default for all topics.",
                    false,
-                   _buttons({ { { L"\x267B Recreate", yes }, { L"Cancel", no } } }));
+                   _buttons({ { { L"\x267B Recreate \u00B7 verbose", allOn }, { L"\x267B Recreate \u00B7 conversation", allOff } }, { { L"Cancel", no } } }));
             LogNav(L"remote telegram /recreate -> asked");
+            return;
+        }
+        if (name == L"verbose")
+        {
+            _runVerboseCommand(L"", cmd.args, threadId);
             return;
         }
         if (name == L"idle" || name == L"board")
@@ -1269,7 +1358,7 @@ namespace Agentmaster::Msg
             _reply(threadId, L"/cc works in a session's topic.", false);
             return;
         }
-        _reply(threadId, L"Here: a search in plain words, or /clear, /idle, /board, /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.", false);
+        _reply(threadId, L"Here: a search in plain words, or /clear, /idle, /board, /newsession &lt;folder&gt;, /pauseall, /resumeall, /verbose, /recreate, /status, /help.", false);
     }
 
     bool MessagingService::_ensureSearchBridge(int64_t threadId)
@@ -1698,6 +1787,22 @@ namespace Agentmaster::Msg
                 answer(L"That button expired.");
                 return;
             }
+            if (tok.kind == L"recreate-one")
+            {
+                // §21.11: the topic the button sits in is deleted in a moment, so the outcome is the button's toast, and the
+                // tick makes the topic again (one per tick, before the sync's plan).
+                const int mode = tok.payload == L"1" ? 1 : 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    _recreateOne.emplace_back(tok.sessionId, mode);
+                    _tickRequested = true;
+                }
+                _tickCv.notify_all();
+                answer(mode == 1 ? L"\x267B Making this topic again, verbose \u2014 it comes back at the top with its history." :
+                                   L"\x267B Making this topic again, conversation only \u2014 it comes back at the top with its history.");
+                LogNav(L"remote telegram /recreate " + ShortId(tok.sessionId) + L" -> confirmed");
+                return;
+            }
             answer(L"");
             const std::wstring& k = tok.kind;
             if (k == L"cancel")
@@ -1715,6 +1820,32 @@ namespace Agentmaster::Msg
                 _tickCv.notify_all();
                 _reply(threadId, L"\x267B Making the topics again \x2014 the old ones go first, then the new list, the most recent on top, then each session's history.", false);
                 LogNav(L"remote telegram /recreate -> confirmed");
+            }
+            else if (k == L"recreate-all")
+            {
+                // §21.11: the chosen mode becomes the default first (the new topics are made in it), then the recreation runs
+                // on the tick thread like /recreate's.
+                const bool verbose = tok.payload == L"1";
+                _setDefaultVerbose(verbose, -1);
+                _recreateRequested.store(true);
+                {
+                    std::lock_guard lk{ _mtx };
+                    _tickRequested = true;
+                }
+                _tickCv.notify_all();
+                _reply(threadId,
+                       std::wstring{ L"\x267B Making the topics again, " } + (verbose ? L"verbose" : L"conversation only") +
+                           L" (now the default for all topics) \x2014 the old ones go first, then the new list, the most recent on top, then each session's history.",
+                       false);
+                LogNav(std::wstring{ L"remote telegram /recreate -> confirmed (" } + (verbose ? L"verbose" : L"conversation") + L")");
+            }
+            else if (k == L"verbose-topic")
+            {
+                _setTopicVerbose(tok.sessionId, tok.payload == L"1" ? 1 : (tok.payload == L"0" ? 0 : -1), threadId);
+            }
+            else if (k == L"verbose-default")
+            {
+                _setDefaultVerbose(tok.payload == L"1", threadId);
             }
             else if (k == L"backlog-drop")
             {
@@ -1997,6 +2128,119 @@ namespace Agentmaster::Msg
         }
     }
 
+    // ===== the topics' verbose mode (§21.11) ======================================================
+
+    void MessagingService::_runVerboseCommand(const std::wstring& sessionId, const std::wstring& args, int64_t threadId)
+    {
+        const std::wstring word = detail::Lower(Trimmed(args));
+        const bool topic = !sessionId.empty();
+        if (word == L"on" || word == L"verbose" || word == L"1" || word == L"true")
+        {
+            topic ? _setTopicVerbose(sessionId, 1, threadId) : _setDefaultVerbose(true, threadId);
+            return;
+        }
+        if (word == L"off" || word == L"conversation" || word == L"0" || word == L"false")
+        {
+            topic ? _setTopicVerbose(sessionId, 0, threadId) : _setDefaultVerbose(false, threadId);
+            return;
+        }
+        if (topic && (word == L"default" || word == L"auto"))
+        {
+            _setTopicVerbose(sessionId, -1, threadId);
+            return;
+        }
+        if (!word.empty())
+        {
+            _reply(threadId, topic ? L"Usage: /verbose on | off | default" : L"Usage: /verbose on | off", false);
+            return;
+        }
+        // No argument: the mode in effect, and buttons to change it.
+        const bool def = _defaultVerbose.load();
+        const std::wstring explain =
+            L"\n\n<b>Verbose</b> shows the whole session as it runs: what Claude says before each tool, a work log of the tool calls (Bash commands and more), compactions. "
+            L"<b>Conversation</b> shows your messages and each turn's last answer \x2014 you, Claude, you, Claude \x2014 plus questions, plans, interrupts and API errors.";
+        if (topic)
+        {
+            int mode = -1;
+            {
+                std::lock_guard lk{ _mtx };
+                if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+                {
+                    mode = it->second.verbose;
+                }
+            }
+            const bool on = mode < 0 ? def : mode == 1;
+            _reply(threadId,
+                   std::wstring{ L"<b>This topic</b>: " } + (on ? L"verbose" : L"conversation only") + (mode < 0 ? L" (the default for all topics)." : L" (set for this topic).") + explain +
+                       L"\nA change applies to the messages from now on; /recreate redoes this topic's history in a mode.",
+                   false,
+                   _buttons({ { { L"\U0001F50D Verbose", _tokenFor(L"verbose-topic", sessionId, L"1", kTokenTtlMsFor(2)) },
+                                { L"\U0001F4AC Conversation", _tokenFor(L"verbose-topic", sessionId, L"0", kTokenTtlMsFor(2)) } },
+                              { { std::wstring{ L"\u21BA Follow the default (" } + (def ? L"verbose" : L"conversation") + L")", _tokenFor(L"verbose-topic", sessionId, L"-1", kTokenTtlMsFor(2)) } } }));
+            return;
+        }
+        _reply(threadId,
+               std::wstring{ L"<b>Default for all topics</b>: " } + (def ? L"verbose." : L"conversation only.") + explain +
+                   L"\nA topic set with /verbose in it keeps its own mode. A change applies to the messages from now on; /recreate redoes the history.",
+               false,
+               _buttons({ { { L"\U0001F50D Verbose", _tokenFor(L"verbose-default", L"", L"1", kTokenTtlMsFor(2)) },
+                            { L"\U0001F4AC Conversation", _tokenFor(L"verbose-default", L"", L"0", kTokenTtlMsFor(2)) } } }));
+    }
+
+    void MessagingService::_setTopicVerbose(const std::wstring& sessionId, int verbose, int64_t threadId)
+    {
+        bool found = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+            {
+                it->second.verbose = std::clamp(verbose, -1, 1);
+                _stateDirty = true;
+                found = true;
+            }
+        }
+        if (!found)
+        {
+            _reply(threadId, L"This session has no topic any more.", false);
+            return;
+        }
+        const bool def = _defaultVerbose.load();
+        const bool on = verbose < 0 ? def : verbose == 1;
+        _reply(threadId,
+               std::wstring{ L"This topic is now " } + (on ? L"<b>verbose</b>" : L"<b>conversation only</b>") + (verbose < 0 ? L" (it follows the default for all topics)" : L"") +
+                   L", from the next message on. /recreate redoes its history in a mode.",
+               false);
+        LogNav(L"remote telegram /verbose " + ShortId(sessionId) + L" -> " + (verbose < 0 ? std::wstring{ L"default" } : (verbose == 1 ? std::wstring{ L"on" } : std::wstring{ L"off" })));
+    }
+
+    void MessagingService::_setDefaultVerbose(bool verbose, int64_t threadId)
+    {
+        // settings.json, read-modify-write of the freshest file (the cog's Messaging tab shows the same switch, and its Save
+        // writes what it shows), then the service at once.
+        bool saved = false;
+        try
+        {
+            AppSettings s = LoadAppSettings();
+            s.messagingVerbose = verbose;
+            SaveAppSettings(s);
+            saved = true;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_setDefaultVerbose (settings.json)");
+        }
+        _defaultVerbose.store(verbose);
+        LogNav(std::wstring{ L"remote telegram /verbose default -> " } + (verbose ? L"on" : L"off") + (saved ? L"" : L" (settings.json not written)"));
+        if (threadId >= 0)
+        {
+            _reply(threadId,
+                   std::wstring{ L"Topics are now " } + (verbose ? L"<b>verbose</b>" : L"<b>conversation only</b>") +
+                       L" by default, from the next message on (a topic set with /verbose in it keeps its own mode). /recreate redoes the history." +
+                       (saved ? L"" : L"\n\u26A0 The setting could not be saved: it lasts until Agentmaster restarts."),
+                   false);
+        }
+    }
+
     // ===== replies ===========================================================================
 
     void MessagingService::_reply(int64_t threadId, const std::wstring& html, bool sound, json::Value markup, int64_t replyTo)
@@ -2011,13 +2255,13 @@ namespace Agentmaster::Msg
         {
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history (asks first)";
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)";
         }
         else
         {
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
                    L"/queue \x00B7 /sendnow \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
-                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code";
+                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not";
         }
         _reply(threadId, html, false);
     }

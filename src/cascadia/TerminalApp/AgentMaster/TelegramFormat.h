@@ -16,6 +16,11 @@
 // `<`, which this converter never produces: it escapes first and adds tags from its own structure.
 // The conversion is deliberately conservative — a Markdown feature it does not recognize comes
 // through as plain (escaped) text, never as a broken tag.
+//
+// Since §21.11 Claude's own Markdown (replies, remarks, plans) goes out as a RICH message (Bot API
+// 10.1), which Telegram renders from the Markdown itself — tables included, which HTML mode has no
+// form for. TgPrepareRichMarkdown / TgChunkMarkdown / TgMdEscapeText below serve that path; the HTML
+// converter stays the fallback when a rich send is refused.
 
 #pragma once
 
@@ -621,6 +626,481 @@ namespace Agentmaster::Msg
             chunks.push_back(std::move(chunk));
         }
         return chunks;
+    }
+
+    // ===== Rich messages (Bot API 10.1, MESSAGING.md §21.11) =================================
+    //
+    // A RICH message (sendRichMessage) takes GitHub-flavored Markdown as it is — tables, headings, lists, task lists,
+    // fenced code, quotes, collapsible <details> blocks — and Telegram renders it natively: what a Claude reply IS.
+    // Measured with the dev bot on 2026-10-17: a table with links, bold and code in its cells came back as a real table
+    // block; "$5 and $10", "a == b" and "x || y" stayed plain text; but every '<' that looks like a tag is DROPPED
+    // ("List<int> … <T>" arrived as "List … "), "&lt;" restores it, and "\<" is shown as typed. A single line break
+    // inside a paragraph is a space (GitHub's rule); two trailing spaces keep it. The limits: 32,768 characters, 500
+    // blocks (a list item, a table row, a quote each count), 20 table columns.
+
+    // A rich message's text limit is 32,768 UTF-8 characters; a chunk stays well under it in UTF-16 units (every
+    // character is at least one unit, so this many units are at most this many characters). The room above it is for
+    // what TgPrepareRichMarkdown adds after the split (an "&lt;" for each '<', two spaces per hard break).
+    inline constexpr size_t kRichChunkMaxChars = 24000;
+    // The most a prepared part may hold and still go as a rich message (under Telegram's 32,768 with a margin): a part
+    // that grew past it in preparation (thousands of '<') goes as HTML instead (Messaging.cpp).
+    inline constexpr size_t kRichMessageMaxChars = 32000;
+    // The 500-block limit, kept with room: a chunk holds at most this many lines (a line is at most one block — a list
+    // item, a table row, a paragraph line).
+    inline constexpr size_t kRichChunkMaxLines = 400;
+
+    namespace detail
+    {
+        // A fenced code block's opening or closing line: up to three spaces, then a run of at least three '`' or '~'.
+        // Returns the run's length and character, or 0 when the line is no fence.
+        inline size_t MdFenceRun(std::wstring_view line, wchar_t& ch) noexcept
+        {
+            size_t i = 0;
+            while (i < line.size() && i < 3 && line[i] == L' ')
+            {
+                ++i;
+            }
+            if (i >= line.size() || (line[i] != L'`' && line[i] != L'~'))
+            {
+                return 0;
+            }
+            const wchar_t c = line[i];
+            size_t n = 0;
+            while (i + n < line.size() && line[i + n] == c)
+            {
+                ++n;
+            }
+            if (n < 3)
+            {
+                return 0;
+            }
+            ch = c;
+            return n;
+        }
+
+        // Whether a line closes the fence opened by a run of `n` × `c`: the same character, at least as long, nothing
+        // after it but spaces.
+        inline bool MdClosesFence(std::wstring_view line, wchar_t c, size_t n) noexcept
+        {
+            wchar_t ch = 0;
+            const size_t run = MdFenceRun(line, ch);
+            if (run < n || ch != c)
+            {
+                return false;
+            }
+            size_t i = line.find_first_not_of(L' ');
+            i += run;
+            for (; i < line.size(); ++i)
+            {
+                if (line[i] != L' ' && line[i] != L'\t')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Splits a text into lines (LF; a CR before it is dropped). The last line has no LF after it.
+        inline std::vector<std::wstring_view> MdLines(std::wstring_view md)
+        {
+            std::vector<std::wstring_view> lines;
+            size_t p = 0;
+            while (p <= md.size())
+            {
+                const size_t nl = md.find(L'\n', p);
+                std::wstring_view line = md.substr(p, nl == std::wstring_view::npos ? std::wstring_view::npos : nl - p);
+                if (!line.empty() && line.back() == L'\r')
+                {
+                    line.remove_suffix(1);
+                }
+                lines.push_back(line);
+                if (nl == std::wstring_view::npos)
+                {
+                    break;
+                }
+                p = nl + 1;
+            }
+            return lines;
+        }
+
+        // Escapes '<' as "&lt;" outside inline code spans of one line (a span is a run of N backticks closed by the next
+        // run of exactly N on the line; an unclosed run is literal text). Inside a span nothing changes: no entity is
+        // decoded in code, so an escape there would show as typed.
+        inline void MdEscapeTagsInLine(std::wstring_view line, std::wstring& out)
+        {
+            size_t i = 0;
+            while (i < line.size())
+            {
+                const wchar_t c = line[i];
+                if (c == L'`')
+                {
+                    size_t n = 0;
+                    while (i + n < line.size() && line[i + n] == L'`')
+                    {
+                        ++n;
+                    }
+                    // Find the closing run of exactly n backticks.
+                    size_t j = i + n;
+                    size_t close = std::wstring_view::npos;
+                    while (j < line.size())
+                    {
+                        if (line[j] == L'`')
+                        {
+                            size_t m = 0;
+                            while (j + m < line.size() && line[j + m] == L'`')
+                            {
+                                ++m;
+                            }
+                            if (m == n)
+                            {
+                                close = j;
+                                break;
+                            }
+                            j += m;
+                        }
+                        else
+                        {
+                            ++j;
+                        }
+                    }
+                    if (close == std::wstring_view::npos)
+                    {
+                        out.append(line.substr(i, n)); // no closing run: the backticks are text
+                        i += n;
+                        continue;
+                    }
+                    out.append(line.substr(i, close + n - i)); // the whole span, as written
+                    i = close + n;
+                    continue;
+                }
+                if (c == L'<')
+                {
+                    out += L"&lt;";
+                }
+                else
+                {
+                    out += c;
+                }
+                ++i;
+            }
+        }
+
+        // A COLLAPSIBLE BLOCK's tag line: "<details>", "<details open>" or "</details>" at the start of a line (up to three
+        // spaces before it), a "<summary>…</summary>" right after the opening tag. Telegram's rich Markdown renders
+        // <details> as a collapsible block and parses Markdown inside it (the history's tool groups are such blocks,
+        // MessagingModels.h RenderHistory); these tags are kept, the text around them escaped like any line. Returns
+        // false (writing nothing) for any other line.
+        inline bool MdKeepCollapsibleTags(std::wstring_view line, std::wstring& out)
+        {
+            size_t i = 0;
+            while (i < line.size() && i < 3 && line[i] == L' ')
+            {
+                ++i;
+            }
+            const std::wstring_view rest = line.substr(i);
+            std::wstring_view tag;
+            for (const std::wstring_view t : { std::wstring_view{ L"<details>" }, std::wstring_view{ L"<details open>" }, std::wstring_view{ L"</details>" } })
+            {
+                if (rest.substr(0, t.size()) == t)
+                {
+                    tag = t;
+                    break;
+                }
+            }
+            if (tag.empty())
+            {
+                return false;
+            }
+            out.append(line.substr(0, i));
+            out.append(tag);
+            std::wstring_view tail = rest.substr(tag.size());
+            constexpr std::wstring_view kOpen{ L"<summary>" };
+            constexpr std::wstring_view kClose{ L"</summary>" };
+            if (tag != L"</details>" && tail.substr(0, kOpen.size()) == kOpen)
+            {
+                const size_t close = tail.rfind(kClose);
+                if (close != std::wstring_view::npos && close >= kOpen.size())
+                {
+                    out.append(kOpen);
+                    MdEscapeTagsInLine(tail.substr(kOpen.size(), close - kOpen.size()), out);
+                    out.append(kClose);
+                    tail = tail.substr(close + kClose.size());
+                }
+            }
+            MdEscapeTagsInLine(tail, out);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Prepares Markdown — a Claude reply or remark as written — for a Telegram RICH message's `markdown` field: every
+    /// '&lt;' outside code becomes "&amp;lt;" (Telegram drops a tag it does not know, and with it the text: "List&lt;int&gt;"
+    /// came out as "List"), and every line that another non-blank line follows ends with two spaces (a hard break: Claude
+    /// writes for a terminal that keeps its line breaks, where Markdown would join the lines). Fenced code blocks and
+    /// inline code spans are copied exactly. Two exceptions: a table row (a line that starts with '|') gets no hard break
+    /// — the rows are separate lines of the table already — and a collapsible block's tag line ("&lt;details&gt;" … at
+    /// the start of a line, see detail::MdKeepCollapsibleTags) keeps its tags. Lines are joined with LF.
+    /// </summary>
+    /// <param name="md">The Markdown.</param>
+    /// <returns>The text to send as `rich_message.markdown`.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TgPrepareRichMarkdown(std::wstring_view md)
+    {
+        const auto lines = detail::MdLines(md);
+        std::wstring out;
+        out.reserve(md.size() + md.size() / 16 + 16);
+        bool inFence = false;
+        wchar_t fenceCh = 0;
+        size_t fenceLen = 0;
+        for (size_t k = 0; k < lines.size(); ++k)
+        {
+            const std::wstring_view line = lines[k];
+            if (k > 0)
+            {
+                out += L'\n';
+            }
+            if (inFence)
+            {
+                out.append(line);
+                if (detail::MdClosesFence(line, fenceCh, fenceLen))
+                {
+                    inFence = false;
+                }
+                continue;
+            }
+            wchar_t ch = 0;
+            if (const size_t run = detail::MdFenceRun(line, ch); run > 0)
+            {
+                out.append(line); // the opening line, its info string included
+                inFence = true;
+                fenceCh = ch;
+                fenceLen = run;
+                continue;
+            }
+            if (!detail::MdKeepCollapsibleTags(line, out))
+            {
+                detail::MdEscapeTagsInLine(line, out);
+            }
+            // A hard break when a non-blank line follows (not a fence's opening line: the code block starts a block of
+            // its own, and a break at the end of a paragraph is ignored anyway). Not after a table row: a row is a line of
+            // the table already, and two spaces after its closing pipe would be a cell's text to a strict parser.
+            const size_t firstChar = line.find_first_not_of(L" \t");
+            const bool blank = firstChar == std::wstring_view::npos;
+            const bool tableRow = !blank && line[firstChar] == L'|';
+            if (!blank && !tableRow && k + 1 < lines.size())
+            {
+                const std::wstring_view next = lines[k + 1];
+                const bool nextBlank = next.find_first_not_of(L" \t") == std::wstring_view::npos;
+                const bool endsWithBreak = line.size() >= 2 ? (line.substr(line.size() - 2) == L"  " || line.back() == L'\\') : line.back() == L'\\';
+                if (!nextBlank && !endsWithBreak)
+                {
+                    out += L"  ";
+                }
+            }
+        }
+        return out;
+    }
+
+    /// <summary>
+    /// Splits Markdown into parts that each fit one rich message: at most <paramref name="maxChars"/> UTF-16 units and
+    /// <paramref name="maxLines"/> lines (the 500-block limit), cut at a blank line outside code where one exists, else
+    /// at a line end. A part that ends inside a fenced code block closes the fence, and the next part opens it again with
+    /// the same opening line, so every part is valid Markdown. A text that fits is one part, unchanged.
+    /// </summary>
+    /// <param name="md">The Markdown (unprepared: TgPrepareRichMarkdown runs on each part).</param>
+    /// <param name="maxChars">The most UTF-16 units in one part.</param>
+    /// <param name="maxLines">The most lines in one part.</param>
+    /// <returns>The parts, in order; at least one (possibly empty).</returns>
+    /// <exception cref="std::bad_alloc">If the parts cannot be allocated.</exception>
+    inline std::vector<std::wstring> TgChunkMarkdown(std::wstring_view md, size_t maxChars = kRichChunkMaxChars, size_t maxLines = kRichChunkMaxLines)
+    {
+        std::vector<std::wstring> parts;
+        const auto lines = detail::MdLines(md);
+        if (md.size() <= maxChars && lines.size() <= maxLines)
+        {
+            parts.emplace_back(md);
+            return parts;
+        }
+        maxChars = std::max<size_t>(maxChars, 200);
+        maxLines = std::max<size_t>(maxLines, 10);
+        std::wstring cur;
+        size_t curLines = 0;
+        size_t lastBlankCut = std::wstring::npos; // a cut point in `cur`: just after a blank line outside code
+        size_t lastBlankLines = 0;
+        bool inFence = false;
+        wchar_t fenceCh = 0;
+        size_t fenceLen = 0;
+        std::wstring fenceOpen; // the open fence's opening line (re-opened in the next part)
+        const auto closeAndPush = [&](std::wstring part, bool fenceOpenAtCut) {
+            if (fenceOpenAtCut)
+            {
+                if (!part.empty() && part.back() != L'\n')
+                {
+                    part += L'\n';
+                }
+                part += std::wstring(fenceLen, fenceCh);
+            }
+            while (!part.empty() && (part.back() == L'\n' || part.back() == L' '))
+            {
+                part.pop_back();
+            }
+            parts.push_back(std::move(part));
+        };
+        for (size_t k = 0; k < lines.size(); ++k)
+        {
+            const std::wstring_view line = lines[k];
+            const size_t add = line.size() + 1;
+            if (!cur.empty() && (cur.size() + add > maxChars || curLines + 1 > maxLines))
+            {
+                if (!inFence && lastBlankCut != std::wstring::npos && lastBlankCut > 0)
+                {
+                    // Cut at the last blank line: what follows it starts the next part.
+                    std::wstring rest = cur.substr(lastBlankCut);
+                    const size_t restLines = curLines - lastBlankLines;
+                    closeAndPush(cur.substr(0, lastBlankCut), false);
+                    cur = std::move(rest);
+                    curLines = restLines;
+                }
+                else
+                {
+                    // No blank line to cut at (one long paragraph, list, table or code block): cut here.
+                    closeAndPush(cur, inFence);
+                    cur.clear();
+                    curLines = 0;
+                    if (inFence)
+                    {
+                        cur = fenceOpen + L'\n';
+                        curLines = 1;
+                    }
+                }
+                lastBlankCut = std::wstring::npos;
+                lastBlankLines = 0;
+            }
+            // A single line longer than a part: hard pieces (never between the two halves of a surrogate pair: a lone half
+            // is not valid UTF-16, and the UTF-8 the request carries could not encode it).
+            std::wstring_view rem = line;
+            while (rem.size() + 1 > maxChars)
+            {
+                size_t take = maxChars - 1 - std::min<size_t>(cur.size(), maxChars - 2);
+                if (take > 1 && rem[take - 1] >= 0xD800 && rem[take - 1] <= 0xDBFF)
+                {
+                    --take;
+                }
+                cur.append(rem.substr(0, take));
+                closeAndPush(cur, inFence);
+                cur = inFence ? fenceOpen + L'\n' : std::wstring{};
+                curLines = inFence ? 1 : 0;
+                rem.remove_prefix(take);
+            }
+            cur.append(rem);
+            cur += L'\n';
+            ++curLines;
+            if (inFence)
+            {
+                if (detail::MdClosesFence(line, fenceCh, fenceLen))
+                {
+                    inFence = false;
+                }
+            }
+            else
+            {
+                wchar_t ch = 0;
+                if (const size_t run = detail::MdFenceRun(line, ch); run > 0)
+                {
+                    inFence = true;
+                    fenceCh = ch;
+                    fenceLen = run;
+                    fenceOpen.assign(line);
+                }
+                else if (line.find_first_not_of(L" \t") == std::wstring_view::npos)
+                {
+                    lastBlankCut = cur.size();
+                    lastBlankLines = curLines;
+                }
+            }
+        }
+        if (!cur.empty() || parts.empty())
+        {
+            closeAndPush(cur, inFence);
+        }
+        return parts;
+    }
+
+    /// <summary>
+    /// Plain text (a question, an option, a tool line, an error) as Markdown that shows it as typed: the characters
+    /// Markdown would read as formatting are backslash-escaped, '&lt;' becomes "&amp;lt;" (the one escape Telegram's rich
+    /// Markdown honours for it), a line that starts like an ordered list item ("1. ", "2) ") keeps its number as text, and
+    /// every line break is kept (a hard break).
+    /// </summary>
+    /// <param name="text">The plain text.</param>
+    /// <returns>The Markdown.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TgMdEscapeText(std::wstring_view text)
+    {
+        std::wstring out;
+        out.reserve(text.size() + text.size() / 8 + 8);
+        bool lineStart = true; // only spaces since the start of the line
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            const wchar_t c = text[i];
+            if (lineStart && c >= L'0' && c <= L'9')
+            {
+                // "12. text" / "3) text" at a line's start is an ordered list item to Markdown: the digits stay, the
+                // '.' or ')' after them is escaped. Any other run of digits is plain text.
+                size_t j = i;
+                while (j < text.size() && text[j] >= L'0' && text[j] <= L'9')
+                {
+                    ++j;
+                }
+                out.append(text.substr(i, j - i));
+                if (j < text.size() && (text[j] == L'.' || text[j] == L')'))
+                {
+                    out += L'\\';
+                    out += text[j];
+                    ++j;
+                }
+                i = j - 1;
+                lineStart = false;
+                continue;
+            }
+            lineStart = (c == L'\n') || (lineStart && (c == L' ' || c == L'\r'));
+            switch (c)
+            {
+            case L'\\':
+            case L'`':
+            case L'*':
+            case L'_':
+            case L'[':
+            case L']':
+            case L'#':
+            case L'|':
+            case L'~':
+            case L'=':
+            case L'$':
+            case L'!':
+            case L'>':
+            case L'-':
+            case L'+':
+                out += L'\\';
+                out += c;
+                break;
+            case L'<':
+                out += L"&lt;";
+                break;
+            case L'&':
+                out += L"&amp;";
+                break;
+            case L'\r':
+                break;
+            case L'\n':
+                out += L"  \n";
+                break;
+            default:
+                out += c;
+                break;
+            }
+        }
+        return out;
     }
 
     /// <summary>

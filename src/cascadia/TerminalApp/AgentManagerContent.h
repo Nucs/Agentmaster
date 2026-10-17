@@ -1330,6 +1330,14 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setMsgForget{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgStatus{ nullptr };
         bool _msgForgetToken{ false }; // "Forget token" was clicked: Save removes the stored token
+        // MESSAGING.md §21.11: the topics' default mode (verbose = the work too; off = the conversation only), Claude's
+        // Markdown as rich messages, and the optional SECRETARY bot (a second bot that sends the user's turns as the user):
+        // its token goes to Credential Manager on Save like the topics bot's; empty = keep the stored one.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVerbose{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgRich{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::PasswordBox _setMsgSecretaryToken{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _setMsgSecretaryForget{ nullptr };
+        bool _msgForgetSecretaryToken{ false }; // "Forget secretary token" was clicked: Save removes it
         void _CheckTelegramBot(); // the "Check bot" button: getMe with the typed (else stored) token on a worker thread; the result lands in _setMsgStatus
         // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
         // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state

@@ -966,6 +966,242 @@ void TestMessaging()
             ex.historyPending = false;
             CHECK(BuildCardText(s, 5000, 0, false, &ex).find(L"history is being added") == std::wstring::npos, "and stops saying it when it is in");
         }
+
+        // §21.11 — RICH MESSAGES: the preparation of Claude's Markdown. A '<' outside code becomes &lt; (Telegram drops a tag it
+        // does not know, and its text with it), code is copied as written, a line that another follows gets a hard break, a
+        // table row does not, and a collapsible block's tags (the history's tool groups) are kept.
+        {
+            constexpr auto npos = std::wstring::npos;
+            const std::wstring md = L"Use List<int> and `vector<T>` here.\nSecond line.\n\n| a | b |\n|---|---|\n| <x> | 2 |\n\n```cpp\nint a<b;\n```\n"
+                                    L"<details><summary>3 <calls></summary>\n\n```text\nx<y\n```\n\n</details>";
+            const std::wstring p = TgPrepareRichMarkdown(md);
+            CHECK(p.find(L"Use List&lt;int> and `vector<T>` here.  \nSecond line.\n") != npos, "a '<' outside code escaped, a code span as written, a hard break between two lines");
+            CHECK(p.find(L"| a | b |\n|---|---|\n| &lt;x> | 2 |\n") != npos, "a table's rows get no hard break (a cell is still escaped)");
+            CHECK(p.find(L"```cpp\nint a<b;\n```") != npos, "a fenced block is copied as written");
+            CHECK(p.find(L"<details><summary>3 &lt;calls></summary>\n\n```text\nx<y\n```\n\n</details>") != npos, "a collapsible block keeps its tags, its summary escaped");
+            CHECK(TgPrepareRichMarkdown(L"a  \nb") == L"a  \nb" && TgPrepareRichMarkdown(L"a\\\nb") == L"a\\\nb", "a line that ends in a break already gets no second one");
+            CHECK(TgPrepareRichMarkdown(L"one\n\ntwo") == L"one\n\ntwo", "paragraphs: no hard break before a blank line");
+            CHECK(TgPrepareRichMarkdown(L"x <details> y") == L"x &lt;details> y", "a details tag inside a line is text");
+            CHECK(TgPrepareRichMarkdown(L"a\r\nb") == L"a  \nb", "a CR before a line break is dropped");
+
+            // The split: a text that fits is one part, unchanged; a long one is cut at a blank line; a code block cut in two is
+            // closed and opened again; a surrogate pair is never cut.
+            CHECK(TgChunkMarkdown(L"short").size() == 1 && TgChunkMarkdown(L"short")[0] == L"short", "a short text is one part, unchanged");
+            {
+                std::wstring big;
+                for (int i = 0; i < 300; ++i)
+                {
+                    big += L"paragraph " + std::to_wstring(i) + L" " + std::wstring(80, L'x') + L"\n\n";
+                }
+                const auto parts = TgChunkMarkdown(big, 2000, 400);
+                bool fits = true;
+                bool starts = true;
+                size_t paras = 0;
+                for (const auto& part : parts)
+                {
+                    fits = fits && part.size() <= 2000;
+                    starts = starts && part.rfind(L"paragraph ", 0) == 0;
+                    paras += CountOf(part, L"paragraph ");
+                }
+                CHECK(parts.size() > 10 && fits, "a long text: parts that each fit");
+                CHECK(paras == 300, "no paragraph lost or repeated");
+                CHECK(starts, "every part starts at a paragraph (cut at a blank line)");
+            }
+            {
+                std::wstring code = L"intro\n\n```cpp\n";
+                for (int i = 0; i < 100; ++i)
+                {
+                    code += L"int v" + std::to_wstring(i) + L" = 0; // " + std::wstring(40, L'c') + L"\n";
+                }
+                code += L"```\nafter";
+                const auto parts = TgChunkMarkdown(code, 1500, 400);
+                bool balanced = true;
+                size_t lines = 0;
+                for (const auto& part : parts)
+                {
+                    balanced = balanced && CountOf(part, L"```") % 2 == 0;
+                    lines += CountOf(part, L"int v");
+                }
+                CHECK(parts.size() >= 3 && balanced, "a long code block: every part closes the fence it opens");
+                CHECK(parts.size() >= 2 && parts[1].rfind(L"```cpp\n", 0) == 0, "the next part opens it again, with its language");
+                CHECK(lines == 100 && parts.back().find(L"after") != npos, "no code line is lost, and the text after the block arrives");
+            }
+            {
+                std::wstring emoji;
+                for (int i = 0; i < 300; ++i)
+                {
+                    emoji += L"\U0001F600";
+                }
+                const auto parts = TgChunkMarkdown(emoji, 202, 400);
+                bool whole = true;
+                size_t units = 0;
+                for (const auto& part : parts)
+                {
+                    whole = whole && !part.empty() && !(part.back() >= 0xD800 && part.back() <= 0xDBFF) && !(part.front() >= 0xDC00 && part.front() <= 0xDFFF);
+                    units += part.size();
+                }
+                CHECK(parts.size() >= 3 && whole && units == 600, "one long line of emoji: cut into parts, never between the halves of a pair");
+            }
+
+            // Our own plain lines as Markdown: shown as typed.
+            CHECK(TgMdEscapeText(L"a*b_c [x](y) <T> & #1 |p| ~s~ $5 = -n") == L"a\\*b\\_c \\[x\\](y) &lt;T\\> &amp; \\#1 \\|p\\| \\~s\\~ \\$5 \\= \\-n", "plain text shows as typed");
+            CHECK(TgMdEscapeText(L"1. first\n2) second") == L"1\\. first  \n2\\) second", "a number at a line's start stays a number; a line break stays");
+        }
+
+        // §21.11 — the history in both forms, and the CONVERSATION ONLY mode (the default): the user's posts and each turn's
+        // last message, plus what asked the user something or ended the turn.
+        {
+            constexpr auto npos = std::wstring::npos;
+            int64_t lastDay = 20261016;
+            const auto quiet = RenderHistory({ item(TopicItemKind::Prompt, L"fix it", day1), item(TopicItemKind::Text, L"Looking."), tool(L"t1", L"Bash", L"Bash: test"),
+                                               result(L"t1", true, L"exit 1"), item(TopicItemKind::Text, L"Almost."), item(TopicItemKind::Prompt, L"also docs", day1, true),
+                                               item(TopicItemKind::Compaction, L"compacted"), item(TopicItemKind::Question, L"Ship now?"), item(TopicItemKind::Answer, L"yes", day1),
+                                               tool(L"t2", L"Edit", L"Edit: a.cpp"), item(TopicItemKind::Text, L"Shipped.") },
+                                             false,
+                                             lastDay,
+                                             {},
+                                             false);
+            CHECK(quiet.size() == 5, "user, mid-turn user, question, answer, reply - no narrative");
+            if (quiet.size() == 5)
+            {
+                CHECK(quiet[0].fromUser && quiet[0].userText == L"fix it" && quiet[1].fromUser && quiet[1].userText == L"also docs", "the user's prompt and the message typed while it ran");
+                CHECK(!quiet[2].fromUser && quiet[2].html.find(L"Ship now?") != npos && quiet[2].markdown == L"\x2753 **Ship now?**", "the question, in both forms");
+                CHECK(quiet[3].fromUser && quiet[3].userText == L"yes", "the answer is the user's");
+                CHECK(!quiet[4].fromUser && quiet[4].markdown == L"Shipped." && quiet[4].html.find(L"Shipped.") != npos, "the turn's last message: Claude's text as written, the HTML its fallback");
+            }
+            CHECK(std::none_of(quiet.begin(), quiet.end(), [](const HistoryPost& hp) { return hp.html.find(L"Looking.") != std::wstring::npos || hp.html.find(L"Bash: test") != std::wstring::npos || hp.html.find(L"compacted") != std::wstring::npos; }),
+                  "no remark, no tool call, no compaction");
+            const auto stopped = RenderHistory({ item(TopicItemKind::Prompt, L"x", day1), item(TopicItemKind::Text, L"Starting."), tool(L"t5", L"Bash", L"Bash: long"), item(TopicItemKind::Interrupt, L"") },
+                                               false,
+                                               lastDay,
+                                               {},
+                                               false);
+            CHECK(stopped.size() == 2 && stopped[1].markdown == L"\x25A0 *interrupted*", "an interrupted turn: the user's post and the mark");
+            const auto table = RenderHistory({ item(TopicItemKind::Prompt, L"compare", day1), item(TopicItemKind::Text, L"| a | b |\n|---|---|\n| 1 | 2 |") }, false, lastDay, {}, false);
+            CHECK(table.size() == 2 && table[1].markdown == L"| a | b |\n|---|---|\n| 1 | 2 |", "a reply's table reaches the rich message as Claude wrote it");
+
+            // VERBOSE (the narrative too): a remark's tool calls in a collapsible block named by its tools, inside a fence longer
+            // than any backtick run in the lines.
+            const auto loud = RenderHistory({ item(TopicItemKind::Prompt, L"go", day1), item(TopicItemKind::Text, L"Checking."), tool(L"t1", L"Bash", L"Bash: run ```x```"),
+                                              tool(L"t2", L"Bash", L"Bash: two"), tool(L"t3", L"Edit", L"Edit: a.cpp"), item(TopicItemKind::Text, L"Done.") },
+                                            false,
+                                            lastDay);
+            CHECK(loud.size() == 3, "user, narrative, reply");
+            if (loud.size() == 3)
+            {
+                CHECK(loud[1].markdown.rfind(L"Checking.", 0) == 0, "the narrative's Markdown opens with the remark as written");
+                CHECK(loud[1].markdown.find(L"<details><summary>\U0001F527 Bash \x00D7" L"2, Edit</summary>\n\n````text\n\x2022 Bash: run ```x```\n") != npos,
+                      "the tool calls: a collapsible block named by its tools, a fence longer than any backtick run");
+                CHECK(loud[1].markdown.find(L"\n````\n\n</details>") != npos, "the block is closed");
+                CHECK(loud[2].markdown == L"Done.", "the reply's Markdown is Claude's text");
+                const std::wstring prepared = TgPrepareRichMarkdown(loud[1].markdown);
+                CHECK(prepared.find(L"<details><summary>") != npos && prepared.find(L"</details>") != npos, "the prepared narrative keeps the collapsible block");
+            }
+
+            // The plan of a window renders in the topic's mode.
+            HistoryWindow w;
+            w.items = { item(TopicItemKind::Prompt, L"p", day1), item(TopicItemKind::Text, L"a"), tool(L"t1", L"Bash", L"Bash: b"), item(TopicItemKind::Text, L"c") };
+            w.itemAt = { 0, 10, 20, 30 };
+            w.consumedTo = 40;
+            int64_t dayA = 0;
+            int64_t dayB = 0;
+            CHECK(PlanHistoryPosts(w, dayA).size() == 4 && PlanHistoryPosts(w, dayB, {}, false).size() == 3, "verbose: day, user, narrative, reply; conversation only: day, user, reply");
+        }
+
+        // §21.11 — the topic names' STATE GLYPH: the tab strip's dot as an emoji, before the title.
+        {
+            CHECK(TopicDisplayName(SessionState::Running, L"Agentmaster") == L"\U0001F535 Agentmaster", "the state glyph, a space, the title");
+            CHECK(std::wstring{ StateGlyph(SessionState::Idle) } == L"\x26AA" && std::wstring{ StateGlyph(SessionState::NeedsApproval) } == L"\U0001F7E0" &&
+                      std::wstring{ StateGlyph(SessionState::WaitingForInput) } == L"\U0001F7E1",
+                  "idle white, needs-approval orange, waiting yellow");
+            std::wstring longTitle(130, L'a');
+            longTitle[118] = static_cast<wchar_t>(0xD83D);
+            longTitle[119] = static_cast<wchar_t>(0xDE00);
+            const std::wstring cutName = TopicDisplayName(SessionState::Idle, longTitle);
+            CHECK(cutName.size() <= 128 && cutName.back() == L'\x2026' && !(cutName[cutName.size() - 2] >= 0xD800 && cutName[cutName.size() - 2] <= 0xDBFF),
+                  "a long title is cut, ending in an ellipsis, never between the halves of a pair");
+
+            std::map<std::wstring, TopicRecord> topics;
+            TopicRecord a;
+            a.sessionId = L"a";
+            a.threadId = 1;
+            a.nameState = static_cast<int>(SessionState::Running);
+            topics[L"a"] = a;
+            TopicRecord b = a;
+            b.sessionId = L"b";
+            b.threadId = 2;
+            topics[L"b"] = b;
+            TopicRecord c = a;
+            c.sessionId = L"c";
+            c.threadId = 3;
+            c.nameState = -1;
+            topics[L"c"] = c;
+            const auto fact = [](const wchar_t* id, SessionState st, int64_t since) {
+                TabFact f;
+                f.sessionId = id;
+                f.state = st;
+                f.live = true;
+                f.inTab = true;
+                f.claude = true;
+                f.stateSinceMs = since;
+                return f;
+            };
+            const int64_t now = 1000000;
+            std::vector<TabFact> facts{ fact(L"a", SessionState::Running, now - 20000), fact(L"b", SessionState::WaitingForInput, now - 20000), fact(L"c", SessionState::Running, now - 30000) };
+            CHECK(PickStateRename(facts, topics, now) == L"b", "a waiting session's name changes before a running one's (the states that need the user first)");
+            facts[1].stateSinceMs = now - 2000;
+            CHECK(PickStateRename(facts, topics, now) == L"c", "a state younger than kNameStateSettleMs waits (a short turn's flicker renames nothing)");
+            topics[L"c"].nameSetMs = now - 5000;
+            CHECK(PickStateRename(facts, topics, now).empty(), "a topic renamed lately waits kNameRenameGapMs; a name that shows its state is left alone");
+            facts[1].stateSinceMs = 0;
+            CHECK(PickStateRename(facts, topics, now) == L"b", "an unknown state clock reads as settled");
+            facts[1].live = false;
+            CHECK(PickStateRename(facts, topics, now).empty(), "a session that is not live in a tab is not renamed");
+
+            TabFact fresh = fact(L"n", SessionState::NeedsApproval, now);
+            fresh.lastActivityMs = now;
+            fresh.title = L"New tab";
+            const auto ops = PlanTopicSync({ fresh }, {}, now, 600000);
+            CHECK(ops.size() == 1 && ops[0].kind == TopicSyncOp::Kind::Create && ops[0].state == SessionState::NeedsApproval, "a create carries the state its name's glyph shows");
+        }
+
+        // §21.11 — the state file: a topic's mode and its name's state, and the secretary bot's facts, round-trip; an older
+        // file reads as the default mode with no glyph yet; the settings default to the conversation only and rich messages.
+        {
+            MessagingState st;
+            st.businessBotId = 42;
+            st.secretaryBotId = 42;
+            st.secretaryUpdateOffset = 7;
+            TopicRecord t;
+            t.sessionId = L"v";
+            t.threadId = 3;
+            t.verbose = 1;
+            t.nameState = static_cast<int>(SessionState::Error);
+            t.nameSetMs = 99;
+            st.topics[L"v"] = t;
+            const auto back = StateFromJson(StateToJson(st));
+            CHECK(back && back->businessBotId == 42 && back->secretaryBotId == 42 && back->secretaryUpdateOffset == 7, "the secretary bot's facts round-trip");
+            CHECK(back && back->topics.count(L"v") && back->topics.at(L"v").verbose == 1 && back->topics.at(L"v").nameState == static_cast<int>(SessionState::Error) &&
+                      back->topics.at(L"v").nameSetMs == 99,
+                  "a topic's mode and its name's state round-trip");
+            const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(old && old->topics.count(L"o") && old->topics.at(L"o").verbose == -1 && old->topics.at(L"o").nameState == -1 && old->businessBotId == 0,
+                  "an older file: the default mode, no glyph yet (renamed once), the topics bot holds any connection");
+            TopicRecord dflt;
+            TopicRecord on = dflt;
+            on.verbose = 1;
+            TopicRecord off = dflt;
+            off.verbose = 0;
+            CHECK(!TopicIsVerbose(dflt, false) && TopicIsVerbose(dflt, true) && TopicIsVerbose(on, false) && !TopicIsVerbose(off, true), "a topic's own mode wins over the default");
+            const AppSettings defaults;
+            CHECK(!defaults.messagingVerbose && defaults.messagingRichMessages, "defaults: the conversation only, rich messages on");
+            AppSettings set;
+            set.messagingVerbose = true;
+            set.messagingRichMessages = false;
+            const AppSettings again = AppSettingsFromJson(ToJson(set));
+            const AppSettings blank = AppSettingsFromJson(json::Value::MkObj());
+            CHECK(again.messagingVerbose && !again.messagingRichMessages && !blank.messagingVerbose && blank.messagingRichMessages, "both settings round-trip; absent keys read as the defaults");
+        }
     }
 
     // ---- the remote prompt's runner bypass (D30) ----

@@ -2,7 +2,10 @@
 
 > **Status: Telegram v1 IMPLEMENTED on 2026-10-16 (§21 says exactly what was built, where it differs from the
 > design below, and what is still open; §21.6 = the topics per TAB, Claude Code's own recap, the card that
-> rings — dev 0.0.1.16, not production); designed 2026-10-15, revised twice on 2026-10-16.** The bot on this
+> rings — dev 0.0.1.16, not production; §21.11 = Claude's Markdown as Telegram RICH messages (tables render), a
+> VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
+> optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17); designed
+> 2026-10-15, revised twice on 2026-10-16.** The bot on this
 > machine is the user's `@ClaudeSessionsGateBot` since 2026-10-16 18:50 (the token in
 > `K:\source\telegram\ClaudeSessionsGateBot.env`, stored in Windows Credential Manager by the cog — never in a
 > profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on). Teams, webhooks and external connectors
@@ -1663,3 +1666,175 @@ matched by title or path without reading it.
   older year, unknown), the menu spans, the whole answer of two cards (a quote, a session known only by its id, the
   count not listed), "Nothing found.", the escaping of a title and a quote, distinct glyphs, and both menus.
 - **Not done:** no live run; the answer's look on a phone (the blockquotes' spacing) is unverified.
+
+### 21.11 Rich messages, verbose or conversation-only topics, a state glyph in every topic name, a secretary bot (2026-10-17)
+
+> Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.21 (`Q:\agentmaster-layouts\Debug-B`, a purged full
+> rebuild, 03:08), not in production. Checked live: the glyph renames and their notice deletes; the rich Markdown as
+> Telegram parses it. Still open: §21.11.5.
+
+**The user's four requests** (2026-10-17, after the §21.9 replay): "Can the threads name be edited to have an emoji
+representing the status of the tab/thread similarily to how tabs present"; "When recreating the threads, prompts/messages
+sent to claude by the user should be sent to the thread using secretary (bot acting on user's behalf posting in his
+name), search online how it works"; "The threads should have global and personal verbose mode (telegram specific verbose
+mode, not claude code's verbose) where: Verbose shows like now, the bash commands and more; Non-verbose: historically
+shows only user's prompt and the assistant's turn's last message - so we get user->assitant->user->assistant messages.
+User can recreate a specific topic as verbose or all, incl configuring the default for all (which is non-verbose by
+default)"; "each message from claude code is most of the time markdown but we are plain text so markdown tables are not
+showing beyond unformatted ascii".
+
+#### 21.11.1 Claude's Markdown as RICH messages (tables, headings)
+
+- **What Telegram offers** (Bot API 10.1, `sendRichMessage` + `InputRichMessage`): a message given as `markdown` (GitHub
+  Flavored Markdown "where possible", with "arbitrary HTML" whose supported tags are parsed), `html` or `blocks` —
+  headings, lists, task lists, TABLES (≤ 20 columns, inline formatting only in a cell), quotes, fenced code, `<details>`
+  collapsible blocks (Markdown is parsed inside them), footnotes, math. Limits: 32,768 characters, 500 blocks.
+  `editMessageText` takes `rich_message` too. The HTML parse mode of `sendMessage` (what §10.3's converter targets) has
+  no table form at all — a table came out as its pipes.
+- **Measured** (`richtest.py`, the bot's own chat, each message read back from the API's parsed `rich_message` and
+  deleted): a `<`-tag Telegram does not know is DROPPED with its text ("List<int>" → "List"); `&lt;` restores it,
+  `\<` does not; the other backslash escapes work (`\* \_ \| \$ \= \- \# \[ \] \` \~`); a single line break inside a
+  paragraph is a space (GitHub's rule) and two trailing spaces keep it; `$5` stays text, `$HOME` becomes a cashtag;
+  `<details><summary>…</summary>` around a fenced block is a collapsible block.
+- **The preparation** (`TgPrepareRichMarkdown`, TelegramFormat.h, pure): every `<` outside code becomes `&lt;`; fenced
+  blocks and inline code spans are copied exactly; a line another non-blank line follows gets two trailing spaces
+  (Claude writes for a terminal that keeps its line breaks); a TABLE ROW (a line that starts with `|`) gets none; a line
+  that starts with `<details>`, `<details open>` or `</details>` keeps its tags and a `<summary>…</summary>` right after
+  the opening tag (`detail::MdKeepCollapsibleTags`) — the history's tool groups are such blocks.
+- **The split** (`TgChunkMarkdown`): ≤ `kRichChunkMaxChars` (24,000 UTF-16 units — the room up to the 32,768 limit is
+  for what the preparation adds) and ≤ 400 lines (the 500-block limit) per part, cut at a blank line outside code where
+  one exists; a part that ends inside a fenced block closes it and the next part opens it again with the same line; a
+  line longer than a part is cut hard, never between the two halves of a surrogate pair. A prepared part still over
+  `kRichMessageMaxChars` (32,000: thousands of `<`) goes as HTML.
+- **Our own lines** (`TgMdEscapeText`): a question, an option, an API error as Markdown that shows as typed — the
+  formatting characters backslash-escaped, `<` → `&lt;`, `&` → `&amp;`, a number at a line's start kept a number
+  (`1\.`), every line break kept.
+- **The sender** (`MessagingService::_sendRich`): the parts as `sendRichMessage` items (silent but the last, `onDone` on
+  the last, the reply reference on the first). A part Telegram refuses — any 400 that names no missing chat or thread,
+  or a 404 (a Bot API without the method; then no rich message is tried again this run) — goes again as HTML **in its
+  own place**: the caller's HTML for a message of one part, else that part through `TgMarkdownToHtml`. The place is kept
+  by a new outbox order, `(priority, seq, subSeq)`: a message's parts share its seq, part j sits at `j × 4096`, its HTML
+  fallback's chunks after it, and an HTML chunk's plain-text fallback (the old "can't parse entities" rescue, which went
+  out at Final priority with a new seq — after later messages) now takes the slot right after the refused chunk too
+  (`_htmlItems`, shared by `_sendText`). `_enqueue` keeps a seq an item brings.
+- **What goes rich**: the final reply of a turn, the remarks (verbose), a plan ("📋 **Plan ready for approval** …" +
+  the plan), an interrupt's text + "■ *interrupted*", and in the HISTORY replay the replies, the narrative and its tool
+  groups. The ⌨ prompt lines, the questions, API errors, the work log (edited in place), the cards and every notice stay
+  HTML (`sendMessage`). The traffic census counts `sendRichMessage` on its own.
+- **The switch**: `AppSettings::messagingRichMessages` (default on; the cog's Messaging tab, "Send Claude's Markdown as
+  rich messages (tables, headings)") — off = the HTML of §10.3, for a Telegram app too old to show rich messages.
+
+#### 21.11.2 VERBOSE or the CONVERSATION ONLY — per topic, with a default for all
+
+- **The modes**: verbose = the topic as before (§21.5/§21.9): the assistant's remarks, a work log of the tool calls,
+  failed results, compactions. The conversation only = the user's posts (the prompt, a message typed while the turn ran,
+  an answer, a slash command) and each turn's LAST message, plus the questions and plans that asked the user something,
+  and an interrupt or an API error that ended a turn — user → Claude → user → Claude.
+- **Where it is set**: `AppSettings::messagingVerbose` is the default for all topics (default OFF — the user's rule; the
+  cog's "Topics show the work (verbose)"); `TopicRecord::verbose` overrides it per topic (-1 follows the default, 0, 1;
+  persisted). `TopicIsVerbose` resolves it.
+- **Commands**: `/verbose` in a session topic shows the topic's mode with buttons (Verbose · Conversation · Follow the
+  default); `/verbose on|off|default` sets it. In the 🔎 Search topic `/verbose` (buttons, or `on|off`) sets the DEFAULT
+  (a settings.json read-modify-write, live at once). A change applies to the messages from then on.
+- **Recreating in a mode**: `/recreate` in a session topic offers "This topic · verbose / conversation" (the topic is
+  deleted and made again at once with its session's whole history in that mode; `TopicRecord::verbose` keeps it; one per
+  tick, `_recreateOneTopic` through `_recreateOne`; the outcome is the button's toast, the topic it sat in being gone)
+  and "All topics · verbose / conversation"; `/recreate` in Search offers the latter two. Recreating all sets the chosen
+  mode as the default first (the per-topic modes go with the old topics), then runs the §21.8 recreation.
+- **The live mirror** (`_applyItems`): in the conversation-only mode a tool call drops the text gathered before it (a
+  remark is not the turn's last message) instead of posting it, no work-log line is written, failed results and
+  compactions are skipped, the text before a question is dropped. What is left when the turn ends is its final reply.
+- **The history** (`RenderHistory(…, verbose)`, `PlanHistoryPosts(…, verbose)`): the same rule. Every bot post carries its
+  Markdown (`HistoryPost::markdown`) beside the HTML: Claude's text as written, our lines escaped, a remark's tool calls as
+  `<details><summary>🔧 Bash ×3, Edit</summary>` around a fenced block whose fence is longer than any backtick run in the
+  lines. The day lines and the user's lines stay HTML only.
+
+#### 21.11.3 The state glyph in every topic name
+
+- **The glyph** (`StateGlyph`): the tab strip's status dot as an emoji — Running 🔵, Waiting for you 🟡, Needs approval
+  🟠, Error 🔴, Done (claude exited) 🟢, Idle ⚪ (the tab's dot is gray; Telegram has no gray circle). The name is
+  `TopicDisplayName(state, title)`: the glyph, a space, the title (≤ 120 units, "…", never cut inside a pair).
+  `TopicRecord::title` keeps the BARE title (the sync compares it with the tab's), `nameState` the state the name shows
+  (-1 = none yet), `nameSetMs` when it was set (both persisted). A topic made by an older build has no glyph and is
+  renamed once.
+- **When a name follows the state** (`PickStateRename`, pure, + `_stateNameTick`): at most ONE rename per tick, only for
+  a state that has held `kNameStateSettleMs` (8 s — a short turn's Running ↔ Waiting flicker renames nothing), at least
+  `kNameRenameGapMs` (30 s) after the topic's last rename, the states that need the user first (Needs approval, Error,
+  Waiting for you, then the rest), and only while the last minute holds fewer than `kNameRenameCallsPerMinute` (12)
+  calls and no 429 pause runs; never in the start-up hold or a recreation. A title change still renames through the
+  sync's plan (its Rename / Create / Rekey ops carry the state), with the glyph.
+- **The "topic renamed" notice**: Telegram posts a service message for every topic edit; the bot gets its own back
+  through getUpdates (like the `forum_topic_created` of every topic it makes) and DELETES a `forum_topic_edited` one
+  (Backfill priority; three refusals in a row stop the deletes). A rename therefore costs two calls.
+
+#### 21.11.4 The SECRETARY: the user's turns as the user's own messages
+
+- **How Telegram's Secretary Mode works** (core.telegram.org/bots/features, "Business Bots"; read 2026-10-17): the bot
+  enables Secretary Mode in @BotFather; the user connects it to their account (Telegram → Settings → Chat Automation —
+  formerly Business → Chatbots; since Bot API 10.0 no Premium is needed; ONE such bot per account) and chooses which
+  chats it may access; the bot gets a `business_connection` update with the rights (`can_reply` covers "private chats
+  with incoming messages in the last 24 hours") and sends on the user's behalf with `business_connection_id`. And, the
+  part that decides the design, "Communication via Business Accounts": "If a bot is connected to a business account
+  using Chat Access Mode, it can send messages to OTHER bots used by that business account. This requires Bot-to-Bot
+  Communication Mode to be enabled for the bot that is sending the messages." A bot posting into its OWN chat with the
+  user on the user's behalf — what §21.5's probe tries — is not documented.
+- **So two paths**, one code path (`_sendAsUser` sends with the client of whichever bot holds the connection,
+  `MessagingState::businessBotId`):
+  1. **A second, SECRETARY bot** (new, optional): its token in Credential Manager
+     (`Agentmaster:messaging:telegram-secretary:<profile leaf>`, the cog's "Secretary bot token (a second bot)"); the
+     service makes a client and a poller of its own for it (`_secretaryPollLoop`: getMe once — its id, and
+     `can_connect_to_business`, i.e. Secretary Mode on in @BotFather — then getUpdates with `allowed_updates` =
+     `business_connection` ONLY, so it never receives the chats it may access; its own offset, `secretaryUpdateOffset`,
+     reset when the bot changes; one poller per token machine-wide, like the topics bot's). A changed secretary token
+     restarts the service at the next Apply. Its sends go through the same outbox (`OutItem::asSecretary`), in order with
+     the bot's posts. The topics bot drops the copies it receives: they carry `sender_business_bot`, and the echo guard
+     knows their text.
+  2. **The topics bot itself** connected under Chat Automation: §21.5's path, unchanged — the probe finds out.
+  A disconnect of the bot that does NOT hold the stored connection changes nothing (moving the connection between the
+  two bots sends one a disconnect and the other a connect, in any order). The probe (one message as the user in the 🔎
+  Search topic) runs after every connection; a refusal now explains the second-bot route.
+- **The setup** (in the cog, under "SECRETARY (OPTIONAL)"): @BotFather → /newbot → paste its token; in @BotFather turn on
+  its Secretary Mode and Bot-to-Bot Communication; Save; in Telegram → Settings → Chat Automation add the second bot, let
+  it reply, and let it reach the chat with the topics bot. The cog's status line (`StatusText`) says where it stands:
+  off / running and waiting to be connected / connected without the right to reply / checking / works (sent by @bot) /
+  refused (with Telegram's reason) / a problem of the secretary bot (Secretary Mode off, token refused, polled
+  elsewhere, the same token as the topics bot).
+- **The history** already sends the user's turns as the user while secretary mode works (§21.9: `_pumpBackfill`'s
+  `asUser`); a topic recreated after the secretary works carries them as the user's messages.
+
+#### 21.11.5 Tests, the build, and what is open
+
+- **Tests** (`TestMessaging`, the §21.11 blocks): the preparation (escapes, code spans and fences as written, hard breaks,
+  none for a table row or before a blank line, the details tags kept and their summary escaped, a details tag inside a
+  line escaped, CR dropped); the split (300 paragraphs, each part fits and starts at a paragraph, none lost; a 100-line
+  code block closed and reopened with its language, no line lost; 300 emoji in one line never cut inside a pair); the
+  escaping of our lines; the conversation-only history (user, mid-turn user, question, answer, reply — no narrative; an
+  interrupted turn; a reply's table as written); the verbose history's details block (summary "Bash ×2, Edit", a 4-tick
+  fence around a line holding three); the plan in both modes; the glyphs, the display name and its cut; the rename
+  picker (urgency, the settle, the per-topic gap, an unknown clock, a session not live); a create carrying its state;
+  the state file's new keys and an older file; both settings and their defaults. The isolated m5 run: 7,396 checks, the
+  3 known TestTaskbarBadge failures only. `/Zs /W4` of Messaging.cpp + Messaging.Inbound.cpp: clean.
+- **The build incident**: the first dev build of this work (0.0.1.21, incremental) crashed 2 s after the start-up hold
+  ended — an AV in `std::_Container_base12::_Orphan_all_locked_v3` under `TerminalPage::_SidePanelSelectSession`'s
+  assignment to `_sidePanelSelectedId` (`TerminalPage.AgentSidePanel.cpp:3101`), i.e. a member at another offset than
+  the code expected. `AppSettings` (SessionModels.h) had gained two fields, and the incremental build left objects
+  compiled against the old layout — exactly the build-install skill's §5.8 rule ("purge whenever SessionModels.h …
+  changes"), which this build skipped. The purge (`Generated Files`, `obj\x64\Debug\TerminalApp`, `TerminalAppLib`,
+  `agentmaster-cli`, `agentmaster-sessiondb`) and a full rebuild fixed it.
+- **Checked live** (dev 0.0.1.21, 2026-10-17 03:08–03:20): the start-up hold ended at 03:10:16 and the first glyph
+  rename went at 03:11:34 ("🔴 perf", "🟡 Agentmaster", …), then one about every 2 s until the call window filled; the
+  traffic census of the first 10 minutes read `editForumTopic=42 deleteMessage=42` — Telegram DOES post a "topic
+  renamed" notice in the bot's private chat, the bot gets each back through getUpdates, and every one was deleted (no
+  refusal). The rich path, offline through the app's own code (`prepmd`, a probe that runs `TgChunkMarkdown` +
+  `TgPrepareRichMarkdown`) and then sent to the 🔎 Search topic and deleted: a Claude-like reply came back as a heading, a
+  paragraph whose line breaks and `List<int>` (in and outside code) are kept, a TABLE block (header row, a right-aligned
+  column, `compile <TerminalApp>` and a bold cell intact), an ordered list, a `cpp` code block with `<typename T>`, a
+  quote with a link whose url holds parentheses, and "$5 … x < y && y > z" as text; a verbose narrative's tool group came
+  back as a `details` block titled "🔧 Bash ×2, Edit" holding the `text` code block (a three-backtick run and `"a<b>"`
+  intact). The same 10 minutes held 123 card edits — the restart re-edit the §21.9 run already counted (125), not this
+  work.
+- **Open** (live): a reply's table on the phone and the desktop app (the API's parse is checked, not the clients'
+  rendering; an app too old for rich messages is what the switch is for); a refused rich part falling back in its
+  place; `/verbose` and the four recreate buttons; whether a rename moves a topic up the list for a moment (the notice is
+  its last message until it is deleted); the secretary bot end to end — it needs the user's second bot and the Chat
+  Automation step, nothing can be checked without them.

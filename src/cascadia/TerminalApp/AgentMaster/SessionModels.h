@@ -3085,10 +3085,21 @@ namespace Agentmaster
         //    private-chat topic) — D25, default 10; 0 deletes at once.
         //  - messagingSearchThinking: the Search topic's agent thinking level word (off / low / medium / high /
         //    xhigh / max), default "high" (the user's rule); an unknown word reads as high.
+        //  - messagingVerbose (MESSAGING.md §21.11): the DEFAULT mode of every topic — true = verbose (the assistant's
+        //    remarks, a work log of the tool calls, compactions: the whole session as it runs), false = the
+        //    conversation only (the user's posts and each turn's final reply, plus the questions, plans, interrupts and
+        //    API errors). Default OFF, the user's rule. A topic can override it (/verbose in the topic, or recreating
+        //    the topic in a mode: TopicRecord::verbose); recreating ALL topics in a mode sets this. Telegram's own
+        //    setting, not Claude Code's verbose.
+        //  - messagingRichMessages (§21.11): send Claude's Markdown (replies, remarks, plans, the history's narrative)
+        //    as Telegram RICH messages (Bot API 10.1: tables, headings, lists render). Default ON; off = the HTML
+        //    conversion of §10.3, which has no tables (for a Telegram app too old to show rich messages).
         bool messagingEnabled{ false };
         std::wstring messagingTelegramOwnerId{};
         uint32_t messagingIdleGraceMinutes{ 10 };
         std::wstring messagingSearchThinking{ L"high" };
+        bool messagingVerbose{ false };
+        bool messagingRichMessages{ true };
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back

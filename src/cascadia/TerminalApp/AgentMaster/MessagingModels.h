@@ -862,16 +862,26 @@ namespace Agentmaster::Msg
         bool fromUser{ false };
         std::wstring userText; // fromUser: the user's words as typed (plain text)
         std::wstring html; // the bot's message (Telegram HTML); for fromUser, the line the bot posts in the user's place
+        /// <summary>
+        /// §21.11: the same message as Markdown for a RICH message (Bot API 10.1) — Claude's own text as written, our own
+        /// lines escaped (TgMdEscapeText), a tool group as a collapsible &lt;details&gt; block. Empty = `html` only (a day
+        /// line, a user's line). The sender prefers it and falls back to `html` when Telegram refuses the rich send.
+        /// </summary>
+        std::wstring markdown;
     };
 
     /// <summary>
     /// Renders transcript items (ClassifyTranscriptLine in history mode) into a topic's history (§21.9, the user's "a
-    /// thread is a reflection of the entire session"): per turn, a day line when the day changes; the user's prompt (a
-    /// HistoryPost from the user); the assistant's narrative — each remark ("why the bash is invoked") followed by the
-    /// tool calls it led to in one folded quote, compactions, interrupts, API errors, questions, plans and the user's
-    /// slash commands — packed into messages of at most kHistoryPackChars; and the turn's final reply as its own message.
-    /// The packing is what makes a whole session fit the chat's budget: 266 turns of 49 sessions came to 1,175 messages
-    /// (measured 2026-10-16), against 6,581 in the live layout (one message per remark and per work-log segment).
+    /// thread is a reflection of the entire session"). Per turn: a day line when the day changes; the user's prompt (a
+    /// HistoryPost from the user); then, VERBOSE, the assistant's narrative — each remark ("why the bash is invoked")
+    /// followed by the tool calls it led to in one folded group, compactions, interrupts, API errors, questions, plans —
+    /// packed into messages of at most kHistoryPackChars, and the turn's final reply as its own message. NOT VERBOSE
+    /// (§21.11, the default — the user's "only user's prompt and the assistant's turn's last message"): the user's posts,
+    /// the questions and plans that asked the user something, an interrupt or an API error that ended a turn, and each
+    /// turn's final reply — user → assistant → user → assistant. Both modes keep the user's own posts: a message typed
+    /// while the turn ran, an answer to a question, a slash command. The packing is what makes a whole session fit the
+    /// chat's budget: 266 turns of 49 sessions came to 1,175 messages (measured 2026-10-16), against 6,581 in the live
+    /// layout (one message per remark and per work-log segment).
     /// </summary>
     /// <param name="items">The items in transcript order. They start at a turn's prompt — or, after a reader window
     /// that split one long turn, inside a turn (those items render as narrative).</param>
@@ -879,17 +889,19 @@ namespace Agentmaster::Msg
     /// its last text is narrative, not its final reply — the reply comes with the window where the turn ends.</param>
     /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered; a turn on another day gets a day line first.</param>
     /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (⚙ instead of ⌨ in the bot's line).</param>
+    /// <param name="verbose">True: the narrative too (remarks, tool calls, compactions); false: the conversation only.</param>
     /// <returns>The posts, in the order they are to be sent.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {})
+    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {}, bool verbose = true)
     {
         std::vector<HistoryPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
-        const auto emitBot = [&](std::wstring html) {
+        const auto emitBot = [&](std::wstring html, std::wstring markdown) {
             if (!html.empty())
             {
                 HistoryPost p;
                 p.html = std::move(html);
+                p.markdown = std::move(markdown);
                 out.push_back(std::move(p));
             }
         };
@@ -905,6 +917,36 @@ namespace Agentmaster::Msg
                 p.html += L"\n<blockquote expandable>" + TgEscapeHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text) + L"</blockquote>";
             }
             return p;
+        };
+        // Our own blocks, in both forms (the HTML the fallback sends, the Markdown a rich message carries).
+        const auto questionBlock = [](const TopicItem& it) {
+            std::wstring html = L"\x2753 <b>" + TgEscapeHtml(it.text) + L"</b>";
+            // The bold run must start and end next to a character (Markdown's flanking rule), so the question is trimmed.
+            std::wstring_view q = it.text;
+            while (!q.empty() && std::iswspace(q.front()))
+            {
+                q.remove_prefix(1);
+            }
+            while (!q.empty() && std::iswspace(q.back()))
+            {
+                q.remove_suffix(1);
+            }
+            std::wstring md = q.empty() ? std::wstring{ L"\x2753" } : L"\x2753 **" + TgMdEscapeText(q) + L"**";
+            for (size_t o = 0; o < it.options.size(); ++o)
+            {
+                html += L"\n" + std::to_wstring(o + 1) + L". " + TgEscapeHtml(it.options[o]);
+                md += (o == 0 ? L"\n\n" : L"\n") + std::to_wstring(o + 1) + L". " + TgMdEscapeText(it.options[o]);
+            }
+            return std::pair<std::wstring, std::wstring>{ std::move(html), std::move(md) };
+        };
+        const auto planBlock = [](const TopicItem& it) {
+            return std::pair<std::wstring, std::wstring>{ L"\U0001F4CB <b>Plan</b>\n" + TgMarkdownToHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text),
+                                                          L"\U0001F4CB **Plan**\n\n" + (it.text.size() > 20000 ? it.text.substr(0, 20000) + L"\x2026" : it.text) };
+        };
+        const auto interruptBlock = []() { return std::pair<std::wstring, std::wstring>{ L"\x25A0 <i>interrupted</i>", L"\x25A0 *interrupted*" }; };
+        const auto apiErrorBlock = [](const TopicItem& it) {
+            const std::wstring text = it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text;
+            return std::pair<std::wstring, std::wstring>{ L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(text), L"\x26A0 **API error**  \n" + TgMdEscapeText(text) };
         };
         std::unordered_map<std::wstring, std::wstring> toolNames; // tool_use id -> name, to label a failed result
         size_t i = 0;
@@ -924,7 +966,7 @@ namespace Agentmaster::Msg
                 const TopicItem& p = items[start];
                 if (const int64_t day = TgDayKey(p.tsMs); day != 0 && day != lastDayKey)
                 {
-                    emitBot(L"<i>\x2014 " + TgEscapeHtml(TgDayText(p.tsMs)) + L" \x2014</i>");
+                    emitBot(L"<i>\x2014 " + TgEscapeHtml(TgDayText(p.tsMs)) + L" \x2014</i>", std::wstring{});
                     lastDayKey = day;
                 }
                 out.push_back(userLine(p, false));
@@ -950,58 +992,119 @@ namespace Agentmaster::Msg
                     break; // the turn ended on a tool call, a question, a plan, an error, an interrupt, a command
                 }
             }
-            // The narrative, packed.
+            // The narrative, packed — in both forms side by side.
             std::wstring cur; // the message being packed (HTML)
+            std::wstring curMd; // the same message (Markdown)
             std::wstring group; // the open folded group of tool lines (plain text)
+            std::vector<std::wstring> groupTools; // the group's tool names, in order (its summary)
             const auto closeGroup = [&]() {
                 if (group.empty())
                 {
                     return;
                 }
                 std::wstring g = L"<blockquote expandable>" + TgEscapeHtml(group) + L"</blockquote>";
+                // The Markdown: a collapsible block whose summary names the tools ("🔧 Bash ×3, Edit"), the lines inside
+                // a fenced block (nothing in them is read as formatting) with a fence longer than any backtick run.
+                std::wstring summary;
+                {
+                    std::vector<std::pair<std::wstring, size_t>> counts;
+                    for (const auto& name : groupTools)
+                    {
+                        auto c = std::find_if(counts.begin(), counts.end(), [&name](const auto& e) { return e.first == name; });
+                        if (c == counts.end())
+                        {
+                            counts.emplace_back(name, 1);
+                        }
+                        else
+                        {
+                            ++c->second;
+                        }
+                    }
+                    for (const auto& [name, n] : counts)
+                    {
+                        summary += (summary.empty() ? L"" : L", ") + TgEscapeHtml(name.empty() ? std::wstring{ L"tool" } : name) + (n > 1 ? L" \x00D7" + std::to_wstring(n) : std::wstring{});
+                    }
+                    if (summary.empty())
+                    {
+                        summary = L"failed tool calls";
+                    }
+                }
+                size_t longest = 0;
+                for (size_t a = 0; a < group.size();)
+                {
+                    if (group[a] == L'`')
+                    {
+                        size_t n = 0;
+                        while (a + n < group.size() && group[a + n] == L'`')
+                        {
+                            ++n;
+                        }
+                        longest = (std::max)(longest, n);
+                        a += n;
+                    }
+                    else
+                    {
+                        ++a;
+                    }
+                }
+                const std::wstring fence((std::max)(size_t{ 3 }, longest + 1), L'`');
+                std::wstring gMd = L"<details><summary>\U0001F527 " + summary + L"</summary>\n\n" + fence + L"text\n" + group + L"\n" + fence + L"\n\n</details>";
                 group.clear();
+                groupTools.clear();
                 if (!cur.empty() && cur.size() + 1 + g.size() > kHistoryPackChars)
                 {
-                    emitBot(std::move(cur));
+                    emitBot(std::move(cur), std::move(curMd));
                     cur.clear();
+                    curMd.clear();
                 }
                 if (!cur.empty())
                 {
                     cur += L"\n";
+                    curMd += L"\n\n";
                 }
                 cur += g;
+                curMd += gMd;
             };
-            const auto addLine = [&](const std::wstring& line) {
+            const auto addLine = [&](const std::wstring& line, const std::wstring& tool) {
                 // A group that would no longer fit beside what the message holds is closed, and the message sent.
                 if (!group.empty() && cur.size() + group.size() + line.size() + 48 > kHistoryPackChars)
                 {
                     closeGroup();
-                    emitBot(std::move(cur));
+                    emitBot(std::move(cur), std::move(curMd));
                     cur.clear();
+                    curMd.clear();
                 }
                 if (!group.empty())
                 {
                     group += L"\n";
                 }
                 group += line;
+                if (!tool.empty())
+                {
+                    groupTools.push_back(tool);
+                }
             };
-            const auto addBlock = [&](const std::wstring& html) {
+            const auto addBlock = [&](const std::wstring& html, const std::wstring& md) {
                 closeGroup();
                 if (!cur.empty() && cur.size() + 2 + html.size() > kHistoryPackChars)
                 {
-                    emitBot(std::move(cur));
+                    emitBot(std::move(cur), std::move(curMd));
                     cur.clear();
+                    curMd.clear();
                 }
                 if (!cur.empty())
                 {
                     cur += L"\n\n";
+                    curMd += L"\n\n";
                 }
                 cur += html; // a block longer than the limit is a message of its own; the sender splits it
+                curMd += md;
             };
             const auto flush = [&]() {
                 closeGroup();
-                emitBot(std::move(cur));
+                emitBot(std::move(cur), std::move(curMd));
                 cur.clear();
+                curMd.clear();
             };
             for (size_t k = hasPrompt ? start + 1 : start; k < end; ++k)
             {
@@ -1009,47 +1112,96 @@ namespace Agentmaster::Msg
                 if (k == replyIdx)
                 {
                     flush();
-                    emitBot(TgMarkdownToHtml(it.text));
+                    emitBot(TgMarkdownToHtml(it.text), it.text);
                     continue;
                 }
                 switch (it.kind)
                 {
                 case TopicItemKind::Text:
-                    addBlock(TgMarkdownToHtml(it.text));
+                    if (verbose)
+                    {
+                        addBlock(TgMarkdownToHtml(it.text), it.text);
+                    }
                     break;
                 case TopicItemKind::ToolCall:
                     toolNames[it.toolUseId] = it.toolName;
-                    addLine(L"\x2022 " + it.summary);
+                    if (verbose)
+                    {
+                        addLine(L"\x2022 " + it.summary, it.toolName);
+                    }
                     break;
                 case TopicItemKind::ToolResult:
-                    if (it.isError)
+                    if (verbose && it.isError)
                     {
                         const auto n = toolNames.find(it.toolUseId);
-                        addLine(L"\x2717 " + (n == toolNames.end() ? std::wstring{} : n->second + L": ") + it.text);
+                        addLine(L"\x2717 " + (n == toolNames.end() ? std::wstring{} : n->second + L": ") + it.text, std::wstring{});
                     }
                     break;
                 case TopicItemKind::Question:
                 {
-                    std::wstring html = L"\x2753 <b>" + TgEscapeHtml(it.text) + L"</b>";
-                    for (size_t o = 0; o < it.options.size(); ++o)
+                    // A question asked the user something: in both modes (its answer, a user post, follows).
+                    auto [html, md] = questionBlock(it);
+                    if (verbose)
                     {
-                        html += L"\n" + std::to_wstring(o + 1) + L". " + TgEscapeHtml(it.options[o]);
+                        addBlock(html, md);
                     }
-                    addBlock(html);
+                    else
+                    {
+                        flush();
+                        emitBot(std::move(html), std::move(md));
+                    }
                     break;
                 }
                 case TopicItemKind::Plan:
-                    addBlock(L"\U0001F4CB <b>Plan</b>\n" + TgMarkdownToHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text));
+                {
+                    auto [html, md] = planBlock(it);
+                    if (verbose)
+                    {
+                        addBlock(html, md);
+                    }
+                    else
+                    {
+                        flush();
+                        emitBot(std::move(html), std::move(md));
+                    }
                     break;
+                }
                 case TopicItemKind::Compaction:
-                    addBlock(L"<i>\x2014 " + TgEscapeHtml(it.text) + L" \x2014</i>");
+                    if (verbose)
+                    {
+                        addBlock(L"<i>\x2014 " + TgEscapeHtml(it.text) + L" \x2014</i>", L"*\x2014 " + TgMdEscapeText(it.text) + L" \x2014*");
+                    }
                     break;
                 case TopicItemKind::Interrupt:
-                    addBlock(L"\x25A0 <i>interrupted</i>");
+                {
+                    // The turn ended here (the user pressed Esc): in both modes.
+                    auto [html, md] = interruptBlock();
+                    if (verbose)
+                    {
+                        addBlock(html, md);
+                    }
+                    else
+                    {
+                        flush();
+                        emitBot(std::move(html), std::move(md));
+                    }
                     break;
+                }
                 case TopicItemKind::ApiError:
-                    addBlock(L"\x26A0 <b>API error</b>\n" + TgEscapeHtml(it.text.size() > 2000 ? it.text.substr(0, 2000) : it.text));
+                {
+                    // The turn died here: in both modes.
+                    auto [html, md] = apiErrorBlock(it);
+                    if (verbose)
+                    {
+                        addBlock(html, md);
+                    }
+                    else
+                    {
+                        flush();
+                        emitBot(std::move(html), std::move(md));
+                    }
                     break;
+                }
                 case TopicItemKind::Command:
                 {
                     // The user's slash command is the user's turn too: sent as the user, or the bot's code line.
@@ -1261,9 +1413,10 @@ namespace Agentmaster::Msg
     /// <param name="w">The window (SplitHistoryWindow), with `itemAt`.</param>
     /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered before the window.</param>
     /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (RenderHistory's ⚙).</param>
+    /// <param name="verbose">RenderHistory's mode (§21.11): true = the narrative too, false = the conversation only.</param>
     /// <returns>The posts in order; a turn that renders nothing hands its end to the next turn's last post.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {})
+    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {}, bool verbose = true)
     {
         std::vector<HistoryPlanPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
@@ -1277,7 +1430,7 @@ namespace Agentmaster::Msg
             }
             const bool lastGroup = end == w.items.size();
             const std::vector<TopicItem> group(w.items.begin() + static_cast<std::ptrdiff_t>(begin), w.items.begin() + static_cast<std::ptrdiff_t>(end));
-            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, isRunnerPrompt);
+            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, isRunnerPrompt, verbose);
             // Where this turn ends: the next turn's first line, or the window's end. Without itemAt (a caller that did not
             // fill it) only the window's end is known.
             const int64_t commitTo = lastGroup ? w.consumedTo : (end < w.itemAt.size() ? w.itemAt[end] : 0);
@@ -1366,7 +1519,31 @@ namespace Agentmaster::Msg
         int64_t backfillPos{ 0 };
         int64_t backfillEnd{ 0 };
         int64_t backfillDayKey{ 0 };
+        /// <summary>
+        /// The topic's own VERBOSE mode (§21.11): -1 follows the default for all topics (AppSettings::messagingVerbose),
+        /// 1 verbose (the remarks, the work log of tool calls, compactions — the whole session as it runs), 0 the
+        /// conversation only (the user's posts and each turn's final reply, plus the questions, plans, interrupts and API
+        /// errors that ended or paused a turn). Set by /verbose in the topic and by recreating the topic in a mode; a
+        /// recreation of ALL topics clears it (the chosen mode becomes the default instead). TopicIsVerbose resolves it.
+        /// </summary>
+        int verbose{ -1 };
+        /// <summary>
+        /// The STATE GLYPH the topic's name shows (§21.11, the user's "an emoji representing the status … similarly to
+        /// how tabs present"): the SessionState as an int, -1 = none yet (a topic made before the glyph existed, or one
+        /// whose rename has not run). `nameSetMs` is when the name was last set (the state renames' per-topic gap).
+        /// </summary>
+        int nameState{ -1 };
+        int64_t nameSetMs{ 0 };
     };
+
+    /// <summary>Whether a topic shows the whole session (verbose) or the conversation only (§21.11).</summary>
+    /// <param name="t">The topic.</param>
+    /// <param name="defaultVerbose">The default for all topics (AppSettings::messagingVerbose; off by default).</param>
+    /// <returns>True when the topic is verbose.</returns>
+    inline bool TopicIsVerbose(const TopicRecord& t, bool defaultVerbose) noexcept
+    {
+        return t.verbose < 0 ? defaultVerbose : t.verbose == 1;
+    }
 
     /// <summary>Whether a topic's history replay (§21.9) still has to run (or finish).</summary>
     /// <param name="t">The topic.</param>
@@ -1416,6 +1593,16 @@ namespace Agentmaster::Msg
         bool businessCanReply{ false };
         int businessMode{ 0 };
         std::wstring businessNote;
+        /// <summary>
+        /// Which bot holds the business connection (§21.11): 0 or the topics bot's id = the topics bot itself; the
+        /// SECRETARY bot's id = the second bot the user connected under Chat Automation, whose client then sends as the
+        /// user (Telegram documents a business bot sending to the user's chats with OTHER bots). `secretaryBotId` and
+        /// `secretaryUpdateOffset` are the secretary bot's getMe id and getUpdates offset (update ids are per bot: a new
+        /// secretary bot starts from 0).
+        /// </summary>
+        int64_t businessBotId{ 0 };
+        int64_t secretaryBotId{ 0 };
+        int64_t secretaryUpdateOffset{ 0 };
         // The layout the session topics were made under (kTopicLayoutVersion; 0 = before §21.8, or a file without the key).
         int topicLayout{ 0 };
         // The RECREATION's old topics (thread ids) that still have to be deleted in Telegram (§21.8). Persisted, so a
@@ -1454,6 +1641,9 @@ namespace Agentmaster::Msg
         o.Set(L"businessCanReply", json::Value::MkBool(s.businessCanReply));
         o.Set(L"businessMode", json::Value::MkNum(static_cast<double>(s.businessMode)));
         o.Set(L"businessNote", json::Value::MkStr(s.businessNote));
+        o.Set(L"businessBotId", json::Value::MkNum(static_cast<double>(s.businessBotId)));
+        o.Set(L"secretaryBotId", json::Value::MkNum(static_cast<double>(s.secretaryBotId)));
+        o.Set(L"secretaryUpdateOffset", json::Value::MkNum(static_cast<double>(s.secretaryUpdateOffset)));
         o.Set(L"topicLayout", json::Value::MkNum(static_cast<double>(s.topicLayout)));
         auto orphans = json::Value::MkArr();
         for (const int64_t thread : s.orphanThreads)
@@ -1486,6 +1676,9 @@ namespace Agentmaster::Msg
             to.Set(L"backfillPos", json::Value::MkNum(static_cast<double>(t.backfillPos)));
             to.Set(L"backfillEnd", json::Value::MkNum(static_cast<double>(t.backfillEnd)));
             to.Set(L"backfillDayKey", json::Value::MkNum(static_cast<double>(t.backfillDayKey)));
+            to.Set(L"verbose", json::Value::MkNum(static_cast<double>(t.verbose)));
+            to.Set(L"nameState", json::Value::MkNum(static_cast<double>(t.nameState)));
+            to.Set(L"nameSetMs", json::Value::MkNum(static_cast<double>(t.nameSetMs)));
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
@@ -1513,6 +1706,9 @@ namespace Agentmaster::Msg
         s.businessCanReply = v.BoolAt(L"businessCanReply", false);
         s.businessMode = static_cast<int>(v.I64At(L"businessMode", 0));
         s.businessNote = v.StrAt(L"businessNote");
+        s.businessBotId = v.I64At(L"businessBotId", 0); // absent = the topics bot (the only one before §21.11)
+        s.secretaryBotId = v.I64At(L"secretaryBotId", 0);
+        s.secretaryUpdateOffset = v.I64At(L"secretaryUpdateOffset", 0);
         s.topicLayout = static_cast<int>(v.I64At(L"topicLayout", 0)); // absent = topics made before §21.8
         if (const auto* orphans = v.Find(L"orphanThreads"); orphans && orphans->type == json::Value::Type::Arr)
         {
@@ -1558,6 +1754,10 @@ namespace Agentmaster::Msg
                 t.backfillPos = to.I64At(L"backfillPos", 0);
                 t.backfillEnd = to.I64At(L"backfillEnd", 0);
                 t.backfillDayKey = to.I64At(L"backfillDayKey", 0);
+                // §21.11 (absent in an older file: the default mode, and a name with no glyph yet — renamed once).
+                t.verbose = std::clamp(static_cast<int>(to.I64At(L"verbose", -1)), -1, 1);
+                t.nameState = std::clamp(static_cast<int>(to.I64At(L"nameState", -1)), -1, static_cast<int>(SessionState::Done));
+                t.nameSetMs = to.I64At(L"nameSetMs", 0);
                 s.topics[t.sessionId] = std::move(t);
             }
         }
@@ -1587,6 +1787,9 @@ namespace Agentmaster::Msg
         std::wstring continuedFromId;
         // MostRecentSortKeyMs(session): the side panel's MOST RECENT key, which orders the topic list (§21.8).
         int64_t mostRecentMs{ 0 };
+        // SessionInfo::stateChangedAtUnixMs: when the state (or live / started) last changed — how long the state the topic
+        // name would show has held (PickStateRename). 0 = unknown: treated as settled.
+        int64_t stateSinceMs{ 0 };
     };
 
     /// <summary>
@@ -1654,6 +1857,7 @@ namespace Agentmaster::Msg
         std::wstring title; // Create / Rename / Rekey: the title to use
         std::wstring colorHex; // Create: the tab color
         int64_t mostRecentMs{ 0 }; // Create: the session's MOST RECENT key (the creates come oldest first, §21.8)
+        SessionState state{ SessionState::Idle }; // Create / Rename / Rekey: the state the name's glyph shows (§21.11)
     };
 
     namespace detail
@@ -1796,6 +2000,7 @@ namespace Agentmaster::Msg
                         op.fromSessionId = sid;
                         op.title = heir->title.empty() ? heir->sessionId.substr(0, 8) : heir->title;
                         op.colorHex = heir->colorHex;
+                        op.state = heir->state;
                         rekeyedTo[heir->sessionId] = true;
                         ops.push_back(std::move(op));
                         continue;
@@ -1846,6 +2051,7 @@ namespace Agentmaster::Msg
                 op.kind = TopicSyncOp::Kind::Rename;
                 op.sessionId = sid;
                 op.title = f->title;
+                op.state = f->state;
                 ops.push_back(std::move(op));
             }
         }
@@ -1870,6 +2076,7 @@ namespace Agentmaster::Msg
             op.title = f->title.empty() ? sid.substr(0, 8) : f->title;
             op.colorHex = f->colorHex;
             op.mostRecentMs = f->mostRecentMs;
+            op.state = f->state;
             creates.push_back(std::move(op));
         }
         std::stable_sort(creates.begin(), creates.end(), [](const TopicSyncOp& x, const TopicSyncOp& y) {
@@ -1880,6 +2087,129 @@ namespace Agentmaster::Msg
             ops.push_back(std::move(op));
         }
         return ops;
+    }
+
+    // ===== the topic name's state glyph (§21.11) ===============================================
+
+    /// <summary>
+    /// The glyph a topic's NAME starts with for its session's state (§21.11, the user's "an emoji representing the status
+    /// of the tab/thread similarly to how tabs present"): the tab strip's status dot as an emoji — Running 🔵, Waiting for
+    /// you 🟡, Needs approval 🟠, Error 🔴, Done (claude exited) 🟢, Idle ⚪ (the tab's dot is gray; Telegram has no gray
+    /// circle).
+    /// </summary>
+    /// <param name="s">The state.</param>
+    /// <returns>The glyph (a static string).</returns>
+    inline const wchar_t* StateGlyph(SessionState s) noexcept
+    {
+        switch (s)
+        {
+        case SessionState::Running:
+            return L"\U0001F535";
+        case SessionState::WaitingForInput:
+            return L"\U0001F7E1";
+        case SessionState::NeedsApproval:
+            return L"\U0001F7E0";
+        case SessionState::Error:
+            return L"\U0001F534";
+        case SessionState::Done:
+            return L"\U0001F7E2";
+        case SessionState::Idle:
+        default:
+            return L"\x26AA";
+        }
+    }
+
+    // The most UTF-16 units of a title in a topic's name (Telegram allows 128 characters; the glyph and a space go first).
+    inline constexpr size_t kTopicTitleMaxChars = 120;
+
+    /// <summary>
+    /// A topic's name (§21.11): the state glyph, a space, the title — a title past kTopicTitleMaxChars ends in "…" (never cut
+    /// between the halves of a surrogate pair).
+    /// </summary>
+    /// <param name="s">The session's state.</param>
+    /// <param name="title">The tab title ("" = the caller's fallback, e.g. the short session id).</param>
+    /// <returns>The name for createForumTopic / editForumTopic.</returns>
+    /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+    inline std::wstring TopicDisplayName(SessionState s, std::wstring_view title)
+    {
+        std::wstring t{ title };
+        if (t.size() > kTopicTitleMaxChars)
+        {
+            size_t cut = kTopicTitleMaxChars - 1;
+            if (cut > 0 && t[cut - 1] >= 0xD800 && t[cut - 1] <= 0xDBFF)
+            {
+                --cut;
+            }
+            t = t.substr(0, cut) + L"\x2026";
+        }
+        return std::wstring{ StateGlyph(s) } + L" " + t;
+    }
+
+    // A state the topic name follows must have held this long (a Running ↔ Waiting flicker of a short turn renames nothing),
+    // and two renames of one topic are this far apart at least. Each rename costs two calls in the chat (the edit, and the
+    // delete of the "topic renamed" notice Telegram posts), so the names follow the fleet with a lag rather than spend the
+    // chat's budget (the service also renames only while the last minute's calls leave room).
+    inline constexpr int64_t kNameStateSettleMs = 8 * 1000;
+    inline constexpr int64_t kNameRenameGapMs = 30 * 1000;
+
+    /// <summary>
+    /// The topic whose NAME should change next to show its session's state (§21.11): one whose name shows another state (or
+    /// none yet), whose session is live in a tab, whose state has held for kNameStateSettleMs, and whose last rename is
+    /// kNameRenameGapMs old. The states that need the user go first (Needs approval, Error, Waiting for you, then the rest),
+    /// then the state that has held the longest. A title change is not this function's: PlanTopicSync's Rename sets the title
+    /// and the glyph together.
+    /// </summary>
+    /// <param name="facts">The live sessions (the sync's facts, with stateSinceMs).</param>
+    /// <param name="topics">The topic map.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>The session id of the topic to rename; "" when none is due.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring PickStateRename(const std::vector<TabFact>& facts, const std::map<std::wstring, TopicRecord>& topics, int64_t nowMs)
+    {
+        const auto urgency = [](SessionState s) {
+            switch (s)
+            {
+            case SessionState::NeedsApproval:
+                return 0;
+            case SessionState::Error:
+                return 1;
+            case SessionState::WaitingForInput:
+                return 2;
+            default:
+                return 3;
+            }
+        };
+        const TabFact* best = nullptr;
+        for (const auto& f : facts)
+        {
+            if (!f.live || !f.inTab || !f.claude)
+            {
+                continue;
+            }
+            const auto it = topics.find(f.sessionId);
+            if (it == topics.end() || it->second.threadId <= 0)
+            {
+                continue;
+            }
+            const TopicRecord& t = it->second;
+            if (t.nameState == static_cast<int>(f.state))
+            {
+                continue;
+            }
+            if (f.stateSinceMs > 0 && nowMs - f.stateSinceMs < kNameStateSettleMs)
+            {
+                continue; // not settled yet
+            }
+            if (t.nameSetMs > 0 && nowMs - t.nameSetMs < kNameRenameGapMs)
+            {
+                continue; // renamed lately
+            }
+            if (!best || urgency(f.state) < urgency(best->state) || (urgency(f.state) == urgency(best->state) && f.stateSinceMs < best->stateSinceMs))
+            {
+                best = &f;
+            }
+        }
+        return best ? best->sessionId : std::wstring{};
     }
 
     // ===== what a message in a topic is ======================================================
@@ -1908,7 +2238,7 @@ namespace Agentmaster::Msg
         L"moveidle", L"wake", L"favorite", L"unfavorite", L"tags", L"tag", L"untag", L"sessionid", L"path", L"gitbranch",
         L"draft", L"summary", L"transcript", L"screen", L"restartsession", L"deactivate", L"activate", L"forksession",
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
-        L"reactivate", L"recreate"
+        L"reactivate", L"recreate", L"verbose"
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at
