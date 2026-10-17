@@ -622,7 +622,8 @@ risk R1 concerns.
 
 ### 8.1 Settings → Presets (a tab after Sessions)
 
-The cog's card grew to 800 DIP for the ninth tab. Edits go into a DRAFT, written on Save and dropped on
+The cog's card grew to 800 DIP for the ninth tab (920 since 2026-10-17, when Messaging made ten and "Claude" and
+"About" no longer fit). Edits go into a DRAFT, written on Save and dropped on
 Cancel (the Per-directory env area's form semantics).
 
 ```

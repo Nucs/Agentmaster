@@ -705,7 +705,19 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(Thickness{ 1, 1, 1, 1 });
         card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
         card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(800); // Agentmaster: wide enough for the nine top-tab buttons (incl. Presets, Commands + Notifications) on one row
+        // Agentmaster: 920 DIP (800 + 15%) so the ten top-tab buttons fit on one row (730 held eight, 800
+        // nine; then Messaging made ten, and the runner tab's label grew from "Tests Autorunner" to
+        // "Prompt Queue Runner"). At 12 px Segoe UI plus each button's 12 + 12 padding the strip needs
+        // ~826 DIP; 920 minus the 20 + 20 padding and the 1 + 1 border leaves 878 (800 left 758, which
+        // cut "Claude" short and hid "About" past the card's right edge).
+        // ⚠ The strip is a plain horizontal StackPanel: a button that does not fit is CLIPPED with no
+        // scroll or overflow cue, so re-measure the labels and widen this again whenever a tab is added
+        // or renamed.
+        // Tradeoffs of the fixed width: a Manager page narrower than the card clips BOTH card edges
+        // (Center alignment of an oversized child), and the description panel left of the card
+        // (_settingsLocalTip, AnchorTopLeftOutside) needs 140 DIP of room plus its gaps there, so it
+        // falls back to floating tooltips on a page narrower than ~1240 DIP (~1120 at 800).
+        card.Width(920);
         card.HorizontalAlignment(HorizontalAlignment::Center);
         card.VerticalAlignment(VerticalAlignment::Center);
         card.RequestedTheme(ElementTheme::Dark);
