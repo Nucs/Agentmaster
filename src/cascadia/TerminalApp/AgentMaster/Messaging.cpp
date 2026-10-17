@@ -119,10 +119,10 @@ namespace Agentmaster::Msg
         constexpr int64_t kTokenTtlMs = 2 * 60 * 60 * 1000;
         // How many topics a tick creates or deletes at most (each is an API call on the tick thread).
         constexpr size_t kTopicOpsPerTick = 6;
-        // The topic names' state glyphs (§21.11): a rename goes only while the last minute holds fewer calls than this (the
-        // chat's flood budget is near 20 a minute and the live traffic goes first); the delete of the "topic renamed"
-        // notice Telegram posts is one more call.
-        constexpr size_t kNameRenameCallsPerMinute = 12;
+        // The topic names' state glyphs (§21.11): a rename goes while the last minute's calls leave room for its two (the edit,
+        // and the delete of the "topic renamed" notice Telegram posts) under kHistoryCallsPerMinute, and the history replay
+        // waits for it (MessagingModels.h NameRenameFits / HistoryYieldsToRename). Until 2026-10-17 a rename needed the window
+        // under 12 calls — a level the replay never let it fall to, so no topic name followed its session for hours.
         // §21.12: a prompt's status follows a session state only once it has held this long (a recon synth undone a pass later
         // must not edit the line twice); an Error shows at once.
         constexpr int64_t kPromptStatusSettleMs = 3 * 1000;
@@ -1366,26 +1366,49 @@ namespace Agentmaster::Msg
                     {
                         continue;
                     }
-                    // The best item: lowest priority value, then the oldest.
-                    auto best = _outbox.begin();
+                    // The best item: lowest priority value, then the oldest — among the items whose method no long 429
+                    // parks (_floodParking; the secretary bot's sends have their own): a parked method's items stay queued
+                    // in their places until its deadline while every other method goes on.
+                    const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                    auto best = _outbox.end();
+                    int64_t parkedUntil = 0; // the earliest deadline among the skipped items: how long to wait when all are parked
                     for (auto it = _outbox.begin(); it != _outbox.end(); ++it)
                     {
-                        if (static_cast<int>(it->prio) < static_cast<int>(best->prio) ||
+                        if (const int64_t until = FloodParkedUntil(it->asSecretary ? _secretaryFloodParking : _floodParking, _outItemMethod(*it), now); until > 0)
+                        {
+                            parkedUntil = parkedUntil == 0 ? until : (std::min)(parkedUntil, until); // (std::min): the <windows.h> macro
+                            continue;
+                        }
+                        if (best == _outbox.end() || static_cast<int>(it->prio) < static_cast<int>(best->prio) ||
                             (it->prio == best->prio && (it->seq < best->seq || (it->seq == best->seq && it->subSeq < best->subSeq))))
                         {
                             best = it;
                         }
                     }
-                    const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                    if (best == _outbox.end())
+                    {
+                        // Every queued item waits for Telegram's flood control: sleep (in slices, below) until the first deadline.
+                        waitMs = (std::max<int64_t>)(1, parkedUntil - now);
+                    }
                     // A history message (§21.9) is only ever the best item when nothing else is queued; it waits the longer
                     // gap, goes only while the last minute holds fewer than kHistoryCallsPerMinute calls (the chat's flood
-                    // limit is near 20 a minute, live traffic included), and not for kHistoryFloodPauseMs after a 429.
-                    const bool history = best->prio == SendPriority::History;
-                    const int64_t gap = history ? kBackfillGapMs : (best->paced ? kSendGapMs : kLightGapMs);
+                    // limit is near 20 a minute, live traffic included), not for kHistoryFloodPauseMs after a 429, and not
+                    // while a due topic RENAME waits for room (the rename goes first: HistoryYieldsToRename).
+                    const bool history = best != _outbox.end() && best->prio == SendPriority::History;
+                    const int64_t gap = best == _outbox.end() ? 0 : (history ? kBackfillGapMs : (best->paced ? kSendGapMs : kLightGapMs));
                     _noteCallLocked(0); // prunes the window only
-                    if (history && _floodAtMs != 0 && now - _floodAtMs < kHistoryFloodPauseMs)
+                    if (best == _outbox.end())
+                    {
+                        // (waitMs set above)
+                    }
+                    else if (history && _floodAtMs != 0 && now - _floodAtMs < kHistoryFloodPauseMs)
                     {
                         waitMs = kHistoryFloodPauseMs - (now - _floodAtMs);
+                    }
+                    else if (history && HistoryYieldsToRename(_renameWaitingSinceMs, now))
+                    {
+                        // The next free call is the rename's: _stateNameTick tries again every kTickMs and clears the stamp.
+                        waitMs = 500;
                     }
                     else if (history && _recentCallsMs.size() >= kHistoryCallsPerMinute)
                     {
@@ -1440,19 +1463,45 @@ namespace Agentmaster::Msg
                     return _api->Call(item.method, item.params, 30000);
                 };
                 TgResult r = call();
+                const std::wstring method = _outItemMethod(item);
                 {
                     // The traffic census the tick loop logs every 10 minutes: one count per method, and the
-                    // pacing refusals under "429" — the chat's real call rate, which no other log shows.
+                    // pacing refusals under "429" — the chat's real call rate, which no other log shows. Edits also by
+                    // what they edit (_editsByKind), since an edit flood earned a 6542 s wait with no other trace.
                     std::lock_guard lk{ _mtx };
-                    ++_trafficByMethod[item.document ? std::wstring{ L"sendDocument" } : item.method];
+                    ++_trafficByMethod[method];
+                    if (method == L"editMessageText")
+                    {
+                        ++_editsByKind[EditKindOfKey(item.key)];
+                    }
                     if (!r.ok && r.httpStatus == 429)
                     {
                         ++_trafficByMethod[L"429"];
                     }
                 }
+                if (!r.ok && r.httpStatus == 429 && r.retryAfterSec > kFloodParkAfterSec)
+                {
+                    // A LONG wait (6542 s once, 2026-10-17): park only this method and put the item back in its place; every
+                    // other method goes on, and a second method refused meanwhile parks them all (_parkForFlood). Not answered,
+                    // so no onDone yet: the item goes again after the deadline. An edit of the same message queued while
+                    // this one was in flight replaced it already (the key), and then this stale one is dropped.
+                    _noteFlood(method, r.retryAfterSec);
+                    _parkForFlood(method, r.retryAfterSec, item.asSecretary);
+                    {
+                        std::lock_guard lk{ _mtx };
+                        const bool superseded = !item.key.empty() &&
+                                                std::any_of(_outbox.begin(), _outbox.end(), [&item](const OutItem& o) { return o.key == item.key; });
+                        if (!superseded)
+                        {
+                            _outbox.push_back(std::move(item));
+                        }
+                    }
+                    continue;
+                }
                 if (!r.ok && r.httpStatus == 429)
                 {
-                    // Telegram's pacing verdict: wait what it says, then retry the same item once.
+                    // A SHORT wait (up to kFloodParkAfterSec): Telegram's pacing verdict is waited out here, then the same
+                    // item is retried once — the outbox's order is kept, and everything waits a moment.
                     const int64_t wait = std::max<int64_t>(1, r.retryAfterSec) * 1000;
                     _log(L"[msg] pacing: 429 on " + item.method + L", waiting " + std::to_wstring(wait / 1000) + L" s");
                     _noteFlood(item.method, r.retryAfterSec);
@@ -1533,9 +1582,11 @@ namespace Agentmaster::Msg
                 {
                     _lastTrafficLogMs = now;
                     std::map<std::wstring, uint32_t> census;
+                    std::map<std::wstring, uint32_t> edits;
                     {
                         std::lock_guard lk{ _mtx };
                         census.swap(_trafficByMethod);
+                        edits.swap(_editsByKind);
                     }
                     std::wstring line = L"[msg] traffic (" + std::to_wstring(kTrafficLogMs / 60000) + L" min):";
                     uint32_t total = 0;
@@ -1545,6 +1596,16 @@ namespace Agentmaster::Msg
                         total += count;
                     }
                     line += census.empty() ? std::wstring{ L" nothing sent" } : L" (" + std::to_wstring(total) + L" calls)";
+                    if (!edits.empty())
+                    {
+                        // The editMessageText calls above, by what they edited (not counted again in the total).
+                        std::wstring parts;
+                        for (const auto& [kind, count] : edits)
+                        {
+                            parts += (parts.empty() ? L"" : L" ") + kind + L"=" + std::to_wstring(count);
+                        }
+                        line += L" edits(" + parts + L")";
+                    }
                     _log(line);
                 }
                 // Threaded Mode: topics need it; until it is on, getMe is re-asked every minute and the owner
@@ -1872,6 +1933,12 @@ namespace Agentmaster::Msg
             {
                 std::lock_guard lk{ _mtx };
                 const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                if (FloodParkedUntil(_floodParking, method, now) > 0)
+                {
+                    // A long 429 holds this method (or the whole chat): the call would only collect another refusal. The
+                    // caller leaves the work (a topic to create / delete / rename) for a tick after the deadline.
+                    return false;
+                }
                 if (_lastSendMs == 0 || now - _lastSendMs >= kSendGapMs)
                 {
                     _lastSendMs = now;
@@ -1904,8 +1971,51 @@ namespace Agentmaster::Msg
             std::lock_guard lk{ _mtx };
             _floodAtMs = static_cast<int64_t>(::GetTickCount64());
         }
+        // What else waits is the caller's line: a short wait holds the thread that met it, a long one parks the method
+        // (_parkForFlood says which). Until 2026-10-17 this line said "live messages go on" while the send loop slept.
         _log(L"[msg] history replay paused " + std::to_wstring(kHistoryFloodPauseMs / 60000) + L" min: Telegram refused a " + method + L" (429, retry after " +
-             std::to_wstring(retryAfterSec) + L" s); live messages go on");
+             std::to_wstring(retryAfterSec) + L" s)");
+    }
+
+    void MessagingService::_parkForFlood(const std::wstring& method, int retryAfterSec, bool secretary)
+    {
+        bool all = false;
+        int64_t remainingMs = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            const int64_t now = static_cast<int64_t>(::GetTickCount64());
+            FloodParking& parking = secretary ? _secretaryFloodParking : _floodParking;
+            all = ParkForFlood(parking, method, retryAfterSec, now);
+            remainingMs = (std::max<int64_t>)(0, FloodParkedUntil(parking, method, now) - now);
+        }
+        const int64_t wall = WallMs();
+        const std::wstring who = secretary ? std::wstring{ L"the secretary bot's " } : std::wstring{};
+        _log(L"[msg] pacing: 429 on " + who + method + L" (retry after " + std::to_wstring(retryAfterSec) + L" s): " +
+             (all ? L"a second method refused \x2014 every " + who + L"call waits until " + TgClockText(wall + remainingMs, wall)
+                  : who + method + L" waits until " + TgClockText(wall + remainingMs, wall) + L"; the other calls go on"));
+    }
+
+    bool MessagingService::_handleTickFlood(const std::wstring& method, const TgResult& r)
+    {
+        if (r.ok || r.httpStatus != 429)
+        {
+            return false;
+        }
+        _noteFlood(method, r.retryAfterSec);
+        if (r.retryAfterSec > kFloodParkAfterSec)
+        {
+            // A long wait parks the method: sleeping it out here would freeze the tick (every mirror, card and rename) for
+            // the whole retry_after — and createForumTopic's old sleep did not even end for Stop.
+            _parkForFlood(method, r.retryAfterSec);
+            return true;
+        }
+        const int64_t waitMs = static_cast<int64_t>((std::max)(1, r.retryAfterSec)) * 1000;
+        _log(L"[msg] pacing: 429 on " + method + L", waiting " + std::to_wstring(waitMs / 1000) + L" s");
+        for (int64_t slept = 0; slept < waitMs && !_stop.load(); slept += 250)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        return true;
     }
 
     // ===== the outbox ========================================================================
@@ -3040,16 +3150,10 @@ namespace Agentmaster::Msg
             p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
             p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
             const TgResult r = _api->Call(L"deleteForumTopic", p, 20000);
-            if (!r.ok && r.httpStatus == 429)
+            if (_handleTickFlood(L"deleteForumTopic", r))
             {
-                // Telegram's pacing verdict: wait what it says (stop-aware) and try the same topic again next tick.
-                _log(L"[msg] pacing: 429 on deleteForumTopic, waiting " + std::to_wstring((std::max)(1, r.retryAfterSec)) + L" s");
-                _noteFlood(L"deleteForumTopic", r.retryAfterSec);
-                const int64_t waitMs = static_cast<int64_t>((std::max)(1, r.retryAfterSec)) * 1000;
-                for (int64_t slept = 0; slept < waitMs && !_stop.load(); slept += 250)
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-                }
+                // Telegram's pacing verdict: a short wait was waited out (stop-aware), a long one parks the method; either
+                // way the same topic is tried again on a later tick.
                 break;
             }
             if (!r.ok && !r.ThreadNotFound())
@@ -3089,7 +3193,7 @@ namespace Agentmaster::Msg
         p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(TgTopicIconColor(colorHex))));
         if (!_awaitCallSlot(L"createForumTopic"))
         {
-            return; // stopping
+            return; // stopping, or a long 429 parks topic creation: the sync plans the topic again on a later tick
         }
         TgResult r = _api->Call(L"createForumTopic", p, 20000);
         if (!r.ok && r.httpStatus == 400 && r.description.find(L"icon") != std::wstring::npos)
@@ -3106,11 +3210,9 @@ namespace Agentmaster::Msg
         }
         if (!r.ok)
         {
-            if (r.httpStatus == 429)
-            {
-                _noteFlood(L"createForumTopic", r.retryAfterSec);
-                std::this_thread::sleep_for(std::chrono::seconds(std::max(1, r.retryAfterSec)));
-            }
+            // A 429 is waited out stop-aware when short and parks createForumTopic when long (the old sleep here ran the whole
+            // retry_after on the tick thread and did not end for Stop); the sync plans the topic again on a later tick.
+            _handleTickFlood(L"createForumTopic", r);
             _log(L"[msg] topic create failed for " + ShortId(sessionId) + L": " + r.description);
             return;
         }
@@ -3910,9 +4012,15 @@ namespace Agentmaster::Msg
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
         if (!_awaitCallSlot(L"deleteForumTopic"))
         {
-            return; // stopping: the record stays, the next run deletes it
+            return; // stopping, or a long 429 parks topic deletes: the record stays, and a later tick (or run) deletes it
         }
         const TgResult r = _api->Call(L"deleteForumTopic", p, 20000);
+        if (_handleTickFlood(L"deleteForumTopic", r))
+        {
+            // Telegram's flood control refused it: the record stays (dropping it, as any other failure does, would leave the
+            // topic in the chat with nothing that knows it), and the sync plans the delete again after the pause.
+            return;
+        }
         if (!r.ok && !r.ThreadNotFound())
         {
             _log(L"[msg] topic delete failed for " + ShortId(sessionId) + L": " + r.description + L" (dropping the record anyway)");
@@ -3963,14 +4071,23 @@ namespace Agentmaster::Msg
         p.Set(L"name", json::Value::MkStr(name));
         if (!_awaitCallSlot(L"editForumTopic"))
         {
-            return; // stopping: the title is renamed by the next run's sync
+            return; // stopping, or a long 429 parks renames: the name stays due, and a later tick (or run) renames it
         }
         const TgResult r = _api->Call(L"editForumTopic", p, 20000);
+        if (_handleTickFlood(L"editForumTopic", r))
+        {
+            // Telegram's flood control refused it: NOT recorded, so the name stays due and is made after the pause (the
+            // record used to take the new state "either way", and a topic refused this way kept its old glyph until the
+            // session's next change).
+            _log(L"[msg] topic rename of " + ShortId(sessionId) + L" refused by Telegram's flood control (429); it is made again after the pause");
+            return;
+        }
         {
             std::lock_guard lk{ _mtx };
             if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
             {
-                // Remember the title and the glyph's state either way: a refused rename must not be retried every tick.
+                // Remember the title and the glyph's state either way (a refusal other than the flood control's — a name
+                // Telegram will not take — must not be retried every tick).
                 it->second.title = title;
                 it->second.nameState = static_cast<int>(state);
                 it->second.nameSetMs = WallMs();
@@ -4021,22 +4138,38 @@ namespace Agentmaster::Msg
                 std::lock_guard lk{ _mtx };
                 if (!_state.orphanThreads.empty())
                 {
+                    _renameWaitingSinceMs = 0; // a recreation's deletes come first; the replay must not hold meanwhile
                     return;
                 }
-                // Only while the chat's budget has room: the live traffic and the history replay go first.
+                // Not for kHistoryFloodPauseMs after a 429, and not while a long one parks the rename's method.
                 const int64_t tick = static_cast<int64_t>(::GetTickCount64());
                 _noteCallLocked(0); // prunes the window only
-                if ((_floodAtMs != 0 && tick - _floodAtMs < kHistoryFloodPauseMs) || _recentCallsMs.size() >= kNameRenameCallsPerMinute)
+                if ((_floodAtMs != 0 && tick - _floodAtMs < kHistoryFloodPauseMs) || FloodParkedUntil(_floodParking, L"editForumTopic", tick) > 0)
                 {
+                    _renameWaitingSinceMs = 0; // the replay must not hold for a rename that cannot go
                     return;
                 }
                 // §21.13: the state glyph AND the color square (PickNameRename: PickStateRename's rule, then the tabs whose
                 // color changed, then the quiet re-squares of topics named before the square or under another mode).
                 sid = PickNameRename(_lastFacts, _state.topics, WallMs(), _currentColorMode()).sessionId;
-            }
-            if (sid.empty())
-            {
-                return;
+                if (sid.empty())
+                {
+                    _renameWaitingSinceMs = 0;
+                    return;
+                }
+                // The live traffic goes first by itself (it never checks the window); the RENAME goes before the history
+                // replay, which held the window at its cap for hours and starved every rename (2026-10-17: 1 of ~411 topics
+                // renamed in five hours). No room now: the replay holds its next message (HistoryYieldsToRename) until the
+                // window has drained enough, a few seconds, and this tick's successor makes the rename.
+                if (!NameRenameFits(_recentCallsMs.size(), kHistoryCallsPerMinute))
+                {
+                    if (_renameWaitingSinceMs == 0)
+                    {
+                        _renameWaitingSinceMs = tick;
+                    }
+                    return;
+                }
+                _renameWaitingSinceMs = 0;
             }
             const auto f = std::find_if(_lastFacts.begin(), _lastFacts.end(), [&sid](const TabFact& x) { return x.sessionId == sid; });
             if (f == _lastFacts.end())

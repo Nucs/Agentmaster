@@ -329,6 +329,17 @@ namespace Agentmaster::Msg
             /// </summary>
             std::function<void(json::Value&)> beforeSend;
         };
+        /// <summary>
+        /// The Bot API method an outbox item calls, as the traffic census and the flood parking name it: "sendDocument" for a
+        /// document upload (its `method` field is not what goes on the wire), else the item's `method`.
+        /// </summary>
+        /// <param name="item">The outbox item.</param>
+        /// <returns>The method name.</returns>
+        /// <exception cref="std::bad_alloc">If the name cannot be copied.</exception>
+        static std::wstring _outItemMethod(const OutItem& item)
+        {
+            return item.document ? std::wstring{ L"sendDocument" } : item.method;
+        }
         /// <summary>Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).</summary>
         void _enqueue(OutItem item);
         /// <summary>The next outbox sequence number (for a message whose parts and fallbacks must keep one place). Takes `_mtx`.</summary>
@@ -468,9 +479,10 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The topic NAMES' state glyphs and color squares (§21.11, §21.13), once per tick after the sync: at most one rename
         /// (PickNameRename over the sync's facts: the states that need the user, then a tab's color change, then the quiet
-        /// re-squares) and only while the last minute's calls leave room (kNameRenameCallsPerMinute), no 429 pause runs, the
-        /// start-up hold is over and no recreation is under way — a name follows its session's state and color with a lag
-        /// rather than spend the chat's budget. Tick thread; never throws (Rule #18 inside).
+        /// re-squares) and only while the last minute's calls leave room for its two calls (NameRenameFits), no 429 pause runs
+        /// and no long 429 parks editForumTopic, the start-up hold is over and no recreation is under way. A due rename that
+        /// finds no room stamps _renameWaitingSinceMs, and the history replay holds until it went (HistoryYieldsToRename):
+        /// renames come after the live traffic and BEFORE the replay. Tick thread; never throws (Rule #18 inside).
         /// </summary>
         void _stateNameTick() noexcept;
         /// <summary>The last sync's facts of one session (tick thread; null when the sync did not list it).</summary>
@@ -543,9 +555,11 @@ namespace Agentmaster::Msg
         /// against the chat's ~1 call/s budget without waiting for it before §21.8 (a recreation makes ~150 calls).
         /// Counts the call in the traffic census.
         /// </summary>
-        /// <param name="method">The Bot API method (the census key).</param>
-        /// <returns>True when the call may go; false when the service is stopping — the caller must not make it
-        /// (Stop aborts only the request in flight, so a call started now would hold Stop's join for its timeout).</returns>
+        /// <param name="method">The Bot API method (the census key, and the key the flood parking holds).</param>
+        /// <returns>True when the call may go; false when the service is stopping, or when a long 429 parks the method
+        /// (_floodParking) — the caller must not make it, and leaves the work for a later tick (Stop aborts only the request
+        /// in flight, so a call started now would hold Stop's join for its timeout; a parked method would only collect
+        /// another refusal).</returns>
         bool _awaitCallSlot(const wchar_t* method);
         /// <summary>
         /// Brings the topic's STICKY card up to date (§21.5, §21.6): posts it when there is none, re-posts it at the
@@ -831,6 +845,13 @@ namespace Agentmaster::Msg
         /// chat's real call rate can be read — Telegram's flood limit is per chat and its penalty was 21 minutes.
         /// </summary>
         std::map<std::wstring, uint32_t> _trafficByMethod;
+        /// <summary>
+        /// The editMessageText calls of the same census by WHAT they edit — "card", "prompt" (a §21.12 status), "worklog", or
+        /// "other" (from the outbox item's key) — under `_mtx`, logged and cleared with the census as `edits(card=N …)`. Edits
+        /// draw on the chat's flood budget like messages, and one earned a 6542 s retry_after (2026-10-17) with no way to tell
+        /// from the log which kind had piled up; not counted in the line's call total (the census counts each call once).
+        /// </summary>
+        std::map<std::wstring, uint32_t> _editsByKind;
         int64_t _lastTrafficLogMs{ 0 };
         /// <summary>
         /// The topic list's ORDER keys (§21.8), refreshed by every sync from the live sessions: session id ->
@@ -948,6 +969,44 @@ namespace Agentmaster::Msg
         std::deque<int64_t> _recentCallsMs;
         /// <summary>When the last 429 came (GetTickCount64 ms; 0 = none this run): history waits kHistoryFloodPauseMs after it, live traffic does not.</summary>
         int64_t _floodAtMs{ 0 };
+        /// <summary>
+        /// The LONG-FLOOD PARKING (MessagingModels.h FloodParking), under `_mtx`: a 429 whose retry_after is above
+        /// kFloodParkAfterSec parks only the refused method (the send loop serves the other methods' items, and the tick's
+        /// direct topic calls skip a parked method until a later tick); a second method refused meanwhile parks every method.
+        /// Before 2026-10-17 the thread that met the 429 slept the whole retry_after — 6542 s once, with nothing sent.
+        /// </summary>
+        FloodParking _floodParking;
+        /// <summary>
+        /// The same parking for the SECRETARY bot's sends (§21.11: items with OutItem::asSecretary go out with its client), under
+        /// `_mtx`: its flood control is that bot's own, so its 429s never park — nor escalate to — this bot's methods.
+        /// </summary>
+        FloodParking _secretaryFloodParking;
+        /// <summary>
+        /// When a due topic rename first found the call window full (GetTickCount64 ms; 0 = no rename waits), under `_mtx`. Set
+        /// and cleared by _stateNameTick; while set (at most kNameRenameHoldMaxMs) the send loop holds HISTORY items, so the
+        /// window drains and the rename goes before the replay (HistoryYieldsToRename) — without it the replay kept the window
+        /// full for hours and no topic name followed its session's state.
+        /// </summary>
+        int64_t _renameWaitingSinceMs{ 0 };
+        /// <summary>
+        /// Parks `method` for a long 429 (ParkForFlood under `_mtx`) and logs what is held until when (a local clock time). Takes
+        /// `_mtx`.
+        /// </summary>
+        /// <param name="method">The refused method.</param>
+        /// <param name="retryAfterSec">Telegram's retry_after (above kFloodParkAfterSec).</param>
+        /// <param name="secretary">True for a send of the SECRETARY bot (parks in _secretaryFloodParking, never this bot's methods).</param>
+        /// <exception cref="std::bad_alloc">If the parking or the log line cannot grow.</exception>
+        void _parkForFlood(const std::wstring& method, int retryAfterSec, bool secretary = false);
+        /// <summary>
+        /// Telegram's verdict on one call made on the TICK thread (a topic create / delete / rename): a long 429 parks the
+        /// method (_parkForFlood) and returns at once; a short one waits it out here, stop-aware. Either way the history replay
+        /// pauses (_noteFlood). Anything but a 429 returns at once. A topic call that met a 429 is NOT retried here: its
+        /// caller leaves it for a later tick.
+        /// </summary>
+        /// <param name="method">The method that was called.</param>
+        /// <param name="r">Its answer.</param>
+        /// <returns>True when the answer was a 429 (the call did not happen).</returns>
+        bool _handleTickFlood(const std::wstring& method, const TgResult& r);
         /// <summary>Records one call in the call window and drops what is older than a minute. Caller holds `_mtx`.</summary>
         /// <param name="tickMs">GetTickCount64 at the call.</param>
         void _noteCallLocked(int64_t tickMs);
