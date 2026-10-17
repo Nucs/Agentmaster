@@ -22,12 +22,19 @@
 //     throws (counted at once), a double reply, RunWindowTool to one window, RunWindowToolOnHost to the host;
 //   * the two system prompts' structure: the three headings in order, the plan rule, ten behaviors and nineteen
 //     workflows, every tool named, no database tool in the page prompt, no `deep` in the database prompt, never
-//     "on the screen", ASCII, and under MSVC's literal limit.
+//     "on the screen", ASCII, and under MSVC's literal limit;
+//   * what "## Tools" teaches (the user's review of 2026-10-18: "grep various forms of what we are looking for"), and
+//     that it is TRUE of the code: the matching rules (any case, a word inside longer words, every word in ONE kind of
+//     place, the page's query never matching the branch) against MatchesQueryText / SearchIndexFast; each regex example
+//     of "Patterns for grep" against GrepRequiredLiteral (the fixed piece the prompt promises is the one the grep
+//     narrows by, and the bad examples really have none); the per-mode costs, the workflows that use the patterns,
+//     and the tabs advice; and the page tools' schemas that repeat it.
 
 #include "m5_tests.h"
 
 #include "../Engine.h"
 #include "../SessionDbToolDefs.h"
+#include "../SessionSearch.h"
 #include "../SessionSearchTools.h"
 #include "../WindowTabTools.h"
 
@@ -531,14 +538,106 @@ namespace
         CHECK(db.find(L"who_touched with") != std::wstring::npos && db.find(L"timeline for the period") != std::wstring::npos && page.find(L"who_touched") == std::wstring::npos,
               "the workflows that differ by mode use each mode's own tools");
     }
+
+    /// <summary>
+    /// What "## Tools" teaches about matching and patterns (the user's review of 2026-10-18: "grep various forms of what
+    /// we are looking for"), and that it is TRUE of the code: the rules against MatchesQueryText / SearchIndexFast, each
+    /// regex example against GrepRequiredLiteral (the page grep's narrowing key), the per-mode costs, the workflows and
+    /// the tabs advice that use them, and the page tools' schemas that repeat them at call time.
+    /// </summary>
+    void TestToolsTeaching()
+    {
+        constexpr auto npos = std::wstring::npos;
+        const std::wstring page = SessionSearchToolset::SystemPrompt();
+        const std::wstring db = SessionSearchToolset::DatabaseSystemPrompt();
+        for (const auto* prompt : { &page, &db })
+        {
+            const std::wstring tools = Section(*prompt, L"\n## Tools\n", L"\n## Workflow Guidelines\n");
+            const std::wstring workflows = Section(*prompt, L"\n## Workflow Guidelines\n", L"");
+            CHECK(tools.find(L"a word also matches inside longer words") != npos && tools.find(L"drag finds dragging") != npos && tools.find(L"separate searches") != npos &&
+                      tools.find(L"in the same step") != npos,
+                  "tools: any case, a word inside longer words (one stem covers its forms), other words for it as separate searches of one step");
+            CHECK(tools.find(L"ONE kind of place") != npos && tools.find(L"put a folder in dir") != npos,
+                  "tools: a query's words all match in ONE kind of place, so a folder goes in dir");
+            CHECK(tools.find(L"Patterns for grep.") != npos && tools.find(L"drag(ged|ging|s)?") != npos && tools.find(L"tab[ _-]?drag") != npos && tools.find(L"drag.{0,40}crash") != npos &&
+                      tools.find(L"source.agentmaster") != npos,
+                  "tools: Patterns for grep, with the forms (endings and spellings, separators, nearness, either slash)");
+            CHECK(tools.find(L"outside every group and alternative") != npos && tools.find(L"(dragged|dragging)") != npos && tools.find(L"separate grep calls in the same step") != npos &&
+                      tools.find(L"0\\.6\\.8") != npos,
+                  "tools: the plain piece outside every group, the examples that have none, separate greps for unrelated words, escaping");
+            CHECK(tools.find(L"pass after as a session id") != npos && tools.find(L"Before you open a tab, list the window it goes in") != npos,
+                  "tools: list the target window before an open, and pass after as a session id when opening several (every pos after a new tab shifts)");
+            CHECK(workflows.find(L"in the same step with other words for it") != npos && workflows.find(L"one regex for all its forms") != npos && workflows.find(L"try a shorter stem") != npos,
+                  "workflows 1, 2 and 8 use the matching rules and the patterns");
+        }
+        const std::wstring pageTools = Section(page, L"\n## Tools\n", L"\n## Workflow Guidelines\n");
+        const std::wstring dbTools = Section(db, L"\n## Tools\n", L"\n## Workflow Guidelines\n");
+        CHECK(pageTools.find(L"The git branch is not among them") != npos && pageTools.find(L"20 s budget") != npos && pageTools.find(L"narrow it with dir or a period") != npos,
+              "page tools: the branch is only a filter, a pattern with no plain piece reads every session (20 s budget), deep is narrowed first");
+        CHECK(dbTools.find(L"is refused unless you name the sessions in ids") != npos && dbTools.find(L"RE2") != npos && dbTools.find(L"fuzzy:true") != npos &&
+                  dbTools.find(L"cursor") != npos && dbTools.find(L"case_sensitive:true") != npos,
+              "database tools: a regex with no plain piece is refused without ids; RE2, fuzzy, cursor and case_sensitive are taught");
+
+        // The code behind the matching rules (the page search's matcher and index; the database's search folds and
+        // matches inside index terms the same way, SessionDbSearch.cpp, which the service's own tests cover).
+        CHECK(MatchesQueryText(L"dragging the tab", L"drag", false) && MatchesQueryText(FoldLower(L"SessionScanner.cpp"), L"scanner", false) &&
+                  !MatchesQueryText(L"tab drag", L"tab-drag", false),
+              "code: a word matches inside longer words, case folded; a phrase matches only as written");
+        {
+            std::vector<SessionIndexEntry> entries(1);
+            entries[0].sessionId = L"s-branch";
+            entries[0].stats.customTitle = L"Polish the overlay";
+            entries[0].stats.cwd = L"K:\\source\\Agentmaster";
+            entries[0].stats.gitBranch = L"feature-tooltip";
+            SessionQuery q; // the page search's index query, as RunSessionSearch builds it
+            q.scopeTitle = true;
+            q.scopeDirs = true;
+            q.scopeFiles = true;
+            q.text = L"tooltip";
+            CHECK(SearchIndexFast(entries, q).empty(), "code: the page's query never matches the git branch (only the branch filter does), as its Tools text says");
+            q.text = L"agentmaster overlay";
+            CHECK(SearchIndexFast(entries, q).size() == 1, "code: the words of one query may hit different names and places (the folder and the title)");
+            q.text = L"agentmaster tooltip";
+            CHECK(SearchIndexFast(entries, q).empty(), "code: ... but every word must hit one of them: \"agentmaster tooltip\" misses, the prompt's own example");
+        }
+        // Each regex example of "Patterns for grep" against the page grep's own reader: the fixed piece the prompt
+        // promises ("drag(ged|ging)? has one (drag)") is the key the grep narrows by, and the bad examples have none.
+        CHECK(GrepRequiredLiteral(L"drag(ged|ging|s)?", true) == L"drag" && GrepRequiredLiteral(L"(re)?compil(e|ed|er|ing)", true) == L"compil" &&
+                  GrepRequiredLiteral(L"colou?r", true) == L"colo" && GrepRequiredLiteral(L"tab[ _-]?drag", true) == L"drag" &&
+                  GrepRequiredLiteral(L"drag.{0,40}crash", true) == L"crash" && GrepRequiredLiteral(L"source.agentmaster", true) == L"agentmaster" &&
+                  GrepRequiredLiteral(LR"(0\.6\.8)", true) == L"0.6.8",
+              "code: every good example of Patterns for grep keeps a plain piece that the grep narrows by");
+        CHECK(GrepRequiredLiteral(L"(dragged|dragging)", true).empty() && GrepRequiredLiteral(L"dragged|dragging", true).empty(),
+              "code: ... and the bad examples (a group alone, a top-level |) have none, so they read every session");
+
+        // The page tools' schemas and descriptions repeat the rules where the model reads them at call time.
+        SessionSearchToolset::Callbacks cb;
+        cb.catalog = [](int64_t, const std::function<bool()>&) { return std::shared_ptr<const SessionCatalog>{}; };
+        cb.onShow = [](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>&) {};
+        SessionSearchToolset toolset{ cb };
+        const auto servers = toolset.Servers();
+        const HarnessTool* search = FindTool(servers, L"sessions", L"search");
+        const HarnessTool* grep = FindTool(servers, L"sessions", L"grep");
+        CHECK(search && grep, "the page toolset has search and grep");
+        if (search && grep)
+        {
+            CHECK(search->inputSchemaJson.find(L"also matches inside longer words") != npos && search->inputSchemaJson.find(L"put a folder in dir and a branch in branch") != npos &&
+                      search->description.find(L"inside longer words") != npos,
+                  "schema: search's query states the stem, the one-place and the folder / branch rules");
+            CHECK(grep->inputSchemaJson.find(L"drag(ged|ging)?") != npos && grep->inputSchemaJson.find(L"outside its groups and alternatives is slow") != npos &&
+                      grep->description.find(L"every form of a word") != npos,
+                  "schema: grep's regex and its description state the forms rule and its cost");
+        }
+    }
 }
 
 void TestTabTools()
 {
     // The section header every suite prints, so a [FAIL] line in the run's output reads under its suite.
-    std::wprintf(L"Window and tab tools (SESSIONS.md 9.14 - the window rules, the tabs server, the answered fan-out, the system prompts):\n");
+    std::wprintf(L"Window and tab tools (SESSIONS.md 9.14 - the window rules, the tabs server, the answered fan-out, the system prompts, what ## Tools teaches):\n");
     TestWindowRules();
     TestTabsServer();
     TestEngineFanOut();
     TestPrompts();
+    TestToolsTeaching();
 }
