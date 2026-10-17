@@ -595,7 +595,7 @@ void TestMessaging()
         q.text = L"also update the docs\nsecond line";
         s.queue.push_back(q);
         s.pendingInput = L"and then rebase onto <main>";
-        const std::wstring card = BuildCardText(s, 1000 + 3 * 60 * 1000, 0, false);
+        const std::wstring card = TgRenderTitleTokensClassic(BuildCardText(s, 1000 + 3 * 60 * 1000, 0, false)); // §21.15: the title is a token; the classic text
         CHECK(card.find(L"<b>Agentmaster/feature</b>") != std::wstring::npos, "the card leads with the title");
         // The "since" is a LOCAL clock time ("HH:MM" — the same day in the test's epochs), never a span: the
         // card is re-edited on every text change, and a span changed every minute on every topic.
@@ -1316,13 +1316,13 @@ void TestMessaging()
             CHECK(TitleMentionHtml(blue, L"a <b>") == L"\U0001F7E6 a &lt;b&gt;" && TitleMentionHtml(L"", L"a & b") == L"a &amp; b", "a mention: the square, a space, the escaped title");
 
             // The change line, in the user's words: "<from>" changed the title to "<to>".
-            CHECK(BuildTopicChangeNoticeHtml(L"old", blue, L"new", blue) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E6 new\x201D</i>", "a new title: the old one quoted with its square, then the new one");
-            CHECK(BuildTopicChangeNoticeHtml(L"old", blue, L"new", green) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E9 new\x201D</i>", "a new title and a new color: one line, the squares show both");
-            CHECK(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", green) == L"<i>\x201C\U0001F7E6 tab\x201D changed the color to \U0001F7E9</i>", "the color alone");
+            CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"old", blue, L"new", blue)) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E6 new\x201D</i>", "a new title: the old one quoted with its square, then the new one");
+            CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"old", blue, L"new", green)) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E9 new\x201D</i>", "a new title and a new color: one line, the squares show both");
+            CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", green)) == L"<i>\x201C\U0001F7E6 tab\x201D changed the color to \U0001F7E9</i>", "the color alone");
             CHECK(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", blue).empty() && BuildTopicChangeNoticeHtml(L"tab", L"", L"tab", blue).empty() && BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", L"").empty(),
                   "no line when nothing changed, or a square only appears or goes (a topic named before the square, the \"Remove colors\" mode)");
-            CHECK(BuildTopicChangeNoticeHtml(L"a<b", L"", L"c&d", L"") == L"<i>\x201C" L"a&lt;b\x201D changed the title to \x201C" L"c&amp;d\x201D</i>", "the titles are escaped");
-            CHECK(BuildTopicChangeNoticeHtml(L"", L"", L"new", blue) == L"<i>The title is now \x201C\U0001F7E6 new\x201D</i>", "no old title known: the new one alone");
+            CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"a<b", L"", L"c&d", L"")) == L"<i>\x201C" L"a&lt;b\x201D changed the title to \x201C" L"c&amp;d\x201D</i>", "the titles are escaped");
+            CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"", L"", L"new", blue)) == L"<i>The title is now \x201C\U0001F7E6 new\x201D</i>", "no old title known: the new one alone");
 
             // Which name changes next: the states that need the user, then a tab's color change, then the quiet re-squares.
             const int64_t now = 2000000;
@@ -1416,8 +1416,109 @@ void TestMessaging()
             s.live = true;
             CardExtras ex;
             ex.colorSquare = blue;
-            CHECK(BuildCardText(s, 5000, 0, false, &ex).rfind(L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>\n", 0) == 0, "the card: the pin, the square, the title");
-            CHECK(BuildCardText(s, 5000, 0, false).rfind(L"\U0001F4CC <b>agent manager tab</b>\n", 0) == 0, "no square: the card as before");
+            CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false, &ex)).rfind(L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>\n", 0) == 0, "the card: the pin, the square, the title");
+            CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)).rfind(L"\U0001F4CC <b>agent manager tab</b>\n", 0) == 0, "no square: the card as before");
+        }
+
+        // §21.15 — the title CHIP: in a rich message a title is an in-text copy_text button in the Telegram look nearest the
+        // tab's color, the square in its label. The builders write a title TOKEN whose classic render is the §21.13 text byte for
+        // byte (the checks above compare that render); the converter makes a classic message rich (paragraphs, line breaks,
+        // quotes), lifting the chips out of the formatting around them; the card's form is persisted.
+        {
+            const std::wstring blue = L"\U0001F7E6";
+            const std::wstring green = L"\U0001F7E9";
+            const std::wstring red = L"\U0001F7E5";
+            // The look: the square's family when Telegram has one, else the app's plain button (never a neighbor's color).
+            CHECK(std::wstring{ TgTitleChipStyle(blue) } == L"primary" && std::wstring{ TgTitleChipStyle(green) } == L"success" && std::wstring{ TgTitleChipStyle(red) } == L"danger",
+                  "chip look: blue primary, green success, red danger");
+            bool plainLook = true;
+            for (const wchar_t* sq : { L"\U0001F7E7", L"\U0001F7E8", L"\U0001F7EA", L"\U0001F7EB", L"\x2B1B", L"\x2B1C", L"" })
+            {
+                plainLook = plainLook && std::wstring{ TgTitleChipStyle(sq) }.empty();
+            }
+            CHECK(plainLook, "chip look: orange, yellow, purple, brown, black, white and no square get the plain button");
+            int coloredChips = 0;
+            for (const wchar_t* hex : { L"#E06C75", L"#E5C07B", L"#98C379", L"#56B6C2", L"#61AFEF", L"#C678DD", L"#D19A66", L"#BE5046", L"#528BFF", L"#7FD962", L"#FF9E64", L"#2BBAC5", L"#B267E6", L"#F78C6C" })
+            {
+                coloredChips += *TgTitleChipStyle(TgTitleColorSquare(hex)) ? 1 : 0;
+            }
+            CHECK(coloredChips == 8, "chip look: 8 of the 14 tab palette colors have a Telegram color (4 blue, 2 green, 2 red)");
+
+            // The token: its classic render is the §21.13 text in each form; a framing character inside a title is dropped.
+            const std::wstring plainToken = TgTitleToken(TgTitleForm::Plain, blue, L"a <b> & c");
+            CHECK(TgHasTitleTokens(plainToken) && !TgHasTitleTokens(L"no token here"), "a token is seen; plain text has none");
+            CHECK(TgRenderTitleTokensClassic(L"x " + plainToken + L" y") == L"x \U0001F7E6 a &lt;b&gt; &amp; c y" && TgRenderTitleTokensClassic(plainToken) == TitleMentionHtml(blue, L"a <b> & c"),
+                  "classic Plain: the §21.13 mention, escaped");
+            CHECK(TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Bold, blue, L"t")) == L"\U0001F7E6 <b>t</b>" && TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Bold, L"", L"t")) == L"<b>t</b>",
+                  "classic Bold: the square outside the bold title (the card's line); no square, the bold title alone");
+            CHECK(TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Quoted, blue, L"t")) == L"\x201C\U0001F7E6 t\x201D" && TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Square, green, L"t")) == green &&
+                      TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Square, L"", L"t")) == L"t",
+                  "classic Quoted: in quotes; Square: the square alone (the title when there is none)");
+            CHECK(TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Plain, L"", std::wstring{ L"a" } + kTgTitleTokenOpen + L"b" + kTgTitleTokenClose)) == L"ab" &&
+                      TgRenderTitleTokensClassic(std::wstring{ L"x" } + kTgTitleTokenOpen + L"y" + kTgTitleTokenMid) == L"xy",
+                  "a framing character inside a title is dropped; a stray one in the text too");
+
+            // The chip: a copy_text button in the look, the square and the title in its label, the title in its copy.
+            CHECK(TgTitleChipHtml(blue, TgEscapeHtml(L"docs 2")) == L"<tg-button type=\"copy_text\" style=\"primary\" text=\"docs 2\">\U0001F7E6 docs 2</tg-button>",
+                  "chip: the button the color tests kept (thread 26785, message 905)");
+            CHECK(TgTitleChipHtml(L"\U0001F7E8", TgEscapeHtml(L"Desktop")) == L"<tg-button type=\"copy_text\" text=\"Desktop\">\U0001F7E8 Desktop</tg-button>",
+                  "chip: no Telegram color, the plain look (no style attribute), the square still in the label");
+            CHECK(TgTitleChipHtml(L"", TgEscapeHtml(L"a \"q\" <b> & c")) == L"<tg-button type=\"copy_text\" text=\"a &quot;q&quot; &lt;b&gt; &amp; c\">a \"q\" &lt;b&gt; &amp; c</tg-button>",
+                  "chip: the copy escaped for its attribute (the quotes too), the label escaped as text");
+            CHECK(TgTitleChipHtml(L"", L"a\nb") == L"<tg-button type=\"copy_text\" text=\"a b\">a b</tg-button>", "chip: one line (a line break becomes a space)");
+            const std::wstring longTitle(150, L'x');
+            const std::wstring longChip = TgTitleChipHtml(blue, TgEscapeHtml(longTitle));
+            CHECK(longChip.find(L"text=\"" + longTitle + L"\"") != std::wstring::npos && longChip.find(L">\U0001F7E6 " + std::wstring(99, L'x') + L"\x2026</tg-button>") != std::wstring::npos,
+                  "chip: a long title is cut in the label (an ellipsis at 100 units) and whole in the copy");
+            const std::wstring hugeChip = TgTitleChipHtml(L"", TgEscapeHtml(std::wstring(255, L'y') + L"\U0001F600"));
+            CHECK(hugeChip.find(L"text=\"" + std::wstring(255, L'y') + L"\"") != std::wstring::npos, "chip: the copy is cut at 256 units, never inside a surrogate pair");
+            CHECK(TgTitleChipHtml(blue, L"  ") == L"\U0001F7E6   ", "chip: a blank title has nothing to copy: the plain mention");
+
+            // The rich form of a classic message: paragraphs at blank lines, "<br>" for a line break (rich HTML reads a raw one as
+            // a space — thread 26785, message 907), quotes and code as blocks, the chips lifted out of the formatting around them.
+            CHECK(TgRichHtmlFromClassic(L"\U0001F4CC " + TgTitleToken(TgTitleForm::Bold, blue, L"docs 2") + L"\nline two\nline three\n\nsecond paragraph") ==
+                      L"<p>\U0001F4CC <tg-button type=\"copy_text\" style=\"primary\" text=\"docs 2\">\U0001F7E6 docs 2</tg-button><br>line two<br>line three</p><p>second paragraph</p>",
+                  "rich: the card's shape — the chip, line breaks, a second paragraph");
+            CHECK(TgRichHtmlFromClassic(L"Renamed to <b>" + TgTitleToken(TgTitleForm::Plain, green, L"new") + L"</b> (the topic follows).") ==
+                      L"<p>Renamed to <tg-button type=\"copy_text\" style=\"success\" text=\"new\">\U0001F7E9 new</tg-button> (the topic follows).</p>",
+                  "rich: a chip inside bold leaves the bold, and no empty bold is left behind");
+            CHECK(TgRichHtmlFromClassic(BuildTopicChangeNoticeHtml(L"old", blue, L"new", green)) ==
+                      L"<p><tg-button type=\"copy_text\" style=\"primary\" text=\"old\">\U0001F7E6 old</tg-button><i> changed the title to </i><tg-button type=\"copy_text\" style=\"success\" text=\"new\">\U0001F7E9 new</tg-button></p>",
+                  "rich: the change line — two chips, the words between them italic, no quotes");
+            CHECK(TgRichHtmlFromClassic(BuildTopicChangeNoticeHtml(L"tab", blue, L"tab", green)) ==
+                      L"<p><tg-button type=\"copy_text\" style=\"primary\" text=\"tab\">\U0001F7E6 tab</tg-button><i> changed the color to </i><tg-button type=\"copy_text\" style=\"success\" text=\"tab\">\U0001F7E9 tab</tg-button></p>",
+                  "rich: a color change shows the new color as a chip of the title");
+            CHECK(TgRichHtmlFromClassic(L"a\n<blockquote>q1\nq2</blockquote>\nb <i>x\n\ny</i>") == L"<p>a</p><blockquote>q1<br>q2</blockquote><p>b <i>x<br><br>y</i></p>",
+                  "rich: a quote is a block with line breaks; a blank line inside italic is two breaks (a paragraph cannot end there)");
+            CHECK(TgRichHtmlFromClassic(L"<pre>line 1\nline 2</pre>\nafter") == L"<pre>line 1\nline 2</pre><p>after</p>", "rich: code keeps its line breaks");
+            CHECK(TgRichHtmlFromClassic(L"<a href=\"https://t.me/x?a=1&amp;b=2\">a link</a>\n\n\n") == L"<p><a href=\"https://t.me/x?a=1&amp;b=2\">a link</a></p>",
+                  "rich: a link and its entities stay; trailing blank lines make no empty paragraph");
+            CHECK(TgRichHtmlFromClassic(L"\n\n").empty() && TgRichHtmlFromClassic(L"plain").compare(L"<p>plain</p>") == 0, "rich: nothing visible gives nothing; a text without tokens is only structured");
+
+            // The card: one text, two renders — the classic one is the §21.13 line (its hash is what the record holds), the rich one
+            // leads with the chip.
+            SessionInfo s;
+            s.id = L"chip-session";
+            s.title = L"docs 2";
+            s.live = true;
+            CardExtras ex;
+            ex.colorSquare = blue;
+            const std::wstring card = BuildCardText(s, 5000, 0, false, &ex);
+            CHECK(TgRenderTitleTokensClassic(card).rfind(L"\U0001F4CC \U0001F7E6 <b>docs 2</b>\n", 0) == 0, "the card's classic render: the §21.13 line, unchanged");
+            CHECK(TgRichHtmlFromClassic(card).rfind(L"<p>\U0001F4CC <tg-button type=\"copy_text\" style=\"primary\" text=\"docs 2\">\U0001F7E6 docs 2</tg-button><br>", 0) == 0,
+                  "the card's rich form: the pin, then the chip");
+
+            // The card's form round-trips; an older file reads as a classic card (the slow upgrade converts it later).
+            MessagingState st;
+            TopicRecord t;
+            t.sessionId = L"r";
+            t.threadId = 9;
+            t.cardRich = true;
+            st.topics[L"r"] = t;
+            const auto back = StateFromJson(StateToJson(st));
+            CHECK(back && back->topics.count(L"r") && back->topics.at(L"r").cardRich, "the card's form round-trips");
+            const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(old && old->topics.count(L"o") && !old->topics.at(L"o").cardRich, "an older file: a classic card");
         }
 
         // §21.11 — the state file: a topic's mode and its name's state, and the secretary bot's facts, round-trip; an older

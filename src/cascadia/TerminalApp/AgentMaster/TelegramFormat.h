@@ -31,6 +31,7 @@
 #include <cwctype>
 #include <string>
 #include <string_view>
+#include <utility> // std::pair: the rich converter's stack of open inline tags (§21.15)
 #include <vector>
 
 namespace Agentmaster::Msg
@@ -1315,6 +1316,691 @@ namespace Agentmaster::Msg
     {
         const wchar_t* sq = TgTitleColorSquare(hex);
         return *sq ? std::wstring{ sq } + L" " : std::wstring{};
+    }
+
+    // ===== the title chip (§21.15) ===============================================================================================
+    //
+    // The user's "Go for 10 with copy_text button is great, even better if we can specify hex color code or equivalent of hex
+    // color code" (2026-10-17, after the color tests in thread 26785 of the dev chat): a session's title, wherever the bot prints
+    // it, is a CHIP — an in-text copy_text button of a rich message (Bot API 10.3), in the Telegram look nearest the tab's color,
+    // the §21.13 square inside its label; a tap copies the title. A builder writes a title TOKEN where the title goes
+    // (TgTitleToken), and the send layer renders the message one of two ways: classic HTML — the §21.13 square before the title,
+    // byte for byte what the builders printed before (TgRenderTitleTokensClassic), so a card's hash, taken over that render, does
+    // not change with the upgrade — or a rich message whose titles are chips (TgRichHtmlFromClassic). The rich form needs the
+    // cog's rich switch; without it, or when Telegram refuses the rich message, the classic render goes in its place.
+
+    /// <summary>
+    /// The Telegram button LOOK nearest a tab color (§21.15). The Bot API gives a button no color of its own: `style` is one of
+    /// “danger” (red), “success” (green) and “primary” (blue) — a rich message's button adds “link”, a borderless link — and
+    /// "Apps may use theme-specific colors for the button background and text based on the style" (the docs). So no hex color
+    /// can be asked for, and the shade on the screen is the app's. The square's color FAMILY picks the look when the family has
+    /// one (🟦 primary, 🟩 success, 🟥 danger); every other square (🟧 🟨 🟪 🟫 ⬛ ⬜) and no square get the app's plain button
+    /// rather than a neighbor's color — an orange tab with a red chip would read as a red tab — and the chip's label keeps the
+    /// square, which names the family either way. Of the 14 tab palette colors, 8 get a colored chip.
+    /// </summary>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
+    /// <returns>"primary", "success", "danger", or "" for the plain look (a static string, never null).</returns>
+    inline const wchar_t* TgTitleChipStyle(std::wstring_view colorSquare) noexcept
+    {
+        if (colorSquare == L"\U0001F7E6")
+        {
+            return L"primary";
+        }
+        if (colorSquare == L"\U0001F7E9")
+        {
+            return L"success";
+        }
+        if (colorSquare == L"\U0001F7E5")
+        {
+            return L"danger";
+        }
+        return L"";
+    }
+
+    /// <summary>
+    /// How a title TOKEN reads in a CLASSIC (HTML) message (§21.15). Each form is what its place printed before the chips, so a
+    /// classic render is byte for byte the old text. A rich message shows the chip alone in every form: its quotes, its bold
+    /// and a bare square all give way to the button.
+    /// </summary>
+    enum class TgTitleForm : wchar_t
+    {
+        Plain = L'p', // "🟦 title" — the §21.13 mention (TitleMentionHtml's text); the caller's own tags wrap it
+        Bold = L'b', // "🟦 <b>title</b>" — the title line of the card and of a Search answer's row
+        Quoted = L'q', // "“🟦 title”" — a title the change line names
+        Square = L's', // "🟦" — the change line's new color (the plain mention when there is no square)
+    };
+
+    // The private-use characters that frame a title token: OPEN, the form, the square, MID, the escaped title, CLOSE. They never
+    // reach Telegram: every send path renders the tokens, and the outbox renders a stray one classic (MessagingService::_enqueue).
+    inline constexpr wchar_t kTgTitleTokenOpen = L'\xE000';
+    inline constexpr wchar_t kTgTitleTokenMid = L'\xE001';
+    inline constexpr wchar_t kTgTitleTokenClose = L'\xE002';
+
+    // A chip's label shows at most this many UTF-16 units of the title (an ellipsis past it: a button is no place for a
+    // paragraph); its copy is the whole title up to Telegram's CopyTextButton limit, "1-256 characters".
+    inline constexpr size_t kTgTitleChipLabelMaxChars = 100;
+    inline constexpr size_t kTgCopyTextMaxChars = 256;
+
+    namespace detail
+    {
+        /// <summary>Whether a character frames a title token (§21.15); such a character is dropped from a token's parts.</summary>
+        /// <param name="c">The character.</param>
+        /// <returns>True for OPEN, MID and CLOSE.</returns>
+        inline constexpr bool TgIsTitleTokenMarker(wchar_t c) noexcept
+        {
+            return c == kTgTitleTokenOpen || c == kTgTitleTokenMid || c == kTgTitleTokenClose;
+        }
+
+        /// <summary>
+        /// Undoes TgEscapeHtml exactly (§21.15): a token carries its title escaped, so the token can sit inside HTML, and the
+        /// chip needs the text back to cut it and to quote it in an attribute. Only the three entities TgEscapeHtml writes are
+        /// read; any other '&amp;' stays as it is.
+        /// </summary>
+        /// <param name="s">Text escaped by TgEscapeHtml.</param>
+        /// <returns>The text before escaping.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring TgUnescapeOwnHtml(std::wstring_view s)
+        {
+            std::wstring out;
+            out.reserve(s.size());
+            for (size_t i = 0; i < s.size();)
+            {
+                if (s[i] == L'&')
+                {
+                    const std::wstring_view rest = s.substr(i);
+                    if (rest.rfind(L"&amp;", 0) == 0)
+                    {
+                        out += L'&';
+                        i += 5;
+                        continue;
+                    }
+                    if (rest.rfind(L"&lt;", 0) == 0)
+                    {
+                        out += L'<';
+                        i += 4;
+                        continue;
+                    }
+                    if (rest.rfind(L"&gt;", 0) == 0)
+                    {
+                        out += L'>';
+                        i += 4;
+                        continue;
+                    }
+                }
+                out += s[i];
+                ++i;
+            }
+            return out;
+        }
+
+        /// <summary>
+        /// The longest prefix of at most `maxUnits` UTF-16 units that does not end inside a surrogate pair: a lone high
+        /// surrogate would make the text invalid UTF-16, which Telegram refuses.
+        /// </summary>
+        /// <param name="s">The text.</param>
+        /// <param name="maxUnits">The cap, in UTF-16 units.</param>
+        /// <returns>The prefix (the whole text when it fits).</returns>
+        inline std::wstring_view TgPrefixUnits(std::wstring_view s, size_t maxUnits) noexcept
+        {
+            if (s.size() <= maxUnits)
+            {
+                return s;
+            }
+            size_t n = maxUnits;
+            if (n > 0 && s[n - 1] >= 0xD800 && s[n - 1] <= 0xDBFF)
+            {
+                --n; // the cut would split a pair: the whole pair stays out
+            }
+            return s.substr(0, n);
+        }
+
+        /// <summary>TgEscapeHtml plus the double quote: a value for a double-quoted HTML attribute.</summary>
+        /// <param name="s">The raw text.</param>
+        /// <returns>The escaped text.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring TgEscapeHtmlAttribute(std::wstring_view s)
+        {
+            std::wstring out;
+            out.reserve(s.size() + 16);
+            for (const wchar_t c : TgEscapeHtml(s))
+            {
+                if (c == L'"')
+                {
+                    out += L"&quot;";
+                }
+                else
+                {
+                    out += c;
+                }
+            }
+            return out;
+        }
+
+        /// <summary>Reads the title token that starts at `pos` (§21.15): its form, its square and its escaped title.</summary>
+        /// <param name="s">The text.</param>
+        /// <param name="pos">The index of a kTgTitleTokenOpen.</param>
+        /// <param name="form">Receives the form (Plain for an unknown form character).</param>
+        /// <param name="square">Receives the color square ("" = none).</param>
+        /// <param name="escapedTitle">Receives the title, escaped by TgEscapeHtml.</param>
+        /// <returns>The index just past the token's CLOSE; npos when no well-formed token starts at `pos` (the caller drops
+        /// the stray OPEN and goes on).</returns>
+        /// <exception cref="std::bad_alloc">If a part cannot be copied.</exception>
+        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle)
+        {
+            if (pos + 2 >= s.size() || s[pos] != kTgTitleTokenOpen)
+            {
+                return std::wstring_view::npos;
+            }
+            const size_t mid = s.find(kTgTitleTokenMid, pos + 2);
+            if (mid == std::wstring_view::npos)
+            {
+                return std::wstring_view::npos;
+            }
+            const size_t close = s.find(kTgTitleTokenClose, mid + 1);
+            const size_t nextOpen = s.find(kTgTitleTokenOpen, pos + 1);
+            if (close == std::wstring_view::npos || (nextOpen != std::wstring_view::npos && nextOpen < close))
+            {
+                return std::wstring_view::npos; // a token that never closes, or one cut off by the next token
+            }
+            switch (s[pos + 1])
+            {
+            case static_cast<wchar_t>(TgTitleForm::Bold):
+                form = TgTitleForm::Bold;
+                break;
+            case static_cast<wchar_t>(TgTitleForm::Quoted):
+                form = TgTitleForm::Quoted;
+                break;
+            case static_cast<wchar_t>(TgTitleForm::Square):
+                form = TgTitleForm::Square;
+                break;
+            default:
+                form = TgTitleForm::Plain;
+                break;
+            }
+            square.assign(s.substr(pos + 2, mid - pos - 2));
+            escapedTitle.assign(s.substr(mid + 1, close - mid - 1));
+            return close + 1;
+        }
+    }
+
+    /// <summary>
+    /// A title TOKEN (§21.15): what a builder writes where a message names a session, instead of the title. The send layer
+    /// renders it, classic (TgRenderTitleTokensClassic: the §21.13 square and title, in the given form) or as a chip
+    /// (TgRichHtmlFromClassic). To every HTML helper in between (chunking, the plain-text fallback) a token is ordinary text:
+    /// private-use characters frame it, and the title inside is already escaped. A title or square that carries one of the
+    /// framing characters loses it here, so a token always parses.
+    /// </summary>
+    /// <param name="form">How the classic render reads (TgTitleForm).</param>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
+    /// <param name="title">The title as is (escaped here); the caller cuts it where its place wants it cut.</param>
+    /// <returns>The token.</returns>
+    /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
+    inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title)
+    {
+        std::wstring clean;
+        clean.reserve(title.size());
+        for (const wchar_t c : title)
+        {
+            if (!detail::TgIsTitleTokenMarker(c))
+            {
+                clean += c;
+            }
+        }
+        std::wstring token;
+        token.reserve(colorSquare.size() + clean.size() + 16);
+        token += kTgTitleTokenOpen;
+        token += static_cast<wchar_t>(form);
+        for (const wchar_t c : colorSquare)
+        {
+            if (!detail::TgIsTitleTokenMarker(c))
+            {
+                token += c;
+            }
+        }
+        token += kTgTitleTokenMid;
+        token += TgEscapeHtml(clean);
+        token += kTgTitleTokenClose;
+        return token;
+    }
+
+    /// <summary>Whether a text carries a title token (§21.15) — what makes the send layer render it.</summary>
+    /// <param name="text">The text.</param>
+    /// <returns>True when a token OPEN is in it.</returns>
+    inline bool TgHasTitleTokens(std::wstring_view text) noexcept
+    {
+        return text.find(kTgTitleTokenOpen) != std::wstring_view::npos;
+    }
+
+    /// <summary>
+    /// A text's title tokens rendered CLASSIC (§21.15): each token becomes the §21.13 mention in its form — "🟦 title",
+    /// "🟦 &lt;b&gt;title&lt;/b&gt;", "“🟦 title”" or the bare square — so the result is byte for byte what the builders
+    /// printed before the chips, and a card's hash taken over it is the hash its topic record already holds. A stray framing
+    /// character is dropped.
+    /// </summary>
+    /// <param name="text">Telegram HTML with title tokens.</param>
+    /// <returns>Telegram HTML without them (the text itself when it has none).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgRenderTitleTokensClassic(std::wstring_view text)
+    {
+        if (std::find_if(text.begin(), text.end(), detail::TgIsTitleTokenMarker) == text.end())
+        {
+            return std::wstring{ text };
+        }
+        std::wstring out;
+        out.reserve(text.size());
+        for (size_t i = 0; i < text.size();)
+        {
+            const wchar_t c = text[i];
+            if (c == kTgTitleTokenOpen)
+            {
+                TgTitleForm form{ TgTitleForm::Plain };
+                std::wstring square;
+                std::wstring title;
+                const size_t end = detail::TgParseTitleToken(text, i, form, square, title);
+                if (end == std::wstring_view::npos)
+                {
+                    ++i; // a stray OPEN: dropped
+                    continue;
+                }
+                const std::wstring mention = square.empty() ? title : square + L" " + title;
+                switch (form)
+                {
+                case TgTitleForm::Bold:
+                    out += (square.empty() ? std::wstring{} : square + L" ") + L"<b>" + title + L"</b>";
+                    break;
+                case TgTitleForm::Quoted:
+                    out += L"\x201C" + mention + L"\x201D";
+                    break;
+                case TgTitleForm::Square:
+                    out += square.empty() ? mention : square;
+                    break;
+                default:
+                    out += mention;
+                    break;
+                }
+                i = end;
+                continue;
+            }
+            if (!detail::TgIsTitleTokenMarker(c))
+            {
+                out += c;
+            }
+            ++i;
+        }
+        return out;
+    }
+
+    /// <summary>
+    /// A title CHIP (§21.15): a copy_text button inside a rich message's text, in the look nearest the tab's color
+    /// (TgTitleChipStyle), its label the square and the title, a tap copying the title. Measured on the dev bot (thread 26785,
+    /// messages 904 / 905, 2026-10-17): Telegram keeps the button and its style inside a paragraph. The label is one line cut at
+    /// kTgTitleChipLabelMaxChars; the copy is that line up to kTgCopyTextMaxChars. A blank title has nothing to copy (a copy text
+    /// needs one character), so it stays the plain mention.
+    /// </summary>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none: the plain look, no square in the label).</param>
+    /// <param name="escapedTitle">The title escaped by TgEscapeHtml, as a token carries it.</param>
+    /// <returns>Rich-message HTML: one &lt;tg-button&gt; element (or the plain mention for a blank title).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgTitleChipHtml(std::wstring_view colorSquare, std::wstring_view escapedTitle)
+    {
+        // One line, trimmed: a line break or a tab would split the label of a button that sits inside a line of text.
+        std::wstring line = detail::TgUnescapeOwnHtml(escapedTitle);
+        for (auto& c : line)
+        {
+            if (c == L'\r' || c == L'\n' || c == L'\t')
+            {
+                c = L' ';
+            }
+        }
+        const size_t a = line.find_first_not_of(L' ');
+        if (a == std::wstring::npos)
+        {
+            return colorSquare.empty() ? std::wstring{ escapedTitle } : std::wstring{ colorSquare } + L" " + std::wstring{ escapedTitle };
+        }
+        line = line.substr(a, line.find_last_not_of(L' ') - a + 1);
+        std::wstring label = line;
+        if (label.size() > kTgTitleChipLabelMaxChars)
+        {
+            label = std::wstring{ detail::TgPrefixUnits(label, kTgTitleChipLabelMaxChars - 1) } + L"\x2026";
+        }
+        std::wstring chip = L"<tg-button type=\"copy_text\"";
+        if (const wchar_t* style = TgTitleChipStyle(colorSquare); *style)
+        {
+            chip += L" style=\"";
+            chip += style;
+            chip += L"\"";
+        }
+        chip += L" text=\"" + detail::TgEscapeHtmlAttribute(detail::TgPrefixUnits(line, kTgCopyTextMaxChars)) + L"\">";
+        if (!colorSquare.empty())
+        {
+            chip += std::wstring{ colorSquare } + L" ";
+        }
+        chip += TgEscapeHtml(label) + L"</tg-button>";
+        return chip;
+    }
+
+    namespace detail
+    {
+        /// <summary>The index just past the HTML tag that starts at `pos` (a '&lt;'), quotes in its attributes respected.</summary>
+        /// <param name="s">The text.</param>
+        /// <param name="pos">The index of the '&lt;'.</param>
+        /// <returns>The index after the tag's '&gt;'; npos when the tag never ends.</returns>
+        inline size_t TgTagEnd(std::wstring_view s, size_t pos) noexcept
+        {
+            wchar_t quote = 0;
+            for (size_t i = pos + 1; i < s.size(); ++i)
+            {
+                const wchar_t c = s[i];
+                if (quote != 0)
+                {
+                    if (c == quote)
+                    {
+                        quote = 0;
+                    }
+                }
+                else if (c == L'"' || c == L'\'')
+                {
+                    quote = c;
+                }
+                else if (c == L'>')
+                {
+                    return i + 1;
+                }
+            }
+            return std::wstring_view::npos;
+        }
+
+        /// <summary>A tag's name in lower case: "b" for "&lt;b&gt;", "&lt;/b&gt;" and "&lt;b/&gt;".</summary>
+        /// <param name="tag">The whole tag, '&lt;' to '&gt;'.</param>
+        /// <returns>The name ("" for a malformed tag).</returns>
+        /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+        inline std::wstring TgTagName(std::wstring_view tag)
+        {
+            size_t i = 1;
+            if (i < tag.size() && tag[i] == L'/')
+            {
+                ++i;
+            }
+            std::wstring name;
+            for (; i < tag.size(); ++i)
+            {
+                const wchar_t c = tag[i];
+                if ((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'-')
+                {
+                    name += c;
+                }
+                else if (c >= L'A' && c <= L'Z')
+                {
+                    name += static_cast<wchar_t>(c - L'A' + L'a');
+                }
+                else
+                {
+                    break;
+                }
+            }
+            return name;
+        }
+
+        /// <summary>Whether a tag formats text inside a line (bold, a link, a spoiler …) rather than making a block.</summary>
+        /// <param name="name">The tag's lower-case name.</param>
+        /// <returns>True for an inline tag of Telegram's rich tag set.</returns>
+        inline bool TgIsInlineTag(std::wstring_view name) noexcept
+        {
+            static constexpr std::wstring_view kInline[] = { L"b", L"strong", L"i", L"em", L"u", L"ins", L"s", L"strike", L"del", L"code", L"a",
+                                                              L"tg-spoiler", L"span", L"mark", L"sub", L"sup", L"tg-emoji", L"tg-time" };
+            for (const auto n : kInline)
+            {
+                if (n == name)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Drops the EMPTY inline pairs ("&lt;b&gt;&lt;/b&gt;", an empty link …) that a chip leaves when it is lifted out of the
+        /// formatting around it (TgRichFromClassicCore), until none is left, so nested empty pairs go too.
+        /// </summary>
+        /// <param name="s">Rich-message HTML.</param>
+        /// <returns>The same HTML without empty inline pairs.</returns>
+        /// <exception cref="std::bad_alloc">If a tag name cannot be allocated.</exception>
+        inline std::wstring TgDropEmptyInlinePairs(std::wstring s)
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (size_t i = s.find(L'<'); i != std::wstring::npos; i = s.find(L'<', i + 1))
+                {
+                    if (i + 1 >= s.size() || s[i + 1] == L'/')
+                    {
+                        continue;
+                    }
+                    const size_t end = TgTagEnd(s, i);
+                    if (end == std::wstring::npos)
+                    {
+                        break;
+                    }
+                    const std::wstring name = TgTagName(std::wstring_view{ s }.substr(i, end - i));
+                    if (name.empty() || !TgIsInlineTag(name))
+                    {
+                        continue;
+                    }
+                    const std::wstring close = L"</" + name + L">";
+                    if (s.compare(end, close.size(), close) == 0)
+                    {
+                        s.erase(i, end - i + close.size());
+                        changed = true;
+                        break; // the positions moved: scan again from the start
+                    }
+                }
+            }
+            return s;
+        }
+
+        /// <summary>Trims a rich paragraph's edges: spaces, tabs and line breaks ("&lt;br&gt;") before its first and after its last visible part.</summary>
+        /// <param name="p">The paragraph's HTML, trimmed in place.</param>
+        inline void TgTrimRichBreaks(std::wstring& p)
+        {
+            bool trimmed = true;
+            while (trimmed)
+            {
+                trimmed = false;
+                if (p.rfind(L"<br>", 0) == 0)
+                {
+                    p.erase(0, 4);
+                    trimmed = true;
+                }
+                else if (!p.empty() && (p.front() == L' ' || p.front() == L'\t'))
+                {
+                    p.erase(0, 1);
+                    trimmed = true;
+                }
+                if (p.size() >= 4 && p.compare(p.size() - 4, 4, L"<br>") == 0)
+                {
+                    p.erase(p.size() - 4);
+                    trimmed = true;
+                }
+                else if (!p.empty() && (p.back() == L' ' || p.back() == L'\t'))
+                {
+                    p.pop_back();
+                    trimmed = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The converter's core (TgRichHtmlFromClassic): with `blocks`, paragraphs and block elements; without (the body of a
+        /// quote), one inline run in which a blank line is two line breaks.
+        /// </summary>
+        /// <param name="html">Classic Telegram HTML with title tokens.</param>
+        /// <param name="blocks">True for a whole message, false for a quote's body.</param>
+        /// <returns>Rich-message HTML.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        inline std::wstring TgRichFromClassicCore(std::wstring_view html, bool blocks)
+        {
+            std::wstring out; // the finished blocks (blocks == true)
+            std::wstring run; // the paragraph being built (the whole result when blocks == false)
+            // The inline tags open in `run`, outermost first: names and opening tags. A chip closes them before itself and opens
+            // them again after it, so a button never sits inside bold or italic: Telegram's own examples never put one there,
+            // and a button's label may hold plain text only.
+            std::vector<std::pair<std::wstring, std::wstring>> open;
+            const auto flush = [&]() {
+                std::wstring p = TgDropEmptyInlinePairs(std::move(run));
+                run.clear();
+                TgTrimRichBreaks(p);
+                if (!p.empty())
+                {
+                    out += L"<p>" + p + L"</p>";
+                }
+            };
+            const size_t n = html.size();
+            size_t i = 0;
+            while (i < n)
+            {
+                const wchar_t c = html[i];
+                if (c == kTgTitleTokenOpen)
+                {
+                    TgTitleForm form{ TgTitleForm::Plain };
+                    std::wstring square;
+                    std::wstring title;
+                    const size_t end = TgParseTitleToken(html, i, form, square, title);
+                    if (end == std::wstring_view::npos)
+                    {
+                        ++i; // a stray OPEN: dropped
+                        continue;
+                    }
+                    for (auto it = open.rbegin(); it != open.rend(); ++it)
+                    {
+                        run += L"</" + it->first + L">";
+                    }
+                    run += TgTitleChipHtml(square, title);
+                    for (const auto& o : open)
+                    {
+                        run += o.second;
+                    }
+                    i = end;
+                    continue;
+                }
+                if (TgIsTitleTokenMarker(c) || c == L'\r')
+                {
+                    ++i;
+                    continue;
+                }
+                if (c == L'<')
+                {
+                    const size_t end = TgTagEnd(html, i);
+                    if (end == std::wstring_view::npos)
+                    {
+                        run += L"&lt;"; // never from our builders (they escape '<'): shown as text, not as a broken tag
+                        ++i;
+                        continue;
+                    }
+                    const std::wstring_view tag = html.substr(i, end - i);
+                    const bool closing = tag.size() > 1 && tag[1] == L'/';
+                    const bool selfClosing = tag.size() > 2 && tag[tag.size() - 2] == L'/';
+                    const std::wstring name = TgTagName(tag);
+                    if (blocks && !closing && open.empty() && (name == L"blockquote" || name == L"pre"))
+                    {
+                        // A block: the paragraph before it ends, and the block goes whole. Our builders write these tags in lower
+                        // case and never nest a quote, so the first closing tag is this block's.
+                        const std::wstring closeTag = L"</" + name + L">";
+                        const size_t closeAt = html.find(closeTag, end);
+                        const size_t innerEnd = closeAt == std::wstring_view::npos ? n : closeAt;
+                        flush();
+                        std::wstring_view inner = html.substr(end, innerEnd - end);
+                        out += tag;
+                        if (name == L"pre")
+                        {
+                            out += TgRenderTitleTokensClassic(inner); // code keeps its line breaks; a title inside code stays text
+                        }
+                        else
+                        {
+                            // The quote's body: one run whose line breaks are "<br>" (the docs' rich quote is written that way).
+                            while (!inner.empty() && (inner.front() == L'\n' || inner.front() == L'\r'))
+                            {
+                                inner.remove_prefix(1);
+                            }
+                            while (!inner.empty() && (inner.back() == L'\n' || inner.back() == L'\r'))
+                            {
+                                inner.remove_suffix(1);
+                            }
+                            std::wstring body = TgRichFromClassicCore(inner, false);
+                            TgTrimRichBreaks(body);
+                            out += body;
+                        }
+                        out += closeTag;
+                        i = closeAt == std::wstring_view::npos ? n : closeAt + closeTag.size();
+                        if (i < n && html[i] == L'\n')
+                        {
+                            ++i; // the line break that ends the block's line belongs to the block
+                        }
+                        continue;
+                    }
+                    if (closing)
+                    {
+                        for (size_t k = open.size(); k-- > 0;)
+                        {
+                            if (open[k].first == name)
+                            {
+                                open.erase(open.begin() + static_cast<std::ptrdiff_t>(k));
+                                break;
+                            }
+                        }
+                    }
+                    else if (!selfClosing && TgIsInlineTag(name))
+                    {
+                        open.emplace_back(name, std::wstring{ tag });
+                    }
+                    run += tag;
+                    i = end;
+                    continue;
+                }
+                if (c == L'\n')
+                {
+                    size_t breaks = 0;
+                    while (i < n && (html[i] == L'\n' || html[i] == L'\r'))
+                    {
+                        breaks += html[i] == L'\n' ? 1 : 0;
+                        ++i;
+                    }
+                    if (blocks && breaks >= 2 && open.empty())
+                    {
+                        flush(); // a blank line: the paragraph ends
+                    }
+                    else
+                    {
+                        run += breaks >= 2 ? L"<br><br>" : L"<br>"; // inside formatting a paragraph cannot end: two breaks
+                    }
+                    continue;
+                }
+                run += c;
+                ++i;
+            }
+            if (blocks)
+            {
+                flush();
+                return out;
+            }
+            return TgDropEmptyInlinePairs(std::move(run));
+        }
+    }
+
+    /// <summary>
+    /// A classic Telegram HTML message as RICH-message HTML (§21.15), its title tokens as chips. Measured on the dev bot
+    /// (thread 26785, 2026-10-17): rich HTML reads a raw line break as a space and runs the whole text into one paragraph
+    /// (message 907), so the structure is made explicit — a blank line ends a paragraph ("&lt;p&gt;"), a line break is
+    /// "&lt;br&gt;" (message 908: kept as a break), a quote or a code block is a block of its own. Every other tag (b, i, u, s,
+    /// code, a, tg-spoiler — all in the rich tag set) and every entity stays as written. A chip is lifted out of the inline
+    /// formatting around it (closed before it, opened again after it; the empty pairs that leaves are dropped).
+    /// </summary>
+    /// <param name="html">Classic Telegram HTML as the builders write it, with title tokens.</param>
+    /// <returns>Rich-message HTML for rich_message.html ("" for a text with nothing visible).</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgRichHtmlFromClassic(std::wstring_view html)
+    {
+        return detail::TgRichFromClassicCore(html, true);
     }
 
     /// <summary>

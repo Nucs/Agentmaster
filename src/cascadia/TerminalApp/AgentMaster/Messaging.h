@@ -358,7 +358,39 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="replyRef">§21.12: reply to the turn's prompt once its message id is known (the first chunk only;
         /// `replyToMessageId` wins when both are given). May be empty.</param>
+        /// <remarks>
+        /// §21.15: a text that names a session carries TITLE TOKENS (TgTitleToken). While title chips are wanted
+        /// (_titleChipsWanted) and the rich form fits Telegram's rich limit, it goes as ONE rich message whose titles are chips
+        /// (_sendTitledRich); otherwise — and as that message's fallback — its classic render (TgRenderTitleTokensClassic: the
+        /// §21.13 squares) goes the HTML way described above. A text without tokens goes the HTML way exactly as before.
+        /// </remarks>
         void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr);
+        /// <summary>
+        /// Whether a message that names a session goes as a RICH message whose titles are CHIPS (§21.15): the cog's rich switch
+        /// (AppSettings::messagingRichMessages, the same switch as Claude's rich Markdown) is on, and this run has not found the
+        /// Bot API without sendRichMessage (a 404 latches _richUnavailable). Any thread (two atomics).
+        /// </summary>
+        /// <returns>True when titled messages go rich.</returns>
+        bool _titleChipsWanted() const noexcept;
+        /// <summary>
+        /// Queues ONE rich message whose titles are chips (§21.15). `classicHtml` is the same message's classic render: when
+        /// Telegram refuses the rich message (RichRefusalWantsFallback — a 400 about the message, or a 404 that latches
+        /// _richUnavailable for the run), the classic render goes in its place (the same outbox sequence number, so it lands
+        /// where the rich message would have) with the same buttons, reply and `onDone`. The rich message carries the buttons,
+        /// the reply reference and `onDone` itself; `key` replaces a queued item with the same key, as for _sendText.
+        /// </summary>
+        /// <param name="threadId">The topic (0 = the chat's General view).</param>
+        /// <param name="richHtml">The rich-message HTML (TgRichHtmlFromClassic of the tokenized text), within kRichMessageMaxChars.</param>
+        /// <param name="classicHtml">The classic render of the same text (TgRenderTitleTokensClassic): the fallback.</param>
+        /// <param name="silent">No sound.</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key (a card post's "card-post:&lt;session&gt;").</param>
+        /// <param name="replyMarkup">The inline keyboard (a non-object = none).</param>
+        /// <param name="onDone">Called with Telegram's answer to the message that went (rich, or its fallback's last chunk); may be empty.</param>
+        /// <param name="replyToMessageId">The message it replies to (0 = none).</param>
+        /// <param name="replyRef">§21.12: reply to the turn's prompt once its id is known; may be empty.</param>
+        /// <exception cref="std::bad_alloc">If an item cannot be allocated.</exception>
+        void _sendTitledRich(int64_t threadId, const std::wstring& richHtml, const std::wstring& classicHtml, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, std::shared_ptr<PromptRef> replyRef);
         /// <summary>
         /// Posts Claude's MARKDOWN into a topic as a RICH message (§21.11, Bot API 10.1: tables, headings, lists and code
         /// render the way Claude wrote them; the HTML conversion has no tables). The text is split into parts that fit
@@ -407,8 +439,40 @@ namespace Agentmaster::Msg
         void _notePromptEcho(int64_t threadId, const std::wstring& text, int64_t messageId);
         /// <summary>Stamps the topic that owns `threadId` as "something newer than the card landed here" (the sticky card's trigger).</summary>
         void _noteTopicPosted(int64_t threadId);
-        /// <summary>Edits a message in place (an edit cannot be split: cut at Telegram's limit). `onDone` gets Telegram's answer on the send thread (may be empty).</summary>
-        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr);
+        /// <summary>
+        /// Edits a message in place (an edit cannot be split: cut at Telegram's limit). `onDone` gets Telegram's answer on the
+        /// send thread (may be empty).
+        /// </summary>
+        /// <param name="messageId">The message (0 or less = nothing to edit: no call).</param>
+        /// <param name="html">The new text: Telegram HTML, with title tokens (§21.15) or without.</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key: a newer edit with the same key replaces a queued one.</param>
+        /// <param name="replyMarkup">The inline keyboard (a non-object = none: an edit without one removes the message's).</param>
+        /// <param name="onDone">Called with Telegram's answer to the edit that went (the rich one, or its classic fallback).</param>
+        /// <param name="onForm">§21.15: called on the send thread with the FORM the message shows after an edit that took (or that
+        /// Telegram found unchanged): true = rich, false = classic. Not called when the edit failed otherwise. May be empty.</param>
+        /// <remarks>
+        /// §21.15: a text with title tokens is edited as a RICH message whose titles are chips while _titleChipsWanted and the rich
+        /// form fits — editMessageText turns a classic message into a rich one and back (measured on the dev bot, thread 26785,
+        /// messages 909 / 910) — else as its classic render. A rich edit Telegram refuses (RichEditRefusalWantsFallback) is made
+        /// again with the classic render, in its own outbox place and without a key, so it never replaces a newer edit queued
+        /// meanwhile.
+        /// </remarks>
+        /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
+        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr, std::function<void(bool)> onForm = nullptr);
+        /// <summary>
+        /// The CLASSIC editMessageText item of a text without title tokens (§21.15 split it out of _editText, which also builds
+        /// the classic fallback of a refused rich edit with it): HTML parse mode, no link previews, the text cut at Telegram's
+        /// limit.
+        /// </summary>
+        /// <param name="messageId">The message.</param>
+        /// <param name="html">Telegram HTML without title tokens.</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key.</param>
+        /// <param name="replyMarkup">The inline keyboard (a non-object = none).</param>
+        /// <returns>The item, without onDone.</returns>
+        /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
+        OutItem _classicEditItem(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, const json::Value& replyMarkup) const;
         void _react(int64_t messageId, std::wstring_view emoji);
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
@@ -568,7 +632,25 @@ namespace Agentmaster::Msg
         /// the edit gap (a state change, a rename); `ping` asks for a re-post WITH SOUND, kept until it can be sent
         /// (a card post still in flight, or a refused one waiting its minute).
         /// </summary>
+        /// <remarks>
+        /// §21.15: the card's title is a chip when titled messages go rich (_titleChipsWanted). The comparison hash is taken over
+        /// the card's classic render, so it does not move with the form; a card whose text is unchanged but whose FORM is not the
+        /// wanted one (TopicRecord::cardRich — every card posted before the chips, or after the rich switch flipped) is re-edited
+        /// only when _takeCardFormatSlot gives it the turn: one card per kCardFormatGapMs, within the chat's call budget.
+        /// </remarks>
         void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false);
+        /// <summary>
+        /// The SLOW FORM UPGRADE's gate (§21.15): whether the card of `sessionId`, unchanged but shown in the other form, may be
+        /// re-edited now. One such edit per kCardFormatGapMs across all topics, none while a 429 pause runs or a long one parks
+        /// editMessageText, none while the last minute's calls leave no room for one more under kHistoryCallsPerMinute, and never
+        /// for a card whose rich form Telegram refused for this very text (CardState::richRefusedHash). Taking the slot stamps it
+        /// and logs how many cards still wait. Takes `_mtx`.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="hash">The card's classic hash (what TopicRecord::cardTextHash holds).</param>
+        /// <param name="wantRich">The form wanted (_titleChipsWanted).</param>
+        /// <returns>True when the card is re-edited now.</returns>
+        bool _takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich);
         std::optional<SessionInfo> _session(const std::wstring& sessionId) const;
 
         // ----- the mirror (Messaging.cpp) -----
@@ -617,6 +699,10 @@ namespace Agentmaster::Msg
             SessionState lastState{ SessionState::Idle }; // the state the card last showed (a change edits at once)
             bool pingWanted{ false }; // a re-post WITH SOUND is owed (see _refreshCard)
             bool repostWanted{ false }; // a SILENT re-post is owed: the list's re-sort (§21.9) moves this topic up
+            // §21.15: the classic hash (TopicRecord::cardTextHash) of the card text whose RICH form Telegram refused (it went as
+            // HTML). The slow form upgrade skips the card while its text is that one, so a refusal is not retried every gap; a
+            // changed text tries the rich form again. 0 = none refused.
+            uint32_t richRefusedHash{ 0 };
         };
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
@@ -988,6 +1074,18 @@ namespace Agentmaster::Msg
         /// full for hours and no topic name followed its session's state.
         /// </summary>
         int64_t _renameWaitingSinceMs{ 0 };
+        /// <summary>
+        /// When the SLOW FORM UPGRADE (§21.15, _takeCardFormatSlot) last re-edited a card whose text was unchanged (GetTickCount64
+        /// ms; 0 = none this run), under `_mtx`: the next such edit waits kCardFormatGapMs, so turning title chips on (the first
+        /// start of this build, or the rich switch) converts the cards one at a time instead of editing every card at once —
+        /// 47 cards edited together earned a 429 with a 21-minute retry_after (2026-10-16).
+        /// </summary>
+        int64_t _lastCardFormatEditMs{ 0 };
+        /// <summary>
+        /// A title token reached the outbox unrendered (§21.15 belt in _enqueue: rendered classic there) — logged once per run,
+        /// since it means a send path that bypasses _sendText / _editText.
+        /// </summary>
+        std::atomic<bool> _titleTokenLeakLogged{ false };
         /// <summary>
         /// Parks `method` for a long 429 (ParkForFlood under `_mtx`) and logs what is held until when (a local clock time). Takes
         /// `_mtx`.
