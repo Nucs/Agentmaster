@@ -337,6 +337,24 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
     rule and the two topic-delete paths), and `_ensureSearchTopic` makes the topic only while
     `searchThreadId` is 0. Its sends then keep failing. The way back today: stop the app, set
     `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
+  - **A button or command that OPENS Search is not possible** (asked 2026-10-17, "preferably in the 'all'
+    area"; checked only, nothing built). Telegram's deep links (`core.telegram.org/api/links`) link a topic only
+    in a group or channel (`t.me/<name>/<topic>`, `t.me/c/<id>/<topic>`). A topic id is the id of the message
+    that created it, and in a private chat each account numbers messages in its own message box
+    (`api/updates`: "private chats … of one user have another common event sequence"). So the bot knows only
+    ITS number for Search (22371 / 25027); the user's app numbers it differently (the same split that §21.12
+    meets with the secretary bot). No button type moves the user's view: `url` needs that link, `callback_data`
+    only reaches the bot, and a Mini App's `openTelegramLink` needs a link too. Not tried on a phone: P0-16's
+    "do links to a private-chat topic work?" is still open.
+  - **What is possible instead:** a `/search` command, or a card button, that makes the bot post one line in
+    Search. Telegram lists topics by their newest message (§21.8), so Search moves to the top of the list,
+    under the user's own pins. Tapping that post's notification should open Search (not tried). Both bots
+    report `allows_users_to_create_topics: true` (getMe, 2026-10-17), so in the "All" view every message the
+    user types becomes a NEW topic ("Type any message to create a new thread", `api/forum` → Bot forums). A
+    `/search` typed there arrives in its own fresh topic, which the bot can delete as it answers. BotFather's
+    "Disallow users to create new threads" makes "All" (the General topic) take messages directly, but it also
+    stops the user from creating, editing and deleting topics (`BOT_FORUM_CREATE_FORBIDDEN`); whether it also
+    stops pinning one is not documented.
 - **One topic per tab** — for every tab, in every Agentmaster window, that hosts a **Claude Code** session
   (managed, or a hand-typed claude Agentmaster adopted), **whose state is not Idle**. Running, Waiting for
   you, Needs approval, Error and Done are listed; **Idle is the only state that is not**. A **pinned**
