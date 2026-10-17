@@ -824,6 +824,22 @@ namespace Agentmaster::Msg
         /// <returns>The outcome, plain text (one sentence).</returns>
         std::wstring _reactivate(const std::wstring& sessionId);
         /// <summary>
+        /// A directory DOT's tap (§21.16.7): puts the tab's topic FIRST in Telegram's thread list — the way into a topic on
+        /// Telegram Android, which opens no topic from a link. It asks the tick for a silent re-post of the topic's sticky card
+        /// (`CardState::repostWanted`, the re-sort's own mechanism: the next per-topic pass deletes the card and sends it again,
+        /// two calls), which makes the card the topic's newest message: Telegram orders a bot chat's topics by their last
+        /// message, and Android's "All" view adds "Continue last thread ›" under the chat's last message when it is in a topic.
+        /// It also records the topic for `_frontHeld` (via `_frontRequests`), so the quiet re-sort does not move it back. A
+        /// topic whose history is still being replayed keeps its card above the history until the replay is in: the move waits
+        /// for that, and the toast says so. A second tap on the same dot within kFrontTapGapMs only answers. Runs on the poll
+        /// thread; takes `_mtx` and wakes the tick.
+        /// </summary>
+        /// <param name="threadId">The topic's thread id, from the dot's callback data (ParseDirectoryFrontCallbackData).</param>
+        /// <returns>The toast, plain text (DirectoryFrontAnswer, or why nothing moves).</returns>
+        /// <exception cref="std::bad_alloc">If memory runs out (it passes through _handleCallback to _handleUpdate, whose guard
+        /// logs it; the tap then gets no toast and nothing moves).</exception>
+        std::wstring _bringTopicToFront(int64_t threadId);
+        /// <summary>
         /// A `business_connection` update: the user connected, edited or removed a bot under Telegram → Settings → Chat
         /// Automation (H3: the connecting user must be the paired owner). `viaSecretary`: it came to the SECRETARY bot
         /// (§21.11), whose client then sends as the user; else to the topics bot. A disconnect of the bot that does NOT
@@ -1075,6 +1091,15 @@ namespace Agentmaster::Msg
         std::deque<std::wstring> _resortQueue;
         std::unordered_set<std::wstring> _runningIds; // tick thread: the sessions the last sync saw Running (no re-sort while any runs)
         /// <summary>
+        /// §21.16.7, tick thread only: the topics the user put FIRST with a directory dot — session id -> the session's order key
+        /// (`_orderKeys`' MostRecentSortKeyMs) at the tap. The quiet re-sort leaves such a topic out of the list it puts in MOST
+        /// RECENT order while that key is unchanged, so it does not re-post up to kResortMaxTopics other cards a minute later to
+        /// push the topic back to its rank — which would undo the user's move. The session's next turn changes the key (a turn
+        /// boundary), and from then on the topic is ordered like any other. Cleared with the re-sort's state (a start, a bot
+        /// change, a recreation); a session whose topic is gone drops out at the next re-sort pass.
+        /// </summary>
+        std::unordered_map<std::wstring, int64_t> _frontHeld;
+        /// <summary>
         /// The START-UP HOLD on "closed" topic deletes (MESSAGING.md §21.4). `_startedMs` is when this run's
         /// service started; while the start is younger than `kStartupCloseHoldMinMs`, and while any registered
         /// window is still restoring (`ServiceHooks::windowsRestoring`, capped at `kStartupCloseHoldCapMs`), a topic
@@ -1202,6 +1227,17 @@ namespace Agentmaster::Msg
         std::unordered_map<std::wstring, CardState> _cards; // session id -> its card's transient state (CardState)
         std::unordered_map<std::wstring, PromptStatus> _reacted; // prompt id -> the status its Telegram message shows
         std::unordered_map<std::wstring, int64_t> _dirty; // session ids the registry notified since the last tick (-> ms)
+        /// <summary>
+        /// §21.16.7, under `_mtx`: the topics a directory DOT put first, not yet seen by the tick — session id -> when the tap
+        /// came (WallMs). The poll thread writes it (_bringTopicToFront); the tick folds it into `_frontHeld` at its next
+        /// re-sort pass, because the order key it records there (`_orderKeys`) is the tick thread's alone.
+        /// </summary>
+        std::unordered_map<std::wstring, int64_t> _frontRequests;
+        /// <summary>
+        /// §21.16.7, under `_mtx`: the last dot tap per THREAD (WallMs). A second tap on the same dot within kFrontTapGapMs is
+        /// answered without a second re-post: one double tap must not cost four calls of the chat's flood budget.
+        /// </summary>
+        std::unordered_map<int64_t, int64_t> _frontTapMs;
 
         struct Token
         {

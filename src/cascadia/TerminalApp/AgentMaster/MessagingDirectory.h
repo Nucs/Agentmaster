@@ -15,12 +15,23 @@
 // (tests_messaging_directory.cpp); the service (Messaging.cpp, MessagingService::_directoryTick) gathers the facts, sends,
 // edits and pins.
 //
-// The links. A chip opens https://t.me/<bot>/<topic>?topic=<topic>: the MESSAGE link of the topic's creation message (the
+// The links. A title chip opens https://t.me/<bot>/<topic>?topic=<topic>: the MESSAGE link of the topic's creation message (the
 // deep-link spec's form for a topic: "the topic ID is actually the ID of the service message that created the topic") plus
-// the `topic` parameter Telegram Desktop's link code reads. A topic id is the USER-space id the Bot API hands out (MESSAGING.md
-// §5.1), so the number is right on the user's side. Read from the clients' sources (2026-10-17; nothing tried on a device):
-// Telegram Desktop opens the topic; Telegram Android does NOTHING for a link to the bot chat that is already open
-// (LaunchActivity: `isBot && sameDialogId` only calls setBotUser); iOS reads it as a plain message link into the chat.
+// the `topic` parameter the apps' link code reads. A topic id is the USER-space id the Bot API hands out (MESSAGING.md §5.1),
+// so the number is right on the user's side. What a tap does, read from the clients' sources (Desktop 2026-10-15, Android
+// 2026-10-13, iOS 2026-10-07) and, for Android, seen by the user (2026-10-17):
+//   - Telegram Desktop opens the topic — when it has the bot chat's topic list loaded (showRepliesForMessage needs the topic
+//     and its unread count; else it does nothing for a bot).
+//   - Telegram iOS opens it through its reply-thread path, which finds the topic in the list the app has loaded
+//     (_internal_fetchChannelReplyThreadMessage's local thread info) — read from the code only.
+//   - Telegram ANDROID cannot: its link code selects a topic only in a GROUP forum, so for a bot it opens a new chat screen at
+//     message <topic> in the "All" view — the topic's first message, which is what the user saw. NO link form changes that
+//     (`?topic=`, `?thread=`, tg://resolve, tg://openmessage, the two-number path: all end in the same ChatActivity).
+// The DOT. So Android has a way in, each tab's state dot is a callback button (DirectoryFrontCallbackData): a tap makes the bot
+// re-post that topic's sticky card, the topic's newest message then. Telegram lists a bot chat's topics by their last message,
+// so the topic becomes the FIRST in the thread list on every app, and Android's "All" view puts its own "Continue last thread ›"
+// button under the card (ChatMessageCell: the chat's last message, in a topic). The user's choice, 2026-10-17: "Link + dot
+// button" (MESSAGING.md §21.16.7).
 
 #pragma once
 
@@ -142,6 +153,12 @@ namespace Agentmaster::Msg
         /// </summary>
         size_t tagsWithoutTabs{ 0 };
         size_t tabsShown{ 0 }; // tab chips in the rich render
+        /// <summary>
+        /// The tabs of the rich render whose state dot is a button (DirectoryFrontCallbackData): the listed tabs that have a
+        /// topic. A tab with no topic keeps a plain dot — there is no card to re-post. The classic render has no dot buttons
+        /// (Telegram HTML cannot hold an in-text callback), so this counts the rich render only.
+        /// </summary>
+        size_t dotsShown{ 0 };
     };
 
     // ===== the pieces ================================================================================================
@@ -166,6 +183,60 @@ namespace Agentmaster::Msg
         }
         const std::wstring id = std::to_wstring(threadId);
         return L"https://t.me/" + std::wstring{ botUsername } + L"/" + id + L"?topic=" + id;
+    }
+
+    /// <summary>
+    /// The prefix of a tab DOT's callback data (§21.16.7): "d:front:" and then the topic's thread id. The service's
+    /// _handleCallback reads it back with ParseDirectoryFrontCallbackData. It names the THREAD, not the session: a topic follows
+    /// its tab to the next conversation (a /clear or a /resume in the tab rekeys it to another session id) while its thread id
+    /// stays, so a dot the directory drew before a rekey still finds its topic — the message is edited at most every two minutes.
+    /// </summary>
+    inline constexpr std::wstring_view kDirectoryFrontCallbackPrefix = L"d:front:";
+
+    /// <summary>
+    /// The callback data of a tab's dot button: "d:front:&lt;thread id&gt;" — at most 27 characters, well under the Bot API's
+    /// limit of 64 bytes for callback data.
+    /// </summary>
+    /// <param name="threadId">The topic's message_thread_id.</param>
+    /// <returns>The data; "" for an id that is not positive (no topic: the dot stays a plain glyph).</returns>
+    /// <exception cref="std::bad_alloc">If the data cannot be allocated.</exception>
+    inline std::wstring DirectoryFrontCallbackData(int64_t threadId)
+    {
+        if (threadId <= 0)
+        {
+            return {};
+        }
+        return std::wstring{ kDirectoryFrontCallbackPrefix } + std::to_wstring(threadId);
+    }
+
+    /// <summary>
+    /// Reads a dot button's callback data back (DirectoryFrontCallbackData). Any other data — another button's, a malformed or a
+    /// forged one — reads as 0: only decimal digits may follow the prefix, at most 18 of them, so the value always fits an
+    /// int64 and is never negative; a 0 id (or a prefix with nothing after it) is no topic either.
+    /// </summary>
+    /// <param name="data">The callback query's data.</param>
+    /// <returns>The thread id (&gt; 0), or 0 when the data is not a dot's.</returns>
+    inline int64_t ParseDirectoryFrontCallbackData(std::wstring_view data) noexcept
+    {
+        if (data.size() <= kDirectoryFrontCallbackPrefix.size() || data.substr(0, kDirectoryFrontCallbackPrefix.size()) != kDirectoryFrontCallbackPrefix)
+        {
+            return 0;
+        }
+        const std::wstring_view digits = data.substr(kDirectoryFrontCallbackPrefix.size());
+        if (digits.size() > 18)
+        {
+            return 0; // 19+ digits could overflow int64: not data this service ever wrote
+        }
+        int64_t value = 0;
+        for (const wchar_t c : digits)
+        {
+            if (c < L'0' || c > L'9')
+            {
+                return 0;
+            }
+            value = value * 10 + (c - L'0');
+        }
+        return value;
     }
 
     /// <summary>
@@ -317,6 +388,27 @@ namespace Agentmaster::Msg
             return L"<a href=\"" + TgEscapeHtmlAttribute(url) + L"\">" + TgEscapeHtml(label) + L"</a>";
         }
 
+        /// <summary>
+        /// A tab's state DOT in the rich render (§21.16.7). With a topic it is an in-text CALLBACK button showing the glyph: a tap
+        /// makes the bot put that topic first in the thread list (DirectoryFrontCallbackData), the way into a topic that Telegram
+        /// Android has, since no link opens one there. With no topic it is the plain glyph: there is no card to re-post. No style
+        /// attribute — the app's plain button — so the dot keeps its own state color.
+        /// </summary>
+        /// <param name="state">The tab's state (the glyph: StateGlyph, like the topic names).</param>
+        /// <param name="threadId">The tab's topic (0 = none).</param>
+        /// <returns>One &lt;tg-button&gt; element, or the bare glyph.</returns>
+        /// <exception cref="std::bad_alloc">If the element cannot be allocated.</exception>
+        inline std::wstring DirectoryDotHtml(SessionState state, int64_t threadId)
+        {
+            const std::wstring glyph{ StateGlyph(state) };
+            const std::wstring data = DirectoryFrontCallbackData(threadId);
+            if (data.empty())
+            {
+                return glyph;
+            }
+            return L"<tg-button type=\"callback_data\" data=\"" + TgEscapeHtmlAttribute(data) + L"\">" + glyph + L"</tg-button>";
+        }
+
         /// <summary>"&lt;b&gt;5&lt;/b&gt; running": a bold count and its word, the plural word for every count but 1.</summary>
         /// <param name="n">The count.</param>
         /// <param name="one">The word after 1.</param>
@@ -375,6 +467,24 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// The toast a dot's tap answers with (answerCallbackQuery's text; Telegram shows it at the top of the chat and caps it at 200
+    /// characters): which thread goes first in the thread list. The re-post itself follows on the service's next tick, so it says
+    /// "goes", not "is". A topic whose HISTORY is still being replayed keeps its card above the history until the replay is in
+    /// (the sticky card's rule, §21.9), so its toast says the move waits for that. The title is one line, trimmed and cut at the
+    /// chip's length (detail::DirectoryLabel), so the toast always fits.
+    /// </summary>
+    /// <param name="title">The tab's title ("" = "This thread").</param>
+    /// <param name="historyPending">The topic's history replay is not done (TopicBackfillPending).</param>
+    /// <returns>Plain text, under 200 characters.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring DirectoryFrontAnswer(std::wstring_view title, bool historyPending)
+    {
+        const std::wstring label = detail::DirectoryLabel(title);
+        const std::wstring who = label.empty() ? std::wstring{ L"This thread" } : L"\x201C" + label + L"\x201D";
+        return L"\x2191 " + who + (historyPending ? L" goes first in the thread list once its history is in" : L" goes first in the thread list");
+    }
+
+    /// <summary>
     /// Joins the tag universe with the open tabs: one DirectoryTag per tag, carrying the open tabs whose tag list names it
     /// (case-insensitively, the tag store's identity). A tag no open tab carries is kept, with no tabs: the RENDER leaves it out
     /// (RenderDirectory, the user's "Tags with 0 tabs should not be shown") and counts it for the service's log. A tab is listed
@@ -430,17 +540,21 @@ namespace Agentmaster::Msg
     /// 🧭 Dedicated topics
     /// [🔎 Search]
     /// 🏷 Tags
+    /// Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).
     /// 🟪 release · 3 tabs
-    /// 🔵 [🟦 Agentmaster]
-    /// 🟡 [🟩 docs]
-    /// ⚪ [🟦 an idle tab]        (a chip that opens nothing: the tab has no topic)
+    /// [🔵] [🟦 Agentmaster]
+    /// [🟡] [🟩 docs]
+    /// ⚪ [🟦 an idle tab]        (a plain dot and a chip that opens nothing: the tab has no topic)
     /// updated 5 minutes ago
     /// </code>
     /// The stats rows come FIRST: a pinned message's bar shows the start of its text, so the counts read at the top of the chat.
     /// Tags go in case-insensitive order of their names, the tabs of a tag in case-insensitive order of their titles — orders
     /// that do not move while the fleet works, so the content changes only when a count, a state, a title or a tag does. In the
-    /// rich render each title is a chip (a URL button) in the look nearest its color; in the classic render it is a link with
-    /// the color square first. Only a tag that an open tab carries is listed: a tag with no open tab (carried by closed
+    /// rich render each title is a chip (a URL button) in the look nearest its color, and the state dot before it is a
+    /// callback button that puts the tab's topic first in the thread list (§21.16.7: Telegram Android opens no topic from a
+    /// link) — one italic line under the Tags heading says which does what, when any listed tab has a topic. In the classic
+    /// render a title is a link with the color square first and the dot is plain text (Telegram HTML has no in-text callback
+    /// button). Only a tag that an open tab carries is listed: a tag with no open tab (carried by closed
     /// sessions only, or by none) is left out of both renders — the user's "Tags with 0 tabs should not be shown" (2026-10-17)
     /// — and counted in DirectoryRender::tagsWithoutTabs, so it changes neither the message nor its hash. A tag lists at most
     /// kDirectoryMaxTabsPerTag tabs ("… and 4 more"); when a render is full, the tags that do not fit are counted in one line
@@ -449,8 +563,8 @@ namespace Agentmaster::Msg
     /// <param name="m">The model.</param>
     /// <param name="updatedAtMs">When the content was rendered (the footer's date-time entity, Unix ms).</param>
     /// <param name="nowMs">The clock the footer's text uses (TgClockText's "same day" test).</param>
-    /// <returns>The two renders, the content hash (without the footer), the truncation counts and the count of the tags left
-    /// out for having no open tab.</returns>
+    /// <returns>The two renders, the content hash (without the footer), the truncation counts, the count of the tags left out
+    /// for having no open tab and the count of the dot buttons.</returns>
     /// <exception cref="std::bad_alloc">If a render cannot be allocated.</exception>
     inline DirectoryRender RenderDirectory(const DirectoryModel& m, int64_t updatedAtMs, int64_t nowMs)
     {
@@ -504,6 +618,16 @@ namespace Agentmaster::Msg
             tags.push_back(&t);
         }
         std::stable_sort(tags.begin(), tags.end(), [](const DirectoryTag* a, const DirectoryTag* b) { return detail::TitleLessCi(a->name, b->name); });
+        // The legend (§21.16.7), rich only and only when a dot is a button: the title and the dot do different things, and the
+        // phone's way in is the dot (Telegram Android opens no topic from a link). Before the sections, so the size checks below
+        // count it.
+        const bool anyDot = std::any_of(tags.begin(), tags.end(), [](const DirectoryTag* t) {
+            return std::any_of(t->tabs.begin(), t->tabs.end(), [](const DirectoryTab& tab) { return tab.threadId > 0; });
+        });
+        if (anyDot)
+        {
+            rich += L"<p><i>Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).</i></p>";
+        }
         if (tags.empty())
         {
             // ONE line for "no tag at all" and "tags, but none on an open tab": it is true of both, and a separate line for the
@@ -545,13 +669,19 @@ namespace Agentmaster::Msg
             std::wstring richSection = L"<p>" + head;
             std::wstring classicSection = L"\n\n" + head;
             const size_t listed = (std::min)(tabs.size(), kDirectoryMaxTabsPerTag); // (std::min): the <windows.h> macro
+            size_t sectionDots = 0; // counted into r.dotsShown only when the section is added (it may not fit)
             for (size_t i = 0; i < listed; ++i)
             {
                 const DirectoryTab& tab = *tabs[i];
                 const std::wstring label = detail::DirectoryTabLabel(tab);
                 const std::wstring url = DirectoryTopicUrl(m.botUsername, tab.threadId);
-                richSection += L"<br>" + std::wstring{ StateGlyph(tab.state) } + L" " + detail::DirectoryChipHtml(label, TgTitleColorSquare(tab.colorHex), url);
+                // Rich: the dot is the callback button (a tab with a topic), then the title chip; classic: the plain glyph.
+                richSection += L"<br>" + detail::DirectoryDotHtml(tab.state, tab.threadId) + L" " + detail::DirectoryChipHtml(label, TgTitleColorSquare(tab.colorHex), url);
                 classicSection += L"\n" + std::wstring{ StateGlyph(tab.state) } + L" " + detail::DirectoryLinkHtml(label, url);
+                if (tab.threadId > 0)
+                {
+                    ++sectionDots;
+                }
             }
             if (tabs.size() > listed)
             {
@@ -565,6 +695,7 @@ namespace Agentmaster::Msg
                 rich += richSection;
                 ++r.tagsShown;
                 r.tabsShown += listed;
+                r.dotsShown += sectionDots;
             }
             else
             {
@@ -600,15 +731,20 @@ namespace Agentmaster::Msg
     /// <summary>
     /// What a render lists, in words, for the service's log lines — the directory's post and the first edit of a run, the only
     /// places on the PC where the content of a sent directory can be read back: "2 tag(s), 5 tab chip(s)", then, only when there
-    /// are any, the tags left out for having no open tab and the tags the full message could not hold. The FORM (rich / HTML) is
-    /// not in it: the post logs the form it asks for, the edit the form Telegram took.
+    /// are any, the dot buttons of the rich render (§21.16.7), the tags left out for having no open tab and the tags the full
+    /// message could not hold. The FORM (rich / HTML) is not in it: the post logs the form it asks for, the edit the form
+    /// Telegram took — and only the rich form carries the dot buttons.
     /// </summary>
     /// <param name="r">The render (RenderDirectory's counts).</param>
-    /// <returns>The words, e.g. "2 tag(s), 5 tab chip(s), 6 tag(s) on no open tab not listed".</returns>
+    /// <returns>The words, e.g. "2 tag(s), 5 tab chip(s), 4 dot button(s), 6 tag(s) on no open tab not listed".</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring DescribeDirectoryRender(const DirectoryRender& r)
     {
         std::wstring s = std::to_wstring(r.tagsShown) + L" tag(s), " + std::to_wstring(r.tabsShown) + L" tab chip(s)";
+        if (r.dotsShown > 0)
+        {
+            s += L", " + std::to_wstring(r.dotsShown) + L" dot button(s)";
+        }
         if (r.tagsWithoutTabs > 0)
         {
             s += L", " + std::to_wstring(r.tagsWithoutTabs) + L" tag(s) on no open tab not listed";

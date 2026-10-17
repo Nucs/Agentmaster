@@ -157,6 +157,11 @@ namespace Agentmaster::Msg
         // How long a pick menu's action buttons live: the action tokens' lifetime (the pick itself never expires, so a
         // tap on it opens a fresh menu).
         constexpr int kSearchActionTtlHours = 2;
+
+        // §21.16.7: a second tap on the same directory dot within this window only answers. The first tap's re-post is queued
+        // or just sent, and the topic is first already; another would cost two more calls of the chat's flood budget (~20 a
+        // minute) for nothing. Longer than a double tap and the tick's few seconds, short enough that a later tap still works.
+        constexpr int64_t kFrontTapGapMs = 10 * 1000;
     }
 
     // ===== updates ===========================================================================
@@ -371,6 +376,61 @@ namespace Agentmaster::Msg
         }
         LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> already running");
         return std::wstring{ L"It is running already (" } + StateLabel(s->state) + L").";
+    }
+
+    std::wstring MessagingService::_bringTopicToFront(int64_t threadId)
+    {
+        const int64_t now = WallMs();
+        std::wstring sessionId;
+        bool historyPending = false;
+        bool repeated = false;
+        {
+            std::lock_guard lk{ _mtx };
+            // By THREAD: the dot was drawn with the topic's thread id, which survives a rekey of the topic to the tab's next
+            // conversation (a /clear or a /resume), while the session id it was drawn for may not.
+            for (const auto& [sid, t] : _state.topics)
+            {
+                if (t.threadId == threadId)
+                {
+                    sessionId = sid;
+                    historyPending = TopicBackfillPending(t);
+                    break;
+                }
+            }
+            if (!sessionId.empty())
+            {
+                auto& lastTap = _frontTapMs[threadId];
+                repeated = lastTap > 0 && now - lastTap < kFrontTapGapMs;
+                if (!repeated)
+                {
+                    lastTap = now;
+                    // The next per-topic pass re-posts the card SILENTLY (_refreshCard: the flag is kept until a post can carry
+                    // it, so a card post in flight or a history replay only delays it), and the tick folds the request into
+                    // _frontHeld at its re-sort pass, so the quiet re-sort leaves the topic first.
+                    _cards[sessionId].repostWanted = true;
+                    _frontRequests[sessionId] = now;
+                    _tickRequested = true;
+                }
+            }
+        }
+        if (sessionId.empty())
+        {
+            // The directory is edited at most every two minutes, so a dot can outlive its topic for a moment: the tab closed or
+            // went idle past its grace (its topic was deleted), or the topics were made again (new thread ids).
+            LogNav(L"remote telegram front thread " + std::to_wstring(threadId) + L" -> no topic");
+            return L"That thread is gone: its tab closed or went idle. The list follows within two minutes.";
+        }
+        const auto s = _session(sessionId);
+        const std::wstring answerText = DirectoryFrontAnswer(s ? s->title : std::wstring{}, historyPending);
+        if (repeated)
+        {
+            return answerText; // a double tap: the first tap's re-post is on its way, so nothing new is queued
+        }
+        _tickCv.notify_all(); // the re-post goes at the next tick, not at the end of the tick's wait (kTickMs)
+        _log(L"[msg] " + ShortId(sessionId) + L" put first in the thread list (a directory dot)" +
+             (historyPending ? std::wstring{ L"; its card moves once its history replay is in" } : std::wstring{}));
+        LogNav(L"remote telegram front " + ShortId(sessionId));
+        return answerText;
     }
 
     void MessagingService::_handleMessage(const json::Value& msg, bool edited)
@@ -1761,6 +1821,13 @@ namespace Agentmaster::Msg
         {
             answer(L"");
             _showSearchPick(*pick, threadId, messageId);
+            return;
+        }
+        // A directory DOT (§21.16.7): stateless like the Search buttons — it names the topic's thread, so it works again and after
+        // a restart. The toast says which thread goes first in the list (or why none does).
+        if (const int64_t frontThread = ParseDirectoryFrontCallbackData(data); frontThread > 0)
+        {
+            answer(_bringTopicToFront(frontThread));
             return;
         }
         if (data.rfind(L"c:", 0) == 0)

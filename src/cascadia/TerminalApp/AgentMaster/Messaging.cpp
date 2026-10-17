@@ -836,6 +836,10 @@ namespace Agentmaster::Msg
                 _resortTooLongLogged = false;
                 _resortQueue.clear();
                 _runningIds.clear();
+                // §21.16.7: a dot's hold and its pending requests are this run's (the order keys are rebuilt by the first sync).
+                _frontHeld.clear();
+                _frontRequests.clear();
+                _frontTapMs.clear();
                 _recreateStartedMs = 0;
                 // The DIRECTORY (§21.16): the outbox was cleared above, so no send of the last run is in flight; a new serial makes
                 // any answer still on its way stale. What the message shows stays in the state file (no edit for an unchanged
@@ -1691,6 +1695,11 @@ namespace Agentmaster::Msg
                                     _mirrors.clear();
                                     _cards.clear();
                                     _reacted.clear();
+                                    // §21.16.7: the dots' holds and requests name the OLD bot's topics (this runs on the tick
+                                    // thread, which owns _frontHeld).
+                                    _frontHeld.clear();
+                                    _frontRequests.clear();
+                                    _frontTapMs.clear();
                                     _backfill = BackfillBatch{}; // its topics are the old bot's
                                     // §21.16: the directory message is a message of the OLD bot's chat; the new bot posts its own.
                                     _state.directoryMessageId = 0;
@@ -3350,6 +3359,10 @@ namespace Agentmaster::Msg
             _state.topicLayout = kTopicLayoutVersion;
             _mirrors.clear();
             _cards.clear();
+            // §21.16.7: the old topics' dot requests and taps (thread ids that are about to be deleted); _frontHeld is cleared
+            // with the re-sort's queue below.
+            _frontRequests.clear();
+            _frontTapMs.clear();
             _backfill = BackfillBatch{}; // a batch of an old topic is pointless (its queued posts go with the purge below)
             _stateDirty = true;
             // Queued work for the old topics is pointless: their cards' posts / edits / deletes and work-log edits (keyed
@@ -3378,6 +3391,7 @@ namespace Agentmaster::Msg
         _replayTopics = 0;
         _resortFull = false;
         _resortQueue.clear();
+        _frontHeld.clear(); // §21.16.7: a recreation orders the whole list again; a dot's hold on an old topic means nothing now
         _log(L"[msg] recreation (" + why + L"): " + std::to_wstring(count) + L" old topic(s) are deleted first; then the list is made again, the oldest first, so it reads in MOST RECENT order");
         LogNav(L"remote telegram recreate-topics old=" + std::to_wstring(count));
         _appNote(L"♻ <b>Making the topics again</b> in MOST RECENT order (like the side panel): the " + std::to_wstring(count) +
@@ -4064,6 +4078,32 @@ namespace Agentmaster::Msg
         {
             const int64_t now = WallMs();
             const bool full = _resortFull;
+            // §21.16.7: the topics a directory DOT put first since the last pass. The poll thread only records the tap
+            // (_bringTopicToFront); the order key that ends the hold is the tick thread's (`_orderKeys`), so the fold happens here,
+            // before any of the returns below. A held topic whose topic is gone is dropped in the same pass.
+            {
+                std::unordered_map<std::wstring, int64_t> requests;
+                {
+                    std::lock_guard lk{ _mtx };
+                    requests.swap(_frontRequests);
+                    for (auto it = _frontHeld.begin(); it != _frontHeld.end();)
+                    {
+                        it = _state.topics.count(it->first) ? std::next(it) : _frontHeld.erase(it);
+                    }
+                }
+                for (const auto& kv : requests)
+                {
+                    const auto key = _orderKeys.find(kv.first);
+                    _frontHeld[kv.first] = key == _orderKeys.end() ? 0 : key->second.first;
+                    // A re-sort in progress re-posts other topics after the tap, which would push this one down again: it is
+                    // re-posted LAST instead (moved to the end of the queue), so it ends on top of what the re-sort builds.
+                    if (!_resortQueue.empty())
+                    {
+                        _resortQueue.erase(std::remove(_resortQueue.begin(), _resortQueue.end(), kv.first), _resortQueue.end());
+                        _resortQueue.push_back(kv.first);
+                    }
+                }
+            }
             if (_startupHoldOpen || _recreating)
             {
                 return; // the order keys are incomplete until every window has re-homed its tabs, and a recreation orders the list itself
@@ -4125,6 +4165,17 @@ namespace Agentmaster::Msg
                     if (t.threadId <= 0 || t.cardMessageId <= 0 || _orderKeys.find(sid) == _orderKeys.end())
                     {
                         continue;
+                    }
+                    // §21.16.7: a topic the user put first with a directory dot stays OUT of the order — neither moved down nor
+                    // counted as "not quiet" by its own re-post — while its session's order key is the one it had at the tap.
+                    // Its next turn changes the key; from then on it is ordered like any other topic.
+                    if (const auto held = _frontHeld.find(sid); held != _frontHeld.end())
+                    {
+                        if (_orderKeys.find(sid)->second.first == held->second)
+                        {
+                            continue;
+                        }
+                        _frontHeld.erase(held);
                     }
                     const int64_t lastMs = std::max(t.cardPostedMs, t.lastPostedMs);
                     if (!full && now - lastMs < kResortQuietMs)
