@@ -523,6 +523,15 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > gives every shown session a `why` (one line of evidence), and answers with a VERDICT sentence that
 > never names a screen. The table shows each `why` as a quote line under the row's title; the
 > Telegram Search topic shows one card per session with it (`MESSAGING.md` §21.10).
+>
+> **2026-10-17, later (the user's request; NOT BUILT yet): windows and tabs, and a new prompt**
+> (9.14). A third tool server, `tabs`: `list` (the windows and their tabs), `resume` and `fork` (a
+> session as a tab, after a chosen tab; refused with several windows open until the user names one)
+> and `deactivate` (one tab, on the user's request). The system prompt now has `# Instructional
+> Behaviors`, `## Tools` and `## Workflow Guidelines`: the model tells its plan ("I'll 1. ... 2. ...
+> 3."), which the page and the Telegram topic show, and answers descriptively instead of in one
+> sentence. Both conversations take the session database's tools when it is On and its service can
+> start.
 
 ### 9.1 What the user sees
 
@@ -613,9 +622,10 @@ look around freely. The show tool is the one place where the result changes.
 - **The result text** is compact JSON: the window, the counts, and one object per row (id, title,
   folder, branch, times, sizes, why it matched). Flags and lists appear only when they say
   something.
-- **The system prompt** has nine rules since 2026-10-17 (eight before; rules 4 to 6 are 9.12's:
-  read every candidate, a `why` each, a verdict sentence). The first is from 2026-10-13 (in no
-  build yet; production 0.6.8.19 has the seven rules without it):
+- **The system prompt** — ⚠ replaced later on 2026-10-17 by the three-part prompt of 9.14 (in no
+  build yet); what follows is the prompt it replaced. It had nine rules since 2026-10-17 (eight
+  before; rules 4 to 6 are 9.12's: read every candidate, a `why` each, a verdict sentence). The first
+  is from 2026-10-13 (production 0.6.8.19 has the seven rules without it):
   - The model's first step, for every request, starts with a mention, in one or two short lines,
     of which kinds of tool calls it can use for the request, out of everything its two tools can do
     (search by words; by folder, branch, tag, favorite or open; by a period; the full text; sort and
@@ -1047,6 +1057,134 @@ none of its 3 sessions in its 20 s.
 3. **Later: a cold start of about a second.** The first item of 9.11's "a cold index is slow": the
    catalog saved as one file and checked against each transcript's size and modification time, as
    a refresh does, so that a start reads one file instead of 3,671.
+
+### 9.14 Windows and tabs, and a prompt that explains itself (2026-10-17, NOT BUILT yet)
+
+> **The user's request of 2026-10-17:** enable the session database's tools in both conversations
+> (the Sessions page's and the Telegram Search topic's); add tools that resume or fork a session by
+> id — refusing, while more than one window is open, until the user names a window — and place the
+> new tab next to a tab chosen from a list of the windows and their tabs (titles, inferred folder,
+> newest turn start, newest activity), the same as the tab menu's Fork session; add a tool that
+> deactivates ONE tab at a time and only on the user's request; and give the system prompt three
+> parts — `# Instructional Behaviors`, `## Tools`, `## Workflow Guidelines` (numbered, covering every
+> kind of conversation about sessions and search) — with a model that is descriptive ("I'll 1., 2.,
+> 3.") and helpful instead of hasty. Written and tested in the m5 suite and with `cl /Zs`; no build,
+> no live model run yet.
+
+**The tabs server** (`AgentMaster/SessionSearchTools.{h,cpp}`; in both modes, last in the model's
+list so the search tools keep their places):
+
+| Tool | What it does |
+|---|---|
+| `mcp__tabs__list` | Every window — its number (1..N, creation order), short id, tab count, `last_used`, `asked_from`, `agent_manager_page` — and its tabs: `pos`, `title`, `kind` (claude / codex / shell), the session's short id (the same ids every other tool takes), `state` in the Triage Board's words, `dormant`, `adopted`, `dir`, `works_in` (the inferred folder, when it differs), `branch`, `last_turn` (the newest turn's start), `active` (the newest activity), `selected`. Filters: `window`, `dir` (the folder or works_in), `title`; `limit` per window (default 40, at most 200: the selected tab and the most recently active ones, listed in strip order, with a note when tabs were left out). Read-only. |
+| `mcp__tabs__resume` | Opens a closed session again as a tab: `id`; `window` (required while more than one is open); `after` (a pos or a session id of THAT window; without it, the end of the strip); `focus` (default false: a background tab, nothing changes on the user's view). An open session is never opened a second time: the result says where its tab is, and `focus:true` brings it to the front. |
+| `mcp__tabs__fork` | Opens a FORK (a new conversation that starts with the source's history; the source is untouched) as a tab: the same arguments plus `model`. Without `after` the fork goes right after its source's tab when the source is in that window (the tab menu's Fork session placement), else at the end. |
+| `mcp__tabs__deactivate` | Parks ONE tab (the tab menu's Deactivate ▸ Deactivate Tab): `id`, `cut_off_turn`. |
+
+**Guards in code**, not only in the prompt — with bypass permissions nothing else refuses a tool
+call (`SDK_HARNESS.md` §5.1):
+
+- With more than one window open and no `window`, resume and fork REFUSE. The refusal tells the
+  model not to choose and describes every window ("window 1 (id 8a2b1c3d): 24 tabs, "Agentmaster"
+  selected; this request came from it"); a fork's refusal also names the tab of its source. With
+  one window there is nothing to ask. `ResolveWindowArgument` takes a number, `#2`, `window 2`, a
+  short or whole window id (4 characters at least), and refuses an ambiguous prefix.
+- At most 5 opens (`kMaxTabOpensPerRequest`) and ONE deactivate per request; the request
+  generation restarts the counts. A window that refused an open gives its slot back; one that did
+  not answer in time keeps it spent (the tab may still open), and the model is told to list the tabs
+  before it tries again.
+- Deactivate takes one id (a list is refused); a session with no tab, or an adopted tab (a claude
+  started by hand in a shell), is refused; a dormant tab answers "nothing to do"; a running or
+  needs-approval tab only with `cut_off_turn:true`, after the user confirmed — a park cuts the turn
+  off (`HOOKS.md` "Cut-off turns").
+
+**How a call reaches a window** (`AgentMaster/WindowTabTools.h`; `Engine.h`
+`RegisterWindowAgentToolHandler` / `CollectWindowCensus` / `RunWindowTool` / `RunWindowToolOnHost`;
+`TerminalPage.AgentSessionsAi.cpp` `_RunAgentWindowTool`):
+
+- Every window registers an agent-tool sink at engine init (detached in `~TerminalPage`). Unlike
+  the Telegram bot's fire-and-forget sinks, every request is ANSWERED from the window's UI thread,
+  and the engine waits for the answers on the SDK's reader thread: a census 4 s, an open 15 s, a
+  park 10 s. A window that does not answer is left out of a census; a sink that throws counts as
+  answered at once; a second answer is ignored.
+- A window reports only its strip (position, title, session, selected tab): one pass over its tab
+  map, never a lookup per tab. The agent fills each tab's session facts (state, folders, branch,
+  times) from ONE `SnapshotLiveForCards`, off the UI thread (`EnrichWindowCensus`).
+- Resume runs `_ResumeSessionFromDisk`; fork runs the tab menu's `_ForkManagedSessionById` for a
+  session the registry knows (Codex-aware, the unsent draft carried) and `_ForkSessionFromDisk`
+  otherwise — each now with an explicit strip slot (after the asked tab; a fork after its source;
+  else the end — never Terminal's newTabPosition, so the model's report of the place stays true) and
+  returning the opened id. The tab opens in the background unless the request asks for focus. The
+  folder and title of a session the registry does not know come from its sidecar index, read on the
+  tool-call thread. Deactivate runs `_DeactivateTabsFromMenu` with the this-tab scope (its
+  focused-tab rule and strip keeper), after the window's own checks (adopted, dormant, a delivery
+  holding the input box).
+- The page's request carries its window (`SessionSearchAgent::Ask(text, _windowId)`): the list marks
+  it `asked_from`, so the model can offer it when it asks — it never takes it alone. A request from
+  Telegram has no origin.
+
+**The system prompt** (`kSystemPrompt` / `kDatabaseSystemPrompt`, composed at compile time from
+shared pieces so the two modes cannot drift; about 14,000 characters each):
+
+- An introduction, then **`# Instructional Behaviors`** (10, numbered): (1) open every request with
+  a plan — "I'll 1. ..., 2. ..., 3. ..." — before the first tool call and in the same message (no
+  extra model request), chosen from everything the tools can do; (2) the user sees only the messages
+  and the shown sessions, so every finding and action is in words; (3) end with a reply — what was
+  found or done, then what the user can do next — plain text, numbered lines, about 1,200 characters
+  at most, the shown sessions referred to by number (they follow the reply as cards on a phone, as
+  rows on the PC); (4) offer the likely next step as a one-word question; (5) act at once, ask only
+  for the user's decisions (which window, which of several sessions, cutting a turn off) as a
+  numbered choice; (6) read before showing, never invent an id, a window, a tab or a quote; (7) the
+  workspace is the user's: resume and fork only what was asked, deactivate only on an explicit
+  request and one tab per request; (8) follow-ups build on earlier results; (9) the user's language,
+  local times; (10) the `indexing` note.
+- **`## Tools`**: every tool, by group (finding and reading — they change nothing; showing; windows
+  and tabs — list reads, the other three change the workspace), with when and how to use it.
+- **`## Workflow Guidelines`** (19, numbered): a described session; exact words or an error; a file or
+  folder (`who_touched` in the database mode); a period (`timeline` in the database mode); a mark or
+  state; a question about what a session did or decided; a follow-up; nothing found; several equal
+  matches; resume; fork; the window choice; the place in the window (after the tab it belongs with:
+  a fork's source, else the most recently active tab working in the same folder, else a related one,
+  else the end); deactivate; questions about the workspace; token use and relatives (`usage` /
+  `related`, or "no tool for it" in the page mode); a pasted id; an out-of-scope request; a tool
+  error.
+- What it replaced: the nine rules of 9.3 / 9.12, whose reply was "exactly ONE short sentence, under
+  20 words" — the part the user called hasty. Carried over: the plan before the first call in the
+  same message (rule 1 of 2026-10-13, now meant for the user), read before show, a `why` each with the
+  user's words first, never "the screen", the `indexing` note. `show`'s result now asks for the reply
+  ("what you found or did ..., then the likely next step"), and the step cap rose from 12 to 16
+  (list + resume / fork, and one refused call, on top of a search request).
+
+**What the user sees of the plan:** the agent turns every text block the model writes before a tool
+call into the request's narration (`SessionSearchEventKind::Narration`,
+`SessionSearchSnapshot::narration`, at most 2,000 characters, the start kept). The page's strip shows
+it above the activity while the request runs, then the reply; the strip's text now wraps every line,
+scrolls past 180 DIP and can be selected. The Telegram bridge puts the narration above the answer,
+because the service posts nothing while a request runs.
+
+**The session database's tools:** both conversations take them when `sessionDbMode` is On at the
+app's start AND the service can start — `SearchDatabaseProfileIfUsable` asks
+`SessionDbServiceInstalled` whether `agentmaster-sessiondb.exe` has `duckdb.dll` beside it; if not,
+the conversation keeps the page search and hooks.log says why. Every loose layout until 2026-10-17
+lacked `duckdb.dll` (the wapproj's Content item never reached a registered build folder), so the
+database could not start on any install of this machine; `CascadiaPackage.wapproj`'s
+`CopyAgentmasterDuckDbToLayout` copies it now, and `tools\Swap-AgentmasterLayout.ps1` warns about a
+layout without it (a warning, so a rollback to an older slot stays possible). The default stays Off:
+the first run builds the database (37 minutes on this machine, `SESSIONS_DB.md` §16.4). Switching this
+machine's two profiles On belongs to the deploy of a build with the fix (not done yet).
+
+**Tests:** `tests_tabtools.cpp` (`TestTabTools`, 133 checks): the window rules; the four tools on fake
+windows (ids, flags, filters, the limit, the refusals, `after` by pos and by id, the default fork
+placement, the caps, an unanswered vs a refused open, every deactivate refusal); the engine's
+answered fan-out on a local Engine (order, the sink's own id, last-active, a silent window, a throwing
+sink, a double reply, one window, the host); both prompts' headings, plan rule, counts, tool names, no
+`deep` in the database prompt, ASCII. `tests_harness.cpp` and `tests_sessiondb.cpp` pin what carried
+over. Not run yet: the page's XAML, the windows' half (`_RunAgentWindowTool`), a live model.
+
+**Logs** (hooks.log): `[ai-search] tool resume|fork|deactivate <sid8> -> ...` (the agent, with the
+outcome), `[nav] ai-tool resume|fork <sid8> slot=N/M [bg|focus]` and `[nav] ai-tool deactivate <sid8>`
+(the window), `[ai-search] <conversation>: the session database mode is On, but its service is not
+installed ...`.
 
 ---
 

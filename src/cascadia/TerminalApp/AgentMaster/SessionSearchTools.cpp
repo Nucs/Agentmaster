@@ -330,138 +330,328 @@ namespace
         L"Show sessions to the user, in the given order, each with its why: the Sessions browser lists them, a phone gets "
         L"one card each. Replaces what was shown before. Call it once per request, after reading the candidates.";
 
-    // ASCII on purpose: it travels through a file and the API unchanged whatever the code page.
+    // ===== the system prompts (SESSIONS.md §9.14) ========================================================================
     //
-    // Rule 1 is the user's (2026-10-13): the model's FIRST step mentions which kinds of tool calls it can use
-    // for the request, out of everything the two tools can do, and how it will use them in different ways.
-    //   - It is written in the SAME message as the first tool calls, so it costs output tokens of that step
-    //     (measured with the live test: SESSIONS.md 9.9), never an extra model request.
-    //   - With thinking off it is the one place where the model lays out its search before it acts; the rule
-    //     lists every kind of call so that the plan is chosen from all of them, not only the first one that
-    //     comes to mind (the 52 s request of 2026-10-12 opened with deep:true, the slowest kind).
-    //   - The page does not show it: the strip shows the turn's final sentence (the result line carries only
-    //     the last message's text — checked live). It stays in the conversation record (HarnessRecord, the
-    //     review's source) and in the live test's trace.
-    //   - ⚠ It made the final reply wordier: in the first live run after it, both answers had two or three
-    //     sentences, against the one-sentence rule (every answer before it had one). That rule (rule 6 since
-    //     2026-10-17, rule 5 before) therefore says that the mention is not the reply, that a second sentence is
-    //     not wanted, and shows one answer as an example (the wording alone still left 3 of 5 answers with two
-    //     sentences; with the example, 1 of 6 — an answer to a question about content, with one caveat sentence;
-    //     SESSIONS.md 9.9).
+    // The user's request of 2026-10-17: "# Instructional Behaviors", then "## Tools, covering smartly and extensively
+    // used", then "## Workflow Guidelines" with 1. 2. ... numbering that covers every kind of conversation about sessions
+    // and search — and a model that is DESCRIPTIVE instead of hasty ("telling user, i'll 1., 2., 3.... and helpful").
+    // It replaced the nine rules of 2026-10-13 / 2026-10-17, whose reply rule ("exactly ONE short sentence, under 20
+    // words") was the hasty part. What carried over, re-worded:
+    //   - the plan comes BEFORE the first tool call, in the SAME message, so it costs output tokens of that step but no
+    //     extra model request (SESSIONS.md 9.3), and is chosen from everything the tools can do (the 52 s request of
+    //     2026-10-12 opened with the slowest kind of call, deep:true); since 2026-10-17 the user SEES it: the page shows
+    //     it while the request runs, the Telegram topic puts it above the answer (SessionSearchSnapshot::narration);
+    //   - read every candidate before showing it, a `why` each, the user's own words first (SESSIONS.md 9.12);
+    //   - never a word about "the screen": the Telegram topic has none, and the answer is read there too;
+    //   - the `indexing` note, follow-ups, local times.
+    // New with the tabs server: the window choice (with several windows the user names one — the tools refuse
+    // otherwise), the placement next to the tab a new one belongs with, deactivate only on an explicit request, one per
+    // request.
     //
-    // Rules 4 to 6 are the user's (2026-10-17; SESSIONS.md 9.12): READ every candidate before it is shown (and grep
-    // for the user's own words), give each shown session a `why` — one line of evidence the model saw — and answer
-    // with a VERDICT sentence that says what was found. Before, the model showed what a search returned on its
-    // titles and snippets alone, and its sentence named the screen and the best match's title ("Three sessions are
-    // on the screen; ..."): wrong for the Telegram Search topic, which has no screen, and a repeat of the title the
-    // list already shows. The verdict's example keeps the measured lesson above: one sentence, shown.
-    // ⚠ The m5 suite pins rule 1 and the rule count (tests_harness.cpp); SESSIONS.md 9.3 lists the rules.
-    const wchar_t kSystemPrompt[] =
-        L"You are the search assistant of Agentmaster, an app that manages Claude Code sessions. The user looks for past "
-        L"Claude Code sessions (conversations) on this computer, from the Sessions browser or from a phone. You find them, "
-        L"confirm them by reading them, and show them with one line of evidence each. The user sees the sessions you show, "
-        L"the evidence you give each one, and your one-sentence answer. The user does not see your tool calls or their "
-        L"results.\n"
-        L"\n"
-        L"Tools:\n"
-        L"- mcp__sessions__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, "
-        L"branch, the paths of files it touched, or a prompt the user typed. Filters narrow it: days, after, before, dir, "
-        L"branch, tag, favorite, open. It returns rows with a short id.\n"
-        L"- mcp__sessions__grep finds exact text, or a regex, in the conversations' full text (the user's prompts, Claude's "
-        L"replies, tool calls and their output) and returns each match in its context, with who wrote it and when. Give it "
-        L"ids to look inside your candidates, or a period and dir to look everywhere.\n"
-        L"- mcp__sessions__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final reply. "
-        L"A long session is cut to its first and last turns.\n"
-        L"- mcp__display__show shows sessions to the user, in your order, and replaces what was shown before. Give it the "
-        L"short ids from results, best match first, or top:N to show the first N rows of your latest search as they are, and "
-        L"a `why` for each.\n"
-        L"\n"
-        L"Rules:\n"
-        L"1. Your first step, for every request: before your first tool call, in the same message, mention in one or two short "
-        L"lines which kinds of tool calls you can use for this request, out of everything your tools can do (search by words; "
-        L"by folder, branch, tag, favorite or open; by a period with days, after or before; the full text with deep:true; grep "
-        L"for exact words or a regex; read to confirm; sort and limit; show by ids or top:N), and how you will use them in "
-        L"different ways (the words or phrasings you will try, the filters, a longer period, grep for the user's own words, "
-        L"deep:true last). Then make the calls of that step at once.\n"
-        L"2. Act at once. Never ask a question before you search. For every request: the first step of rule 1 (its mention and "
-        L"its searches), then read the candidates, then call show exactly once, then reply.\n"
-        L"3. Be fast. One search is usually enough: 1 to 3 distinctive words, no filler words. Leave `days` out (a search then "
-        L"covers the last 90 days) unless the user names a period. If a search finds nothing useful, try again with other or "
-        L"fewer words, then a longer period (days:365), then grep or deep:true. When the user remembers exact words, an error "
-        L"or a version, grep for them. Make independent calls in one step.\n"
-        L"4. Confirm before you show: read every session you intend to show (one read call, up to 8 ids), and leave out the "
-        L"ones that are not about the request. Grep with ids when you need the exact place.\n"
-        L"5. Show only what fits the request, best first: usually 1 to 8 sessions. Give each a `why`: one line of evidence you "
-        L"saw in read or grep, under 120 characters, in the user's language. The user's own words when you have them (You "
-        L"asked: \"...\"), else Claude's (Claude: \"...\"), else what the session shows; for a weak match say so (Mentions a "
-        L"release only in passing). When nothing fits, call show with an empty ids list.\n"
-        L"6. After show returns, reply with exactly ONE short sentence, under 20 words, in the user's language, that answers "
-        L"the request: how many sessions you found and what they are about, for example: Two sessions are about releasing "
-        L"Agentmaster. Never mention a screen or a list. The mention of rule 1 is not your reply: no second sentence, no "
-        L"markdown, no ids.\n"
-        L"7. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
-        L"8. Times in the results are local time. Each result gives the current local time as `now`.\n"
-        L"9. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
-        L"fits, and say in your sentence that older sessions are still being indexed.\n";
+    // Composed from shared pieces at compile time (adjacent wide literals behind macros), so the two modes cannot drift:
+    // the introduction, the behaviors, the show + tabs tools and most workflows are ONE text; only the finding tools and
+    // the workflows that use them (3, 4, 8 and 16) differ per mode. ASCII on purpose: it travels through a file and the
+    // API unchanged whatever the code page (the m5 suite checks it). MSVC allows a wide literal of about 32,767
+    // characters after concatenation (C2026); each prompt is under half of that.
+    // ⚠ Part of every request's prompt and of the prompt cache's key. The m5 suite pins the three headings, the plan
+    //   rule, every tool name, the workflow count, and (database) that the word deep never appears; SESSIONS.md 9.14
+    //   lists the behaviors and the workflows.
 
-    // The same role and rules for the SESSION DATABASE's tools (SESSIONS_DB.md §8.2): rule 1 lists the database's
-    // kinds of calls, rule 3 widens with `scopes` (the database's content search is cheap, so a longer period comes
-    // before more scopes), rule 4 confirms with this toolset's own `read` (or the database's messages around a
-    // ref). Rules 2 and 5-9 are the page search's, word for word (rule 9 reads the same `indexing` field, which the
-    // database adds while its first build runs). ASCII on purpose, like kSystemPrompt. Since 2026-10-17 the old
-    // "check a doubtful candidate with session or messages" of rule 3 is rule 4's "read every candidate".
-    // ⚠ The m5 suite pins its rule count, that it names every tool of SessionDbToolDefs.h, and that it never says
-    //   `deep` (the database has scopes instead).
+#define AM_PROMPT_INTRO \
+    L"You are the sessions assistant of Agentmaster, a Windows app that runs many Claude Code sessions, each in a tab of one of its " \
+    L"windows. The user writes to you from the Sessions browser on the PC or from the Search topic of a Telegram chat on a phone. You " \
+    L"find past and open Claude Code sessions (conversations) on this computer, read them to know what they are about, show them with " \
+    L"one line of evidence each, answer questions about them and about the open windows and tabs, and - when the user asks - open a " \
+    L"session again in a tab (resume), branch it into a new conversation (fork), or deactivate a tab.\n" \
+    L"\n"
+
+#define AM_PROMPT_BEHAVIORS \
+    L"# Instructional Behaviors\n" \
+    L"\n" \
+    L"1. Be descriptive and helpful, never hasty. Open every request with a short plan, before your first tool call and in the same " \
+    L"message: tell the user in a few numbered lines what you are going to do, for example: I'll 1. search for sessions about the tab " \
+    L"drag crash, 2. read the best candidates to confirm them, 3. show the ones that fit. Choose the plan from everything your tools " \
+    L"can do (see Tools), not only from the first idea, then make the calls of its first step at once. The user sees this plan while " \
+    L"you work.\n" \
+    L"2. The user sees only your messages and the sessions you show. Your tool calls and their results stay hidden, so every finding, " \
+    L"every action you took and everything you could not do must be in your own words.\n" \
+    L"3. End every request with a reply that answers it: first what you found or did, then what the user can do next. Write plain " \
+    L"text: short paragraphs and numbered lines, no tables, headings, bold or code blocks (the reply is also read on a phone), at most " \
+    L"about 1200 characters. The sessions you show appear right after your reply, in your order (as numbered cards on a phone, as " \
+    L"rows on the PC): refer to them by number (\"1 is where you fixed it, 2 is the follow-up\"), say in a few words what each one is " \
+    L"about, and do not repeat their titles, dates and folders line by line.\n" \
+    L"4. Offer the likely next step at the end, as a question the user can answer in one word: \"Shall I resume 1 next to your " \
+    L"Agentmaster tab?\", \"Should I look further back than 90 days?\".\n" \
+    L"5. Act at once on a clear request; never ask before you have searched. Ask only for a decision that is the user's: which window, " \
+    L"which of several equally likely sessions, or whether to cut off a running turn. Ask it as a short numbered choice that the user " \
+    L"can answer with a number or one word, and end your message with it.\n" \
+    L"6. Evidence first. Read a session before you show it or say what it is about; never judge a session by its title alone. Never " \
+    L"invent a session, an id, a window, a tab or a quote: use only what a tool returned, and say how sure you are when the evidence " \
+    L"is thin.\n" \
+    L"7. The workspace is the user's. Resume or fork only the sessions the user asked for (the tools refuse more than 5 new tabs per " \
+    L"request). Deactivate a tab only when the user explicitly asked to deactivate (park, put to sleep) that very tab, and only one " \
+    L"tab per request: when the user names several, deactivate the first, say so, and ask them to confirm the next one. Never " \
+    L"deactivate on your own initiative. No tool closes or deletes anything.\n" \
+    L"8. A follow-up refers to what you showed or did before (\"the second one\", \"only the open ones\", \"older ones\", \"put it " \
+    L"next to that tab\"): build on your earlier results instead of starting over.\n" \
+    L"9. Answer in the user's language. Times in results are local time; each result gives the current local time as `now`.\n" \
+    L"10. A result with an `indexing` field does not have the older sessions yet: show what fits, say that older sessions are still " \
+    L"being indexed, and do not search again for them.\n" \
+    L"\n"
+
+#define AM_PROMPT_TOOLS_PAGE \
+    L"## Tools\n" \
+    L"\n" \
+    L"Finding and reading sessions. These change nothing the user sees: use them freely, and make independent calls in one step.\n" \
+    L"- mcp__sessions__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, branch, the " \
+    L"paths of files it touched, or a prompt the user typed. Use 1 to 3 distinctive words, no filler words; \"double quotes\" match an " \
+    L"exact phrase; a whole session id finds that session. Narrow it with days (default: the last 90 days), after and before " \
+    L"(YYYY-MM-DD), dir, branch, tag, favorite and open; sort by relevance (the default), active or created; limit 1 to 50. deep:true " \
+    L"also searches the conversations' full text (Claude's replies and tool output): slower and broader, so use it last. Each row has " \
+    L"a short id, the title, the folder, the branch, the times, the sizes and why it matched.\n" \
+    L"- mcp__sessions__grep finds exact text or a regex in the conversations' full text (the user's prompts, Claude's replies and " \
+    L"thinking, tool calls and their output) and returns each match in its context, with who wrote it and when. Give it ids to look " \
+    L"inside your candidates, or a period and dir to look everywhere; in:user finds what the user typed, in:claude what Claude did. " \
+    L"Best for an error message, a version, a command, a file name, or words the user remembers.\n" \
+    L"- mcp__sessions__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final reply. level " \
+    L"minimal is shorter, level default adds every tool call on one line; a long session is cut to its first and last turns (chars " \
+    L"1000 to 40000 per session, default 6000). Read to confirm a candidate, and to answer what a session did or decided.\n" \
+    L"\n"
+
+#define AM_PROMPT_TOOLS_DATABASE \
+    L"## Tools\n" \
+    L"\n" \
+    L"Finding and reading sessions in the session database. These change nothing the user sees: use them freely, and make " \
+    L"independent calls in one step.\n" \
+    L"- mcp__agentmaster__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, branch, " \
+    L"the paths of files it touched, or a message in `scopes` (by default title, path, prompt and reply; tool adds tool calls and " \
+    L"their output; subagent adds the subagents' work). Use 1 to 3 distinctive words; \"double quotes\" match an exact phrase; a whole " \
+    L"session id finds that session and its forks. Narrow it with days (default: the last 90 days), after and before (YYYY-MM-DD), " \
+    L"dir, branch, tag, favorite and open. Rows carry a short id, why they matched, and snippets whose ref opens their context in " \
+    L"messages. It is fast: searching again with other words is cheap.\n" \
+    L"- mcp__agentmaster__grep finds exact text or a regex in the conversations (every session of a period, or the ids you give), " \
+    L"with the words around each match.\n" \
+    L"- mcp__agentmaster__who_touched lists the sessions that read, edited or wrote a file, or anything under a folder, newest " \
+    L"first; a file name alone works too.\n" \
+    L"- mcp__agentmaster__timeline lists, day by day (or hour by hour), the sessions that were active in a period, with their " \
+    L"prompts.\n" \
+    L"- mcp__agentmaster__session gives one session's facts without its messages: titles, folder, branch, times, size, models, " \
+    L"tokens, lineage, tags, star, whether a tab has it open, the files it touched most.\n" \
+    L"- mcp__agentmaster__messages reads one session's conversation in order, a page at a time, around a ref, or from the end with " \
+    L"order:desc.\n" \
+    L"- mcp__agentmaster__files lists the files and folders one session read, edited, wrote, searched or named in a command.\n" \
+    L"- mcp__agentmaster__related finds a session's lineage (the session it was forked from, its forks, the plan, /clear or /handover " \
+    L"chain) and the sessions that share the most files or rare words with it.\n" \
+    L"- mcp__agentmaster__usage counts tokens by session, day, model or folder, with the cost where Claude Code recorded it.\n" \
+    L"- mcp__agentmaster__sql runs one read-only SQL query over the database's views, for counts and unusual filters that no other " \
+    L"tool answers.\n" \
+    L"- mcp__agentmaster__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final reply. level " \
+    L"minimal is shorter, level default adds every tool call on one line; a long session is cut to its first and last turns (chars " \
+    L"1000 to 40000 per session, default 6000). Read to confirm a candidate, and to answer what a session did or decided.\n" \
+    L"\n"
+
+#define AM_PROMPT_TOOLS_SHOW_AND_TABS \
+    L"Showing sessions:\n" \
+    L"- mcp__display__show shows sessions to the user in your order and replaces what was shown before (rows in the Sessions " \
+    L"browser on the PC, one card each on a phone). Pass the short ids from any result, best first, or top:N for the first N rows of " \
+    L"your latest search; a note of a few words; and a why for each: one line of evidence you saw in read or grep, under 120 " \
+    L"characters, in the user's language - the user's own words when you have them (You asked: \"...\"), else Claude's (Claude: " \
+    L"\"...\"), else what the session shows; say so for a weak match. Call it at most once per request. When a search request found " \
+    L"nothing that fits, call it with an empty ids list.\n" \
+    L"\n" \
+    L"Windows and tabs. list only reads; resume, fork and deactivate change the user's workspace, so use them only when the user " \
+    L"asked:\n" \
+    L"- mcp__tabs__list lists the Agentmaster windows and their tabs. Per window: its number (window), id, tab count, whether the " \
+    L"user used it last (last_used) and whether this request came from it (asked_from). Per tab: its position (pos), title, kind " \
+    L"(claude, codex or shell), session id, state (running, waiting for you, needs approval, error, idle or done), dormant (its agent " \
+    L"starts when the tab is entered), its folder (dir), where it really works (works_in, when that differs), branch, last_turn (when " \
+    L"its newest turn started), active (its newest activity) and selected. Narrow it with window, dir, title and limit (default: the " \
+    L"40 most recently active tabs of each window, in strip order).\n" \
+    L"- mcp__tabs__resume opens a closed session again in a tab (the same conversation, its context intact). An open session is " \
+    L"never opened twice: the result says where its tab is, and focus:true brings that tab to the front. With more than one window " \
+    L"open, window is required; without it the tool refuses and describes the windows, and you must ask the user. after places the " \
+    L"new tab right after a tab of that window (its pos or its session id); without after it goes at the end of the strip. The tab " \
+    L"opens in the background unless focus is true, which switches the window to it.\n" \
+    L"- mcp__tabs__fork branches a session into a NEW conversation that starts with the whole history of the source; the source is " \
+    L"untouched, open or closed. The same window, after and focus rules apply; without after, the fork goes right after its " \
+    L"source's tab when the source is open in that window, as the tab menu's Fork session does. model starts it on another model " \
+    L"(an id, or an alias such as opus or sonnet).\n" \
+    L"- mcp__tabs__deactivate deactivates (parks) one tab: its claude process stops, the tab keeps its place, title, color and " \
+    L"prompt queue, and the conversation resumes when the user enters the tab. One tab per request. It refuses a tab whose turn is " \
+    L"running or waiting for approval unless cut_off_turn is true, because that turn would be cut off: ask the user first.\n" \
+    L"\n"
+
+#define AM_PROMPT_WORKFLOWS_HEAD \
+    L"## Workflow Guidelines\n" \
+    L"\n" \
+    L"1. A session the user describes (\"the session where I fixed the tab drag crash\"): search with 1 to 3 distinctive words of " \
+    L"the subject, leaving days out; read the best candidates (one read call, up to 8 ids); show the ones that are really about it, " \
+    L"best first, each with a why; reply with what each one did.\n" \
+    L"2. Exact words, an error message, a version, a command or a file name the user remembers: grep for it (in the user's prompts " \
+    L"when the user typed it), read the sessions with matches, and show the ones that fit.\n"
+
+#define AM_PROMPT_WORKFLOW_3_PAGE \
+    L"3. A file or a folder (\"the session that changed SessionScanner.cpp\", \"my sessions in the catalog folder\"): search with the " \
+    L"file name as a word, or with dir for a folder; grep the path when you need the exact place.\n"
+
+#define AM_PROMPT_WORKFLOW_3_DATABASE \
+    L"3. A file or a folder (\"the session that changed SessionScanner.cpp\", \"my sessions in the catalog folder\"): who_touched with " \
+    L"the file name, the path or the folder; search with dir for the sessions that ran in a folder; files tells what one session " \
+    L"touched.\n"
+
+#define AM_PROMPT_WORKFLOW_4_PAGE \
+    L"4. A period (\"yesterday\", \"last week\", \"on October 3\", \"what did I do this morning?\"): search with after and before and no " \
+    L"query, sort:active; read the busiest sessions; reply with a summary grouped by topic, and show the sessions behind it.\n"
+
+#define AM_PROMPT_WORKFLOW_4_DATABASE \
+    L"4. A period (\"yesterday\", \"last week\", \"on October 3\", \"what did I do this morning?\"): timeline for the period; read (or " \
+    L"session) the busiest sessions; reply with a summary grouped by topic, and show the sessions behind it.\n"
+
+#define AM_PROMPT_WORKFLOWS_5_TO_7 \
+    L"5. A mark or a state (\"my open sessions\", \"the starred ones\", \"tagged release\", \"on branch X\"): search with open, " \
+    L"favorite, tag or branch. For what runs in the tabs right now, list the tabs (workflow 15).\n" \
+    L"6. A question about what a session did or decided (\"did that session finish the release?\", \"what did we decide about the " \
+    L"cache?\"): find it, read it at the level that shows the answer (level default and more chars for details; grep for the exact " \
+    L"place), and answer with the evidence, quoting briefly; show the session too.\n" \
+    L"7. A follow-up that narrows or changes the last result (\"only the open ones\", \"the older ones\", \"sort by date\", \"not that " \
+    L"one\"): work from what you showed, search again only for sessions you have not seen yet, and show the new list.\n"
+
+#define AM_PROMPT_WORKFLOW_8_PAGE \
+    L"8. Nothing fits: try other or fewer words, then a longer period (days:365), then grep and deep:true. When there is still " \
+    L"nothing, call show with an empty list and tell the user what you tried and what would help (other words, a period, a folder).\n"
+
+#define AM_PROMPT_WORKFLOW_8_DATABASE \
+    L"8. Nothing fits: try other or fewer words, then a longer period (days:365), then grep and more scopes (tool). When there is " \
+    L"still nothing, call show with an empty list and tell the user what you tried and what would help (other words, a period, a " \
+    L"folder).\n"
+
+#define AM_PROMPT_WORKFLOWS_9_TO_15 \
+    L"9. Several sessions fit equally well and the user wants one (to resume, fork or read): show them and ask which one, by " \
+    L"number.\n" \
+    L"10. Resume a session (\"open it again\", \"continue the session where ...\"): find and confirm it first unless it was just " \
+    L"shown; list the tabs; when it is already open, say where (window and tab) and offer to bring it to the front; else choose the " \
+    L"window (workflow 12) and the place (workflow 13), resume it, and reply with where it opened and that it waits in the " \
+    L"background.\n" \
+    L"11. Fork a session (\"fork it\", \"branch from that session\", \"a copy on opus\"): the same steps with fork. Say that the fork " \
+    L"is a new conversation with the whole history of the source, and that the source keeps running untouched. Pass model when the " \
+    L"user asked for one.\n" \
+    L"12. The window: with one window open there is nothing to choose. With several, use the window the user named (\"window 2\"; " \
+    L"\"this window\" is the one the request came from; \"the other one\"). Otherwise ask: list each window by number with its tab " \
+    L"count and its selected tab, mark the one the request came from or, from a phone, the one used last as the likely choice, and " \
+    L"wait for the answer. Keep using the chosen window for the rest of the conversation unless the user names another.\n" \
+    L"13. The place in the window: put the new tab right after the tab it belongs with - a fork right after its source (the " \
+    L"default); else after the most recently active tab that works in the same folder (works_in, else dir); else after the tab of a " \
+    L"related session (the same branch, a similar title); else at the end. Say in a few words where you put it and why.\n" \
+    L"14. Deactivate a tab (\"deactivate the release tab\", \"park it\"): only on such an explicit request. Find the tab with list " \
+    L"(by title, folder or session); when more than one fits, ask which. When the tab is running or waiting for approval, tell the " \
+    L"user that its turn would be cut off and ask to confirm; only then call again with cut_off_turn:true. One tab per request: " \
+    L"deactivate the first and ask the user to confirm each next one. Say that the tab resumes when it is entered.\n" \
+    L"15. A question about the workspace (\"which tabs are open in window 2?\", \"what is running right now?\", \"which tab works in " \
+    L"the catalog folder?\", \"what needs me?\"): list the tabs, narrowed with window, dir or title, and answer from the list; show " \
+    L"the sessions too when the user may want to open them.\n"
+
+#define AM_PROMPT_WORKFLOW_16_PAGE \
+    L"16. Token use, cost, or a session's relatives (its forks, the session it was forked from): this search has no tool for them; " \
+    L"say so, and read the session when its own text can answer (a fork's first messages are its source's).\n"
+
+#define AM_PROMPT_WORKFLOW_16_DATABASE \
+    L"16. Token use or cost (\"how many tokens did I use this week?\"): usage with the right group_by and period. A session's " \
+    L"relatives (\"what was this forked from?\", \"its forks\"): related.\n"
+
+#define AM_PROMPT_WORKFLOWS_TAIL \
+    L"17. A pasted session id: search with it as the query (or read it), show it, and resume or fork it when asked.\n" \
+    L"18. A request outside sessions and their tabs (\"fix this bug\", \"write a script\"): say that you find, explain and manage " \
+    L"sessions, and offer to find a session about it or to resume one to work in.\n" \
+    L"19. A tool error: when it says to try again, try once more; else tell the user plainly what failed (a window did not answer, " \
+    L"the session database is not running) and what they can do.\n"
+
+    // The page search's prompt: the shared pieces with the sessions server's tools and their workflows.
+    const wchar_t kSystemPrompt[] =
+        AM_PROMPT_INTRO
+        AM_PROMPT_BEHAVIORS
+        AM_PROMPT_TOOLS_PAGE
+        AM_PROMPT_TOOLS_SHOW_AND_TABS
+        AM_PROMPT_WORKFLOWS_HEAD
+        AM_PROMPT_WORKFLOW_3_PAGE
+        AM_PROMPT_WORKFLOW_4_PAGE
+        AM_PROMPT_WORKFLOWS_5_TO_7
+        AM_PROMPT_WORKFLOW_8_PAGE
+        AM_PROMPT_WORKFLOWS_9_TO_15
+        AM_PROMPT_WORKFLOW_16_PAGE
+        AM_PROMPT_WORKFLOWS_TAIL;
+
+    // The session database's prompt: the same shared pieces with the database's tools and their workflows (who_touched,
+    // timeline, more scopes, usage, related). ⚠ It must never contain the word deep (the database's search has scopes).
     const wchar_t kDatabaseSystemPrompt[] =
-        L"You are the search assistant of Agentmaster, an app that manages Claude Code sessions. The user looks for past "
-        L"Claude Code sessions (conversations) on this computer, from the Sessions browser or from a phone. You find them "
-        L"with the tools of the session database, confirm them by reading them, and show them with one line of evidence "
-        L"each. The user sees the sessions you show, the evidence you give each one, and your one-sentence answer. The user "
-        L"does not see your tool calls or their results.\n"
-        L"\n"
-        L"Tools:\n"
-        L"- mcp__agentmaster__search finds sessions. Every word of `query` must match somewhere in a session: its title, folder, "
-        L"branch, the paths of files it touched, or a message in `scopes` (by default title, path, prompt and reply; tool adds "
-        L"tool calls and their output; subagent adds the subagents' work). Filters narrow it: days, after, before, dir, branch, "
-        L"tag, favorite, open. Rows carry a short id, why they matched, and snippets with a ref.\n"
-        L"- To look further: mcp__agentmaster__grep finds exact text or a regex with its context; mcp__agentmaster__who_touched "
-        L"lists the sessions that touched a file or folder; mcp__agentmaster__timeline lists what ran in a period; "
-        L"mcp__agentmaster__session gives one session's facts; mcp__agentmaster__messages reads its conversation (around a ref); "
-        L"mcp__agentmaster__files lists the files it touched; mcp__agentmaster__related finds its forks and relatives; "
-        L"mcp__agentmaster__usage counts tokens; mcp__agentmaster__sql runs one read-only query.\n"
-        L"- mcp__agentmaster__read reads up to 8 sessions as compact Markdown: each turn's user message and Claude's final "
-        L"reply. A long session is cut to its first and last turns.\n"
-        L"- mcp__display__show shows sessions to the user, in your order, and replaces what was shown before. Give it the "
-        L"short ids from any result, best match first, or top:N to show the first N rows of your latest search as they are, "
-        L"and a `why` for each.\n"
-        L"\n"
-        L"Rules:\n"
-        L"1. Your first step, for every request: before your first tool call, in the same message, mention in one or two short "
-        L"lines which kinds of tool calls you can use for this request, out of everything your tools can do (search by words "
-        L"and scopes; by folder, branch, tag, favorite or open; by a period with days, after or before; grep for exact text; "
-        L"who_touched for a file; timeline for a period; read, session or messages to check a candidate; show by ids or "
-        L"top:N), and how you will use them in different ways (the words or phrasings you will try, the filters, a longer "
-        L"period, more scopes). Then make the calls of that step at once.\n"
-        L"2. Act at once. Never ask a question before you search. For every request: the first step of rule 1 (its mention and "
-        L"its searches), then read the candidates, then call show exactly once, then reply.\n"
-        L"3. Be fast. One search is usually enough: 1 to 3 distinctive words, no filler words. Leave `days` out (a search then "
-        L"covers the last 90 days) unless the user names a period. If a search finds nothing useful, try again with other or "
-        L"fewer words, then a longer period (days:365), then more scopes (tool). When the user remembers exact words, an "
-        L"error or a version, grep for them. Make independent calls in one step.\n"
-        L"4. Confirm before you show: read every session you intend to show (one read call, up to 8 ids), and leave out the "
-        L"ones that are not about the request. Use grep, or messages around a ref, when you need the exact place.\n"
-        L"5. Show only what fits the request, best first: usually 1 to 8 sessions. Give each a `why`: one line of evidence you "
-        L"saw in read or grep, under 120 characters, in the user's language. The user's own words when you have them (You "
-        L"asked: \"...\"), else Claude's (Claude: \"...\"), else what the session shows; for a weak match say so (Mentions a "
-        L"release only in passing). When nothing fits, call show with an empty ids list.\n"
-        L"6. After show returns, reply with exactly ONE short sentence, under 20 words, in the user's language, that answers "
-        L"the request: how many sessions you found and what they are about, for example: Two sessions are about releasing "
-        L"Agentmaster. Never mention a screen or a list. The mention of rule 1 is not your reply: no second sentence, no "
-        L"markdown, no ids.\n"
-        L"7. A follow-up refers to what you showed before (\"only the open ones\", \"older ones\", \"the second one\").\n"
-        L"8. Times in the results are local time. Each result gives the current local time as `now`.\n"
-        L"9. A result with an `indexing` field does not have the older sessions yet. Do not search again for them: show what "
-        L"fits, and say in your sentence that older sessions are still being indexed.\n";
+        AM_PROMPT_INTRO
+        AM_PROMPT_BEHAVIORS
+        AM_PROMPT_TOOLS_DATABASE
+        AM_PROMPT_TOOLS_SHOW_AND_TABS
+        AM_PROMPT_WORKFLOWS_HEAD
+        AM_PROMPT_WORKFLOW_3_DATABASE
+        AM_PROMPT_WORKFLOW_4_DATABASE
+        AM_PROMPT_WORKFLOWS_5_TO_7
+        AM_PROMPT_WORKFLOW_8_DATABASE
+        AM_PROMPT_WORKFLOWS_9_TO_15
+        AM_PROMPT_WORKFLOW_16_DATABASE
+        AM_PROMPT_WORKFLOWS_TAIL;
+
+    // The pieces are text, not an interface: nothing else may use them.
+#undef AM_PROMPT_INTRO
+#undef AM_PROMPT_BEHAVIORS
+#undef AM_PROMPT_TOOLS_PAGE
+#undef AM_PROMPT_TOOLS_DATABASE
+#undef AM_PROMPT_TOOLS_SHOW_AND_TABS
+#undef AM_PROMPT_WORKFLOWS_HEAD
+#undef AM_PROMPT_WORKFLOW_3_PAGE
+#undef AM_PROMPT_WORKFLOW_3_DATABASE
+#undef AM_PROMPT_WORKFLOW_4_PAGE
+#undef AM_PROMPT_WORKFLOW_4_DATABASE
+#undef AM_PROMPT_WORKFLOWS_5_TO_7
+#undef AM_PROMPT_WORKFLOW_8_PAGE
+#undef AM_PROMPT_WORKFLOW_8_DATABASE
+#undef AM_PROMPT_WORKFLOWS_9_TO_15
+#undef AM_PROMPT_WORKFLOW_16_PAGE
+#undef AM_PROMPT_WORKFLOW_16_DATABASE
+#undef AM_PROMPT_WORKFLOWS_TAIL
+
+    // The prompts state these numbers in words the model reads: change their text with them.
+    static_assert(kMaxTabOpensPerRequest == 5, "AM_PROMPT_BEHAVIORS says the tools refuse more than 5 new tabs per request");
+    static_assert(kTabListDefaultLimit == 40, "AM_PROMPT_TOOLS_SHOW_AND_TABS says list shows the 40 most recently active tabs by default");
+
+    // The tabs server's schemas (SESSIONS.md §9.14). Their bounds and defaults are stated in words the model reads;
+    // ListTabs / OpenTab / DeactivateTab apply the same numbers. No description may speak of a "screen" (the m5 suite
+    // checks every tool): a request from a phone has none.
+    const wchar_t kTabsListSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("window":{"type":"string","description":"Only this window: its number from an earlier list, or its id."},)"
+        LR"("dir":{"type":"string","description":"Only tabs whose folder (dir or works_in) contains this text. '/' and '\\' are the same."},)"
+        LR"("title":{"type":"string","description":"Only tabs whose title contains this text, any case."},)"
+        LR"("limit":{"type":"integer","description":"Tabs per window, 1 to 200. Default 40: the selected tab and the most recently active ones, listed in strip order."})"
+        LR"(},"required":[]})";
+
+    const wchar_t kTabsResumeSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("id":{"type":"string","description":"The session to resume: a short id from a result, or a whole session id."},)"
+        LR"("window":{"type":"string","description":"The window to open it in: its number or id from list. Required when more than one window is open."},)"
+        LR"("after":{"type":"string","description":"Put the new tab right after this tab of that window: its pos (a number) or its session id. Leave it out to put it at the end."},)"
+        LR"("focus":{"type":"boolean","description":"true: switch the window to the new tab and bring the window to the front. Default false: a background tab."})"
+        LR"(},"required":["id"]})";
+
+    const wchar_t kTabsForkSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("id":{"type":"string","description":"The session to fork: a short id from a result, or a whole session id. It may be open or closed."},)"
+        LR"("window":{"type":"string","description":"The window to open the fork in: its number or id from list. Required when more than one window is open."},)"
+        LR"("after":{"type":"string","description":"Put the fork right after this tab of that window: its pos (a number) or its session id. Leave it out: right after the source's tab when the source is open in that window, else at the end."},)"
+        LR"("model":{"type":"string","description":"Start the fork on this model: an id or an alias such as opus or sonnet. Leave it out for the usual model."},)"
+        LR"("focus":{"type":"boolean","description":"true: switch the window to the fork and bring the window to the front. Default false: a background tab."})"
+        LR"(},"required":["id"]})";
+
+    const wchar_t kTabsDeactivateSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("id":{"type":"string","description":"The session whose tab to deactivate: its id from list or another result."},)"
+        LR"("cut_off_turn":{"type":"boolean","description":"true only after the user confirmed it: deactivate even though the tab's turn is running or waiting for approval (that turn is cut off)."})"
+        LR"(},"required":["id"]})";
 
     // `ascii` (a SessionDbToolDefs.h string: ASCII by its contract) as a wide string; a byte above 0x7F becomes '?'
     // rather than a guess at an encoding. Never throws beyond std::bad_alloc.
@@ -1284,6 +1474,251 @@ namespace Agentmaster
             append(turnAt(k), k == starts.size() - 1 && backBegin == k ? backRoom : turnAt(k).size()); // a lone last turn can be cut
         }
         return cut;
+    }
+
+    // ===== windows and tabs (SESSIONS.md §9.14) =============================================
+
+    namespace
+    {
+        /// <summary>A window id folded for comparison: lower case, braces and spaces dropped.</summary>
+        /// <param name="text">A record id ("{8A2B...}") or what the model wrote.</param>
+        /// <returns>The folded text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring FoldWindowIdText(std::wstring_view text)
+        {
+            std::wstring bare;
+            bare.reserve(text.size());
+            for (const wchar_t c : text)
+            {
+                if (c != L'{' && c != L'}' && c != L' ' && c != L'\t')
+                {
+                    bare.push_back(c);
+                }
+            }
+            return FoldLower(bare);
+        }
+
+        /// <summary>True when `text` is 1 to 6 ASCII digits — a window or tab NUMBER rather than an id. Six digits at
+        /// most, so the conversion can never overflow.</summary>
+        /// <param name="text">The trimmed argument.</param>
+        /// <returns>Whether it is a small number.</returns>
+        bool IsSmallNumber(std::wstring_view text) noexcept
+        {
+            if (text.empty() || text.size() > 6)
+            {
+                return false;
+            }
+            for (const wchar_t c : text)
+            {
+                if (c < L'0' || c > L'9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>The value of a string IsSmallNumber accepted.</summary>
+        /// <param name="text">1 to 6 ASCII digits.</param>
+        /// <returns>The number.</returns>
+        size_t SmallNumberValue(std::wstring_view text) noexcept
+        {
+            size_t n = 0;
+            for (const wchar_t c : text)
+            {
+                n = n * 10 + static_cast<size_t>(c - L'0');
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// A tool argument the model may send either as a JSON string or as a number ("after": 3 and "after": "3" mean
+        /// the same tab), as trimmed text; "" when it is absent or of another type.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <param name="key">The argument's name.</param>
+        /// <returns>The text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring StringOrNumberArgument(const json::Value& arguments, const wchar_t* key)
+        {
+            const auto* v = arguments.Find(key);
+            if (!v)
+            {
+                return {};
+            }
+            if (v->type == json::Value::Type::Str)
+            {
+                return Trim(v->str);
+            }
+            if (v->type == json::Value::Type::Num && v->AsI64() >= 0)
+            {
+                return std::to_wstring(v->AsI64());
+            }
+            return {};
+        }
+
+        /// <summary>A path folded for a substring test: lower case, '/' as '\'.</summary>
+        /// <param name="text">A folder path or a piece of one.</param>
+        /// <returns>The folded text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring FoldPathText(std::wstring_view text)
+        {
+            std::wstring out = FoldLower(Trim(text));
+            std::replace(out.begin(), out.end(), L'/', L'\\');
+            return out;
+        }
+
+        /// <summary>Where a session's tab is: its window and its entry in that window's tab list.</summary>
+        struct TabLocation
+        {
+            size_t window{ 0 }; // index into the census
+            size_t tab{ 0 }; // index into that window's tabs
+        };
+
+        /// <summary>The tab of `sessionId` in the census (a session's tab lives in exactly one window).</summary>
+        /// <param name="windows">The census.</param>
+        /// <param name="sessionId">The whole session id; "" finds nothing.</param>
+        /// <returns>Where it is, or nullopt when no window has a tab for it.</returns>
+        std::optional<TabLocation> FindSessionTab(const std::vector<WindowCensus>& windows, const std::wstring& sessionId) noexcept
+        {
+            if (sessionId.empty())
+            {
+                return std::nullopt;
+            }
+            for (size_t w = 0; w < windows.size(); ++w)
+            {
+                for (size_t t = 0; t < windows[w].tabs.size(); ++t)
+                {
+                    if (windows[w].tabs[t].sessionId == sessionId)
+                    {
+                        return TabLocation{ w, t };
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
+        /// <summary>"window 2, tab 5 "Agentmaster"" — how a result names a tab for the model (and, through it, the user).</summary>
+        /// <param name="windows">The census.</param>
+        /// <param name="where">The tab.</param>
+        /// <returns>The phrase.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring DescribeTabPlace(const std::vector<WindowCensus>& windows, const TabLocation& where)
+        {
+            const auto& tab = windows[where.window].tabs[where.tab];
+            return L"window " + std::to_wstring(where.window + 1) + L", tab " + std::to_wstring(tab.index + 1) + L" \"" + Cut(OneLine(tab.title), 80) + L"\"";
+        }
+    }
+
+    std::wstring WindowHandleOf(const std::wstring& windowId)
+    {
+        // "{8A2B1C3D-...}" -> "8a2b1c3d": the braces are presentation, and the model writes the id back in any case.
+        const std::wstring bare = FoldWindowIdText(windowId);
+        return bare.size() > 8 ? bare.substr(0, 8) : bare;
+    }
+
+    std::wstring DescribeWindowsForModel(const std::vector<WindowCensus>& windows, const std::wstring& originWindowId)
+    {
+        std::wstring out;
+        for (size_t i = 0; i < windows.size(); ++i)
+        {
+            const auto& w = windows[i];
+            out += L"window " + std::to_wstring(i + 1) + L" (id " + WindowHandleOf(w.windowId) + L"): " + std::to_wstring(w.tabs.size()) + (w.tabs.size() == 1 ? L" tab" : L" tabs");
+            // The tab a window shows is what the user recognizes it by ("the window with the Agentmaster tab").
+            std::wstring selected;
+            for (const auto& t : w.tabs)
+            {
+                if (t.selected)
+                {
+                    selected = t.title;
+                    break;
+                }
+            }
+            if (w.managerPageVisible)
+            {
+                out += L", showing its Agent Manager page";
+            }
+            else if (!selected.empty())
+            {
+                out += L", \"" + Cut(OneLine(selected), 60) + L"\" selected";
+            }
+            if (w.lastActive)
+            {
+                out += L"; the user used it last";
+            }
+            if (!originWindowId.empty() && w.windowId == originWindowId)
+            {
+                out += L"; this request came from it";
+            }
+            out += L"\n";
+        }
+        return out;
+    }
+
+    std::optional<size_t> ResolveWindowArgument(const std::vector<WindowCensus>& windows, std::wstring_view argument, const std::wstring& originWindowId, std::wstring& error)
+    {
+        if (windows.empty())
+        {
+            error = L"No Agentmaster window answered, so no tab can be opened in one. Try once more; if it fails again, tell the user that the windows did not answer.";
+            return std::nullopt;
+        }
+        std::wstring arg = FoldLower(Trim(argument));
+        // Forgiving about the shapes a model writes a number in: "2", "#2", "window 2".
+        if (arg.rfind(L"window", 0) == 0)
+        {
+            arg = Trim(std::wstring_view{ arg }.substr(6));
+        }
+        if (!arg.empty() && arg.front() == L'#')
+        {
+            arg = Trim(std::wstring_view{ arg }.substr(1));
+        }
+        if (arg.empty())
+        {
+            if (windows.size() == 1)
+            {
+                return size_t{ 0 }; // one window: nothing to ask
+            }
+            // The user's rule (2026-10-17): with several windows, the USER names one. The refusal carries everything the
+            // model needs to ask well: every window by number, and the likely one marked.
+            error = L"Not opened: there are " + std::to_wstring(windows.size()) + L" Agentmaster windows open and the user has not said which one to use. Do not choose one yourself. Ask the user which window, describing them by number as below (the one this request came from, or else the one used last, is the likely choice), then call again with window set to the number or the id:\n" +
+                    DescribeWindowsForModel(windows, originWindowId);
+            return std::nullopt;
+        }
+        if (IsSmallNumber(arg))
+        {
+            const size_t n = SmallNumberValue(arg);
+            if (n >= 1 && n <= windows.size())
+            {
+                return n - 1;
+            }
+            error = L"There is no window " + arg + L". The open windows are:\n" + DescribeWindowsForModel(windows, originWindowId);
+            return std::nullopt;
+        }
+        // An id: the short one, a longer prefix or the whole one, braces optional, any case (4 characters at least, so a
+        // stray word never matches).
+        const std::wstring bare = FoldWindowIdText(arg);
+        std::optional<size_t> found;
+        if (bare.size() >= 4)
+        {
+            for (size_t i = 0; i < windows.size(); ++i)
+            {
+                if (FoldWindowIdText(windows[i].windowId).rfind(bare, 0) == 0)
+                {
+                    if (found)
+                    {
+                        error = L"The window id " + Cut(arg, 40) + L" fits more than one window: pass its number instead. The open windows are:\n" + DescribeWindowsForModel(windows, originWindowId);
+                        return std::nullopt;
+                    }
+                    found = i;
+                }
+            }
+        }
+        if (found)
+        {
+            return found;
+        }
+        error = L"No open window has the id " + Cut(arg, 40) + L". The open windows are:\n" + DescribeWindowsForModel(windows, originWindowId);
+        return std::nullopt;
     }
 
     // ===== the tool servers =================================================================
@@ -2264,8 +2699,476 @@ namespace Agentmaster
             }
             text += L".";
         }
-        text += L" Now reply to the user with one short sentence.";
+        // The reply comes next (the Instructional Behaviors of the system prompt): what was found, the shown sessions by
+        // number, then the likely next step. The old "one short sentence" request is what the user called hasty.
+        text += L" Now write your reply: what you found or did (refer to the shown sessions by number), then the likely next step.";
         return { text, false };
+    }
+
+    bool SessionSearchToolset::TakeTabActionSlot(bool deactivate, std::wstring& error)
+    {
+        // The request the action belongs to: the generation moves with every new request, interrupt and reset, so each
+        // request gets its own budget without a callback from the agent.
+        const uint64_t generation = _callbacks.generation ? _callbacks.generation() : 0;
+        std::lock_guard lock{ _mutex };
+        if (generation != _tabActionGeneration)
+        {
+            _tabActionGeneration = generation;
+            _tabOpensThisRequest = 0;
+            _tabDeactivatesThisRequest = 0;
+        }
+        if (deactivate)
+        {
+            // The user's rule: one at a time. A list of tabs is parked over several requests, each one confirmed.
+            if (_tabDeactivatesThisRequest >= 1)
+            {
+                error = L"Not deactivated: a tab was already deactivated in this request, and only one tab may be deactivated per request. Tell the user which tab you deactivated, and ask them to confirm the next one; deactivate it after their answer.";
+                return false;
+            }
+            ++_tabDeactivatesThisRequest;
+            return true;
+        }
+        if (_tabOpensThisRequest >= kMaxTabOpensPerRequest)
+        {
+            error = L"Not opened: this request already opened " + std::to_wstring(kMaxTabOpensPerRequest) + L" tabs, the most one request may open. Tell the user what you opened, and that they can ask again for more.";
+            return false;
+        }
+        ++_tabOpensThisRequest;
+        return true;
+    }
+
+    void SessionSearchToolset::ReturnTabActionSlot(bool deactivate) noexcept
+    {
+        try
+        {
+            std::lock_guard lock{ _mutex };
+            size_t& count = deactivate ? _tabDeactivatesThisRequest : _tabOpensThisRequest;
+            if (count > 0)
+            {
+                --count;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the slot stays spent — the request may open one tab fewer, never one more.
+            LogSwallowedException(L"SessionSearchToolset::ReturnTabActionSlot");
+        }
+    }
+
+    HarnessToolResult SessionSearchToolset::ListTabs(const json::Value& arguments)
+    {
+        using json::Value;
+        const int64_t now = Now();
+        const std::vector<WindowCensus> windows = _callbacks.tabs.census();
+        if (windows.empty())
+        {
+            return { L"No Agentmaster window answered. Try once more; if it fails again, tell the user that the windows did not answer.", true };
+        }
+        const std::wstring origin = _callbacks.tabs.originWindowId ? _callbacks.tabs.originWindowId() : std::wstring{};
+        std::optional<size_t> only;
+        if (const std::wstring windowArg = StringOrNumberArgument(arguments, L"window"); !windowArg.empty())
+        {
+            std::wstring error;
+            only = ResolveWindowArgument(windows, windowArg, origin, error);
+            if (!only)
+            {
+                return { error, true };
+            }
+        }
+        const std::wstring dirNeedle = FoldPathText(arguments.StrAt(L"dir"));
+        const std::wstring titleNeedle = FoldLower(Trim(arguments.StrAt(L"title")));
+        size_t limit = kTabListDefaultLimit;
+        if (const auto* l = arguments.Find(L"limit"); l && l->type == Value::Type::Num)
+        {
+            // Clamped, not refused (the search tools' rule): a list of 200 is more useful than an error.
+            limit = static_cast<size_t>((std::clamp)(l->AsI64(), int64_t{ 1 }, static_cast<int64_t>(kTabListMaxLimit)));
+        }
+
+        Value root = Value::MkObj();
+        root.Set(L"now", Value::MkStr(LocalDateTimeText(now)));
+        root.Set(L"windows_open", Value::MkNum(static_cast<double>(windows.size())));
+        Value list = Value::MkArr();
+        bool anyCut = false;
+        for (size_t w = 0; w < windows.size(); ++w)
+        {
+            if (only && *only != w)
+            {
+                continue;
+            }
+            const WindowCensus& win = windows[w];
+            // The filters, in the strip's order.
+            std::vector<size_t> match;
+            for (size_t t = 0; t < win.tabs.size(); ++t)
+            {
+                const auto& tab = win.tabs[t];
+                if (!titleNeedle.empty() && FoldLower(tab.title).find(titleNeedle) == std::wstring::npos)
+                {
+                    continue;
+                }
+                if (!dirNeedle.empty() && FoldPathText(tab.dir).find(dirNeedle) == std::wstring::npos && FoldPathText(tab.worksIn).find(dirNeedle) == std::wstring::npos)
+                {
+                    continue;
+                }
+                match.push_back(t);
+            }
+            // Over the limit: the selected tab and the most recently active ones (what a placement decision and a
+            // "what is running" question need), then back to the strip's order so pos reads naturally.
+            std::vector<size_t> keep = match;
+            if (keep.size() > limit)
+            {
+                std::stable_sort(keep.begin(), keep.end(), [&win](size_t a, size_t b) {
+                    const auto& ta = win.tabs[a];
+                    const auto& tb = win.tabs[b];
+                    if (ta.selected != tb.selected)
+                    {
+                        return ta.selected;
+                    }
+                    return ta.lastActivityUnixMs > tb.lastActivityUnixMs;
+                });
+                keep.resize(limit);
+                std::sort(keep.begin(), keep.end());
+                anyCut = true;
+            }
+            Value wobj = Value::MkObj();
+            wobj.Set(L"window", Value::MkNum(static_cast<double>(w + 1)));
+            wobj.Set(L"id", Value::MkStr(WindowHandleOf(win.windowId)));
+            wobj.Set(L"tabs", Value::MkNum(static_cast<double>(win.tabs.size())));
+            if (keep.size() != win.tabs.size())
+            {
+                wobj.Set(L"listed", Value::MkNum(static_cast<double>(keep.size())));
+            }
+            // Flags only when they say something: fewer tokens for the model to read.
+            if (win.lastActive)
+            {
+                wobj.Set(L"last_used", Value::MkBool(true));
+            }
+            if (!origin.empty() && win.windowId == origin)
+            {
+                wobj.Set(L"asked_from", Value::MkBool(true));
+            }
+            if (win.managerPageVisible)
+            {
+                wobj.Set(L"agent_manager_page", Value::MkBool(true));
+            }
+            Value tabs = Value::MkArr();
+            for (const size_t t : keep)
+            {
+                const auto& tab = win.tabs[t];
+                Value o = Value::MkObj();
+                o.Set(L"pos", Value::MkNum(static_cast<double>(tab.index + 1)));
+                o.Set(L"title", Value::MkStr(Cut(OneLine(tab.title), 120)));
+                if (tab.sessionId.empty())
+                {
+                    o.Set(L"kind", Value::MkStr(L"shell"));
+                }
+                else
+                {
+                    o.Set(L"kind", Value::MkStr(tab.codex ? L"codex" : L"claude"));
+                    // The same short ids as every other result: read, show, resume, fork and deactivate take them.
+                    std::wstring handle;
+                    {
+                        std::lock_guard lock{ _mutex };
+                        handle = AssignHandleLocked(tab.sessionId);
+                    }
+                    o.Set(L"id", Value::MkStr(handle));
+                    if (!tab.state.empty())
+                    {
+                        o.Set(L"state", Value::MkStr(tab.state));
+                    }
+                    if (!tab.started)
+                    {
+                        o.Set(L"dormant", Value::MkBool(true));
+                    }
+                    if (tab.external)
+                    {
+                        o.Set(L"adopted", Value::MkBool(true));
+                    }
+                    if (!tab.dir.empty())
+                    {
+                        o.Set(L"dir", Value::MkStr(tab.dir));
+                    }
+                    if (!tab.worksIn.empty())
+                    {
+                        o.Set(L"works_in", Value::MkStr(tab.worksIn));
+                    }
+                    if (!tab.branch.empty())
+                    {
+                        o.Set(L"branch", Value::MkStr(tab.branch));
+                    }
+                    if (tab.lastTurnUnixMs > 0)
+                    {
+                        o.Set(L"last_turn", Value::MkStr(ActiveWithAgo(tab.lastTurnUnixMs, now)));
+                    }
+                    if (tab.lastActivityUnixMs > 0)
+                    {
+                        o.Set(L"active", Value::MkStr(ActiveWithAgo(tab.lastActivityUnixMs, now)));
+                    }
+                }
+                if (tab.selected)
+                {
+                    o.Set(L"selected", Value::MkBool(true));
+                }
+                tabs.Push(std::move(o));
+            }
+            wobj.Set(L"tab_list", std::move(tabs));
+            list.Push(std::move(wobj));
+        }
+        root.Set(L"list", std::move(list));
+        if (anyCut)
+        {
+            root.Set(L"note", Value::MkStr(L"Some windows have more tabs than are listed: narrow with dir or title, or raise limit (up to 200)."));
+        }
+        return { json::Dump(root), false };
+    }
+
+    HarnessToolResult SessionSearchToolset::OpenTab(const json::Value& arguments, WindowToolRequest::Kind kind)
+    {
+        const bool fork = kind == WindowToolRequest::Kind::Fork;
+        if (!_callbacks.tabs.census || !_callbacks.tabs.open)
+        {
+            return { L"Opening tabs is not available here.", true };
+        }
+        const std::wstring written = Trim(arguments.StrAt(L"id"));
+        if (written.empty())
+        {
+            return { std::wstring{ L"Pass id: the session to " } + (fork ? L"fork" : L"resume") + L" (a short id from a result, or a whole session id).", true };
+        }
+        std::vector<std::wstring> unknown;
+        const std::vector<std::wstring> ids = ResolveWrittenIds({ written }, unknown);
+        if (ids.empty())
+        {
+            return { L"No session has the id " + Cut(written, 40) + L". Pass an id exactly as a result printed it, or search first.", true };
+        }
+        const std::wstring sessionId = ids.front();
+        const std::vector<WindowCensus> windows = _callbacks.tabs.census();
+        const std::wstring origin = _callbacks.tabs.originWindowId ? _callbacks.tabs.originWindowId() : std::wstring{};
+        const std::optional<TabLocation> where = FindSessionTab(windows, sessionId);
+        const bool focus = arguments.BoolAt(L"focus");
+
+        // A resume of a session that has a tab already: never a second tab of one conversation (two writers of one
+        // transcript, OBSERVER.md §20). Say where it is, and bring it forward when asked.
+        if (!fork && where)
+        {
+            const auto& tab = windows[where->window].tabs[where->tab];
+            std::wstring text = L"Already open: " + DescribeTabPlace(windows, *where) + L" (window id " + WindowHandleOf(windows[where->window].windowId) + L")" +
+                                (tab.started ? std::wstring{} : std::wstring{ L", dormant: it starts when the user enters the tab" }) + L". No new tab was opened.";
+            if (focus)
+            {
+                const bool brought = _callbacks.tabs.focus && _callbacks.tabs.focus(sessionId);
+                text += brought ? L" The tab was brought to the front." : L" It could not be brought to the front.";
+            }
+            return { text, false };
+        }
+
+        // The window. With several open and none named, the tool refuses: the user names one (the user's rule).
+        std::wstring error;
+        const std::optional<size_t> windowIndex = ResolveWindowArgument(windows, StringOrNumberArgument(arguments, L"window"), origin, error);
+        if (!windowIndex)
+        {
+            if (fork && where)
+            {
+                // The usual answer for a fork, to offer the user: next to its source, as the tab menu's Fork session does.
+                error += L"The source session is open in " + DescribeTabPlace(windows, *where) + L": a fork usually goes right after it.\n";
+            }
+            return { error, true };
+        }
+        const WindowCensus& target = windows[*windowIndex];
+
+        WindowToolRequest request;
+        request.kind = kind;
+        request.sessionId = sessionId;
+        request.focus = focus;
+        if (fork)
+        {
+            request.model = Trim(arguments.StrAt(L"model"));
+        }
+        // `after`: a position in the target window, or the session id of one of its tabs.
+        std::wstring afterTitle;
+        if (const std::wstring after = StringOrNumberArgument(arguments, L"after"); !after.empty())
+        {
+            if (IsSmallNumber(after))
+            {
+                const size_t pos = SmallNumberValue(after);
+                if (pos < 1 || pos > target.tabs.size())
+                {
+                    return { L"Window " + std::to_wstring(*windowIndex + 1) + L" has no tab " + after + L" (it has " + std::to_wstring(target.tabs.size()) + L" tabs). Pass a pos from list, or leave after out to put the tab at the end.", true };
+                }
+                request.afterIndex = static_cast<int32_t>(pos - 1);
+                for (const auto& tab : target.tabs)
+                {
+                    if (tab.index + 1 == pos)
+                    {
+                        afterTitle = tab.title;
+                    }
+                }
+            }
+            else
+            {
+                std::vector<std::wstring> afterUnknown;
+                const std::vector<std::wstring> afterIds = ResolveWrittenIds({ after }, afterUnknown);
+                const auto inTarget = std::find_if(target.tabs.begin(), target.tabs.end(), [&afterIds](const WindowTabInfo& tab) {
+                    return !afterIds.empty() && tab.sessionId == afterIds.front();
+                });
+                if (inTarget == target.tabs.end())
+                {
+                    return { L"The tab to put it after (" + Cut(after, 40) + L") is not in window " + std::to_wstring(*windowIndex + 1) + L". List that window's tabs and pass a pos or a session id from it, or leave after out.", true };
+                }
+                request.afterSessionId = inTarget->sessionId;
+                afterTitle = inTarget->title;
+            }
+        }
+        else if (fork && where && where->window == *windowIndex)
+        {
+            afterTitle = windows[where->window].tabs[where->tab].title; // the window's default: right after the source
+        }
+
+        if (!TakeTabActionSlot(false, error))
+        {
+            return { error, true };
+        }
+        const WindowToolOutcome outcome = _callbacks.tabs.open(target.windowId, request);
+        if (!outcome.handled || !outcome.ok)
+        {
+            // A window that refused opened nothing: the slot goes back. A window that did not ANSWER may still open
+            // the tab after the timeout, so its slot stays spent and the model is told to look before it retries.
+            if (outcome.handled)
+            {
+                ReturnTabActionSlot(false);
+            }
+            std::wstring why = !outcome.message.empty() ? outcome.message :
+                                                          (outcome.handled ? std::wstring{ L"the window refused it." } :
+                                                                             std::wstring{ L"the window did not answer in time. The tab may still open: list the tabs before you try again." });
+            return { std::wstring{ fork ? L"Not forked: " : L"Not resumed: " } + why, true };
+        }
+        const std::wstring opened = outcome.sessionId.empty() ? sessionId : outcome.sessionId;
+        std::wstring handle;
+        {
+            std::lock_guard lock{ _mutex };
+            handle = AssignHandleLocked(opened);
+        }
+        std::wstring text = std::wstring{ fork ? L"Forked" : L"Resumed" } + L" in window " + std::to_wstring(*windowIndex + 1) + L" (id " + WindowHandleOf(target.windowId) + L")";
+        if (outcome.index >= 0)
+        {
+            text += L" as tab " + std::to_wstring(outcome.index + 1);
+        }
+        if (!afterTitle.empty())
+        {
+            text += L", right after \"" + Cut(OneLine(afterTitle), 80) + L"\"";
+        }
+        text += focus ? L"; the window switched to it and came to the front." : L"; it is a background tab, so the user's view did not change.";
+        if (fork)
+        {
+            text += L" The fork's id is " + handle + L"; the source is untouched.";
+        }
+        else if (opened != sessionId)
+        {
+            // Rule #6: a transcript that is gone resumes nothing; the window started a fresh session in its folder.
+            text += L" Its transcript was gone, so a FRESH session started in its folder instead, id " + handle + L".";
+        }
+        if (!outcome.message.empty())
+        {
+            text += L" " + outcome.message;
+        }
+        return { text, false };
+    }
+
+    HarnessToolResult SessionSearchToolset::DeactivateTab(const json::Value& arguments)
+    {
+        if (!_callbacks.tabs.census || !_callbacks.tabs.deactivate)
+        {
+            return { L"Deactivating tabs is not available here.", true };
+        }
+        if (const auto* idArg = arguments.Find(L"id"); idArg && idArg->type == json::Value::Type::Arr)
+        {
+            return { L"Pass ONE id, as a string: deactivate parks one tab per request.", true };
+        }
+        const std::wstring written = Trim(arguments.StrAt(L"id"));
+        if (written.empty())
+        {
+            return { L"Pass id: the session whose tab to deactivate (its id from list).", true };
+        }
+        std::vector<std::wstring> unknown;
+        const std::vector<std::wstring> ids = ResolveWrittenIds({ written }, unknown);
+        if (ids.empty())
+        {
+            return { L"No session has the id " + Cut(written, 40) + L". List the tabs and pass an id from the list.", true };
+        }
+        const std::wstring sessionId = ids.front();
+        const std::vector<WindowCensus> windows = _callbacks.tabs.census();
+        const std::optional<TabLocation> where = FindSessionTab(windows, sessionId);
+        if (!where)
+        {
+            return { L"That session has no open tab in any window, so there is nothing to deactivate.", true };
+        }
+        const WindowTabInfo& tab = windows[where->window].tabs[where->tab];
+        const std::wstring place = DescribeTabPlace(windows, *where);
+        if (tab.external)
+        {
+            return { L"Not deactivated: " + place + L" runs a claude the user started by hand in a shell tab. Its terminal is the user's own shell, and Deactivate never parks it.", true };
+        }
+        if (!tab.started)
+        {
+            return { L"Nothing to do: " + place + L" is already dormant. Its claude is not running, and it starts when the user enters the tab.", false };
+        }
+        // A turn in flight is cut off by a park (the session then reads Error, HOOKS.md "Cut-off turns"): only on the
+        // user's confirmation, which the model passes as cut_off_turn.
+        const bool turnInFlight = tab.state == L"running" || tab.state == L"needs approval";
+        if (turnInFlight && !arguments.BoolAt(L"cut_off_turn"))
+        {
+            return { L"Not deactivated: " + place + L" is " + tab.state + L", and deactivating it now cuts that turn off. Tell the user, ask them to confirm, and only then call again with cut_off_turn:true.", true };
+        }
+        std::wstring error;
+        if (!TakeTabActionSlot(true, error))
+        {
+            return { error, true };
+        }
+        const WindowToolOutcome outcome = _callbacks.tabs.deactivate(sessionId);
+        if (!outcome.handled || !outcome.ok)
+        {
+            if (outcome.handled)
+            {
+                ReturnTabActionSlot(true); // the host refused: nothing was parked
+            }
+            const std::wstring why = !outcome.message.empty() ? outcome.message : (outcome.handled ? std::wstring{ L"its window refused it." } : std::wstring{ L"its window did not answer in time. List the tabs to see whether it was parked." });
+            return { L"Not deactivated: " + why, true };
+        }
+        return { L"Deactivated " + place + L": its claude stopped; the tab keeps its place, title, color and prompt queue, and the conversation resumes when the user enters it." + (outcome.message.empty() ? std::wstring{} : L" " + outcome.message), false };
+    }
+
+    std::vector<HarnessTool> SessionSearchToolset::MakeTabTools()
+    {
+        std::vector<HarnessTool> tools;
+        HarnessTool list;
+        list.name = kTabsListTool;
+        list.description = L"List the Agentmaster windows and their tabs: per tab its position, title, session id, state, folder (dir, works_in), last turn and last activity; per window its number, the selected tab, and whether the user used it last or asked from it. Read it before you resume, fork or deactivate, and to answer what is open or running. Changes nothing.";
+        list.inputSchemaJson = kTabsListSchema;
+        list.readOnly = true; // it only reads; one model step may run it beside a search
+        list.handler = [this](const json::Value& arguments) { return ListTabs(arguments); };
+        tools.push_back(std::move(list));
+
+        // The three that change the workspace are NOT read-only: the SDK runs them one at a time, and never beside
+        // another call of the same step that could still be reading the tabs they change.
+        HarnessTool resume;
+        resume.name = kTabsResumeTool;
+        resume.description = L"Open a closed session again in a tab (the same conversation, its context intact), in a window you name, right after a tab you choose. Refuses when several windows are open and none is named: then ask the user which window. An already open session is not opened twice: the result says where its tab is. Use it only when the user asked to resume or open a session.";
+        resume.inputSchemaJson = kTabsResumeSchema;
+        resume.handler = [this](const json::Value& arguments) { return OpenTab(arguments, WindowToolRequest::Kind::Resume); };
+        tools.push_back(std::move(resume));
+
+        HarnessTool fork;
+        fork.name = kTabsForkTool;
+        fork.description = L"Branch a session into a NEW conversation that starts with the source's whole history, as a tab of a window you name, right after a tab you choose (by default right after the source's tab, like the tab menu's Fork session). The source is untouched. Refuses when several windows are open and none is named: then ask the user which window. Use it only when the user asked to fork.";
+        fork.inputSchemaJson = kTabsForkSchema;
+        fork.handler = [this](const json::Value& arguments) { return OpenTab(arguments, WindowToolRequest::Kind::Fork); };
+        tools.push_back(std::move(fork));
+
+        HarnessTool deactivate;
+        deactivate.name = kTabsDeactivateTool;
+        deactivate.description = L"Deactivate (park) ONE tab: its claude stops, the tab keeps its place and resumes the conversation when the user enters it. Only when the user explicitly asked to deactivate that tab; one tab per request. A tab whose turn is running or waiting for approval needs cut_off_turn:true, after the user confirmed.";
+        deactivate.inputSchemaJson = kTabsDeactivateSchema;
+        deactivate.handler = [this](const json::Value& arguments) { return DeactivateTab(arguments); };
+        tools.push_back(std::move(deactivate));
+        return tools;
     }
 
     HarnessTool SessionSearchToolset::MakeReadTool()
@@ -2311,6 +3214,15 @@ namespace Agentmaster
             std::vector<HarnessToolServer> servers;
             servers.push_back(std::move(db));
             servers.push_back(std::move(display));
+            // The window and tab tools (SESSIONS.md 9.14): the same in both modes, last, so the search tools keep their
+            // places in the model's list.
+            if (UsesTabs())
+            {
+                HarnessToolServer tabs;
+                tabs.name = kTabsServer;
+                tabs.tools = MakeTabTools();
+                servers.push_back(std::move(tabs));
+            }
             return servers;
         }
 
@@ -2345,6 +3257,13 @@ namespace Agentmaster
         std::vector<HarnessToolServer> servers;
         servers.push_back(std::move(sessions));
         servers.push_back(std::move(display));
+        if (UsesTabs())
+        {
+            HarnessToolServer tabs;
+            tabs.name = kTabsServer;
+            tabs.tools = MakeTabTools();
+            servers.push_back(std::move(tabs));
+        }
         return servers;
     }
 }

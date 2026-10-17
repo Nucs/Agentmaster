@@ -431,6 +431,15 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 
 ### 5.4 🔎 Search: find, wake, revive (D24)
 
+- **2026-10-17, later (NOT BUILT yet; `SESSIONS.md` §9.14):** the agent also gets the **tabs** server —
+  `list` (every window and its tabs), `resume` / `fork` (a session as a tab after a chosen tab; with more
+  than one window open the call refuses until the user names a window, which from a phone the agent must
+  always ask) and `deactivate` (ONE tab, only on the user's explicit request) — and the three-part system
+  prompt (`# Instructional Behaviors`, `## Tools`, `## Workflow Guidelines`): it tells its plan ("I'll 1.
+  … 2. … 3. …"), which the bridge (`MessagingSearchBridge.cpp`) puts ABOVE the answer, and replies
+  descriptively instead of in one verdict sentence. It takes the session database's tools only when the
+  mode is On AND the service can start (`SearchDatabaseProfileIfUsable`); a phone's resume / fork opens a
+  background tab.
 - **The agent:** the Sessions page's search agent — `SessionSearchAgent` on the agent harness, Sonnet 5.5,
   its tools (`search`, `grep`, `read`, `show` since 2026-10-17; the session database's tools and `read`
   when that is On) and system prompt — at

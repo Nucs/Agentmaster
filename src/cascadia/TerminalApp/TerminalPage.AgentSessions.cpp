@@ -2175,7 +2175,9 @@ namespace winrt::TerminalApp::implementation
     // transcript-gated) with its Auto Testing + autorunner, and flips it back to live (Open). A
     // missing transcript yields a fresh id; _LaunchClaudeSession then drops the stale record so it
     // doesn't linger. (Name kept for churn; "archived" here just means the !live state.)
-    TerminalApp::Tab TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
+    // insertPosition (SESSIONS.md §9.14): the 0-based strip slot for the tab, threaded to the launch; -1 = the end
+    // (Terminal's newTabPosition) — every caller before the AI search's resume tool passed nothing.
+    TerminalApp::Tab TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId, uint32_t insertPosition)
     {
         if (!_sessionRegistry)
         {
@@ -2192,7 +2194,7 @@ namespace winrt::TerminalApp::implementation
         // degraded to fresh reports the NEW id, not the requested one).
         if (info->kind == ::Agentmaster::AgentKind::Codex)
         {
-            return _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            return _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info, {}, insertPosition);
         }
         // Native-exe-only policy gate (auto-recovering) — Claude restore only (Codex above needs no
         // claude.exe). Covers the Archive page's "Restore here" / bulk Restore / double-click and the
@@ -2202,7 +2204,7 @@ namespace winrt::TerminalApp::implementation
             _PromptClaudeMissing();
             return nullptr;
         }
-        return _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+        return _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info, {}, insertPosition);
     }
 
     // Agentmaster (Codex managed-session support): launch a codex.exe on a ConPTY as a MANAGED tab,
@@ -3824,9 +3826,14 @@ namespace winrt::TerminalApp::implementation
     // THIS window (it reads the shared registry — no live tab needed, so the board can fork a session
     // hosted in another window into here). A source never prompted has no transcript/rollout to fork ->
     // fresh in the same dir (Rule #6). insertPosition threads tab placement (-1 == end). Returns false
-    // only when `sourceId` is not a known managed session.
-    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride)
+    // only when `sourceId` is not a known managed session. forkedIdOut (optional, SESSIONS.md §9.14): receives the
+    // NEW session's id — "" when no tab opened (the native-exe gate, a failed launch) — for the AI search's fork tool.
+    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride, std::wstring* forkedIdOut)
     {
+        if (forkedIdOut)
+        {
+            forkedIdOut->clear(); // every exit below that opens nothing leaves it empty
+        }
         if (!_sessionRegistry || sourceId.empty())
         {
             return false;
@@ -3856,6 +3863,10 @@ namespace winrt::TerminalApp::implementation
             const auto forkedTab = _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
             const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
             ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (codex, fresh \x2014 no rollout)" } : std::wstring{ L" (codex)" }));
+            if (forkedIdOut)
+            {
+                *forkedIdOut = forkedId;
+            }
             return true;
         }
         // Native-exe-only policy gate (auto-recovering): a Claude fork is a launch (--fork-session).
@@ -3878,6 +3889,10 @@ namespace winrt::TerminalApp::implementation
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
         _CarryDraftIntoFork(sourceId, forkedId, std::move(carry)); // a no-op for an empty draft / a failed launch
         ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}));
+        if (forkedIdOut)
+        {
+            *forkedIdOut = forkedId;
+        }
         return true;
     }
 

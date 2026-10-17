@@ -83,11 +83,15 @@ namespace winrt::TerminalApp::implementation
     // vanished). This reuses every existing guarantee: title pinning, per-dir tab color, hooks
     // correlation by the same id, Rule #6's gating. Resumes EXACTLY the clicked id — no continuation-tail
     // redirect (timing-based, unsound — see the `const target = sessionId` note below).
-    void TerminalPage::_ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title)
+    // insertPosition (SESSIONS.md §9.14): the 0-based strip slot for the new tab; -1 = the end (Terminal's newTabPosition).
+    // The AI search's resume tool passes the slot right after the tab the model chose. Returns the session whose tab is
+    // open now (the target; the FRESH id a resume without a transcript degraded to; the target itself when it was live
+    // already), or "" when nothing opened.
+    std::wstring TerminalPage::_ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title, uint32_t insertPosition)
     {
         if (!_sessionRegistry || sessionId.empty() || dir.empty())
         {
-            return;
+            return {};
         }
         // Nav audit: the user picked this ROW to resume (right-click "Resume here", the detail-pane
         // button, or a double-click prompt). The clicked id is what launches; the downstream
@@ -108,7 +112,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _ActivateClaudeSession(winrt::hstring{ target });
             }
-            return;
+            return target; // open already: that tab is the answer (nothing new was opened)
         }
         // Native-exe-only policy gate (auto-recovering): everything past here LAUNCHES a claude (seed an
         // archived-shaped record, then _RestoreArchivedSession --resume), so gate + prompt here — BEFORE
@@ -118,7 +122,7 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::LogNav(L"sessions resume-done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
-            return;
+            return {};
         }
         if (!existing)
         {
@@ -130,7 +134,7 @@ namespace winrt::TerminalApp::implementation
             s.live = false; // archived-shaped: exactly what _RestoreArchivedSession expects
             _sessionRegistry->Upsert(std::move(s));
         }
-        const auto resumedTab = _RestoreArchivedSession(winrt::hstring{ target });
+        const auto resumedTab = _RestoreArchivedSession(winrt::hstring{ target }, insertPosition);
         // Nav audit END (pairs with the resume-click BEGIN above): the actually-opened id. Normally ==
         // target; a resume whose transcript vanished degrades to a FRESH id (Rule #6), reported here. A
         // resume-click with neither a "resume -> jump" nor a resume-done means the launch crashed mid-open.
@@ -140,6 +144,7 @@ namespace winrt::TerminalApp::implementation
         {
             _HideSessionsPage(); // foreground: land on the freshly opened tab. Background bulk-open keeps the list open.
         }
+        return resumedId;
     }
 
     // Fork ANY on-disk session into a NEW managed conversation — the duplicate-tab fork's exact
@@ -148,11 +153,13 @@ namespace winrt::TerminalApp::implementation
     // parent transcript untouched. Transcript-gated: a parent with no transcript (or one the
     // cleanup sweep deleted mid-view) degrades to a FRESH session in the same dir rather than
     // dying on "No conversation found". Safe on a LIVE parent — the fork writes its own file.
-    void TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride)
+    // insertPosition (SESSIONS.md §9.14): the 0-based strip slot for the fork; -1 = the end (Terminal's newTabPosition).
+    // Returns the NEW session's id, or "" when no tab opened (a gate, a failed launch, missing arguments).
+    std::wstring TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride, uint32_t insertPosition)
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
         {
-            return;
+            return {};
         }
         // Nav audit: the user picked this ROW to fork. The clicked id is what they SEE; the
         // continuation resolve below logs the actual fork SOURCE, and the downstream [fork] line
@@ -166,7 +173,7 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::LogNav(L"sessions fork-done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
-            return;
+            return {};
         }
         // Fork EXACTLY the picked session — no timing-based "continuation tail" redirect (it merged
         // unrelated same-cwd sessions: /clear leaves no on-disk successor link, /compact is in-place, a
@@ -184,7 +191,7 @@ namespace winrt::TerminalApp::implementation
         // another window or a closed one with a persisted memory (the remembered draft answers), or one the
         // registry never knew (nothing to carry — _CaptureDraftForFork returns empty).
         auto carry = _CaptureDraftForFork(forkParentId);
-        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, static_cast<uint32_t>(-1), modelOverride);
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride);
         _CarryDraftIntoFork(forkParentId, forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{}, std::move(carry));
         // Nav audit END (pairs with the fork-click BEGIN above): the NEW forked id — exactly "the id of the
         // new forked session" the user asked to be able to trace, alongside the source it forked from. A
@@ -197,6 +204,7 @@ namespace winrt::TerminalApp::implementation
         {
             _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.
         }
+        return forkedId;
     }
 
     // Agentmaster: the Sessions-page double-click prompt — Resume / Fork / Cancel. Double-clicking a

@@ -95,20 +95,21 @@ namespace Agentmaster::Msg
                 try
                 {
                     // The start level the cog holds now (a bridge sets the level again, live); the session database's
-                    // tools when it is On, read once like the page's agent (SESSIONS_DB.md §8.2: a change of the mode
-                    // reaches the agent at the next start of the app).
+                    // tools when it is On AND its service can start, read once like the page's agent (SESSIONS_DB.md
+                    // §8.2: a change of the mode reaches the agent at the next start of the app; a service without
+                    // duckdb.dll keeps the page search, SearchDatabaseProfileIfUsable).
                     const AppSettings settings = LoadAppSettings();
                     options.thinkingLevel = ThinkingLevelFromWord(settings.messagingSearchThinking);
-                    if (settings.sessionDbMode == SessionDbMode::On)
-                    {
-                        options.sessionDbProfile = AgentmasterStateDir();
-                    }
+                    options.sessionDbProfile = SearchDatabaseProfileIfUsable(settings.sessionDbMode == SessionDbMode::On, L"telegram-search");
                 }
                 catch (...)
                 {
                     // Rule #18. Recovery: the conversation starts at high thinking on the page search.
                     LogSwallowedException(L"telegram-search: read the settings");
                 }
+                // SESSIONS.md §9.14: the window and tab tools over the app's windows — the same as the page's agent. From a
+                // phone no request has an origin window, so with several windows open the model must ask which one.
+                options.tabTools = MakeEngineTabTools();
                 options.claudeExe = [] { return SharedEngine().claudeExePath; };
                 options.openSessions = [] {
                     std::vector<std::pair<std::wstring, std::wstring>> open;
@@ -148,8 +149,9 @@ namespace Agentmaster::Msg
 
         /// <summary>
         /// Maps one conversation event to the service's four: Searching, Shown (with its rows, remembered for the
-        /// Answer), Answer (with the request's last shown rows, or none when it showed nothing) and Failed. State changes,
-        /// candidates, compactions and resets show nothing in a topic.
+        /// Answer), Answer (the model's plan above its reply, with the request's last shown rows, or none when it showed
+        /// nothing) and Failed. State changes, candidates, compactions, resets and the narration events themselves show
+        /// nothing in a topic (the narration reaches it through the Answer).
         /// </summary>
         /// <param name="st">The bridge's state.</param>
         /// <param name="e">The event, on the conversation's threads.</param>
@@ -177,7 +179,10 @@ namespace Agentmaster::Msg
                 case SessionSearchEventKind::Answer:
                 {
                     out.kind = SearchBridgeEvent::Kind::Answer;
-                    out.text = e.text;
+                    // SESSIONS.md §9.14: the model's plan ("I'll 1. ... 2. ... 3. ...", written before its first tool call)
+                    // above its reply. The service is quiet while a request runs (it posts only the answer), so this is
+                    // the one place the phone sees what the model set out to do; the page shows the same plan live.
+                    out.text = e.snapshot.narration.empty() ? e.text : (e.snapshot.narration + L"\n\n" + e.text);
                     std::lock_guard lk{ st.mtx };
                     out.rows = std::move(st.lastRows);
                     st.lastRows.clear();
@@ -188,7 +193,7 @@ namespace Agentmaster::Msg
                     out.text = e.text;
                     break;
                 default:
-                    return; // state changes, candidates, compactions, resets: nothing to show in a topic
+                    return; // state changes, candidates, compactions, resets, narration (it rides the Answer): nothing to show in a topic
                 }
                 if (st.sink)
                 {

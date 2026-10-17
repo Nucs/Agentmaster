@@ -818,26 +818,24 @@ void TestSessionSearchTools()
         CHECK(promptAscii && prompt.find(L"mcp__sessions__search") != std::wstring::npos && prompt.find(L"mcp__sessions__grep") != std::wstring::npos && prompt.find(L"mcp__sessions__read") != std::wstring::npos &&
                   prompt.find(L"mcp__display__show") != std::wstring::npos && prompt.find(L"indexing") != std::wstring::npos,
               "toolset: the system prompt is ASCII and names the four tools and the indexing note");
-        // The user's rule of 2026-10-13: the FIRST step mentions which kinds of tool calls the request can
-        // use, out of all the tools, and how in different ways. Pinned by its place (rule 1), its words,
-        // and the rule count that SESSIONS.md 9.3 states.
-        const size_t ruleOne = prompt.find(L"\n1. Your first step");
-        const size_t ruleTwo = prompt.find(L"\n2. ");
-        CHECK(ruleOne != std::wstring::npos && ruleTwo != std::wstring::npos && ruleOne < ruleTwo, "toolset: rule 1 of the system prompt is the first step");
-        const std::wstring ruleOneText = (ruleOne != std::wstring::npos && ruleTwo != std::wstring::npos && ruleOne < ruleTwo) ? prompt.substr(ruleOne, ruleTwo - ruleOne) : std::wstring{};
-        CHECK(ruleOneText.find(L"kinds of tool calls") != std::wstring::npos && ruleOneText.find(L"out of everything your tools can do") != std::wstring::npos && ruleOneText.find(L"in different ways") != std::wstring::npos && ruleOneText.find(L"before your first tool call, in the same message") != std::wstring::npos, "toolset: rule 1 says to mention the kinds of tool calls, out of all the tools, and how in different ways - in the same message as the first calls (no extra model request)");
-        CHECK(ruleOneText.find(L"deep:true") != std::wstring::npos && ruleOneText.find(L"top:N") != std::wstring::npos && ruleOneText.find(L"after or before") != std::wstring::npos, "toolset: rule 1 lists every kind of call (words, filters, period, full text, show) so the plan is chosen from all of them");
-        CHECK(ruleOneText.find(L"grep for exact words or a regex") != std::wstring::npos && ruleOneText.find(L"read to confirm") != std::wstring::npos, "toolset: rule 1 lists grep and read among the kinds of calls");
-        CHECK(prompt.find(L"\n9. ") != std::wstring::npos && prompt.find(L"\n10. ") == std::wstring::npos, "toolset: the system prompt has nine rules (the count SESSIONS.md 9.3 states)");
-        // The user's rules of 2026-10-17 (SESSIONS.md 9.12): read before show, a why per session, a verdict sentence.
-        const size_t ruleFour = prompt.find(L"\n4. Confirm before you show");
-        CHECK(ruleFour != std::wstring::npos && prompt.find(L"read every session you intend to show", ruleFour) != std::wstring::npos, "toolset: rule 4 makes the model read every session it shows");
-        CHECK(prompt.find(L"\n5. Show only what fits") != std::wstring::npos && prompt.find(L"Give each a `why`") != std::wstring::npos && prompt.find(L"You asked:") != std::wstring::npos, "toolset: rule 5 asks one line of evidence per shown session, the user's own words first");
-        CHECK(prompt.find(L"\n6. After show returns") != std::wstring::npos && prompt.find(L"Never mention a screen or a list") != std::wstring::npos && prompt.find(L"on the screen") == std::wstring::npos,
-              "toolset: rule 6's verdict never names a screen (the Telegram topic has none)");
+        // The structure the user asked for on 2026-10-17 (SESSIONS.md 9.14) is pinned in full by tests_tabtools.cpp (the
+        // headings, the counts, every tool name). Here: what carried over from the rules of 2026-10-13 / 2026-10-17 - the
+        // plan comes BEFORE the first tool call, in the SAME message (no extra model request), chosen from everything the
+        // tools can do; every candidate is read before it is shown; a why each, the user's own words first; never a screen.
+        const size_t behaviorsAt = prompt.find(L"# Instructional Behaviors");
+        const size_t toolsAt = prompt.find(L"## Tools");
+        const std::wstring behaviors = (behaviorsAt != std::wstring::npos && toolsAt != std::wstring::npos && behaviorsAt < toolsAt) ? prompt.substr(behaviorsAt, toolsAt - behaviorsAt) : std::wstring{};
+        CHECK(behaviors.find(L"Open every request with a short plan, before your first tool call and in the same message") != std::wstring::npos &&
+                  behaviors.find(L"Choose the plan from everything your tools can do") != std::wstring::npos,
+              "toolset: behavior 1 is the plan - before the first tool call, in the same message (no extra model request), chosen from everything the tools can do");
+        CHECK(prompt.find(L"Read a session before you show it") != std::wstring::npos && prompt.find(L"read the best candidates (one read call, up to 8 ids)") != std::wstring::npos,
+              "toolset: every candidate is read before it is shown");
+        CHECK(prompt.find(L"a why for each") != std::wstring::npos && prompt.find(L"You asked:") != std::wstring::npos, "toolset: one line of evidence per shown session, the user's own words first");
+        CHECK(prompt.find(L"on the screen") == std::wstring::npos && prompt.find(L"exactly ONE short sentence") == std::wstring::npos,
+              "toolset: never a screen (the Telegram topic has none), and no longer the one-sentence reply the user called hasty");
         const std::wstring dbPrompt = SessionSearchToolset::DatabaseSystemPrompt();
-        CHECK(dbPrompt.find(L"\n9. ") != std::wstring::npos && dbPrompt.find(L"\n10. ") == std::wstring::npos && dbPrompt.find(L"mcp__agentmaster__read") != std::wstring::npos && dbPrompt.find(L"on the screen") == std::wstring::npos,
-              "toolset: the database prompt has the same nine rules, with its own read");
+        CHECK(dbPrompt.find(L"# Instructional Behaviors") != std::wstring::npos && dbPrompt.find(L"mcp__agentmaster__read") != std::wstring::npos && dbPrompt.find(L"on the screen") == std::wstring::npos,
+              "toolset: the database prompt has the same behaviors, with its own read");
         const auto& search = servers[0].tools[0].handler;
         const auto& show = servers[1].tools[0].handler;
 

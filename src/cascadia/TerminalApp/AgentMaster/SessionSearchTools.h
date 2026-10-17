@@ -20,10 +20,12 @@
 //                      line of evidence the model saw (`why`) — to the surface: the Sessions page
 //                      shows exactly those rows in that order, Telegram one card per session.
 //
-// The model understands the request, calls search (once, or a few times with other words), reads
-// the candidates (and greps for the user's own words), keeps what fits, calls show, and writes one
-// sentence. The split is the point: search, grep and read never change what the user sees, so the
-// model can look around freely, and the show tool is the ONE place where the result changes.
+// The model understands the request, tells the user its plan ("I'll 1. ... 2. ... 3. ..."), calls
+// search (once, or a few times with other words), reads the candidates (and greps for the user's own
+// words), keeps what fits, calls show, and writes a descriptive reply with the likely next step
+// (the system prompt's Instructional Behaviors, SESSIONS.md §9.14). The split is the point: search,
+// grep and read never change what the user sees, so the model can look around freely, and the show
+// tool is the ONE place where the result changes.
 //
 // With the session database On (SESSIONS_DB.md §8.2; Callbacks::database), the first server is
 // replaced by the database's read tools (SessionDbToolDefs.h) as the server `agentmaster`: search
@@ -32,6 +34,20 @@
 // candidate is confirmed the same way in both modes. No catalog is read then (no sidecar gather,
 // no index keeper); `show` and its short ids work the same way, and a short id the conversation's
 // own searches never printed is resolved through the service.
+//
+// With Callbacks::tabs set (SESSIONS.md §9.14; both search conversations in the app), a third server
+// `tabs` acts on the user's WORKSPACE:
+//
+//   tabs.list        — the windows and their tabs (title, session, state, folders, last turn, last
+//                      activity): what the model reads to pick a window and the place for a new tab.
+//   tabs.resume      — open a closed session again in a tab, in a chosen window, after a chosen tab.
+//   tabs.fork        — the same for a FORK (a new conversation with the source's history).
+//   tabs.deactivate  — park ONE tab (its claude stops; the tab resumes when entered).
+//
+// Guards in code, not only in the prompt (SDK_HARNESS.md §5.1: with bypass permissions nothing
+// else refuses a tool call): with more than one window open, resume and fork REFUSE until the call
+// names one (the model has to ask the user); at most kMaxTabOpensPerRequest opens and ONE
+// deactivate per request; a deactivate of a tab whose turn runs needs cut_off_turn.
 //
 // This file needs neither the SDK nor nlohmann/json (it uses AgentHarness.h only for the tool
 // types), so the standalone test harness compiles it and calls the tool handlers directly.
@@ -52,6 +68,7 @@
 #include "Json.h"
 #include "SessionSearch.h" // SessionQuery / SessionHit
 #include "TranscriptStore.h" // SessionIndexEntry / TranscriptRef
+#include "WindowTabTools.h" // WindowCensus / WindowToolRequest / WindowToolOutcome — the tabs server's exchange with the windows
 
 namespace Agentmaster
 {
@@ -356,12 +373,64 @@ namespace Agentmaster
     //   throws      — std::bad_alloc.
     SessionReadCut CutRenderedTranscript(std::wstring_view markdown, size_t budgetChars);
 
+    // ===== windows and tabs (SESSIONS.md §9.14) =============================================
+
+    /// <summary>At most this many tabs a request may open (resume + fork together).</summary>
+    /// <remarks>
+    /// A guard in code because the harness runs with bypass permissions (SDK_HARNESS.md §5.1): a model that misread a
+    /// request ("resume all my sessions from last month") must not start dozens of claude.exe processes. The user who
+    /// wants more asks again; the tool's refusal tells the model to say so.
+    /// </remarks>
+    inline constexpr size_t kMaxTabOpensPerRequest = 5;
+
+    /// <summary>
+    /// How many tabs a `list` shows per window when the model names no `limit`: the most recently active ones, plus the
+    /// selected tab, in strip order. The release fleet holds windows of 400+ tabs: listing them all would cost tens of
+    /// thousands of tokens per call.
+    /// </summary>
+    inline constexpr size_t kTabListDefaultLimit = 40;
+    /// <summary>The most tabs a `list` shows per window, whatever `limit` asks.</summary>
+    inline constexpr size_t kTabListMaxLimit = 200;
+
+    /// <summary>The short id the model sees for a window: the first 8 characters of its record id, braces dropped,
+    /// lower case ("{8A2B1C3D-...}" → "8a2b1c3d"). Short on purpose, like a session's short id.</summary>
+    /// <param name="windowId">The window's record id.</param>
+    /// <returns>The short id; the whole folded id when it is shorter than 8 characters.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    std::wstring WindowHandleOf(const std::wstring& windowId);
+
+    /// <summary>
+    /// One line per window, the way the model describes the windows to the user when it must ask which one:
+    /// "window 1 (id 8a2b1c3d): 24 tabs, "Agentmaster" selected; you used it last; this request came from it".
+    /// </summary>
+    /// <param name="windows">The census, in its order (the numbers are 1-based positions in it).</param>
+    /// <param name="originWindowId">The window the request came from ("" = none: a phone).</param>
+    /// <returns>The lines, each ending in a newline.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    std::wstring DescribeWindowsForModel(const std::vector<WindowCensus>& windows, const std::wstring& originWindowId);
+
+    /// <summary>
+    /// Which window a tool's `window` argument names — the rule behind "with more than one window, the model must ask".
+    /// </summary>
+    /// <param name="windows">The census, in its order.</param>
+    /// <param name="argument">What the model passed: "" (none), a 1-based number, or a window id (short or whole, any
+    /// case, braces optional).</param>
+    /// <param name="originWindowId">The window the request came from ("" = none); only named in an error.</param>
+    /// <param name="error">Receives, when the result is nullopt, the error written FOR THE MODEL: with no window
+    /// named and more than one open, the instruction to ask the user plus every window's description line.</param>
+    /// <returns>The index into `windows`; nullopt with `error` set when nothing is open, the argument names no
+    /// window, or none was named while more than one is open.</returns>
+    /// <exception cref="std::bad_alloc">If the error text cannot be allocated.</exception>
+    /// <remarks>Pure; with exactly one window an empty argument means that window (there is nothing to ask).</remarks>
+    std::optional<size_t> ResolveWindowArgument(const std::vector<WindowCensus>& windows, std::wstring_view argument, const std::wstring& originWindowId, std::wstring& error);
+
     // ===== the tool servers =================================================================
 
-    // The two tool servers of the Sessions AI search, and the state they share between calls of
-    // one conversation: which short id means which session, the rows of the latest search (so
-    // `show` can take "the first N of that"), and where each session's transcript is (so `read`
-    // and `grep` with ids open the file a result named).
+    // The tool servers of the Sessions AI search (sessions or agentmaster, display, and with
+    // Callbacks::tabs the tabs server), and the state they share between calls of one conversation:
+    // which short id means which session, the rows of the latest search (so `show` can take "the
+    // first N of that"), where each session's transcript is (so `read` and `grep` with ids open the
+    // file a result named), and how many tabs the running request opened or parked.
     //
     // Thread-safe: the handlers run on the SDK's reader thread, and read-only search calls of one
     // model turn may run at the same time.
@@ -416,6 +485,33 @@ namespace Agentmaster
                 // Same thread rules. Optional: without it `show` knows only the ids of searches.
                 std::function<std::vector<std::wstring>(const std::vector<std::wstring>& handles)> resolve;
             } database;
+
+            // The window and tab tools (SESSIONS.md §9.14), optional. When `census` is set, the toolset also serves the
+            // server "tabs" (list, resume, fork, deactivate): the tools that change the user's WORKSPACE, beside `show`,
+            // which changes only what the user sees. Every member is called on the tool-call thread with the model
+            // waiting; the app's implementations hop to the windows' UI thread and wait a few seconds at most
+            // (SessionSearchAgent's engine tab tools over Engine.h CollectWindowCensus / RunWindowTool). A test gives
+            // fakes, so the tools' rules (the window choice, the placement, the caps) are pinned without a window.
+            struct TabTools
+            {
+                // Every window and its tabs, in the windows' creation order, the session facts filled (WindowTabInfo's
+                // registry half). Required for the server. An empty answer = no window answered (the tools say so).
+                std::function<std::vector<WindowCensus>()> census;
+                // Run a Resume or Fork request in the window `windowId` and return its outcome (a timeout = an outcome
+                // with handled == false). Required for resume and fork; the implementation fills the request's
+                // dir / title for a session the window's registry may not know.
+                std::function<WindowToolOutcome(const std::wstring& windowId, const WindowToolRequest& request)> open;
+                // Park the tab of `sessionId` in whichever window hosts it and return the host's outcome (no host / a
+                // timeout = handled == false). Required for deactivate.
+                std::function<WindowToolOutcome(const std::wstring& sessionId)> deactivate;
+                // Bring the tab of an already-open session to the front (its window foregrounded, the tab selected).
+                // Optional: without it, resume of an open session only says where the tab is.
+                std::function<bool(const std::wstring& sessionId)> focus;
+                // The window the RUNNING request came from — the Sessions page that asked — or "" (the Telegram topic,
+                // a test). Optional. Only described to the model ("this request came from it"): it never chooses the
+                // window by itself, because the user's rule is that with several windows the user names one.
+                std::function<std::wstring()> originWindowId;
+            } tabs;
         };
 
         //   throws — std::invalid_argument when a required callback is missing (catalog — unless
@@ -424,10 +520,17 @@ namespace Agentmaster
 
         // The servers to put into HarnessOptions::toolServers: "sessions" (search, grep, read)
         // and "display" (show); with Callbacks::database.call set, "agentmaster" (the database's
-        // tools, then this toolset's own read) and "display" instead. The handlers refer to this
-        // object: it must outlive the conversation's process.
+        // tools, then this toolset's own read) and "display" instead. With Callbacks::tabs.census
+        // set, a last server "tabs" (list, resume, fork, deactivate) in either mode. The handlers
+        // refer to this object: it must outlive the conversation's process.
         //   throws — std::bad_alloc.
         std::vector<HarnessToolServer> Servers();
+
+        /// <summary>True when the toolset serves the window and tab tools (Callbacks::tabs.census is set).</summary>
+        bool UsesTabs() const noexcept
+        {
+            return static_cast<bool>(_callbacks.tabs.census);
+        }
 
         // True when the toolset serves the session database's tools (Callbacks::database.call).
         bool UsesDatabase() const noexcept
@@ -443,29 +546,36 @@ namespace Agentmaster
         //   throws — std::bad_alloc.
         std::wstring ResolveHandle(const std::wstring& handle) const;
 
-        // The system prompt of the Sessions AI search: the role, the four tools, and nine rules.
-        // Rule 1 makes the model's FIRST step a short mention of which kinds of tool calls it can use
-        // for the request, out of everything the tools can do, and how it will use them in different
-        // ways — written in the same message as its first calls, so it costs output tokens in that
-        // step but no extra model request. Rule 4 makes it READ every session it intends to show
-        // (and grep for the user's own words), rule 5 give each a `why`, rule 6 answer in ONE
-        // sentence that says what it found — never "on the screen", since the answer is also read
-        // on a phone (the user's choice of 2026-10-17, SESSIONS.md §9.12). ASCII (it travels
-        // through a file and the API unchanged).
-        //   returns — a static, NUL-terminated string; never null.
-        // ⚠ Its text is part of every request's prompt and of the prompt cache's key: a change costs a
-        //   new cache entry, and the m5 suite pins rule 1 and the count of rules.
+        /// <summary>
+        /// The system prompt of the AI search on the PAGE SEARCH (the sessions / display / tabs servers), in the
+        /// structure of the user's request of 2026-10-17 (SESSIONS.md §9.14): an introduction, then
+        /// "# Instructional Behaviors" (numbered: be descriptive — open every request with an "I'll 1. ... 2. ... 3."
+        /// plan before the first tool call, end it with a reply that says what was found or done and offers the next
+        /// step; evidence first; the workspace is the user's), "## Tools" (every tool, by group, with when and how to
+        /// use it), and "## Workflow Guidelines" (numbered, one for every kind of conversation about sessions and
+        /// search: describe, exact words, file / folder, period, marks, content questions, follow-ups, nothing found,
+        /// several matches, resume, fork, the window choice, the placement, deactivate, workspace questions, ids,
+        /// out-of-scope requests, tool errors).
+        /// </summary>
+        /// <returns>A static, NUL-terminated ASCII string (it travels through a file and the API unchanged); never null.</returns>
+        /// <remarks>
+        /// It replaced the nine terse rules of 2026-10-13 / 2026-10-17, whose "exactly ONE short sentence" reply the
+        /// user called hasty. The plan is written in the same message as the first calls: no extra model request, and
+        /// the page shows it while the request runs (SessionSearchSnapshot::narration). ⚠ Part of every request's
+        /// prompt and of the prompt cache's key: a change costs one new cache entry; the m5 suite pins the three
+        /// headings, the plan rule, every tool name, and that the text is ASCII.
+        /// </remarks>
         static const wchar_t* SystemPrompt() noexcept;
 
-        // The system prompt of the AI search on the SESSION DATABASE (Callbacks::database.call): the
-        // same role and the same nine rules, for the database's tools (mcp__agentmaster__search with
-        // `scopes` where the page search had `deep`; grep, who_touched, timeline, session, messages,
-        // files, related, usage and sql to look further), this toolset's mcp__agentmaster__read to
-        // confirm a candidate, and mcp__display__show. ASCII.
-        //   returns — a static, NUL-terminated string; never null.
-        // ⚠ Like SystemPrompt(): part of every request's prompt and of the prompt cache's key; the m5
-        //   suite pins its rule count, that it names every database tool, and that it never says
-        //   `deep` (the database has scopes).
+        /// <summary>
+        /// The system prompt of the AI search on the SESSION DATABASE (Callbacks::database.call): the same introduction,
+        /// behaviors and structure as SystemPrompt(), with the database's tools in "## Tools" (mcp__agentmaster__search
+        /// with `scopes`, grep, who_touched, timeline, session, messages, files, related, usage, sql, this toolset's own
+        /// read) and the workflows that use them (who_touched for a file, timeline for a period, usage, related).
+        /// </summary>
+        /// <returns>A static, NUL-terminated ASCII string; never null.</returns>
+        /// <remarks>⚠ Like SystemPrompt(); the m5 suite also pins that it names every database tool and never contains
+        /// the word `deep` (the database's search has scopes, not a deep switch).</remarks>
         static const wchar_t* DatabaseSystemPrompt() noexcept;
 
         // A one-line description of a database tool call for the user (the page's "Searching: ..."
@@ -486,6 +596,13 @@ namespace Agentmaster
         // The database's server (the model calls mcp__agentmaster__<tool>): the same name as the
         // stdio MCP server `agentmaster-sessiondb.exe mcp`, so a tool reads the same everywhere.
         static constexpr wchar_t kDatabaseServer[] = L"agentmaster";
+        // The window and tab tools' server (the model calls mcp__tabs__list, mcp__tabs__resume,
+        // mcp__tabs__fork and mcp__tabs__deactivate).
+        static constexpr wchar_t kTabsServer[] = L"tabs";
+        static constexpr wchar_t kTabsListTool[] = L"list";
+        static constexpr wchar_t kTabsResumeTool[] = L"resume";
+        static constexpr wchar_t kTabsForkTool[] = L"fork";
+        static constexpr wchar_t kTabsDeactivateTool[] = L"deactivate";
 
     private:
         // What the conversation's own results told it about a session: enough for `read` and a
@@ -554,10 +671,67 @@ namespace Agentmaster
         void RememberHandles(const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds);
         int64_t Now() const;
 
+        /// <summary>The tabs server's four tools (descriptions, schemas, handlers), in the order the model reads them.</summary>
+        /// <returns>list, resume, fork, deactivate.</returns>
+        /// <exception cref="std::bad_alloc">If the tools cannot be allocated.</exception>
+        std::vector<HarnessTool> MakeTabTools();
+
+        /// <summary>
+        /// The `list` tool: the census, filtered by window / dir / title, each window's tabs cut to `limit` (the
+        /// selected tab and the most recently active ones, shown in strip order), as the JSON the model reads. Every
+        /// listed session gets its short id (so read, show, resume, fork and deactivate take it).
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <returns>The JSON result, or an error result written for the model (no window answered, an unknown window).</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        HarnessToolResult ListTabs(const json::Value& arguments);
+
+        /// <summary>
+        /// The `resume` and `fork` tools: resolve the id, refuse past the per-request cap, report an already-open
+        /// session instead of opening it twice (resume), resolve the window (refusing, with every window described, when
+        /// several are open and none is named), resolve `after` to a tab of that window, then run the request there.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <param name="kind">WindowToolRequest::Kind::Resume or ::Fork.</param>
+        /// <returns>A one-paragraph result for the model (where the tab opened, a fork's new id), or an error result.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the census / open callbacks throw (the harness answers the model with it).</exception>
+        HarnessToolResult OpenTab(const json::Value& arguments, WindowToolRequest::Kind kind);
+
+        /// <summary>
+        /// The `deactivate` tool: ONE session's tab, never a shell's or an adopted one; a tab that is already dormant is
+        /// reported, not parked again; a tab whose turn runs (or waits for approval) only with cut_off_turn:true; at most
+        /// one park per request.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <returns>A result for the model saying what happened, or an error result saying why not and what to do.</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the census / deactivate callbacks throw.</exception>
+        HarnessToolResult DeactivateTab(const json::Value& arguments);
+
+        /// <summary>
+        /// Count one tab action against the RUNNING request's caps (kMaxTabOpensPerRequest opens, one deactivate). The
+        /// counters restart whenever Callbacks::generation moves (a new request, an interrupt, a reset).
+        /// </summary>
+        /// <param name="deactivate">True for a deactivate, false for a resume / fork.</param>
+        /// <param name="error">Receives the refusal, written for the model, when the cap is reached.</param>
+        /// <returns>True when the action may run (and was counted); false with `error` set.</returns>
+        /// <exception cref="std::bad_alloc">If the error text cannot be allocated.</exception>
+        bool TakeTabActionSlot(bool deactivate, std::wstring& error);
+
+        /// <summary>Give back the slot TakeTabActionSlot counted, for an action that turned out to do nothing.</summary>
+        /// <param name="deactivate">The kind the slot was taken for.</param>
+        void ReturnTabActionSlot(bool deactivate) noexcept;
+
         Callbacks _callbacks;
-        mutable std::mutex _mutex; // guards the three members below
+        mutable std::mutex _mutex; // guards the members below
         std::unordered_map<std::wstring, std::wstring> _handles; // short id (lower case) -> full session id
         std::vector<std::wstring> _lastSearchIds; // the latest search's rows, full ids, result order
         std::unordered_map<std::wstring, KnownSession> _known; // full id -> what a search / grep row said about it (Reset clears it)
+        // The tab actions of the running request (TakeTabActionSlot): the request generation they belong to, and how
+        // many opens / deactivates it made. ~0 = none counted yet.
+        uint64_t _tabActionGeneration{ ~uint64_t{ 0 } };
+        size_t _tabOpensThisRequest{ 0 };
+        size_t _tabDeactivatesThisRequest{ 0 };
     };
 }

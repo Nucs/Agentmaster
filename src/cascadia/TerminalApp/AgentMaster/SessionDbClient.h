@@ -99,4 +99,20 @@ namespace Agentmaster::SessionDb
     // new one takes the stable name; old renamed copies are deleted when nothing holds them.
     // Returns false with `error` when the source files are missing or a copy failed. Never throws.
     bool EnsureServiceBinaries(const std::wstring& profileDir, const std::wstring& sourceDir, std::wstring& error);
+
+    /// <summary>
+    /// True when the session database service CAN start for `profileDir`: the agentmaster-sessiondb.exe that
+    /// ServiceClient::FindServiceExe would start (the copied-out one in &lt;profile&gt;\sessiondb\bin, else the package's)
+    /// has duckdb.dll beside it — the import the service cannot start without.
+    /// </summary>
+    /// <param name="profileDir">The profile whose service would run.</param>
+    /// <returns>True when both files are there; false otherwise, and on any failure to look (logged).</returns>
+    /// <remarks>
+    /// A file check only (no process is started, nothing is copied), cheap enough for the AI search to ask once when it
+    /// creates its conversation (SearchDatabaseProfileIfUsable). Every loose layout built before 2026-10-17 (the stock
+    /// bin\x64\&lt;Config&gt; and every -LayoutDir hot-deploy slot) shipped the service WITHOUT duckdb.dll — the wapproj's
+    /// Content item never reached a build folder that is registered as it is, until CopyAgentmasterDuckDbToLayout — which
+    /// is the case this answers false for. Never throws.
+    /// </remarks>
+    bool SessionDbServiceInstalled(const std::wstring& profileDir) noexcept;
 }
