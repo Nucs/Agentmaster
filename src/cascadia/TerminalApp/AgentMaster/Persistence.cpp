@@ -940,6 +940,9 @@ namespace Agentmaster
         o.Set(L"messagingTelegramOwnerId", json::Value::MkStr(s.messagingTelegramOwnerId));
         o.Set(L"messagingIdleGraceMinutes", json::Value::MkNum(ClampMessagingIdleGraceMinutes(s.messagingIdleGraceMinutes)));
         o.Set(L"messagingSearchThinking", json::Value::MkStr(s.messagingSearchThinking));
+        // §21.11: the topics' default mode (conversation only unless set) and the rich-message switch (on unless set).
+        o.Set(L"messagingVerbose", json::Value::MkBool(s.messagingVerbose));
+        o.Set(L"messagingRichMessages", json::Value::MkBool(s.messagingRichMessages));
         return o;
     }
 
@@ -1255,6 +1258,8 @@ namespace Agentmaster
         s.messagingTelegramOwnerId = v.StrAt(L"messagingTelegramOwnerId");
         s.messagingIdleGraceMinutes = ClampMessagingIdleGraceMinutes(v.U32At(L"messagingIdleGraceMinutes", 10));
         s.messagingSearchThinking = v.StrAt(L"messagingSearchThinking", L"high");
+        s.messagingVerbose = v.BoolAt(L"messagingVerbose", false); // §21.11: absent => the conversation only
+        s.messagingRichMessages = v.BoolAt(L"messagingRichMessages", true); // §21.11: absent => rich messages
         return s;
     }
 

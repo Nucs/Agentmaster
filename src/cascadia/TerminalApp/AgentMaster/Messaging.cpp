@@ -119,6 +119,13 @@ namespace Agentmaster::Msg
         constexpr int64_t kTokenTtlMs = 2 * 60 * 60 * 1000;
         // How many topics a tick creates or deletes at most (each is an API call on the tick thread).
         constexpr size_t kTopicOpsPerTick = 6;
+        // The topic names' state glyphs (§21.11): a rename goes only while the last minute holds fewer calls than this (the
+        // chat's flood budget is near 20 a minute and the live traffic goes first); the delete of the "topic renamed"
+        // notice Telegram posts is one more call.
+        constexpr size_t kNameRenameCallsPerMinute = 12;
+        // A rich message's parts each take a block of this many sub-sequence slots in the outbox (§21.11): part j at
+        // j * stride, its HTML fallback's chunks after it (MessagingService::_htmlItems, two slots per chunk).
+        constexpr uint32_t kRichPartSubSeqStride = 4096;
         // The START-UP HOLD on "closed" topic deletes (§21.4): at an app start every session reads live=false
         // until its window re-homes its tabs (the registry loads sessions.json as archived; each reopened window
         // flips its own tabs live, one by one, in its first layout; a second window registers only when the
@@ -136,6 +143,85 @@ namespace Agentmaster::Msg
         int64_t WallMs()
         {
             return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        }
+
+        // ----- Credential Manager: the one place a bot token is stored (M4) -----
+
+        // Reads a generic credential's blob as a token (trailing NULs, spaces and line breaks dropped); "" when absent or
+        // refused. Throws std::bad_alloc only (the callers contain it).
+        std::wstring ReadCredentialToken(const std::wstring& target)
+        {
+            PCREDENTIALW cred = nullptr;
+            if (!::CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred) || !cred)
+            {
+                return {};
+            }
+            std::wstring token;
+            if (cred->CredentialBlob && cred->CredentialBlobSize >= sizeof(wchar_t))
+            {
+                token.assign(reinterpret_cast<const wchar_t*>(cred->CredentialBlob), cred->CredentialBlobSize / sizeof(wchar_t));
+            }
+            ::CredFree(cred);
+            while (!token.empty() && (token.back() == L'\0' || token.back() == L' ' || token.back() == L'\r' || token.back() == L'\n'))
+            {
+                token.pop_back();
+            }
+            return token;
+        }
+
+        // Writes (replaces) a token as a generic credential, trimmed; an all-blank token is refused (false). A refusal of
+        // Credential Manager is logged to hooks.log with `what` ("bot token", "secretary bot token") — never the token.
+        // Throws std::bad_alloc only.
+        bool StoreCredentialToken(std::wstring target, std::wstring_view token, const wchar_t* what)
+        {
+            std::wstring value{ token };
+            const size_t a = value.find_first_not_of(L" \t\r\n");
+            if (a == std::wstring::npos)
+            {
+                return false;
+            }
+            const size_t b = value.find_last_not_of(L" \t\r\n");
+            value = value.substr(a, b - a + 1);
+            std::wstring user = L"bot";
+            CREDENTIALW cred{};
+            cred.Type = CRED_TYPE_GENERIC;
+            cred.TargetName = target.data();
+            cred.UserName = user.data();
+            cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+            cred.CredentialBlobSize = static_cast<DWORD>(value.size() * sizeof(wchar_t));
+            cred.CredentialBlob = reinterpret_cast<LPBYTE>(value.data());
+            const bool ok = ::CredWriteW(&cred, 0) != FALSE;
+            if (!ok)
+            {
+                AppendStateLog(L"hooks.log", std::wstring{ L"[msg] could not store the " } + what + L" in Credential Manager (error " + std::to_wstring(::GetLastError()) + L")\n");
+            }
+            return ok;
+        }
+
+        // Deletes a generic credential; true when deleted or absent.
+        bool ClearCredentialToken(const std::wstring& target) noexcept
+        {
+            if (::CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0))
+            {
+                return true;
+            }
+            return ::GetLastError() == ERROR_NOT_FOUND;
+        }
+
+        // Whether a refused RICH send should go again as HTML (§21.11): a 400 about the message itself (its Markdown, its
+        // size, a block Telegram does not take) or a 404 (a Bot API without the method). Not a missing chat or thread (the
+        // HTML would be refused the same), not a 429 (the send loop already waited and retried), not a transport failure.
+        bool RichRefusalWantsFallback(const TgResult& r) noexcept
+        {
+            if (r.ok || r.transportFailed)
+            {
+                return false;
+            }
+            if (r.httpStatus == 404)
+            {
+                return true;
+            }
+            return r.httpStatus == 400 && !r.ThreadNotFound() && r.description.find(L"chat not found") == std::wstring::npos;
         }
 
         // FNV-1a of a token, for the one-poller-per-token mutex name (never the token itself).
@@ -469,7 +555,45 @@ namespace Agentmaster::Msg
     std::wstring MessagingService::StatusText() const
     {
         std::lock_guard lk{ _mtx };
-        return _status;
+        if (!_running.load())
+        {
+            return _status;
+        }
+        // The SECRETARY line (§21.5, §21.11): who sends the user's turns as the user, or what is missing for it.
+        std::wstring line;
+        const int64_t secretaryId = _secretaryBotId.load();
+        const bool viaSecretary = _state.businessBotId != 0 && _state.businessBotId == secretaryId;
+        const std::wstring secretaryName = _secretaryUsername.empty() ? std::wstring{ L"the secretary bot" } : L"@" + _secretaryUsername;
+        if (!_secretaryProblem.empty())
+        {
+            line = L"Secretary bot: " + _secretaryProblem + L".";
+        }
+        else if (_state.businessMode == 1)
+        {
+            line = L"Secretary: your prompts appear as your own messages (sent by " + (viaSecretary ? secretaryName : std::wstring{ L"this bot" }) + L").";
+        }
+        else if (_state.businessMode == -1)
+        {
+            line = L"Secretary: Telegram refused to send as you (" + _state.businessNote + L")" +
+                   (_secretaryOn.load() ? std::wstring{ L"." } : std::wstring{ L"; a second bot as the secretary can (the steps below)." });
+        }
+        else if (!_state.businessConnectionId.empty() && _state.businessEnabled && !_state.businessCanReply)
+        {
+            line = L"Secretary: connected without the right to reply \x2014 allow it under Telegram \x2192 Settings \x2192 Chat Automation.";
+        }
+        else if (!_state.businessConnectionId.empty() && _state.businessEnabled)
+        {
+            line = L"Secretary: connected; checking with one message in the \U0001F50E Search topic.";
+        }
+        else if (_secretaryOn.load())
+        {
+            line = L"Secretary: " + secretaryName + L" is running \x2014 connect it under Telegram \x2192 Settings \x2192 Chat Automation (allow it to reply).";
+        }
+        else
+        {
+            line = L"Secretary: off (optional \x2014 your prompts show as the bot's \x2328 lines).";
+        }
+        return _status + L"\n" + line;
     }
 
     void MessagingService::SetSearchFactory(SearchBridgeFactory factory) noexcept
@@ -490,6 +614,9 @@ namespace Agentmaster::Msg
         try
         {
             _idleGraceMs.store(static_cast<int64_t>(ClampMessagingIdleGraceMinutes(settings.messagingIdleGraceMinutes)) * 60 * 1000);
+            // §21.11: the default mode of the topics and the rich-message switch apply to the next message (live).
+            _defaultVerbose.store(settings.messagingVerbose);
+            _richMessages.store(settings.messagingRichMessages);
             int64_t owner = 0;
             for (const wchar_t c : settings.messagingTelegramOwnerId)
             {
@@ -536,8 +663,17 @@ namespace Agentmaster::Msg
             }
             if (_running.load())
             {
-                // A live reconfiguration: the owner / grace / thinking word were taken above; a token change
-                // needs a restart of the poller (the token is baked into the client).
+                // A live reconfiguration: the owner / grace / thinking word / topic mode / rich switch were taken above; a
+                // token change needs a restart of the poller (the token is baked into the client) — the SECRETARY bot's
+                // too (§21.11): a Save that stored, replaced or forgot it restarts the service here.
+                const std::wstring secretary = ReadStoredSecretaryToken(_profile);
+                if ((secretary.empty() ? std::wstring{} : TokenHash(secretary)) != _secretaryTokenHash)
+                {
+                    _log(L"[msg] the secretary bot token changed: the service restarts to pick it up");
+                    Stop();
+                    _start(token);
+                    return;
+                }
                 _tickCv.notify_all();
                 return;
             }
@@ -556,7 +692,8 @@ namespace Agentmaster::Msg
             // M7 — one poller per token, machine-wide: Telegram answers a second concurrent getUpdates
             // with 409 and the two readers steal each other's updates. The mutex is named by a hash of the
             // token (never the token).
-            const std::wstring mutexName = L"Global\\Agentmaster-telegram-" + TokenHash(token);
+            const std::wstring mainHash = TokenHash(token);
+            const std::wstring mutexName = L"Global\\Agentmaster-telegram-" + mainHash;
             HANDLE m = ::CreateMutexW(nullptr, TRUE, mutexName.c_str());
             if (m && ::GetLastError() == ERROR_ALREADY_EXISTS)
             {
@@ -596,6 +733,42 @@ namespace Agentmaster::Msg
             _secretaryFailures.store(0);
             _stop.store(false);
             _api = std::make_unique<TelegramApi>(std::move(token));
+            // The SECRETARY bot (§21.11), when its token is stored: a client and a poller of its own (one poller per token,
+            // machine-wide, like the topics bot's), started with the other threads below.
+            {
+                std::wstring secretary = ReadStoredSecretaryToken(_profile);
+                _secretaryTokenHash = secretary.empty() ? std::wstring{} : TokenHash(secretary);
+                _secretaryBotId.store(0);
+                {
+                    std::lock_guard lk{ _mtx };
+                    _secretaryUsername.clear();
+                    _secretaryProblem.clear();
+                }
+                if (!secretary.empty() && _secretaryTokenHash == mainHash)
+                {
+                    _log(L"[msg] the secretary bot token is the topics bot's own token: no second bot is started");
+                    std::lock_guard lk{ _mtx };
+                    _secretaryProblem = L"its token is the topics bot's own \x2014 the secretary must be a second bot";
+                }
+                else if (!secretary.empty())
+                {
+                    const std::wstring secretaryMutex = L"Global\\Agentmaster-telegram-" + _secretaryTokenHash;
+                    HANDLE sm = ::CreateMutexW(nullptr, TRUE, secretaryMutex.c_str());
+                    if (sm && ::GetLastError() == ERROR_ALREADY_EXISTS)
+                    {
+                        ::CloseHandle(sm);
+                        _log(L"[msg] secretary bot not started: another process holds its poller mutex");
+                        std::lock_guard lk{ _mtx };
+                        _secretaryProblem = L"another Agentmaster instance (or program) already polls it";
+                    }
+                    else
+                    {
+                        _secretaryMutex = sm;
+                        _secretaryApi = std::make_unique<TelegramApi>(std::move(secretary));
+                        _secretaryOn.store(true);
+                    }
+                }
+            }
             _topicsEnabled.store(false);
             _botId.store(0); // re-arms the poll loop's identity gate: this token may name another bot than the last run's
             _lastGetMeMs = 0;
@@ -646,7 +819,13 @@ namespace Agentmaster::Msg
             _pollThread = std::thread([this]() noexcept { _pollLoop(); });
             _sendThread = std::thread([this]() noexcept { _sendLoop(); });
             _tickThread = std::thread([this]() noexcept { _tickLoop(); });
-            _log(L"[msg] messaging started (owner " + std::to_wstring(_ownerId) + L", idle grace " + std::to_wstring(_idleGraceMs.load() / 60000) + L" min)");
+            if (_secretaryApi)
+            {
+                _secretaryThread = std::thread([this]() noexcept { _secretaryPollLoop(); });
+            }
+            _log(L"[msg] messaging started (owner " + std::to_wstring(_ownerId) + L", idle grace " + std::to_wstring(_idleGraceMs.load() / 60000) + L" min, topics " +
+                 (_defaultVerbose.load() ? L"verbose" : L"conversation only") + L" by default, " + (_richMessages.load() ? L"rich messages" : L"HTML messages") +
+                 (_secretaryApi ? L", a secretary bot" : L"") + L")");
         }
         catch (...)
         {
@@ -672,6 +851,10 @@ namespace Agentmaster::Msg
             {
                 _api->Abort(); // the long poll returns at once
             }
+            if (_secretaryApi)
+            {
+                _secretaryApi->Abort(); // the secretary's long poll too (§21.11)
+            }
             if (_registryObserver)
             {
                 _registry->RemoveObserver(_registryObserver);
@@ -688,6 +871,10 @@ namespace Agentmaster::Msg
             if (_tickThread.joinable())
             {
                 _tickThread.join();
+            }
+            if (_secretaryThread.joinable())
+            {
+                _secretaryThread.join();
             }
             _saveStateIfDirty(true);
             // A clean stop removes the run marker (a marker found at the next start means a crash).
@@ -709,6 +896,16 @@ namespace Agentmaster::Msg
                 _search.reset();
             }
             _api.reset();
+            // The secretary's client goes after every thread that could use it is joined (the send loop uses it).
+            _secretaryOn.store(false);
+            _secretaryApi.reset();
+            _secretaryBotId.store(0);
+            if (_secretaryMutex)
+            {
+                ::ReleaseMutex(static_cast<HANDLE>(_secretaryMutex));
+                ::CloseHandle(static_cast<HANDLE>(_secretaryMutex));
+                _secretaryMutex = nullptr;
+            }
             _log(L"[msg] messaging stopped");
         }
         catch (...)
@@ -750,23 +947,7 @@ namespace Agentmaster::Msg
     {
         try
         {
-            const auto target = TokenCredentialTarget(profileDir);
-            PCREDENTIALW cred = nullptr;
-            if (!::CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred) || !cred)
-            {
-                return {};
-            }
-            std::wstring token;
-            if (cred->CredentialBlob && cred->CredentialBlobSize >= sizeof(wchar_t))
-            {
-                token.assign(reinterpret_cast<const wchar_t*>(cred->CredentialBlob), cred->CredentialBlobSize / sizeof(wchar_t));
-            }
-            ::CredFree(cred);
-            while (!token.empty() && (token.back() == L'\0' || token.back() == L' ' || token.back() == L'\r' || token.back() == L'\n'))
-            {
-                token.pop_back();
-            }
-            return token;
+            return ReadCredentialToken(TokenCredentialTarget(profileDir));
         }
         catch (...)
         {
@@ -779,29 +960,7 @@ namespace Agentmaster::Msg
     {
         try
         {
-            std::wstring value{ token };
-            const size_t a = value.find_first_not_of(L" \t\r\n");
-            if (a == std::wstring::npos)
-            {
-                return false;
-            }
-            const size_t b = value.find_last_not_of(L" \t\r\n");
-            value = value.substr(a, b - a + 1);
-            auto target = TokenCredentialTarget(profileDir);
-            std::wstring user = L"bot";
-            CREDENTIALW cred{};
-            cred.Type = CRED_TYPE_GENERIC;
-            cred.TargetName = target.data();
-            cred.UserName = user.data();
-            cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
-            cred.CredentialBlobSize = static_cast<DWORD>(value.size() * sizeof(wchar_t));
-            cred.CredentialBlob = reinterpret_cast<LPBYTE>(value.data());
-            const bool ok = ::CredWriteW(&cred, 0) != FALSE;
-            if (!ok)
-            {
-                AppendStateLog(L"hooks.log", L"[msg] could not store the bot token in Credential Manager (error " + std::to_wstring(::GetLastError()) + L")\n");
-            }
-            return ok;
+            return StoreCredentialToken(TokenCredentialTarget(profileDir), token, L"bot token");
         }
         catch (...)
         {
@@ -814,16 +973,60 @@ namespace Agentmaster::Msg
     {
         try
         {
-            const auto target = TokenCredentialTarget(profileDir);
-            if (::CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0))
-            {
-                return true;
-            }
-            return ::GetLastError() == ERROR_NOT_FOUND;
+            return ClearCredentialToken(TokenCredentialTarget(profileDir));
         }
         catch (...)
         {
             LogSwallowedException(L"MessagingService::ClearToken");
+            return false;
+        }
+    }
+
+    std::wstring MessagingService::SecretaryTokenCredentialTarget(std::wstring_view profileDir)
+    {
+        std::wstring leaf = Leaf(profileDir);
+        if (leaf.empty())
+        {
+            leaf = L"default";
+        }
+        return L"Agentmaster:messaging:telegram-secretary:" + leaf;
+    }
+
+    std::wstring MessagingService::ReadStoredSecretaryToken(std::wstring_view profileDir) noexcept
+    {
+        try
+        {
+            return ReadCredentialToken(SecretaryTokenCredentialTarget(profileDir));
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::ReadStoredSecretaryToken");
+            return {};
+        }
+    }
+
+    bool MessagingService::StoreSecretaryToken(std::wstring_view profileDir, std::wstring_view token) noexcept
+    {
+        try
+        {
+            return StoreCredentialToken(SecretaryTokenCredentialTarget(profileDir), token, L"secretary bot token");
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::StoreSecretaryToken");
+            return false;
+        }
+    }
+
+    bool MessagingService::ClearSecretaryToken(std::wstring_view profileDir) noexcept
+    {
+        try
+        {
+            return ClearCredentialToken(SecretaryTokenCredentialTarget(profileDir));
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::ClearSecretaryToken");
             return false;
         }
     }
@@ -1017,6 +1220,130 @@ namespace Agentmaster::Msg
         }
     }
 
+    void MessagingService::_secretaryPollLoop() noexcept
+    {
+        int64_t backoffMs = 1000;
+        bool known = false;
+        while (!_stop.load())
+        {
+            try
+            {
+                if (!known)
+                {
+                    // getMe first: the bot's id (its update ids are its own — a new secretary bot starts from offset 0) and
+                    // whether Secretary Mode is on for it in @BotFather (getMe's can_connect_to_business).
+                    const TgResult me = _secretaryApi->Call(L"getMe", json::Value::MkObj(), 15000);
+                    if (_stop.load())
+                    {
+                        break;
+                    }
+                    if (!me.ok)
+                    {
+                        if (me.httpStatus == 401)
+                        {
+                            _log(L"[msg] secretary bot: Telegram refused its token (401); sends as the user stay off");
+                            std::lock_guard lk{ _mtx };
+                            _secretaryProblem = L"Telegram refused its token (401) \x2014 paste a new one";
+                            return;
+                        }
+                        const int64_t wait = backoffMs;
+                        backoffMs = std::min<int64_t>(backoffMs * 2, 60000);
+                        for (int64_t slept = 0; slept < wait && !_stop.load(); slept += 250)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                        }
+                        continue;
+                    }
+                    const int64_t id = me.result.I64At(L"id", 0);
+                    const std::wstring user = me.result.StrAt(L"username");
+                    const bool canConnect = me.result.BoolAt(L"can_connect_to_business", false);
+                    {
+                        std::lock_guard lk{ _mtx };
+                        if (id != 0 && _state.secretaryBotId != id)
+                        {
+                            _state.secretaryBotId = id;
+                            _state.secretaryUpdateOffset = 0;
+                            _stateDirty = true;
+                        }
+                        _secretaryUsername = user;
+                        _secretaryProblem = canConnect ? std::wstring{} : L"Secretary Mode is off for @" + user + L" \x2014 turn it on in @BotFather (Bot Settings)";
+                    }
+                    _secretaryBotId.store(id);
+                    _log(L"[msg] secretary bot @" + user + L" ready (Secretary Mode " + (canConnect ? L"on" : L"OFF \x2014 turn it on in @BotFather") + L")");
+                    known = true;
+                    backoffMs = 1000;
+                }
+                auto params = json::Value::MkObj();
+                int64_t offset = 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    offset = _state.secretaryUpdateOffset;
+                }
+                if (offset > 0)
+                {
+                    params.Set(L"offset", json::Value::MkNum(static_cast<double>(offset)));
+                }
+                params.Set(L"timeout", json::Value::MkNum(static_cast<double>(kPollTimeoutSec)));
+                params.Set(L"limit", json::Value::MkNum(100));
+                // ONLY the connection: a business bot would otherwise get every message of every chat it may access.
+                auto allowed = json::Value::MkArr();
+                allowed.Push(json::Value::MkStr(L"business_connection"));
+                params.Set(L"allowed_updates", std::move(allowed));
+                const TgResult r = _secretaryApi->Call(L"getUpdates", params, kPollReceiveTimeoutMs);
+                if (_stop.load())
+                {
+                    break;
+                }
+                if (!r.ok)
+                {
+                    if (r.httpStatus == 409 || r.httpStatus == 401)
+                    {
+                        _log(L"[msg] secretary bot getUpdates " + std::to_wstring(r.httpStatus) + L": " + r.description + L"; its poll loop ends");
+                        std::lock_guard lk{ _mtx };
+                        _secretaryProblem = r.httpStatus == 409 ? L"another program polls it (409)" : L"Telegram refused its token (401)";
+                        return;
+                    }
+                    const int64_t wait = r.retryAfterSec > 0 ? static_cast<int64_t>(r.retryAfterSec) * 1000 : backoffMs;
+                    backoffMs = std::min<int64_t>(backoffMs * 2, 60000);
+                    for (int64_t slept = 0; slept < wait && !_stop.load(); slept += 250)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    }
+                    continue;
+                }
+                backoffMs = 1000;
+                if (r.result.type == json::Value::Type::Arr)
+                {
+                    for (const auto& u : r.result.arr)
+                    {
+                        const int64_t updateId = u.I64At(L"update_id", 0);
+                        {
+                            std::lock_guard lk{ _mtx };
+                            if (updateId + 1 > _state.secretaryUpdateOffset)
+                            {
+                                _state.secretaryUpdateOffset = updateId + 1;
+                                _stateDirty = true;
+                            }
+                        }
+                        if (const auto* bc = u.Find(L"business_connection"); bc && bc->type == json::Value::Type::Obj)
+                        {
+                            _handleBusinessConnection(*bc, true);
+                        }
+                        if (_stop.load())
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"MessagingService::_secretaryPollLoop");
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        }
+    }
+
     void MessagingService::_sendLoop() noexcept
     {
         while (!_stop.load())
@@ -1040,7 +1367,8 @@ namespace Agentmaster::Msg
                     auto best = _outbox.begin();
                     for (auto it = _outbox.begin(); it != _outbox.end(); ++it)
                     {
-                        if (static_cast<int>(it->prio) < static_cast<int>(best->prio) || (it->prio == best->prio && it->seq < best->seq))
+                        if (static_cast<int>(it->prio) < static_cast<int>(best->prio) ||
+                            (it->prio == best->prio && (it->seq < best->seq || (it->seq == best->seq && it->subSeq < best->subSeq))))
                         {
                             best = it;
                         }
@@ -1077,15 +1405,26 @@ namespace Agentmaster::Msg
                     std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(waitMs, 1200)));
                     continue;
                 }
-                TgResult r;
-                if (item.document)
-                {
-                    r = _api->SendDocument(item.params, item.fileName, item.fileBytes, 60000);
-                }
-                else
-                {
-                    r = _api->Call(item.method, item.params, 30000);
-                }
+                // One call with the client the item names: a send as the user through the SECRETARY bot (§21.11) uses its
+                // client, which exists for the whole run when it was made (it is reset only after this thread is joined).
+                const auto call = [this, &item]() {
+                    if (item.document)
+                    {
+                        return _api->SendDocument(item.params, item.fileName, item.fileBytes, 60000);
+                    }
+                    if (item.asSecretary)
+                    {
+                        if (!_secretaryApi)
+                        {
+                            TgResult none;
+                            none.description = L"the secretary bot is not running";
+                            return none;
+                        }
+                        return _secretaryApi->Call(item.method, item.params, 30000);
+                    }
+                    return _api->Call(item.method, item.params, 30000);
+                };
+                TgResult r = call();
                 {
                     // The traffic census the tick loop logs every 10 minutes: one count per method, and the
                     // pacing refusals under "429" — the chat's real call rate, which no other log shows.
@@ -1111,14 +1450,7 @@ namespace Agentmaster::Msg
                         _lastSendMs = static_cast<int64_t>(::GetTickCount64());
                         _noteCallLocked(_lastSendMs); // the retry is a call into the chat too
                     }
-                    if (item.document)
-                    {
-                        r = _api->SendDocument(item.params, item.fileName, item.fileBytes, 60000);
-                    }
-                    else
-                    {
-                        r = _api->Call(item.method, item.params, 30000);
-                    }
+                    r = call();
                 }
                 if (item.onDone)
                 {
@@ -1330,6 +1662,7 @@ namespace Agentmaster::Msg
                     }
                 }
                 _syncTopics();
+                _stateNameTick(); // §21.11: at most one topic name follows its session's state per tick, within the budget
 
                 // The mirror and the cards, per topic. The topic set is copied under the lock; each
                 // session's work reads the registry and the transcript outside it.
@@ -1571,10 +1904,19 @@ namespace Agentmaster::Msg
                     }
                 }
             }
-            item.seq = ++_outSeq;
+            if (item.seq == 0)
+            {
+                item.seq = ++_outSeq; // a chunk or a fallback brings the seq of its message (its place in the order)
+            }
             _outbox.push_back(std::move(item));
         }
         _sendCv.notify_one();
+    }
+
+    uint64_t MessagingService::_takeOutSeq()
+    {
+        std::lock_guard lk{ _mtx };
+        return ++_outSeq;
     }
 
     json::Value MessagingService::_buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const
@@ -1606,15 +1948,19 @@ namespace Agentmaster::Msg
         return markup;
     }
 
-    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
+    std::vector<MessagingService::OutItem> MessagingService::_htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase)
     {
-        // A text past Telegram's limit goes out as several messages; only the LAST carries the buttons
-        // and the callback, and only the first the reply reference.
+        // A text past Telegram's limit goes out as several messages; only the LAST carries the buttons and the callback,
+        // and only the first the reply reference. Every chunk keeps the message's place: (seq, subSeqBase + 2i), and its
+        // plain-text fallback the slot right after it.
+        std::vector<OutItem> items;
         const auto chunks = TgChunkHtml(html);
         for (size_t i = 0; i < chunks.size(); ++i)
         {
             OutItem item;
             item.prio = prio;
+            item.seq = seq;
+            item.subSeq = subSeqBase + static_cast<uint32_t>(2 * i);
             item.key = (i + 1 == chunks.size()) ? key : std::wstring{};
             item.method = L"sendMessage";
             item.params = json::Value::MkObj();
@@ -1647,19 +1993,23 @@ namespace Agentmaster::Msg
                 item.onDone = onDone;
             }
             // Telegram refuses HTML it cannot parse (a 400): fall back to the escaped plain text, so a
-            // reply is never lost to a formatting edge case.
+            // reply is never lost to a formatting edge case. The fallback takes this chunk's place in the order.
             const std::wstring plainText = chunks[i];
             const int64_t thread = threadId;
+            const uint64_t plainSeq = seq;
+            const uint32_t plainSub = item.subSeq + 1;
             auto self = weak_from_this();
             auto inner = std::move(item.onDone);
-            item.onDone = [self, plainText, thread, inner](const TgResult& r) {
+            item.onDone = [self, plainText, thread, inner, prio, plainSeq, plainSub](const TgResult& r) {
                 if (!r.ok && r.httpStatus == 400 && r.description.find(L"can't parse entities") != std::wstring::npos)
                 {
                     if (auto me = self.lock())
                     {
                         me->_log(L"[msg] Telegram refused the HTML of a message; sending it as plain text");
                         OutItem plain;
-                        plain.prio = SendPriority::Final;
+                        plain.prio = prio;
+                        plain.seq = plainSeq;
+                        plain.subSeq = plainSub;
                         plain.method = L"sendMessage";
                         plain.params = json::Value::MkObj();
                         plain.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(me->_ownerId)));
@@ -1698,6 +2048,102 @@ namespace Agentmaster::Msg
                     inner(r);
                 }
             };
+            items.push_back(std::move(item));
+        }
+        return items;
+    }
+
+    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
+    {
+        for (auto& item : _htmlItems(threadId, html, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, _takeOutSeq(), 0))
+        {
+            _enqueue(std::move(item));
+        }
+        if (movesCard && threadId > 0)
+        {
+            _noteTopicPosted(threadId);
+        }
+    }
+
+    void MessagingService::_sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
+    {
+        const bool blank = markdown.find_first_not_of(L" \t\r\n") == std::wstring::npos;
+        if (blank || !_richMessages.load() || _richUnavailable.load())
+        {
+            _sendText(threadId, fallbackHtml.empty() ? TgMarkdownToHtml(markdown) : fallbackHtml, silent, prio, L"", json::Value{}, std::move(onDone), replyToMessageId, movesCard);
+            return;
+        }
+        const auto parts = TgChunkMarkdown(markdown);
+        const uint64_t seq = _takeOutSeq(); // every part, and every fallback, keeps this message's place in the order
+        auto self = weak_from_this();
+        for (size_t j = 0; j < parts.size(); ++j)
+        {
+            const bool last = j + 1 == parts.size();
+            const uint32_t sub = static_cast<uint32_t>(j) * kRichPartSubSeqStride;
+            // What this part falls back to: the caller's HTML for a message of one part, else this part converted.
+            const std::wstring partHtml = parts.size() == 1 && !fallbackHtml.empty() ? fallbackHtml : TgMarkdownToHtml(parts[j]);
+            std::function<void(const TgResult&)> partDone = last ? onDone : nullptr;
+            const int64_t replyTo = j == 0 ? replyToMessageId : 0;
+            const bool quiet = silent || !last; // only the last part rings
+            std::wstring prepared = TgPrepareRichMarkdown(parts[j]);
+            if (prepared.size() > kRichMessageMaxChars || prepared.find_first_not_of(L" \t\r\n") == std::wstring::npos)
+            {
+                // Grown past the rich limit by its escapes (thousands of '<'), or nothing left to show: HTML in its place.
+                for (auto& item : _htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1))
+                {
+                    _enqueue(std::move(item));
+                }
+                continue;
+            }
+            OutItem item;
+            item.prio = prio;
+            item.seq = seq;
+            item.subSeq = sub;
+            item.method = L"sendRichMessage";
+            item.params = json::Value::MkObj();
+            item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            if (threadId > 0)
+            {
+                item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
+            }
+            {
+                auto rich = json::Value::MkObj();
+                rich.Set(L"markdown", json::Value::MkStr(prepared));
+                item.params.Set(L"rich_message", std::move(rich));
+            }
+            item.params.Set(L"disable_notification", json::Value::MkBool(quiet));
+            if (replyTo > 0)
+            {
+                auto rp = json::Value::MkObj();
+                rp.Set(L"message_id", json::Value::MkNum(static_cast<double>(replyTo)));
+                rp.Set(L"allow_sending_without_reply", json::Value::MkBool(true));
+                item.params.Set(L"reply_parameters", std::move(rp));
+            }
+            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone](const TgResult& r) {
+                if (RichRefusalWantsFallback(r))
+                {
+                    if (auto me = self.lock())
+                    {
+                        if (r.httpStatus == 404 && !me->_richUnavailable.exchange(true))
+                        {
+                            me->_log(L"[msg] the Bot API has no sendRichMessage (404: " + r.description + L"): Claude's Markdown goes as HTML for the rest of this run");
+                        }
+                        else if (r.httpStatus != 404)
+                        {
+                            me->_log(L"[msg] Telegram refused a rich message (" + r.description + L"); it goes as HTML in its place");
+                        }
+                        for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1))
+                        {
+                            me->_enqueue(std::move(fb));
+                        }
+                    }
+                    return;
+                }
+                if (partDone)
+                {
+                    partDone(r);
+                }
+            };
             _enqueue(std::move(item));
         }
         if (movesCard && threadId > 0)
@@ -1727,17 +2173,24 @@ namespace Agentmaster::Msg
     void MessagingService::_sendAsUser(int64_t threadId, const std::wstring& text, std::function<void(const TgResult&)> onDone, SendPriority prio)
     {
         std::wstring connection;
+        int64_t holder = 0;
         {
             std::lock_guard lk{ _mtx };
             connection = _state.businessConnectionId;
+            holder = _state.businessBotId;
         }
         const int64_t botId = _botId.load();
-        if (connection.empty() || botId == 0)
+        // Which bot sends (§21.11): the one that holds the business connection — the SECRETARY bot (a second bot the user
+        // connected under Chat Automation, with its own client), or the topics bot itself (0, or its own id).
+        const int64_t secretaryId = _secretaryBotId.load();
+        const bool viaSecretary = holder != 0 && holder != botId && holder == secretaryId;
+        const bool holderGone = holder != 0 && holder != botId && !viaSecretary;
+        if (connection.empty() || botId == 0 || holderGone)
         {
             TgResult none;
             none.ok = false;
             none.httpStatus = 0;
-            none.description = connection.empty() ? L"no business connection" : L"the bot's id is not known yet";
+            none.description = connection.empty() ? L"no business connection" : (botId == 0 ? L"the bot's id is not known yet" : L"the bot that holds the business connection is not running");
             if (onDone)
             {
                 onDone(none);
@@ -1781,6 +2234,7 @@ namespace Agentmaster::Msg
             OutItem item;
             item.prio = prio;
             item.method = L"sendMessage";
+            item.asSecretary = viaSecretary;
             item.params = json::Value::MkObj();
             item.params.Set(L"business_connection_id", json::Value::MkStr(connection));
             // Seen from the business account (the user), its chat with this bot is "the private chat with user
@@ -2085,6 +2539,7 @@ namespace Agentmaster::Msg
             f.tabToken = s.tabToken; // per tab: a topic follows its tab to the next conversation (Rekey)
             f.continuedFromId = s.continuedFromId; // ...also to a /handover-here successor, which takes the tab on a new connection
             f.mostRecentMs = MostRecentSortKeyMs(s); // the side panel's MOST RECENT key: the creates' order (§21.8)
+            f.stateSinceMs = s.stateChangedAtUnixMs; // how long the state has held: the topic name's glyph waits for it (§21.11)
             _orderKeys[s.id] = { f.mostRecentMs, s.title }; // ...and the tick's posting order
             if (s.state == SessionState::Running)
             {
@@ -2093,6 +2548,7 @@ namespace Agentmaster::Msg
             facts.push_back(std::move(f));
             byId.emplace(s.id, std::move(s));
         }
+        _lastFacts = facts; // the state glyph renames read them after the sync (_stateNameTick)
         {
             // The tab each topic's session is in NOW (a restart gives every tab a new token, and the topic's tab is
             // what a later Rekey matches): kept in step here, before the plan reads the records.
@@ -2229,6 +2685,23 @@ namespace Agentmaster::Msg
                 return; // a resumed recreation builds its new list after the hold too, when every tab is live
             }
         }
+        // A topic the user asked to make again in a mode (§21.11, /recreate in the topic): one per tick, before the plan (the
+        // plan then sees the new record and leaves it alone).
+        {
+            std::pair<std::wstring, int> one;
+            {
+                std::lock_guard lk{ _mtx };
+                if (!_recreateOne.empty())
+                {
+                    one = std::move(_recreateOne.front());
+                    _recreateOne.pop_front();
+                }
+            }
+            if (!one.first.empty())
+            {
+                _recreateOneTopic(one.first, one.second);
+            }
+        }
         std::vector<TopicSyncOp> ops;
         {
             std::lock_guard lk{ _mtx };
@@ -2277,7 +2750,7 @@ namespace Agentmaster::Msg
                             LogSwallowedException(L"MessagingService::_syncTopics (color)");
                         }
                     }
-                    _createTopic(op.sessionId, op.title, color);
+                    _createTopic(op.sessionId, op.title, color, op.state);
                     if (_recreating)
                     {
                         std::lock_guard lk{ _mtx };
@@ -2288,7 +2761,7 @@ namespace Agentmaster::Msg
             case TopicSyncOp::Kind::Rename:
                 if (apiOps++ < kTopicOpsPerTick)
                 {
-                    _renameTopic(op.sessionId, op.title);
+                    _renameTopic(op.sessionId, op.title, op.state);
                 }
                 break;
             case TopicSyncOp::Kind::Rekey:
@@ -2463,13 +2936,12 @@ namespace Agentmaster::Msg
         return done;
     }
 
-    void MessagingService::_createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex)
+    void MessagingService::_createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose)
     {
-        std::wstring name = title.empty() ? ShortId(sessionId) : title;
-        if (name.size() > 120)
-        {
-            name = name.substr(0, 119) + L"\x2026";
-        }
+        // The name carries the state glyph first (§21.11); the record keeps the bare title, which the sync compares with
+        // the tab's (a long title is cut in the name only).
+        const std::wstring bare = title.empty() ? ShortId(sessionId) : title;
+        const std::wstring name = TopicDisplayName(state, bare);
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"name", json::Value::MkStr(name));
@@ -2513,8 +2985,11 @@ namespace Agentmaster::Msg
         TopicRecord t;
         t.sessionId = sessionId;
         t.threadId = thread;
-        t.title = name;
+        t.title = bare;
         t.createdMs = WallMs();
+        t.nameState = static_cast<int>(state);
+        t.nameSetMs = t.createdMs;
+        t.verbose = verbose; // §21.11: -1 follows the default; a topic recreated in a mode keeps that mode
         if (s)
         {
             t.tabToken = s->tabToken;
@@ -2875,9 +3350,15 @@ namespace Agentmaster::Msg
                             }
                         }
                     }
-                    posts = PlanHistoryPosts(w, day, [&runner](const std::wstring& text) {
-                        return !runner.empty() && runner.count(NormalizePromptTextForCompare(text)) > 0;
-                    });
+                    // The topic's mode (§21.11): verbose replays the narrative too, the conversation only the user's posts and the
+                    // turns' last messages.
+                    posts = PlanHistoryPosts(
+                        w,
+                        day,
+                        [&runner](const std::wstring& text) {
+                            return !runner.empty() && runner.count(NormalizePromptTextForCompare(text)) > 0;
+                        },
+                        _topicVerbose(t));
                 }
                 if (posts.empty())
                 {
@@ -3003,6 +3484,11 @@ namespace Agentmaster::Msg
                                 me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, answered, 0, true);
                             },
                             SendPriority::History);
+                    }
+                    else if (!p.markdown.empty())
+                    {
+                        // Claude's Markdown as a rich message (§21.11); a part Telegram refuses goes as the HTML in its place.
+                        _sendRich(thread, p.markdown, p.html, true, SendPriority::History, answered, 0, true);
                     }
                     else
                     {
@@ -3216,7 +3702,7 @@ namespace Agentmaster::Msg
         _sendText(t.threadId, L"<i>\x2014 a new conversation in this tab (" + TgEscapeHtml(ShortId(toSessionId)) + L") \x2014</i>", true, SendPriority::New, L"", json::Value{}, nullptr);
         if (!title.empty() && title != oldTitle)
         {
-            _renameTopic(toSessionId, title); // refreshes the card on success
+            _renameTopic(toSessionId, title, s->state); // refreshes the card on success
         }
         _refreshCard(toSessionId, true);
     }
@@ -3266,7 +3752,7 @@ namespace Agentmaster::Msg
         _log(L"[msg] topic deleted " + ShortId(sessionId) + L" (" + reason + L")");
     }
 
-    void MessagingService::_renameTopic(const std::wstring& sessionId, const std::wstring& title)
+    void MessagingService::_renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state)
     {
         int64_t thread = 0;
         {
@@ -3278,11 +3764,7 @@ namespace Agentmaster::Msg
             }
             thread = it->second.threadId;
         }
-        std::wstring name = title;
-        if (name.size() > 120)
-        {
-            name = name.substr(0, 119) + L"\x2026";
-        }
+        const std::wstring name = TopicDisplayName(state, title); // the state glyph first (§21.11)
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
         p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
@@ -3296,8 +3778,10 @@ namespace Agentmaster::Msg
             std::lock_guard lk{ _mtx };
             if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
             {
-                // Remember the title either way: a refused rename must not be retried every tick.
+                // Remember the title and the glyph's state either way: a refused rename must not be retried every tick.
                 it->second.title = title;
+                it->second.nameState = static_cast<int>(state);
+                it->second.nameSetMs = WallMs();
                 _stateDirty = true;
             }
         }
@@ -3310,6 +3794,106 @@ namespace Agentmaster::Msg
         {
             _log(L"[msg] topic rename failed for " + ShortId(sessionId) + L": " + r.description);
         }
+    }
+
+    void MessagingService::_stateNameTick() noexcept
+    {
+        try
+        {
+            if (_startupHoldOpen || _recreating || _lastFacts.empty())
+            {
+                return; // the facts are not complete in the hold; a recreation makes every name anew
+            }
+            std::wstring sid;
+            {
+                std::lock_guard lk{ _mtx };
+                if (!_state.orphanThreads.empty())
+                {
+                    return;
+                }
+                // Only while the chat's budget has room: the live traffic and the history replay go first.
+                const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+                _noteCallLocked(0); // prunes the window only
+                if ((_floodAtMs != 0 && tick - _floodAtMs < kHistoryFloodPauseMs) || _recentCallsMs.size() >= kNameRenameCallsPerMinute)
+                {
+                    return;
+                }
+                sid = PickStateRename(_lastFacts, _state.topics, WallMs());
+            }
+            if (sid.empty())
+            {
+                return;
+            }
+            const auto f = std::find_if(_lastFacts.begin(), _lastFacts.end(), [&sid](const TabFact& x) { return x.sessionId == sid; });
+            if (f == _lastFacts.end())
+            {
+                return;
+            }
+            std::wstring title = f->title;
+            if (title.empty())
+            {
+                std::lock_guard lk{ _mtx };
+                if (const auto it = _state.topics.find(sid); it != _state.topics.end())
+                {
+                    title = it->second.title;
+                }
+            }
+            _renameTopic(sid, title, f->state);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no rename this tick; the next tick picks again.
+            LogSwallowedException(L"MessagingService::_stateNameTick");
+        }
+    }
+
+    void MessagingService::_recreateOneTopic(const std::wstring& sessionId, int verbose)
+    {
+        const auto s = _session(sessionId);
+        std::wstring title;
+        bool had = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+            {
+                title = it->second.title;
+                had = true;
+            }
+        }
+        if (!s || !had)
+        {
+            _log(L"[msg] /recreate of " + ShortId(sessionId) + L": the topic or its session is gone; nothing to do");
+            return;
+        }
+        if (!s->title.empty())
+        {
+            title = s->title;
+        }
+        std::wstring color;
+        try
+        {
+            color = ResolveSessionColorHex(LoadAppSettings().tabColorMode, *s);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_recreateOneTopic (color)");
+        }
+        const wchar_t* mode = verbose == 1 ? L"verbose" : L"conversation only";
+        _deleteTopic(sessionId, std::wstring{ L"recreated " } + mode + L" by the user");
+        _createTopic(sessionId, title, color, s->state, verbose);
+        bool made = false;
+        {
+            std::lock_guard lk{ _mtx };
+            made = _state.topics.count(sessionId) > 0;
+        }
+        _log(L"[msg] topic of " + ShortId(sessionId) + L" made again, " + mode +
+             (made ? std::wstring{ L"; its whole history follows" } : std::wstring{ L"; Telegram refused the new topic (the sync makes it again, in the default mode)" }));
+        LogNav(L"remote telegram /recreate " + ShortId(sessionId) + L" -> " + (verbose == 1 ? L"verbose" : L"conversation"));
+    }
+
+    bool MessagingService::_topicVerbose(const TopicRecord& t) const noexcept
+    {
+        return TopicIsVerbose(t, _defaultVerbose.load());
     }
 
     void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping)
@@ -3456,7 +4040,8 @@ namespace Agentmaster::Msg
         // message of its own, silent. The work log so far is closed with its final content first, so the remark
         // lands below it, and the tools that follow start a new work-log message below the remark.
         _flushWorkLog(sessionId, topic, m, true);
-        _sendText(topic.threadId, TgMarkdownToHtml(m.pendingText), true, SendPriority::New, L"", json::Value{}, nullptr);
+        // Claude's own Markdown (§21.11): a rich message, so a table or a heading in a remark shows as one.
+        _sendRich(topic.threadId, m.pendingText, TgMarkdownToHtml(m.pendingText), true, SendPriority::New, nullptr);
         m.pendingText.clear();
         m.workLog.clear();
         m.workLogMessageId = 0;
@@ -3565,11 +4150,19 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound)
+    void MessagingService::_postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound, const std::wstring& markdown)
     {
         _flushWorkLog(sessionId, topic, m, true);
-        // The ONE message of a turn with sound (D5 / M12) — unless the caller rings something else for it (§21.6).
-        _sendText(topic.threadId, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr);
+        // The ONE message of a turn with sound (D5 / M12) — unless the caller rings something else for it (§21.6). Claude's
+        // own Markdown goes as a rich message (§21.11: tables, headings), the HTML its fallback.
+        if (!markdown.empty())
+        {
+            _sendRich(topic.threadId, markdown, html, !sound, SendPriority::Final, nullptr);
+        }
+        else
+        {
+            _sendText(topic.threadId, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr);
+        }
         _endTurnQuietly(sessionId, topic, m);
         _log(L"[msg] " + ShortId(sessionId) + L" final message (" + why + (sound ? L"" : L", silent") + L")");
     }
@@ -3668,6 +4261,10 @@ namespace Agentmaster::Msg
         // older one stale. The card reads them at its next refresh; a Recap item is nothing more in the thread.
         FoldRecapFacts(items, topic.recapText, topic.recapAtMs, topic.lastMessageAtMs);
         std::optional<SessionInfo> fresher; // a newer snapshot, fetched at most once, for a prompt the queue copy lacks
+        // §21.11: VERBOSE shows the whole session (the remarks, a work log of the tool calls, compactions); the conversation
+        // only (the default) shows the user's posts and each turn's last message — a remark before a tool call is dropped,
+        // so what is left when the turn ends is its final reply. Questions, plans, interrupts and API errors show in both.
+        const bool verbose = _topicVerbose(topic);
         for (const auto& it : items)
         {
             switch (it.kind)
@@ -3679,7 +4276,8 @@ namespace Agentmaster::Msg
                 {
                     if (!m.pendingText.empty())
                     {
-                        _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"a new prompt closed the turn");
+                        const std::wstring text = m.pendingText; // a copy: _postFinal clears the mirror's text
+                        _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"a new prompt closed the turn", true, text);
                     }
                     else
                     {
@@ -3792,7 +4390,7 @@ namespace Agentmaster::Msg
                         text += L"\n\n";
                     }
                     text += it.text;
-                    _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"end of turn");
+                    _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"end of turn", true, text);
                 }
                 else
                 {
@@ -3805,14 +4403,22 @@ namespace Agentmaster::Msg
                 }
                 break;
             case TopicItemKind::ToolCall:
-                // What the assistant said before the tool call — "why the bash is invoked" — is a message of
-                // its own (§21.5), not a line in the work log.
-                _postRemark(sessionId, topic, m);
                 m.toolNames[it.toolUseId] = it.toolName;
-                _appendWorkLog(m, L"\x2022 " + it.summary);
+                if (verbose)
+                {
+                    // What the assistant said before the tool call — "why the bash is invoked" — is a message of
+                    // its own (§21.5), not a line in the work log.
+                    _postRemark(sessionId, topic, m);
+                    _appendWorkLog(m, L"\x2022 " + it.summary);
+                }
+                else
+                {
+                    m.pendingText.clear(); // the conversation only: a remark is not the turn's last message
+                    m.turnOpen = true;
+                }
                 break;
             case TopicItemKind::ToolResult:
-                if (it.isError)
+                if (it.isError && verbose)
                 {
                     std::wstring name;
                     if (const auto n = m.toolNames.find(it.toolUseId); n != m.toolNames.end())
@@ -3824,7 +4430,14 @@ namespace Agentmaster::Msg
                 break;
             case TopicItemKind::Question:
             {
-                _postRemark(sessionId, topic, m);
+                if (verbose)
+                {
+                    _postRemark(sessionId, topic, m);
+                }
+                else
+                {
+                    m.pendingText.clear();
+                }
                 std::wstring html = L"\x2753 <b>" + TgEscapeHtml(it.text) + L"</b>";
                 if (!it.options.empty())
                 {
@@ -3844,24 +4457,32 @@ namespace Agentmaster::Msg
             case TopicItemKind::Plan:
             {
                 std::wstring html = L"\U0001F4CB <b>Plan ready for approval</b> \x2014 approve or reject it at the PC.";
+                // The plan is Claude's Markdown (headings, lists, often a table): a rich message (§21.11).
+                std::wstring markdown = L"\U0001F4CB **Plan ready for approval** \x2014 approve or reject it at the PC.";
                 if (!it.text.empty())
                 {
                     html += L"\n" + TgMarkdownToHtml(it.text.size() > 3500 ? it.text.substr(0, 3500) + L"\x2026" : it.text);
+                    markdown += L"\n\n" + (it.text.size() > 20000 ? it.text.substr(0, 20000) + L"\x2026" : it.text);
                 }
                 const bool sound = !m.approvalPinged;
                 m.awaitingAnswer = true;
-                _postFinal(sessionId, topic, m, html, L"a plan", sound);
+                _postFinal(sessionId, topic, m, html, L"a plan", sound, markdown);
                 break;
             }
             case TopicItemKind::Compaction:
-                _appendWorkLog(m, L"\x2014 " + it.text + L" \x2014");
+                if (verbose)
+                {
+                    _appendWorkLog(m, L"\x2014 " + it.text + L" \x2014");
+                }
                 break;
             case TopicItemKind::Interrupt:
                 // The user stopped the turn (Esc at the PC, or /interrupt here): what the assistant had said so far,
                 // then the mark — silent, the user did it. A stray marker with no turn shown posts nothing.
                 if (m.turnOpen || !m.pendingText.empty())
                 {
-                    _postFinal(sessionId, topic, m, (m.pendingText.empty() ? std::wstring{} : TgMarkdownToHtml(m.pendingText) + L"\n\n") + L"\x25A0 <i>interrupted</i>", L"interrupted", false);
+                    const std::wstring text = m.pendingText; // a copy: _postFinal clears the mirror's text
+                    _postFinal(sessionId, topic, m, (text.empty() ? std::wstring{} : TgMarkdownToHtml(text) + L"\n\n") + L"\x25A0 <i>interrupted</i>", L"interrupted", false,
+                               (text.empty() ? std::wstring{} : text + L"\n\n") + L"\x25A0 *interrupted*");
                 }
                 break;
             case TopicItemKind::ApiError:
@@ -3966,14 +4587,16 @@ namespace Agentmaster::Msg
         if (from == SessionState::Running && atRest && !m.pendingText.empty())
         {
             // The turn's last words that no terminal line marked as final: the turn's message with sound.
-            _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"the state left Running");
+            const std::wstring text = m.pendingText;
+            _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"the state left Running", true, text);
         }
         else if (s.state == SessionState::Done && from != SessionState::Done)
         {
             // claude exited: what it said last closes the turn (silent), the card says it exited and rings.
             if (!m.pendingText.empty())
             {
-                _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"exited", false);
+                const std::wstring text = m.pendingText;
+                _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"exited", false, text);
             }
             else
             {
@@ -3991,7 +4614,8 @@ namespace Agentmaster::Msg
                 topic.errorAnnounced = true;
                 if (!m.pendingText.empty())
                 {
-                    _postFinal(sessionId, topic, m, TgMarkdownToHtml(m.pendingText), L"error state", false);
+                    const std::wstring text = m.pendingText;
+                    _postFinal(sessionId, topic, m, TgMarkdownToHtml(text), L"error state", false, text);
                 }
                 else
                 {

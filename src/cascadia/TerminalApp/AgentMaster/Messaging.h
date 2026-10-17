@@ -218,6 +218,31 @@ namespace Agentmaster::Msg
         /// <returns>True when removed or absent; false (logged) on a refusal.</returns>
         static bool ClearToken(std::wstring_view profileDir) noexcept;
 
+        // ----- the SECRETARY bot's token (§21.11; optional; Credential Manager like the topics bot's) -----
+        // A second bot, connected to the user's account under Telegram → Settings → Chat Automation, sends the user's
+        // turns into the topics bot's chat AS THE USER. Telegram documents exactly this ("a bot connected to a business
+        // account … can send messages to other bots used by that business account"; the sending bot needs Bot-to-Bot
+        // Communication Mode); a bot posting into its OWN chat on the user's behalf is not documented.
+
+        /// <summary>The Credential Manager target of a profile's secretary bot token: "Agentmaster:messaging:telegram-secretary:&lt;leaf&gt;".</summary>
+        /// <param name="profileDir">The profile directory.</param>
+        /// <returns>The target name.</returns>
+        /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+        static std::wstring SecretaryTokenCredentialTarget(std::wstring_view profileDir);
+        /// <summary>Reads the stored secretary bot token.</summary>
+        /// <param name="profileDir">The profile directory.</param>
+        /// <returns>The token, or "" when none is stored or Credential Manager refused the read.</returns>
+        static std::wstring ReadStoredSecretaryToken(std::wstring_view profileDir) noexcept;
+        /// <summary>Stores (replaces) the secretary bot token; a running service restarts its bots at the next Apply.</summary>
+        /// <param name="profileDir">The profile directory.</param>
+        /// <param name="token">The token; whitespace trimmed; an empty token is refused (use ClearSecretaryToken).</param>
+        /// <returns>True on success; false (logged) when Credential Manager refused.</returns>
+        static bool StoreSecretaryToken(std::wstring_view profileDir, std::wstring_view token) noexcept;
+        /// <summary>Removes the stored secretary bot token (the cog's "Forget").</summary>
+        /// <param name="profileDir">The profile directory.</param>
+        /// <returns>True when removed or absent; false (logged) on a refusal.</returns>
+        static bool ClearSecretaryToken(std::wstring_view profileDir) noexcept;
+
         // The result of a getMe probe (the cog's "Check bot" button, and the service's own start).
         struct BotCheck
         {
@@ -236,6 +261,14 @@ namespace Agentmaster::Msg
         // ----- lifecycle (Messaging.cpp) -----
         void _start(std::wstring token) noexcept;
         void _pollLoop() noexcept;
+        /// <summary>
+        /// The SECRETARY bot's poll loop (§21.11; its own thread, only when a secretary token is stored): getMe once (the
+        /// bot's id — update ids are per bot — and whether Secretary Mode is on for it), then getUpdates for
+        /// `business_connection` ONLY (allowed_updates: a business bot would otherwise get every message of the chats it
+        /// may access). Each connection update goes to _handleBusinessConnection as the secretary's. A 401 or a 409 ends the
+        /// loop (logged; secretary sends stay off). Never throws (Rule #18 inside).
+        /// </summary>
+        void _secretaryPollLoop() noexcept;
         void _sendLoop() noexcept;
         void _tickLoop() noexcept;
         void _onRegistryNotify(const SessionInfo& s) noexcept;
@@ -260,8 +293,26 @@ namespace Agentmaster::Msg
             std::string fileBytes;
             bool paced{ true }; // counts against the one-message-per-second budget
             std::function<void(const TgResult&)> onDone; // called on the send thread (may be empty)
+            /// <summary>
+            /// The order WITHIN one sequence number (the outbox serves by priority, then seq, then subSeq): the chunks of
+            /// one message share its seq, and a chunk's fallback (a refused rich part sent again as HTML, a refused HTML
+            /// sent again as plain text) takes the slot right after the refused one — so a fallback lands where the
+            /// refused message would have, never after the next message.
+            /// </summary>
+            uint32_t subSeq{ 0 };
+            /// <summary>Sent with the SECRETARY bot's client (§21.11): a send as the user through its business connection.</summary>
+            bool asSecretary{ false };
         };
+        /// <summary>Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).</summary>
         void _enqueue(OutItem item);
+        /// <summary>The next outbox sequence number (for a message whose parts and fallbacks must keep one place). Takes `_mtx`.</summary>
+        uint64_t _takeOutSeq();
+        /// <summary>
+        /// The sendMessage items of one HTML text (chunked at Telegram's limit): the buttons and `onDone` ride the LAST chunk,
+        /// the reply reference the first, only the last may ring. Chunk i sorts at (`seq`, `subSeqBase` + 2i); a chunk
+        /// Telegram refuses as HTML ("can't parse entities") is sent again as plain text in the slot right after it.
+        /// </summary>
+        std::vector<OutItem> _htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase);
         /// <summary>
         /// Posts HTML into a topic (chunked at Telegram's limit; the buttons and `onDone` ride the LAST chunk, the
         /// reply reference the first; a refused HTML is re-sent as plain text). `movesCard` (default) stamps the
@@ -269,6 +320,24 @@ namespace Agentmaster::Msg
         /// posts pass false, or the card would chase itself forever.
         /// </summary>
         void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true);
+        /// <summary>
+        /// Posts Claude's MARKDOWN into a topic as a RICH message (§21.11, Bot API 10.1: tables, headings, lists and code
+        /// render the way Claude wrote them; the HTML conversion has no tables). The text is split into parts that fit
+        /// (TgChunkMarkdown) and each part prepared (TgPrepareRichMarkdown). A part Telegram refuses (any 400 that names no
+        /// missing chat or thread; a 404 means the Bot API has no rich messages, and none is tried again this run) goes
+        /// again as HTML in its own place: `fallbackHtml` for a message of one part, else that part converted. With rich
+        /// messages off (AppSettings::messagingRichMessages) or `markdown` empty, `fallbackHtml` goes at once (_sendText).
+        /// Only the last part rings and gets `onDone`; the first carries the reply reference; `movesCard` as _sendText.
+        /// </summary>
+        /// <param name="threadId">The topic (0 = the chat's General view).</param>
+        /// <param name="markdown">Claude's Markdown as written (the caller's own lines escaped with TgMdEscapeText).</param>
+        /// <param name="fallbackHtml">The same message as Telegram HTML ("" = TgMarkdownToHtml of the Markdown).</param>
+        /// <param name="silent">No sound (the last part rings otherwise).</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="onDone">Called with the last part's answer (on the send thread; may be empty).</param>
+        /// <param name="replyToMessageId">The message the first part replies to (0 = none).</param>
+        /// <param name="movesCard">Stamps the topic's lastPostedMs (the sticky card re-posts below it).</param>
+        void _sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true);
         /// <summary>
         /// Sends plain text into a topic AS THE USER through the Telegram Business connection (the user's "Secretary
         /// mode"; §21.5) — the way a prompt typed at the PC becomes the user's own bubble in the topic. Only valid
@@ -332,9 +401,35 @@ namespace Agentmaster::Msg
         // ----- topics = tabs (Messaging.cpp) -----
         void _ensureSearchTopic();
         void _syncTopics();
-        void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex);
+        /// <summary>
+        /// Makes a session's topic: named TopicDisplayName(state, title) (the state glyph first, §21.11), colored like the
+        /// tab, seeded from the transcript (its history replayed first, §21.9), its card posted. `verbose` is the new topic's
+        /// TopicRecord::verbose (-1 = the default for all; a topic recreated in a mode passes 0 or 1). Tick thread.
+        /// </summary>
+        void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose = -1);
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
-        void _renameTopic(const std::wstring& sessionId, const std::wstring& title);
+        /// <summary>
+        /// Renames a session's topic to TopicDisplayName(state, title) and records both (a refused rename is recorded too,
+        /// so it is not retried every tick). Tick thread (a direct call, paced by _awaitCallSlot).
+        /// </summary>
+        void _renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state);
+        /// <summary>
+        /// The topic names' STATE GLYPHS (§21.11), once per tick after the sync: at most one rename (PickStateRename over the
+        /// sync's facts) and only while the last minute's calls leave room (kNameRenameCallsPerMinute), no 429 pause runs,
+        /// the start-up hold is over and no recreation is under way — a name follows its session's state with a lag rather
+        /// than spend the chat's budget. Tick thread; never throws (Rule #18 inside).
+        /// </summary>
+        void _stateNameTick() noexcept;
+        /// <summary>
+        /// Recreates ONE session's topic in a mode (§21.11, /recreate in the topic): the topic is deleted with its messages and
+        /// made again at once with its session's whole history, rendered verbose or not (TopicRecord::verbose = `verbose`).
+        /// Tick thread (the requests come from the poll thread through `_recreateOne`).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="verbose">0 = the conversation only, 1 = verbose.</param>
+        void _recreateOneTopic(const std::wstring& sessionId, int verbose);
+        /// <summary>Whether a topic is verbose now (TopicIsVerbose with the default for all topics). Any thread.</summary>
+        bool _topicVerbose(const TopicRecord& t) const noexcept;
         /// <summary>
         /// Starts the RECREATION (§21.8): every session topic's thread moves to MessagingState::orphanThreads (persisted),
         /// the topic map, the mirrors and the cards are cleared, queued work for the old topics is dropped, the layout is
@@ -444,9 +539,10 @@ namespace Agentmaster::Msg
         /// <summary>
         /// Closes the turn with a message: the work log is finished, `html` is posted — with sound unless `sound` is
         /// false (D5 / M12: a turn's ONE message with sound; §21.6 posts an interrupt, or the text before an exit or an
-        /// Error whose card rings instead, silently) — and the turn's work-log state is reset.
+        /// Error whose card rings instead, silently) — and the turn's work-log state is reset. With `markdown` (§21.11:
+        /// Claude's own text) the message goes as a RICH message, `html` its fallback (_sendRich).
         /// </summary>
-        void _postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound = true);
+        void _postFinal(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::wstring& html, const std::wstring& why, bool sound = true, const std::wstring& markdown = {});
         /// <summary>Closes the turn WITHOUT a message (claude exited or failed with nothing more to say): the work log is finished and its state reset.</summary>
         void _endTurnQuietly(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
         void _appendWorkLog(Mirror& m, const std::wstring& line);
@@ -479,8 +575,27 @@ namespace Agentmaster::Msg
         /// <param name="sessionId">The session.</param>
         /// <returns>The outcome, plain text (one sentence).</returns>
         std::wstring _reactivate(const std::wstring& sessionId);
-        /// <summary>A `business_connection` update: the user connected, edited or removed this bot under Telegram Business → Chatbots (H3: the connecting user must be the paired owner).</summary>
-        void _handleBusinessConnection(const json::Value& bc);
+        /// <summary>
+        /// A `business_connection` update: the user connected, edited or removed a bot under Telegram → Settings → Chat
+        /// Automation (H3: the connecting user must be the paired owner). `viaSecretary`: it came to the SECRETARY bot
+        /// (§21.11), whose client then sends as the user; else to the topics bot. A disconnect of the bot that does NOT
+        /// hold the stored connection changes nothing (the user moved the connection to the other bot).
+        /// </summary>
+        void _handleBusinessConnection(const json::Value& bc, bool viaSecretary = false);
+        /// <summary>
+        /// /verbose (§21.11): in a session topic (`sessionId` non-empty) shows and sets that topic's mode — "on", "off",
+        /// "default", or buttons; in the 🔎 Search topic the DEFAULT for all topics (AppSettings::messagingVerbose, written
+        /// to settings.json and applied at once). A change applies to the messages that come from now on; /recreate redoes a
+        /// topic's history in a mode. Poll thread.
+        /// </summary>
+        void _runVerboseCommand(const std::wstring& sessionId, const std::wstring& args, int64_t threadId);
+        /// <summary>Sets one topic's mode (-1 default, 0 off, 1 on) and replies in its topic. Poll thread.</summary>
+        void _setTopicVerbose(const std::wstring& sessionId, int verbose, int64_t threadId);
+        /// <summary>
+        /// Sets the default mode for all topics (settings.json read-modify-write, then live) and replies in `threadId` — no
+        /// reply when it is negative (a recreation of all topics in a mode says it in its own line). Poll thread.
+        /// </summary>
+        void _setDefaultVerbose(bool verbose, int64_t threadId);
         /// <summary>The SECRETARY PROBE: one send as the user into the Search topic; its answer decides `businessMode` and is reported there.</summary>
         void _probeSecretary();
         void _wake(const std::wstring& sessionId, bool pin);
@@ -553,10 +668,44 @@ namespace Agentmaster::Msg
         std::thread _tickThread;
         std::unique_ptr<TelegramApi> _api;
         void* _tokenMutex{ nullptr }; // the machine-wide one-poller-per-token mutex (M7); HANDLE as void*
+        /// <summary>
+        /// The SECRETARY bot (§21.11), only when its token is stored: its client (made at _start, reset at Stop after the
+        /// threads are joined; the send loop uses it for OutItem::asSecretary), its poll thread, its one-poller mutex, its
+        /// id from getMe (0 until known) and name, and the FNV hash of the token the service started with (a cog Save
+        /// with another token restarts the service).
+        /// </summary>
+        std::unique_ptr<TelegramApi> _secretaryApi;
+        std::thread _secretaryThread;
+        void* _secretaryMutex{ nullptr };
+        std::atomic<int64_t> _secretaryBotId{ 0 };
+        std::wstring _secretaryUsername; // under `_mtx`
+        std::wstring _secretaryProblem; // under `_mtx`: why the secretary bot does not work ("" = no known problem)
+        std::wstring _secretaryTokenHash; // "" = no secretary token at the start
+        std::atomic<bool> _secretaryOn{ false }; // the secretary's client exists (StatusText reads it from any thread)
 
         int64_t _ownerId{ 0 }; // the paired Telegram user (AppSettings::messagingTelegramOwnerId)
         std::atomic<int64_t> _idleGraceMs{ 10 * 60 * 1000 };
         std::wstring _searchThinkingWord{ L"high" };
+        /// <summary>
+        /// §21.11: the default mode of the topics (AppSettings::messagingVerbose), whether Claude's Markdown goes as rich
+        /// messages (AppSettings::messagingRichMessages), and — set once a send found the Bot API without them (a 404) —
+        /// that rich messages are not available this run.
+        /// </summary>
+        std::atomic<bool> _defaultVerbose{ false };
+        std::atomic<bool> _richMessages{ true };
+        std::atomic<bool> _richUnavailable{ false };
+        /// <summary>
+        /// Tick thread: the last sync's facts (the state glyph renames read them, _stateNameTick). `_renameNoticeFailures`
+        /// (any thread) counts the deletes of Telegram's "topic renamed" notices that were refused in a row — three stop
+        /// the deletes, which would only cost calls.
+        /// </summary>
+        std::vector<TabFact> _lastFacts;
+        std::atomic<int> _renameNoticeFailures{ 0 };
+        /// <summary>
+        /// The single-topic recreations the user confirmed (§21.11; the poll thread queues, the tick runs them): session id
+        /// and mode (0 the conversation only, 1 verbose). Under `_mtx`.
+        /// </summary>
+        std::deque<std::pair<std::wstring, int>> _recreateOne;
         std::atomic<bool> _topicsEnabled{ false };
         int64_t _lastGetMeMs{ 0 };
         /// <summary>

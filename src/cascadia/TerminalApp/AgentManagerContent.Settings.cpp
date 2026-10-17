@@ -1179,6 +1179,37 @@ namespace winrt::TerminalApp::implementation
         }
         AgentSetTip(_setMsgThinking, L"How much the Search topic's agent (the Sessions page's search agent, Sonnet 5.5, in a conversation of its own) thinks before it answers. High by default. Applies to the next Search process.");
         panel.Children().Append(_setMsgThinking);
+        // §21.11: what a topic shows by default (/verbose in a topic sets its own), and how Claude's Markdown goes.
+        _setMsgVerbose = ToggleSwitch{};
+        _setMsgVerbose.Header(winrt::box_value(L"Topics show the work (verbose)"));
+        AgentSetTip(_setMsgVerbose, L"On: a topic shows the whole session as it runs \x2014 what Claude says before each tool, a work log of the tool calls (Bash commands and more), compactions. Off (the default): your messages and each turn's last answer only \x2014 you, Claude, you, Claude \x2014 plus questions, plans, interrupts and API errors. The default for every topic; /verbose in a topic sets that topic's own. It applies to the next message; /recreate redoes the history in a mode.");
+        panel.Children().Append(_setMsgVerbose);
+        _setMsgRich = ToggleSwitch{};
+        _setMsgRich.Header(winrt::box_value(L"Send Claude's Markdown as rich messages (tables, headings)"));
+        AgentSetTip(_setMsgRich, L"On (the default): Claude's replies, remarks and plans go as Telegram rich messages, which show its tables, headings, lists and code blocks as Claude wrote them. Off: the older HTML conversion, which shows a table as plain text \x2014 for a Telegram app too old to show rich messages. A rich message Telegram refuses goes as HTML anyway.");
+        panel.Children().Append(_setMsgRich);
+        panel.Children().Append(SettingsSeparator(L"SECRETARY (OPTIONAL)"));
+        {
+            auto steps = Text(L"Your prompts typed at the PC \x2014 and your turns in a recreated topic's history \x2014 can appear in the topics as YOUR OWN messages, sent on your behalf. Telegram lets a bot connected to your account (Telegram \x2192 Settings \x2192 Chat Automation) send to your chats with OTHER bots, so this takes a SECOND bot: @BotFather \x2192 /newbot \x2192 paste its token below; in @BotFather, in that bot's Bot Settings, turn on Secretary Mode and Bot-to-Bot Communication. Save, then in Telegram \x2192 Settings \x2192 Chat Automation add the second bot, let it reply to messages, and let it reach your chat with the topics bot. Agentmaster checks with one message in the \U0001F50E Search topic; the status above says how it went. Without a second bot, connecting the topics bot itself there is tried the same way.", 11, false, 0.75);
+            steps.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(steps);
+        }
+        _setMsgSecretaryToken = PasswordBox{};
+        _setMsgSecretaryToken.Header(winrt::box_value(L"Secretary bot token (a second bot)"));
+        AgentSetTip(_setMsgSecretaryToken, L"Stored in Windows Credential Manager on Save, like the topics bot's token; never in settings.json or a log. Leave it empty to keep the stored token. Saving a new one restarts the bot.");
+        panel.Children().Append(_setMsgSecretaryToken);
+        _setMsgSecretaryForget = Button{};
+        _setMsgSecretaryForget.Content(winrt::box_value(L"Forget secretary token"));
+        AgentSetTip(_setMsgSecretaryForget, L"Remove the stored secretary bot token on Save: your prompts show as the bot's \x2328 lines again (unless the topics bot itself is connected as your secretary).");
+        _setMsgSecretaryForget.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _msgForgetSecretaryToken = true;
+            if (_setMsgSecretaryToken)
+            {
+                _setMsgSecretaryToken.Password(L"");
+                _setMsgSecretaryToken.PlaceholderText(L"the stored secretary token is removed on Save");
+            }
+        });
+        panel.Children().Append(_setMsgSecretaryForget);
 
         // === CLAUDE tab ===
         panel = claudePanel;
@@ -3000,6 +3031,14 @@ namespace winrt::TerminalApp::implementation
             _setMsgToken.Password(L"");
             const std::wstring stored = ::Agentmaster::Msg::MessagingService::ReadStoredToken(::Agentmaster::AgentmasterStateDir());
             _setMsgToken.PlaceholderText(stored.empty() ? winrt::hstring{ L"paste the token \x2014 123456789:AA\x2026" } : winrt::hstring{ L"stored: " + ::Agentmaster::Msg::TelegramApi::MaskToken(stored) + L" (leave empty to keep it)" });
+            // §21.11: the topics' default mode, the rich switch, the secretary bot's token (masked placeholder only).
+            _setMsgVerbose.IsOn(_appSettings.messagingVerbose);
+            _setMsgRich.IsOn(_appSettings.messagingRichMessages);
+            _msgForgetSecretaryToken = false;
+            _setMsgSecretaryToken.Password(L"");
+            const std::wstring storedSecretary = ::Agentmaster::Msg::MessagingService::ReadStoredSecretaryToken(::Agentmaster::AgentmasterStateDir());
+            _setMsgSecretaryToken.PlaceholderText(storedSecretary.empty() ? winrt::hstring{ L"optional \x2014 a second bot's token" } :
+                                                                           winrt::hstring{ L"stored: " + ::Agentmaster::Msg::TelegramApi::MaskToken(storedSecretary) + L" (leave empty to keep it)" });
             std::wstring status;
             if (const auto& svc = ::Agentmaster::SharedEngine().messaging)
             {
@@ -3756,6 +3795,8 @@ namespace winrt::TerminalApp::implementation
             const std::wstring words[] = { L"off", L"low", L"medium", L"high", L"xhigh", L"max" };
             const int32_t idx = _setMsgThinking.SelectedIndex();
             _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
+            _appSettings.messagingVerbose = _setMsgVerbose.IsOn(); // §21.11
+            _appSettings.messagingRichMessages = _setMsgRich.IsOn();
         }
         if (_setTaskbarUnreadBadge)
         {
@@ -4112,6 +4153,25 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::LogNav(L"messaging token forgotten");
             }
             _msgForgetToken = false;
+        }
+        if (_setMsgSecretaryToken)
+        {
+            // §21.11: the SECRETARY bot's token, the same way: a typed token replaces the stored one, "Forget" removes it. The
+            // service's Apply compares it with the token it started with and restarts the bot when it changed.
+            const std::wstring typed{ _setMsgSecretaryToken.Password() };
+            const std::wstring profile = ::Agentmaster::AgentmasterStateDir();
+            if (!typed.empty() && typed.find_first_not_of(L" \t\r\n") != std::wstring::npos)
+            {
+                ::Agentmaster::LogNav(::Agentmaster::Msg::MessagingService::StoreSecretaryToken(profile, typed) ? L"messaging secretary token stored" :
+                                                                                                                   L"messaging secretary token store FAILED (Credential Manager refused)");
+                _setMsgSecretaryToken.Password(L"");
+            }
+            else if (_msgForgetSecretaryToken)
+            {
+                ::Agentmaster::Msg::MessagingService::ClearSecretaryToken(profile);
+                ::Agentmaster::LogNav(L"messaging secretary token forgotten");
+            }
+            _msgForgetSecretaryToken = false;
         }
         if (_settingsSink)
         {
