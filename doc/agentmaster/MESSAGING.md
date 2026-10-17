@@ -2394,8 +2394,9 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 > user saw the first directory (commit a7196c11b), and is LIVE on dev 0.0.1.27 since 21:17 (`Q:\agentmaster-layouts\Debug-B`):
 > its first start EDITED message 916. The DOT (§21.16.7: a tab's state dot is a button that puts its topic first in the
 > thread list, because no link opens a bot-chat topic on Telegram Android, §21.16.3) was written at 23:00 the same night
-> (commit e4c953201) and is NOT BUILT yet. Not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
-> swap need the user's word.
+> (commit e4c953201) and is LIVE on dev 0.0.1.28 since 2026-10-18 00:09 (`Q:\agentmaster-layouts\Debug`, the build of
+> 2404f7838): its first start EDITED message 916 with one dot button; a tap on it is not checked yet. Not in production
+> (0.6.8.21 is the build of 46e3aad42) — a production build and swap need the user's word.
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
 topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
@@ -2650,10 +2651,29 @@ updated 5 minutes ago
   flags of Messaging.cpp, Messaging.Inbound.cpp and AgentManagerContent.Settings.cpp (another includer of Messaging.h): clean;
   a negative control (a false `static_assert` on `kDirectoryFrontCallbackPrefix` appended to a copy of
   Messaging.Inbound.cpp) failed as it must.
-- **Open:** the build (it waits for another session's uncommitted work in the same tree to be committed: a dev build would
-  ship it half-done); then on the user's Android the dot's look, the toast, the thread first in the thread tabs, and
-  "Continue last thread ›" under the card; whether iOS opens the topic from the title as its source says; a production build
-  and swap need the user's word.
+- **The build** (2026-10-17 23:54 – 2026-10-18 00:06): it waited ~30 min for another session that was editing
+  `TerminalPage.h`, `Engine.h`, `SessionSearchTools.*` and the wapproj in the same tree, until that session committed its
+  work as 2404f7838 (the AI search's window and tab tools); a build before that would have shipped it half-done. Then Debug,
+  HEAD 2404f7838, into `Q:\agentmaster-layouts\Debug` while dev ran from `Debug-B`, from a session inside production
+  (`devbuild.ps1`, this session's scratchpad `swap\`). PURGED although no listed trigger changed (`SessionModels.h`,
+  `SessionRegistry.*`, `*.idl`): 2404f7838 gave the `TerminalPage` class (`_windowAgentToolsToken`) and the `Engine` struct
+  (the agent-tool sinks) new data members, the stale-layout case the purge rule exists for; the script's new `-ForcePurge`
+  says why in its log. 704.5 s with 3 compilers, "Build OK"; TerminalApp.dll bakes 2404f7838, the manifest
+  `AgentmasterDev 0.0.1.0`, 192 icons, the layout idle. K: sat at 0–1 GB free while the session waited (a docs edit failed
+  `ENOSPC`); no build of this repo ran then, and the top writers were Rider (with `K:\source\NumSharp` open) and .NET
+  build nodes.
+- **The swap** (00:06:49, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`; two open dev sessions, both Idle):
+  0.0.1.27 → 0.0.1.28, drain 5.1 s, register 2.3 s at the first attempt, **downtime 7.9 s**; the window re-homed 57 tabs by
+  00:09:08, none skipped.
+- **Live** (dev hooks.log, `messaging\telegram\state.json`, `messaging.log`): 00:07:00 connected; 00:09:08 the start-up hold
+  ended (129 s); 00:09:39 `[msg] directory edited (message 916, rich: 1 tag(s), 1 tab chip(s), 1 dot button(s), 6 tag(s) on
+  no open tab not listed)` — Telegram took a rich `editMessageText` whose text holds an in-text `callback_data` button.
+  state.json's `directoryHash` moved (707476022 → 1661888261: the dots and the legend are in the rich text the hash covers),
+  `directoryRich` and `directoryPinned` stay true. No `[tg]` failure, no 429, no swallowed exception, no new messaging.log
+  line, no Application Error.
+- **Open:** a tap — only a real tap sends a callback, so it waits for the user's Android: the dot's look, the toast, the
+  thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
+  line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
