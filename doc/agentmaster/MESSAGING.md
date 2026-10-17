@@ -2380,10 +2380,11 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 
 ### 21.16 The pinned directory — the dedicated topics and every tag on an open tab with its tabs, in one message of the main view (2026-10-17)
 
-> Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev 0.0.1.26 since 20:40
-> (`Q:\agentmaster-layouts\Debug`, the build of 19c6b7d1b); not in production (0.6.8.21 is the build of 46e3aad42) — a
-> production build and swap need the user's word. The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was
-> written the same evening, after the user saw the first directory; NOT BUILT yet.
+> Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev since 0.0.1.26 (20:40, the build of
+> 19c6b7d1b). The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was written the same evening, after the
+> user saw the first directory (commit a7196c11b), and is LIVE on dev 0.0.1.27 since 21:17 (`Q:\agentmaster-layouts\Debug-B`):
+> its first start EDITED message 916. Not in production (0.6.8.21 is the build of 46e3aad42) — a production build and swap
+> need the user's word.
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
 topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
@@ -2547,9 +2548,21 @@ updated 5 minutes ago
   "release"); the log's words. The isolated m5 run (HEAD 19c6b7d1b + this work): 7,652 checks, only the 3 known
   TestTaskbarBadge failures. `cl /Zs` with the last Debug build's flags of Messaging.cpp and Messaging.Inbound.cpp: clean,
   and a negative control (a `static_assert` on `DirectoryRender` appended to a copy of Messaging.cpp) failed as it must.
+  - **Built** 21:11–21:14 (`devbuild.ps1`, a session inside production): Debug, HEAD a7196c11b, into
+    `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`; incremental (no purge trigger since 19c6b7d1b), 166 s with 3
+    compilers; TerminalApp.dll bakes a7196c11b, the manifest `AgentmasterDev 0.0.1.0`, 192 icons. K: sat between 0 and 3 GB
+    free that evening (the commit's first try failed there: `git hash-object` exit 128), and the build's intermediates went
+    to Q: through the `obj\x64\Debug` junction.
+  - **Swapped** 21:14:52 (`Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open dev session, Idle): 0.0.1.26 →
+    0.0.1.27, drain 1.4 s, register 2.5 s at the first attempt, **downtime 4.5 s**; the window re-homed 57 tabs by 21:16:40,
+    none skipped.
+  - **Live:** the start-up hold ended 21:17:00; at 21:17:16 `[msg] directory edited (message 916, rich: 1 tag(s), 1 tab
+    chip(s), 6 tag(s) on no open tab not listed)` — the directory's FIRST edit: Telegram took a rich `editMessageText` of
+    the thread-less rich message. state.json's `directoryHash` moved (160477192 → 707476022), `directoryRich` and
+    `directoryPinned` stay true; no new messaging.log line, no `[tg]` failure, no swallowed exception.
 - **Open:** the look on the user's phone and Desktop (the chips' looks, the disabled chips, the pinned bar's first line, a
-  tap); whether a pin in a bot forum's General shows in every topic's pinned bar or only in "All" (not documented); the first
-  edit (it comes with the first change of a count, a state or a tag); a production build and swap need the user's word.
+  tap); whether a pin in a bot forum's General shows in every topic's pinned bar or only in "All" (not documented); a
+  production build and swap need the user's word.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
