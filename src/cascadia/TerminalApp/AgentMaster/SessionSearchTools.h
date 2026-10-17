@@ -551,8 +551,11 @@ namespace Agentmaster
         /// structure of the user's request of 2026-10-17 (SESSIONS.md §9.14): an introduction, then
         /// "# Instructional Behaviors" (numbered: be descriptive — open every request with an "I'll 1. ... 2. ... 3."
         /// plan before the first tool call, end it with a reply that says what was found or done and offers the next
-        /// step; evidence first; the workspace is the user's), "## Tools" (every tool, by group, with when and how to
-        /// use it), and "## Workflow Guidelines" (numbered, one for every kind of conversation about sessions and
+        /// step; evidence first; the workspace is the user's), "## Tools" (how the finders match words — any case, a
+        /// word inside longer words, all words in ONE kind of place, so a folder goes in `dir` — and how to write a grep
+        /// pattern that covers every form of a word yet keeps a plain piece outside its groups; then every tool, by
+        /// group, with when and how to use it and what it costs), and "## Workflow Guidelines" (numbered, one for every
+        /// kind of conversation about sessions and
         /// search: describe, exact words, file / folder, period, marks, content questions, follow-ups, nothing found,
         /// several matches, resume, fork, the window choice, the placement, deactivate, workspace questions, ids,
         /// out-of-scope requests, tool errors).
@@ -563,7 +566,9 @@ namespace Agentmaster
         /// user called hasty. The plan is written in the same message as the first calls: no extra model request, and
         /// the page shows it while the request runs (SessionSearchSnapshot::narration). ⚠ Part of every request's
         /// prompt and of the prompt cache's key: a change costs one new cache entry; the m5 suite pins the three
-        /// headings, the plan rule, every tool name, and that the text is ASCII.
+        /// headings, the plan rule, the matching rules and the grep patterns, every tool name, and that the text is
+        /// ASCII. The matching rules are the code's (MatchesQueryText, SearchIndexFast, GrepRequiredLiteral): change
+        /// the text with them (SESSIONS.md §9.14 "What ## Tools teaches").
         /// </remarks>
         static const wchar_t* SystemPrompt() noexcept;
 

@@ -1058,7 +1058,14 @@ none of its 3 sessions in its 20 s.
    catalog saved as one file and checked against each transcript's size and modification time, as
    a refresh does, so that a start reads one file instead of 3,671.
 
-### 9.14 Windows and tabs, and a prompt that explains itself (2026-10-17, NOT BUILT yet)
+### 9.14 Windows and tabs, and a prompt that explains itself (2026-10-17; in DEV 0.0.1.28 since 2026-10-18 00:06, not in production; "What ## Tools teaches" of 2026-10-18 NOT BUILT yet)
+
+> **State, checked 2026-10-18 00:20:** another session built dev from `2404f7838` (this section's commit) and
+> swapped it in as 0.0.1.28 (`Q:\agentmaster-layouts\Debug`, 00:06:49; commit `0735f2612`). A UTF-16LE probe of
+> that layout's `TerminalApp.dll` finds `# Instructional Behaviors` and `mcp__tabs__list`, and `duckdb.dll` now
+> lies beside `agentmaster-sessiondb.exe` (the `CopyAgentmasterDuckDbToLayout` fix works). Dev's profile still has
+> `sessionDbMode` Off, and dev's hooks.log has no AI-search request since the swap: nothing below has run against
+> the live model yet. Production (0.6.8.21) has none of it.
 
 > **The user's request of 2026-10-17:** enable the session database's tools in both conversations
 > (the Sessions page's and the Telegram Search topic's); add tools that resume or fork a session by
@@ -1124,7 +1131,8 @@ call (`SDK_HARNESS.md` §5.1):
   Telegram has no origin.
 
 **The system prompt** (`kSystemPrompt` / `kDatabaseSystemPrompt`, composed at compile time from
-shared pieces so the two modes cannot drift; about 14,000 characters each):
+shared pieces so the two modes cannot drift; about 14,000 characters each as built in 0.0.1.28, about
+17,500 (page) and 19,100 (database) with the Tools teaching of 2026-10-18 below):
 
 - An introduction, then **`# Instructional Behaviors`** (10, numbered): (1) open every request with
   a plan — "I'll 1. ..., 2. ..., 3. ..." — before the first tool call and in the same message (no
@@ -1154,6 +1162,57 @@ shared pieces so the two modes cannot drift; about 14,000 characters each):
   user's words first, never "the screen", the `indexing` note. `show`'s result now asks for the reply
   ("what you found or did ..., then the likely next step"), and the step cap rose from 12 to 16
   (list + resume / fork, and one refused call, on top of a search request).
+
+**What `## Tools` teaches** (the user's review of 2026-10-18: "Review if we are using/specifying how to use
+each ## Tools smartly. For example, grep various forms of what we are looking for. Look into the rest";
+NOT BUILT yet). The section first said only WHAT each tool does; it now opens with how the finders match,
+because that decides what a call can find and what it costs, and every tool's bullet carries its traps. Every
+rule below was read off the code, and the m5 suite checks the code against the prompt's own examples:
+
+- **How the finders match** (a shared head, `AM_PROMPT_TOOLS_HEAD`): case never matters and a word also
+  matches INSIDE longer words — `MatchesQueryText` and the database's `Dictionary::TermsContaining` are
+  substring matches — so one stem covers a word's forms (`compil` finds compile, compiler, compiling;
+  `scanner` finds SessionScanner). The words of one query are an AND, so Claude's own terms, a synonym and the
+  user's other language are SEPARATE searches of one step. A rare word beats a common one.
+- **All words of a query match in ONE kind of place:** the names and places (title, first prompt, folder, touched
+  paths — each word may hit a different one; `SearchIndexFast`), or ONE typed prompt (`SearchHistoryPrompts`), or
+  with `deep` ONE message (`SearchTranscriptsSlow`); the database's blocks behave the same. So a folder belongs in
+  `dir`, never in `query`: "agentmaster tooltip" misses a session whose later prompts say tooltip, while
+  `dir:agentmaster` + `query:tooltip` finds it. On the PAGE the git branch is not a query target at all
+  (`SearchIndexFast` never reads `gitBranch`; the old text said it was): it is only the `branch` filter.
+- **Patterns for grep** (shared): plain text matches as written (any case, spaces included, nothing to escape);
+  one regex catches every form of one thing — endings `drag(ged|ging|s)?`, spellings `colou?r`, separators
+  `tab[ _-]?drag` (tab drag / tab-drag / tab_drag / TabDrag), nearness `drag.{0,40}crash`, either slash
+  `source.agentmaster`. ⚠ It must keep a plain piece of 3+ letters or digits OUTSIDE every group and alternative:
+  that piece is the only thing the grep can narrow by (`GrepRequiredLiteral` / `RegexLiteralRuns` on the page, the
+  service's `LongestRegexLiteral`). `(dragged|dragging)` or a top-level `a|b` has none: the page then reads every
+  session of the period in full and can stop at its 20 s budget (`stopped`), the database refuses the call unless
+  it names `ids`. Words with nothing in common are separate greps of one step; escaping (`0\.6\.8`); an error
+  message's most telling fragment, never all of it.
+- **Per tool:** search — the default sort's tiers, `deep` for words only Claude wrote or words that must meet in
+  one message (tens of seconds over 90 days: narrow it first, grep before it); grep — `in:user` as the best
+  evidence, `ids` for candidates, `stopped` / `too_complex`, `limit` / `context`; read — all candidates in one
+  call, level `default` for decisions, the middle of a long session through a grep with its id and a read with more
+  chars, never the subagents' work; the database's grep (RE2: no lookarounds or backreferences; `roles`,
+  `case_sensitive`, `cursor`), search (`scopes`, `fuzzy`, 1-2 character words, `cursor`), who_touched (`op`, 365
+  days), timeline (`group`, defaults), session (cheaper than a read), messages (`around` a ref, `order:desc`,
+  `roles`, `full`), files, related (`kinds`), usage (never estimate a cost), sql (aggregate in the query); show (ids
+  from ANY result, after the reads); list (narrow with `title` / `dir` rather than `limit`; list the target window
+  before an open); resume / fork (every tab after a new one moves one `pos` right: several opens in one window pass
+  `after` as a session id); deactivate (its id and state from list).
+- **Workflows 1, 2 and 8** use it: a described session is searched with other words for it in the same step;
+  exact words are grepped as one regex for all their forms; "nothing fits" tries a shorter stem, other words and
+  the other language before a longer period, grep and `deep` (or, in the database, `fuzzy` and more scopes).
+- **The page tools' schemas** repeat the rules where the model reads them at call time: `query` (one kind of place,
+  inside longer words, folder and branch in their filters), `deep` (every word in one message, narrow it first),
+  `pattern` (as written), `regex` (a group next to a plain piece, the cost without one), and the search / grep
+  descriptions. The database's tool texts (`SessionDbToolDefs.h`) are unchanged: their grep already states the
+  literal rule, and a change there needs `kToolRegistryVersion` bumped.
+- **Tests:** `TestToolsTeaching` (`tests_tabtools.cpp`) — the teachings in both prompts; the page's
+  `MatchesQueryText` (inside longer words, case folded, a phrase only as written) and `SearchIndexFast` (the branch
+  never matched; words on different fields match; "agentmaster tooltip" misses); `GrepRequiredLiteral` of every
+  good example (`drag`, `compil`, `colo`, `drag`, `crash`, `agentmaster`, `0.6.8`) and of the bad ones (none); the
+  schemas. A rule of `## Tools` that stops being true of the code fails there.
 
 **What the user sees of the plan:** the agent turns every text block the model writes before a tool
 call into the request's narration (`SessionSearchEventKind::Narration`,

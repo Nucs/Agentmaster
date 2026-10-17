@@ -18,7 +18,9 @@
 > build of §16 meets only the last part (it builds in 37 min, through a second program). §17.2 has the measurements
 > (the existing extractor parses the whole corpus in 16.4 s on 16 threads), and §17.3 the recommended redesign.
 >
-> **2026-10-17 (NOT BUILT yet): the database could never start on this machine, and the AI search now checks.** Every
+> **2026-10-17 (in DEV 0.0.1.28 since 2026-10-18 00:06, built from 2404f7838: its `Q:\agentmaster-layouts\Debug` now
+> holds `duckdb.dll` beside the service; dev's profile is still Off; production 0.6.8.21 has neither): the database
+> could never start on this machine, and the AI search now checks.** Every
 > loose layout — the stock `bin\x64\<Config>` and every `Q:\agentmaster-layouts` hot-deploy slot — shipped
 > `agentmaster-sessiondb.exe` WITHOUT `duckdb.dll`: the wapproj's `<Content Include="$(DuckDbDir)duckdb.dll">` never
 > reached a build folder that is registered as it is, so `EnsureServiceBinaries` refused ("The package has no
