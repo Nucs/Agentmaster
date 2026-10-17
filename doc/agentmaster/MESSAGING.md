@@ -2380,7 +2380,9 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 
 ### 21.16 The pinned directory — the dedicated topics and every tag with its tabs, in one message of the main view (2026-10-17)
 
-> Status: written 2026-10-17 (session 0b1f8635); not built yet.
+> Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev 0.0.1.26 since 20:40
+> (`Q:\agentmaster-layouts\Debug`, the build of 19c6b7d1b); not in production (0.6.8.21 is the build of 46e3aad42) — a
+> production build and swap need the user's word.
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
 topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
@@ -2504,8 +2506,26 @@ updated 5 minutes ago
   order out); the limits (20 tabs a tag, 60 big tags against both caps); the decision (post, in flight, back-off, gap, form,
   a refused rich form); the "gone" answers; the state fields' round trip; the census kind; the palette pinned against an
   independent FNV-1a. The isolated m5 run (HEAD + this work): 7,582 checks, only the 3 known TestTaskbarBadge failures.
-- **Open:** the build and the live check on the dev bot; the look on the phone; whether a pin in a bot forum's General shows in
-  every topic's pinned bar or only in "All" (not documented); a production build and swap need the user's word.
+  `cl /Zs /W4 /WX` of Messaging.cpp, Messaging.Inbound.cpp, SessionStore.cpp and the test: clean. `/Zs` of two app files that
+  paint tags from the moved palette (TabHeaderControl.cpp, TerminalPage.AgentObserver.cpp) against the last Debug build's
+  PCH: clean, and a negative control (`static_assert(kTagPaletteRgbCount == 13)` appended) failed at that line as it must.
+- **The build** (20:27, after the session that was editing `SessionModels.h` in the same tree committed its work as
+  19c6b7d1b — a build before that would have shipped its half-done code): Debug, HEAD 19c6b7d1b, into
+  `Q:\agentmaster-layouts\Debug` while dev ran from `Debug-B`, from a session inside production (`devbuild.ps1`, this
+  session's scratchpad `swap\`); PURGED (`SessionModels.h` changed since dev's 7017fd863), 580 s with 3 compilers, "Build OK",
+  TerminalApp.dll bakes 19c6b7d1b, the manifest `AgentmasterDev 0.0.1.0`, 192 icons.
+- **The swap** (20:37:51, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open dev session, Idle): 0.0.1.25 →
+  0.0.1.26, drain 1.5 s, register 2.1 s at the first attempt, **downtime 4.5 s**; the window re-homed 57 tabs, none skipped.
+- **Checked live** (dev hooks.log, `messaging\telegram\state.json`, `messaging.log`): 20:37:58 connected; 20:39:57 the start-up
+  hold ended and, in the same tick, `[msg] directory: posting it in the chat's main view (7 tag(s), 1 tab chip(s), rich)` (dev
+  has 7 tags; one open tab carries a tag); 20:40:14 `directory posted (message 916, rich)` — Telegram took a thread-less rich
+  message with in-text URL buttons in the bot forum; 20:40:16 `directory pinned (message 916)`. state.json:
+  `directoryMessageId` 916, `directoryRich` and `directoryPinned` true. The first census (20:47:58): `pinChatMessage=1
+  sendRichMessage=1 deleteMessage=2` — the pin's note and the notice of the one topic rename (`editForumTopic=1`) — no 429,
+  and no directory edit (nothing it shows changed). No `[tg]` failure in messaging.log after the swap, no swallowed exception.
+- **Open:** the look on the user's phone and Desktop (the chips' looks, the disabled chips, the pinned bar's first line, a
+  tap); whether a pin in a bot forum's General shows in every topic's pinned bar or only in "All" (not documented); the first
+  edit (it comes with the first change of a count, a state or a tag); a production build and swap need the user's word.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
