@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster M5 — MESSAGING.md §21.16: the pinned DIRECTORY, its pure half (MessagingDirectory.h) — the topic links, the two
-// stats rows, the join of the tags with the open tabs, both renders (the rich message with URL chips in the tab colors, and the
-// classic HTML fallback), the content hash that decides an edit, the post / edit decision and the "message is gone" rule — plus
-// the state file's new fields, the census kind of its edits, and the tag palette the directory shares with the app (SessionStore.h,
-// Rule #17). The service's sends and pins (Messaging.cpp) need Telegram; the live check is the dev bot (MESSAGING.md §21.16).
+// stats rows, the join of the tags with the open tabs, both renders (the rich message with URL chips in the tab colors and the
+// tabs' state dots as callback buttons, and the classic HTML fallback), the content hash that decides an edit, the post / edit
+// decision and the "message is gone" rule, the dot's callback data and its toast (§21.16.7) — plus the state file's new fields,
+// the census kind of its edits, and the tag palette the directory shares with the app (SessionStore.h, Rule #17). The service's
+// sends, pins and the dot's re-post (Messaging.cpp, Messaging.Inbound.cpp) need Telegram; the live check is the dev bot.
 
 #include "m5_tests.h"
 
@@ -214,27 +215,73 @@ void TestMessagingDirectory()
               "a tag no open tab carries is not shown at all (the user's \"Tags with 0 tabs should not be shown\")");
         CHECK(r.rich.find(L"<b>\U0001F7E8 release</b> \x00B7 4 tabs<br>") != std::wstring::npos && r.rich.find(L"\U0001F7E5 beta</b> \x00B7 1 tab<br>") != std::wstring::npos,
               "a tag's count of open tabs, singular and plural");
-        const std::wstring agentmaster = L"<br>\U0001F535 <tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</tg-button>";
+        // §21.16.7: a tab WITH a topic has its state dot as a callback button (it puts the topic first in the thread list: the
+        // way in on Telegram Android, which opens no topic from a link), then its title chip; a tab without one keeps a plain dot.
+        const std::wstring agentmaster = L"<br><tg-button type=\"callback_data\" data=\"d:front:26785\">\U0001F535</tg-button> "
+                                         L"<tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</tg-button>";
         const std::wstring idleTab = L"<br>\x26AA <tg-button type=\"disabled\" style=\"success\">\U0001F7E9 idle tab</tg-button>";
-        const std::wstring orange = L"<br>\U0001F534 <tg-button type=\"url\" url=\"https://t.me/Bot/40?topic=40\">\U0001F7E7 orange &lt;x&gt; &amp; \"q\"</tg-button>";
-        const std::wstring zeta = L"<br>\U0001F7E1 <tg-button type=\"url\" style=\"success\" url=\"https://t.me/Bot/31?topic=31\">\U0001F7E9 zeta work</tg-button>";
+        const std::wstring orange = L"<br><tg-button type=\"callback_data\" data=\"d:front:40\">\U0001F534</tg-button> "
+                                    L"<tg-button type=\"url\" url=\"https://t.me/Bot/40?topic=40\">\U0001F7E7 orange &lt;x&gt; &amp; \"q\"</tg-button>";
+        const std::wstring zeta = L"<br><tg-button type=\"callback_data\" data=\"d:front:31\">\U0001F7E1</tg-button> "
+                                  L"<tg-button type=\"url\" style=\"success\" url=\"https://t.me/Bot/31?topic=31\">\U0001F7E9 zeta work</tg-button>";
         const size_t a = r.rich.find(agentmaster);
         const size_t i = r.rich.find(idleTab);
         const size_t o = r.rich.find(orange);
         const size_t z = r.rich.find(zeta);
-        CHECK(a != std::wstring::npos, "a blue tab: its state glyph, then a primary URL chip to its topic, the square in its label");
-        CHECK(i != std::wstring::npos, "a tab with no topic (idle): a disabled chip, still in its color's look");
+        CHECK(a != std::wstring::npos, "a blue tab: its state dot as a dot button, then a primary URL chip to its topic, the square in its label");
+        CHECK(i != std::wstring::npos, "a tab with no topic (idle): a plain dot and a disabled chip, still in its color's look");
         CHECK(o != std::wstring::npos, "an orange tab: the plain chip (no style), its title escaped");
         CHECK(z != std::wstring::npos, "a green tab: a success chip");
         CHECK(a < i && i < o && o < z, "the tabs of a tag in case-insensitive order of their titles");
-        CHECK(r.rich.find(L"\U0001F7E2 <tg-button type=\"url\" style=\"danger\" url=\"https://t.me/Bot/50?topic=50\">\U0001F7E5 dddd5555</tg-button>") != std::wstring::npos,
+        CHECK(r.rich.find(L"<tg-button type=\"callback_data\" data=\"d:front:50\">\U0001F7E2</tg-button> "
+                          L"<tg-button type=\"url\" style=\"danger\" url=\"https://t.me/Bot/50?topic=50\">\U0001F7E5 dddd5555</tg-button>") != std::wstring::npos,
               "a tab with no title shows its session id's first 8 characters; a red tab is a danger chip");
         CHECK(r.classic.find(L"\n\U0001F535 <a href=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</a>") != std::wstring::npos &&
                   r.classic.find(L"\n\x26AA \U0001F7E9 idle tab") != std::wstring::npos,
-              "the classic render: a link per tab, the bare label for one with no topic");
-        CHECK(r.tagsShown == 2 && r.tagsHidden == 0 && r.tagsWithoutTabs == 1 && r.tabsShown == 5,
-              "the counts of a render that fits: 2 tags listed, the one no open tab carries counted apart");
-        CHECK(DescribeDirectoryRender(r) == L"2 tag(s), 5 tab chip(s), 1 tag(s) on no open tab not listed", "the log's words for a render");
+              "the classic render: a plain dot and a link per tab, the bare label for one with no topic");
+        CHECK(r.classic.find(L"callback_data") == std::wstring::npos && r.classic.find(L"<tg-button") == std::wstring::npos,
+              "the classic render has no dot buttons (Telegram HTML has no in-text callback button)");
+        CHECK(r.tagsShown == 2 && r.tagsHidden == 0 && r.tagsWithoutTabs == 1 && r.tabsShown == 5 && r.dotsShown == 4,
+              "the counts of a render that fits: 2 tags listed, the one no open tab carries counted apart, a dot button for each tab with a topic");
+        CHECK(DescribeDirectoryRender(r) == L"2 tag(s), 5 tab chip(s), 4 dot button(s), 1 tag(s) on no open tab not listed", "the log's words for a render");
+        // The legend says which does what, under the Tags heading, rich only.
+        const std::wstring legend = L"<p><i>Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).</i></p>";
+        CHECK(r.rich.find(L"<h3>\U0001F3F7\xFE0F Tags</h3>" + legend) != std::wstring::npos, "the legend comes right under the Tags heading");
+        CHECK(r.classic.find(L"Tap its dot") == std::wstring::npos, "the classic render has no legend (its dots are not buttons)");
+        // A directory whose listed tabs have no topic has no dot button, and so no legend.
+        DirectoryModel dotless = m;
+        for (auto& tag : dotless.tags)
+        {
+            for (auto& tab : tag.tabs)
+            {
+                tab.threadId = 0;
+            }
+        }
+        const DirectoryRender dl = RenderDirectory(dotless, updatedAt, updatedAt);
+        CHECK(dl.dotsShown == 0 && dl.rich.find(L"callback_data") == std::wstring::npos && dl.rich.find(legend) == std::wstring::npos && dl.tabsShown == 5,
+              "no tab with a topic: plain dots, no legend");
+        CHECK(DescribeDirectoryRender(dl) == L"2 tag(s), 5 tab chip(s), 1 tag(s) on no open tab not listed", "no dot button: the log's words do not mention them");
+    }
+    // ---- the dot's callback data and its toast (§21.16.7) ----
+    {
+        CHECK(DirectoryFrontCallbackData(26785) == L"d:front:26785" && DirectoryFrontCallbackData(0).empty() && DirectoryFrontCallbackData(-3).empty(),
+              "a dot's data names its topic's thread; no topic, no data");
+        CHECK(DirectoryFrontCallbackData(9223372036854775807ll).size() <= 64, "the longest data fits the Bot API's 64-byte limit");
+        CHECK(ParseDirectoryFrontCallbackData(DirectoryFrontCallbackData(25027)) == 25027 && ParseDirectoryFrontCallbackData(L"d:front:1") == 1,
+              "the data reads back to its thread");
+        CHECK(ParseDirectoryFrontCallbackData(L"d:front:") == 0 && ParseDirectoryFrontCallbackData(L"d:front:0") == 0 &&
+                  ParseDirectoryFrontCallbackData(L"d:front:-5") == 0 && ParseDirectoryFrontCallbackData(L"d:front:12x") == 0 &&
+                  ParseDirectoryFrontCallbackData(L"d:front:1 ") == 0 && ParseDirectoryFrontCallbackData(L"D:front:5") == 0 &&
+                  ParseDirectoryFrontCallbackData(L"c:runner:5") == 0 && ParseDirectoryFrontCallbackData(L"") == 0,
+              "data that is not a dot's - empty, zero, signed, with junk, another button's - reads as no topic");
+        CHECK(ParseDirectoryFrontCallbackData(L"d:front:999999999999999999") == 999999999999999999ll && ParseDirectoryFrontCallbackData(L"d:front:9999999999999999999") == 0,
+              "18 digits read back; 19 could overflow and read as no topic");
+        CHECK(DirectoryFrontAnswer(L"Agentmaster", false) == L"\x2191 \x201C" L"Agentmaster\x201D goes first in the thread list", "the toast names the thread");
+        CHECK(DirectoryFrontAnswer(L"Agentmaster", true) == L"\x2191 \x201C" L"Agentmaster\x201D goes first in the thread list once its history is in",
+              "a topic still replaying its history moves once the history is in");
+        CHECK(DirectoryFrontAnswer(L"  ", false) == L"\x2191 This thread goes first in the thread list", "no title: \"This thread\"");
+        const std::wstring longTitle(500, L'x');
+        CHECK(DirectoryFrontAnswer(longTitle, true).size() < 200, "a long title is cut, so the toast stays under Telegram's 200 characters");
     }
     // The footer: the relative date-time entity, apps keep it current; the PC's clock time is its text.
     {
