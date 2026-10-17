@@ -1838,3 +1838,84 @@ showing beyond unformatted ascii".
   place; `/verbose` and the four recreate buttons; whether a rename moves a topic up the list for a moment (the notice is
   its last message until it is deleted); the secretary bot end to end — it needs the user's second bot and the Chat
   Automation step, nothing can be checked without them.
+
+### 21.12 The user's line, the reply that quotes it, the status on the prompt; one bot per install (2026-10-17)
+
+> Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.22 (`Q:\agentmaster-layouts\Debug`, a purged full
+> rebuild, 11:24), on the NEW dev bot; not in production (0.6.8.20 predates the whole Telegram feature — below).
+
+**The user's requests** (2026-10-17 morning): "1. Lets introduce the changes to the user message: a. "👤 You · 14:02 · typed
+at the PC" (or "📱 from the phone", "⚙ runner")\n<the prompt>" b. Make each reply a reply to its prompt. Send Claude's
+final reply with reply_parameters pointing at that turn's prompt message. Telegram then shows a small quote of your prompt
+at the top of the answer, so every pair is visibly you → Claude. This costs no extra calls; the prompt's message id only has
+to be kept for the turn. c. A stronger, consistent marker. Replace the subtle ⌨ with a bold 👤 You header. d. A status on
+the prompt itself. Edit the prompt line from "⏳ running"/"🔴 error" and others to "✅ answered" and when no longer the last
+prompt user sent, remove the status on the prompt itself." and "2. We have a release version of telegram and a debug version
+of telegram. The one used by debug should move to the release agentmaster … The new debug: <token>. Kindly do the move".
+
+#### 21.12.1 The user's lines
+
+- **One format** for every line the bot posts in the user's place, live and in the history (`BuildPromptLineHtml`,
+  `BuildAnswerLineHtml`, `BuildCommandLineHtml`, MessagingModels.h, pure): a bold **👤 You** header, the clock (local), what
+  it is — "typed at the PC", "📱 from the phone", "⚙ runner" (`PromptSource`), "mid-turn" for a message typed while the turn
+  ran, "↩ answer", "command" — and, on the turn's prompt, its status; then the words on the next line (escaped; past 600
+  characters or 8 lines an expandable quote; cut at 3,000 — an edit cannot be split). The old `⌨ HH:MM · <first line>` and
+  `⚙` lines are gone.
+- **Where the source comes from**: live, the session's queue (`QueuedPrompt::remoteSource` = a message of this topic, origin
+  Autorun = the runner); a prompt sent from this topic is still not mirrored (the user's own message is there). In the
+  history the same queue decides, so a phone prompt replays as "📱 from the phone".
+- A send AS THE USER (the secretary, §21.11) stays the user's own bubble with no header.
+
+#### 21.12.2 The reply quotes its prompt
+
+- The turn's final message (the reply, a question, a plan, an interrupt, an API error — every `_postFinal`) is sent with
+  `reply_parameters` = the turn's prompt message, `allow_sending_without_reply` true. **No extra call**: the id is the
+  prompt send's own answer.
+- **How the id reaches the reply** (`MessagingService::PromptRef`, an object shared behind a pointer — the tick works on a
+  COPY of a session's mirror and writes it back, so a field a send's callback wrote meanwhile would be lost): the prompt
+  line's `onDone` stores its message id; the reply's outbox item carries a pre-send hook (`OutItem::beforeSend`,
+  `_applyReplyRef`) that reads it when the item GOES — the send loop makes one call at a time, in order, so the prompt has
+  answered by then. A prompt sent from the phone: its id is the user's own message (from `remoteSource`), known at once. A
+  prompt sent as the user by the secretary bot: its id in THIS bot's view comes with the echo the topics bot receives
+  (`_notePromptEcho`, matched by the text's hash); until then, or when a send was refused, the reply goes without a quote.
+- **The order fix it needed**: prompt lines went at the New priority and replies at Final, so a fast turn (prompt and reply
+  read in one tick) posted the reply FIRST. Prompt lines now go at Final, the reply's priority, in queue order.
+- **The history** marks each turn's prompt and reply (`HistoryPost::turnPrompt` / `turnReply`); `_pumpBackfill` keeps the
+  turn's PromptRef while it queues the batch, so the replayed reply quotes the replayed prompt too (not a prompt replayed as
+  the user — that id is in the user's view).
+
+#### 21.12.3 The status on the prompt itself
+
+- **Only the LAST prompt** carries a status (`TopicRecord::prompt*`, persisted, so a restart keeps updating it): ⏳ running,
+  🟠 needs you, ✅ answered, 🔴 error, ⏹ ended, ■ interrupted (`PromptTurnStatusFor`: Running, Needs approval, Error, Done,
+  and at rest answered — or interrupted when the user stopped the turn). When the next turn's prompt arrives, the previous
+  prompt's status is removed (a message typed mid-turn is not a turn's prompt and changes nothing).
+- **Our line** (typed at the PC, the runner's, a refused send as the user): the status is an EDIT of the line
+  (`editMessageText`, the cards' priority, keyed per message so a newer status replaces one still queued). **The user's own
+  message** (from the phone; sent as the user): a bot cannot edit the user's words, and Telegram allows a fixed reaction set
+  (no ⏳ / ✅ / 🔴), so the status is a REACTION: 👨‍💻 running, 🤔 needs you, 👌 answered, 💔 error, 😴 ended, 🙈 interrupted;
+  none once a newer prompt was sent. A phone prompt that FAILED keeps its 👎 (it never became a turn).
+- A new state shows once it has held `kPromptStatusSettleMs` (3 s — a recon synth undone a pass later must not edit twice);
+  an Error at once. Cost: two edits (or reactions) per turn — ✅ at the end, removal at the next prompt.
+- **A fix it needed**: `_syncReactions` re-set 👨‍💻 on every Sent phone prompt of every queue after each restart (`_reacted` is
+  per run) — a burst of calls that would also undo the statuses. A prompt picked up before the run saw it queued is now
+  recorded, not reacted.
+
+#### 21.12.4 One bot per install — the move
+
+- **Before**: `@ClaudeSessionsGateBot` (8965034992) was polled by the DEV install; the RELEASE install had no bot.
+- **The new dev bot**: `@ClaudeSessionsDebugGateBot` (8986177119, created by the owner; Threaded Mode ON — checked with a
+  read-only getMe). Its token is in Credential Manager `Agentmaster:messaging:telegram:.agentmaster-dev` and in the hub file
+  `K:\source\telegram\ClaudeSessionsDebugGateBot.env` (untracked, like the other bot's).
+- **The move** (11:24): dev's GUI stopped (no session was running); dev's state file (the old bot's 48 topics, the Search
+  topic 22371, the update offset) COPIED to the release profile (`~\.agentmaster\messaging\telegram\state.json`), so the
+  release, once its bot runs, knows the old topics: it deletes them as "closed" after its start-up hold (they are dev's
+  sessions) and keeps the Search topic; the old bot's token copied to `Agentmaster:messaging:telegram:.agentmaster`; the new
+  token stored for dev; dev swapped to 0.0.1.22. Dev's log: `the bot changed (@ClaudeSessionsGateBot ->
+  @ClaudeSessionsDebugGateBot): … reset`, `connected as @ClaudeSessionsDebugGateBot (topics enabled)`, a new Search topic
+  (thread 25027). The hub map (`K:\source\telegram\CLAUDE.md`) and the old bot's file header say who polls which bot now.
+- **⚠ The release cannot run it yet**: production is 0.6.8.20 (`Q:\agentmaster-layouts\Release-B`, swapped 06:22 today),
+  whose TerminalApp.dll was built on 2026-10-14 — before the Telegram feature existed (2026-10-16; a probe of the DLL finds
+  none of its strings). So the old bot sits idle, its chat holding dev's last topics, until production runs a build with
+  messaging AND the bot is switched on in its cog (Settings → Messaging: "Run the Telegram bot", user id 473303454, Save —
+  the token is stored already; a running instance reads the messaging settings only at its start or a cog Save).

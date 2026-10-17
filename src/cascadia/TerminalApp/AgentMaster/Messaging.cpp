@@ -123,6 +123,9 @@ namespace Agentmaster::Msg
         // chat's flood budget is near 20 a minute and the live traffic goes first); the delete of the "topic renamed"
         // notice Telegram posts is one more call.
         constexpr size_t kNameRenameCallsPerMinute = 12;
+        // §21.12: a prompt's status follows a session state only once it has held this long (a recon synth undone a pass later
+        // must not edit the line twice); an Error shows at once.
+        constexpr int64_t kPromptStatusSettleMs = 3 * 1000;
         // A rich message's parts each take a block of this many sub-sequence slots in the outbox (§21.11): part j at
         // j * stride, its HTML fallback's chunks after it (MessagingService::_htmlItems, two slots per chunk).
         constexpr uint32_t kRichPartSubSeqStride = 4096;
@@ -1405,6 +1408,18 @@ namespace Agentmaster::Msg
                     std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(waitMs, 1200)));
                     continue;
                 }
+                // §21.12: a final reply points at its turn's prompt here — the prompt was queued before it and has answered by now.
+                if (item.beforeSend)
+                {
+                    try
+                    {
+                        item.beforeSend(item.params);
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"MessagingService::_sendLoop (beforeSend)"); // the item goes as it is
+                    }
+                }
                 // One call with the client the item names: a send as the user through the SECRETARY bot (§21.11) uses its
                 // client, which exists for the whole run when it was made (it is reset only after this thread is joined).
                 const auto call = [this, &item]() {
@@ -1729,6 +1744,7 @@ namespace Agentmaster::Msg
                     _followTranscript(sid, topic, mirror, *s);
                     _flushWorkLog(sid, topic, mirror, false);
                     _syncReactions(*s);
+                    _updatePromptStatus(topic, mirror, *s); // §21.12: after the reactions (a phone prompt's 👨‍💻 goes first)
                     _sweepRevives(*s);
                     {
                         std::lock_guard lk{ _mtx };
@@ -1752,6 +1768,15 @@ namespace Agentmaster::Msg
                             rec.recapAtMs = topic.recapAtMs;
                             rec.lastMessageAtMs = topic.lastMessageAtMs;
                             rec.errorAnnounced = topic.errorAnnounced;
+                            // §21.12: the last prompt's line — only this thread writes these fields (a send's answer lands in the
+                            // mirror's PromptRef, which _updatePromptStatus copies over).
+                            rec.promptMessageId = topic.promptMessageId;
+                            rec.promptBotLine = topic.promptBotLine;
+                            rec.promptTsMs = topic.promptTsMs;
+                            rec.promptSource = topic.promptSource;
+                            rec.promptText = topic.promptText;
+                            rec.promptStatus = topic.promptStatus;
+                            rec.promptInterrupted = topic.promptInterrupted;
                             _stateDirty = true;
                             auto& cur = _mirrors[sid];
                             if (workLogAnswerLanded && cur.workLogGen == mirror.workLogGen && cur.workLogMessageId > 0)
@@ -1948,7 +1973,20 @@ namespace Agentmaster::Msg
         return markup;
     }
 
-    std::vector<MessagingService::OutItem> MessagingService::_htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase)
+    void MessagingService::_applyReplyRef(json::Value& params, const PromptRef& ref)
+    {
+        const int64_t id = ref.id.load();
+        if (id <= 0 || params.Find(L"reply_parameters"))
+        {
+            return; // not known (refused, or a send as the user whose echo has not come): the reply goes without a quote
+        }
+        auto rp = json::Value::MkObj();
+        rp.Set(L"message_id", json::Value::MkNum(static_cast<double>(id)));
+        rp.Set(L"allow_sending_without_reply", json::Value::MkBool(true)); // the prompt deleted meanwhile must not cost the reply
+        params.Set(L"reply_parameters", std::move(rp));
+    }
+
+    std::vector<MessagingService::OutItem> MessagingService::_htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef)
     {
         // A text past Telegram's limit goes out as several messages; only the LAST carries the buttons and the callback,
         // and only the first the reply reference. Every chunk keeps the message's place: (seq, subSeqBase + 2i), and its
@@ -1983,6 +2021,11 @@ namespace Agentmaster::Msg
                 rp.Set(L"message_id", json::Value::MkNum(static_cast<double>(replyToMessageId)));
                 rp.Set(L"allow_sending_without_reply", json::Value::MkBool(true));
                 item.params.Set(L"reply_parameters", std::move(rp));
+            }
+            else if (i == 0 && replyRef)
+            {
+                // §21.12: the reply to the turn's prompt, resolved when the item goes (the prompt has answered by then).
+                item.beforeSend = [replyRef](json::Value& p) { _applyReplyRef(p, *replyRef); };
             }
             if (i + 1 == chunks.size())
             {
@@ -2053,9 +2096,9 @@ namespace Agentmaster::Msg
         return items;
     }
 
-    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
+    void MessagingService::_sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard, std::shared_ptr<PromptRef> replyRef)
     {
-        for (auto& item : _htmlItems(threadId, html, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, _takeOutSeq(), 0))
+        for (auto& item : _htmlItems(threadId, html, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, _takeOutSeq(), 0, std::move(replyRef)))
         {
             _enqueue(std::move(item));
         }
@@ -2065,12 +2108,12 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard)
+    void MessagingService::_sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, bool movesCard, std::shared_ptr<PromptRef> replyRef)
     {
         const bool blank = markdown.find_first_not_of(L" \t\r\n") == std::wstring::npos;
         if (blank || !_richMessages.load() || _richUnavailable.load())
         {
-            _sendText(threadId, fallbackHtml.empty() ? TgMarkdownToHtml(markdown) : fallbackHtml, silent, prio, L"", json::Value{}, std::move(onDone), replyToMessageId, movesCard);
+            _sendText(threadId, fallbackHtml.empty() ? TgMarkdownToHtml(markdown) : fallbackHtml, silent, prio, L"", json::Value{}, std::move(onDone), replyToMessageId, movesCard, std::move(replyRef));
             return;
         }
         const auto parts = TgChunkMarkdown(markdown);
@@ -2084,12 +2127,13 @@ namespace Agentmaster::Msg
             const std::wstring partHtml = parts.size() == 1 && !fallbackHtml.empty() ? fallbackHtml : TgMarkdownToHtml(parts[j]);
             std::function<void(const TgResult&)> partDone = last ? onDone : nullptr;
             const int64_t replyTo = j == 0 ? replyToMessageId : 0;
+            const std::shared_ptr<PromptRef> partRef = j == 0 ? replyRef : nullptr; // §21.12: the first part quotes the prompt
             const bool quiet = silent || !last; // only the last part rings
             std::wstring prepared = TgPrepareRichMarkdown(parts[j]);
             if (prepared.size() > kRichMessageMaxChars || prepared.find_first_not_of(L" \t\r\n") == std::wstring::npos)
             {
                 // Grown past the rich limit by its escapes (thousands of '<'), or nothing left to show: HTML in its place.
-                for (auto& item : _htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1))
+                for (auto& item : _htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef))
                 {
                     _enqueue(std::move(item));
                 }
@@ -2119,7 +2163,11 @@ namespace Agentmaster::Msg
                 rp.Set(L"allow_sending_without_reply", json::Value::MkBool(true));
                 item.params.Set(L"reply_parameters", std::move(rp));
             }
-            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone](const TgResult& r) {
+            else if (partRef)
+            {
+                item.beforeSend = [partRef](json::Value& p) { _applyReplyRef(p, *partRef); };
+            }
+            item.onDone = [self, threadId, partHtml, quiet, prio, seq, sub, replyTo, partDone, partRef](const TgResult& r) {
                 if (RichRefusalWantsFallback(r))
                 {
                     if (auto me = self.lock())
@@ -2132,7 +2180,7 @@ namespace Agentmaster::Msg
                         {
                             me->_log(L"[msg] Telegram refused a rich message (" + r.description + L"); it goes as HTML in its place");
                         }
-                        for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1))
+                        for (auto& fb : me->_htmlItems(threadId, partHtml, quiet, prio, L"", json::Value{}, partDone, replyTo, seq, sub + 1, partRef))
                         {
                             me->_enqueue(std::move(fb));
                         }
@@ -2270,6 +2318,34 @@ namespace Agentmaster::Msg
             }
         }
         return false;
+    }
+
+    void MessagingService::_notePromptEcho(int64_t threadId, const std::wstring& text, int64_t messageId)
+    {
+        if (threadId == 0 || messageId <= 0)
+        {
+            return;
+        }
+        const uint32_t hash = EchoHash(text);
+        std::lock_guard lk{ _mtx };
+        for (const auto& [sid, t] : _state.topics)
+        {
+            if (t.threadId != threadId)
+            {
+                continue;
+            }
+            // The mirror's PromptRef is the object every copy shares: the id lands there whatever the tick is doing.
+            if (const auto mit = _mirrors.find(sid); mit != _mirrors.end() && mit->second.promptRef)
+            {
+                auto& ref = *mit->second.promptRef;
+                if (ref.id.load() == 0 && ref.echoHash.load() == hash)
+                {
+                    ref.botLine.store(false);
+                    ref.id.store(messageId);
+                }
+            }
+            return;
+        }
     }
 
     void MessagingService::_editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone)
@@ -3338,13 +3414,19 @@ namespace Agentmaster::Msg
                 std::vector<HistoryPlanPost> posts;
                 if (!w.items.empty())
                 {
-                    // The ⚙ of a prompt the runner sent (in the bot's line): the session's queue knows the newest of them.
+                    // Where a prompt came from (§21.12: "⚙ runner", "📱 from the phone", else "typed at the PC" in the user's line):
+                    // the session's queue knows the newest of them.
                     std::unordered_set<std::wstring> runner;
+                    std::unordered_set<std::wstring> phone;
                     if (const auto s = _session(sid))
                     {
                         for (const auto& q : s->queue)
                         {
-                            if (q.origin == PromptOrigin::Autorun && q.remoteSource.empty())
+                            if (!q.remoteSource.empty())
+                            {
+                                phone.insert(NormalizePromptTextForCompare(q.text));
+                            }
+                            else if (q.origin == PromptOrigin::Autorun)
                             {
                                 runner.insert(NormalizePromptTextForCompare(q.text));
                             }
@@ -3355,8 +3437,13 @@ namespace Agentmaster::Msg
                     posts = PlanHistoryPosts(
                         w,
                         day,
-                        [&runner](const std::wstring& text) {
-                            return !runner.empty() && runner.count(NormalizePromptTextForCompare(text)) > 0;
+                        [&runner, &phone](const std::wstring& text) {
+                            if (runner.empty() && phone.empty())
+                            {
+                                return PromptSource::Pc;
+                            }
+                            const std::wstring key = NormalizePromptTextForCompare(text);
+                            return phone.count(key) ? PromptSource::Phone : (runner.count(key) ? PromptSource::Runner : PromptSource::Pc);
                         },
                         _topicVerbose(t));
                 }
@@ -3446,10 +3533,33 @@ namespace Agentmaster::Msg
                         }
                     } };
                 };
+                std::shared_ptr<PromptRef> turnRef; // §21.12: the current turn's prompt line (its reply quotes it)
                 for (const auto& planned : posts)
                 {
                     const HistoryPost& p = planned.post;
-                    const std::function<void(const TgResult&)> answered = answeredFor(planned.commitTo, planned.dayAfter);
+                    std::function<void(const TgResult&)> answered = answeredFor(planned.commitTo, planned.dayAfter);
+                    if (p.turnPrompt)
+                    {
+                        // The turn's prompt line: its answer names its message (lineAnswered below) - the bot's line; a send as
+                        // the user is in the user's view, so a history reply to it goes without a quote.
+                        turnRef = std::make_shared<PromptRef>();
+                    }
+                    const std::shared_ptr<PromptRef> promptLineRef = p.turnPrompt ? turnRef : nullptr;
+                    const auto lineAnswered = [answered, promptLineRef](const TgResult& r) {
+                        if (promptLineRef && r.ok)
+                        {
+                            if (const int64_t id = r.result.I64At(L"message_id", 0); id > 0)
+                            {
+                                promptLineRef->botLine.store(true);
+                                promptLineRef->id.store(id);
+                            }
+                        }
+                        if (answered)
+                        {
+                            answered(r);
+                        }
+                    };
+                    const std::shared_ptr<PromptRef> replyRef = p.turnReply ? turnRef : nullptr;
                     if (p.fromUser && asUser)
                     {
                         // SECRETARY MODE (§21.5): the user's turn is the user's own bubble, as it was in the conversation. A
@@ -3459,7 +3569,7 @@ namespace Agentmaster::Msg
                         _sendAsUser(
                             thread,
                             p.userText,
-                            [self, thread, fallback, answered](const TgResult& r) {
+                            [self, thread, fallback, answered, lineAnswered](const TgResult& r) {
                                 auto me = self.lock();
                                 if (!me)
                                 {
@@ -3481,18 +3591,19 @@ namespace Agentmaster::Msg
                                     me->_state.businessNote = r.description;
                                     me->_stateDirty = true;
                                 }
-                                me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, answered, 0, true);
+                                me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, lineAnswered, 0, true);
                             },
                             SendPriority::History);
                     }
                     else if (!p.markdown.empty())
                     {
-                        // Claude's Markdown as a rich message (§21.11); a part Telegram refuses goes as the HTML in its place.
-                        _sendRich(thread, p.markdown, p.html, true, SendPriority::History, answered, 0, true);
+                        // Claude's Markdown as a rich message (§21.11); a part Telegram refuses goes as the HTML in its place. The
+                        // turn's reply quotes its prompt (§21.12).
+                        _sendRich(thread, p.markdown, p.html, true, SendPriority::History, answered, 0, true, replyRef);
                     }
                     else
                     {
-                        _sendText(thread, p.html, true, SendPriority::History, L"", json::Value{}, answered, 0, true);
+                        _sendText(thread, p.html, true, SendPriority::History, L"", json::Value{}, lineAnswered, 0, true, replyRef);
                     }
                 }
                 return; // one batch at a time
@@ -3654,7 +3765,15 @@ namespace Agentmaster::Msg
             t = it->second;
         }
         // Everything that belonged to the OLD conversation goes: its mirror position and transcript, its work log, its
-        // recap, its Error note. What belongs to the TOPIC stays: the thread, the card message, the sticky clocks.
+        // recap, its Error note, its last prompt (whose status is removed: §21.12). What belongs to the TOPIC stays: the
+        // thread, the card message, the sticky clocks.
+        _showPromptStatus(t, PromptTurnStatus::None);
+        t.promptMessageId = 0;
+        t.promptBotLine = false;
+        t.promptTsMs = 0;
+        t.promptSource = 0;
+        t.promptText.clear();
+        t.promptInterrupted = false;
         t.sessionId = toSessionId;
         t.tabToken = s->tabToken;
         t.workLogMessageId = 0;
@@ -3889,6 +4008,66 @@ namespace Agentmaster::Msg
         _log(L"[msg] topic of " + ShortId(sessionId) + L" made again, " + mode +
              (made ? std::wstring{ L"; its whole history follows" } : std::wstring{ L"; Telegram refused the new topic (the sync makes it again, in the default mode)" }));
         LogNav(L"remote telegram /recreate " + ShortId(sessionId) + L" -> " + (verbose == 1 ? L"verbose" : L"conversation"));
+    }
+
+    void MessagingService::_updatePromptStatus(TopicRecord& topic, Mirror& m, const SessionInfo& s)
+    {
+        if (topic.promptText.empty() && topic.promptMessageId == 0)
+        {
+            return; // the live mirror has seen no prompt in this topic yet
+        }
+        // The id arrives in the shared PromptRef (the line's send, or the echo of a send as the user); after a restart the record
+        // holds it and the PromptRef is made from it.
+        if (!m.promptRef)
+        {
+            m.promptRef = std::make_shared<PromptRef>();
+            m.promptRef->botLine.store(topic.promptBotLine);
+            m.promptRef->id.store(topic.promptMessageId);
+        }
+        else if (const int64_t id = m.promptRef->id.load(); id > 0 && id != topic.promptMessageId)
+        {
+            topic.promptBotLine = m.promptRef->botLine.load();
+            topic.promptMessageId = id;
+        }
+        if (topic.promptMessageId <= 0)
+        {
+            return; // the line's send has not answered yet: next tick
+        }
+        const PromptTurnStatus want = PromptTurnStatusFor(s.state, topic.promptInterrupted);
+        if (static_cast<int>(want) == topic.promptStatus)
+        {
+            return;
+        }
+        if (want != PromptTurnStatus::Error && s.stateChangedAtUnixMs > 0 && WallMs() - s.stateChangedAtUnixMs < kPromptStatusSettleMs)
+        {
+            return; // a state that may still flicker: it shows once it has held
+        }
+        _showPromptStatus(topic, want);
+    }
+
+    void MessagingService::_showPromptStatus(TopicRecord& topic, PromptTurnStatus status)
+    {
+        if (topic.promptMessageId <= 0 || topic.promptStatus == static_cast<int>(status))
+        {
+            topic.promptStatus = static_cast<int>(status);
+            return;
+        }
+        if (topic.promptBotLine)
+        {
+            // Our line: the same line with the new status (or none). Keyed per message, so a newer status replaces one still
+            // queued; at the cards' priority, after every message.
+            _editText(topic.promptMessageId,
+                      BuildPromptLineHtml(topic.promptTsMs, static_cast<PromptSource>(topic.promptSource), topic.promptText, status, false),
+                      SendPriority::CardEdit,
+                      L"pl:" + std::to_wstring(topic.promptMessageId),
+                      json::Value{});
+        }
+        else
+        {
+            // The user's own message: a reaction from Telegram's fixed set (an empty one removes it).
+            _react(topic.promptMessageId, PromptStatusReaction(status));
+        }
+        topic.promptStatus = static_cast<int>(status);
     }
 
     bool MessagingService::_topicVerbose(const TopicRecord& t) const noexcept
@@ -4155,13 +4334,15 @@ namespace Agentmaster::Msg
         _flushWorkLog(sessionId, topic, m, true);
         // The ONE message of a turn with sound (D5 / M12) — unless the caller rings something else for it (§21.6). Claude's
         // own Markdown goes as a rich message (§21.11: tables, headings), the HTML its fallback.
+        // §21.12: a reply to the turn's prompt — Telegram shows a quote of the prompt on the answer, every pair visibly you →
+        // Claude (no extra call: the id is the prompt send's answer, read when this message goes).
         if (!markdown.empty())
         {
-            _sendRich(topic.threadId, markdown, html, !sound, SendPriority::Final, nullptr);
+            _sendRich(topic.threadId, markdown, html, !sound, SendPriority::Final, nullptr, 0, true, m.promptRef);
         }
         else
         {
-            _sendText(topic.threadId, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr);
+            _sendText(topic.threadId, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr, 0, true, m.promptRef);
         }
         _endTurnQuietly(sessionId, topic, m);
         _log(L"[msg] " + ShortId(sessionId) + L" final message (" + why + (sound ? L"" : L", silent") + L")");
@@ -4294,10 +4475,11 @@ namespace Agentmaster::Msg
                     m.approvalPinged = false;
                 }
                 // Its source: a prompt sent from this topic is the user's own message (not mirrored); one
-                // the runner sent reads ⚙; one typed at the PC reads ⌨.
+                // the runner sent reads "⚙ runner"; one typed at the PC reads "typed at the PC" (§21.12).
                 const std::wstring key = NormalizePromptTextForCompare(it.text);
                 bool fromTopic = false;
                 bool fromQueue = false;
+                int64_t topicMessageId = 0; // a prompt sent from this topic: the user's own message (QueuedPrompt::remoteSource)
                 const auto matchQueue = [&](const SessionInfo& from) {
                     size_t looked = 0;
                     for (auto q = from.queue.rbegin(); q != from.queue.rend() && looked < 60; ++q, ++looked)
@@ -4310,6 +4492,10 @@ namespace Agentmaster::Msg
                         {
                             fromTopic = !q->remoteSource.empty();
                             fromQueue = q->remoteSource.empty() && q->origin == PromptOrigin::Autorun;
+                            if (fromTopic && q->remoteSource.rfind(L"telegram:", 0) == 0)
+                            {
+                                topicMessageId = static_cast<int64_t>(std::wcstoll(q->remoteSource.c_str() + 9, nullptr, 10));
+                            }
                             return true;
                         }
                     }
@@ -4329,15 +4515,49 @@ namespace Agentmaster::Msg
                         matchQueue(*fresher);
                     }
                 }
+                if (!it.midTurn)
+                {
+                    // §21.12: this is the turn's prompt — the LAST prompt the user sent. The previous one's status goes, this
+                    // one carries the turn's status from now on, and the turn's final reply quotes it. A message typed while
+                    // a turn ran is not the turn's prompt: it gets no status.
+                    _showPromptStatus(topic, PromptTurnStatus::None);
+                    auto ref = std::make_shared<PromptRef>();
+                    topic.promptMessageId = 0;
+                    topic.promptBotLine = false;
+                    topic.promptTsMs = it.tsMs;
+                    topic.promptSource = static_cast<int>(fromTopic ? PromptSource::Phone : (fromQueue ? PromptSource::Runner : PromptSource::Pc));
+                    topic.promptText = it.text.size() > kUserLineMaxChars ? it.text.substr(0, kUserLineMaxChars) : it.text;
+                    topic.promptStatus = static_cast<int>(PromptTurnStatus::Running);
+                    topic.promptInterrupted = false;
+                    if (fromTopic && topicMessageId > 0)
+                    {
+                        // The user's own message from this topic: known at once; its status is a reaction (_syncReactions has
+                        // just shown 👨‍💻 for the pickup, the running status).
+                        ref->id.store(topicMessageId);
+                        topic.promptMessageId = topicMessageId;
+                    }
+                    m.promptRef = ref;
+                }
                 if (fromTopic)
                 {
                     break;
                 }
-                std::wstring html = std::wstring{ fromQueue ? L"\x2699 " : L"\x2328 " } + (it.midTurn ? L"(mid-turn) " : L"") + L"<b>" + TgEscapeHtml(TgFirstLine(it.text, 200)) + L"</b>";
-                if (it.text.find(L'\n') != std::wstring::npos || it.text.size() > 200)
-                {
-                    html += L"\n<blockquote expandable>" + TgEscapeHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text) + L"</blockquote>";
-                }
+                // §21.12: "👤 You · 14:02 · typed at the PC · ⏳ running" over the prompt (a mid-turn message: no status). Sent at
+                // the FINAL priority, the reply's: queued in the same tick (a fast turn), the reply must not overtake its prompt.
+                const PromptSource source = fromQueue ? PromptSource::Runner : PromptSource::Pc;
+                const std::wstring html = BuildPromptLineHtml(it.tsMs, source, it.text, it.midTurn ? PromptTurnStatus::None : PromptTurnStatus::Running, it.midTurn);
+                const std::shared_ptr<PromptRef> ref = it.midTurn ? nullptr : m.promptRef;
+                // The bot's line answers with its id: the turn's reply quotes it, and its status is an edit of it.
+                const auto lineSent = [ref](const TgResult& r) {
+                    if (ref && r.ok)
+                    {
+                        if (const int64_t id = r.result.I64At(L"message_id", 0); id > 0)
+                        {
+                            ref->botLine.store(true);
+                            ref->id.store(id);
+                        }
+                    }
+                };
                 int businessMode = 0;
                 {
                     std::lock_guard lk{ _mtx };
@@ -4348,36 +4568,45 @@ namespace Agentmaster::Msg
                     // SECRETARY MODE (§21.5): the prompt is the user's own bubble in the topic, sent on the user's
                     // behalf through the Telegram Business connection; a refused send falls back to the bot's line
                     // above, and three refusals in a row turn the mode off (the user may have revoked the right).
+                    // Its id in THIS bot's view comes with the echo (_notePromptEcho, matched by the text's hash).
+                    if (ref)
+                    {
+                        ref->echoHash.store(EchoHash(it.text));
+                    }
                     const int64_t thread = topic.threadId;
                     const std::wstring fallback = html;
                     const std::wstring plain = it.text;
                     auto self = weak_from_this();
-                    _sendAsUser(thread, plain, [self, thread, fallback](const TgResult& r) {
-                        auto me = self.lock();
-                        if (!me)
-                        {
-                            return;
-                        }
-                        if (r.ok)
-                        {
-                            me->_secretaryFailures.store(0);
-                            return;
-                        }
-                        const int failures = me->_secretaryFailures.fetch_add(1) + 1;
-                        me->_log(L"[msg] secretary: a send as the user was refused (" + r.description + L"); the prompt goes out as the bot's line" + (failures >= 3 ? L"; secretary mode is off until the bot is connected again" : L""));
-                        if (failures >= 3)
-                        {
-                            std::lock_guard lk{ me->_mtx };
-                            me->_state.businessMode = -1;
-                            me->_state.businessNote = r.description;
-                            me->_stateDirty = true;
-                        }
-                        me->_sendText(thread, fallback, true, SendPriority::New, L"", json::Value{}, nullptr);
-                    });
+                    _sendAsUser(
+                        thread,
+                        plain,
+                        [self, thread, fallback, lineSent](const TgResult& r) {
+                            auto me = self.lock();
+                            if (!me)
+                            {
+                                return;
+                            }
+                            if (r.ok)
+                            {
+                                me->_secretaryFailures.store(0);
+                                return;
+                            }
+                            const int failures = me->_secretaryFailures.fetch_add(1) + 1;
+                            me->_log(L"[msg] secretary: a send as the user was refused (" + r.description + L"); the prompt goes out as the bot's line" + (failures >= 3 ? L"; secretary mode is off until the bot is connected again" : L""));
+                            if (failures >= 3)
+                            {
+                                std::lock_guard lk{ me->_mtx };
+                                me->_state.businessMode = -1;
+                                me->_state.businessNote = r.description;
+                                me->_stateDirty = true;
+                            }
+                            me->_sendText(thread, fallback, true, SendPriority::Final, L"", json::Value{}, lineSent);
+                        },
+                        SendPriority::Final);
                 }
                 else
                 {
-                    _sendText(topic.threadId, html, true, SendPriority::New, L"", json::Value{}, nullptr);
+                    _sendText(topic.threadId, html, true, SendPriority::Final, L"", json::Value{}, lineSent);
                 }
                 break;
             }
@@ -4478,6 +4707,7 @@ namespace Agentmaster::Msg
             case TopicItemKind::Interrupt:
                 // The user stopped the turn (Esc at the PC, or /interrupt here): what the assistant had said so far,
                 // then the mark — silent, the user did it. A stray marker with no turn shown posts nothing.
+                topic.promptInterrupted = true; // §21.12: the last prompt reads "■ interrupted" once the session is at rest
                 if (m.turnOpen || !m.pendingText.empty())
                 {
                     const std::wstring text = m.pendingText; // a copy: _postFinal clears the mirror's text
@@ -4495,7 +4725,7 @@ namespace Agentmaster::Msg
                 break;
             }
             case TopicItemKind::Command:
-                _sendText(topic.threadId, L"<code>" + TgEscapeHtml(it.text.size() > 300 ? it.text.substr(0, 300) : it.text) + L"</code>", true, SendPriority::New, L"", json::Value{}, nullptr);
+                _sendText(topic.threadId, BuildCommandLineHtml(it.tsMs, it.text), true, SendPriority::New, L"", json::Value{}, nullptr); // §21.12: "👤 You · 14:02 · command"
                 break;
             case TopicItemKind::Answer:
             {
@@ -4509,7 +4739,7 @@ namespace Agentmaster::Msg
                 m.workLogDirty = false;
                 ++m.workLogGen;
                 m.awaitingAnswer = false;
-                const std::wstring html = L"\x2328 \x21A9 <b>" + TgEscapeHtml(it.text.size() > 1000 ? it.text.substr(0, 1000) + L"\x2026" : it.text) + L"</b>";
+                const std::wstring html = BuildAnswerLineHtml(it.tsMs, it.text); // §21.12: "👤 You · 14:02 · ↩ answer" over the answer
                 bool asUser = false;
                 {
                     std::lock_guard lk{ _mtx };
@@ -4645,11 +4875,13 @@ namespace Agentmaster::Msg
                 continue;
             }
             PromptStatus shown = PromptStatus::Pending;
+            bool known = false;
             {
                 std::lock_guard lk{ _mtx };
                 if (const auto it = _reacted.find(q.id); it != _reacted.end())
                 {
                     shown = it->second;
+                    known = true;
                 }
             }
             PromptStatus want = q.status;
@@ -4659,6 +4891,15 @@ namespace Agentmaster::Msg
             }
             if (want == shown)
             {
+                continue;
+            }
+            if (!known && want == PromptStatus::Sent)
+            {
+                // Picked up before this run saw it queued (a restart: _reacted is per run). Its reaction is the turn's status
+                // now (§21.12: 👌 answered, none once a newer prompt was sent) — re-setting 👨‍💻 on every old prompt of every
+                // queue would undo those, and cost a call each. Recorded, not reacted.
+                std::lock_guard lk{ _mtx };
+                _reacted[q.id] = want;
                 continue;
             }
             int64_t msgId = 0;

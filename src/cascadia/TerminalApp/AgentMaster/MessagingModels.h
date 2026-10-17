@@ -846,6 +846,232 @@ namespace Agentmaster::Msg
         return !recapText.empty() && recapAtMs > 0 && recapAtMs > lastMessageAtMs;
     }
 
+    // ===== the user's lines (§21.12) =========================================================
+
+    /// <summary>
+    /// Where a prompt came from (§21.12): the user's line in a topic names it — typed at the PC, sent from the phone (a
+    /// message of this topic, QueuedPrompt::remoteSource), or sent by the Prompt Queue Runner (origin Autorun).
+    /// </summary>
+    enum class PromptSource : int
+    {
+        Pc = 0,
+        Phone = 1,
+        Runner = 2,
+    };
+
+    /// <summary>
+    /// The status a turn's PROMPT shows (§21.12, the user's "a status on the prompt itself"): while the turn runs, what it
+    /// stopped at, or that it was answered — and None once a newer prompt was sent (only the last prompt carries one).
+    /// </summary>
+    enum class PromptTurnStatus : int
+    {
+        None = 0,
+        Running = 1,
+        NeedsYou = 2,
+        Answered = 3,
+        Error = 4,
+        Ended = 5,
+        Interrupted = 6,
+    };
+
+    /// <summary>The source's words in the user's line: "typed at the PC", "📱 from the phone", "⚙ runner".</summary>
+    /// <param name="s">The source.</param>
+    /// <returns>The words (a static string).</returns>
+    inline const wchar_t* PromptSourceText(PromptSource s) noexcept
+    {
+        switch (s)
+        {
+        case PromptSource::Phone:
+            return L"\U0001F4F1 from the phone";
+        case PromptSource::Runner:
+            return L"\x2699 runner";
+        case PromptSource::Pc:
+        default:
+            return L"typed at the PC";
+        }
+    }
+
+    /// <summary>A status as the prompt line shows it: "⏳ running", "🟠 needs you", "✅ answered", "🔴 error", "⏹ ended", "■ interrupted"; "" for None.</summary>
+    /// <param name="s">The status.</param>
+    /// <returns>The words (a static string).</returns>
+    inline const wchar_t* PromptStatusText(PromptTurnStatus s) noexcept
+    {
+        switch (s)
+        {
+        case PromptTurnStatus::Running:
+            return L"\x23F3 running";
+        case PromptTurnStatus::NeedsYou:
+            return L"\U0001F7E0 needs you";
+        case PromptTurnStatus::Answered:
+            return L"\x2705 answered";
+        case PromptTurnStatus::Error:
+            return L"\U0001F534 error";
+        case PromptTurnStatus::Ended:
+            return L"\x23F9 ended";
+        case PromptTurnStatus::Interrupted:
+            return L"\x25A0 interrupted";
+        case PromptTurnStatus::None:
+        default:
+            return L"";
+        }
+    }
+
+    /// <summary>
+    /// A status as a REACTION on the user's own message (a prompt sent from the phone, or as the user through the secretary
+    /// bot — a bot cannot edit the user's words, and Telegram allows only its fixed reaction set): 👨‍💻 running, 🤔 needs you,
+    /// 👌 answered, 💔 error, 😴 ended, 🙈 interrupted; "" removes the reaction (None).
+    /// </summary>
+    /// <param name="s">The status.</param>
+    /// <returns>The reaction emoji (a static string; "" = none).</returns>
+    inline const wchar_t* PromptStatusReaction(PromptTurnStatus s) noexcept
+    {
+        switch (s)
+        {
+        case PromptTurnStatus::Running:
+            return L"\U0001F468\x200D\U0001F4BB";
+        case PromptTurnStatus::NeedsYou:
+            return L"\U0001F914";
+        case PromptTurnStatus::Answered:
+            return L"\U0001F44C";
+        case PromptTurnStatus::Error:
+            return L"\U0001F494";
+        case PromptTurnStatus::Ended:
+            return L"\U0001F634";
+        case PromptTurnStatus::Interrupted:
+            return L"\U0001F648";
+        case PromptTurnStatus::None:
+        default:
+            return L"";
+        }
+    }
+
+    /// <summary>
+    /// The status the LAST prompt shows for its session's state (§21.12): Running → running, Needs approval → needs you,
+    /// Error → error, Done (claude exited) → ended, and at rest (Waiting for you, Idle) → answered, or interrupted when the
+    /// user stopped the turn.
+    /// </summary>
+    /// <param name="state">The session's state.</param>
+    /// <param name="interrupted">The turn ended on an interrupt (Esc, /interrupt).</param>
+    /// <returns>The status to show.</returns>
+    inline PromptTurnStatus PromptTurnStatusFor(SessionState state, bool interrupted) noexcept
+    {
+        switch (state)
+        {
+        case SessionState::Running:
+            return PromptTurnStatus::Running;
+        case SessionState::NeedsApproval:
+            return PromptTurnStatus::NeedsYou;
+        case SessionState::Error:
+            return PromptTurnStatus::Error;
+        case SessionState::Done:
+            return PromptTurnStatus::Ended;
+        case SessionState::WaitingForInput:
+        case SessionState::Idle:
+        default:
+            return interrupted ? PromptTurnStatus::Interrupted : PromptTurnStatus::Answered;
+        }
+    }
+
+    // The user's words in their line: plain when short, an expandable quote past these (Telegram folds it), cut at
+    // kUserLineMaxChars (an edit cannot be split: the whole line stays under Telegram's 4,096 characters).
+    inline constexpr size_t kUserLinePlainMaxChars = 600;
+    inline constexpr size_t kUserLinePlainMaxLines = 8;
+    inline constexpr size_t kUserLineMaxChars = 3000;
+
+    namespace detail
+    {
+        // "<b>👤 You</b> · 14:02 · <what>" — the clock left out when unknown (0).
+        inline std::wstring UserLineHeader(int64_t tsMs, std::wstring_view what)
+        {
+            std::wstring h = L"<b>\U0001F464 You</b>";
+            if (tsMs > 0)
+            {
+                h += L" \x00B7 " + TgClockText(tsMs, tsMs);
+            }
+            if (!what.empty())
+            {
+                h += L" \x00B7 ";
+                h.append(what);
+            }
+            return h;
+        }
+
+        // The user's words below the header: escaped as they are when short, else in an expandable quote; cut at
+        // kUserLineMaxChars (never between the halves of a surrogate pair).
+        inline std::wstring UserLineBody(std::wstring_view text)
+        {
+            std::wstring t{ text };
+            while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' '))
+            {
+                t.pop_back();
+            }
+            if (t.size() > kUserLineMaxChars)
+            {
+                size_t cut = kUserLineMaxChars;
+                if (t[cut - 1] >= 0xD800 && t[cut - 1] <= 0xDBFF)
+                {
+                    --cut;
+                }
+                t = t.substr(0, cut) + L"\x2026";
+            }
+            const size_t lines = 1 + static_cast<size_t>(std::count(t.begin(), t.end(), L'\n'));
+            if (t.size() <= kUserLinePlainMaxChars && lines <= kUserLinePlainMaxLines)
+            {
+                return TgEscapeHtml(t);
+            }
+            return L"<blockquote expandable>" + TgEscapeHtml(t) + L"</blockquote>";
+        }
+    }
+
+    /// <summary>
+    /// The user's PROMPT as the bot posts it in a topic (§21.12, the user's design): a bold "👤 You" header with the clock,
+    /// where it came from ("typed at the PC", "📱 from the phone", "⚙ runner"), "mid-turn" for a message typed while the turn
+    /// ran, and the turn's status when it has one — then the prompt itself:
+    /// "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · typed at the PC · ⏳ running\n&lt;the prompt&gt;". The status changes are edits of
+    /// this same line, so the builder renders every state from the same facts.
+    /// </summary>
+    /// <param name="tsMs">The prompt's transcript time (unix ms; 0 = no clock).</param>
+    /// <param name="source">Where it came from.</param>
+    /// <param name="text">The prompt as typed.</param>
+    /// <param name="status">The turn's status (None = no status: an older prompt, or a history line).</param>
+    /// <param name="midTurn">Typed while the turn ran (no status of its own: the turn's prompt carries it).</param>
+    /// <returns>Telegram HTML.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring BuildPromptLineHtml(int64_t tsMs, PromptSource source, std::wstring_view text, PromptTurnStatus status, bool midTurn)
+    {
+        std::wstring what = PromptSourceText(source);
+        if (midTurn)
+        {
+            what += L" \x00B7 mid-turn";
+        }
+        if (status != PromptTurnStatus::None)
+        {
+            what += L" \x00B7 ";
+            what += PromptStatusText(status);
+        }
+        return detail::UserLineHeader(tsMs, what) + L"\n" + detail::UserLineBody(text);
+    }
+
+    /// <summary>The user's ANSWER to a question (§21.9 / §21.12): "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · ↩ answer\n&lt;the answer&gt;".</summary>
+    /// <param name="tsMs">The answer's transcript time (0 = no clock).</param>
+    /// <param name="answer">The answer as given.</param>
+    /// <returns>Telegram HTML.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring BuildAnswerLineHtml(int64_t tsMs, std::wstring_view answer)
+    {
+        return detail::UserLineHeader(tsMs, L"\x21A9 answer") + L"\n" + detail::UserLineBody(answer);
+    }
+
+    /// <summary>The user's slash COMMAND (§21.12): "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · command\n&lt;code&gt;/compact …&lt;/code&gt;".</summary>
+    /// <param name="tsMs">The command's transcript time (0 = no clock).</param>
+    /// <param name="command">The command line as echoed ("/compact keep the plan"; cut at 300).</param>
+    /// <returns>Telegram HTML.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring BuildCommandLineHtml(int64_t tsMs, std::wstring_view command)
+    {
+        return detail::UserLineHeader(tsMs, L"command") + L"\n<code>" + TgEscapeHtml(command.size() > 300 ? command.substr(0, 300) : command) + L"</code>";
+    }
+
     // ===== the history replay (§21.9) ========================================================
 
     // A history replay packs a turn's narrative — the assistant's remarks and the tool calls they led to — into
@@ -868,6 +1094,13 @@ namespace Agentmaster::Msg
         /// line, a user's line). The sender prefers it and falls back to `html` when Telegram refuses the rich send.
         /// </summary>
         std::wstring markdown;
+        /// <summary>
+        /// §21.12: the TURN's prompt (its first user line — not a message typed while it ran) and the turn's final REPLY. The
+        /// sender sends the reply as a reply to the prompt's message (Telegram shows a quote of the prompt on the answer),
+        /// once the prompt's own send answered with its message id.
+        /// </summary>
+        bool turnPrompt{ false };
+        bool turnReply{ false };
     };
 
     /// <summary>
@@ -888,11 +1121,12 @@ namespace Agentmaster::Msg
     /// <param name="lastTurnContinues">The last turn goes on past these items (the reader's window ended inside it):
     /// its last text is narrative, not its final reply — the reply comes with the window where the turn ends.</param>
     /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered; a turn on another day gets a day line first.</param>
-    /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (⚙ instead of ⌨ in the bot's line).</param>
+    /// <param name="promptSource">Optional: where a prompt came from (§21.12: "typed at the PC", "📱 from the phone", "⚙ runner" in
+    /// the user's line); empty = typed at the PC.</param>
     /// <param name="verbose">True: the narrative too (remarks, tool calls, compactions); false: the conversation only.</param>
     /// <returns>The posts, in the order they are to be sent.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {}, bool verbose = true)
+    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true)
     {
         std::vector<HistoryPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
@@ -906,16 +1140,14 @@ namespace Agentmaster::Msg
             }
         };
         const auto userLine = [&](const TopicItem& it, bool midTurn) {
+            // §21.12: "👤 You · 14:02 · <source>" over the prompt; a history line carries no status (only the live LAST
+            // prompt does).
             HistoryPost p;
             p.fromUser = true;
             p.userText = it.text;
-            const bool runner = isRunnerPrompt && isRunnerPrompt(it.text);
-            p.html = std::wstring{ runner ? L"\x2699 " : L"\x2328 " } + (it.tsMs > 0 ? TgClockText(it.tsMs, it.tsMs) + L" \x00B7 " : std::wstring{}) +
-                     (midTurn ? L"(mid-turn) " : L"") + L"<b>" + TgEscapeHtml(TgFirstLine(it.text, 200)) + L"</b>";
-            if (it.text.find(L'\n') != std::wstring::npos || it.text.size() > 200)
-            {
-                p.html += L"\n<blockquote expandable>" + TgEscapeHtml(it.text.size() > 3000 ? it.text.substr(0, 3000) + L"\x2026" : it.text) + L"</blockquote>";
-            }
+            p.turnPrompt = !midTurn;
+            const PromptSource source = promptSource ? promptSource(it.text) : PromptSource::Pc;
+            p.html = BuildPromptLineHtml(it.tsMs, source, it.text, PromptTurnStatus::None, midTurn);
             return p;
         };
         // Our own blocks, in both forms (the HTML the fallback sends, the Markdown a rich message carries).
@@ -1113,6 +1345,7 @@ namespace Agentmaster::Msg
                 {
                     flush();
                     emitBot(TgMarkdownToHtml(it.text), it.text);
+                    out.back().turnReply = hasPrompt; // §21.12: the reply quotes its prompt (a turn begun in an earlier window has none here)
                     continue;
                 }
                 switch (it.kind)
@@ -1209,7 +1442,7 @@ namespace Agentmaster::Msg
                     HistoryPost p;
                     p.fromUser = true;
                     p.userText = it.text;
-                    p.html = L"<code>" + TgEscapeHtml(it.text.size() > 300 ? it.text.substr(0, 300) : it.text) + L"</code>";
+                    p.html = BuildCommandLineHtml(it.tsMs, it.text);
                     out.push_back(std::move(p));
                     break;
                 }
@@ -1225,8 +1458,7 @@ namespace Agentmaster::Msg
                     HistoryPost p;
                     p.fromUser = true;
                     p.userText = it.text;
-                    p.html = L"\x2328 " + (it.tsMs > 0 ? TgClockText(it.tsMs, it.tsMs) + L" \x00B7 " : std::wstring{}) + L"\x21A9 <b>" +
-                             TgEscapeHtml(it.text.size() > 1000 ? it.text.substr(0, 1000) + L"\x2026" : it.text) + L"</b>";
+                    p.html = BuildAnswerLineHtml(it.tsMs, it.text);
                     out.push_back(std::move(p));
                     break;
                 }
@@ -1412,11 +1644,11 @@ namespace Agentmaster::Msg
     /// </summary>
     /// <param name="w">The window (SplitHistoryWindow), with `itemAt`.</param>
     /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered before the window.</param>
-    /// <param name="isRunnerPrompt">Optional: true for a prompt the runner sent (RenderHistory's ⚙).</param>
+    /// <param name="promptSource">Optional: where a prompt came from (RenderHistory's user line, §21.12).</param>
     /// <param name="verbose">RenderHistory's mode (§21.11): true = the narrative too, false = the conversation only.</param>
     /// <returns>The posts in order; a turn that renders nothing hands its end to the next turn's last post.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<bool(const std::wstring&)>& isRunnerPrompt = {}, bool verbose = true)
+    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true)
     {
         std::vector<HistoryPlanPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
@@ -1430,7 +1662,7 @@ namespace Agentmaster::Msg
             }
             const bool lastGroup = end == w.items.size();
             const std::vector<TopicItem> group(w.items.begin() + static_cast<std::ptrdiff_t>(begin), w.items.begin() + static_cast<std::ptrdiff_t>(end));
-            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, isRunnerPrompt, verbose);
+            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, promptSource, verbose);
             // Where this turn ends: the next turn's first line, or the window's end. Without itemAt (a caller that did not
             // fill it) only the window's end is known.
             const int64_t commitTo = lastGroup ? w.consumedTo : (end < w.itemAt.size() ? w.itemAt[end] : 0);
@@ -1534,6 +1766,23 @@ namespace Agentmaster::Msg
         /// </summary>
         int nameState{ -1 };
         int64_t nameSetMs{ 0 };
+        /// <summary>
+        /// The LAST PROMPT the user sent in this topic's session (§21.12) — the one whose line carries the turn's status and
+        /// whose message the turn's final reply answers. `promptMessageId`: the bot's prompt line, or the user's own message
+        /// (a prompt from the phone, or one sent as the user by the secretary bot); 0 = not known yet (the send has not
+        /// answered). `promptBotLine`: true = our message, whose status is an EDIT of the line (BuildPromptLineHtml from
+        /// promptTsMs / promptSource / promptText); false = the user's message, whose status is a REACTION.
+        /// `promptStatus`: the PromptTurnStatus the message shows now (None = none). `promptInterrupted`: the turn ended
+        /// on an interrupt. Set by the live mirror when a new turn's prompt arrives (the previous prompt's status is
+        /// removed then); persisted, so a restart keeps updating it. Empty for a topic whose live mirror has seen no prompt.
+        /// </summary>
+        int64_t promptMessageId{ 0 };
+        bool promptBotLine{ false };
+        int64_t promptTsMs{ 0 };
+        int promptSource{ 0 };
+        std::wstring promptText;
+        int promptStatus{ 0 };
+        bool promptInterrupted{ false };
     };
 
     /// <summary>Whether a topic shows the whole session (verbose) or the conversation only (§21.11).</summary>
@@ -1679,6 +1928,17 @@ namespace Agentmaster::Msg
             to.Set(L"verbose", json::Value::MkNum(static_cast<double>(t.verbose)));
             to.Set(L"nameState", json::Value::MkNum(static_cast<double>(t.nameState)));
             to.Set(L"nameSetMs", json::Value::MkNum(static_cast<double>(t.nameSetMs)));
+            if (t.promptMessageId != 0 || !t.promptText.empty())
+            {
+                // §21.12: the last prompt's line (omitted when the live mirror has seen none).
+                to.Set(L"promptMessageId", json::Value::MkNum(static_cast<double>(t.promptMessageId)));
+                to.Set(L"promptBotLine", json::Value::MkBool(t.promptBotLine));
+                to.Set(L"promptTsMs", json::Value::MkNum(static_cast<double>(t.promptTsMs)));
+                to.Set(L"promptSource", json::Value::MkNum(static_cast<double>(t.promptSource)));
+                to.Set(L"promptText", json::Value::MkStr(t.promptText));
+                to.Set(L"promptStatus", json::Value::MkNum(static_cast<double>(t.promptStatus)));
+                to.Set(L"promptInterrupted", json::Value::MkBool(t.promptInterrupted));
+            }
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
@@ -1758,6 +2018,14 @@ namespace Agentmaster::Msg
                 t.verbose = std::clamp(static_cast<int>(to.I64At(L"verbose", -1)), -1, 1);
                 t.nameState = std::clamp(static_cast<int>(to.I64At(L"nameState", -1)), -1, static_cast<int>(SessionState::Done));
                 t.nameSetMs = to.I64At(L"nameSetMs", 0);
+                // §21.12 (absent in an older file: no prompt tracked yet — the next live prompt starts it).
+                t.promptMessageId = to.I64At(L"promptMessageId", 0);
+                t.promptBotLine = to.BoolAt(L"promptBotLine", false);
+                t.promptTsMs = to.I64At(L"promptTsMs", 0);
+                t.promptSource = std::clamp(static_cast<int>(to.I64At(L"promptSource", 0)), 0, static_cast<int>(PromptSource::Runner));
+                t.promptText = to.StrAt(L"promptText");
+                t.promptStatus = std::clamp(static_cast<int>(to.I64At(L"promptStatus", 0)), 0, static_cast<int>(PromptTurnStatus::Interrupted));
+                t.promptInterrupted = to.BoolAt(L"promptInterrupted", false);
                 s.topics[t.sessionId] = std::move(t);
             }
         }

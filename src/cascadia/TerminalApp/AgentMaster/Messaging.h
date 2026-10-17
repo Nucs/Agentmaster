@@ -281,6 +281,26 @@ namespace Agentmaster::Msg
         void _saveStateIfDirty(bool force);
 
         // ----- the outbox -----
+        /// <summary>
+        /// §21.12: a turn's PROMPT message as its send answers it — the bot's prompt line (its id from sendMessage, `botLine`
+        /// true: its status is an edit of the line), or the user's own message (a prompt sent from the phone: its id is known
+        /// at once; one sent as the user by the secretary bot: its id in THIS bot's view comes with the echo, matched by
+        /// `echoHash`; `botLine` false: its status is a reaction). An OBJECT shared by the mirror, the send's callback and the
+        /// final reply's pre-send hook: the tick works on a COPY of a session's mirror and writes it back, so a field written
+        /// by a callback meanwhile would be lost — an object behind a shared pointer is the same in both copies. 0 = not known.
+        /// </summary>
+        struct PromptRef
+        {
+            std::atomic<int64_t> id{ 0 };
+            std::atomic<bool> botLine{ false };
+            std::atomic<uint32_t> echoHash{ 0 };
+        };
+        /// <summary>
+        /// Points `params` at the turn's prompt (reply_parameters, allow_sending_without_reply) when its message id is known by
+        /// now and the item names no other reply; otherwise leaves it (the reply goes without a quote). The outbox's pre-send
+        /// hook of a final reply (OutItem::beforeSend).
+        /// </summary>
+        static void _applyReplyRef(json::Value& params, const PromptRef& ref);
         struct OutItem
         {
             SendPriority prio{ SendPriority::New };
@@ -302,6 +322,12 @@ namespace Agentmaster::Msg
             uint32_t subSeq{ 0 };
             /// <summary>Sent with the SECRETARY bot's client (§21.11): a send as the user through its business connection.</summary>
             bool asSecretary{ false };
+            /// <summary>
+            /// Called on the send thread right before the call (may be empty): a final reply sets its reply_parameters here, from
+            /// the turn's PromptRef — its prompt was queued before it and has answered with its id by the time this item goes
+            /// (the send loop makes one call at a time, in order; §21.12).
+            /// </summary>
+            std::function<void(json::Value&)> beforeSend;
         };
         /// <summary>Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).</summary>
         void _enqueue(OutItem item);
@@ -312,14 +338,16 @@ namespace Agentmaster::Msg
         /// the reply reference the first, only the last may ring. Chunk i sorts at (`seq`, `subSeqBase` + 2i); a chunk
         /// Telegram refuses as HTML ("can't parse entities") is sent again as plain text in the slot right after it.
         /// </summary>
-        std::vector<OutItem> _htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase);
+        std::vector<OutItem> _htmlItems(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, uint64_t seq, uint32_t subSeqBase, std::shared_ptr<PromptRef> replyRef = nullptr);
         /// <summary>
         /// Posts HTML into a topic (chunked at Telegram's limit; the buttons and `onDone` ride the LAST chunk, the
         /// reply reference the first; a refused HTML is re-sent as plain text). `movesCard` (default) stamps the
         /// topic's `lastPostedMs`, which makes the sticky card re-post itself below the new message; the card's own
         /// posts pass false, or the card would chase itself forever.
         /// </summary>
-        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true);
+        /// <param name="replyRef">§21.12: reply to the turn's prompt once its message id is known (the first chunk only;
+        /// `replyToMessageId` wins when both are given). May be empty.</param>
+        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr);
         /// <summary>
         /// Posts Claude's MARKDOWN into a topic as a RICH message (§21.11, Bot API 10.1: tables, headings, lists and code
         /// render the way Claude wrote them; the HTML conversion has no tables). The text is split into parts that fit
@@ -337,7 +365,9 @@ namespace Agentmaster::Msg
         /// <param name="onDone">Called with the last part's answer (on the send thread; may be empty).</param>
         /// <param name="replyToMessageId">The message the first part replies to (0 = none).</param>
         /// <param name="movesCard">Stamps the topic's lastPostedMs (the sticky card re-posts below it).</param>
-        void _sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true);
+        /// <param name="replyRef">§21.12: reply to the turn's prompt once its message id is known (the first part, and its HTML
+        /// fallback). May be empty.</param>
+        void _sendRich(int64_t threadId, const std::wstring& markdown, const std::wstring& fallbackHtml, bool silent, SendPriority prio, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr);
         /// <summary>
         /// Sends plain text into a topic AS THE USER through the Telegram Business connection (the user's "Secretary
         /// mode"; §21.5) — the way a prompt typed at the PC becomes the user's own bubble in the topic. Only valid
@@ -357,6 +387,13 @@ namespace Agentmaster::Msg
         /// <param name="text">The message's text.</param>
         /// <returns>True when the message is our echo and must be ignored.</returns>
         bool _takeSecretaryEcho(int64_t threadId, const std::wstring& text);
+        /// <summary>
+        /// §21.12: an echo of our send AS THE USER (a message of the owner that the secretary bot sent, or that repeats a text
+        /// sent as the user) arrived in `threadId` with `messageId` — THIS bot's id of the user's bubble. When it is the topic's
+        /// current prompt (its PromptRef waits for an id and its text hash matches), the id is recorded: the turn's status
+        /// becomes a reaction on that message, and the turn's final reply quotes it. Any thread; takes `_mtx`.
+        /// </summary>
+        void _notePromptEcho(int64_t threadId, const std::wstring& text, int64_t messageId);
         /// <summary>Stamps the topic that owns `threadId` as "something newer than the card landed here" (the sticky card's trigger).</summary>
         void _noteTopicPosted(int64_t threadId);
         /// <summary>Edits a message in place (an edit cannot be split: cut at Telegram's limit). `onDone` gets Telegram's answer on the send thread (may be empty).</summary>
@@ -518,6 +555,12 @@ namespace Agentmaster::Msg
             std::unordered_map<std::wstring, std::wstring> toolNames; // tool_use id -> name (to label a failed result)
             int64_t lastTranscriptCheckMs{ 0 };
             int64_t lastResolveMs{ 0 };
+            /// <summary>
+            /// §21.12: the current turn's PROMPT (its message id as its send answers; see PromptRef) — the final reply quotes it
+            /// and its status follows the turn. Null until the mirror sees a prompt in this run (then rebuilt from the
+            /// TopicRecord's persisted promptMessageId).
+            /// </summary>
+            std::shared_ptr<PromptRef> promptRef;
         };
         /// <summary>
         /// The card's transient state per session, apart from the Mirror on purpose: the tick works on a COPY of a
@@ -546,6 +589,15 @@ namespace Agentmaster::Msg
         /// <summary>Closes the turn WITHOUT a message (claude exited or failed with nothing more to say): the work log is finished and its state reset.</summary>
         void _endTurnQuietly(const std::wstring& sessionId, TopicRecord& topic, Mirror& m);
         void _appendWorkLog(Mirror& m, const std::wstring& line);
+        /// <summary>
+        /// §21.12, once per tick and topic: brings the LAST prompt's status up to the session's state (PromptTurnStatusFor) —
+        /// an edit of the bot's prompt line, or a reaction on the user's own message — once its message id is known and the
+        /// new state has held kPromptStatusSettleMs (an Error shows at once). Syncs the record's id from the mirror's
+        /// PromptRef (or rebuilds the PromptRef from the record after a restart). Tick thread.
+        /// </summary>
+        void _updatePromptStatus(TopicRecord& topic, Mirror& m, const SessionInfo& s);
+        /// <summary>Shows `status` on the topic's last prompt (an edit of our line, or a reaction on the user's message; None removes it) and records it. Tick thread.</summary>
+        void _showPromptStatus(TopicRecord& topic, PromptTurnStatus status);
         void _onStateEdge(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _syncReactions(const SessionInfo& s);
 
