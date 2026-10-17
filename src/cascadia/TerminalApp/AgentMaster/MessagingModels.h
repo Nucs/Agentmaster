@@ -1767,6 +1767,17 @@ namespace Agentmaster::Msg
         int nameState{ -1 };
         int64_t nameSetMs{ 0 };
         /// <summary>
+        /// The COLOR SQUARE the topic's name shows after the state glyph (§21.13, the user's "can the title have a color
+        /// background in all places we print title, that matches"): TgTitleColorSquare of the tab color when the name was last
+        /// set ("" = none: the "Remove colors" mode, or a topic named before §21.13). `nameColorMode` is the TabColorMode that
+        /// color was resolved under (-1 = unknown: a topic named before §21.13). A square that differs under the SAME mode is a
+        /// change of the tab's color, and the topic gets a line saying so (BuildTopicChangeNoticeHtml); a topic named under
+        /// another mode, or before §21.13, gets the new square QUIETLY (a mode switch would otherwise post a line in every
+        /// topic). The card's title shows the same square (CardExtras::colorSquare), so the card and the list always agree.
+        /// </summary>
+        std::wstring nameColor;
+        int nameColorMode{ -1 };
+        /// <summary>
         /// The LAST PROMPT the user sent in this topic's session (§21.12) — the one whose line carries the turn's status and
         /// whose message the turn's final reply answers. `promptMessageId`: the bot's prompt line, or the user's own message
         /// (a prompt from the phone, or one sent as the user by the secretary bot); 0 = not known yet (the send has not
@@ -1928,6 +1939,9 @@ namespace Agentmaster::Msg
             to.Set(L"verbose", json::Value::MkNum(static_cast<double>(t.verbose)));
             to.Set(L"nameState", json::Value::MkNum(static_cast<double>(t.nameState)));
             to.Set(L"nameSetMs", json::Value::MkNum(static_cast<double>(t.nameSetMs)));
+            // §21.13: the name's color square and the mode it was resolved under (-1 = the name predates the square).
+            to.Set(L"nameColor", json::Value::MkStr(t.nameColor));
+            to.Set(L"nameColorMode", json::Value::MkNum(static_cast<double>(t.nameColorMode)));
             if (t.promptMessageId != 0 || !t.promptText.empty())
             {
                 // §21.12: the last prompt's line (omitted when the live mirror has seen none).
@@ -2018,6 +2032,9 @@ namespace Agentmaster::Msg
                 t.verbose = std::clamp(static_cast<int>(to.I64At(L"verbose", -1)), -1, 1);
                 t.nameState = std::clamp(static_cast<int>(to.I64At(L"nameState", -1)), -1, static_cast<int>(SessionState::Done));
                 t.nameSetMs = to.I64At(L"nameSetMs", 0);
+                // §21.13 (absent in an older file: a name with no square yet and an unknown mode — re-squared once, quietly).
+                t.nameColor = to.StrAt(L"nameColor");
+                t.nameColorMode = std::clamp(static_cast<int>(to.I64At(L"nameColorMode", -1)), -1, static_cast<int>(TabColorMode::NoColor));
                 // §21.12 (absent in an older file: no prompt tracked yet — the next live prompt starts it).
                 t.promptMessageId = to.I64At(L"promptMessageId", 0);
                 t.promptBotLine = to.BoolAt(L"promptBotLine", false);
@@ -2044,7 +2061,13 @@ namespace Agentmaster::Msg
         bool inTab{ false }; // a ConPTY hosts it (SessionInfo::tabToken non-empty)
         bool claude{ true }; // AgentKind::Claude (D23: Codex is never listed)
         bool pinned{ false }; // never idle (SessionInfo::pinned)
-        std::wstring colorHex; // the tab color ("" = unknown)
+        // The tab color: ResolveSessionColorHex under the tab-color mode, as the tab, the board and the side panel resolve it
+        // ("" = none: the "Remove colors" mode, or a caller that did not resolve it). Since §21.13 the sync fills it for every
+        // session: the topic's icon color at creation, and the color square of its name, its card and every title mention.
+        std::wstring colorHex;
+        // When colorHex last changed as the sync saw it (§21.13; the service's own clock, not persisted): how long the color the
+        // topic name would show has held (PickNameRename). 0 = unknown (its first sight in this run): treated as settled.
+        int64_t colorSinceMs{ 0 };
         // SessionInfo::lastActivityUnixMs (persisted): the newest hook / activity — and, for a NEW session or a
         // fork, its creation instant (the launch seam stamps it). 0 = never.
         int64_t lastActivityMs{ 0 };
@@ -2413,19 +2436,103 @@ namespace Agentmaster::Msg
         return std::wstring{ StateGlyph(s) } + L" " + t;
     }
 
+    /// <summary>
+    /// A topic's name with the tab's COLOR (§21.13, the user's "State, then color"): the state glyph, a space, the color
+    /// square, a space, the title — `🟡 🟦 agent manager tab`. Telegram has no colored text or background in a topic name or a
+    /// message (HTML `span style` / `mark` are refused, a rich message's `==mark==` is a highlight of the reader's own color,
+    /// custom emoji need a Premium owner — measured 2026-10-17), so a square emoji in the tab's color family is the one marker
+    /// that shows everywhere and follows a change. An empty square is the 2-argument name exactly (the "Remove colors" mode).
+    /// The title is cut like the 2-argument name: the glyph, the square and two spaces take at most 6 of Telegram's 128
+    /// characters.
+    /// </summary>
+    /// <param name="s">The session's state.</param>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = no square).</param>
+    /// <param name="title">The tab title ("" = the caller's fallback, e.g. the short session id).</param>
+    /// <returns>The name for createForumTopic / editForumTopic.</returns>
+    /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+    inline std::wstring TopicDisplayName(SessionState s, std::wstring_view colorSquare, std::wstring_view title)
+    {
+        std::wstring name = TopicDisplayName(s, title);
+        if (!colorSquare.empty())
+        {
+            // After the glyph and its space: the 2-argument name is "<glyph> <title>", so the square goes at that offset (the
+            // glyph is one or two UTF-16 units, StateGlyph's table).
+            const size_t at = std::wstring_view{ StateGlyph(s) }.size() + 1;
+            name.insert(at, std::wstring{ colorSquare } + L" ");
+        }
+        return name;
+    }
+
+    /// <summary>
+    /// A title MENTION with the tab's color (§21.13): the color square, a space, the escaped title — what every message that
+    /// names a session prints (the card, the Search answer, the replies, the change line), so a title reads the same color
+    /// in every place. No square = the escaped title alone.
+    /// </summary>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
+    /// <param name="title">The title as is (escaped here).</param>
+    /// <returns>Telegram HTML (no tags: the caller wraps it in &lt;b&gt; where it wants).</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TitleMentionHtml(std::wstring_view colorSquare, std::wstring_view title)
+    {
+        return colorSquare.empty() ? TgEscapeHtml(title) : std::wstring{ colorSquare } + L" " + TgEscapeHtml(title);
+    }
+
+    /// <summary>
+    /// The line a topic gets when its tab's TITLE or COLOR changed (§21.13, the user's "send a message like whatsapp does for
+    /// group chat name changed", in their words: "&lt;from&gt;" changed the title to "&lt;to&gt;"). It quotes the title the
+    /// topic showed, with its color square, and says what it became: `“🟦 old” changed the title to “🟦 new”` (a color that
+    /// changed at the same time shows in the two squares), or `“🟦 title” changed the color to 🟩` when only the color
+    /// changed. Italic: a line about the topic, not a message of the conversation. Telegram's own "topic renamed" notice is
+    /// deleted by the service — it names no old title and shows no color.
+    /// </summary>
+    /// <param name="oldTitle">The title the topic's name showed ("" = unknown: the line names the new title only).</param>
+    /// <param name="oldSquare">The color square the name showed ("" = none).</param>
+    /// <param name="newTitle">The title the topic's name shows now.</param>
+    /// <param name="newSquare">The color square the name shows now ("" = none).</param>
+    /// <returns>Telegram HTML; "" when no title changed and the color did not change from one square to another (a square
+    /// that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a change worth a line).</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
+    inline std::wstring BuildTopicChangeNoticeHtml(std::wstring_view oldTitle, std::wstring_view oldSquare, std::wstring_view newTitle, std::wstring_view newSquare)
+    {
+        // A mention is cut like the Search answer's titles (TgFirstLine: the first line, an ellipsis past 200 units).
+        const auto mention = [](std::wstring_view square, std::wstring_view title) {
+            return L"\x201C" + TitleMentionHtml(square, TgFirstLine(title, 200)) + L"\x201D";
+        };
+        if (!newTitle.empty() && oldTitle != newTitle)
+        {
+            if (oldTitle.empty())
+            {
+                return L"<i>The title is now " + mention(newSquare, newTitle) + L"</i>";
+            }
+            return L"<i>" + mention(oldSquare, oldTitle) + L" changed the title to " + mention(newSquare, newTitle) + L"</i>";
+        }
+        if (!oldSquare.empty() && !newSquare.empty() && oldSquare != newSquare)
+        {
+            return L"<i>" + mention(oldSquare, newTitle.empty() ? oldTitle : newTitle) + L" changed the color to " + std::wstring{ newSquare } + L"</i>";
+        }
+        return {};
+    }
+
     // A state the topic name follows must have held this long (a Running ↔ Waiting flicker of a short turn renames nothing),
     // and two renames of one topic are this far apart at least. Each rename costs two calls in the chat (the edit, and the
     // delete of the "topic renamed" notice Telegram posts), so the names follow the fleet with a lag rather than spend the
     // chat's budget (the service also renames only while the last minute's calls leave room).
     inline constexpr int64_t kNameStateSettleMs = 8 * 1000;
     inline constexpr int64_t kNameRenameGapMs = 30 * 1000;
+    // §21.13: a switch of the tab-color mode re-colors every tab, and the Individual mode deals new colors moments after it.
+    // A color change this soon after the service saw the mode change — or this soon after the topic was made (a new tab's
+    // first colors) — is not the user's recolor of a tab, so its topic changes square QUIETLY (NoticeOldSquare), and only a
+    // mode that has held this long is stamped on a topic whose square it does not change (the service's silent
+    // TopicRecord::nameColorMode update).
+    inline constexpr int64_t kColorModeSettleMs = 60 * 1000;
 
     /// <summary>
     /// The topic whose NAME should change next to show its session's state (§21.11): one whose name shows another state (or
     /// none yet), whose session is live in a tab, whose state has held for kNameStateSettleMs, and whose last rename is
     /// kNameRenameGapMs old. The states that need the user go first (Needs approval, Error, Waiting for you, then the rest),
     /// then the state that has held the longest. A title change is not this function's: PlanTopicSync's Rename sets the title
-    /// and the glyph together.
+    /// and the glyph together. Since §21.13 the service picks with PickNameRename, which applies this rule first and the
+    /// color square's after it; this state-only form stays the rule's reference (the m5 suite pins it).
     /// </summary>
     /// <param name="facts">The live sessions (the sync's facts, with stateSinceMs).</param>
     /// <param name="topics">The topic map.</param>
@@ -2478,6 +2585,149 @@ namespace Agentmaster::Msg
             }
         }
         return best ? best->sessionId : std::wstring{};
+    }
+
+    /// <summary>The topic PickNameRename chose, and what of its name is out of date.</summary>
+    struct NameRenamePick
+    {
+        std::wstring sessionId; // "" = no rename is due
+        bool state{ false }; // the name's glyph shows another state than the session's
+        bool color{ false }; // the name's square differs from the tab's color square (§21.13)
+    };
+
+    /// <summary>
+    /// The topic whose NAME should change next (§21.11 + §21.13): PickStateRename's rule for the state glyph, and the same for
+    /// the COLOR SQUARE — a name whose square differs from its tab's (TgTitleColorSquare of TabFact::colorHex, a changed tab
+    /// color, a topic named before §21.13, a switch of the tab-color mode) is due once that color has held kNameStateSettleMs
+    /// (TabFact::colorSinceMs; an inferred folder that flips back and forth renames nothing). Every rename sets the whole name,
+    /// so one call fixes both. The order: the states that need the user first (as PickStateRename), then a real color change
+    /// of a tab (the topic's square was resolved under `colorMode`: its topic gets a line about it), then the quiet re-squares
+    /// (a topic named before §21.13 or under another mode), each the change that has held the longest first. A title change is
+    /// not this function's: PlanTopicSync's Rename sets the title, the glyph and the square at once.
+    /// </summary>
+    /// <param name="facts">The live sessions (the sync's facts, with stateSinceMs, colorHex and colorSinceMs).</param>
+    /// <param name="topics">The topic map.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="colorMode">The tab-color mode the facts' colors were resolved under.</param>
+    /// <returns>The topic to rename and why; an empty session id when none is due.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline NameRenamePick PickNameRename(const std::vector<TabFact>& facts, const std::map<std::wstring, TopicRecord>& topics, int64_t nowMs, TabColorMode colorMode)
+    {
+        // 0-3: a state the name must show (PickStateRename's urgency); 4: the tab's color changed; 5: a quiet re-square.
+        const auto urgency = [](SessionState s) {
+            switch (s)
+            {
+            case SessionState::NeedsApproval:
+                return 0;
+            case SessionState::Error:
+                return 1;
+            case SessionState::WaitingForInput:
+                return 2;
+            default:
+                return 3;
+            }
+        };
+        NameRenamePick pick;
+        int bestRank = 0;
+        int64_t bestSince = 0;
+        for (const auto& f : facts)
+        {
+            if (!f.live || !f.inTab || !f.claude)
+            {
+                continue;
+            }
+            const auto it = topics.find(f.sessionId);
+            if (it == topics.end() || it->second.threadId <= 0)
+            {
+                continue;
+            }
+            const TopicRecord& t = it->second;
+            if (t.nameSetMs > 0 && nowMs - t.nameSetMs < kNameRenameGapMs)
+            {
+                continue; // renamed lately
+            }
+            const bool stateDue = t.nameState != static_cast<int>(f.state) && (f.stateSinceMs <= 0 || nowMs - f.stateSinceMs >= kNameStateSettleMs);
+            const bool colorDue = t.nameColor != TgTitleColorSquare(f.colorHex) && (f.colorSinceMs <= 0 || nowMs - f.colorSinceMs >= kNameStateSettleMs);
+            if (!stateDue && !colorDue)
+            {
+                continue; // up to date, or a change that has not held yet
+            }
+            const int rank = stateDue ? urgency(f.state) : (t.nameColorMode == static_cast<int>(colorMode) ? 4 : 5);
+            const int64_t since = stateDue ? f.stateSinceMs : f.colorSinceMs;
+            if (pick.sessionId.empty() || rank < bestRank || (rank == bestRank && since < bestSince))
+            {
+                pick.sessionId = f.sessionId;
+                pick.state = stateDue;
+                pick.color = colorDue;
+                bestRank = rank;
+                bestSince = since;
+            }
+        }
+        return pick;
+    }
+
+    /// <summary>The color square a rename puts in a topic's name, and the tab-color mode it stands for (§21.13).</summary>
+    struct NameColorChoice
+    {
+        std::wstring square; // TgTitleColorSquare of the color ("" = none)
+        int mode{ -1 }; // the TabColorMode the square was resolved under (-1 = unknown), for TopicRecord::nameColorMode
+    };
+
+    /// <summary>
+    /// The color square a rename puts in a topic's NAME (§21.13): the tab's color once it has held kNameStateSettleMs (or its
+    /// clock is unknown), else the square the name shows already, with the mode it was set under — so a rename for another
+    /// reason (the state glyph, the user's new title) never carries a color that is still changing, and the change is made,
+    /// and told, once it has held (PickNameRename). With no facts for the session (it left the sync's list), the name keeps
+    /// its square too.
+    /// </summary>
+    /// <param name="f">The session's facts (null = not in the sync's list).</param>
+    /// <param name="t">The topic as it is (nameColor, nameColorMode).</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="colorMode">The tab-color mode the facts' colors were resolved under.</param>
+    /// <returns>The square and its mode.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline NameColorChoice ChooseNameColor(const TabFact* f, const TopicRecord& t, int64_t nowMs, TabColorMode colorMode)
+    {
+        NameColorChoice c;
+        if (f && (f->colorSinceMs <= 0 || nowMs - f->colorSinceMs >= kNameStateSettleMs))
+        {
+            c.square = TgTitleColorSquare(f->colorHex);
+            c.mode = static_cast<int>(colorMode);
+        }
+        else
+        {
+            c.square = t.nameColor;
+            c.mode = t.nameColorMode;
+        }
+        return c;
+    }
+
+    /// <summary>
+    /// The square the CHANGE LINE quotes as the one the topic showed before a rename (§21.13): the name's own square when its
+    /// change to `after` is a change of the TAB's color — both squares resolved under the same tab-color mode, a mode that has
+    /// not changed for `settleMs` (a mode switch re-colors, and an Individual switch deals new colors moments later), on a
+    /// topic older than `settleMs` (a new tab's Individual color is dealt at its first paint, and a home-folder launch's
+    /// inferred folder can be found moments after its topic was made) — else the new square itself, which makes
+    /// BuildTopicChangeNoticeHtml say nothing about the color (a topic named before §21.13, a switch of the mode, the
+    /// "Remove colors" mode, a topic just made: the square changes quietly; a title change is still told).
+    /// </summary>
+    /// <param name="before">The topic as it was named (nameColor, nameColorMode, createdMs).</param>
+    /// <param name="after">ChooseNameColor's choice for the rename.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <param name="modeChangedMs">When the service saw the tab-color mode change last (0 = not in this run).</param>
+    /// <param name="settleMs">How long after a mode change, or a topic's creation, a color change is not the user's recolor of a
+    /// tab (kColorModeSettleMs).</param>
+    /// <returns>The square for BuildTopicChangeNoticeHtml's `oldSquare`.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring NoticeOldSquare(const TopicRecord& before, const NameColorChoice& after, int64_t nowMs, int64_t modeChangedMs, int64_t settleMs)
+    {
+        const bool modeStable = modeChangedMs <= 0 || nowMs - modeChangedMs >= settleMs;
+        const bool topicSettled = before.createdMs <= 0 || nowMs - before.createdMs >= settleMs;
+        if (modeStable && topicSettled && before.nameColorMode >= 0 && before.nameColorMode == after.mode && !before.nameColor.empty())
+        {
+            return before.nameColor;
+        }
+        return after.square;
     }
 
     // ===== what a message in a topic is ======================================================
@@ -2924,6 +3174,9 @@ namespace Agentmaster::Msg
         int prompts{ 0 }; // prompts the user typed in it
         std::wstring why; // the model's one line of evidence ("" = it gave none)
         SearchPickState state{ SearchPickState::Closed };
+        // §21.13: the session's tab color as a square (TgTitleColorSquare), before its title like in every place that names a
+        // session; an on-disk session with no tab wears its folder's color, like the Sessions page's chip. "" = none.
+        std::wstring colorSquare;
     };
 
     /// <summary>
@@ -3074,7 +3327,9 @@ namespace Agentmaster::Msg
                 html += L"\n\n";
             }
             const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 100);
-            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" <b>" + TgEscapeHtml(title) + L"</b>";
+            // The glyph for where it stands, then the tab's color square (§21.13: "State, then color", like the topic names).
+            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + (card.colorSquare.empty() ? std::wstring{} : card.colorSquare + L" ") +
+                    L"<b>" + TgEscapeHtml(title) + L"</b>";
             std::wstring meta;
             const auto add = [&meta](const std::wstring& part) {
                 if (!part.empty())
@@ -3119,7 +3374,7 @@ namespace Agentmaster::Msg
     inline std::wstring BuildSearchPickMenuHtml(const SearchCard& card, int64_t nowMs)
     {
         const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 200);
-        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgEscapeHtml(title) + L"</b>";
+        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TitleMentionHtml(card.colorSquare, title) + L"</b>"; // §21.13: the color square first
         std::wstring place = card.dir;
         if (!card.branch.empty())
         {
@@ -3216,6 +3471,10 @@ namespace Agentmaster::Msg
         // §21.9: the topic's history replay is not done yet. The card says so; when the last part is in, the card is
         // re-posted below it without the line (or, for a history with nothing to show, edited once).
         bool historyPending{ false };
+        // §21.13: the color square before the card's title — the square the topic's NAME shows (TopicRecord::nameColor), so
+        // the card and the topic list always agree, and a color change edits the card in the same step as the name (the
+        // rename refreshes the card). "" = none.
+        std::wstring colorSquare;
     };
 
     /// <summary>
@@ -3292,13 +3551,19 @@ namespace Agentmaster::Msg
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleLeavesAtMs">When an Idle topic leaves the list (0 = not idle).</param>
     /// <param name="globalPause">The runner's process-wide pause.</param>
-    /// <param name="extras">The recap and its freshness (CardExtras); null = no recap block.</param>
+    /// <param name="extras">The recap and its freshness, the history line, the title's color square (CardExtras); null = none of them.</param>
     /// <returns>The HTML text.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause, const CardExtras* extras = nullptr)
     {
         std::wstring out;
-        out += L"\U0001F4CC <b>" + TgEscapeHtml(s.title.empty() ? s.id.substr(0, 8) : s.title) + L"</b>\n";
+        // §21.13: the title with the tab's color square before it (the square the topic's name shows; none without extras).
+        out += L"\U0001F4CC ";
+        if (extras && !extras->colorSquare.empty())
+        {
+            out += extras->colorSquare + L" ";
+        }
+        out += L"<b>" + TgEscapeHtml(s.title.empty() ? s.id.substr(0, 8) : s.title) + L"</b>\n";
         // State line.
         out += StateLabel(s.state);
         // CLOCK TIMES, never spans: the service edits the card whenever this text changes, so a "3m" that

@@ -25,6 +25,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath> // std::fabs / std::fmod: TgTitleColorSquare's hue (§21.13)
 #include <cstdint>
 #include <ctime>
 #include <cwctype>
@@ -1166,6 +1167,154 @@ namespace Agentmaster::Msg
             }
         }
         return best;
+    }
+
+    // ===== the title's color marker (MESSAGING.md §21.13) ==========================================
+
+    /// <summary>
+    /// Parses a tab color, "#RRGGBB" or "#AARRGGBB" (the alpha byte is ignored), into 0xRRGGBB. Total: a malformed value
+    /// is refused, never half-read. (TgTopicIconColor keeps its own parse, which falls back to blue instead of refusing.)
+    /// </summary>
+    /// <param name="hex">The color text.</param>
+    /// <param name="rgb">Receives 0xRRGGBB when the text parses; untouched otherwise.</param>
+    /// <returns>True when the text is a well-formed color.</returns>
+    inline bool TgParseRgbHex(std::wstring_view hex, uint32_t& rgb) noexcept
+    {
+        if (hex.empty() || hex.front() != L'#' || (hex.size() != 7 && hex.size() != 9))
+        {
+            return false;
+        }
+        uint32_t v = 0;
+        for (size_t i = 1; i < hex.size(); ++i)
+        {
+            const wchar_t c = hex[i];
+            uint32_t d = 0;
+            if (c >= L'0' && c <= L'9')
+            {
+                d = static_cast<uint32_t>(c - L'0');
+            }
+            else if (c >= L'a' && c <= L'f')
+            {
+                d = static_cast<uint32_t>(c - L'a' + 10);
+            }
+            else if (c >= L'A' && c <= L'F')
+            {
+                d = static_cast<uint32_t>(c - L'A' + 10);
+            }
+            else
+            {
+                return false;
+            }
+            v = (v << 4) | d;
+        }
+        rgb = v & 0xFFFFFFu; // "#AARRGGBB": the alpha byte shifted out above the low 24 bits
+        return true;
+    }
+
+    /// <summary>
+    /// The COLORED SQUARE emoji that stands for a tab's color wherever the bot prints a session's title (§21.13: the topic
+    /// name, the card, the Search answers, the command replies) — the closest Telegram has to a colored background behind
+    /// a title. Measured against the API on 2026-10-17 (scratchpad colortest.py, thread 26785 of the dev chat): classic
+    /// HTML refuses &lt;span style&gt; and &lt;mark&gt;; a rich message keeps &lt;mark&gt; / ==marked== but the client
+    /// paints the highlight in its OWN color and drops a style; a custom emoji entity is dropped unless the bot's owner has
+    /// Telegram Premium; a topic icon color is one of six and fixed at creation. A square emoji works in a topic name (plain
+    /// text) and in every message, and an edit changes it, so it can follow the tab.
+    /// The pick goes by HUE, not by distance: the tab palette is pastel (One Dark), and a plain RGB or Lab distance to the
+    /// vivid emoji maps its reds and corals to the brown square. HSL buckets: very dark ⇒ ⬛, very light ⇒ ⬜, unsaturated ⇒
+    /// ⬛ / ⬜ by lightness, a dark warm hue ⇒ 🟫, then red [330°, 12°) · orange [12°, 35°) · yellow [35°, 70°) · green
+    /// [70°, 165°) · blue [165°, 255°) (cyan joins blue: there is no cyan square) · purple [255°, 330°). The 14 palette
+    /// colors land on 6 squares (🟥 🟧 🟨 🟩 🟦 🟪), so two folders can share a square — it marks a color, it is not unique.
+    /// </summary>
+    /// <param name="hex">The tab color ("#RRGGBB" / "#AARRGGBB"); "" (the "Remove colors" mode, or no color known) or a
+    /// malformed value gives no square.</param>
+    /// <returns>The square as a static UTF-16 string, or "" (never null).</returns>
+    inline const wchar_t* TgTitleColorSquare(std::wstring_view hex) noexcept
+    {
+        uint32_t rgb = 0;
+        if (!TgParseRgbHex(hex, rgb))
+        {
+            return L"";
+        }
+        const double r = static_cast<double>((rgb >> 16) & 0xFF) / 255.0;
+        const double g = static_cast<double>((rgb >> 8) & 0xFF) / 255.0;
+        const double b = static_cast<double>(rgb & 0xFF) / 255.0;
+        const double mx = (std::max)({ r, g, b }); // (std::max): the <windows.h> macro
+        const double mn = (std::min)({ r, g, b });
+        const double l = (mx + mn) / 2.0;
+        const double d = mx - mn;
+        // HSL saturation; d == 0 is a grey (and covers pure black and white, where the divisor would be 0).
+        const double s = d == 0.0 ? 0.0 : d / (1.0 - std::fabs(2.0 * l - 1.0));
+        double h = 0.0;
+        if (d != 0.0)
+        {
+            if (mx == r)
+            {
+                h = 60.0 * std::fmod((g - b) / d, 6.0);
+            }
+            else if (mx == g)
+            {
+                h = 60.0 * ((b - r) / d + 2.0);
+            }
+            else
+            {
+                h = 60.0 * ((r - g) / d + 4.0);
+            }
+            if (h < 0.0)
+            {
+                h += 360.0;
+            }
+        }
+        if (l < 0.15)
+        {
+            return L"\x2B1B";
+        }
+        if (l > 0.92)
+        {
+            return L"\x2B1C";
+        }
+        if (s < 0.18)
+        {
+            return l < 0.5 ? L"\x2B1B" : L"\x2B1C";
+        }
+        if (h < 45.0 && l < 0.42)
+        {
+            return L"\U0001F7EB"; // brown: a dark red / orange / amber
+        }
+        if (h >= 330.0 || h < 12.0)
+        {
+            return L"\U0001F7E5";
+        }
+        if (h < 35.0)
+        {
+            return L"\U0001F7E7";
+        }
+        if (h < 70.0)
+        {
+            return L"\U0001F7E8";
+        }
+        if (h < 165.0)
+        {
+            return L"\U0001F7E9";
+        }
+        if (h < 255.0)
+        {
+            return L"\U0001F7E6";
+        }
+        return L"\U0001F7EA";
+    }
+
+    /// <summary>
+    /// The prefix a printed title takes (§21.13): the tab color's square and a space ("🟦 "), or "" when there is no color —
+    /// so a caller writes <c>TgTitleColorPrefix(hex) + "&lt;b&gt;" + title + "&lt;/b&gt;"</c> and a colorless session reads
+    /// as before.
+    /// </summary>
+    /// <param name="hex">The tab color ("" = none).</param>
+    /// <returns>"🟦 " or "".</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring TgTitleColorPrefix(std::wstring_view hex)
+    {
+        const wchar_t* sq = TgTitleColorSquare(hex);
+        return *sq ? std::wstring{ sq } + L" " : std::wstring{};
     }
 
     /// <summary>
