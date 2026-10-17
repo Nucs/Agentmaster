@@ -4625,7 +4625,7 @@ send - nothing is submitted until the user presses Enter in that tab.
         spec.authTokenEnv = launch.authTokenEnv;
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride, std::wstring_view initialPrompt, const CompiledClaudeLaunch* launch)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view targetSessionId, std::wstring_view modelOverride, std::wstring_view initialPrompt, const CompiledClaudeLaunch* launch)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -4634,16 +4634,18 @@ send - nothing is submitted until the user presses Enter in that tab.
 
         // Fork wins over resume (mutually exclusive). A fork normally mints a FRESH id (the fork target —
         // the commandline resumes the source but --fork-session writes to this new id); a resume reuses
-        // the given id; a fresh launch mints a new one. A RESTORE re-fork passes forkIntoSessionId — the
+        // the given id; a fresh launch mints a new one. A RESTORE re-fork passes targetSessionId — the
         // fork's EXISTING id — so it forks back into the same id (re-materializing a never-messaged fork
         // whose own transcript was never written, preserving its identity across the restart instead of
-        // churning a new id); collision-free since that id is unused on disk. forkIntoSessionId is honored
-        // only when forking.
+        // churning a new id); collision-free since that id is unused on disk. A FRESH launch honors
+        // targetSessionId too (MESSAGING.md §21.17: the Telegram bot's new-thread picker chooses the id so
+        // it can bind the user's thread before the tab exists — a freshly minted GUID, unused on disk). A
+        // resume ignores it.
         const bool fork = !forkFromSessionId.empty();
         const bool resume = !fork && !resumeSessionId.empty();
         spec.sessionId = resume ? std::wstring{ resumeSessionId } :
-            (fork && !forkIntoSessionId.empty()) ? std::wstring{ forkIntoSessionId } :
-                                                   NewSessionId();
+            !targetSessionId.empty() ? std::wstring{ targetSessionId } :
+                                       NewSessionId();
 
         const auto stateDir = AgentmasterStateDir();
         // The launcher picks the hook invocation (exec form for claude >= 2.1.139 — HOOKS.md "Hook invocation").

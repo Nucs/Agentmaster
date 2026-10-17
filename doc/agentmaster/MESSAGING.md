@@ -6,7 +6,7 @@
 > VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
 > optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17; §21.12 = the
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
-> 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §22 = folder groups — the topics grouped by working
+> 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — NOT BUILT yet; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
@@ -2685,6 +2685,156 @@ updated 5 minutes ago
 - **Open:** a tap — only a real tap sends a callback, so it waits for the user's Android: the dot's look, the toast, the
   thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
   line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
+
+### 21.17 Every title opens its topic, the "👤 You" line names its session, turns reply to turns, and a NEW THREAD starts a session (2026-10-18; NOT BUILT yet)
+
+> The user's requests (2026-10-18): "1. The user prompt message should have the title at 2nd row (below "You * time * typed at
+> pc") which is clickable jumping to the thread like other titles. Other titles that are not, should jump to the thread. 1.5.
+> The you messages which are the user starting a turn, should be a reply to previous user message. this way we can jump between
+> user turns. 2. When creating a new thread in telegram and user is typing a prompt, similar to browse, ask user to pick
+> workdir. two lists, one of most recently 10 with paging and second is top 10 used overall with paging. once picked, removed
+> and that folder is used to create the session. this covers creation of a new tab. Then user can set the title."
+
+#### 21.17.1 Every title is a link to its topic
+
+- **What changed.** A title TOKEN (§21.15) can name its session's topic: `TgTitleToken(form, square, title, threadId)` writes a
+  THREAD part (`kTgTitleTokenThread`, U+E003, and the thread id's digits) between the square and MID. The send layer renders such
+  a token as a LINK to the topic once it knows the bot's username: in a rich message a URL chip — the §21.16 directory's own
+  button, `<tg-button type="url" style="primary" url="https://t.me/<bot>/<thread>?topic=<thread>">🟦 title</tg-button>`, the
+  same look and label as the §21.15 copy chip — and in a classic message an `<a href>` around the title, the square left
+  outside. One link builder, `TgTopicUrl` (TelegramFormat.h), now serves the directory too (`DirectoryTopicUrl` calls it).
+- **Where.** The card's title (`CardExtras::threadId`, its own topic); the change line "“🟦 old” changed the title to “🟦 new”"
+  (`BuildTopicChangeNoticeHtml`'s `threadId`); the 🔎 Search answer's cards and the pick menu (`SearchCard::threadId`, the
+  session's topic when it has one); `/status`, `/rename`, `/summary`, the cut-off-turn confirm and `/idle` (`_threadOf`); and
+  the new "👤 You" row (§21.17.2). A session with no topic (closed, idle past its grace, not opened yet: "Opened … — its topic is
+  coming up") keeps the copy chip / plain mention.
+- **What a tap does** is §21.16.3's finding: Telegram Desktop opens the topic, iOS should (read from its source only), Telegram
+  ANDROID lands in the chat's "All" view at the topic's first message — no link form changes that. The dot button (§21.16.7) is
+  still the way in on Android. A URL chip no longer COPIES the title (a button has one action); `/sessionid` and the PC's copy
+  menus still give the title and the id.
+- **The hash does not move.** Every hash of a text — the card's `cardTextHash`, the directory's — is taken over the render
+  WITHOUT the username (`TgRenderTitleTokensClassic(text)`, the pre-§21.17 bytes), so no card is re-edited because of the links
+  in a burst. The link is a FORM, like the rich-ness: `TopicRecord::cardLinked` (persisted, absent = false) says whether the card
+  already carries it, and the SLOW FORM UPGRADE (§21.15, `_takeCardFormatSlot`, one card per `kCardFormatGapMs` within the
+  chat's budget) re-edits every unlinked card once — also a card whose rich form Telegram refused for that text: the edit falls
+  back to the classic form, which carries the link. The log says `card re-edited with a title chip that links to its topic (its
+  form only; N more card(s) to go)`. Messages already sent (the history, older replies) keep their copy chips.
+- **The username** comes from this run's `getMe` (`_botUsername`), copied for the send paths behind its own leaf lock
+  (`_linkBot`, `_linkBotMtx`: some callers of `_sendText` / `_editText` hold `_mtx`). Before the first `getMe` answers, and after a
+  token change until the new bot's does, titles go as before.
+
+#### 21.17.2 The "👤 You" line's title row
+
+- **The line:** `<b>👤 You</b> · 14:02 · typed at the PC · ⏳ running`, then the SESSION'S TITLE on the second row — a URL chip in
+  the tab's color look (rich) or `🟦 <a href>title</a>` (classic) —, then the prompt. In the chat's "All" view, where every
+  topic's messages run together, the row says whose turn a line is and opens its thread.
+- **Every "👤 You" line the bot posts:** the live prompt (`_applyItems`), the live answer (↩ answer) and slash command, the
+  status edits of the last prompt (`_showPromptStatus` builds the same row, with the topic's title and square of NOW), and the
+  history replay (`RenderHistory` / `PlanHistoryPosts`' `titleRow`). One builder for all: `UserLineTitleRow(title, sessionId,
+  nameColor, threadId)` — the topic record's title (the short id when blank, the first line, 120 characters) and the square its
+  name shows. A line with a row carries a title token, so it goes as a RICH message (with the classic render as its fallback).
+  A message sent AS THE USER (secretary mode) holds the user's words only: no row.
+
+#### 21.17.3 A turn's prompt line replies to the previous turn's
+
+- **Live:** the line of a new turn's prompt (not a message typed mid-turn) is sent as a REPLY to the previous turn's prompt —
+  the mirror's `PromptRef` of that turn (its id may still be in flight: the outbox's pre-send hook resolves it), else the
+  record's `promptMessageId` (after a restart), else, once the topic's history replay is done, the replay's last line. A tap on
+  the quote jumps to that turn; its own quote jumps to the one before. The previous prompt may be the user's own message from
+  the phone: the bot's line quotes it all the same (`allow_sending_without_reply`: a deleted one costs nothing).
+- **The history replay** chains its turns the same way: each turn's prompt line replies to the previous turn's line of the
+  replay. The chain's last link is kept on the record (`TopicRecord::historyPromptMessageId`, persisted, written when the line's
+  send answers), so a replay that a restart interrupted goes on with its chain, and the first live turn after the replay quotes it.
+- **Limits:** the user's OWN messages (sent from the phone, or AS the user by the secretary bot) cannot be made replies — the
+  chain runs through the bot's lines, and a user's message is quoted only when it is the previous turn's prompt. A live turn that
+  starts while the history replay still runs has nothing to quote (the replay's line it would quote is not posted yet).
+
+#### 21.17.4 A thread the user opens starts a new session
+
+- **The flow.** The user opens a thread in the bot's chat. Telegram sends `forum_topic_created` from the user (before §21.17
+  the bot answered "Topics are made from Agentmaster's tabs"), then the user's message.
+  - A thread the user NAMED (`is_name_implicit` false): the name becomes the session's title, and the picker goes up at once.
+  - A thread Telegram named after the first message (`is_name_implicit` true): the picker goes up with that message — one post,
+    not a post and an edit.
+  - A message in any thread no session owns (one the user opened, one made before §21.17, one whose session closed while the
+    thread stayed) is HELD (👀 reaction), and the thread gets a picker if it has none; a recreation's old topic, about to be
+    deleted, is told so instead.
+- **The PICKER** (MessagingNewThread.h, `BuildNewThreadPickerHtml` / `BuildNewThreadPickerKeyboard`): "📂 New session — pick
+  the folder it works in", what happens to the held messages, how the title is chosen ("Its title: <b>name</b> — rename this
+  thread to change it", or the folder's name), "Or send a folder's full path"; then two lists, each with its own paging, ten a
+  page, every line numbered like its button:
+  - 🕘 **Recent** · 1–10 of 34: `<b>1</b> K:\source\Agentmaster · 3m ago` — the folder whose newest session was active last,
+    first (`SortFoldersByRecency`).
+  - 🏆 **Most used** · 1–10 of 34: `<b>1</b> K:\source\Agentmaster · 412 sessions` — the folder more sessions worked in, first
+    (`SortFoldersByUse`).
+  - Buttons two to a row, `🕘 1 · Agentmaster` (a folder's name; its parent too when another shown folder has the same name,
+    `NewThreadFolderLabel`), `◀ Recent` / `Recent ▶` and `◀ Most used` / `Most used ▶` only where they lead somewhere, and
+    `✖ Cancel`. The buttons' data names the list and an index or a page (`nt:r:12`, `nt:mp:1`, `nt:x` —
+    `NewThreadCallbackData` / `ParseNewThreadCallbackData`), never a path (a path can pass the 64-byte limit); the lists live in
+    the picker's state. A page change edits the picker in place.
+- **The lists** (`BuildNewThreadLists`) are the Sessions page's folder universe (`CollectSessionFolders`, §10 of SESSIONS.md:
+  a session counts for its launch folder and, when it differs, its inferred one) over EVERY session the registry holds, the
+  archived ones too ("top 10 used overall") — read through a new lean read, `SessionRegistry::PlaceSamples` (two folder
+  strings and a stamp per record, never the queues). The machine's temp roots are left out (`CollectMachineTempRoots`), and
+  every listed folder is probed once (`GetFileAttributesW`: a deleted folder is not offered; a UNC path is kept unprobed, an
+  offline share would hold the poll thread). At most 100 folders a list.
+- **A pick** (`_startNewThreadSession`): the folder is checked again; a session id is minted (`NewSessionId`) and recorded with
+  the thread, the title and the held messages in `_threadBinds` BEFORE the launch, because the launch is asynchronous; then a
+  `RemoteLaunchRequest` NewSession with `newSessionId` goes to the most recently active window, which opens a background tab
+  with THAT id (`_RemoteLaunch` → `_SpawnClaudeSession` → `_LaunchClaudeSession`'s `presetSessionId` → `BuildClaudeSpawn`'s
+  `targetSessionId`, which a fresh launch now honors as a re-fork did — a freshly minted GUID names no transcript). The picker is
+  deleted (the user's "once picked, removed"); the toast says "Opening a new session in Agentmaster…". A typed folder path
+  (`NewThreadTypedFolder`: one line, absolute, quotes and `/` allowed) is a pick too. A refused launch (no window) keeps the
+  picker. Cancel deletes the picker and drops what it held (the messages stay in the chat).
+- **The binding** (`_adoptBoundThreads`, the tick thread, BEFORE the topic sync's plan): the first sync that sees the session
+  live makes the user's thread its topic — a `TopicRecord` with the user's thread id, seeded like a created topic
+  (`_seedFromTranscript`: a fresh session, mirrored from its first line), so the plan makes no topic of its own for it. The
+  thread is renamed like every topic (`_renameTopic`: state glyph, color square, title; a refused rename stays due for the
+  state-name tick), its card is posted, the session at rest is held in "Waiting for you" (like a revive: its topic outlasts the
+  idle grace), the background tab is started (`sessionAction "start"`), and the held messages go in order through
+  `_handleTopicMessage(…, held = true)` — as if sent in the topic (the first is the session's first prompt; a `/rename` among
+  them renames), never asked about as backlog however long the pick took. A message sent while the launch runs is held for it
+  too. A bind whose session is not live after 3 minutes (`kNewThreadBindTimeoutMs`) is dropped and the thread is told.
+- **The title.** The thread's name when the user gave one; else the folder-derived default (`DeriveSessionTitle`). RENAMING the
+  thread later renames the session (`forum_topic_edited` from the owner → `_onUserTopicRenamed`: the name without the state
+  glyph and color square, `StripTopicNameDecoration`, through `sessionAction "rename"` like `/rename`); the sync then renames
+  the thread back to its decorated form and posts its change line. `/rename <title>` in the thread works as everywhere.
+- **In memory only.** The pickers (`_newThreads`) and the binds (`_threadBinds`) are not persisted: after a restart a picker's
+  buttons answer "This folder picker is from before a restart (or was used): send a message in this thread for a new one", and
+  the thread's next message posts a new picker. A picker no one used for a day is forgotten. A start of the bot (a token
+  change) clears both.
+- **Logs:** `[msg] new thread <id> opened by the user …`, `… opening session <sid8> in <folder> …`, `… is now the topic of
+  <sid8> “title” in <folder> 🟦 (N held message(s) handed over)`, `… did not come up within 3 min; the thread is free again`,
+  `[msg] <sid8> renamed from its thread …`; `[nav] remote telegram new-thread <id>` (`held` / `-> launch <sid8>` / `cancelled`
+  / `bound <sid8>`), `[nav] remote telegram topic-rename <sid8>`, `[nav] remote launch new … id=<sid8>`.
+
+#### 21.17.5 The code, the tests, what is open
+
+- **Code:** TelegramFormat.h (`kTgTitleTokenThread`, `TgTopicUrl`, the token's thread, the linked classic render, the URL chip,
+  `TgRichHtmlFromClassic`'s username); MessagingDirectory.h (`DirectoryTopicUrl` → `TgTopicUrl`); MessagingModels.h
+  (`UserLineTitleRow`, the builders' `titleRow`, `RenderHistory` / `PlanHistoryPosts`, `CardExtras::threadId`,
+  `SearchCard::threadId`, the change line's `threadId`, `TopicRecord::cardLinked` / `historyPromptMessageId`); the new
+  MessagingNewThread.h (the picker's pure half); Messaging.h / Messaging.cpp (`_linkBot`, `_threadOf`, the card's link form,
+  the live and history chains, `_adoptBoundThreads`); Messaging.Inbound.cpp (the routing, the picker, the pick, the rename);
+  SessionRegistry (`PlaceSamples`); RemoteLaunch.h (`newSessionId`); ClaudeSpawn (`targetSessionId`); TerminalPage
+  (`_SpawnClaudeSession` / `_LaunchClaudeSession`'s `presetSessionId`, `_RemoteLaunch`).
+- **Tests:** `TestMessagingNewThread` (tests_messaging_newthread.cpp) — the link builder; every form of a threaded token with
+  and without the username, the hashed render unchanged, a stray THREAD marker, a malformed or overlong thread; the URL chip and
+  the copy chip; a title in a quote links, in code not; the card, the change line and the Search cards; the "You" row in the
+  three builders and the replay; the record's two fields round-trip; the lists (recency and use orders with their ties, the
+  scratch root, a gone folder, one probe per folder, the cap); pages, the callback data and its malformed forms; labels; the
+  picker's text and keyboard; a typed folder; a name without its decoration; `PlaceSamples`. `TestSpawnBuilders`: a fresh launch
+  takes a chosen id (`--session-id`, no `--resume`), and mints one without. The isolated m5 run (HEAD f2fb06549 + this work):
+  7,949 checks, only the 3 known TestTaskbarBadge failures (a first run before the rebase also failed TestCmdPathLimit's
+  real-cmd.exe end-to-end once, which this work does not touch; it passed on the re-run). `cl /Zs` with the last Debug build's
+  flags on a shadow tree of exactly this commit: the 10 units it touches or that include its headers (Messaging.cpp,
+  Messaging.Inbound.cpp, Engine.cpp, MessagingSearchBridge.cpp, AgentManagerContent.Settings.cpp, the three TerminalPage
+  units, SessionRegistry.cpp, ClaudeSpawn.cpp) pass; on the live tree all 104 TerminalAppLib units and the CLI's 17 at /W4 /WX
+  pass; three negative controls (`static_assert`s on `kNewThreadPageSize`, `TopicRecord::historyPromptMessageId`,
+  `RemoteLaunchRequest::newSessionId`) fail with exactly C2338.
+- **Open:** the live checks on the dev bot: a new thread → the picker → a pick → the thread becomes the topic with its card, the
+  held prompt delivered; a rename of the thread; the title chips opening their threads (Desktop) and the reply chain's quotes;
+  whether Android does anything better with the URL chip than with the directory's (it should not, §21.16.3).
 
 ### 21.18 The start note at every launch, and the card's default runner line (2026-10-18; NOT BUILT yet)
 

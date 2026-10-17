@@ -849,6 +849,11 @@ namespace Agentmaster::Msg
             }
             _topicsEnabled.store(false);
             _botId.store(0); // re-arms the poll loop's identity gate: this token may name another bot than the last run's
+            {
+                // §21.17: no title links until this token's getMe names its bot (the old username could name another bot).
+                std::lock_guard linkLock{ _linkBotMtx };
+                _linkBotName.clear();
+            }
             _lastGetMeMs = 0;
             _startNotePosted = false;
             _startedMs = WallMs(); // the start-up hold on "closed" deletes counts from here
@@ -904,6 +909,11 @@ namespace Agentmaster::Msg
                 _frontHeld.clear();
                 _frontRequests.clear();
                 _frontTapMs.clear();
+                // §21.17: the new threads' pickers and launch binds name threads of the chat the last start polled — this token
+                // may be another bot's. A picker's thread gets a new picker with its next message; a bind whose launch is still
+                // under way leaves its session as an ordinary new tab (the sync gives it a topic of its own).
+                _newThreads.clear();
+                _threadBinds.clear();
                 _recreateStartedMs = 0;
                 // The DIRECTORY (§21.16): the outbox was cleared above, so no send of the last run is in flight; a new serial makes
                 // any answer still on its way stale. What the message shows stays in the state file (no edit for an unchanged
@@ -1741,6 +1751,12 @@ namespace Agentmaster::Msg
                             {
                                 std::lock_guard lk{ _mtx };
                                 _botUsername = user;
+                                {
+                                    // §21.17: the title links' copy, behind its own leaf lock (_linkBot): the send paths read it
+                                    // whatever their callers hold. A different bot's username replaces it with the rest below.
+                                    std::lock_guard linkLock{ _linkBotMtx };
+                                    _linkBotName = user;
+                                }
                                 // A DIFFERENT bot than the state file's (the token was replaced in the cog): the
                                 // update offset, the Search topic and the topic map are the OLD bot's — update ids
                                 // are per bot (a stale higher offset would drop every update of the new one), and
@@ -2363,11 +2379,14 @@ namespace Agentmaster::Msg
         std::wstring classic;
         if (TgHasTitleTokens(html))
         {
-            classic = TgRenderTitleTokensClassic(html);
+            // §21.17: with the bot's username known, a title that names its topic links to it in both forms (a URL chip, an
+            // <a> around the title); before the first getMe answers the titles go as before (copy chips, plain mentions).
+            const std::wstring bot = _linkBot();
+            classic = TgRenderTitleTokensClassic(html, bot);
             text = &classic;
             if (_titleChipsWanted())
             {
-                if (std::wstring rich = TgRichHtmlFromClassic(html); !rich.empty() && rich.size() <= kRichMessageMaxChars)
+                if (std::wstring rich = TgRichHtmlFromClassic(html, bot); !rich.empty() && rich.size() <= kRichMessageMaxChars)
                 {
                     _sendTitledRich(threadId, rich, classic, silent, prio, key, std::move(replyMarkup), std::move(onDone), replyToMessageId, std::move(replyRef));
                     if (movesCard && threadId > 0)
@@ -2391,6 +2410,19 @@ namespace Agentmaster::Msg
     bool MessagingService::_titleChipsWanted() const noexcept
     {
         return _richMessages.load() && !_richUnavailable.load();
+    }
+
+    std::wstring MessagingService::_linkBot() const
+    {
+        std::lock_guard lk{ _linkBotMtx }; // a leaf lock: callers may hold _mtx
+        return _linkBotName;
+    }
+
+    int64_t MessagingService::_threadOf(const std::wstring& sessionId) const
+    {
+        std::lock_guard lk{ _mtx };
+        const auto it = _state.topics.find(sessionId);
+        return it == _state.topics.end() ? 0 : it->second.threadId;
     }
 
     void MessagingService::_sendTitledRich(int64_t threadId, const std::wstring& richHtml, const std::wstring& classicHtml, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, std::shared_ptr<PromptRef> replyRef)
@@ -2765,8 +2797,10 @@ namespace Agentmaster::Msg
         }
         // A text that names a session: a RICH edit whose titles are chips while they are wanted (editMessageText turns a classic
         // message into a rich one and back — measured, thread 26785, messages 909 / 910), else the classic render.
-        std::wstring classic = TgRenderTitleTokensClassic(html);
-        std::wstring rich = _titleChipsWanted() ? TgRichHtmlFromClassic(html) : std::wstring{};
+        // §21.17: the titles link to their topics once the bot's username is known (_sendText's rule).
+        const std::wstring bot = _linkBot();
+        std::wstring classic = TgRenderTitleTokensClassic(html, bot);
+        std::wstring rich = _titleChipsWanted() ? TgRichHtmlFromClassic(html, bot) : std::wstring{};
         if (rich.empty() || rich.size() > kRichMessageMaxChars)
         {
             OutItem item = _classicEditItem(messageId, classic, prio, key, replyMarkup);
@@ -3432,6 +3466,9 @@ namespace Agentmaster::Msg
                 _recreateOneTopic(one.first, one.second);
             }
         }
+        // §21.17: a session started from a thread the user opened becomes THAT thread's topic — bound before the plan, so the plan
+        // finds its record and makes no topic of its own for it.
+        _adoptBoundThreads(byId, colorMode);
         std::vector<TopicSyncOp> ops;
         {
             std::lock_guard lk{ _mtx };
@@ -3751,6 +3788,148 @@ namespace Agentmaster::Msg
         _refreshCard(sessionId, true);
     }
 
+    void MessagingService::_adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode)
+    {
+        // The binds whose session is live now, and the ones that waited too long; both leave the list under the lock, and the work
+        // (Telegram calls, registry writes) runs after it.
+        std::vector<ThreadBind> ready;
+        std::vector<ThreadBind> expired;
+        {
+            std::lock_guard lk{ _mtx };
+            if (_threadBinds.empty())
+            {
+                return;
+            }
+            const int64_t now = WallMs();
+            for (auto it = _threadBinds.begin(); it != _threadBinds.end();)
+            {
+                if (const auto s = byId.find(it->sessionId); s != byId.end() && s->second.live)
+                {
+                    ready.push_back(std::move(*it));
+                    it = _threadBinds.erase(it);
+                }
+                else if (now - it->requestedMs > kNewThreadBindTimeoutMs)
+                {
+                    expired.push_back(std::move(*it));
+                    it = _threadBinds.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+        for (const auto& b : expired)
+        {
+            // The launch never registered a live session (no window took it, claude.exe missing, a preset refused): the user's
+            // messages stay where they are in the chat, and the next message in the thread asks for a folder again.
+            _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": the session " + ShortId(b.sessionId) + L" in " + b.dir + L" did not come up within " +
+                 std::to_wstring(kNewThreadBindTimeoutMs / 60000) + L" min; the thread is free again");
+            _reply(b.threadId, L"The new session did not start (no window opened it within " + std::to_wstring(kNewThreadBindTimeoutMs / 60000) +
+                                   L" minutes). Send a message here to pick a folder again.",
+                   false);
+        }
+        for (auto& b : ready)
+        {
+            const SessionInfo& s = byId.at(b.sessionId);
+            // The thread must still be free and the session must have no topic: nothing else makes either while the bind waits
+            // (the plan runs after this, and a user thread is in no record), so a hit here is a bug worth the line, not a crash.
+            bool taken = false;
+            {
+                std::lock_guard lk{ _mtx };
+                taken = _state.topics.count(b.sessionId) > 0;
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    taken = taken || t.threadId == b.threadId;
+                }
+            }
+            if (taken)
+            {
+                _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L" not bound to " + ShortId(b.sessionId) + L": the thread or the session has a topic already");
+                continue;
+            }
+            // At rest it waits for the user (like a revive): an Idle session's topic would leave the list after the idle grace,
+            // and this one was just made from the phone.
+            SessionState state = s.state;
+            if (state == SessionState::Idle || state == SessionState::Done)
+            {
+                _registry->Update(s.id, [](SessionInfo& ss) {
+                    if (ss.state == SessionState::Idle || ss.state == SessionState::Done)
+                    {
+                        ss.state = SessionState::WaitingForInput;
+                        ss.lastActivityUnixMs = WallMs(); // the Waiting-for-you window starts now
+                        ss.readUnixMs = 0;
+                    }
+                });
+                state = SessionState::WaitingForInput;
+            }
+            // The record, as _createTopic makes one — but for the user's thread, and with no name recorded yet: the rename below
+            // records it when Telegram takes it, and a refused rename leaves the name due for the state-name tick (nameState -1).
+            const std::wstring bare = s.title.empty() ? ShortId(s.id) : s.title;
+            TopicRecord t;
+            t.sessionId = s.id;
+            t.threadId = b.threadId;
+            t.title = bare;
+            t.createdMs = WallMs();
+            t.nameState = -1;
+            t.nameSetMs = 0;
+            t.nameColorMode = -1;
+            t.tabToken = s.tabToken;
+            _seedFromTranscript(t, s); // a fresh session: no transcript yet, so no history to replay, mirrored from its first line
+            {
+                std::lock_guard lk{ _mtx };
+                _state.topics[s.id] = t;
+                _mirrors.erase(s.id);
+                _cards.erase(s.id);
+                _stateDirty = true;
+            }
+            std::wstring color;
+            try
+            {
+                color = ResolveSessionColorHex(colorMode, s);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: no square in the log line; the rename resolves the color itself.
+                LogSwallowedException(L"MessagingService::_adoptBoundThreads (color)");
+            }
+            _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L" is now the topic of " + ShortId(s.id) + L" \x201C" + bare + L"\x201D in " + b.dir +
+                 (color.empty() ? std::wstring{} : L" " + std::wstring{ TgTitleColorSquare(color) }) + L" (" + std::to_wstring(b.held.size()) + L" held message(s) handed over)");
+            LogNav(L"remote telegram new-thread bound " + ShortId(s.id) + L" thread=" + std::to_wstring(b.threadId));
+            // The thread's name like every topic's (state glyph, color square, title); the card follows the rename. A refused rename
+            // (a flood pause) leaves both to the next ticks: the name is due (nameState -1) and the card is posted below anyway.
+            _renameTopic(s.id, bare, state);
+            _refreshCard(s.id, true);
+            // The tab opened in the background and has not started: start its claude now, so the first prompt does not wait for a
+            // visit at the PC (_queueRemotePrompt would start it too, but held commands alone would not).
+            if (!s.started && !s.external && _hooks.sessionAction)
+            {
+                try
+                {
+                    _hooks.sessionAction(s.id, L"start", L"", nullptr);
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"MessagingService::_adoptBoundThreads (start)");
+                }
+            }
+            // What the user wrote in the thread, oldest first, as if it had been written in the topic (it was read live: no
+            // backlog question).
+            for (const auto& msg : b.held)
+            {
+                try
+                {
+                    _handleTopicMessage(s.id, msg, b.threadId, true);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the next held message still goes; this one stays in the chat for the user to send again.
+                    LogSwallowedException(L"MessagingService::_adoptBoundThreads (a held message)");
+                }
+            }
+        }
+    }
+
     void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash)
     {
         {
@@ -3779,8 +3958,10 @@ namespace Agentmaster::Msg
         // §21.15: the form this post asks for — rich with a title chip when chips are wanted (a card's text always names its
         // session). Telegram's answer says which form went (a refused rich post went as HTML in its place).
         const bool wantRich = _titleChipsWanted() && TgHasTitleTokens(text);
+        // §21.17: the post's title links to its topic when the username is known now (_sendText reads the same value).
+        const bool linked = !_linkBot().empty() && TgHasTitleTokens(text);
         // `!ping` = silent: a card is a status message, and only a state the user must know about rings (§21.6).
-        _sendText(threadId, text, !ping, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId, textHash, wantRich](const TgResult& r) {
+        _sendText(threadId, text, !ping, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId, textHash, wantRich, linked](const TgResult& r) {
             auto me = self.lock();
             if (!me)
             {
@@ -3802,6 +3983,7 @@ namespace Agentmaster::Msg
                             // §21.15: the form the card shows now; a rich post that went as HTML is not retried for this text
                             // by the slow form upgrade (a changed text tries the rich form again).
                             t.cardRich = ResultIsRichMessage(r);
+                            t.cardLinked = linked; // §21.17
                             if (wantRich && !t.cardRich)
                             {
                                 me->_cards[sid].richRefusedHash = textHash;
@@ -4112,7 +4294,8 @@ namespace Agentmaster::Msg
                             const std::wstring key = NormalizePromptTextForCompare(text);
                             return phone.count(key) ? PromptSource::Phone : (runner.count(key) ? PromptSource::Runner : PromptSource::Pc);
                         },
-                        _topicVerbose(t));
+                        _topicVerbose(t),
+                        UserLineTitleRow(t.title, sid, t.nameColor, t.threadId)); // §21.17: the session's title under every "👤 You" header
                 }
                 if (posts.empty())
                 {
@@ -4201,24 +4384,51 @@ namespace Agentmaster::Msg
                     } };
                 };
                 std::shared_ptr<PromptRef> turnRef; // §21.12: the current turn's prompt line (its reply quotes it)
+                // §21.17: the CHAIN of turns — each turn's prompt line replies to the previous turn's, so the user can jump from
+                // turn to turn. Its last link is the record's (a replay a restart interrupted goes on with its chain); a line sent
+                // as the user (secretary mode) is no link: the bot cannot make the user's own message a reply.
+                std::shared_ptr<PromptRef> lastTurnPrompt;
+                if (t.historyPromptMessageId > 0)
+                {
+                    lastTurnPrompt = std::make_shared<PromptRef>();
+                    lastTurnPrompt->id.store(t.historyPromptMessageId);
+                }
                 for (const auto& planned : posts)
                 {
                     const HistoryPost& p = planned.post;
                     std::function<void(const TgResult&)> answered = answeredFor(planned.commitTo, planned.dayAfter);
+                    std::shared_ptr<PromptRef> previousTurn; // §21.17: what this turn's prompt line replies to
                     if (p.turnPrompt)
                     {
                         // The turn's prompt line: its answer names its message (lineAnswered below) - the bot's line; a send as
                         // the user is in the user's view, so a history reply to it goes without a quote.
+                        previousTurn = lastTurnPrompt;
                         turnRef = std::make_shared<PromptRef>();
+                        if (!(p.fromUser && asUser))
+                        {
+                            lastTurnPrompt = turnRef;
+                        }
                     }
                     const std::shared_ptr<PromptRef> promptLineRef = p.turnPrompt ? turnRef : nullptr;
-                    const auto lineAnswered = [answered, promptLineRef](const TgResult& r) {
+                    const auto lineAnswered = [answered, promptLineRef, self, sid, thread](const TgResult& r) {
                         if (promptLineRef && r.ok)
                         {
                             if (const int64_t id = r.result.I64At(L"message_id", 0); id > 0)
                             {
                                 promptLineRef->botLine.store(true);
                                 promptLineRef->id.store(id);
+                                // §21.17: the chain's last link, kept on the record (the first live turn after the replay quotes
+                                // it, and a replay that a restart interrupts goes on from it). Released before `answered`, which
+                                // takes the same lock.
+                                if (auto me = self.lock())
+                                {
+                                    std::lock_guard lk{ me->_mtx };
+                                    if (const auto it = me->_state.topics.find(sid); it != me->_state.topics.end() && it->second.threadId == thread)
+                                    {
+                                        it->second.historyPromptMessageId = id;
+                                        me->_stateDirty = true;
+                                    }
+                                }
                             }
                         }
                         if (answered)
@@ -4226,7 +4436,8 @@ namespace Agentmaster::Msg
                             answered(r);
                         }
                     };
-                    const std::shared_ptr<PromptRef> replyRef = p.turnReply ? turnRef : nullptr;
+                    // A turn's reply quotes its prompt (§21.12); a turn's prompt line quotes the previous turn's (§21.17).
+                    const std::shared_ptr<PromptRef> replyRef = p.turnReply ? turnRef : (p.turnPrompt ? previousTurn : nullptr);
                     if (p.fromUser && asUser)
                     {
                         // SECRETARY MODE (§21.5): the user's turn is the user's own bubble, as it was in the conversation. A
@@ -4639,7 +4850,7 @@ namespace Agentmaster::Msg
             // card (one call, not three: the next real post moves the card below it). Telegram's own "topic renamed" notice is
             // deleted when it arrives (_handleMessage). None while the topic's history is being replayed: it would land among
             // the old turns, and the name shows the change anyway.
-            const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs), title, color.square);
+            const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs), title, color.square, before.threadId);
             if (!notice.empty())
             {
                 if (TopicBackfillPending(before))
@@ -5313,8 +5524,10 @@ namespace Agentmaster::Msg
         {
             // Our line: the same line with the new status (or none). Keyed per message, so a newer status replaces one still
             // queued; at the cards' priority, after every message.
+            // §21.17: the same title row the line was posted with (the topic's title and square of now: a rename since shows).
             _editText(topic.promptMessageId,
-                      BuildPromptLineHtml(topic.promptTsMs, static_cast<PromptSource>(topic.promptSource), topic.promptText, status, false),
+                      BuildPromptLineHtml(topic.promptTsMs, static_cast<PromptSource>(topic.promptSource), topic.promptText, status, false,
+                                          UserLineTitleRow(topic.title, topic.sessionId, topic.nameColor, topic.threadId)),
                       SendPriority::CardEdit,
                       L"pl:" + std::to_wstring(topic.promptMessageId),
                       json::Value{});
@@ -5379,6 +5592,7 @@ namespace Agentmaster::Msg
         // §21.13: the square the topic's NAME shows, not the tab's color of this instant: the card and the list always agree,
         // and a color change edits the card in the rename's own refresh (a topic named before the square gets it then too).
         extras.colorSquare = topic.nameColor;
+        extras.threadId = topic.threadId; // §21.17: the card's title links to its topic (in the chat's "All" view, the way in)
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         json::Value markup;
         _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
@@ -5413,16 +5627,20 @@ namespace Agentmaster::Msg
             return;
         }
         const bool wantRich = _titleChipsWanted();
+        // §21.17: the link is part of the FORM, not of the hash (taken without the username above): every card posted before the
+        // links, or before this run's getMe answered, is linked by the slow upgrade, one card at a time.
+        const bool wantLinked = !_linkBot().empty();
         bool formOnly = false;
         if (hash == topic.cardTextHash)
         {
-            if (topic.cardRich == wantRich)
+            if (topic.cardRich == wantRich && topic.cardLinked == wantLinked)
             {
                 return; // the topic shows this very card already, in the wanted form (also after a restart: both are persisted)
             }
-            // §21.15: the text is unchanged and only the FORM differs — a card posted before the chips, or the rich switch
-            // flipped. Re-edited only when the slow upgrade gives this card the turn: one card at a time, within the budget.
-            if (!_takeCardFormatSlot(sessionId, hash, wantRich))
+            // §21.15: the text is unchanged and only the FORM differs — a card posted before the chips (or the links), or the
+            // rich switch flipped. Re-edited only when the slow upgrade gives this card the turn: one card at a time, within the
+            // budget.
+            if (!_takeCardFormatSlot(sessionId, hash, wantRich, wantLinked))
             {
                 return;
             }
@@ -5479,7 +5697,7 @@ namespace Agentmaster::Msg
                 }
                 me->_log(L"[msg] a card was deleted in Telegram: a new one is posted (thread " + std::to_wstring(thread) + L")");
                 me->_tickCv.notify_one();
-            }, [self, thread, cardId, hash, wantRich](bool rich) {
+            }, [self, thread, cardId, hash, wantRich, wantLinked](bool rich) {
                 // §21.15: the form the card shows after this edit. A rich edit that went as HTML (refused, or past the rich
                 // limit) marks this text refused, so the slow upgrade does not retry it until the text changes.
                 auto me = self.lock();
@@ -5497,6 +5715,13 @@ namespace Agentmaster::Msg
                             t.cardRich = rich;
                             me->_stateDirty = true;
                         }
+                        // §21.17: both forms carry the link when the username was known for this edit (a rich edit that fell
+                        // back to HTML included).
+                        if (t.cardLinked != wantLinked)
+                        {
+                            t.cardLinked = wantLinked;
+                            me->_stateDirty = true;
+                        }
                         if (wantRich && !rich)
                         {
                             me->_cards[sid].richRefusedHash = hash;
@@ -5508,12 +5733,19 @@ namespace Agentmaster::Msg
         }
     }
 
-    bool MessagingService::_takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich)
+    bool MessagingService::_takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich, bool wantLinked)
     {
         size_t waiting = 0;
         {
             std::lock_guard lk{ _mtx };
-            if (wantRich && _cards[sessionId].richRefusedHash == hash)
+            // §21.17: whether this card lacks the link it should carry — an upgrade the classic fallback can make even when the rich
+            // form is refused.
+            bool linkMissing = false;
+            if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+            {
+                linkMissing = it->second.cardLinked != wantLinked;
+            }
+            if (wantRich && _cards[sessionId].richRefusedHash == hash && !linkMissing)
             {
                 return false; // Telegram refused this very text in the rich form: not again until the text changes
             }
@@ -5537,14 +5769,14 @@ namespace Agentmaster::Msg
             _lastCardFormatEditMs = tick;
             for (const auto& [sid, t] : _state.topics)
             {
-                if (sid != sessionId && t.threadId != 0 && t.cardMessageId > 0 && t.cardRich != wantRich)
+                if (sid != sessionId && t.threadId != 0 && t.cardMessageId > 0 && (t.cardRich != wantRich || t.cardLinked != wantLinked))
                 {
                     ++waiting;
                 }
             }
         }
-        _log(L"[msg] " + ShortId(sessionId) + L" card re-edited " + std::wstring{ wantRich ? L"with a title chip" : L"as HTML" } + L" (its form only; " +
-             std::to_wstring(waiting) + L" more card(s) to go)");
+        _log(L"[msg] " + ShortId(sessionId) + L" card re-edited " + std::wstring{ wantRich ? L"with a title chip" : L"as HTML" } +
+             (wantLinked ? L" that links to its topic" : L"") + L" (its form only; " + std::to_wstring(waiting) + L" more card(s) to go)");
         return true;
     }
 
@@ -5854,6 +6086,23 @@ namespace Agentmaster::Msg
                         matchQueue(*fresher);
                     }
                 }
+                // §21.17: the PREVIOUS turn's prompt, which this turn's line replies to (the user's "should be a reply to previous
+                // user message. this way we can jump between user turns"): the live mirror's last prompt — its id may still be in
+                // flight, the shared PromptRef resolves it when this line goes —, else the record's (after a restart), else the
+                // history replay's last line once the replay is done (before that, the line it would quote is not posted yet).
+                std::shared_ptr<PromptRef> previousTurn;
+                if (!it.midTurn)
+                {
+                    if (m.promptRef)
+                    {
+                        previousTurn = m.promptRef;
+                    }
+                    else if (topic.promptMessageId > 0 || (!TopicBackfillPending(topic) && topic.historyPromptMessageId > 0))
+                    {
+                        previousTurn = std::make_shared<PromptRef>();
+                        previousTurn->id.store(topic.promptMessageId > 0 ? topic.promptMessageId : topic.historyPromptMessageId);
+                    }
+                }
                 if (!it.midTurn)
                 {
                     // §21.12: this is the turn's prompt — the LAST prompt the user sent. The previous one's status goes, this
@@ -5884,7 +6133,10 @@ namespace Agentmaster::Msg
                 // §21.12: "👤 You · 14:02 · typed at the PC · ⏳ running" over the prompt (a mid-turn message: no status). Sent at
                 // the FINAL priority, the reply's: queued in the same tick (a fast turn), the reply must not overtake its prompt.
                 const PromptSource source = fromQueue ? PromptSource::Runner : PromptSource::Pc;
-                const std::wstring html = BuildPromptLineHtml(it.tsMs, source, it.text, it.midTurn ? PromptTurnStatus::None : PromptTurnStatus::Running, it.midTurn);
+                // §21.17: the session's title as the line's second row, a link to this topic (in the chat's "All" view it says
+                // whose turn this is; _showPromptStatus edits the line with the same row).
+                const std::wstring html = BuildPromptLineHtml(it.tsMs, source, it.text, it.midTurn ? PromptTurnStatus::None : PromptTurnStatus::Running, it.midTurn,
+                                                              UserLineTitleRow(topic.title, topic.sessionId, topic.nameColor, topic.threadId));
                 const std::shared_ptr<PromptRef> ref = it.midTurn ? nullptr : m.promptRef;
                 // The bot's line answers with its id: the turn's reply quotes it, and its status is an edit of it.
                 const auto lineSent = [ref](const TgResult& r) {
@@ -5919,7 +6171,7 @@ namespace Agentmaster::Msg
                     _sendAsUser(
                         thread,
                         plain,
-                        [self, thread, fallback, lineSent](const TgResult& r) {
+                        [self, thread, fallback, lineSent, previousTurn](const TgResult& r) {
                             auto me = self.lock();
                             if (!me)
                             {
@@ -5939,13 +6191,15 @@ namespace Agentmaster::Msg
                                 me->_state.businessNote = r.description;
                                 me->_stateDirty = true;
                             }
-                            me->_sendText(thread, fallback, true, SendPriority::Final, L"", json::Value{}, lineSent);
+                            // §21.17: the bot's line in the user's place replies to the previous turn's prompt like any other.
+                            me->_sendText(thread, fallback, true, SendPriority::Final, L"", json::Value{}, lineSent, 0, true, previousTurn);
                         },
                         SendPriority::Final);
                 }
                 else
                 {
-                    _sendText(topic.threadId, html, true, SendPriority::Final, L"", json::Value{}, lineSent);
+                    // §21.17: a turn's line quotes the previous turn's prompt (a message typed mid-turn has no previousTurn).
+                    _sendText(topic.threadId, html, true, SendPriority::Final, L"", json::Value{}, lineSent, 0, true, previousTurn);
                 }
                 break;
             }
@@ -6064,7 +6318,9 @@ namespace Agentmaster::Msg
                 break;
             }
             case TopicItemKind::Command:
-                _sendText(topic.threadId, BuildCommandLineHtml(it.tsMs, it.text), true, SendPriority::New, L"", json::Value{}, nullptr); // §21.12: "👤 You · 14:02 · command"
+                // §21.12: "👤 You · 14:02 · command"; §21.17: the session's title row under it.
+                _sendText(topic.threadId, BuildCommandLineHtml(it.tsMs, it.text, UserLineTitleRow(topic.title, topic.sessionId, topic.nameColor, topic.threadId)), true,
+                          SendPriority::New, L"", json::Value{}, nullptr);
                 break;
             case TopicItemKind::Answer:
             {
@@ -6078,7 +6334,8 @@ namespace Agentmaster::Msg
                 m.workLogDirty = false;
                 ++m.workLogGen;
                 m.awaitingAnswer = false;
-                const std::wstring html = BuildAnswerLineHtml(it.tsMs, it.text); // §21.12: "👤 You · 14:02 · ↩ answer" over the answer
+                // §21.12: "👤 You · 14:02 · ↩ answer" over the answer; §21.17: the session's title row under the header.
+                const std::wstring html = BuildAnswerLineHtml(it.tsMs, it.text, UserLineTitleRow(topic.title, topic.sessionId, topic.nameColor, topic.threadId));
                 bool asUser = false;
                 {
                     std::lock_guard lk{ _mtx };

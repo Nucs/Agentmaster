@@ -165,7 +165,9 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The link of a topic of the bot's private chat: https://t.me/&lt;bot&gt;/&lt;topic&gt;?topic=&lt;topic&gt; (see the header
-    /// note: the topic's message link, plus the parameter Telegram Desktop reads).
+    /// note: the topic's message link, plus the parameter Telegram Desktop reads). Since §21.17 the one builder is TgTopicUrl
+    /// (TelegramFormat.h), which every title link of the bot's messages uses too, so a directory chip and a title chip open the
+    /// same place.
     /// </summary>
     /// <param name="botUsername">The bot's username, with or without its leading '@'.</param>
     /// <param name="threadId">The topic's message_thread_id (the Bot API's, which is the user-space id).</param>
@@ -173,16 +175,7 @@ namespace Agentmaster::Msg
     /// <exception cref="std::bad_alloc">If the link cannot be allocated.</exception>
     inline std::wstring DirectoryTopicUrl(std::wstring_view botUsername, int64_t threadId)
     {
-        if (!botUsername.empty() && botUsername.front() == L'@')
-        {
-            botUsername.remove_prefix(1);
-        }
-        if (botUsername.empty() || threadId <= 0)
-        {
-            return {};
-        }
-        const std::wstring id = std::to_wstring(threadId);
-        return L"https://t.me/" + std::wstring{ botUsername } + L"/" + id + L"?topic=" + id;
+        return TgTopicUrl(botUsername, threadId);
     }
 
     /// <summary>

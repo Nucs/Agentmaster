@@ -555,9 +555,24 @@ namespace Agentmaster::Msg
         // Service messages (a topic created by the user, a pinned-message note) carry no text.
         if (msg.Find(L"forum_topic_created"))
         {
+            // §21.17: a thread the user opened starts a NEW SESSION — its folder picker goes up at once (before §21.17 the bot
+            // answered that topics are made from the tabs).
             if (threadId != 0 && threadId != searchThread && sessionId.empty())
             {
-                _reply(threadId, L"Topics are made from Agentmaster's tabs. To start a new session from the phone, send <code>/newsession &lt;folder&gt;</code> in the \U0001F50E Search topic; this topic can be deleted.", false);
+                _onUserThreadCreated(threadId, msg);
+            }
+            return;
+        }
+        // §21.17: the user RENAMED a session's topic — the session takes the name as its title (the bot's own renames come back
+        // with the bot as the sender, handled above). An edit of the icon alone carries no name and changes nothing.
+        if (const auto* editedTopic = msg.Find(L"forum_topic_edited"); editedTopic && editedTopic->type == json::Value::Type::Obj)
+        {
+            if (!sessionId.empty())
+            {
+                if (const auto* newName = editedTopic->Find(L"name"); newName && newName->type == json::Value::Type::Str)
+                {
+                    _onUserTopicRenamed(sessionId, threadId, newName->str);
+                }
             }
             return;
         }
@@ -621,13 +636,26 @@ namespace Agentmaster::Msg
                 _sendHelp(0, true);
                 return;
             }
-            _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones. Send /help for the commands.", false);
+            _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones; a new thread starts a new session (you pick its folder). Send /help for the commands.", false); // §21.17: the new thread
             return;
         }
-        _reply(threadId, L"This topic belongs to no session any more (its tab closed or went idle). The \U0001F50E Search topic brings a session back; this topic can be deleted.", false);
+        // §21.17: a thread no session owns — one the user opened, or one whose session closed while the thread stayed — starts a
+        // new session: the message waits for the thread's folder picker (before §21.17 the bot answered that the topic belongs to
+        // no session any more). A recreation's old topic, about to be deleted, is told so instead.
+        bool orphan = false;
+        {
+            std::lock_guard lk{ _mtx };
+            orphan = std::find(_state.orphanThreads.begin(), _state.orphanThreads.end(), threadId) != _state.orphanThreads.end();
+        }
+        if (orphan)
+        {
+            _reply(threadId, L"This topic is being made again and goes away in a moment; write in its new topic.", false);
+            return;
+        }
+        _holdForNewThread(threadId, msg, edited);
     }
 
-    void MessagingService::_handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId)
+    void MessagingService::_handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held)
     {
         const std::wstring text = msg.StrAt(L"text");
         const int64_t msgId = msg.I64At(L"message_id", 0);
@@ -662,9 +690,10 @@ namespace Agentmaster::Msg
         {
             return;
         }
-        if (IsBacklogUpdate(dateMs, WallMs()))
+        if (!held && IsBacklogUpdate(dateMs, WallMs()))
         {
-            // D2: a message sent while Agentmaster was closed is asked about, never queued silently.
+            // D2: a message sent while Agentmaster was closed is asked about, never queued silently. §21.17: a message a new
+            // thread's picker HELD was read live; however long the folder pick took, it is no backlog.
             const std::wstring age = TgShortSpan(WallMs() - dateMs);
             const std::wstring token = _tokenFor(L"backlog-queue", sessionId, std::to_wstring(msgId) + L"|" + prompt, kTokenTtlMsFor(2));
             const std::wstring drop = _tokenFor(L"backlog-drop", sessionId, std::to_wstring(msgId), kTokenTtlMsFor(2));
@@ -773,6 +802,7 @@ namespace Agentmaster::Msg
             _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
             CardExtras extras;
             extras.colorSquare = _titleSquare(&*s); // §21.13: the title with the tab's color, as the tab shows it now
+            extras.threadId = _threadOf(sessionId); // §21.17: the title links to the session's topic
             _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras), false, markup);
             done(L"ok");
             return;
@@ -937,7 +967,8 @@ namespace Agentmaster::Msg
                 _registry->Update(sessionId, [&](SessionInfo& ss) { ss.title = title; });
             }
             // §21.13: the new title with the tab's color square (the topic's name, and a line saying what changed, follow).
-            _reply(threadId, L"Renamed to <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title) + L"</b> (the topic follows in a moment).", false); // §21.15: a chip in a rich reply
+            // §21.15: a chip in a rich reply; §21.17: a link to the session's topic.
+            _reply(threadId, L"Renamed to <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title, _threadOf(sessionId)) + L"</b> (the topic follows in a moment).", false);
             done(L"ok");
             return;
         }
@@ -1044,7 +1075,8 @@ namespace Agentmaster::Msg
                 return;
             }
             const auto a = AnalyzeSessionTranscript(path, 0);
-            std::wstring html = L"<b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title) + L"</b>\n"; // §21.13: with the tab's color square; §21.15: a chip when rich
+            // §21.13: with the tab's color square; §21.15: a chip when rich; §21.17: a link to the session's topic.
+            std::wstring html = L"<b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title, _threadOf(sessionId)) + L"</b>\n";
             html += TgEscapeHtml(s->workingDir) + (a.branch.empty() ? L"" : L" \x00B7 " + TgEscapeHtml(a.branch)) + L"\n";
             if (!a.firstTs.empty() && !a.lastTs.empty())
             {
@@ -1182,7 +1214,7 @@ namespace Agentmaster::Msg
                     return;
                 }
                 const std::wstring token = _tokenFor(L"confirm-" + name, sessionId, L"", kTokenTtlMsFor(1));
-                _reply(threadId, verb + L" <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title) + L"</b> while a turn is running? The turn is cut off.", false,
+                _reply(threadId, verb + L" <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title, _threadOf(sessionId)) + L"</b> while a turn is running? The turn is cut off.", false,
                        _buttons({ { { verb + L" now", token }, { L"Cancel", _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1)) } } }));
                 done(L"asked");
                 return;
@@ -1398,7 +1430,7 @@ namespace Agentmaster::Msg
             for (const auto& [id, title, square] : idle)
             {
                 ++n;
-                html += L"\n" + std::to_wstring(n) + L". " + TgTitleToken(TgTitleForm::Plain, square, title); // §21.15: a chip when rich
+                html += L"\n" + std::to_wstring(n) + L". " + TgTitleToken(TgTitleForm::Plain, square, title, _threadOf(id)); // §21.15: a chip when rich; §21.17: a link while its topic stands
                 if (n <= 10)
                 {
                     rows.push_back({ { L"Wake " + std::to_wstring(n), _tokenFor(L"wake", id, L"", kTokenTtlMsFor(2)) },
@@ -1609,6 +1641,7 @@ namespace Agentmaster::Msg
             card.prompts = row.prompts;
             card.why = row.why;
             card.colorSquare = _titleSquare(s ? &*s : nullptr, row.dir); // §21.13: its tab's color, else its folder's
+            card.threadId = _threadOf(row.sessionId); // §21.17: a session with a topic: its title links there
             card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
             cards.push_back(std::move(card));
         }
@@ -1678,6 +1711,7 @@ namespace Agentmaster::Msg
         card.prompts = remembered ? row.prompts : 0;
         card.why = remembered ? row.why : std::wstring{};
         card.colorSquare = _titleSquare(s ? &*s : nullptr, dir); // §21.13: its tab's color, else its folder's
+        card.threadId = _threadOf(pick.sessionId); // §21.17: a session with a topic: its title links there
         card.state = state;
         const std::wstring html = BuildSearchPickMenuHtml(card, WallMs());
         // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need. Each acts on
@@ -1704,7 +1738,8 @@ namespace Agentmaster::Msg
         // know), read lean here: the resume below reads the full record again, on the state of that moment. §21.15: a title token —
         // the menu is edited in the form chips want (_editText), so the head is a chip in a rich menu.
         const auto known = _registry->GetWithoutQueue(sessionId);
-        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " + TgTitleToken(TgTitleForm::Plain, _titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title) + L"</b>";
+        const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " +
+                                  TgTitleToken(TgTitleForm::Plain, _titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title, _threadOf(sessionId)) + L"</b>";
         if (kind == L"pick-cancel")
         {
             // The menu goes; the answer above it keeps its pick buttons. A menu already gone (the user deleted it) is a
@@ -1828,6 +1863,13 @@ namespace Agentmaster::Msg
         if (const int64_t frontThread = ParseDirectoryFrontCallbackData(data); frontThread > 0)
         {
             answer(_bringTopicToFront(frontThread));
+            return;
+        }
+        // A new thread's PICKER (§21.17): the data names the list and an index or a page; the picker it belongs to is the one of
+        // the thread the button sits in. The toast says what happens (or that the picker is from before a restart).
+        if (const NewThreadAction pick = ParseNewThreadCallbackData(data); pick.kind != NewThreadAction::Kind::None)
+        {
+            answer(_onNewThreadAction(pick, threadId));
             return;
         }
         if (data.rfind(L"c:", 0) == 0)
@@ -2238,6 +2280,445 @@ namespace Agentmaster::Msg
         }
     }
 
+    // ===== a thread the user opens starts a new session (§21.17) ====================================
+
+    void MessagingService::_onUserThreadCreated(int64_t threadId, const json::Value& msg)
+    {
+        // The name the user gave the thread becomes the session's title; one Telegram made up (is_name_implicit: the user only
+        // typed a message, and the app named the thread after it) does not — the folder's name is the title then, and renaming
+        // the thread later renames the session.
+        std::wstring name;
+        bool implicit = true;
+        if (const auto* created = msg.Find(L"forum_topic_created"); created && created->type == json::Value::Type::Obj)
+        {
+            name = StripTopicNameDecoration(created->StrAt(L"name"));
+            implicit = created->BoolAt(L"is_name_implicit", false);
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            auto& nt = _newThreads[threadId];
+            nt.topicName = implicit ? std::wstring{} : name;
+            nt.lastUseMs = WallMs();
+        }
+        // A thread Telegram named (is_name_implicit) was made from the user's first message, which comes right after this service
+        // message: the picker goes up with it (_holdForNewThread), one post instead of a post and an edit that counts the message.
+        // A thread the user named may have no message yet: its picker goes up now.
+        _log(L"[msg] new thread " + std::to_wstring(threadId) + L" opened by the user" + (implicit ? std::wstring{ L" (an implicit name): its folder picker goes up with the first message" } : L" \x201C" + name + L"\x201D: its folder picker goes up"));
+        LogNav(L"remote telegram new-thread " + std::to_wstring(threadId));
+        if (!implicit)
+        {
+            _showNewThreadPicker(threadId);
+        }
+    }
+
+    void MessagingService::_holdForNewThread(int64_t threadId, const json::Value& msg, bool edited)
+    {
+        const std::wstring text = msg.StrAt(L"text");
+        const int64_t msgId = msg.I64At(L"message_id", 0);
+        const int64_t now = WallMs();
+        if (edited)
+        {
+            // An edit of a message the thread still holds replaces it (it has not reached any session yet); an edit of anything
+            // else is left alone — a message that already went to the session answers that itself, a stray one needs nothing.
+            std::lock_guard lk{ _mtx };
+            const auto replace = [&](std::vector<json::Value>& held) {
+                for (auto& h : held)
+                {
+                    if (h.I64At(L"message_id", 0) == msgId)
+                    {
+                        h = msg;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (const auto it = _newThreads.find(threadId); it != _newThreads.end() && replace(it->second.held))
+            {
+                it->second.lastUseMs = now;
+                return;
+            }
+            for (auto& b : _threadBinds)
+            {
+                if (b.threadId == threadId && replace(b.held))
+                {
+                    return;
+                }
+            }
+            return;
+        }
+        // A thread whose pick is launching: the message waits for that session too.
+        {
+            bool bound = false;
+            bool full = false;
+            {
+                std::lock_guard lk{ _mtx };
+                for (auto& b : _threadBinds)
+                {
+                    if (b.threadId == threadId)
+                    {
+                        bound = true;
+                        full = b.held.size() >= kNewThreadHeldMax;
+                        if (!full)
+                        {
+                            b.held.push_back(msg);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (bound)
+            {
+                if (full)
+                {
+                    _reply(threadId, L"The new session is starting; send this again once it is up.", false, json::Value{}, msgId);
+                }
+                else
+                {
+                    _react(msgId, L"\U0001F440"); // seen: it goes to the session once the session is up
+                }
+                return;
+            }
+        }
+        // A lone folder path picks that folder at once.
+        if (const auto folder = NewThreadTypedFolder(text))
+        {
+            {
+                std::lock_guard lk{ _mtx };
+                _newThreads[threadId].lastUseMs = now; // a thread the bot never saw (after a restart) gets its entry here
+            }
+            const std::wstring outcome = _startNewThreadSession(threadId, *folder);
+            if (!outcome.empty())
+            {
+                _reply(threadId, TgEscapeHtml(outcome), false, json::Value{}, msgId);
+            }
+            return;
+        }
+        bool full = false;
+        {
+            std::lock_guard lk{ _mtx };
+            // Forget pickers nobody used for a day: the map lives in memory only, and a thread left alone needs no entry.
+            for (auto it = _newThreads.begin(); it != _newThreads.end();)
+            {
+                it = it->first != threadId && now - it->second.lastUseMs > kNewThreadPickerIdleMs ? _newThreads.erase(it) : std::next(it);
+            }
+            auto& nt = _newThreads[threadId];
+            full = nt.held.size() >= kNewThreadHeldMax;
+            if (!full)
+            {
+                nt.held.push_back(msg);
+            }
+            nt.lastUseMs = now;
+        }
+        if (full)
+        {
+            _reply(threadId, L"This thread holds " + std::to_wstring(kNewThreadHeldMax) + L" messages already: pick a folder above first.", false, json::Value{}, msgId);
+            return;
+        }
+        _react(msgId, L"\U0001F440"); // seen: it waits for the folder
+        LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" held chars=" + std::to_wstring(text.size()));
+        _showNewThreadPicker(threadId); // posts the picker, or edits it to count what it holds
+    }
+
+    void MessagingService::_showNewThreadPicker(int64_t threadId)
+    {
+        bool needLists = false;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end())
+            {
+                return;
+            }
+            needLists = !it->second.listsBuilt;
+        }
+        // The lists, once per picker and outside the lock: a registry copy of where every session worked, and one probe per
+        // listed folder (a folder deleted since is not offered). A UNC path is kept unprobed — an offline share would hold the
+        // poll thread for the network's timeout; the pick checks it again.
+        NewThreadLists lists;
+        if (needLists)
+        {
+            std::vector<SessionFolderFacts> facts;
+            for (const auto& sample : _registry->PlaceSamples())
+            {
+                facts.push_back(SessionFolderFacts{ sample.workingDir, sample.inferredWorkingDir, sample.lastActivityUnixMs });
+            }
+            std::vector<std::wstring> scratchRoots;
+            try
+            {
+                for (const auto& root : CollectMachineTempRoots())
+                {
+                    scratchRoots.push_back(NormDirKey(TrimFolderPath(root)));
+                }
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: no scratch roots — a temp folder a session ran in may be offered; nothing else changes.
+                LogSwallowedException(L"MessagingService::_showNewThreadPicker (temp roots)");
+            }
+            lists = BuildNewThreadLists(facts, scratchRoots, [](const std::wstring& path) {
+                if (path.size() >= 2 && (path[0] == L'\\' || path[0] == L'/') && (path[1] == L'\\' || path[1] == L'/'))
+                {
+                    return true;
+                }
+                const DWORD attrs = ::GetFileAttributesW(path.c_str());
+                return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            });
+        }
+        std::wstring html;
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
+        int64_t pickerId = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end())
+            {
+                return; // picked or cancelled while the lists were built
+            }
+            auto& nt = it->second;
+            if (needLists && !nt.listsBuilt)
+            {
+                nt.lists = std::move(lists);
+                nt.listsBuilt = true;
+            }
+            if (nt.pickerMessageId < 0)
+            {
+                nt.pickerStale = true; // the post is in flight: its answer shows this state (_showNewThreadPicker again)
+                return;
+            }
+            html = BuildNewThreadPickerHtml(nt.lists, nt.recentPage, nt.usedPage, nt.held.size(), nt.topicName, WallMs());
+            for (const auto& row : BuildNewThreadPickerKeyboard(nt.lists, nt.recentPage, nt.usedPage))
+            {
+                std::vector<std::pair<std::wstring, std::wstring>> r;
+                for (const auto& b : row)
+                {
+                    r.emplace_back(b.text, b.data);
+                }
+                rows.push_back(std::move(r));
+            }
+            pickerId = nt.pickerMessageId;
+            if (pickerId == 0)
+            {
+                nt.pickerMessageId = -1;
+            }
+            nt.pickerStale = false;
+        }
+        if (pickerId > 0)
+        {
+            // In place: a page change, one more held message. Keyed per picker, so a newer page replaces one still queued.
+            _editText(pickerId, html, SendPriority::Final, L"ntp:" + std::to_wstring(threadId), _buttons(rows));
+            return;
+        }
+        auto self = weak_from_this();
+        _sendText(threadId, html, true, SendPriority::Final, L"", _buttons(rows), [self, threadId](const TgResult& r) {
+            auto me = self.lock();
+            if (!me)
+            {
+                return;
+            }
+            const int64_t id = r.ok ? r.result.I64At(L"message_id", 0) : 0;
+            bool again = false;
+            bool orphaned = false;
+            {
+                std::lock_guard lk{ me->_mtx };
+                if (const auto it = me->_newThreads.find(threadId); it != me->_newThreads.end())
+                {
+                    it->second.pickerMessageId = id; // 0 = refused: the next held message posts it again
+                    again = id > 0 && it->second.pickerStale;
+                }
+                else
+                {
+                    orphaned = id > 0; // picked (a typed path) or cancelled while this post flew: it shows nothing anyone needs
+                }
+            }
+            if (!r.ok)
+            {
+                me->_log(L"[msg] new thread " + std::to_wstring(threadId) + L": the folder picker was refused (" + r.description + L")");
+            }
+            if (orphaned)
+            {
+                OutItem del;
+                del.prio = SendPriority::Final;
+                del.method = L"deleteMessage";
+                del.params = json::Value::MkObj();
+                del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(me->_ownerId)));
+                del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(id)));
+                me->_enqueue(std::move(del));
+            }
+            if (again)
+            {
+                me->_showNewThreadPicker(threadId);
+            }
+        });
+    }
+
+    std::wstring MessagingService::_onNewThreadAction(const NewThreadAction& action, int64_t threadId)
+    {
+        static constexpr const wchar_t* kGone = L"This folder picker is from before a restart (or was used): send a message in this thread for a new one.";
+        if (action.kind == NewThreadAction::Kind::PageRecent || action.kind == NewThreadAction::Kind::PageUsed)
+        {
+            {
+                std::lock_guard lk{ _mtx };
+                const auto it = _newThreads.find(threadId);
+                if (it == _newThreads.end() || it->second.pickerMessageId <= 0)
+                {
+                    return kGone;
+                }
+                auto& nt = it->second;
+                if (action.kind == NewThreadAction::Kind::PageRecent)
+                {
+                    nt.recentPage = ClampNewThreadPage(action.value, nt.lists.recent.size());
+                }
+                else
+                {
+                    nt.usedPage = ClampNewThreadPage(action.value, nt.lists.mostUsed.size());
+                }
+                nt.lastUseMs = WallMs();
+            }
+            _showNewThreadPicker(threadId);
+            return L"";
+        }
+        if (action.kind == NewThreadAction::Kind::Cancel)
+        {
+            int64_t pickerId = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                const auto it = _newThreads.find(threadId);
+                if (it == _newThreads.end())
+                {
+                    return kGone;
+                }
+                pickerId = it->second.pickerMessageId;
+                _newThreads.erase(it); // what it held is dropped: the messages stay in the chat, nothing goes anywhere
+            }
+            if (pickerId > 0)
+            {
+                OutItem del;
+                del.prio = SendPriority::Final;
+                del.method = L"deleteMessage";
+                del.params = json::Value::MkObj();
+                del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(pickerId)));
+                _enqueue(std::move(del));
+            }
+            LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" cancelled");
+            return L"Cancelled. Send a message here to pick a folder again, or delete the thread.";
+        }
+        // A folder: the one the button names in the picker's own lists.
+        std::wstring folder;
+        {
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end())
+            {
+                return kGone;
+            }
+            const auto& list = action.kind == NewThreadAction::Kind::PickRecent ? it->second.lists.recent : it->second.lists.mostUsed;
+            if (action.value >= list.size())
+            {
+                return L"That folder is no longer in the list.";
+            }
+            folder = list[action.value].path;
+            it->second.lastUseMs = WallMs();
+        }
+        return _startNewThreadSession(threadId, folder);
+    }
+
+    std::wstring MessagingService::_startNewThreadSession(int64_t threadId, const std::wstring& folder)
+    {
+        const DWORD attrs = ::GetFileAttributesW(folder.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return L"Not a folder on this PC: " + folder;
+        }
+        if (!_hooks.launch)
+        {
+            return L"Opening sessions is not available in this build.";
+        }
+        // The bind goes in BEFORE the launch: the launch is asynchronous (the window's UI thread opens the tab), and the tick may
+        // see the session live at any moment after it. The thread's messages are COPIED into it, so a refused launch leaves the
+        // picker as it was.
+        ThreadBind bind;
+        bind.sessionId = NewSessionId();
+        bind.threadId = threadId;
+        bind.dir = folder;
+        bind.requestedMs = WallMs();
+        int64_t pickerId = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            if (const auto it = _newThreads.find(threadId); it != _newThreads.end())
+            {
+                bind.title = it->second.topicName;
+                bind.held = it->second.held;
+                pickerId = it->second.pickerMessageId;
+            }
+            _threadBinds.push_back(bind);
+        }
+        RemoteLaunchRequest req;
+        req.kind = RemoteLaunchRequest::Kind::NewSession;
+        req.dir = folder;
+        req.title = bind.title; // "" = the folder-derived default title
+        req.newSessionId = bind.sessionId;
+        bool ok = false;
+        try
+        {
+            ok = _hooks.launch(req);
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::_startNewThreadSession (launch)");
+        }
+        if (!ok)
+        {
+            std::lock_guard lk{ _mtx };
+            _threadBinds.erase(std::remove_if(_threadBinds.begin(), _threadBinds.end(), [&](const ThreadBind& b) { return b.sessionId == bind.sessionId; }),
+                               _threadBinds.end());
+            return L"No window could open it right now; try again in a moment.";
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            _newThreads.erase(threadId); // the bind holds the messages now
+        }
+        if (pickerId > 0)
+        {
+            // The user's "once picked, removed": the picker goes; the thread shows the session's card once it is up.
+            OutItem del;
+            del.prio = SendPriority::Final;
+            del.method = L"deleteMessage";
+            del.params = json::Value::MkObj();
+            del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(pickerId)));
+            _enqueue(std::move(del));
+        }
+        _log(L"[msg] new thread " + std::to_wstring(threadId) + L": opening session " + ShortId(bind.sessionId) + L" in " + folder +
+             (bind.title.empty() ? std::wstring{} : L" titled \x201C" + bind.title + L"\x201D") + L" (" + std::to_wstring(bind.held.size()) + L" held message(s))");
+        LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" -> launch " + ShortId(bind.sessionId) + L" dir=" + folder);
+        return L"Opening a new session in " + NewThreadFolderLabel(folder, {}) + L"\x2026";
+    }
+
+    void MessagingService::_onUserTopicRenamed(const std::wstring& sessionId, int64_t threadId, const std::wstring& name)
+    {
+        const std::wstring title = StripTopicNameDecoration(name);
+        if (title.empty())
+        {
+            return; // nothing but the decoration: no title to take
+        }
+        const auto s = _registry->GetWithoutQueue(sessionId);
+        if (!s || s->title == title)
+        {
+            return; // the name the service gave it, or one only re-decorated: the session's title stands
+        }
+        if (_hooks.sessionAction)
+        {
+            _hooks.sessionAction(sessionId, L"rename", title, nullptr); // the hosting window pins the tab + the registry (Rule #11)
+        }
+        else
+        {
+            _registry->Update(sessionId, [&](SessionInfo& ss) { ss.title = title; });
+        }
+        _log(L"[msg] " + ShortId(sessionId) + L" renamed from its thread " + std::to_wstring(threadId) + L" \x2192 \x201C" + title + L"\x201D (the topic name follows)");
+        LogNav(L"remote telegram topic-rename " + ShortId(sessionId));
+    }
+
     // ===== the topics' verbose mode (§21.11) ======================================================
 
     void MessagingService::_runVerboseCommand(const std::wstring& sessionId, const std::wstring& args, int64_t threadId)
@@ -2365,7 +2846,7 @@ namespace Agentmaster::Msg
         {
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model]\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)";
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)";
         }
         else
         {

@@ -142,7 +142,8 @@ namespace winrt::TerminalApp::implementation
         {
             using Kind = ::Agentmaster::RemoteLaunchRequest::Kind;
             const wchar_t* what = request.kind == Kind::Fork ? L"fork" : (request.kind == Kind::Resume ? L"resume" : L"new");
-            ::Agentmaster::LogNav(std::wstring{ L"remote launch " } + what + L" " + ::Agentmaster::ShortId(request.sessionId) + L" dir=" + request.dir + (request.model.empty() ? std::wstring{} : L" model=" + request.model));
+            ::Agentmaster::LogNav(std::wstring{ L"remote launch " } + what + L" " + ::Agentmaster::ShortId(request.sessionId) + L" dir=" + request.dir + (request.model.empty() ? std::wstring{} : L" model=" + request.model) +
+                                  (request.newSessionId.empty() ? std::wstring{} : L" id=" + ::Agentmaster::ShortId(request.newSessionId)));
             if (request.kind != Kind::NewSession && request.dir.empty())
             {
                 ::Agentmaster::LogNav(L"remote launch dropped: no folder for the session");
@@ -156,7 +157,9 @@ namespace winrt::TerminalApp::implementation
             switch (request.kind)
             {
             case Kind::NewSession:
-                _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, static_cast<uint32_t>(-1), winrt::hstring{ request.model });
+                // MESSAGING.md §21.17: the id the requester chose, when it chose one (the bot's new-thread picker binds the user's
+                // thread to it), else a minted one.
+                _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, static_cast<uint32_t>(-1), winrt::hstring{ request.model }, request.newSessionId);
                 break;
             case Kind::Resume:
                 _ResumeSessionFromDisk(request.sessionId, request.dir, request.title);

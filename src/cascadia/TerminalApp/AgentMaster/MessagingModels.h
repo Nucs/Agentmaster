@@ -996,6 +996,26 @@ namespace Agentmaster::Msg
             return h;
         }
 
+        // §21.17: the header and, when given, the session's TITLE ROW under it — the user's "the title at 2nd row (below "You *
+        // time * typed at pc") which is clickable jumping to the thread". `titleRow` is a title token (TgTitleToken with the
+        // topic's thread), so the send layer renders it as a link chip (rich) or a linked mention (classic). In the chat's "All"
+        // view, where every topic's messages run together, it names the thread a "👤 You" line belongs to.
+        //   tsMs     - the line's clock (0 = none), as UserLineHeader.
+        //   what     - the header's "where from" part, as UserLineHeader.
+        //   titleRow - the title token ("" = no row: the pre-§21.17 line, byte for byte).
+        //   returns  - the header, then "\n" and the row when there is one.
+        //   throws   - std::bad_alloc.
+        inline std::wstring UserLineHead(int64_t tsMs, std::wstring_view what, std::wstring_view titleRow)
+        {
+            std::wstring h = UserLineHeader(tsMs, what);
+            if (!titleRow.empty())
+            {
+                h += L"\n";
+                h.append(titleRow);
+            }
+            return h;
+        }
+
         // The user's words below the header: escaped as they are when short, else in an expandable quote; cut at
         // kUserLineMaxChars (never between the halves of a surrogate pair).
         inline std::wstring UserLineBody(std::wstring_view text)
@@ -1035,9 +1055,11 @@ namespace Agentmaster::Msg
     /// <param name="text">The prompt as typed.</param>
     /// <param name="status">The turn's status (None = no status: an older prompt, or a history line).</param>
     /// <param name="midTurn">Typed while the turn ran (no status of its own: the turn's prompt carries it).</param>
-    /// <returns>Telegram HTML.</returns>
+    /// <param name="titleRow">§21.17: the session's title token for the second row (UserLineHead); "" (the default) = no row.
+    /// A status edit of the line must pass the same row, or the edit drops it.</param>
+    /// <returns>Telegram HTML (with a title token when `titleRow` is given: send it through the title-aware send paths).</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-    inline std::wstring BuildPromptLineHtml(int64_t tsMs, PromptSource source, std::wstring_view text, PromptTurnStatus status, bool midTurn)
+    inline std::wstring BuildPromptLineHtml(int64_t tsMs, PromptSource source, std::wstring_view text, PromptTurnStatus status, bool midTurn, std::wstring_view titleRow = {})
     {
         std::wstring what = PromptSourceText(source);
         if (midTurn)
@@ -1049,27 +1071,45 @@ namespace Agentmaster::Msg
             what += L" \x00B7 ";
             what += PromptStatusText(status);
         }
-        return detail::UserLineHeader(tsMs, what) + L"\n" + detail::UserLineBody(text);
+        return detail::UserLineHead(tsMs, what, titleRow) + L"\n" + detail::UserLineBody(text);
     }
 
     /// <summary>The user's ANSWER to a question (§21.9 / §21.12): "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · ↩ answer\n&lt;the answer&gt;".</summary>
     /// <param name="tsMs">The answer's transcript time (0 = no clock).</param>
     /// <param name="answer">The answer as given.</param>
+    /// <param name="titleRow">§21.17: the session's title token for the second row; "" (the default) = no row.</param>
     /// <returns>Telegram HTML.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-    inline std::wstring BuildAnswerLineHtml(int64_t tsMs, std::wstring_view answer)
+    inline std::wstring BuildAnswerLineHtml(int64_t tsMs, std::wstring_view answer, std::wstring_view titleRow = {})
     {
-        return detail::UserLineHeader(tsMs, L"\x21A9 answer") + L"\n" + detail::UserLineBody(answer);
+        return detail::UserLineHead(tsMs, L"\x21A9 answer", titleRow) + L"\n" + detail::UserLineBody(answer);
     }
 
     /// <summary>The user's slash COMMAND (§21.12): "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · command\n&lt;code&gt;/compact …&lt;/code&gt;".</summary>
     /// <param name="tsMs">The command's transcript time (0 = no clock).</param>
     /// <param name="command">The command line as echoed ("/compact keep the plan"; cut at 300).</param>
+    /// <param name="titleRow">§21.17: the session's title token for the second row; "" (the default) = no row.</param>
     /// <returns>Telegram HTML.</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-    inline std::wstring BuildCommandLineHtml(int64_t tsMs, std::wstring_view command)
+    inline std::wstring BuildCommandLineHtml(int64_t tsMs, std::wstring_view command, std::wstring_view titleRow = {})
     {
-        return detail::UserLineHeader(tsMs, L"command") + L"\n<code>" + TgEscapeHtml(command.size() > 300 ? command.substr(0, 300) : command) + L"</code>";
+        return detail::UserLineHead(tsMs, L"command", titleRow) + L"\n<code>" + TgEscapeHtml(command.size() > 300 ? command.substr(0, 300) : command) + L"</code>";
+    }
+
+    /// <summary>
+    /// The TITLE ROW of a session's "👤 You" lines (§21.17): its title as a title token that names its topic, in the tab's color
+    /// — one call for the live mirror, the status edits and the history replay, so the three draw the same row.
+    /// </summary>
+    /// <param name="title">The session's title ("" = the first 8 characters of `sessionId`).</param>
+    /// <param name="sessionId">The session id (the fallback name).</param>
+    /// <param name="colorSquare">The square the topic's name shows (TopicRecord::nameColor; "" = none).</param>
+    /// <param name="threadId">The topic's thread (0 = no link: the row names the session without one).</param>
+    /// <returns>The token (TgTitleForm::Plain, the title cut to its first line and 120 characters).</returns>
+    /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
+    inline std::wstring UserLineTitleRow(std::wstring_view title, std::wstring_view sessionId, std::wstring_view colorSquare, int64_t threadId)
+    {
+        const std::wstring name = title.empty() ? std::wstring{ sessionId.substr(0, 8) } : TgFirstLine(title, 120);
+        return TgTitleToken(TgTitleForm::Plain, colorSquare, name, threadId);
     }
 
     // ===== the history replay (§21.9) ========================================================
@@ -1124,9 +1164,12 @@ namespace Agentmaster::Msg
     /// <param name="promptSource">Optional: where a prompt came from (§21.12: "typed at the PC", "📱 from the phone", "⚙ runner" in
     /// the user's line); empty = typed at the PC.</param>
     /// <param name="verbose">True: the narrative too (remarks, tool calls, compactions); false: the conversation only.</param>
+    /// <param name="titleRow">§21.17: the session's title token (UserLineTitleRow) for the second row of every "👤 You" line the
+    /// bot posts (a prompt, an answer, a command); "" (the default) = no row. A post sent AS THE USER carries only the user's
+    /// words, so the row is in its `html` (the bot's fallback) only.</param>
     /// <returns>The posts, in the order they are to be sent.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true)
+    inline std::vector<HistoryPost> RenderHistory(const std::vector<TopicItem>& items, bool lastTurnContinues, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true, std::wstring_view titleRow = {})
     {
         std::vector<HistoryPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
@@ -1147,7 +1190,7 @@ namespace Agentmaster::Msg
             p.userText = it.text;
             p.turnPrompt = !midTurn;
             const PromptSource source = promptSource ? promptSource(it.text) : PromptSource::Pc;
-            p.html = BuildPromptLineHtml(it.tsMs, source, it.text, PromptTurnStatus::None, midTurn);
+            p.html = BuildPromptLineHtml(it.tsMs, source, it.text, PromptTurnStatus::None, midTurn, titleRow);
             return p;
         };
         // Our own blocks, in both forms (the HTML the fallback sends, the Markdown a rich message carries).
@@ -1442,7 +1485,7 @@ namespace Agentmaster::Msg
                     HistoryPost p;
                     p.fromUser = true;
                     p.userText = it.text;
-                    p.html = BuildCommandLineHtml(it.tsMs, it.text);
+                    p.html = BuildCommandLineHtml(it.tsMs, it.text, titleRow);
                     out.push_back(std::move(p));
                     break;
                 }
@@ -1458,7 +1501,7 @@ namespace Agentmaster::Msg
                     HistoryPost p;
                     p.fromUser = true;
                     p.userText = it.text;
-                    p.html = BuildAnswerLineHtml(it.tsMs, it.text);
+                    p.html = BuildAnswerLineHtml(it.tsMs, it.text, titleRow);
                     out.push_back(std::move(p));
                     break;
                 }
@@ -1646,9 +1689,10 @@ namespace Agentmaster::Msg
     /// <param name="lastDayKey">In/out: TgDayKey of the last turn rendered before the window.</param>
     /// <param name="promptSource">Optional: where a prompt came from (RenderHistory's user line, §21.12).</param>
     /// <param name="verbose">RenderHistory's mode (§21.11): true = the narrative too, false = the conversation only.</param>
+    /// <param name="titleRow">§21.17: RenderHistory's title row of the "👤 You" lines ("" = none).</param>
     /// <returns>The posts in order; a turn that renders nothing hands its end to the next turn's last post.</returns>
     /// <exception cref="std::bad_alloc">If the posts cannot be allocated.</exception>
-    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true)
+    inline std::vector<HistoryPlanPost> PlanHistoryPosts(const HistoryWindow& w, int64_t& lastDayKey, const std::function<PromptSource(const std::wstring&)>& promptSource = {}, bool verbose = true, std::wstring_view titleRow = {})
     {
         std::vector<HistoryPlanPost> out;
         const auto isTurnStart = [](const TopicItem& it) { return it.kind == TopicItemKind::Prompt && !it.midTurn; };
@@ -1662,7 +1706,7 @@ namespace Agentmaster::Msg
             }
             const bool lastGroup = end == w.items.size();
             const std::vector<TopicItem> group(w.items.begin() + static_cast<std::ptrdiff_t>(begin), w.items.begin() + static_cast<std::ptrdiff_t>(end));
-            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, promptSource, verbose);
+            auto rendered = RenderHistory(group, lastGroup && w.turnContinues, lastDayKey, promptSource, verbose, titleRow);
             // Where this turn ends: the next turn's first line, or the window's end. Without itemAt (a caller that did not
             // fill it) only the window's end is known.
             const int64_t commitTo = lastGroup ? w.consumedTo : (end < w.itemAt.size() ? w.itemAt[end] : 0);
@@ -1735,6 +1779,22 @@ namespace Agentmaster::Msg
         /// at a time (MessagingService::_takeCardFormatSlot) — never in a burst.
         /// </summary>
         bool cardRich{ false };
+        /// <summary>
+        /// Whether the topic's card shows its title as a LINK to the topic (§21.17): true once a post or edit went out while the
+        /// bot's username was known (a URL chip in a rich card, an &lt;a&gt; in a classic one); false for every card posted before
+        /// the links. Like `cardRich` it is a FORM: the card hash ignores it (TgRenderTitleTokensClassic without the username), and
+        /// a card whose text is unchanged but whose links are missing is re-edited by the slow form upgrade, one at a time
+        /// (MessagingService::_takeCardFormatSlot) — so the upgrade never edits a whole chat's cards in a burst.
+        /// </summary>
+        bool cardLinked{ false };
+        /// <summary>
+        /// The HISTORY replay's last turn prompt (§21.17): the message id of the bot's "👤 You" line of the newest turn the replay
+        /// has sent so far (0 = none yet). Each replayed turn's line replies to the one before it, and the first live turn after the
+        /// replay replies to this one — the user's "should be a reply to previous user message. this way we can jump between user
+        /// turns". Persisted, so a replay a restart interrupted goes on with the chain. A line sent AS THE USER (secretary mode) is
+        /// not a reply and does not move it.
+        /// </summary>
+        int64_t historyPromptMessageId{ 0 };
         /// <summary>
         /// The tab (WT_SESSION) that hosted the topic's session at the last sync. Topics are PER TAB (§21.6, the
         /// user's "if we show per tab"): when the conversation in a tab changes (/clear, /resume, a handover in
@@ -1958,6 +2018,12 @@ namespace Agentmaster::Msg
             to.Set(L"lastMessageAtMs", json::Value::MkNum(static_cast<double>(t.lastMessageAtMs)));
             to.Set(L"cardTextHash", json::Value::MkNum(static_cast<double>(t.cardTextHash)));
             to.Set(L"cardRich", json::Value::MkBool(t.cardRich)); // §21.15: the card's form (a rich card with a title chip)
+            to.Set(L"cardLinked", json::Value::MkBool(t.cardLinked)); // §21.17: the card's title links to its topic
+            if (t.historyPromptMessageId > 0)
+            {
+                // §21.17: the history replay's last "👤 You" line (omitted while the replay has sent none).
+                to.Set(L"historyPromptMessageId", json::Value::MkNum(static_cast<double>(t.historyPromptMessageId)));
+            }
             to.Set(L"tabToken", json::Value::MkStr(t.tabToken));
             to.Set(L"errorAnnounced", json::Value::MkBool(t.errorAnnounced));
             to.Set(L"backfillPath", json::Value::MkStr(t.backfillPath));
@@ -2057,6 +2123,9 @@ namespace Agentmaster::Msg
                 t.cardTextHash = static_cast<uint32_t>(to.I64At(L"cardTextHash", 0));
                 // §21.15 (absent in an older file: every card posted before the chips is a classic message).
                 t.cardRich = to.BoolAt(L"cardRich", false);
+                // §21.17 (absent in an older file: every card posted before the links — the slow form upgrade links it once).
+                t.cardLinked = to.BoolAt(L"cardLinked", false);
+                t.historyPromptMessageId = (std::max)(int64_t{ 0 }, to.I64At(L"historyPromptMessageId", 0)); // (std::max): the <windows.h> macro
                 t.tabToken = to.StrAt(L"tabToken");
                 t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);
                 t.backfillPath = to.StrAt(L"backfillPath"); // absent (an older file) = no history replay owed
@@ -2528,16 +2597,18 @@ namespace Agentmaster::Msg
     /// <param name="oldSquare">The color square the name showed ("" = none).</param>
     /// <param name="newTitle">The title the topic's name shows now.</param>
     /// <param name="newSquare">The color square the name shows now ("" = none).</param>
+    /// <param name="threadId">§21.17: the topic the line is posted in — every title of the line links to it (0, the default = no
+    /// links).</param>
     /// <returns>Telegram HTML with title tokens; "" when no title changed and the color did not change from one square to another
     /// (a square that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a change worth a
     /// line).</returns>
     /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
-    inline std::wstring BuildTopicChangeNoticeHtml(std::wstring_view oldTitle, std::wstring_view oldSquare, std::wstring_view newTitle, std::wstring_view newSquare)
+    inline std::wstring BuildTopicChangeNoticeHtml(std::wstring_view oldTitle, std::wstring_view oldSquare, std::wstring_view newTitle, std::wstring_view newSquare, int64_t threadId = 0)
     {
         // A mention is cut like the Search answer's titles (TgFirstLine: the first line, an ellipsis past 200 units); classic, it
         // reads “🟦 title” (TgTitleForm::Quoted).
-        const auto mention = [](std::wstring_view square, std::wstring_view title) {
-            return TgTitleToken(TgTitleForm::Quoted, square, TgFirstLine(title, 200));
+        const auto mention = [threadId](std::wstring_view square, std::wstring_view title) {
+            return TgTitleToken(TgTitleForm::Quoted, square, TgFirstLine(title, 200), threadId);
         };
         if (!newTitle.empty() && oldTitle != newTitle)
         {
@@ -2552,7 +2623,7 @@ namespace Agentmaster::Msg
             // The new color: the bare square in a classic line, the title as a chip of the new color in a rich one
             // (TgTitleForm::Square).
             const std::wstring_view title = newTitle.empty() ? oldTitle : newTitle;
-            return L"<i>" + mention(oldSquare, title) + L" changed the color to " + TgTitleToken(TgTitleForm::Square, newSquare, TgFirstLine(title, 200)) + L"</i>";
+            return L"<i>" + mention(oldSquare, title) + L" changed the color to " + TgTitleToken(TgTitleForm::Square, newSquare, TgFirstLine(title, 200), threadId) + L"</i>";
         }
         return {};
     }
@@ -3370,6 +3441,9 @@ namespace Agentmaster::Msg
         // §21.13: the session's tab color as a square (TgTitleColorSquare), before its title like in every place that names a
         // session; an on-disk session with no tab wears its folder's color, like the Sessions page's chip. "" = none.
         std::wstring colorSquare;
+        // §21.17: the session's topic (0 = none: a closed session, an idle tab) — its title on the card and in the pick menu is a
+        // link to that topic.
+        int64_t threadId{ 0 };
     };
 
     /// <summary>
@@ -3523,7 +3597,7 @@ namespace Agentmaster::Msg
             const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 100);
             // The glyph for where it stands, then the tab's color square (§21.13: "State, then color", like the topic names);
             // §21.15: the square and the title as a title token — "🟦 <b>title</b>" classic, a chip in a rich answer.
-            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + TgTitleToken(TgTitleForm::Bold, card.colorSquare, title);
+            html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + TgTitleToken(TgTitleForm::Bold, card.colorSquare, title, card.threadId);
             std::wstring meta;
             const auto add = [&meta](const std::wstring& part) {
                 if (!part.empty())
@@ -3570,7 +3644,7 @@ namespace Agentmaster::Msg
     {
         const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 200);
         // §21.13: the color square first; §21.15: square and title as a title token (TitleMentionHtml's text when classic).
-        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgTitleToken(TgTitleForm::Plain, card.colorSquare, title) + L"</b>";
+        std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgTitleToken(TgTitleForm::Plain, card.colorSquare, title, card.threadId) + L"</b>";
         std::wstring place = card.dir;
         if (!card.branch.empty())
         {
@@ -3671,6 +3745,9 @@ namespace Agentmaster::Msg
         // the card and the topic list always agree, and a color change edits the card in the same step as the name (the
         // rename refreshes the card). "" = none. §21.15: in a rich card it also picks the title chip's look (TgTitleChipStyle).
         std::wstring colorSquare;
+        // §21.17: the topic the card sits in — its title links to it (0 = no link). In the chat's "All" view, where the card is
+        // the topic's newest message, the link is the way into the thread.
+        int64_t threadId{ 0 };
     };
 
     /// <summary>
@@ -3759,7 +3836,7 @@ namespace Agentmaster::Msg
         // §21.13: the title with the tab's color square before it (the square the topic's name shows; none without extras);
         // §21.15: as a title token — "🟦 <b>title</b>" in a classic card, a chip in a rich one.
         out += L"\U0001F4CC ";
-        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title);
+        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title, extras ? extras->threadId : 0);
         out += L"\n";
         // State line.
         out += StateLabel(s.state);

@@ -1375,6 +1375,11 @@ namespace Agentmaster::Msg
     inline constexpr wchar_t kTgTitleTokenOpen = L'\xE000';
     inline constexpr wchar_t kTgTitleTokenMid = L'\xE001';
     inline constexpr wchar_t kTgTitleTokenClose = L'\xE002';
+    // §21.17: the start of a token's THREAD part — the session's topic, as decimal digits, between the square and MID. A title
+    // with a thread is a LINK to its topic once the send layer knows the bot's username (the user's "Other titles that are not,
+    // should jump to the thread"); a token without one (every token written before §21.17, a session that has no topic yet)
+    // renders as before: a copy chip, or the plain classic mention.
+    inline constexpr wchar_t kTgTitleTokenThread = L'\xE003';
 
     // A chip's label shows at most this many UTF-16 units of the title (an ellipsis past it: a button is no place for a
     // paragraph); its copy is the whole title up to Telegram's CopyTextButton limit, "1-256 characters".
@@ -1385,10 +1390,10 @@ namespace Agentmaster::Msg
     {
         /// <summary>Whether a character frames a title token (§21.15); such a character is dropped from a token's parts.</summary>
         /// <param name="c">The character.</param>
-        /// <returns>True for OPEN, MID and CLOSE.</returns>
+        /// <returns>True for OPEN, MID, CLOSE and (§21.17) THREAD.</returns>
         inline constexpr bool TgIsTitleTokenMarker(wchar_t c) noexcept
         {
-            return c == kTgTitleTokenOpen || c == kTgTitleTokenMid || c == kTgTitleTokenClose;
+            return c == kTgTitleTokenOpen || c == kTgTitleTokenMid || c == kTgTitleTokenClose || c == kTgTitleTokenThread;
         }
 
         /// <summary>
@@ -1476,17 +1481,23 @@ namespace Agentmaster::Msg
             return out;
         }
 
-        /// <summary>Reads the title token that starts at `pos` (§21.15): its form, its square and its escaped title.</summary>
+        /// <summary>
+        /// Reads the title token that starts at `pos` (§21.15): its form, its square, its escaped title and (§21.17) the thread
+        /// it links to.
+        /// </summary>
         /// <param name="s">The text.</param>
         /// <param name="pos">The index of a kTgTitleTokenOpen.</param>
         /// <param name="form">Receives the form (Plain for an unknown form character).</param>
         /// <param name="square">Receives the color square ("" = none).</param>
         /// <param name="escapedTitle">Receives the title, escaped by TgEscapeHtml.</param>
+        /// <param name="threadId">Receives the topic the title links to: 0 for a token without a THREAD part, or with one that is
+        /// not a positive decimal number (a token is our own text, so that only happens to a token cut by a caller).</param>
         /// <returns>The index just past the token's CLOSE; npos when no well-formed token starts at `pos` (the caller drops
         /// the stray OPEN and goes on).</returns>
         /// <exception cref="std::bad_alloc">If a part cannot be copied.</exception>
-        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle)
+        inline size_t TgParseTitleToken(std::wstring_view s, size_t pos, TgTitleForm& form, std::wstring& square, std::wstring& escapedTitle, int64_t& threadId)
         {
+            threadId = 0;
             if (pos + 2 >= s.size() || s[pos] != kTgTitleTokenOpen)
             {
                 return std::wstring_view::npos;
@@ -1517,10 +1528,55 @@ namespace Agentmaster::Msg
                 form = TgTitleForm::Plain;
                 break;
             }
-            square.assign(s.substr(pos + 2, mid - pos - 2));
+            // §21.17: the square ends at the THREAD marker when the token has one; the digits after it run up to MID. Digits
+            // only, at most 18 of them (a topic id is far below; more could overflow), else the title links to nothing.
+            size_t squareEnd = mid;
+            if (const size_t threadAt = s.find(kTgTitleTokenThread, pos + 2); threadAt != std::wstring_view::npos && threadAt < mid)
+            {
+                squareEnd = threadAt;
+                const std::wstring_view digits = s.substr(threadAt + 1, mid - threadAt - 1);
+                int64_t value = 0;
+                bool valid = !digits.empty() && digits.size() <= 18;
+                for (const wchar_t c : digits)
+                {
+                    if (c < L'0' || c > L'9')
+                    {
+                        valid = false;
+                        break;
+                    }
+                    value = value * 10 + (c - L'0');
+                }
+                threadId = valid ? value : 0;
+            }
+            square.assign(s.substr(pos + 2, squareEnd - pos - 2));
             escapedTitle.assign(s.substr(mid + 1, close - mid - 1));
             return close + 1;
         }
+    }
+
+    /// <summary>
+    /// The link of a topic of the bot's private chat (§21.16, §21.17): https://t.me/&lt;bot&gt;/&lt;topic&gt;?topic=&lt;topic&gt; —
+    /// the MESSAGE link of the topic's creation message (the deep-link spec's form for a topic: "the topic ID is actually the ID
+    /// of the service message that created the topic") plus the `topic` parameter the apps' link code reads. What a tap does
+    /// differs per app (MessagingDirectory.h's header note, MESSAGING.md §21.16.3): Telegram Desktop opens the topic, Telegram
+    /// Android lands in the chat's "All" view at the topic's first message.
+    /// </summary>
+    /// <param name="botUsername">The bot's username, with or without its leading '@'.</param>
+    /// <param name="threadId">The topic's message_thread_id (the Bot API's, which is the user-space id).</param>
+    /// <returns>The link; "" when either part is missing (no link can be made).</returns>
+    /// <exception cref="std::bad_alloc">If the link cannot be allocated.</exception>
+    inline std::wstring TgTopicUrl(std::wstring_view botUsername, int64_t threadId)
+    {
+        if (!botUsername.empty() && botUsername.front() == L'@')
+        {
+            botUsername.remove_prefix(1);
+        }
+        if (botUsername.empty() || threadId <= 0)
+        {
+            return {};
+        }
+        const std::wstring id = std::to_wstring(threadId);
+        return L"https://t.me/" + std::wstring{ botUsername } + L"/" + id + L"?topic=" + id;
     }
 
     /// <summary>
@@ -1529,13 +1585,18 @@ namespace Agentmaster::Msg
     /// (TgRichHtmlFromClassic). To every HTML helper in between (chunking, the plain-text fallback) a token is ordinary text:
     /// private-use characters frame it, and the title inside is already escaped. A title or square that carries one of the
     /// framing characters loses it here, so a token always parses.
+    /// §21.17: a token that names the session's TOPIC (`threadId` &gt; 0) is a link to that topic wherever the send layer knows
+    /// the bot's username — a URL chip in a rich message, an &lt;a&gt; around the title in a classic one; without a thread it
+    /// stays a copy chip (rich) or the plain mention (classic), as before.
     /// </summary>
     /// <param name="form">How the classic render reads (TgTitleForm).</param>
     /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
     /// <param name="title">The title as is (escaped here); the caller cuts it where its place wants it cut.</param>
+    /// <param name="threadId">The session's topic (its message_thread_id); 0 (the default) = no link — a session with no topic
+    /// yet, or a place that names no topic.</param>
     /// <returns>The token.</returns>
     /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
-    inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title)
+    inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title, int64_t threadId = 0)
     {
         std::wstring clean;
         clean.reserve(title.size());
@@ -1547,7 +1608,7 @@ namespace Agentmaster::Msg
             }
         }
         std::wstring token;
-        token.reserve(colorSquare.size() + clean.size() + 16);
+        token.reserve(colorSquare.size() + clean.size() + 40);
         token += kTgTitleTokenOpen;
         token += static_cast<wchar_t>(form);
         for (const wchar_t c : colorSquare)
@@ -1556,6 +1617,12 @@ namespace Agentmaster::Msg
             {
                 token += c;
             }
+        }
+        if (threadId > 0)
+        {
+            // §21.17: THREAD and the digits, between the square and MID (TgParseTitleToken reads them back).
+            token += kTgTitleTokenThread;
+            token += std::to_wstring(threadId);
         }
         token += kTgTitleTokenMid;
         token += TgEscapeHtml(clean);
@@ -1576,11 +1643,18 @@ namespace Agentmaster::Msg
     /// "🟦 &lt;b&gt;title&lt;/b&gt;", "“🟦 title”" or the bare square — so the result is byte for byte what the builders
     /// printed before the chips, and a card's hash taken over it is the hash its topic record already holds. A stray framing
     /// character is dropped.
+    /// §21.17: given the bot's username, a token that names its topic gets its title wrapped in a link to that topic
+    /// (&lt;a href="https://t.me/…"&gt;title&lt;/a&gt;, the square left outside the link), so a classic message's titles jump to
+    /// their threads too. ⚠ Every HASH of a text is taken WITHOUT the username (the default), so it stays the hash of the
+    /// pre-link render: a topic record's card hash does not move with the links, and the cards are re-edited by the slow form
+    /// upgrade (TopicRecord::cardLinked), never in a burst.
     /// </summary>
     /// <param name="text">Telegram HTML with title tokens.</param>
+    /// <param name="botUsername">The bot's username for the topic links ("" = no links: the pre-§21.17 render, byte for
+    /// byte).</param>
     /// <returns>Telegram HTML without them (the text itself when it has none).</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-    inline std::wstring TgRenderTitleTokensClassic(std::wstring_view text)
+    inline std::wstring TgRenderTitleTokensClassic(std::wstring_view text, std::wstring_view botUsername = {})
     {
         if (std::find_if(text.begin(), text.end(), detail::TgIsTitleTokenMarker) == text.end())
         {
@@ -1596,23 +1670,28 @@ namespace Agentmaster::Msg
                 TgTitleForm form{ TgTitleForm::Plain };
                 std::wstring square;
                 std::wstring title;
-                const size_t end = detail::TgParseTitleToken(text, i, form, square, title);
+                int64_t threadId = 0;
+                const size_t end = detail::TgParseTitleToken(text, i, form, square, title, threadId);
                 if (end == std::wstring_view::npos)
                 {
                     ++i; // a stray OPEN: dropped
                     continue;
                 }
-                const std::wstring mention = square.empty() ? title : square + L" " + title;
+                // §21.17: the title as a link to its topic when one can be made (the square stays outside: an emoji inside a
+                // link would take the link's color on some clients).
+                const std::wstring url = TgTopicUrl(botUsername, threadId);
+                const std::wstring shown = url.empty() || title.empty() ? title : L"<a href=\"" + detail::TgEscapeHtmlAttribute(url) + L"\">" + title + L"</a>";
+                const std::wstring mention = square.empty() ? shown : square + L" " + shown;
                 switch (form)
                 {
                 case TgTitleForm::Bold:
-                    out += (square.empty() ? std::wstring{} : square + L" ") + L"<b>" + title + L"</b>";
+                    out += (square.empty() ? std::wstring{} : square + L" ") + L"<b>" + shown + L"</b>";
                     break;
                 case TgTitleForm::Quoted:
                     out += L"\x201C" + mention + L"\x201D";
                     break;
                 case TgTitleForm::Square:
-                    out += square.empty() ? mention : square;
+                    out += square.empty() ? mention : square; // the bare square names no title: it links nowhere
                     break;
                 default:
                     out += mention;
@@ -1636,12 +1715,17 @@ namespace Agentmaster::Msg
     /// messages 904 / 905, 2026-10-17): Telegram keeps the button and its style inside a paragraph. The label is one line cut at
     /// kTgTitleChipLabelMaxChars; the copy is that line up to kTgCopyTextMaxChars. A blank title has nothing to copy (a copy text
     /// needs one character), so it stays the plain mention.
+    /// §21.17: with a `url` (the title names its topic and the bot's username is known) the chip is a URL button instead — the
+    /// same look and label, a tap opening the topic (the user's "Other titles that are not, should jump to the thread"; the
+    /// directory's chips, §21.16, are the same button). The title is no longer copied by a tap then: /sessionid and the PC's copy
+    /// menus still give it.
     /// </summary>
     /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none: the plain look, no square in the label).</param>
     /// <param name="escapedTitle">The title escaped by TgEscapeHtml, as a token carries it.</param>
+    /// <param name="url">The topic's link (TgTopicUrl); "" (the default) = a copy chip.</param>
     /// <returns>Rich-message HTML: one &lt;tg-button&gt; element (or the plain mention for a blank title).</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-    inline std::wstring TgTitleChipHtml(std::wstring_view colorSquare, std::wstring_view escapedTitle)
+    inline std::wstring TgTitleChipHtml(std::wstring_view colorSquare, std::wstring_view escapedTitle, std::wstring_view url = {})
     {
         // One line, trimmed: a line break or a tab would split the label of a button that sits inside a line of text.
         std::wstring line = detail::TgUnescapeOwnHtml(escapedTitle);
@@ -1663,14 +1747,22 @@ namespace Agentmaster::Msg
         {
             label = std::wstring{ detail::TgPrefixUnits(label, kTgTitleChipLabelMaxChars - 1) } + L"\x2026";
         }
-        std::wstring chip = L"<tg-button type=\"copy_text\"";
+        // §21.17: a URL button opens the topic; without a link the chip copies the title, as before.
+        std::wstring chip = url.empty() ? std::wstring{ L"<tg-button type=\"copy_text\"" } : std::wstring{ L"<tg-button type=\"url\"" };
         if (const wchar_t* style = TgTitleChipStyle(colorSquare); *style)
         {
             chip += L" style=\"";
             chip += style;
             chip += L"\"";
         }
-        chip += L" text=\"" + detail::TgEscapeHtmlAttribute(detail::TgPrefixUnits(line, kTgCopyTextMaxChars)) + L"\">";
+        if (url.empty())
+        {
+            chip += L" text=\"" + detail::TgEscapeHtmlAttribute(detail::TgPrefixUnits(line, kTgCopyTextMaxChars)) + L"\">";
+        }
+        else
+        {
+            chip += L" url=\"" + detail::TgEscapeHtmlAttribute(url) + L"\">";
+        }
         if (!colorSquare.empty())
         {
             chip += std::wstring{ colorSquare } + L" ";
@@ -1836,9 +1928,11 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="html">Classic Telegram HTML with title tokens.</param>
         /// <param name="blocks">True for a whole message, false for a quote's body.</param>
+        /// <param name="botUsername">§21.17: the bot's username — a token that names its topic becomes a URL chip to it; "" = every
+        /// chip copies its title (the §21.15 chip).</param>
         /// <returns>Rich-message HTML.</returns>
         /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-        inline std::wstring TgRichFromClassicCore(std::wstring_view html, bool blocks)
+        inline std::wstring TgRichFromClassicCore(std::wstring_view html, bool blocks, std::wstring_view botUsername)
         {
             std::wstring out; // the finished blocks (blocks == true)
             std::wstring run; // the paragraph being built (the whole result when blocks == false)
@@ -1865,7 +1959,8 @@ namespace Agentmaster::Msg
                     TgTitleForm form{ TgTitleForm::Plain };
                     std::wstring square;
                     std::wstring title;
-                    const size_t end = TgParseTitleToken(html, i, form, square, title);
+                    int64_t threadId = 0;
+                    const size_t end = TgParseTitleToken(html, i, form, square, title, threadId);
                     if (end == std::wstring_view::npos)
                     {
                         ++i; // a stray OPEN: dropped
@@ -1875,7 +1970,7 @@ namespace Agentmaster::Msg
                     {
                         run += L"</" + it->first + L">";
                     }
-                    run += TgTitleChipHtml(square, title);
+                    run += TgTitleChipHtml(square, title, TgTopicUrl(botUsername, threadId)); // §21.17: a link chip when it names its topic
                     for (const auto& o : open)
                     {
                         run += o.second;
@@ -1926,7 +2021,7 @@ namespace Agentmaster::Msg
                             {
                                 inner.remove_suffix(1);
                             }
-                            std::wstring body = TgRichFromClassicCore(inner, false);
+                            std::wstring body = TgRichFromClassicCore(inner, false, botUsername);
                             TgTrimRichBreaks(body);
                             out += body;
                         }
@@ -1996,11 +2091,13 @@ namespace Agentmaster::Msg
     /// formatting around it (closed before it, opened again after it; the empty pairs that leaves are dropped).
     /// </summary>
     /// <param name="html">Classic Telegram HTML as the builders write it, with title tokens.</param>
+    /// <param name="botUsername">§21.17: the bot's username — a title that names its topic becomes a URL chip that opens it;
+    /// "" (the default) = every chip copies its title, the §21.15 render byte for byte.</param>
     /// <returns>Rich-message HTML for rich_message.html ("" for a text with nothing visible).</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-    inline std::wstring TgRichHtmlFromClassic(std::wstring_view html)
+    inline std::wstring TgRichHtmlFromClassic(std::wstring_view html, std::wstring_view botUsername = {})
     {
-        return detail::TgRichFromClassicCore(html, true);
+        return detail::TgRichFromClassicCore(html, true, botUsername);
     }
 
     /// <summary>

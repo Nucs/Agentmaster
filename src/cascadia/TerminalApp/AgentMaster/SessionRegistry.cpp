@@ -460,6 +460,25 @@ namespace Agentmaster
         return out;
     }
 
+    std::vector<SessionPlaceSample> SessionRegistry::PlaceSamples() const
+    {
+        std::lock_guard guard{ _mtx };
+        std::vector<SessionPlaceSample> out;
+        out.reserve(_order.size()); // one allocation: a reallocation would move every sample already copied
+        for (const auto& id : _order)
+        {
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                continue;
+            }
+            const SessionInfo& s = it->second;
+            // (std::max) parenthesized: windows.h's max macro.
+            out.push_back(SessionPlaceSample{ s.workingDir, s.inferredWorkingDir, (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs) });
+        }
+        return out;
+    }
+
     std::vector<SessionInfo> SessionRegistry::SnapshotLiveForScan() const
     {
         std::lock_guard guard{ _mtx };

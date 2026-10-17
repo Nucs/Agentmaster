@@ -55,6 +55,7 @@
 #include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
 #include "MessagingStartNote.h" // the start note's facts, kind, sound and text (§21.18)
 #include "MessagingModels.h"
+#include "MessagingNewThread.h" // §21.17: the new-thread folder picker (lists, text, buttons, callback data)
 #include "RemoteLaunch.h"
 #include "SessionModels.h" // AppSettings, SessionInfo
 #include "TelegramApi.h" // TelegramApi + TgResult (the outbox's completion callbacks name TgResult)
@@ -751,8 +752,26 @@ namespace Agentmaster::Msg
         /// <param name="sessionId">The topic's session.</param>
         /// <param name="hash">The card's classic hash (what TopicRecord::cardTextHash holds).</param>
         /// <param name="wantRich">The form wanted (_titleChipsWanted).</param>
+        /// <param name="wantLinked">§21.17: whether the card's title should link to its topic (the bot's username is known). A card
+        /// that lacks its link is upgraded through this slot too, even when Telegram refused its rich form for this text (the
+        /// edit then falls back to the classic form, which carries the link).</param>
         /// <returns>True when the card is re-edited now.</returns>
-        bool _takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich);
+        bool _takeCardFormatSlot(const std::wstring& sessionId, uint32_t hash, bool wantRich, bool wantLinked);
+        /// <summary>
+        /// The bot's @username WITHOUT the '@' for the topic links of titles (§21.17), "" until this run's first getMe answered.
+        /// A copy of `_botUsername` behind its own LEAF lock (`_linkBotMtx`), so every send path can read it whatever its caller
+        /// holds: some callers of _sendText / _editText hold `_mtx`, which guards `_botUsername`. Any thread.
+        /// </summary>
+        /// <returns>The username; "" = no links yet (titles go as copy chips / plain mentions, as before §21.17).</returns>
+        /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
+        std::wstring _linkBot() const;
+        /// <summary>
+        /// The thread of a session's topic (§21.17): what a reply that names the session links its title to. Takes `_mtx` — never
+        /// call it with `_mtx` held.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <returns>Its topic's message_thread_id; 0 when it has no topic (closed, idle, Codex) — the title then links nowhere.</returns>
+        int64_t _threadOf(const std::wstring& sessionId) const;
         std::optional<SessionInfo> _session(const std::wstring& sessionId) const;
 
         // ----- the mirror (Messaging.cpp) -----
@@ -837,7 +856,16 @@ namespace Agentmaster::Msg
         void _handleUpdate(const json::Value& update) noexcept;
         void _handleMessage(const json::Value& msg, bool edited);
         void _handleCallback(const json::Value& cq);
-        void _handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId);
+        /// <summary>
+        /// A message in a session's topic: an Agentmaster /command runs, a refused one is answered, anything else is queued as the
+        /// session's next prompt (a message older than kBacklogAgeMs is asked about first, D2).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The Telegram message.</param>
+        /// <param name="threadId">The topic's thread.</param>
+        /// <param name="held">§21.17: the message was HELD by a new thread's picker and is handed over now that the session is up —
+        /// it was read live when it came, so it is never asked about as backlog, however long the folder pick took.</param>
+        void _handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held = false);
         void _handleSearchMessage(const json::Value& msg, int64_t threadId);
         bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog);
         void _runSessionCommand(const std::wstring& sessionId, const RemoteCommand& cmd, const json::Value& msg, int64_t threadId);
@@ -902,6 +930,75 @@ namespace Agentmaster::Msg
         void _setPinned(const std::wstring& sessionId, bool pinned);
         void _requestLaunch(RemoteLaunchRequest req, int64_t threadId);
         void _sweepRevives(const SessionInfo& s);
+
+        // ----- §21.17: a thread the user opens starts a new session (Messaging.Inbound.cpp) -----
+        /// <summary>
+        /// The owner created a thread (forum_topic_created) that no session owns. A name the user gave it (is_name_implicit
+        /// false) is kept — it becomes the session's title — and the picker is posted at once, before any message. A thread
+        /// Telegram named (the user only typed a message, which arrives right after) gets its picker with that message
+        /// (_holdForNewThread): one post, not a post and an edit. Poll thread.
+        /// </summary>
+        /// <param name="threadId">The new thread.</param>
+        /// <param name="msg">The service message (its forum_topic_created carries the name and is_name_implicit).</param>
+        void _onUserThreadCreated(int64_t threadId, const json::Value& msg);
+        /// <summary>
+        /// A message in a thread no session owns (and not the Search topic): HELD for the new session the thread's picker starts —
+        /// a lone folder path starts it in that folder at once; anything else waits (at most kNewThreadHeldMax messages) and goes
+        /// to the session in order once it is up. The picker is posted with the first held message when the thread has none yet
+        /// (after a restart, or a thread made before §21.17). An edit replaces the held message's text. A thread whose pick is
+        /// already launching holds the message for the launch. Poll thread.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="msg">The Telegram message.</param>
+        /// <param name="edited">True for an edited_message update.</param>
+        void _holdForNewThread(int64_t threadId, const json::Value& msg, bool edited);
+        /// <summary>
+        /// Posts the thread's picker, or edits it in place when it is up (a page change, one more held message). The lists are
+        /// built on first use (BuildNewThreadLists over the registry's PlaceSamples, the machine's temp roots left out, every
+        /// listed folder probed once). Takes `_mtx` for the state and releases it before the send. Poll thread.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        void _showNewThreadPicker(int64_t threadId);
+        /// <summary>
+        /// A tap on a picker button (ParseNewThreadCallbackData): a page change edits the picker; a folder starts the session
+        /// (_startNewThreadSession); Cancel deletes the picker and drops what it held. Poll thread.
+        /// </summary>
+        /// <param name="action">The button's action.</param>
+        /// <param name="threadId">The thread the picker sits in (the callback's message).</param>
+        /// <returns>The button's toast, plain text ("" = none).</returns>
+        std::wstring _onNewThreadAction(const NewThreadAction& action, int64_t threadId);
+        /// <summary>
+        /// Starts the thread's NEW SESSION in `folder` (§21.17): a fresh Claude tab in the background of the most recently active
+        /// window, under a session id minted here, recorded in `_threadBinds` BEFORE the launch so the tick can bind the thread to
+        /// the session the moment it is live (_adoptBoundThreads); the picker is deleted. A folder that does not exist, or no
+        /// window to open the tab, leaves the picker where it is and says why.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="folder">The working folder (a picker entry, or a path the user typed).</param>
+        /// <returns>The outcome, plain text (a toast, or the reply to a typed path).</returns>
+        std::wstring _startNewThreadSession(int64_t threadId, const std::wstring& folder);
+        /// <summary>
+        /// Binds each picked thread to its session once the session is LIVE (§21.17, tick thread, before the sync's plan so the
+        /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
+        /// user's thread id, seeded like a created topic), is renamed like every topic (state glyph, color square, title), gets
+        /// its card, and receives the held messages as if they had been sent in the topic (the first one is the session's first
+        /// prompt). A session at rest is held in "Waiting for you" (like a revive) so its topic outlasts the idle grace, and a
+        /// tab that has not started yet is started. A bind whose session never came up within kNewThreadBindTimeoutMs is
+        /// dropped, and the thread is told.
+        /// </summary>
+        /// <param name="byId">The sync's live sessions (SnapshotLiveForCards), by id.</param>
+        /// <param name="colorMode">The tab color mode of the sync.</param>
+        void _adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode);
+        /// <summary>
+        /// The owner renamed a session's topic in Telegram (forum_topic_edited): the session takes the name as its title, without
+        /// the state glyph and color square the service shows before it (StripTopicNameDecoration) — like /rename, so the tab,
+        /// the Manager and the topic follow (the sync renames the topic back to the decorated form and posts its change line). A
+        /// name that strips to nothing, or to the title the session has, changes nothing. Poll thread.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="threadId">The topic's thread.</param>
+        /// <param name="name">The new name as Telegram reports it.</param>
+        void _onUserTopicRenamed(const std::wstring& sessionId, int64_t threadId, const std::wstring& name);
         void _askSearch(const std::wstring& text, int64_t threadId);
         void _onSearchEvent(const SearchBridgeEvent& ev) noexcept;
         /// <summary>
@@ -1028,6 +1125,12 @@ namespace Agentmaster::Msg
         /// </summary>
         std::atomic<int64_t> _botId{ 0 };
         std::wstring _botUsername;
+        /// <summary>
+        /// §21.17: `_botUsername` again, for the title links (_linkBot), behind `_linkBotMtx` — a LEAF lock: nothing else is taken
+        /// while it is held, so a send path can read it with `_mtx` held by its caller. Written where `_botUsername` is.
+        /// </summary>
+        mutable std::mutex _linkBotMtx;
+        std::wstring _linkBotName;
         std::wstring _status;
         std::wstring _stateFile;
         MessagingState _state;
@@ -1318,6 +1421,39 @@ namespace Agentmaster::Msg
             int64_t threadId{ 0 }; // where to report
         };
         std::vector<Revive> _revives;
+
+        /// <summary>
+        /// §21.17, under `_mtx`: a thread the user opened that no session owns yet, and its PICKER. In memory only: after a restart
+        /// the next message in the thread posts a new picker (the old one's buttons answer that they are from before the restart).
+        /// </summary>
+        struct NewThread
+        {
+            std::wstring topicName; // the name the user gave the thread ("" = Telegram named it, or it is not known)
+            NewThreadLists lists; // built on first show (listsBuilt)
+            bool listsBuilt{ false };
+            size_t recentPage{ 0 };
+            size_t usedPage{ 0 };
+            int64_t pickerMessageId{ 0 }; // the picker (0 = not posted, or its post was refused; -1 = the post is in flight)
+            bool pickerStale{ false }; // a page change or a held message came while the post flew: its answer renders it again
+            std::vector<json::Value> held; // the user's messages in the thread, oldest first (each a copy of the Message object)
+            int64_t lastUseMs{ 0 }; // the last message or tap (WallMs): a picker idle past kNewThreadPickerIdleMs is forgotten
+        };
+        std::map<int64_t, NewThread> _newThreads; // thread id -> its picker
+        /// <summary>
+        /// §21.17, under `_mtx`: a picked folder's launch, waiting for its session to be live — the session id the launch was
+        /// given (RemoteLaunchRequest::newSessionId), the thread it becomes the topic of, the title it was given ("" = the
+        /// folder-derived default) and the user's messages to hand over. The tick binds it (_adoptBoundThreads).
+        /// </summary>
+        struct ThreadBind
+        {
+            std::wstring sessionId;
+            int64_t threadId{ 0 };
+            std::wstring dir;
+            std::wstring title;
+            std::vector<json::Value> held;
+            int64_t requestedMs{ 0 }; // WallMs of the launch: kNewThreadBindTimeoutMs counts from it
+        };
+        std::vector<ThreadBind> _threadBinds;
 
         SearchBridgeFactory _searchFactory;
         std::unique_ptr<SearchBridge> _search;

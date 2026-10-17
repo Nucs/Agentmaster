@@ -1112,12 +1112,17 @@ namespace Agentmaster
     // is threaded to BuildClaudeCommandline so the spawn launches claude BY FULL PATH — the npm
     // `claude.cmd` via `cmd /c`, a native claude.exe directly — instead of a bare `claude` token that
     // ConPTY's CreateProcessW can only resolve as claude.exe (no PATHEXT). Empty => bare-token fallback.
-    // `forkIntoSessionId` (Agentmaster, fork only): the id the fork should target INSTEAD of a freshly
-    // minted one. A GENUINE fork leaves this empty (mint a new id). A RESTORE re-fork — re-materializing
-    // a NEVER-MESSAGED fork whose own `<id>.jsonl` was never written (its first turn never ran) — passes
-    // the fork's EXISTING id here so it forks back into the same id, preserving its identity (and the
-    // WindowRecord tab ref) across the restart rather than churning a new id every reopen. Collision-free
-    // because a transcript-less fork's id is unused on disk. Ignored unless forkFromSessionId is set.
+    // `targetSessionId` (Agentmaster): the id the spawn should take INSTEAD of a freshly minted one.
+    //   - A fork: a GENUINE fork leaves this empty (mint a new id). A RESTORE re-fork — re-materializing a
+    //     NEVER-MESSAGED fork whose own `<id>.jsonl` was never written (its first turn never ran) — passes
+    //     the fork's EXISTING id here so it forks back into the same id, preserving its identity (and the
+    //     WindowRecord tab ref) across the restart rather than churning a new id every reopen. Collision-free
+    //     because a transcript-less fork's id is unused on disk.
+    //   - A FRESH launch (MESSAGING.md §21.17): a caller that must know the id BEFORE the tab exists passes
+    //     one it minted with NewSessionId — the Telegram bot's new-thread picker binds the user's thread to
+    //     it, so the thread becomes the session's topic the moment the session is live. Collision-free for
+    //     the same reason: a freshly minted GUID names no transcript.
+    //   Ignored for a resume (the resumed id is the spec id).
     // `modelOverride` (Agentmaster, launch-model picker): non-empty => the commandline carries
     // ` --model <id>` (see BuildClaudeCommandline). Ignored when `launch` is given: the compiled launch's
     // own model applies. The launch seams no longer pass a raw pick here — they compile it into `launch`
@@ -1131,7 +1136,7 @@ namespace Agentmaster
     // and the key variable (spec.env + spec.authTokenEnv), and — when it carries env values — a launch
     // settings file instead of the shared hooks file (MaterializeLaunchSettingsFile). The caller owns
     // refusing a launch whose compile failed (CompiledClaudeLaunch::error); this builder does not check.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, const CompiledClaudeLaunch* launch = nullptr);
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view targetSessionId = {}, std::wstring_view modelOverride = {}, std::wstring_view initialPrompt = {}, const CompiledClaudeLaunch* launch = nullptr);
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a

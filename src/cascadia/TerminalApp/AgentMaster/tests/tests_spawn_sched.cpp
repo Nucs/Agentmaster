@@ -234,9 +234,20 @@ void TestSpawnBuilders()
         const auto refork = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", L"", fst, src, L"C:\\bin\\claude.exe", keep);
         CHECK(refork.sessionId == keep, "re-fork targets the fork's existing id (forkIntoSessionId), preserving identity");
         CHECK(refork.commandline.find(L"--resume " + src + L" --fork-session --session-id " + keep) != std::wstring::npos, "re-fork commandline forks the source into the SAME id");
-        // forkIntoSessionId is honored only when forking: a plain resume ignores it (reuses the resume id).
+        // targetSessionId (forkIntoSessionId before MESSAGING.md §21.17) is ignored by a resume: it reuses the resume id.
         const auto resumeIgnores = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", keep, fst, L"", L"C:\\bin\\claude.exe", L"some-other-id");
-        CHECK(resumeIgnores.sessionId == keep, "forkIntoSessionId is ignored on a non-fork (resume reuses its id)");
+        CHECK(resumeIgnores.sessionId == keep, "targetSessionId is ignored by a resume (it reuses its id)");
+        // §21.17: a FRESH launch takes the id its caller chose (the Telegram new-thread picker binds the thread to it before the
+        // tab exists): the spec and the commandline's --session-id are that id, and nothing is resumed or forked.
+        const std::wstring chosen = NewSessionId();
+        const auto freshTarget = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", L"", fst, L"", L"C:\\bin\\claude.exe", chosen);
+        CHECK(freshTarget.sessionId == chosen, "a fresh launch with a targetSessionId takes that id (21.17)");
+        CHECK(freshTarget.commandline.find(L"--session-id " + chosen) != std::wstring::npos && freshTarget.commandline.find(L"--resume") == std::wstring::npos &&
+                  freshTarget.commandline.find(L"--fork-session") == std::wstring::npos,
+              "the fresh launch's commandline names the chosen id and resumes / forks nothing (21.17)");
+        // ...and without one a fresh launch still mints its own.
+        const auto freshMint = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", L"", fst, L"", L"C:\\bin\\claude.exe");
+        CHECK(!freshMint.sessionId.empty() && freshMint.sessionId != chosen, "a fresh launch with no targetSessionId mints a new id");
     }
 
     // ResolveClaudeExeIn (native-exe-only policy): resolve a real claude.exe; a .cmd is only a
