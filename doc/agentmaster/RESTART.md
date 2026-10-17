@@ -3,6 +3,13 @@
 > **Status: PLAN (2026-10-05). Not implemented.** D3 (the unsent draft) is decided (the user, 2026-10-06,
 > §3.13); D1, D2 and D4–D7 (§5) are open. Read against HEAD `747a35ff8` (the restart code is unchanged since
 > `7cc093e01`; the draft code against `82cd65d2a`). Line numbers drift — re-check them before you edit.
+>
+> **2026-10-17 (NOT BUILT yet): R2 for ONE case.** When the resumed conversation's turn died on an API error,
+> today's restart now holds the new connection's `Start` until the old claude has exited, then appends the
+> rewind line (HOOKS.md *API-error turns*, `_StartAfterApiErrorRewind`). Handles: `ProcessExitWait`, opened
+> before the swap from the claude processes whose heartbeat names the conversation (not §3.4's process-tree
+> capture); deadline 15 s; on a timeout it starts anyway, un-rewound (no D7 escalation). Every other restart
+> is unchanged. The full pipeline below should take this step over (phase E, then the rewind in phase F).
 
 ## 1. Goal
 

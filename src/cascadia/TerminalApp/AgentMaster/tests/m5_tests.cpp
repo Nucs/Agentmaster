@@ -161,6 +161,7 @@ int wmain()
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)
     TestUnreadCensus(); // ...and the process-wide unread count behind it
     TestTaskbarThumbnail(); // NOTIFICATIONS.md section 9 — the unread frame on a window's taskbar / Alt+Tab preview (tests_taskbar.cpp)
+    TestApiErrorRewind(); // HOOKS.md "API-error turns" — the rewind that lets a resumed session continue a turn an API error ended (tests_rewind.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

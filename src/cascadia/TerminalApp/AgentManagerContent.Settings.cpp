@@ -1091,6 +1091,12 @@ namespace winrt::TerminalApp::implementation
         _setCarryDraftOnFork.Header(winrt::box_value(L"Copy my unsent prompt into a forked session"));
         AgentSetTip(_setCarryDraftOnFork, L"When you fork a session \x2014 a tab's \x201C" L"Fork session\x201D (or Ctrl+Shift+D), the Manager's Fork, or the Sessions page's Fork here \x2014 the message sitting UNSENT in the source's input box is typed into the new fork's box as well, WITHOUT pressing Enter, so the fork starts one Enter away from the same prompt. The source keeps its copy.\n\nPasted blocks come across as the real pasted text: each [Pasted text #N +M lines] is rebuilt from what you actually pasted (Agentmaster records every paste it passes to Claude), so the fork's box shows the same placeholder backed by the same content \x2014 never the bare label, which Claude would send as literal text. A draft whose pasted block can't be matched for certain (or that holds an image) is not copied at all.\n\nNever fights you: if you start typing into the fork before it lands, your text wins. Off: forks start with an empty input box.");
         panel.Children().Append(_setCarryDraftOnFork);
+        // HOOKS.md "API-error turns": the API-ERROR REWIND before a resume (AppSettings::resumeApiErrorTurns). Every
+        // resume seam reads it fresh from settings.json, so Save applies it to the next resume with no live push.
+        _setResumeApiErrorTurns = ToggleSwitch{};
+        _setResumeApiErrorTurns.Header(winrt::box_value(L"Continue a turn that ended in an API error when its session is resumed"));
+        AgentSetTip(_setResumeApiErrorTurns, L"A turn can die on an API error \x2014 \x201C" L"Connection lost mid-response\x201D, an overloaded or rate-limited API, a server error. Resuming such a session (Restart session, entering a Deactivated or restored tab, Resume here on the Sessions page) normally leaves Claude sitting at the error.\n\nWith this on, Agentmaster first adds ONE line to the session's transcript \x2014 the same line Claude Code writes when you rewind with Esc Esc \x2014 that steps the conversation back to just before the failed response. The resumed Claude then sees an interrupted turn and continues it by itself (your ~/.claude/settings.json sets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1). Nothing is deleted: the error and the half-written reply stay in the file on an abandoned branch.\n\nA refusal or a safety block is never retried. Restart waits (up to 15 s) for the old Claude to exit before it writes the line, because that Claude would otherwise put the error back on exit. Off: a resumed errored session waits at the error for you to type.");
+        panel.Children().Append(_setResumeApiErrorTurns);
         // SESSIONS_DB.md: the session database. Off by default: nothing changes until the user picks Shadow (it
         // runs beside today's search and logs where the two differ) or On (the Sessions page and the AI search
         // read it). Save applies the mode and the interval at once (the refresh tick starts or stops); the threads
@@ -2925,6 +2931,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setCarryDraftOnFork.IsOn(_appSettings.carryDraftOnFork); // PENDING_INPUT.md §11
         }
+        if (_setResumeApiErrorTurns)
+        {
+            _setResumeApiErrorTurns.IsOn(_appSettings.resumeApiErrorTurns); // HOOKS.md "API-error turns"
+        }
         if (_setSessionDbMode)
         {
             // SESSIONS_DB.md: the four settings, clamped the way the engine reads them, and what the refresh tick
@@ -3695,6 +3705,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCarryDraftOnFork)
         {
             _appSettings.carryDraftOnFork = _setCarryDraftOnFork.IsOn(); // PENDING_INPUT.md §11
+        }
+        if (_setResumeApiErrorTurns)
+        {
+            _appSettings.resumeApiErrorTurns = _setResumeApiErrorTurns.IsOn(); // HOOKS.md "API-error turns"
         }
         if (_setSessionDbMode)
         {

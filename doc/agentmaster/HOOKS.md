@@ -652,6 +652,129 @@ the pure rules, the registry, and thirteen staged sessions on a real scanner thr
 three ways back to `Running`, and every shape that must not read as a cut-off (a live turn, a bare
 prompt, a fork, a user interrupt, a dismissed card).
 
+### API-error turns — a resume continues a turn that an API error ended (2026-10-17, NOT BUILT yet)
+
+**The incident (release 0.6.8.21, session `0391efeb` "char plan", 2026-10-17, local times).**
+
+| Time | What happened |
+|---|---|
+| 18:16:37 | A turn started (`/np-function Finish this…`). |
+| 18:56:48 | After 40 min it died: `API Error: Connection lost mid-response. The response above may be incomplete.` The scanner set `Error` (`[recon-error]`). |
+| 18:57:48 | "Restart session". The resumed claude sat idle at the error. |
+| 19:02:49 | A fork (`d60d22df`). It sat idle too (a fork writes no transcript of its own until its first turn). |
+| 19:02:59 | A second restart: idle again. |
+| 19:03:20 | The user typed the command again, and the work went on. |
+
+**What the transcript held** (the tail of `0391efeb.jsonl`):
+- a tool result and a `total_tokens_reminder` attachment;
+- the half-streamed response: a thinking row and a text row ("I write the batch-1 benchmark twins…"), one
+  `message.id`, with the stop reason `end_turn` that the client wrote for the cut stream;
+- the synthetic error row: `model "<synthetic>"`, `isApiErrorMessage: true`, `error: "server_error"`,
+  `truncatedAfterOutput: true`, no `apiErrorStatus`;
+- its `system/turn_duration` child, `cost-state` lines, and a `last-prompt` marker naming the turn_duration row.
+
+**What Claude Code 2.1.291 does when it resumes a conversation** (read from its bundle; the functions
+`PMt` / `bfo` / `EMt` and the loader `aAn`):
+- The loader picks the **active leaf**: the last `last-prompt` line's `leafUuid` when that row exists. A
+  marker with `explicit: true` holds until a transcript row follows it. A marker without it is overridden
+  by a later row that descends from it. Then the loader walks up to the first user / assistant row.
+- The classifier walks back from that row. It skips `system` and `progress` rows, and it skips every
+  **API-error row** (`isApiErrorMessage`) except a refusal, a DLP denial and a safety-monitor block (`EMt`
+  / `xfo`). The first other row decides:
+
+  | Row | Verdict |
+  |---|---|
+  | an assistant row | the turn is complete: nothing happens |
+  | a tool result | `interrupted_turn` |
+  | a human prompt | `interrupted_prompt`: the prompt is sent again |
+  | a meta row, a compact summary | complete |
+
+- For `interrupted_turn` it appends a meta user row, `Continue from where you left off.`. With
+  `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (the user's `~/.claude/settings.json`, set 2026-10-09) it sends
+  it at once.
+- The last message must be younger than `CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS` (5 days on this
+  machine). A skipped API-error row has its own bound (that variable, then a server flag, then 6 h).
+- A marker with `rewound: true` makes the next resume treat its leaf as the user's own rewind and NOT
+  continue (`rewindAnchorUuid`).
+
+So an error **before** any output already resumes by itself. An error **mid-response** never does: the
+classifier stops at the half-response's assistant row and calls the turn complete.
+
+**The fix: one appended line, nothing deleted.** `AgentMaster/ApiErrorRewind.{h,cpp}` appends
+
+    {"type":"last-prompt","lastPrompt":"…","leafUuid":"<the user row below the failed response>","explicit":true,"sessionId":"…"}
+
+This is the line Claude Code's own rewind (Esc Esc) writes, without `rewound`. The loader then takes that
+row as the active leaf. The half-response, the error and everything hanging off it stay in the file on a
+dead branch. The classifier sees a tool result (or a prompt), and the resumed claude continues the turn by
+itself. Proven on a throwaway session before any code was written: with the incident's exact shape, a
+resume did not continue; after the line, the next resume wrote `Continue from where you left off.` and the
+reply. Appending instead of deleting means no rewrite of a 60 MB file, no chain that can break, and an
+undo by one more line.
+
+**⚠ The timing rule: append only while no claude runs the conversation.** Claude Code registers
+`process.on("exit")` → `reAppendSessionMetadata`, which appends a non-explicit `last-prompt` naming the
+process's own leaf. The claude that ran the failed turn holds the error branch as its leaf. Measured: a
+line appended while such a claude lived was followed, at its exit, by its own marker, which put the error
+branch back. Hence:
+- `RewindApiErrorTail` refuses while any live claude's heartbeat (`~/.claude/sessions/<pid>.json`,
+  pid-validated by `PresenceRowMatchesProcess`) names the conversation.
+- `ProcessExitWait` opens handles on those processes BEFORE the seam tells them to close, so a recycled
+  PID cannot fool the wait.
+
+**The planner** (`PlanApiErrorRewind`, pure; it reads the last 256 KiB, then 16 MiB, then the whole file up
+to 256 MiB, only while it needs more):
+
+| Verdict | When | Result |
+|---|---|---|
+| `NotApplicable` | the tail holds no `"isApiErrorMessage":true` (one byte scan, no JSON); the active branch ends in a real message; the conversation went on after the error; an already rewound file | nothing |
+| `Rewind` | the active leaf's message is an API-error row; above it only the failed response's own rows (one `message.id`), bookkeeping rows, earlier error rows and Claude Code's `Continue from where you left off.` rows, down to a user row | the marker line |
+| `RefusalError` | the error is a refusal, a DLP denial or a safety-monitor block | never retried |
+| `UnknownShape` | two different responses above the error with no user row between, an error at the root | left alone |
+| `NeedMoreHistory` | the walk left the bytes read | read more |
+| `TornTail` | the file does not end with a newline | nothing appended |
+
+The target is the nearest user row. Its kind goes to the log: `tool result` and `prompt` continue the
+turn; `meta` (a slash command's skill text) and `compact summary` are rewound but Claude Code will not
+continue them by itself.
+
+**The seams** (`TerminalPage.AgentSessions.cpp`; each reads `AppSettings::resumeApiErrorTurns` fresh):
+
+| Seam | What it does |
+|---|---|
+| "Restart session" (`_RestartManagedSession`, resume only) | Plans while the old claude still runs. When a rewind is due it opens the holders, swaps the new connection in WITHOUT `Start`, and `_StartAfterApiErrorRewind` waits for the holders off the UI thread (at most `kApiErrorRewindExitWaitMs`, 15 s), appends, then starts the connection on the UI thread — only while it is still `NotConnected` (a closed tab or a second restart has closed it). A timeout or a failure still starts it, un-rewound. A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) skips the hold: this restart cannot end it. |
+| "Deactivate" (`_DeactivateManagedTab`, resume only, state `Error` or `midTurnAtRestore`) | Plans before the swap, then `_RewindApiErrorAfterExit` waits for the parked claude's exit and appends. A tab woken before that has a live claude, and the append refuses rather than race it. |
+| A restored resume (`_LaunchClaudeSession` with a `restored` record: window restore, Sessions-page "Resume here", a reopened closed session) | `_RewindApiErrorBeforeRestore` appends synchronously before the connection is built, only for a record whose state is `Error` or whose `midTurnAtRestore` is set, so a 600-tab window restore reads no transcript for a healthy tab. |
+
+**The scanner needs no change.** The marker moves the active leaf off the error branch, so
+`ShouldReleaseErrorOnLeafMove` releases `Error` → `WaitingForInput`; the resumed claude's
+`Continue from where you left off.` turn then lights `Running` (`recon-run` / the working heartbeat).
+
+**Left as it is.**
+- A refusal, a DLP denial, a safety-monitor block.
+- A fork of an errored session: the fork reads the SOURCE's tail, which is not this session's to change.
+  Restart the source instead.
+- A turn older than Claude Code's own age bound (5 days here): rewound, but not continued.
+- An error that will repeat (a prompt too long, an invalid model): the resume fails again, as a manual
+  retry would.
+- `CLAUDE_CODE_RESUME_PROMPT` (a custom continuation text) is not followed (not set on this machine).
+- Codex (no such rows in a rollout).
+
+**Logs** (hooks.log): `[api-error-rewind] <sid8> restart: rewound past "API Error: Connection lost
+mid-response…" (server_error, <ts>) — 2 half-response row(s), 0 earlier continue row(s), 1 row(s) after it
+— to <target8> (tool result); line at byte N; the resumed claude continues the turn (waited N ms for 1
+claude process(es))`. `NOT rewound — <why>` and `FAILED — <why>` lines, and `restart: the held connection was
+closed meanwhile …`. A healthy session logs nothing.
+
+**Tests.** `TestApiErrorRewind` (`tests_rewind.cpp`): the planner on every shape above (the incident, an
+error before output, a prompt's first response, a resume that died again, hook attachments after the
+error, a meta target, refusals, a conversation that went on, a user rewind, idempotence, a cleared
+conversation, a torn line, two responses, a short window vs the whole file), the marker line (Claude Code's
+keys and order, no `rewound`, Hebrew + emoji), and the append on temp files (one line at the old end, a
+second run writes nothing, untouched torn / healthy / refusal files, the window widening). The live
+behavior — Claude Code continuing after the line, and the exit re-stamp — was measured on a throwaway
+session with the ConPTY driver (skill `claude-wrap-ConPTY`); the app's seams are not yet run live.
+
 ### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
 
 **The 2026-09-25 finding: the scanner thread used ~35% of a core.** On the release instance (~60 live

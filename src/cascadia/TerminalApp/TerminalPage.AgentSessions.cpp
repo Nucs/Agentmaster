@@ -38,6 +38,7 @@
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this page hosts
+#include "AgentMaster/ApiErrorRewind.h" // the API-ERROR REWIND before a resume (HOOKS.md "API-error turns")
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
@@ -1023,6 +1024,13 @@ namespace winrt::TerminalApp::implementation
         // touch ~/.claude.json (ClaudeSpawn.h). This is the shared seam for fresh launch / resume /
         // fork / restore / handover, so all of them get the seed exactly as before.
         ::Agentmaster::PrepareManagedClaudeWorkspace(dir, appSettings);
+        // Agentmaster (HOOKS.md "API-error turns"): a RESUME of a restored record whose turn died on an API error gets
+        // the rewind line before this connection can start, so its claude continues the turn (_RewindApiErrorBeforeRestore
+        // — pre-filtered on the record's state, a no-op for every healthy restored tab).
+        if (wantResume && restored)
+        {
+            _RewindApiErrorBeforeRestore(*restored, appSettings);
+        }
         const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, appSettings, effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, {}, launchPrompt, compiledLaunch ? &*compiledLaunch : nullptr);
         if (launchArgs)
         {
@@ -2754,6 +2762,11 @@ namespace winrt::TerminalApp::implementation
         const std::wstring title = info->title;
         const bool isCodex = (info->kind == ::Agentmaster::AgentKind::Codex);
         bool reforked = false;
+        // Agentmaster (HOOKS.md "API-error turns"): set when the resumed conversation needs the rewind line first — the
+        // new connection is then swapped in WITHOUT a Start, and _StartAfterApiErrorRewind starts it after the old claude
+        // (the `rewindHolders`) has exited and the line is appended.
+        bool holdStartForRewind = false;
+        std::shared_ptr<::Agentmaster::ProcessExitWait> rewindHolders;
 
         TerminalConnection::ConptyConnection newConn{ nullptr };
         if (isCodex)
@@ -2810,6 +2823,49 @@ namespace winrt::TerminalApp::implementation
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
             const bool resumed = !reforked && spec.commandline.find(L"--resume ") != std::wstring::npos;
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId + (reforked ? (L" (refork from " + info->forkParentId + L")") : (resumed ? L" (resume)" : L" (fresh)")) + L"\n");
+
+            // Agentmaster (HOOKS.md "API-error turns" — the API-ERROR REWIND). A RESUMED conversation whose turn died on an
+            // API error gets one rewind line before the new claude reads it, so that claude CONTINUES the turn instead of
+            // sitting at the error (the 2026-10-17 report: "When I restart session the session does not try to resume").
+            // Planned NOW, while the old claude still runs (a tail read; a healthy restart stops at one byte scan). The
+            // line itself may only land once that claude has EXITED — at exit it re-stamps the error as the active leaf —
+            // so its process handles are opened here, BEFORE the swap below tells it to close, and the new connection's
+            // Start is held until _StartAfterApiErrorRewind has waited and appended. Re-fork / fresh never read a tail.
+            if (resumed && appSettings.resumeApiErrorTurns)
+            {
+                const auto plan = ::Agentmaster::PlanApiErrorRewindForSession(managedId);
+                if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
+                {
+                    rewindHolders = std::make_shared<::Agentmaster::ProcessExitWait>(::Agentmaster::ProcessExitWait::ForSession(managedId));
+                    // A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) is not ended by this restart:
+                    // holding this tab for it would cost the whole timeout and append nothing. Known only when the observer
+                    // has bound this tab's own claude (info->pid); unknown => wait for every holder.
+                    const auto pids = rewindHolders->Pids();
+                    const auto foreign = std::find_if(pids.begin(), pids.end(), [&](const uint32_t p) { return info->pid != 0 && p != info->pid; });
+                    if (foreign != pids.end())
+                    {
+                        ::Agentmaster::ApiErrorRewindResult skipped;
+                        skipped.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                        skipped.plan = plan;
+                        skipped.detail = L"claude pid " + std::to_wstring(*foreign) + L" in another tab also runs this conversation (this restart cannot end it)";
+                        ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(skipped, managedId, L"restart") + L"\n");
+                        rewindHolders.reset();
+                    }
+                    else
+                    {
+                        holdStartForRewind = true;
+                    }
+                }
+                else if (plan.verdict != ::Agentmaster::ApiErrorRewindVerdict::NotApplicable)
+                {
+                    // A refusal, a torn line, an unknown shape: say why nothing was done (a healthy session says nothing).
+                    ::Agentmaster::ApiErrorRewindResult skipped;
+                    skipped.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                    skipped.plan = plan;
+                    skipped.detail = plan.reason;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(skipped, managedId, L"restart") + L"\n");
+                }
+            }
         }
 
         if (!newConn)
@@ -2885,7 +2941,16 @@ namespace winrt::TerminalApp::implementation
         // "press Enter to restart" INTO the restarted pane (the reported banner). Same teardown, silent.
         control.HardResetWithoutErase();
         control.Connection(newConn);
-        newConn.Start();
+        if (holdStartForRewind)
+        {
+            // The API-error rewind (above): the swap just told the old claude to close; wait for it, append the line,
+            // THEN start — the pane keeps showing the old screen for that second or two.
+            _StartAfterApiErrorRewind(managedId, newConn, rewindHolders);
+        }
+        else
+        {
+            newConn.Start();
+        }
 
         // Re-point this session's stdin injector at the freshly-started connection (Claude only — Codex
         // has no injector in this phase). Correctness Rule #3 binds by sessionId; without this, Autorunner
@@ -2900,6 +2965,124 @@ namespace winrt::TerminalApp::implementation
             });
         }
         return true;
+    }
+
+    // Agentmaster (HOOKS.md "API-error turns"): the RESTART half of the API-error rewind — see TerminalPage.h for the
+    // contract. `this` is never touched after the first suspension: the page can close while the old claude exits (the
+    // fire_and_forget teardown Gotcha), so everything below works on the parameters, the engine and the dispatcher.
+    winrt::fire_and_forget TerminalPage::_StartAfterApiErrorRewind(std::wstring sessionId, TerminalConnection::ConptyConnection newConn, std::shared_ptr<::Agentmaster::ProcessExitWait> holders)
+    {
+        const auto dispatcher{ Dispatcher() };
+        try
+        {
+            co_await winrt::resume_background();
+            try
+            {
+                // The wait and the append run on a pool thread: an exit can take a few seconds (Windows ends a console
+                // client that ignores CTRL_CLOSE after 5 s), and the UI thread must not stall for it.
+                const uint64_t waitStarted = ::GetTickCount64();
+                ::Agentmaster::ApiErrorRewindResult result;
+                if (!holders || holders->WaitAll(::Agentmaster::kApiErrorRewindExitWaitMs))
+                {
+                    // RewindApiErrorTailForSession re-plans on the file as it is NOW (the old claude's exit lines included)
+                    // and re-checks that no claude runs the conversation before it appends.
+                    result = ::Agentmaster::RewindApiErrorTailForSession(sessionId);
+                }
+                else
+                {
+                    std::wstring pids;
+                    for (const auto pid : holders->Pids())
+                    {
+                        pids += (pids.empty() ? L"" : L", ") + std::to_wstring(pid);
+                    }
+                    result.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                    result.detail = L"claude pid " + pids + L" did not exit within " + std::to_wstring(::Agentmaster::kApiErrorRewindExitWaitMs / 1000) + L" s (its exit would undo the line) \x2014 started without the rewind";
+                }
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              ::Agentmaster::DescribeApiErrorRewind(result, sessionId, L"restart") + L" (waited " +
+                                                  std::to_wstring(::GetTickCount64() - waitStarted) + L" ms for " + std::to_wstring(holders ? holders->Count() : 0) + L" claude process(es))\n");
+            }
+            catch (...)
+            {
+                // Contained on the pool thread so the start below still runs: a failed rewind must never leave the
+                // restarted tab without its claude.
+                ::Agentmaster::AgentLogCaughtException(L"_StartAfterApiErrorRewind: wait / append");
+            }
+
+            co_await wil::resume_foreground(dispatcher);
+            // Start ONLY the connection nothing has touched since the swap: a closed tab, a closed window or a second
+            // restart has CLOSED it, and a start then would spawn a claude no pane shows. A tab torn out into another
+            // window keeps its control and its never-started connection, which still starts there.
+            if (newConn.State() == ConnectionState::NotConnected)
+            {
+                newConn.Start();
+            }
+            else
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[api-error-rewind] " + ::Agentmaster::ShortId(sessionId) + L" restart: the held connection was closed meanwhile (the tab closed or restarted again) \x2014 not started\n");
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_StartAfterApiErrorRewind");
+        }
+    }
+
+    // Agentmaster (HOOKS.md "API-error turns"): the DEACTIVATE half — see TerminalPage.h. Touches no page state at all,
+    // so the page closing meanwhile is harmless.
+    winrt::fire_and_forget TerminalPage::_RewindApiErrorAfterExit(std::wstring sessionId, std::shared_ptr<::Agentmaster::ProcessExitWait> holders, std::wstring seam)
+    {
+        try
+        {
+            co_await winrt::resume_background();
+            const uint64_t waitStarted = ::GetTickCount64();
+            ::Agentmaster::ApiErrorRewindResult result;
+            if (!holders || holders->WaitAll(::Agentmaster::kApiErrorRewindExitWaitMs))
+            {
+                result = ::Agentmaster::RewindApiErrorTailForSession(sessionId);
+            }
+            else
+            {
+                result.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                result.detail = L"the parked claude did not exit within " + std::to_wstring(::Agentmaster::kApiErrorRewindExitWaitMs / 1000) + L" s (its exit would undo the line)";
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          ::Agentmaster::DescribeApiErrorRewind(result, sessionId, seam) + L" (waited " +
+                                              std::to_wstring(::GetTickCount64() - waitStarted) + L" ms)\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_RewindApiErrorAfterExit");
+        }
+    }
+
+    // Agentmaster (HOOKS.md "API-error turns"): the RESTORE half — see TerminalPage.h. Synchronous on purpose: the caller
+    // builds the resume connection right after, and a dormant tab can start on its first layout at any moment.
+    void TerminalPage::_RewindApiErrorBeforeRestore(const ::Agentmaster::SessionInfo& restored, const ::Agentmaster::AppSettings& settings)
+    {
+        if (!settings.resumeApiErrorTurns || restored.id.empty() || restored.kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return;
+        }
+        // The cheap pre-filter: only a record whose last known state says the turn was in flight or had failed. An
+        // API error that hit while Agentmaster was not watching is not seen here (the next Restart still finds it).
+        if (restored.state != ::Agentmaster::SessionState::Error && !restored.midTurnAtRestore)
+        {
+            return;
+        }
+        try
+        {
+            const auto result = ::Agentmaster::RewindApiErrorTailForSession(restored.id);
+            if (result.outcome != ::Agentmaster::ApiErrorRewindOutcome::NotNeeded)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(result, restored.id, L"restore") + L"\n");
+            }
+        }
+        catch (...)
+        {
+            // Only the log line can throw (allocation); the launch goes on either way.
+            ::Agentmaster::AgentLogCaughtException(L"_RewindApiErrorBeforeRestore");
+        }
     }
 
     // Agentmaster (deactivate): see TerminalPage.h. Every check a park needs before it touches anything,
@@ -3076,6 +3259,9 @@ namespace winrt::TerminalApp::implementation
         const bool isCodex = (info->kind == ::Agentmaster::AgentKind::Codex);
         bool reforked = false;
         std::wstring parkMode; // what the parked connection will do when started: "resume" / "re-fork" / "fresh (same id)" — for the log
+        // Agentmaster (HOOKS.md "API-error turns"): the claude processes the API-error rewind must outlive, opened before
+        // the swap ends the parked claude; null when no rewind is due.
+        std::shared_ptr<::Agentmaster::ProcessExitWait> rewindHolders;
 
         // Build the DORMANT successor connection — _RestartManagedSession's construction (resume-gated;
         // a transcript-less session relaunches fresh under the SAME id, so the tab keeps its session, where
@@ -3130,6 +3316,27 @@ namespace winrt::TerminalApp::implementation
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
             // The same reading _RestartManagedSession logs, straight off the built commandline.
             parkMode = reforked ? L"re-fork" : (spec.commandline.find(L"--resume ") != std::wstring::npos ? L"resume" : L"fresh (same id)");
+            // Agentmaster (HOOKS.md "API-error turns"): a parked RESUME of a conversation whose turn died on an API error
+            // gets the rewind line once the claude being parked has exited (_RewindApiErrorAfterExit), so the tab wakes
+            // into the interrupted turn. Gated on the record's state (a batch park of hundreds of tabs reads no transcript
+            // for the healthy ones); planned now while that claude still runs, its handles opened before the swap.
+            if (parkMode == L"resume" && appSettings.resumeApiErrorTurns &&
+                (info->state == ::Agentmaster::SessionState::Error || info->midTurnAtRestore))
+            {
+                const auto plan = ::Agentmaster::PlanApiErrorRewindForSession(sid);
+                if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
+                {
+                    rewindHolders = std::make_shared<::Agentmaster::ProcessExitWait>(::Agentmaster::ProcessExitWait::ForSession(sid));
+                }
+                else if (plan.verdict != ::Agentmaster::ApiErrorRewindVerdict::NotApplicable)
+                {
+                    ::Agentmaster::ApiErrorRewindResult skipped;
+                    skipped.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                    skipped.plan = plan;
+                    skipped.detail = plan.reason;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeApiErrorRewind(skipped, sid, L"deactivate") + L"\n");
+                }
+            }
         }
         if (!newConn)
         {
@@ -3219,6 +3426,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[deactivate] " + sid8 + L" skipped - the tab refused the content swap (the session keeps running)\n");
             return false;
+        }
+        if (rewindHolders)
+        {
+            // The swap just told the parked claude to close: append the API-error rewind once it has (off the UI thread).
+            _RewindApiErrorAfterExit(sid, rewindHolders, L"deactivate");
         }
 
         // Retire the replaced host BEFORE the record names the new one (SessionRegistry::RetireHostToken):
