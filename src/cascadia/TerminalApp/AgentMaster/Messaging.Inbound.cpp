@@ -442,6 +442,9 @@ namespace Agentmaster::Msg
         // message with neither mark that repeats a text we just sent as the user in this topic is dropped below.
         if (msg.Find(L"sender_business_bot") || !msg.StrAt(L"business_connection_id").empty())
         {
+            // §21.12: it still names THIS bot's id of the user's bubble — the turn's status reaction and the reply's quote
+            // need it when the bubble is the topic's current prompt.
+            _notePromptEcho(msg.I64At(L"message_thread_id", 0), msg.StrAt(L"text"), msg.I64At(L"message_id", 0));
             return;
         }
         const int64_t threadId = msg.I64At(L"message_thread_id", 0);
@@ -479,6 +482,7 @@ namespace Agentmaster::Msg
         }
         if (!edited && threadId != 0 && _takeSecretaryEcho(threadId, text))
         {
+            _notePromptEcho(threadId, text, msg.I64At(L"message_id", 0)); // §21.12: the current prompt's id in this bot's view
             _log(L"[msg] secretary: our own send as the user came back as a message (thread " + std::to_wstring(threadId) + L"); ignored");
             return;
         }

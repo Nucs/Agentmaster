@@ -766,8 +766,9 @@ void TestMessaging()
             if (posts.size() == 7)
             {
                 CHECK(!posts[0].fromUser && posts[0].html.find(L"Fri 16 Oct 2026") != std::wstring::npos, "the first day line");
-                CHECK(posts[1].fromUser && posts[1].userText == L"fix the crash" && posts[1].html.rfind(L"\x2328 ", 0) == 0 && posts[1].html.find(L" \x00B7 <b>fix the crash</b>") != std::wstring::npos,
-                      "the user's turn: the words as typed, and the bot's line in its place (⌨ clock · first line)");
+                CHECK(posts[1].fromUser && posts[1].userText == L"fix the crash" && posts[1].html.rfind(L"<b>\U0001F464 You</b> \x00B7 ", 0) == 0 &&
+                          posts[1].html.find(L" \x00B7 typed at the PC\nfix the crash") != std::wstring::npos && posts[1].turnPrompt,
+                      "the user's turn: the words as typed, and the bot's line in its place (bold 'You', the clock, the source, then the prompt; the turn's prompt)");
                 CHECK(posts[2].html.find(L"Looking at the stack first.") == 0, "the narrative opens with the first remark");
                 CHECK(posts[2].html.find(L"<blockquote expandable>\x2022 Bash: Run the tests ($ npm test)\n\x2717 Bash: exit 1</blockquote>") != std::wstring::npos,
                       "the remark's tool calls in one folded quote, a failed result labeled with its tool");
@@ -811,13 +812,21 @@ void TestMessaging()
             if (posts.size() == 5)
             {
                 CHECK(posts[1].html.find(L"Working.") != std::wstring::npos && posts[1].html.find(L"\x2022 Bash: build") != std::wstring::npos, "the narrative before the mid-turn message");
-                CHECK(posts[2].fromUser && posts[2].userText == L"also the docs" && posts[2].html.find(L"(mid-turn)") != std::wstring::npos, "the mid-turn message is the user's");
-                CHECK(posts[3].fromUser && posts[3].userText == L"/compact keep the plan" && posts[3].html == L"<code>/compact keep the plan</code>", "the slash command is the user's");
+                CHECK(posts[2].fromUser && posts[2].userText == L"also the docs" && posts[2].html.find(L" \x00B7 typed at the PC \x00B7 mid-turn\nalso the docs") != std::wstring::npos &&
+                          !posts[2].turnPrompt,
+                      "the mid-turn message is the user's (not the turn's prompt)");
+                CHECK(posts[3].fromUser && posts[3].userText == L"/compact keep the plan" && posts[3].html.rfind(L"<b>\U0001F464 You</b>", 0) == 0 &&
+                          posts[3].html.find(L" \x00B7 command\n<code>/compact keep the plan</code>") != std::wstring::npos,
+                      "the slash command is the user's");
+                CHECK(posts[4].turnReply, "the reply is marked: it quotes the turn's prompt");
                 CHECK(!posts[4].fromUser && posts[4].html.find(L"Done.") != std::wstring::npos, "the reply");
             }
             const auto runner = RenderHistory({ item(TopicItemKind::Prompt, L"run the suite", day1), item(TopicItemKind::Text, L"Green.") }, false, lastDay,
-                                              [](const std::wstring& text) { return text == L"run the suite"; });
-            CHECK(runner.size() == 2 && runner[0].fromUser && runner[0].html.rfind(L"\x2699 ", 0) == 0, "a prompt the runner sent: ⚙ in the bot's line");
+                                              [](const std::wstring& text) { return text == L"run the suite" ? PromptSource::Runner : PromptSource::Pc; });
+            CHECK(runner.size() == 2 && runner[0].fromUser && runner[0].html.find(L" \x00B7 \x2699 runner\nrun the suite") != std::wstring::npos, "a prompt the runner sent: '⚙ runner' in the bot's line");
+            const auto phone = RenderHistory({ item(TopicItemKind::Prompt, L"from the bus", day1), item(TopicItemKind::Text, L"On it.") }, false, lastDay,
+                                             [](const std::wstring&) { return PromptSource::Phone; });
+            CHECK(phone.size() == 2 && phone[0].html.find(L" \x00B7 \U0001F4F1 from the phone\nfrom the bus") != std::wstring::npos, "a prompt sent from the phone: '📱 from the phone'");
             const auto stopped = RenderHistory({ item(TopicItemKind::Prompt, L"x", day1), tool(L"t5", L"Bash", L"Bash: long"), item(TopicItemKind::Interrupt, L"") }, false, lastDay);
             CHECK(stopped.size() == 2 && stopped[1].html.find(L"\x2022 Bash: long") != std::wstring::npos && stopped[1].html.find(L"interrupted") != std::wstring::npos,
                   "an interrupted turn: its tools and the mark, no reply");
@@ -827,7 +836,7 @@ void TestMessaging()
                                                 false,
                                                 lastDay);
             CHECK(answered.size() == 4 && answered[1].html.find(L"Swap: Swap now?") != std::wstring::npos && answered[2].fromUser && answered[2].userText == L"Swap now" &&
-                      answered[2].html.find(L"\x21A9 <b>Swap now</b>") != std::wstring::npos && answered[3].html.find(L"Swapping.") != std::wstring::npos,
+                      answered[2].html.find(L" \x00B7 \x21A9 answer\nSwap now") != std::wstring::npos && answered[3].html.find(L"Swapping.") != std::wstring::npos,
                   "the answer to a question is the user's post, between the question and the reply");
         }
 
@@ -1201,6 +1210,81 @@ void TestMessaging()
             const AppSettings again = AppSettingsFromJson(ToJson(set));
             const AppSettings blank = AppSettingsFromJson(json::Value::MkObj());
             CHECK(again.messagingVerbose && !again.messagingRichMessages && !blank.messagingVerbose && blank.messagingRichMessages, "both settings round-trip; absent keys read as the defaults");
+        }
+
+        // §21.12 — the user's LINES: a bold "👤 You" header (the clock, the source, mid-turn, the turn's status) over the words;
+        // the status of the LAST prompt as text (our line) or a reaction (the user's own message).
+        {
+            constexpr auto npos = std::wstring::npos;
+            const std::wstring running = BuildPromptLineHtml(day1, PromptSource::Pc, L"fix <it>", PromptTurnStatus::Running, false);
+            CHECK(running.rfind(L"<b>\U0001F464 You</b> \x00B7 ", 0) == 0 && running.find(L" \x00B7 typed at the PC \x00B7 \x23F3 running\nfix &lt;it&gt;") != npos,
+                  "the prompt line: bold 'You', the clock, typed at the PC, the status, then the prompt (escaped)");
+            CHECK(BuildPromptLineHtml(0, PromptSource::Runner, L"x", PromptTurnStatus::None, false) == L"<b>\U0001F464 You</b> \x00B7 \x2699 runner\nx", "no clock when unknown; no status");
+            CHECK(BuildPromptLineHtml(0, PromptSource::Phone, L"x", PromptTurnStatus::Answered, false).find(L"\U0001F4F1 from the phone \x00B7 \x2705 answered") != npos, "from the phone, answered");
+            CHECK(BuildPromptLineHtml(0, PromptSource::Pc, L"x", PromptTurnStatus::None, true).find(L"typed at the PC \x00B7 mid-turn\nx") != npos, "a mid-turn message says so");
+            const std::wstring longPrompt = BuildPromptLineHtml(0, PromptSource::Pc, std::wstring(700, L'a'), PromptTurnStatus::None, false);
+            CHECK(longPrompt.find(L"\n<blockquote expandable>") != npos && longPrompt.find(L"</blockquote>") != npos, "a long prompt folds into an expandable quote");
+            const std::wstring huge = BuildPromptLineHtml(0, PromptSource::Pc, std::wstring(9000, L'b'), PromptTurnStatus::Running, false);
+            CHECK(huge.size() < kTelegramMessageMaxChars && huge.find(L"\x2026</blockquote>") != npos, "a huge prompt is cut (an edit of the line cannot be split)");
+            CHECK(BuildAnswerLineHtml(0, L"Swap now") == L"<b>\U0001F464 You</b> \x00B7 \x21A9 answer\nSwap now", "the answer line");
+            CHECK(BuildCommandLineHtml(0, L"/compact <x>") == L"<b>\U0001F464 You</b> \x00B7 command\n<code>/compact &lt;x&gt;</code>", "the command line");
+
+            CHECK(PromptTurnStatusFor(SessionState::Running, false) == PromptTurnStatus::Running && PromptTurnStatusFor(SessionState::NeedsApproval, false) == PromptTurnStatus::NeedsYou &&
+                      PromptTurnStatusFor(SessionState::Error, false) == PromptTurnStatus::Error && PromptTurnStatusFor(SessionState::Done, false) == PromptTurnStatus::Ended,
+                  "running, needs you, error, ended follow the state");
+            CHECK(PromptTurnStatusFor(SessionState::WaitingForInput, false) == PromptTurnStatus::Answered && PromptTurnStatusFor(SessionState::Idle, false) == PromptTurnStatus::Answered &&
+                      PromptTurnStatusFor(SessionState::WaitingForInput, true) == PromptTurnStatus::Interrupted,
+                  "at rest: answered, or interrupted when the user stopped the turn");
+            CHECK(std::wstring{ PromptStatusReaction(PromptTurnStatus::Answered) } == L"\U0001F44C" && std::wstring{ PromptStatusReaction(PromptTurnStatus::Running) } == L"\U0001F468\x200D\U0001F4BB" &&
+                      std::wstring{ PromptStatusReaction(PromptTurnStatus::None) }.empty(),
+                  "the user's own message: 👌 answered, 👨‍💻 running, none removes it");
+            for (int st = 1; st <= static_cast<int>(PromptTurnStatus::Interrupted); ++st)
+            {
+                CHECK(std::wstring{ PromptStatusText(static_cast<PromptTurnStatus>(st)) }.size() > 0 && std::wstring{ PromptStatusReaction(static_cast<PromptTurnStatus>(st)) }.size() > 0,
+                      "every status has its words and its reaction");
+            }
+
+            // The history: the turn's prompt and its reply are marked (the reply quotes the prompt), in both modes; a turn begun
+            // in an earlier window has no prompt here, so its reply is not marked.
+            int64_t lastDay = 20261016;
+            const auto quiet = RenderHistory({ item(TopicItemKind::Prompt, L"go", day1), item(TopicItemKind::Text, L"Looking."), tool(L"t1", L"Bash", L"Bash: x"), item(TopicItemKind::Text, L"Done.") },
+                                             false,
+                                             lastDay,
+                                             {},
+                                             false);
+            CHECK(quiet.size() == 2 && quiet[0].turnPrompt && !quiet[0].turnReply && quiet[1].turnReply && !quiet[1].turnPrompt, "conversation only: prompt, then the reply that quotes it");
+            const auto rest = RenderHistory({ item(TopicItemKind::Text, L"Wrapped up.") }, false, lastDay);
+            CHECK(rest.size() == 1 && !rest[0].turnReply, "a reply whose prompt was in an earlier window quotes nothing");
+
+            // The state file keeps the last prompt (a restart goes on updating its status); an older file has none.
+            MessagingState st;
+            TopicRecord t;
+            t.sessionId = L"p";
+            t.threadId = 9;
+            t.promptMessageId = 4242;
+            t.promptBotLine = true;
+            t.promptTsMs = day1;
+            t.promptSource = static_cast<int>(PromptSource::Runner);
+            t.promptText = L"run the suite";
+            t.promptStatus = static_cast<int>(PromptTurnStatus::Answered);
+            t.promptInterrupted = true;
+            st.topics[L"p"] = t;
+            const auto back = StateFromJson(StateToJson(st));
+            const bool same = back && back->topics.count(L"p") && back->topics.at(L"p").promptMessageId == 4242 && back->topics.at(L"p").promptBotLine &&
+                              back->topics.at(L"p").promptTsMs == day1 && back->topics.at(L"p").promptSource == static_cast<int>(PromptSource::Runner) &&
+                              back->topics.at(L"p").promptText == L"run the suite" && back->topics.at(L"p").promptStatus == static_cast<int>(PromptTurnStatus::Answered) &&
+                              back->topics.at(L"p").promptInterrupted;
+            CHECK(same, "the last prompt round-trips");
+            TopicRecord none;
+            none.sessionId = L"n";
+            none.threadId = 1;
+            MessagingState st2;
+            st2.topics[L"n"] = none;
+            const std::wstring text = json::Dump(StateToJson(st2));
+            CHECK(text.find(L"promptMessageId") == npos, "a topic with no prompt tracked writes none of its keys");
+            const auto older = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(older && older->topics.at(L"o").promptMessageId == 0 && older->topics.at(L"o").promptText.empty() && older->topics.at(L"o").promptStatus == 0,
+                  "an older file: no prompt tracked (the next live prompt starts it)");
         }
     }
 
