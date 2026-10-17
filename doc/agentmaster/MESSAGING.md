@@ -4,11 +4,12 @@
 > design below, and what is still open; §21.6 = the topics per TAB, Claude Code's own recap, the card that
 > rings — dev 0.0.1.16, not production; §21.11 = Claude's Markdown as Telegram RICH messages (tables render), a
 > VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
-> optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17); designed
-> 2026-10-15, revised twice on 2026-10-16.** The bot on this
-> machine is the user's `@ClaudeSessionsGateBot` since 2026-10-16 18:50 (the token in
-> `K:\source\telegram\ClaudeSessionsGateBot.env`, stored in Windows Credential Manager by the cog — never in a
-> profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on). Teams, webhooks and external connectors
+> optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17; §21.12 = the
+> "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and the production
+> deploy of §21.12.5); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
+> install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
+> 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
+> cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
 > are still design only. The user's ask: "We plan messaging apps abstract support for Telegram + Microsoft
 > Teams. We will support anything."
 > **The user's decisions so far** (quoted in §18): the bot runs inside the running Agentmaster process
@@ -1842,7 +1843,9 @@ showing beyond unformatted ascii".
 ### 21.12 The user's line, the reply that quotes it, the status on the prompt; one bot per install (2026-10-17)
 
 > Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.22 (`Q:\agentmaster-layouts\Debug`, a purged full
-> rebuild, 11:24), on the NEW dev bot; not in production (0.6.8.20 predates the whole Telegram feature — below).
+> rebuild, 11:24), on the NEW dev bot. Production: a Release build of 46e3aad42 checked in `Q:\agentmaster-layouts\Release`
+> (11:53) and a swap onto it that switches the release bot on, run by a one-shot task at the end of session 0b1f8635's turn
+> (§21.12.5); until that swap production runs 0.6.8.20, which predates the whole Telegram feature.
 
 **The user's requests** (2026-10-17 morning): "1. Lets introduce the changes to the user message: a. "👤 You · 14:02 · typed
 at the PC" (or "📱 from the phone", "⚙ runner")\n<the prompt>" b. Make each reply a reply to its prompt. Send Claude's
@@ -1914,8 +1917,36 @@ of telegram. The one used by debug should move to the release agentmaster … Th
   token stored for dev; dev swapped to 0.0.1.22. Dev's log: `the bot changed (@ClaudeSessionsGateBot ->
   @ClaudeSessionsDebugGateBot): … reset`, `connected as @ClaudeSessionsDebugGateBot (topics enabled)`, a new Search topic
   (thread 25027). The hub map (`K:\source\telegram\CLAUDE.md`) and the old bot's file header say who polls which bot now.
-- **⚠ The release cannot run it yet**: production is 0.6.8.20 (`Q:\agentmaster-layouts\Release-B`, swapped 06:22 today),
-  whose TerminalApp.dll was built on 2026-10-14 — before the Telegram feature existed (2026-10-16; a probe of the DLL finds
-  none of its strings). So the old bot sits idle, its chat holding dev's last topics, until production runs a build with
-  messaging AND the bot is switched on in its cog (Settings → Messaging: "Run the Telegram bot", user id 473303454, Save —
-  the token is stored already; a running instance reads the messaging settings only at its start or a cog Save).
+- **⚠ Production could not run it as it was**: production is 0.6.8.20 (`Q:\agentmaster-layouts\Release-B`, swapped 06:22
+  today), whose TerminalApp.dll was built on 2026-10-14 — before the Telegram feature existed (2026-10-16; a probe of the
+  DLL finds none of its strings). The user's answer (2026-10-17): build and swap production now, the bot on (§21.12.5).
+
+#### 21.12.5 Production gets the bot (2026-10-17 midday)
+
+- **The build**: a purged Release build of HEAD 46e3aad42 (`SessionModels.h` and `SessionRegistry.*` changed since the last
+  Release build, dd8e97e35) into `Q:\agentmaster-layouts\Release` while production kept running from `Release-B`: 692 s
+  ("Build OK in 685.7s"), 3 compilers, lowest free commit 22.1 GB. Checked: TerminalApp.dll bakes 46e3aad42 and holds the
+  messaging strings (production's has none), the manifest is the unstamped Agentmaster 0.0.1.0, 192 icons, nothing runs
+  from the folder. Agentmaster.exe (2026-10-11) and Microsoft.Terminal.Control.dll (2026-10-06) kept their dates: none of
+  their sources changed since (git log).
+- **Why the bot is switched on by a script, at the one safe moment**: 0.6.8.20 saves `settings.json` from its own settings
+  struct, which has no messaging fields, so any save it made (a cog Save, a sort toggle's read-modify-write) would have
+  dropped "Run the Telegram bot" written before the swap. The swap runs `-NoLaunch`; while nothing of production runs, a
+  helper writes `messagingEnabled: true` + `messagingTelegramOwnerId` (a JSON load + dump that gave back the identical bytes
+  for the release file, plus a backup copy beside it); then the app starts and reads them at its engine init.
+- **Who runs the swap**: session 0b1f8635 runs INSIDE production, and the swap ends every production claude. So a one-shot
+  scheduled task (Interactive, the user's own token) runs it outside production's process tree: it deletes itself, gates
+  the layout, waits for 0b1f8635's turn to end (15 s at rest), takes the build mutex, gates again, waits up to 20 min for
+  the other Running sessions (then cuts their turns off — the user accepted "a running turn is cut off"; such a turn reads
+  Error after the restart), swaps, writes the two settings, launches, and watches the new instance up to 60 min for the
+  bot's `connected as` line. The new instance first asks "Reopen your 4 previous Agentmaster windows?"; the engine, and so
+  the bot, starts after the user's answer.
+- **What its first start does** (measured before the swap, confirmed by the user): a topic for every tab that is not Idle —
+  411 of production's 666 Claude tabs (406 are saved "Waiting for you", which decays to Idle only once READ and past the
+  timeout), against dev's 48 — and dev's 48 old topics in that chat deleted as "closed" after the start-up hold; then the
+  history replay, conversation-only by default: ~2,000 typed turns in those sessions (the Sessions sidecars' `userPrompts`),
+  ~4,000 silent messages at 18 calls a minute — about an hour for the topics and their cards and four for the history.
+  Live turns post meanwhile, slower.
+- **Rollback**: `tools\Swap-AgentmasterLayout.ps1 -LayoutDir 'Q:\agentmaster-layouts\Release-B' -PackageName Agentmaster`
+  (0.6.8.20; its settings saves then drop the two messaging keys again, and its bot does not run).
+- The outcome (the swap's numbers, the bot's first lines) is added here after the run.
