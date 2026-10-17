@@ -2383,8 +2383,10 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 > Status: written 2026-10-17 (session 0b1f8635, commit 00b4bc3aa); LIVE on dev since 0.0.1.26 (20:40, the build of
 > 19c6b7d1b). The 0-tab rule (§21.16.1: a tag no open tab carries is not listed) was written the same evening, after the
 > user saw the first directory (commit a7196c11b), and is LIVE on dev 0.0.1.27 since 21:17 (`Q:\agentmaster-layouts\Debug-B`):
-> its first start EDITED message 916. Not in production (0.6.8.21 is the build of 46e3aad42) — a production build and swap
-> need the user's word.
+> its first start EDITED message 916. The DOT (§21.16.7: a tab's state dot is a button that puts its topic first in the
+> thread list, because no link opens a bot-chat topic on Telegram Android, §21.16.3) was written at 23:00 the same night
+> (commit e4c953201) and is NOT BUILT yet. Not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
+> swap need the user's word.
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
 topics, out of which we right now have Search but will more in future. Also a pin all tags and the tabs in the tag. make sure
@@ -2403,10 +2405,11 @@ One rich message (§21.11) in the chat's main view, "All" — the General topic 
 🧭 Dedicated topics
 [🔎 Search]
 🏷️ Tags
+Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).
 🟨 release · 3 tabs
-🔵 [🟦 Agentmaster]
-🟡 [🟩 docs]
-⚪ [🟦 an idle tab]          a chip that opens nothing: the tab has no topic
+[🔵] [🟦 Agentmaster]       the dot is a button (§21.16.7), the title a link
+[🟡] [🟩 docs]
+⚪ [🟦 an idle tab]          a plain dot and a chip that opens nothing: the tab has no topic
 updated 5 minutes ago
 ```
 
@@ -2429,10 +2432,11 @@ updated 5 minutes ago
   `DirectoryRender::tagsWithoutTabs` counts the left-out tags for the log. The listed tags go in case-insensitive order of
   their names, each head in bold with its color square (`ResolveTagDisplayHex`: the picked color, else the palette's,
   §21.16.5) and its count of open tabs. Under it, the OPEN tabs that carry it (live in a tab, any agent) in case-insensitive
-  order of their titles: the state glyph of the topic names (§21.11), then the tab's chip — a URL button to its topic, in
-  the look of the tab color's square (§21.15: 🟦 primary, 🟩 success, 🟥 danger, else the plain button), the square and the
-  title in its label. A tab with no topic (Idle and not pinned, a Codex tab) gets a DISABLED chip in the same look: the title
-  shows, a tap does nothing. Orders that do not move while the fleet works, so the content changes only when a count, a
+  order of their titles: the state glyph of the topic names (§21.11) — in the rich render a callback button when the tab has a
+  topic, which puts the topic first in the thread list (§21.16.7) —, then the tab's chip — a URL button to its topic, in the
+  look of the tab color's square (§21.15: 🟦 primary, 🟩 success, 🟥 danger, else the plain button), the square and the title
+  in its label. A tab with no topic (Idle and not pinned, a Codex tab) gets a plain dot and a DISABLED chip in the same look:
+  the title shows, a tap does nothing. Orders that do not move while the fleet works, so the content changes only when a count, a
   state, a title or a listed tag does. When no tag is listed (no tag at all, or none on an open tab — one line for both, so
   a tag nobody sees cannot change it): "No open tab carries a tag. A tab's right-click menu ▸ Tags adds one."
 - **The footer:** `updated <tg-time … format="r">19:04</tg-time>` — a date-time entity in the RELATIVE format, which every app
@@ -2456,23 +2460,43 @@ updated 5 minutes ago
   `directoryPinned`. A state file of another bot resets them with the rest (the message is in the old bot's chat).
 - **The first start of a build with it** (dev and production alike) posts and pins one directory; nothing else migrates.
 
-#### 21.16.3 What a tap does (read from the clients' sources; nothing tried on a device)
+#### 21.16.3 What a tap on a TITLE does (the clients' sources, 2026-10-17; Android also seen by the user)
 
 - **The link:** `https://t.me/<bot>/<topic>?topic=<topic>` — the deep-link spec's topic form ("the topic ID is actually the ID
   of the service message that created the topic, so whenever the client resolves a message link that points to a
-  messageActionTopicCreate service message, it should open the topic") plus the `topic` parameter Telegram Desktop's link code
-  reads (§5.1). The topic id is the user-space id the Bot API hands out, so the number is right.
-- **Telegram Desktop** opens the topic: `t.me/<bot>/<id>?topic=<id>` becomes `tg://resolve?domain=<bot>&post=<id>&topic=<id>`,
-  and for a non-channel peer the `post` is ignored (`showPeerByLinkResolved` opens it at the unread message). ⚠ Buttons inside a
-  rich message need Desktop 7.1 or later (§21.15.1); the user's Desktop is 7.0.5 (last started 2026-09-25).
-- ⚠ **Telegram Android does NOTHING** for a link to the bot chat that is open already: `LaunchActivity`, for a bot whose chat
-  is the current fragment (`isBot && sameDialogId`), only calls `setBotUser(…)` — the message id and the topic are dropped.
-  **iOS** reads the link as a plain message link into the chat. So on the phone the directory shows the colors, the states and
-  the counts, and its chips do not move the view.
-- **What would make the phone jump (not built, the user's call):** a chip that is a callback instead of a link, whose tap makes
-  the bot RE-POST that topic's sticky card. The card then is the chat's newest message, so Android's "All" view adds its own
-  "Continue last thread ›" button under it, and the topic moves to the top of the topic list. It costs two calls per tap (the
-  card's delete and its send), and a callback chip opens nothing on Desktop — one chip cannot be both.
+  messageActionTopicCreate service message, it should open the topic") plus the `topic` parameter the apps' link code reads
+  (§5.1). The topic id is the user-space id the Bot API hands out, so the number is right: the dev bot's message ids run to
+  ~900 while its thread ids sit at ~25,000 — the production bot's thread ids (22,371, Search) come from the same counter,
+  the USER's message counter, shared by both bots' chats.
+- **Telegram Desktop** (source of 2026-10-15) opens the topic: `t.me/<bot>/<id>?topic=<id>` becomes
+  `tg://resolve?domain=<bot>&post=<id>&topic=<id>`; for a non-channel peer the `post` is ignored, and the `topic` goes to
+  `showRepliesForMessage`, which opens the topic when `forumTopicFor(id)` is loaded with a known unread count — else, for a bot,
+  it does NOTHING (its fallback, `messages.getDiscussionMessage`, is for channels only). ⚠ Buttons inside a rich message need
+  Desktop 7.1 or later (§21.15.1); the user's Desktop was 7.0.5 when last checked.
+- **Telegram iOS** (source of 2026-10-07; read only) should open the topic: the link parses to `.replyThread(id, id)`, and for
+  a non-channel peer `fetchChannelReplyThreadMessage` first looks for the topic in the thread list the app has loaded
+  (`getMessageHistoryThreadInfo` — iOS stores a bot forum's topics there, `ForumChannels.swift`), then asks the server; a hit
+  becomes `.replyThreadMessage` (`isForumPost`), and `openMessageReplies` switches the open bot chat to that thread
+  (`updateChatLocationThread`), at the topic's first message. Only when both fail does the link fall back to a plain message
+  jump into "All".
+- ⚠ **Telegram Android** (source of 2026-10-13) **cannot open a topic of a bot chat from any link** — and the user saw it: the
+  chip "jumps to a place in the 'All' page". `LaunchActivity` picks a topic only for a GROUP forum (`chat != null &&
+  chat.forum` → `openForumFromLink`); for a user or a bot it presents a new `ChatActivity(user_id, message_id)` at message
+  `<topic>` — the topic's creation message, in "All". (This section said before that Android did nothing; that was the path
+  of a link carrying `?start=` — `isBot` is set only from a `start` parameter — not of ours.) No other form helps:
+  `t.me/<bot>?topic=<id>` with no message makes Android shake the open chat (an error vibration); `?thread=`,
+  `tg://resolve?…&topic=`, `tg://openmessage?user_id=…&message_id=…` and the two-number path `t.me/<bot>/<id>/<id>` end in
+  the same `ChatActivity`, whose arguments have no topic (`onFragmentCreate` reads `user_id` and `message_id` only); and
+  `openLinkInternally`, the in-chat shortcut, returns at once for a user chat (`currentChat == null`). Android's bot-chat
+  topics are switched only by its own controls (`topicsTabs.selectTopic`): the thread tabs, the floating topic header while
+  scrolling "All", the topic label over a run of one topic's messages (side-menu layout only, `ChatActionCell`'s
+  `TopicSeparator`), and the "Continue last thread ›" button that `ChatMessageCell` adds under the chat's LAST message when
+  that message is in a topic (`lastInChatList && isAllChats && isBotForum`).
+- **Searched online too** (2026-10-17, web + Brave): Telegram documents topic links for groups and channels only, the Bot
+  API's bot links take only `start`-type parameters, and no project, forum or bug report documents a link into a topic of a
+  bot's private chat.
+- **So the phone's way in is the DOT** (§21.16.7): a tab's state dot is a callback button that puts its topic first in the
+  thread list on every app — on Android one more tap (the first thread tab, or "Continue last thread ›") opens it.
 
 #### 21.16.4 When it changes
 
@@ -2563,6 +2587,64 @@ updated 5 minutes ago
 - **Open:** the look on the user's phone and Desktop (the chips' looks, the disabled chips, the pinned bar's first line, a
   tap); whether a pin in a bot forum's General shows in every topic's pinned bar or only in "All" (not documented); a
   production build and swap need the user's word.
+
+#### 21.16.7 The DOT: putting a tab's topic first in the thread list (2026-10-17)
+
+- **Why:** the user tapped a title chip on Telegram Android and landed "in a place in the 'All' page", and asked for a jump
+  into the topic ("try using the url technique or search online how"). §21.16.3 is the finding: no link opens a topic of a
+  bot chat on Android, and nothing online says otherwise. Offered three ways, the user chose **"Link + dot button"** ("Search
+  online for better or do this"): the title stays the link (Desktop, iPhone), and the dot gives every app a way in.
+- **What it is:** in the RICH directory every listed tab WITH a topic shows its state dot as an in-text callback button,
+  before its title chip: `<tg-button type="callback_data" data="d:front:26785">🔵</tg-button> <tg-button type="url" …>🟦
+  Agentmaster</tg-button>` — no style attribute, the app's plain button, so the dot keeps its state color. A tab with no topic
+  keeps a plain dot. The CLASSIC render (the rich switch off, or a refused rich form) keeps plain dots: Telegram HTML has no
+  in-text callback button. One italic line under the 🏷️ Tags heading, rich only and only when some listed tab has a topic,
+  says which does what: "Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list
+  (any app)."
+- **What a tap does:** `_handleCallback` reads the data (`ParseDirectoryFrontCallbackData`: the THREAD — stateless like the
+  Search buttons, so a dot works after a restart, and it survives a rekey of the topic to the tab's next conversation) and
+  answers with `_bringTopicToFront`: the topic is found by its thread, its card's `CardState::repostWanted` (the re-sort's own
+  flag) is set, and the tick is woken. The next per-topic pass (`_refreshCard`) deletes the sticky card and sends it again,
+  silently — two calls. The card is then the topic's newest message, and Telegram orders a bot chat's topics by their last
+  message (§21.8), so the topic is FIRST in the thread list on every app (after any thread the user pinned); on Android the
+  "All" view also puts "Continue last thread ›" under the card, at the bottom (`ChatMessageCell`: the chat's last message, in
+  a topic). On Android that is then one more tap: the first thread tab, or that button.
+- **The toast** (`DirectoryFrontAnswer`, the callback's answer, under Telegram's 200 characters): `↑ “Agentmaster” goes first
+  in the thread list`; `… once its history is in` while the topic's history replay runs (its sticky card stays above the
+  history until the replay is in, §21.9; the flag waits for it); a dot whose topic is gone (the directory is edited at most
+  every two minutes): "That thread is gone: its tab closed or went idle. The list follows within two minutes." A second tap on
+  the same dot within 10 s (`kFrontTapGapMs`) answers the same toast and queues nothing: a double tap must not cost four calls
+  of the chat's ~20-a-minute budget.
+- **The re-sort leaves the topic first.** Without a hold, the quiet re-sort (§21.9: once a minute, when nothing was posted for
+  30 s) sees the topic out of MOST RECENT order and re-posts every card that ranks above it — up to 24 (`kResortMaxTopics`) —
+  undoing the move a minute later. `_frontHeld` (tick thread) records the session's order key (`_orderKeys`' MostRecentSortKeyMs)
+  at the tap, and `_resortTick` leaves the topic OUT of the list it orders — neither moved down nor counted as "not quiet" by
+  its own re-post — while that key is unchanged. The session's next turn changes the key (a turn boundary); from then on the
+  topic is ordered like any other. The poll thread only records the tap (`_frontRequests`, under `_mtx`); the tick folds it
+  in at its re-sort pass, because the order keys are the tick thread's. A re-sort already in progress re-posts the topic LAST
+  (it is moved to the end of the queue), so it ends on top of what that re-sort builds. Holds and requests are cleared with the
+  re-sort's state (a start, a bot change, a recreation); a held session whose topic is gone drops out at the next pass.
+- **Logs:** `[msg] <sid8> put first in the thread list (a directory dot)` (`; its card moves once its history replay is in`),
+  `[nav] remote telegram front <sid8>` / `… front thread <id> -> no topic`. The directory's post and a run's first edit count
+  them: `…, N tab chip(s), M dot button(s), …` (`DescribeDirectoryRender`, `DirectoryRender::dotsShown`).
+- **The code:** MessagingDirectory.h (`kDirectoryFrontCallbackPrefix`, `DirectoryFrontCallbackData`,
+  `ParseDirectoryFrontCallbackData`, `DirectoryFrontAnswer`, `detail::DirectoryDotHtml`, the legend, `dotsShown`; its header
+  note now says what each app does with a title link); Messaging.Inbound.cpp (`_handleCallback`'s branch, `_bringTopicToFront`,
+  `kFrontTapGapMs`); Messaging.cpp (`_resortTick`'s fold and hold, the three resets); Messaging.h (`_frontRequests`,
+  `_frontTapMs`, `_frontHeld`). Commit e4c953201.
+- **Tests** (`TestMessagingDirectory`): every rich tab line carries its dot button and the tab with no topic a plain dot; the
+  classic render has no button and no legend; the legend sits under the Tags heading and is absent when no listed tab has a
+  topic; `dotsShown` and the log's words; the callback data's round trip, its bound, and every malformed form reading as no
+  topic (empty, `0`, a sign, junk, a trailing space, another prefix, another button's data, 19 digits); the toast with a
+  title, with the history pending, with a blank title, and a 500-character title kept under 200. The isolated m5 run (HEAD
+  de08fe9b7 + this work): 7,666 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the last Debug build's
+  flags of Messaging.cpp, Messaging.Inbound.cpp and AgentManagerContent.Settings.cpp (another includer of Messaging.h): clean;
+  a negative control (a false `static_assert` on `kDirectoryFrontCallbackPrefix` appended to a copy of
+  Messaging.Inbound.cpp) failed as it must.
+- **Open:** the build (it waits for another session's uncommitted work in the same tree to be committed: a dev build would
+  ship it half-done); then on the user's Android the dot's look, the toast, the thread first in the thread tabs, and
+  "Continue last thread ›" under the card; whether iOS opens the topic from the title as its source says; a production build
+  and swap need the user's word.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
