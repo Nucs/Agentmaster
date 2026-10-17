@@ -117,6 +117,19 @@ namespace Agentmaster
         int64_t lastActivityUnixMs{ 0 }; // max(lastActivityUnixMs, convLastActivityUnixMs): the newer of the hook-side stamp and the transcript-derived one; 0 = no recorded activity
     };
 
+    // Agentmaster (MESSAGING.md §21.17 — one more lean registry read): WHERE one session worked and how recently, copied WITHOUT
+    // the rest of the record. A thread the user opens in the Telegram bot's chat starts a new session in a folder the user picks
+    // from two lists — the most recently used folders and the most used ones — built from every session the registry holds
+    // (archived ones too: "top 10 used overall"). A full Snapshot() for it would deep-copy every record with its queue history
+    // (1,614 records and 7.1 million characters of prompts on the release profile, 2026-10-10) with the registry mutex held.
+    // Returned by SessionRegistry::PlaceSamples.
+    struct SessionPlaceSample
+    {
+        std::wstring workingDir; // SessionInfo::workingDir — the launch folder
+        std::wstring inferredWorkingDir; // SessionInfo::inferredWorkingDir — where its tool calls concentrate; EMPTY when unknown or the same folder
+        int64_t lastActivityUnixMs{ 0 }; // max(lastActivityUnixMs, convLastActivityUnixMs), as SessionHeadline; 0 = no recorded activity
+    };
+
     class SessionRegistry
     {
     public:
@@ -196,6 +209,14 @@ namespace Agentmaster
         //   returns — one headline per KNOWN asked id, in the order asked; empty when none is known.
         //   throws  — std::bad_alloc on allocation failure only.
         std::vector<SessionHeadline> HeadlinesOf(const std::vector<std::wstring>& ids) const;
+
+        // Where EVERY session worked (SessionPlaceSample: the launch folder, the inferred folder, the newest activity) — live
+        // and archived records alike, in insertion order. For the Telegram bot's new-thread folder picker (MESSAGING.md §21.17),
+        // which ranks folders by recency and by use over everything the profile holds: it copies two folder strings and a
+        // stamp per record, where Snapshot() copied every record with its queue. Called once per picker, never periodically.
+        //   returns — one sample per record; empty when the registry is empty.
+        //   throws  — std::bad_alloc on allocation failure only.
+        std::vector<SessionPlaceSample> PlaceSamples() const;
 
         // The SessionScanner's per-pass snapshot: the LIVE sessions (the SnapshotLive set and order), each
         // copied without two parts the scanner never reads:

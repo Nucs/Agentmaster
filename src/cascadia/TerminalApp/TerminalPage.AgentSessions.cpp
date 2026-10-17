@@ -356,7 +356,10 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude"). insertPosition
     // threads tab placement: -1 (the default) keeps the end/NewTabPosition behavior; a tab
     // context-menu "New Session Here" passes clickedIndex+1 so the new tab lands next to it.
-    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition, winrt::hstring model)
+    // presetSessionId (MESSAGING.md §21.17): the id the session takes when the caller chose one — the
+    // Telegram bot's new-thread picker mints it so the user's thread is bound to the session before the
+    // tab exists; "" mints one here, as every other launch does.
+    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition, winrt::hstring model, const std::wstring& presetSessionId)
     {
         // Nav audit: the user asked for a FRESH session here (Manager "Launch Claude", a tree/board/
         // Sessions-page "Open New Session Here", or a tab-menu spawn). The resulting minted id lands
@@ -373,7 +376,7 @@ namespace winrt::TerminalApp::implementation
             _PromptClaudeMissing();
             return;
         }
-        const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition, std::wstring{ model });
+        const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition, std::wstring{ model }, {}, {}, presetSessionId);
         // Nav audit END (pairs with the open-new BEGIN above): the minted id of the fresh session. An
         // open-new with no matching done = the launch crashed/no-op'd before the tab was created.
         const std::wstring spawnedId = spawnedTab ? _ClaudeSessionForTab(spawnedTab) : std::wstring{};
@@ -907,7 +910,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Auto Testing + autorunner from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride, const std::wstring& initialPrompt, const std::wstring& inheritLaunchFromId)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride, const std::wstring& initialPrompt, const std::wstring& inheritLaunchFromId, const std::wstring& presetSessionId)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -991,6 +994,13 @@ namespace winrt::TerminalApp::implementation
             forkIntoId = resumeTargetId; // == restored->id (a transcript-less fork has no continuation redirect)
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           L"[restore->refork] " + resumeTargetId + L" has no transcript \x2014 re-forking from source " + effectiveForkFrom + L" into the same id (never-messaged fork; identity preserved)\n");
+        }
+        // MESSAGING.md §21.17: a FRESH launch whose caller chose the id (the Telegram bot's new-thread picker, which binds the
+        // user's thread to it before this tab exists) takes it as the spawn's target — BuildClaudeSpawn honors a target for a
+        // fresh launch as it does for a re-fork. Never for a restore, a resume or a fork: those ids are decided above.
+        if (!presetSessionId.empty() && !restored && effectiveForkFrom.empty() && forkIntoId.empty())
+        {
+            forkIntoId = presetSessionId;
         }
         // forkFromId / a restore re-fork overrides resume/fresh: BuildClaudeSpawn forks the source
         // conversation into the target id (the source transcript is untouched). A genuine fork mints a new

@@ -27,5 +27,9 @@ namespace Agentmaster
         std::wstring title; // the tab title to pin ("" = derived)
         std::wstring model; // a per-launch `--model <id>` ("" = the settings model)
         bool pin{ false }; // MESSAGING.md §5.3: pin the opened session (never idle) once it is live
+        // MESSAGING.md §21.17 (NewSession only): the session id the new session takes, minted by the requester with
+        // NewSessionId — the Telegram bot binds the user's thread to it BEFORE the tab exists, so the thread becomes the
+        // session's topic as soon as the session is live (no topic of its own is made). "" = the launch mints one.
+        std::wstring newSessionId;
     };
 }
