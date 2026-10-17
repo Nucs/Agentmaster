@@ -553,7 +553,8 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The DIRECTORY (§21.16), once per tick after the names, at most every kDirectoryCheckMs: builds the model — the fleet
         /// counts from the sync's facts and the registry's queues, the dedicated topics (_directoryTopics), every tag of the
-        /// session store with the open tabs that carry it — renders it (RenderDirectory) and does what DecideDirectoryAction
+        /// session store joined with the open tabs that carry it — renders it (RenderDirectory, which lists only the tags an
+        /// open tab carries: the user's "Tags with 0 tabs should not be shown") and does what DecideDirectoryAction
         /// says: POST a new message in the chat's main view and pin it (_onDirectoryPosted, _pinDirectory), or EDIT the one it
         /// has (_editDirectory) when its content or form is not the wanted one and the edit gap has passed. Skipped while the
         /// facts are incomplete (the start-up hold, a recreation), before the session store's start-up warm-up is done (its
@@ -593,9 +594,9 @@ namespace Agentmaster::Msg
         void _editDirectory(int64_t messageId, const DirectoryRender& r, bool wantRich, uint64_t serial);
         /// <summary>
         /// Telegram's answer to a directory EDIT: taken (or "not modified") records the content and the form the message
-        /// shows; "the message is gone" (DirectoryEditFoundNoMessage — the user deleted it) forgets the message and posts a
-        /// new one after kDirectoryRepostGapMs; any other refusal backs off kDirectoryRetryMs. A stale serial is ignored.
-        /// Send thread.
+        /// shows, and the run's FIRST taken edit is logged with what it lists; "the message is gone"
+        /// (DirectoryEditFoundNoMessage — the user deleted it) forgets the message and posts a new one after
+        /// kDirectoryRepostGapMs; any other refusal backs off kDirectoryRetryMs. A stale serial is ignored. Send thread.
         /// </summary>
         /// <param name="serial">The edit's number.</param>
         /// <param name="hash">The content hash of what was sent.</param>
@@ -603,7 +604,9 @@ namespace Agentmaster::Msg
         /// <param name="wantRich">The rich form was asked for.</param>
         /// <param name="r">Telegram's answer.</param>
         /// <param name="shownRich">The form the message shows when the edit took (or was found unchanged).</param>
-        void _onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich);
+        /// <param name="what">What the edited render lists (DescribeDirectoryRender), for that first log line.</param>
+        /// <exception cref="std::bad_alloc">If a log line cannot be allocated.</exception>
+        void _onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich, const std::wstring& what);
         /// <summary>
         /// Pins the directory message (pinChatMessage, silent; keyed "dir:pin"), once per message and run: a refused pin is
         /// logged and tried again at the next start. Telegram's "pinned a message" note that the pin leaves in the chat is

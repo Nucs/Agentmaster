@@ -4560,7 +4560,9 @@ namespace Agentmaster::Msg
             m.botUsername = bot;
             m.topics = _directoryTopics();
             // The tags: every tag a session carries (an archived session's too) and the registry's 0-carrier ones, each with the
-            // OPEN tabs that carry it. The store's reads are cached (a directory listing, one stat per small file): milliseconds.
+            // OPEN tabs that carry it. The render lists only the tags an open tab carries (the user's "Tags with 0 tabs should not
+            // be shown"); the rest still pass through the join, which keeps the display casing CollectGlobalTags picks, and are
+            // counted for the log. The store's reads are cached (a directory listing, one stat per small file): milliseconds.
             const auto tagsBySession = LoadAllSessionTags();
             const auto knownTags = LoadKnownTags();
             const auto tagColors = LoadAllTagColors();
@@ -4662,8 +4664,7 @@ namespace Agentmaster::Msg
                     _enqueue(std::move(item));
                 }
             }
-            _log(L"[msg] directory: posting it in the chat's main view (" + std::to_wstring(r.tagsShown) + L" tag(s), " + std::to_wstring(r.tabsShown) + L" tab chip(s)" +
-                 (r.tagsHidden > 0 ? L", " + std::to_wstring(r.tagsHidden) + L" tag(s) left out: the message is full" : std::wstring{}) + (wantRich ? L", rich)" : L", HTML)"));
+            _log(L"[msg] directory: posting it in the chat's main view (" + DescribeDirectoryRender(r) + (wantRich ? L", rich)" : L", HTML)"));
         }
         catch (...)
         {
@@ -4734,11 +4735,12 @@ namespace Agentmaster::Msg
     {
         auto self = weak_from_this();
         const uint32_t hash = r.hash;
-        // Every answer, whichever form went, ends in _onDirectoryEdited with the form the message shows then.
-        const auto finish = [self, serial, hash, messageId, wantRich](const TgResult& res, bool shownRich) {
+        // Every answer, whichever form went, ends in _onDirectoryEdited with the form the message shows then. What the render
+        // lists rides along for the run's first edit log line (the one place the edited content can be read back on the PC).
+        const auto finish = [self, serial, hash, messageId, wantRich, what = DescribeDirectoryRender(r)](const TgResult& res, bool shownRich) {
             if (auto me = self.lock())
             {
-                me->_onDirectoryEdited(serial, hash, messageId, wantRich, res, shownRich);
+                me->_onDirectoryEdited(serial, hash, messageId, wantRich, res, shownRich, what);
             }
         };
         if (!wantRich)
@@ -4791,7 +4793,8 @@ namespace Agentmaster::Msg
         _enqueue(std::move(item));
     }
 
-    void MessagingService::_onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich)
+    void MessagingService::_onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich,
+                                              const std::wstring& what)
     {
         const bool taken = r.ok || r.NotModified();
         const bool gone = !taken && DirectoryEditFoundNoMessage(r.ok, r.httpStatus, r.description);
@@ -4851,7 +4854,8 @@ namespace Agentmaster::Msg
         }
         else if (firstLog)
         {
-            _log(L"[msg] directory edited (message " + std::to_wstring(messageId) + (shownRich ? L", rich" : L", HTML") + L"); later edits are logged only when one fails");
+            _log(L"[msg] directory edited (message " + std::to_wstring(messageId) + (shownRich ? L", rich: " : L", HTML: ") + what +
+                 L"); later edits are logged only when one fails");
         }
     }
 

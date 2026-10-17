@@ -3,10 +3,11 @@
 //
 // Agentmaster — the DIRECTORY (MESSAGING.md §21.16): ONE pinned message per bot chat, in the chat's main view ("All", the
 // General topic of a bot forum), that lists what the chat holds — its DEDICATED topics (🔎 Search today; the list is open for
-// more) and every bookmark tag of Agentmaster with the open tabs that carry it — under two rows of fleet counts. The user's
-// request (2026-10-17): "a pinned message per bot … a nice list of dedicated topics, out of which we right now have Search but
-// will more in future. Also a pin all tags and the tabs in the tag. make sure the message shows titles with coloring and when
-// clicked jumps to the topic … Also a two rows of stats".
+// more) and every bookmark tag of Agentmaster that an open tab carries, with those tabs — under two rows of fleet counts. The
+// user's request (2026-10-17): "a pinned message per bot … a nice list of dedicated topics, out of which we right now have
+// Search but will more in future. Also a pin all tags and the tabs in the tag. make sure the message shows titles with coloring
+// and when clicked jumps to the topic … Also a two rows of stats"; and, once the first directory was up, "Tags with 0 tabs
+// should not be shown" — a tag no open tab carries is left out (§21.16.1).
 //
 // This header is the PURE half: the model the service fills, its two renders — a RICH message whose titles are URL chips in
 // the look nearest the tab's color, and the classic HTML the service sends when Telegram refuses the rich one —, the hash that
@@ -135,6 +136,11 @@ namespace Agentmaster::Msg
         uint32_t hash{ 0 };
         size_t tagsShown{ 0 }; // tag sections in the rich render
         size_t tagsHidden{ 0 }; // tags left out of it (the message was full)
+        /// <summary>
+        /// Tags left out of BOTH renders because no open tab carries them (only closed sessions do, or none: a tag the registry
+        /// keeps for re-use, Rule #17) — the user's "Tags with 0 tabs should not be shown". Counted for the service's log only.
+        /// </summary>
+        size_t tagsWithoutTabs{ 0 };
         size_t tabsShown{ 0 }; // tab chips in the rich render
     };
 
@@ -370,8 +376,9 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// Joins the tag universe with the open tabs: one DirectoryTag per tag, carrying the open tabs whose tag list names it
-    /// (case-insensitively, the tag store's identity). A tag no open tab carries is kept with no tabs (the directory lists every
-    /// tag, "no open tab"); a tab is listed under each of its tags; a tag a tab names that is not in the universe is ignored.
+    /// (case-insensitively, the tag store's identity). A tag no open tab carries is kept, with no tabs: the RENDER leaves it out
+    /// (RenderDirectory, the user's "Tags with 0 tabs should not be shown") and counts it for the service's log. A tab is listed
+    /// under each of its tags; a tag a tab names that is not in the universe is ignored.
     /// </summary>
     /// <param name="tags">The universe: one (display name, color) per tag, any order (CollectGlobalTags' names with
     /// ResolveTagDisplayHex's colors). A name given twice (case-insensitively) is kept once, its first spelling.</param>
@@ -433,13 +440,17 @@ namespace Agentmaster::Msg
     /// Tags go in case-insensitive order of their names, the tabs of a tag in case-insensitive order of their titles — orders
     /// that do not move while the fleet works, so the content changes only when a count, a state, a title or a tag does. In the
     /// rich render each title is a chip (a URL button) in the look nearest its color; in the classic render it is a link with
-    /// the color square first. A tag lists at most kDirectoryMaxTabsPerTag tabs ("… and 4 more"); when a render is full, the
-    /// tags that do not fit are counted in one line ("… and 3 more tags"); with no tag at all a line says where tags are made.
+    /// the color square first. Only a tag that an open tab carries is listed: a tag with no open tab (carried by closed
+    /// sessions only, or by none) is left out of both renders — the user's "Tags with 0 tabs should not be shown" (2026-10-17)
+    /// — and counted in DirectoryRender::tagsWithoutTabs, so it changes neither the message nor its hash. A tag lists at most
+    /// kDirectoryMaxTabsPerTag tabs ("… and 4 more"); when a render is full, the tags that do not fit are counted in one line
+    /// ("… and 3 more tags"); when no tag is listed, one line says how a tab gets one.
     /// </summary>
     /// <param name="m">The model.</param>
     /// <param name="updatedAtMs">When the content was rendered (the footer's date-time entity, Unix ms).</param>
     /// <param name="nowMs">The clock the footer's text uses (TgClockText's "same day" test).</param>
-    /// <returns>The two renders, the content hash (without the footer) and the truncation counts.</returns>
+    /// <returns>The two renders, the content hash (without the footer), the truncation counts and the count of the tags left
+    /// out for having no open tab.</returns>
     /// <exception cref="std::bad_alloc">If a render cannot be allocated.</exception>
     inline DirectoryRender RenderDirectory(const DirectoryModel& m, int64_t updatedAtMs, int64_t nowMs)
     {
@@ -479,16 +490,26 @@ namespace Agentmaster::Msg
         tags.reserve(m.tags.size());
         for (const auto& t : m.tags)
         {
-            if (!t.name.empty())
+            if (t.name.empty())
             {
-                tags.push_back(&t);
+                continue;
             }
+            if (t.tabs.empty())
+            {
+                // No open tab carries it: the user's "Tags with 0 tabs should not be shown". Left out of BOTH renders, and so of
+                // the hash, so the rename, recolor or deletion of a tag nobody sees here never edits the message.
+                ++r.tagsWithoutTabs;
+                continue;
+            }
+            tags.push_back(&t);
         }
         std::stable_sort(tags.begin(), tags.end(), [](const DirectoryTag* a, const DirectoryTag* b) { return detail::TitleLessCi(a->name, b->name); });
         if (tags.empty())
         {
-            rich += L"<p><i>No tags yet. A tab's right-click menu \x25B8 Tags adds one.</i></p>";
-            classic += L"\n<i>No tags yet. A tab's right-click menu \x25B8 Tags adds one.</i>";
+            // ONE line for "no tag at all" and "tags, but none on an open tab": it is true of both, and a separate line for the
+            // second would let a tag no open tab carries change the message after all.
+            rich += L"<p><i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i></p>";
+            classic += L"\n<i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i>";
         }
         size_t richHidden = 0;
         size_t classicHidden = 0;
@@ -518,8 +539,9 @@ namespace Agentmaster::Msg
                 return a->sessionId < b->sessionId;
             });
             const std::wstring square = TgTitleColorSquare(tag->colorHex);
+            // Every tag listed here has at least one open tab (the others were left out above), so the head always counts tabs.
             const std::wstring head = L"<b>" + (square.empty() ? std::wstring{} : square + L" ") + TgEscapeHtml(detail::DirectoryLabel(tag->name)) + L"</b> \x00B7 " +
-                                      (tabs.empty() ? std::wstring{ L"<i>no open tab</i>" } : std::to_wstring(tabs.size()) + (tabs.size() == 1 ? L" tab" : L" tabs"));
+                                      std::to_wstring(tabs.size()) + (tabs.size() == 1 ? L" tab" : L" tabs");
             std::wstring richSection = L"<p>" + head;
             std::wstring classicSection = L"\n\n" + head;
             const size_t listed = (std::min)(tabs.size(), kDirectoryMaxTabsPerTag); // (std::min): the <windows.h> macro
@@ -573,6 +595,29 @@ namespace Agentmaster::Msg
         r.rich = rich + L"<footer>" + mark + L"</footer>";
         r.classic = classic + L"\n\n<i>" + mark + L"</i>";
         return r;
+    }
+
+    /// <summary>
+    /// What a render lists, in words, for the service's log lines — the directory's post and the first edit of a run, the only
+    /// places on the PC where the content of a sent directory can be read back: "2 tag(s), 5 tab chip(s)", then, only when there
+    /// are any, the tags left out for having no open tab and the tags the full message could not hold. The FORM (rich / HTML) is
+    /// not in it: the post logs the form it asks for, the edit the form Telegram took.
+    /// </summary>
+    /// <param name="r">The render (RenderDirectory's counts).</param>
+    /// <returns>The words, e.g. "2 tag(s), 5 tab chip(s), 6 tag(s) on no open tab not listed".</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring DescribeDirectoryRender(const DirectoryRender& r)
+    {
+        std::wstring s = std::to_wstring(r.tagsShown) + L" tag(s), " + std::to_wstring(r.tabsShown) + L" tab chip(s)";
+        if (r.tagsWithoutTabs > 0)
+        {
+            s += L", " + std::to_wstring(r.tagsWithoutTabs) + L" tag(s) on no open tab not listed";
+        }
+        if (r.tagsHidden > 0)
+        {
+            s += L", " + std::to_wstring(r.tagsHidden) + L" tag(s) left out: the message is full";
+        }
+        return s;
     }
 
     // ===== the post / edit decision ======================================================================================
