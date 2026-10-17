@@ -2096,8 +2096,9 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
 
 ### 21.14 A topic's name follows its session during the history replay; a long 429 holds one method, not the bot (2026-10-17)
 
-> Status: written 2026-10-17 (session 0b1f8635); NOT BUILT yet — production 0.6.8.21 (the build of 46e3aad42) still has the
-> rename gate that the replay starves and the 429 sleep that silences the bot.
+> Status: written 2026-10-17 (session 0b1f8635, commit 4f3c643d9); LIVE on dev 0.0.1.24 since 17:24
+> (`Q:\agentmaster-layouts\Debug`); not in production — 0.6.8.21 (the build of 46e3aad42) still has the rename gate that the
+> replay starves and the 429 sleep that silences the bot.
 
 **The user's request** (2026-10-17 ~17:00, after five hours of production's topics): "Can we rename topic when the topic has
 a running session (blue circle) instead of the yellow one or as red when error".
@@ -2145,8 +2146,11 @@ a running session (blue circle) instead of the yellow one or as red when error".
   stop-aware. A closed session's topic delete refused this way keeps its record (it used to drop it and leave the topic in
   the chat).
 - The secretary bot's sends park separately (`_secretaryFloodParking`: its flood control is that bot's own).
-- **Not known:** whether Telegram's 6542 s hold covered edits only or the whole chat. If the whole chat, the first message
-  after the edit's refusal gets its own 429 and everything parks — one more refused call than before, and the same silence.
+- **The hold covers the whole chat, measured after the commit** (§21.14.5): the topic renames production tried at 17:06 were
+  refused with the SAME deadline as the 17:00:59 edit (18:50:02). So the first call on another method after a long 429
+  gets its own 429 and every method parks: one more refused call than the old code made, and the same silence until the
+  deadline. The parking keeps a hold that covers only one method from silencing the others; a hold on the whole chat cannot
+  be worked around.
 - **The census says what was edited:** `[msg] traffic (10 min): … editMessageText=57 … edits(card=40 prompt=12 other=5)`
   (`EditKindOfKey`: `card:` → card, `pl:` → prompt, `wl:` → worklog, else other).
 
@@ -2158,8 +2162,42 @@ a running session (blue circle) instead of the yellow one or as red when error".
   flood parking (one method parked, the others free; a second method escalates to all until the latest deadline; an
   expired entry neither holds nor escalates; a retry_after under a second counts as one), plus the census kinds.
 - `/Zs /W4` of `Messaging.cpp` + `Messaging.Inbound.cpp`: clean.
-- **Not checked live yet:** a rename during a replay, and a long 429 with the other methods going on — production is where
-  both happen (its replay runs for hours; its 6542 s edit wait ends ~18:50).
+- **Dev 0.0.1.24** (17:24): an incremental Debug build into `Q:\agentmaster-layouts\Debug` (no purge trigger since dev's
+  3a73980d9 build; 196 s, `-MaxCpu 4 -ClMpCount 6`); the layout bakes 4f3c643d9 and carries the new log strings; swapped
+  from a shell inside production (0.0.1.23 @ `Debug-B` → 0.0.1.24, drain 2.3 s, register 2.7 s, **downtime 5.8 s**, one Idle
+  session). The new instance: connected as `@ClaudeSessionsDebugGateBot` 1 s after the start, 57 tabs resumed, none skipped,
+  the start-up hold ended at 121 s, no `[exc]`. A real state change came at once (`61e3e3ff idle -> error`, a cut-off turn)
+  and renamed nothing — correctly: its topic was named 🔴 at 13:23 by the previous build. Dev runs no replay any more, so
+  its renames went before this change too: the dev run proves the build, not the fix.
+- **Not checked live yet:** a rename during a replay, and the parking of a long 429 — production is where both happen (its
+  replay runs for hours; its 6542 s hold ends at 18:50:02).
+
+#### 21.14.5 Production after 17:00 (read from its hooks.log at 17:33; production still runs the old code)
+
+- **One deadline for every method.** The edit's 429 at 17:00:59 said `retry after 6542` = 18:50:01. The renames the old
+  code tried (the window had drained while the send loop slept) were refused with the same deadline: five at
+  17:06:00–17:06:07 (`topic rename failed for 0cf68609: Too Many Requests: retry after 6242`, then 54821a94, 13e76a66,
+  7eb21003, 0b1f8635), 0cf68609 again at 17:10:59 (`retry after 5943`), 13e76a66 at 17:26:50 (`retry after 4992`). Each
+  one ends at 18:50:02. Telegram is holding the chat, not only editMessageText. Sends were never tried (the old send loop
+  sleeps through the hold), so they are not proven held, but nothing points the other way.
+- **Records the old code wrote wrong.** It recorded a rename refused this way as made, so these topics' records may name a
+  glyph their topics do not show. A record corrects itself at the session's next state change; the new code does not
+  re-check a name it recorded.
+- **The replay:** between 12:16 and 17:00, 289 of the 412 topics got their history in; 123 are left (232 MB of transcript).
+- **The traffic before the hold** (the `[msg] traffic (10 min)` lines):
+
+  | Time | Calls per 10 min | editMessageText | Notes |
+  |---|---|---|---|
+  | 12:01–12:21 | 404, 496 | 0–3 | the topic creation: 413 createForumTopic + 426 sendMessage (the cards) and 48 orphan deletes, ~45 calls a minute, no 429 |
+  | 12:21–13:01 | 181–186 | 36–44 | the replay at its cap of 18 a minute |
+  | 13:01–15:11 | 174–187 | 10–25 | |
+  | 15:11–17:01 | 180–187 | 23–70 | the edits rose from about 15:31 on (47, 43, 42, 51, 48, 67, 69, 70, 57) |
+
+- **Why Telegram answered with 1 h 49 min, not seconds: not known.** No short 429 came first. Two readings fit the log.
+  Either the chat has a budget over a longer window than a minute (dev's replay of §21.9 ran 1 h 40 min at the same cap
+  without a long hold; production's ran 4 h 45 min), or the edits that rose from about 15:31 on crossed a limit of their own.
+  Either way, the 123 topics left (about two hours at the same pace) could earn another long hold after 18:50. A lower
+  replay budget than 18 calls a minute would lower that risk; it is not changed.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
