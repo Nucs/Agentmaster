@@ -6,7 +6,7 @@
 > VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
 > optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17; §21.12 = the
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
-> 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — NOT BUILT yet; §22 = folder groups — the topics grouped by working
+> 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
@@ -2686,7 +2686,7 @@ updated 5 minutes ago
   thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
   line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
 
-### 21.17 Every title opens its topic, the "👤 You" line names its session, turns reply to turns, and a NEW THREAD starts a session (2026-10-18; NOT BUILT yet)
+### 21.17 Every title opens its topic, the "👤 You" line names its session, turns reply to turns, and a NEW THREAD starts a session (2026-10-18; LIVE on dev 0.0.1.29 since 02:27)
 
 > The user's requests (2026-10-18): "1. The user prompt message should have the title at 2nd row (below "You * time * typed at
 > pc") which is clickable jumping to the thread like other titles. Other titles that are not, should jump to the thread. 1.5.
@@ -2832,9 +2832,28 @@ updated 5 minutes ago
   units, SessionRegistry.cpp, ClaudeSpawn.cpp) pass; on the live tree all 104 TerminalAppLib units and the CLI's 17 at /W4 /WX
   pass; three negative controls (`static_assert`s on `kNewThreadPageSize`, `TopicRecord::historyPromptMessageId`,
   `RemoteLaunchRequest::newSessionId`) fail with exactly C2338.
-- **Open:** the live checks on the dev bot: a new thread → the picker → a pick → the thread becomes the topic with its card, the
-  held prompt delivered; a rename of the thread; the title chips opening their threads (Desktop) and the reply chain's quotes;
-  whether Android does anything better with the URL chip than with the directory's (it should not, §21.16.3).
+- **The build** (2026-10-18 02:14–02:26): Debug, HEAD ac4167e63 (it also carries another session's §21.18 start note,
+  f2fb06549), into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session inside production
+  (`devbuild.ps1`); the tree was clean (both sessions' work committed). PURGED: `SessionRegistry.*` changed since the last Debug
+  build (2404f7838), and `Messaging.h` / `TopicRecord` / `Engine` gained members. 690.6 s with 3 compilers, "Build OK";
+  `TerminalApp.dll` bakes ac4167e63, the manifest `AgentmasterDev 0.0.1.0`, 192 icons, the layout idle. K: had ~250 MB free
+  throughout (the intermediates go to Q:).
+- **The swap** (02:27:24, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`; two open dev sessions, both Idle):
+  0.0.1.28 → 0.0.1.29, drain 5.6 s, register 3.1 s at the first attempt, **downtime 9.4 s**; the window re-homed 57 tabs by
+  02:29:44, none skipped.
+- **Live** (dev hooks.log from the pre-swap offset, `messaging\telegram\state.json`, `messaging.log`, the Application log):
+  02:27:36 connected; §21.18's start note posted in 🔎 Search (message 931, "the previous run did not close" — the swap stops
+  the GUI); the start-up hold ended after 129 s. Every one of the 48 topic cards now carries its title LINK (`cardLinked` true
+  for 48 of 48): two by the slow form upgrade (`… card re-edited with a title chip that links to its topic (its form only; 45 more
+  card(s) to go)`), the rest by the content edits §21.18's card change (the default runner line left out) asked for anyway.
+  The first traffic line: `editMessageText=136 … edits(card=136)` in 10 min — the restore's usual burst (102–134 at every dev
+  start of 2026-10-17/18), no 429. No `[tg]` failure, no refusal, no swallowed exception, no new messaging.log line, no
+  Application Error; the process alive past the hold.
+- **Open:** the user's side, on the dev bot (`@ClaudeSessionsDebugGateBot`): a new thread → the picker → a pick → the thread
+  becomes the topic with its card, the held prompt delivered; a rename of the thread; the title chips opening their threads
+  (Desktop) and the reply chain's quotes (a turn typed at the PC posts the "👤 You" line with its row); whether Android does
+  anything better with the URL chip than with the directory's (it should not, §21.16.3). Not in production (needs the user's
+  word).
 
 ### 21.18 The start note at every launch, and the card's default runner line (2026-10-18; NOT BUILT yet)
 
