@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
+#include "MessagingStartNote.h" // the start note's facts, kind, sound and text (§21.18)
 #include "MessagingModels.h"
 #include "RemoteLaunch.h"
 #include "SessionModels.h" // AppSettings, SessionInfo
@@ -139,7 +140,9 @@ namespace Agentmaster::Msg
         // The existing cross-window seams: restart a session's connection in place; park its tab.
         std::function<void(const std::wstring& sessionId)> restartSession;
         std::function<void(const std::wstring& sessionId)> deactivateSession;
-        // The app's version word for the start note ("dev 0.0.1.9"); "" = not shown.
+        // The app's version word for the start note and the run marker (§21.18): "0.6.8.21", "dev 0.0.1.28", "portable
+        // 0.7.9.0" (MessagingStartNote.h FormatAppVersionWord; Engine.cpp reads the package identity or the portable stamp).
+        // Asked once per start of the bot. Empty, or "", = the note shows no version and the marker carries none.
         std::function<std::wstring()> versionWord;
         // How many open windows have not finished their first-layout restore (Engine::WindowsStillRestoring).
         // While it is above 0, a session that reads live=false may only be waiting for its tab to be re-homed,
@@ -182,6 +185,21 @@ namespace Agentmaster::Msg
 
         /// <summary>Is the connector running (threads up)? Any thread.</summary>
         bool Running() const noexcept;
+
+        /// <summary>
+        /// The app is closing: its LAST window just closed (Engine.cpp, UnregisterLiveWindowIn). Writes
+        /// &lt;profile&gt;\messaging\run.closed with the time, so the next start's note says the run CLOSED instead of "did not
+        /// close normally" (MessagingStartNote.h, §21.18). The app ends with TerminateProcess and the engine is never
+        /// destroyed, so Stop() never runs at a quit: this is the only moment a clean end can be recorded. A stamp written
+        /// while the app goes on (a window set that was empty for a moment) is outdated by the next minute's marker write
+        /// and then proves nothing (StartNoteRunClosedCleanly). Does nothing while the bot is not running — there is no
+        /// marker of this run for the stamp to be compared with. From the stamp on, the tick does not rewrite the run marker
+        /// for kAppClosingMarkerHoldMs (Messaging.cpp): a marker written between the stamp and the process's end would make
+        /// a clean quit read as a crash. Any thread; takes none of the service's locks, only the log's (it runs under the
+        /// engine's window mutex). Never throws: a failed write is logged, and the next note then reads the end as
+        /// unexpected — the safe side, since a false "it closed" would hide a crash.
+        /// </summary>
+        void NoteAppClosing() noexcept;
 
         /// <summary>
         /// One line for the Settings cog: connected as @bot with N topics, waiting for Threaded Mode, no
@@ -513,6 +531,24 @@ namespace Agentmaster::Msg
 
         // ----- topics = tabs (Messaging.cpp) -----
         void _ensureSearchTopic();
+        /// <summary>
+        /// §21.18: sends the START NOTE when it is due — its first send (the facts gathered by _ensureSearchTopic) or a new
+        /// attempt after a failed one (_onStartNoteSent set its time) — into the Search topic, built with this attempt's clock
+        /// (BuildStartNoteText: a note that goes out late says so), with sound only for an app launch (StartNoteRings). With
+        /// no Search topic yet it waits for a later tick. Tick thread; two atomic loads when nothing is due.
+        /// </summary>
+        void _pumpStartNote();
+        /// <summary>
+        /// §21.18: what one send of the start note came back with. Delivered: logged with its message id, done. The Search
+        /// topic gone (the user deleted it: "message thread not found"): the topic is forgotten, the next tick makes a new
+        /// one, and the note goes there. A failure that can pass (no network, a 5xx, a 429 the send loop's one retry did not
+        /// outlast): sent again after a growing wait (30 s doubling, 10 minutes at most), kStartNoteMaxAttempts sends in all.
+        /// Any other refusal (a 4xx about the note itself): logged and dropped — sending it again would be refused again.
+        /// Send thread (the outbox item's onDone).
+        /// </summary>
+        /// <param name="threadId">The Search topic the attempt was sent to.</param>
+        /// <param name="r">Telegram's answer (for a refused HTML, the answer of its plain-text resend).</param>
+        void _onStartNoteSent(int64_t threadId, const TgResult& r);
         void _syncTopics();
         /// <summary>
         /// Makes a session's topic: named TopicDisplayName(state, square, title) (the state glyph, then the tab color's square:
@@ -1001,6 +1037,32 @@ namespace Agentmaster::Msg
         bool _tickRequested{ false };
         int64_t _lastMarkerMs{ 0 };
         bool _startNotePosted{ false };
+        /// <summary>
+        /// §21.18, the START NOTE. `_botStarts` counts the starts of the bot in this process (_start; only the first, at the
+        /// app's launch, rings — ClassifyStartNote). `_versionWord` is the app's version word, read once per start
+        /// (ServiceHooks::versionWord); the run marker and the note carry it — written by _start before the threads run, so
+        /// the threads read it without a lock. `_startNote` holds the facts _ensureSearchTopic gathered (tick thread only).
+        /// `_startNoteState` is where the note stands (kStartNote… in Messaging.cpp), `_startNoteRetryAtMs` when a note whose
+        /// send failed goes again and `_startNoteAttempts` how many sends it took: atomics, since the send thread's answer
+        /// (_onStartNoteSent) moves them while the tick thread reads them.
+        /// </summary>
+        size_t _botStarts{ 0 };
+        std::wstring _versionWord;
+        StartNoteFacts _startNote;
+        std::atomic<int> _startNoteState{ 0 };
+        std::atomic<int64_t> _startNoteRetryAtMs{ 0 };
+        std::atomic<int> _startNoteAttempts{ 0 };
+        /// <summary>
+        /// §21.18: when the app's last window closed (NoteAppClosing, any thread; 0 = not closing). While it is younger than
+        /// kAppClosingMarkerHoldMs the tick writes no run marker, so the close stamp stays the run's newest sign of life.
+        /// </summary>
+        std::atomic<int64_t> _appClosingAtMs{ 0 };
+        /// <summary>
+        /// §21.18, tick thread only: a refused creation of the Search topic is asked for again only from this time on
+        /// (kSearchCreateRetryMs) — the start note re-creates a Search topic the user deleted, and a refusal that lasts must
+        /// not become a createForumTopic call on every tick.
+        /// </summary>
+        int64_t _searchCreateRetryAtMs{ 0 };
         /// <summary>
         /// How many mirrored sessions have a turn open (counted by the tick loop each pass). The work log's edit
         /// gap grows with it (`kWorkLogEditGapMs` × 1 at one turn, ~2 s × N at N turns), so N busy sessions never

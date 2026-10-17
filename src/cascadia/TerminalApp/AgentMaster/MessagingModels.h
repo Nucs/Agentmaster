@@ -3738,7 +3738,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6), as Telegram HTML: the title, the state and since
     /// when (a clock time from persisted stamps, CardStateSinceMs), a Reactivate line for a parked tab, a session
-    /// in Error or a claude that exited, folder · branch · model · context, the runner and the queue, the unsent
+    /// in Error or a claude that exited, folder · branch · model · context, the runner and the queue unless they are the
+    /// common default (an Auto runner with nothing queued and no global pause: no line — §21.18), the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
     /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
     /// API call on the one chat. The title is a title TOKEN (§21.15, TgTitleForm::Bold): the classic render reads
@@ -3821,9 +3822,16 @@ namespace Agentmaster::Msg
             {
                 place += L" \x00B7 ctx " + std::to_wstring(s.contextTokens / 1000) + L"K";
             }
-            out += place + L"\n";
+            // No line break after it: each line below brings its own, so a line that is left out (the runner's, below)
+            // leaves no empty line in the card and no trailing break in the text the hash covers.
+            out += place;
         }
-        // Runner + queue.
+        // Runner + queue — only when they say something. "Runner Auto · queue 0" is the common default (every new session
+        // gets Auto from the cog, and most queues are empty), so on most cards the line only repeated what the user knows
+        // (the user's request of 2026-10-18: "is the common default and should be hidden (not plotted)", §21.18). Any part
+        // that is not the default brings the whole line back as it was — a Paused runner, the global pause, or a queued
+        // prompt (with the next one's first line) — so a card that shows the line shows the same text as before, and only
+        // the cards in the default lose it (one edit each, once, as their hash changes).
         {
             size_t pending = 0;
             std::wstring next;
@@ -3838,15 +3846,19 @@ namespace Agentmaster::Msg
                     ++pending;
                 }
             }
-            out += L"Runner " + std::wstring{ s.autorunner.mode == AutorunnerMode::Full ? L"Auto" : L"Paused" };
-            if (globalPause)
+            const bool runnerIsDefault = s.autorunner.mode == AutorunnerMode::Full && !globalPause && pending == 0;
+            if (!runnerIsDefault)
             {
-                out += L" (Off globally)";
-            }
-            out += L" \x00B7 queue " + std::to_wstring(pending);
-            if (!next.empty())
-            {
-                out += L" \x2014 next: \x201C" + TgEscapeHtml(next) + L"\x201D";
+                out += L"\nRunner " + std::wstring{ s.autorunner.mode == AutorunnerMode::Full ? L"Auto" : L"Paused" };
+                if (globalPause)
+                {
+                    out += L" (Off globally)";
+                }
+                out += L" \x00B7 queue " + std::to_wstring(pending);
+                if (!next.empty())
+                {
+                    out += L" \x2014 next: \x201C" + TgEscapeHtml(next) + L"\x201D";
+                }
             }
         }
         if (!s.pendingInput.empty())
