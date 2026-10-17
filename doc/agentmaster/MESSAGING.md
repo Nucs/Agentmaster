@@ -195,10 +195,10 @@ A prompt with an image keeps the typed path (a plugin's submit carries text only
 | What a bot cannot see | No method lists topics; no update for a deleted topic | Agentmaster's topic map (§4.4) |
 | Drafts | `sendMessageDraft` (private chats, `message_thread_id`), "an ephemeral 30-second preview", `can_stop` (10.3) | The activity draft (§6.2) |
 | Chat actions | `sendChatAction` (typing…) in a private-chat topic; lasts "5 seconds or less" | §6.2 |
-| Buttons | `callback_data` 1–64 bytes; `style` danger/success/primary; copy-text buttons (1–256 characters) | Tokens (§7.5), copy actions (§7.3) |
+| Buttons | `callback_data` 1–64 bytes; `style` danger (red) / success (green) / primary (blue) — no color of their own, the app picks the shades; copy-text buttons (1–256 characters) | Tokens (§7.5), copy actions (§7.3), the title chips (§21.15) |
 | Reactions | `setMessageReaction`: "as non-premium users, bots can set up to one reaction per message"; allowed emoji include ✍ 👀 👨‍💻 👍 👎 | The status of a queued message (§7.1) |
 | Text | 1–4,096 characters; HTML with `pre`/`code`, `blockquote expandable`, `tg-time` | §10.4 |
-| Rich messages | 10.1+: `sendRichMessage` with tables, details, lists | Plans and long replies, later |
+| Rich messages | 10.1+: `sendRichMessage` with tables, details, lists; 10.3: buttons INSIDE the text (`<tg-button>`, a look each); `editMessageText` turns a classic message into a rich one and back | Claude's Markdown (§21.11); the title chips (§21.15) |
 | Checklists | `sendChecklist` is "on behalf of a connected business account" only | Claude's to-do list as a text checklist |
 | Files | Upload 50 MB (photos 10 MB); download 20 MB | Transcripts, diffs, outputs as files |
 | Deleting | Bots may delete their own and the user's messages in a private chat within 48 h | The PIN message (§9.3) |
@@ -2255,6 +2255,126 @@ a running session (blue circle) instead of the yellow one or as red when error".
   without a long hold; production's ran 4 h 45 min), or the edits that rose from about 15:31 on crossed a limit of their own.
   Either way, the 123 topics left (about two hours at the same pace) could earn another long hold after 18:50. A lower
   replay budget than 18 calls a minute would lower that risk; it is not changed.
+
+### 21.15 Every title is a color chip — an in-text button in the tab's color family (2026-10-17)
+
+> Status: written 2026-10-17 (session 13e76a66, commit 7017fd863); LIVE on dev 0.0.1.25 since 18:25
+> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
+> swap need the user's word.
+
+**The user's request** (2026-10-17, after looking at the color tests in thread 26785 of the dev chat): "Go for 10 with
+copy_text button is great, even better if we can specify hex color code or equivalent of hex color code". Test 10 showed the
+title as an in-text copy_text button of a rich message, in each of Telegram's button looks.
+
+#### 21.15.1 What Telegram allows (read and measured 2026-10-17, the dev bot, thread 26785)
+
+- **No color of its own, three looks.** A button's `style` is “danger” (red), “success” (green) or “primary” (blue); a rich
+  message's button adds “link” (a borderless link, callback buttons only). The docs: "Apps may use theme-specific colors for
+  the button background and text based on the style". So a hex color cannot be asked for, and the shade on the screen is the
+  app's — the background and a matching text color, which is what a chip gives.
+- **Exact colors would need custom emoji** (a set of 14 colored squares): "Custom emoji entities can only be used by bots that
+  purchased additional usernames on Fragment or in the messages directly sent by the bot to private, group and supergroup
+  chats if the owner of the bot has a Telegram Premium subscription." The dev bot's custom emoji was stripped in a classic
+  message (test 7) and in a rich one (message 906).
+- **What the API kept** (every message silent; only disabled and copy_text buttons, so no tap reaches the bot):
+
+  | Message | Sent | Kept |
+  |---|---|---|
+  | 904 | the title as a `disabled` button in each look (plain, primary, success, danger) | all four, with their styles |
+  | 905 | the same as `copy_text` buttons | all four, with their styles |
+  | 906 | a custom emoji in a rich message | stripped to its plain emoji |
+  | 907 | classic HTML (`\n` breaks, a blank line, a quote) sent as rich HTML | the breaks read as spaces, the two paragraphs ran into one |
+  | 908 | the same with `<p>` and `<br>` | the line breaks and the paragraphs kept |
+  | 909 | `editMessageText` of a classic message with `rich_message` | the message became rich, its keyboard kept |
+  | 910 | a rich message edited back to classic text, then to rich again | both edits taken, the keyboard kept |
+
+- **Clients:** Telegram Desktop shows buttons inside a rich message from 7.1 (2026-08-21; its changelog: "Add buttons and file
+  blocks to rich messages"); the current release is 7.3.1. The user's Desktop is 7.0.5. Topic names are plain text: no
+  button can be in one.
+
+#### 21.15.2 The chip, and where it shows
+
+- **The chip** (`TgTitleChipHtml`): `<tg-button type="copy_text" style="primary" text="docs 2">🟦 docs 2</tg-button>`. Its
+  label is the §21.13 square and the title (one line, cut at 100 UTF-16 units with an ellipsis); a tap copies the title (up
+  to 256 units, Telegram's CopyTextButton limit); both cuts never split a surrogate pair. A blank title has nothing to copy and
+  stays the plain mention.
+- **The look follows the square's family** (`TgTitleChipStyle`): 🟦 primary, 🟩 success, 🟥 danger. 🟧 🟨 🟪 🟫 ⬛ ⬜ get the
+  app's plain button rather than a neighbor's color (an orange tab with a red chip would read as a red tab); the square in the
+  label names the family either way. Of the 14 tab palette colors, 8 get a colored chip (4 blue, 2 green, 2 red).
+- **Where:** every place §21.13 put a square — the card's title line (`📌 [🟦 docs 2]`), `/status`, a Search answer's rows,
+  a pick menu's head and the action edits of that menu, `/rename`, `/summary`, the interrupt confirm, `/idle`, "Opened …", and
+  the change line: `[🟦 old] changed the title to [🟩 new]`, `[🟦 tab] changed the color to [🟩 tab]` (in a rich line the
+  quotes give way to the chips, and a new color shows as a chip of the title). The topic NAMES keep the square.
+- **Only with rich messages:** the cog's rich switch (`AppSettings::messagingRichMessages`, on by default, the switch of
+  §21.11) turns the chips on and off with Claude's rich Markdown. Off, or when the Bot API has no rich messages (a 404 latches
+  for the run), every title is the §21.13 square and title, as before.
+
+#### 21.15.3 One text, two renders
+
+- **A title is a TOKEN until it is sent.** The builders (`BuildCardText`, `BuildSearchAnswerHtml`, `BuildSearchPickMenuHtml`,
+  `BuildTopicChangeNoticeHtml`, and the six replies in Messaging.Inbound.cpp) write `TgTitleToken(form, square, title)`:
+  private-use characters U+E000…U+E002 frame a form, the square and the escaped title.
+- **The classic render** (`TgRenderTitleTokensClassic`) turns each token into the §21.13 text of its form — Plain
+  `🟦 title`, Bold `🟦 <b>title</b>`, Quoted `“🟦 title”`, Square `🟦` — byte for byte what the builders printed before. So a
+  card's hash, now taken over this render, is the hash its record already holds: the upgrade itself edits no card.
+- **The rich render** (`TgRichHtmlFromClassic`): rich HTML reads a raw line break as a space (message 907), so the converter
+  makes the structure explicit — a blank line ends a paragraph (`<p>`), a line break is `<br>`, a quote or a code block is a
+  block of its own, every other tag (b, i, u, s, code, a, tg-spoiler — all in the rich tag set) and every entity stays. A chip
+  is lifted out of the formatting around it (the tags closed before it and opened again after it; the empty pairs that leaves
+  are dropped), so a button never sits inside bold or italic.
+- **Sending** (`_sendText`): a text with tokens goes as ONE rich message (`_sendTitledRich`: `sendRichMessage`, the buttons, the
+  reply reference and the caller's callback on it) while chips are wanted; Telegram's refusal (a 400 about the message, or a
+  404) sends the classic render in its own place in the outbox, without a key (a key would erase a newer queued item with the
+  same key). A text without tokens goes the HTML way exactly as before.
+- **Editing** (`_editText`): the same for edits (`editMessageText` with `rich_message`, else `text`); a refused rich edit is made
+  again with the classic render, except for "message is not modified" and "message to edit not found", which go to the caller.
+  The edit reports the form the message shows (`onForm`, from Telegram's answer: `rich_message` or `text`).
+- **A belt:** a token that reached the outbox unrendered (a send path that bypasses `_sendText` / `_editText`) is rendered
+  classic there and logged once: `[msg] a title token reached the outbox unrendered (…)`.
+
+#### 21.15.4 The cards that exist already
+
+- **The card's form is recorded** (`TopicRecord::cardRich`, persisted as `cardRich`; absent in an older file = a classic card),
+  from Telegram's own answer to the post or the edit.
+- **A card whose text is unchanged but whose form is not the wanted one** — every card posted before the chips, or every card
+  after the rich switch flipped — is re-edited only when `_takeCardFormatSlot` gives it the turn: one card per 10 s across all
+  topics (`kCardFormatGapMs`), none for 5 minutes after a 429 or while a long one parks `editMessageText`, and only while the
+  last minute's calls leave room for one more under 18 (the history replay's budget). 47 cards edited at once earned a 429
+  with a 21-minute `retry_after` on 2026-10-16. Each such edit logs `[msg] <sid8> card re-edited with a title chip (its form
+  only; N more card(s) to go)`.
+- **A card whose text changes** (a state, the queue, a rename) is edited in the wanted form at once, and a re-posted card
+  (the sticky card, a ping) is posted in it — the upgrade rides the ordinary traffic too.
+- **A refused rich form is not retried** for the same text (`CardState::richRefusedHash`): a card that went as HTML waits for
+  its next text change before the rich form is tried again.
+
+#### 21.15.5 Tests, the build, what is open
+
+- **Tests:** `TestMessaging` — the look of every square and the 8-of-14 palette count; the token forms and their classic
+  renders (a framing character inside a title and a stray one dropped); the chip (the button of message 905, the plain look,
+  the attribute escaping, one line, the label and copy cuts, a surrogate pair at the copy cut, a blank title); the converter
+  (the card's shape, a chip in bold, both change lines, a quote and a blank line inside italic, code, a link with entities,
+  empty input); the card's two renders; `cardRich`'s round trip and an older file. The §21.13 checks now compare the classic
+  render, which proves it byte-identical to before. `TestMessagingSearch` — the rich answer and pick menu. The isolated m5
+  run (HEAD + this work): 7,512 checks, only the 3 known TestTaskbarBadge failures. `/Zs /W4` of Messaging.cpp +
+  Messaging.Inbound.cpp: clean.
+- **The build**: Debug, HEAD 7017fd863, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session
+  inside production (`devbuild.ps1`, this session's scratchpad `swap\`); no purge trigger since dev's 4f3c643d9, so an
+  incremental build: 447 s with 3 compilers, "Build OK", TerminalApp.dll bakes 7017fd863, 192 icons. The script's last check
+  refused the layout because its manifest read `0.0.1.23` — the stamp of that slot's previous swap, which the incremental
+  package step carried over — instead of the unstamped `0.0.1.0`. The manifest was identical to the running one apart from
+  the version, the packaging files had not changed since 3a73980d9, and the swap stamps its own version, so the swap went on.
+- **The swap** (18:25:24, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, no open session): 0.0.1.24 → 0.0.1.25,
+  drain 1.1 s, register 18.9 s at the first attempt, **downtime 20.6 s**; `[msg] connected as @ClaudeSessionsDebugGateBot`
+  1 s after the start.
+- **Checked live** (dev hooks.log and `messaging\telegram\state.json` after the swap): two cards took the slow form upgrade
+  (`898e19f8` at 18:26:04, "47 more card(s) to go"; `f48cd627` at 18:26:14, "38 more"); every other card became rich through
+  the edits and re-posts a restart makes anyway. By 18:31 all **49** topics' cards were rich (`cardRich` true, a card id
+  each). The first 10-minute census: `editMessageText=121 sendMessage=1 setMyCommands=1 (123 calls) edits(card=121)` — the
+  dev restart before it, without chips (17:24), made `editMessageText=102 … edits(card=102)`. No rich message refused, no 429,
+  no unrendered token, no swallowed exception.
+- **Open** (the user's, live): the chips on the phone (the looks, a tap copying the title); Telegram Desktop needs 7.1 or
+  later to show them; a title Telegram's entity detection might find something in (a URL, a /command) inside a button label —
+  if Telegram refuses such a message, it goes as HTML with the square (logged).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
