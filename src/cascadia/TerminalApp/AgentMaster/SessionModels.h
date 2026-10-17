@@ -2450,6 +2450,18 @@ namespace Agentmaster
         // all (a literal placeholder label would submit as junk). GLOBAL, not autorunner-gated (a
         // release build forks too, so this lives in the cog's SESSIONS tab). OFF: forks start empty.
         bool carryDraftOnFork{ true };
+        // Agentmaster (HOOKS.md "API-error turns" — the API-ERROR REWIND): when a session whose turn died on
+        // an API error (a dropped connection, an overloaded or rate-limited API, a 5xx — every kind but a
+        // refusal / DLP / safety block) is RESUMED — "Restart session", a Deactivated tab, a restored tab, a
+        // Sessions-page resume — append ONE line to its transcript first: an explicit last-prompt marker
+        // (Claude Code's own rewind line) that moves the active leaf back to the user row below the failed
+        // response. The resumed claude then sees an interrupted turn instead of a finished one and, with
+        // CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 in the user's settings, continues it by itself. Nothing is
+        // deleted (the error stays on a dead branch). The Restart seam holds the new claude's start until the
+        // old one has exited, because that claude re-stamps the error as its leaf at exit (ApiErrorRewind.h).
+        // GLOBAL; cog SESSIONS tab; read fresh at each seam (LoadAppSettings). OFF: a resumed errored session
+        // sits idle at the error, as before — Claude Code still continues an error that hit BEFORE any output.
+        bool resumeApiErrorTurns{ true };
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager

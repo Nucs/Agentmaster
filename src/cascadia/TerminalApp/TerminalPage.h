@@ -62,6 +62,7 @@ namespace Agentmaster
     struct TabDragBand; // Agentmaster: TabDragMath.h — the pointer-owned tab reorder gesture's band record (complete type included by the .cpp)
     enum class DockProbeMode : int; // Agentmaster: Engine.h — cross-window tab docking, what a drag asks a dock target (complete type included by the .cpp)
     struct DockProbeResult; // Agentmaster: Engine.h — cross-window tab docking, a dock target's answer (slot + numeric window id)
+    class ProcessExitWait; // Agentmaster: ApiErrorRewind.h — handles on the claude.exe processes a resume must outlive (HOOKS.md "API-error turns"; complete type included by TerminalPage.AgentSessions.cpp)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -2043,6 +2044,30 @@ namespace winrt::TerminalApp::implementation
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)
         std::wstring _ManagedSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which MANAGED session (Claude OR Codex) owns this connection, matched by connection IDENTITY across _claudeTabs (agent-agnostic; works for a Codex tab with no tabToken yet)
         bool _RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent); // Agentmaster: in-place "Restart session" for a managed Claude/Codex pane — rebuild the connection from the CURRENT conversation (resume, transcript/rollout-gated; never replay the launch commandline), swap it in, re-point the injector. Returns true if handled; false => not a managed agent (fall through to the upstream restart).
+        // Agentmaster (HOOKS.md "API-error turns" — the API-ERROR REWIND, ApiErrorRewind.h). Three seams resume a conversation
+        // whose turn may have died on an API error; each appends the one rewind line BEFORE a claude reads the transcript, and
+        // never while a claude still runs it (that claude's exit would re-stamp the error as the active leaf).
+        //   _StartAfterApiErrorRewind — the RESTART half. _RestartManagedSession planned a due rewind, opened `holders` (the
+        //       claude.exe processes running the conversation) BEFORE ending the old claude, and swapped `newConn` in WITHOUT
+        //       starting it. Off the UI thread: wait for every holder to exit (at most kApiErrorRewindExitWaitMs), append the
+        //       line; then on the UI thread start `newConn` — only while it is still NotConnected: a tab closed or restarted
+        //       again meanwhile has CLOSED it (ConptyConnection::Close moves even a never-started connection to Closed), and a
+        //       start then would spawn a claude no pane shows; a tab torn out into another window keeps it NotConnected and
+        //       still starts there. A holder that never exits or a failed append still starts the connection, un-rewound.
+        //       `sessionId` the conversation; `newConn` the held connection; `holders` may be null (nothing to wait for).
+        //       fire_and_forget: every step is guarded, since an escaped exception here is std::terminate (Rule #18).
+        winrt::fire_and_forget _StartAfterApiErrorRewind(std::wstring sessionId, winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection newConn, std::shared_ptr<::Agentmaster::ProcessExitWait> holders);
+        //   _RewindApiErrorAfterExit — the DEACTIVATE half. The parked connection starts only when the tab is entered, so
+        //       nothing is held: wait for the parked claude to exit off the UI thread, then append. A claude woken before the
+        //       append is a live holder, and RewindApiErrorTail refuses rather than race it (logged; the next resume retries).
+        //       `seam` names the caller in the log ("deactivate"). Never throws.
+        winrt::fire_and_forget _RewindApiErrorAfterExit(std::wstring sessionId, std::shared_ptr<::Agentmaster::ProcessExitWait> holders, std::wstring seam);
+        //   _RewindApiErrorBeforeRestore — the RESTORE half (_LaunchClaudeSession resuming a restored record: a window
+        //       restore, a Sessions-page resume, a reopened closed session). No claude of this window runs the conversation,
+        //       so the line is appended synchronously before the connection is built — and only for a record whose last
+        //       known state says the turn was in flight or had failed (Error / midTurnAtRestore): a 600-tab window restore
+        //       must not read 600 transcripts. Off with AppSettings::resumeApiErrorTurns. Logs every non-trivial outcome.
+        void _RewindApiErrorBeforeRestore(const ::Agentmaster::SessionInfo& restored, const ::Agentmaster::AppSettings& settings);
         bool _ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}); // Agentmaster (Triage Board / Explorer-tree "Fork session"): fork a managed session by id — the kind-aware fork shared with _DuplicateTab (Claude: `--resume <id> --fork-session`; Codex: `codex fork <rolloutUuid>`; both transcript/rollout-gated -> fresh). Opens the fork in THIS window (window-agnostic: reads the shared registry, no live tab needed). Returns false if the id isn't a known managed session. modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork session" submenu ("" = Default; Claude only — a codex fork takes no --model)
         void _DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab); // Agentmaster (cross-window move): a Claude tab is moving to ANOTHER window (tear-out / moveTab) — evict this window's per-window binding (NOT the injector/live) so teardown can't archive a session now alive elsewhere; the destination re-homes it
         void _DetachClaudePaneForMove(const winrt::com_ptr<Tab>& tab, const std::shared_ptr<Pane>& movingPane); // Agentmaster (cross-window move, pane-level): the movePane-to-window case — evict only if the LEAVING pane is the session's bound (first-terminal) pane; the tab may survive with its other panes
