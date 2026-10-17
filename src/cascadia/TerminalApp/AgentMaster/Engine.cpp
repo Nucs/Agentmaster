@@ -35,6 +35,7 @@
 #include <string>
 #include <thread> // Agentmaster: the debounced sessions.json autosaver worker + the UI-stall watchdog
 #include <unordered_map> // Agentmaster: per-id last-logged [Unknown] line, to dedup the pull/transient notify flood
+#include <vector> // Agentmaster (MESSAGING.md §21.18): the package-id buffer of AppVersionWordForMessaging
 
 namespace Agentmaster
 {
@@ -152,6 +153,60 @@ namespace Agentmaster
             int64_t _lastPokeMs = 0; // newest Poke (drives the quiet window)
             std::thread _thread; // last member: starts after everything above is initialized
         };
+
+        // MESSAGING.md §21.18: the app's version word for the Telegram bot's start note and run marker — the package
+        // identity's version for a packaged install ("0.6.8.21"; the dev package's as "dev 0.0.1.28"), a portable copy's
+        // .am-version stamp ("portable 0.7.9.0"), else "" (a local unpackaged build, the test harness: the note then names no
+        // version). It is what tells the user, from the phone, that a restart was an update (the note's "was …") and which
+        // build came up after a hot swap. Plain Win32 (Engine.cpp stays WinRT-free); asked once per start of the bot.
+        // Never throws: an identity or stamp that cannot be read gives "".
+        std::wstring AppVersionWordForMessaging() noexcept
+        {
+            try
+            {
+                std::wstring version;
+                const bool packaged = !Profiles::PackageFamilyName().empty();
+                if (packaged)
+                {
+                    // PACKAGE_ID carries the manifest's Major.Minor.Build.Revision — the version the hot-swap script stamps
+                    // (0.0.1.28) and the release pipeline writes (0.6.8.21), so the word matches what the user deployed.
+                    UINT32 len = 0;
+                    if (::GetCurrentPackageId(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER && len > 0)
+                    {
+                        std::vector<BYTE> buf(len); // heap memory: aligned for the PACKAGE_ID at its start
+                        if (::GetCurrentPackageId(&len, buf.data()) == ERROR_SUCCESS)
+                        {
+                            const auto* id = reinterpret_cast<const PACKAGE_ID*>(buf.data());
+                            version = std::to_wstring(id->version.Major) + L"." + std::to_wstring(id->version.Minor) + L"." + std::to_wstring(id->version.Build) +
+                                      L"." + std::to_wstring(id->version.Revision);
+                        }
+                    }
+                }
+                else if (Profiles::IsPortableInstall())
+                {
+                    // The stamp the release zip ships beside the exe (the updater's PortableVersionFromDir reads the same
+                    // file): its first run of digits and dots, so a BOM, a CRLF or a trailing note never reaches the word.
+                    const std::wstring stamp = Profiles::detail::ReadUtf8File(Profiles::detail::ExeDirPath() + L"\\.am-version");
+                    for (const wchar_t c : stamp)
+                    {
+                        if ((c >= L'0' && c <= L'9') || c == L'.')
+                        {
+                            version.push_back(c);
+                        }
+                        else if (!version.empty())
+                        {
+                            break;
+                        }
+                    }
+                }
+                return Msg::FormatAppVersionWord(Profiles::IsDevPackage(), !packaged && Profiles::IsPortableInstall(), version);
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"AppVersionWordForMessaging"); // Rule #18; recovery: no version word in the note
+                return {};
+            }
+        }
     }
 
     Engine& SharedEngine()
@@ -487,8 +542,10 @@ namespace Agentmaster
             // sinks above (RequestSessionActionInWindows / RequestLaunchInWindow); restart and park reuse the existing
             // cross-window seams with an EMPTY source window, so the hosting window — whichever it is — acts. Off until
             // the settings say otherwise (Apply starts nothing while messagingEnabled is false, the token is missing
-            // or nobody is paired); the Search factory and the version word are set by the app layer at its init
-            // (TerminalPage::_InitAgentmasterEngine), since both need app-only code.
+            // or nobody is paired); the Search factory is set by the app layer at its init (TerminalPage::
+            // _InitAgentmasterEngine), since it needs app-only code. The version word (§21.18) is plain Win32 and is set
+            // here — until 2026-10-18 this comment said the app layer set it too, and nothing did, so the start note never
+            // named a version.
             {
                 Msg::ServiceHooks hooks;
                 hooks.sessionAction = [](const std::wstring& sid, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply) {
@@ -498,6 +555,7 @@ namespace Agentmaster
                 hooks.restartSession = [](const std::wstring& sid) { RestartSessionInOtherWindows(sid, L""); };
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
                 hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
+                hooks.versionWord = []() { return AppVersionWordForMessaging(); };
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
                 e->messaging->Apply(LoadAppSettings());
             }
@@ -1335,6 +1393,16 @@ namespace Agentmaster
         if (!e.liveWindowIds.empty())
         {
             SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
+        }
+        else if (e.messaging)
+        {
+            // MESSAGING.md §21.18: the LAST window just closed — the app is quitting, and it ends with TerminateProcess right
+            // after, so nothing later can record a clean end. The Telegram bot stamps run.closed, and its next start note says
+            // this run CLOSED rather than "did not close normally". A window set that is empty only for a moment (the last tab
+            // torn out into a new window) stamps too; the bot's next marker write outdates such a stamp
+            // (StartNoteRunClosedCleanly). Under the window mutex like the manifest write above: NoteAppClosing takes none of
+            // the engine's locks and never throws.
+            e.messaging->NoteAppClosing();
         }
         // Agentmaster (discard Manager-only windows): a mid-session-closed window whose record has NO
         // tab refs held nothing but the Manager tab — reopening it would reconstruct exactly what

@@ -283,10 +283,15 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
   Operate commands never run — the bot asks again.
 - **Clean exit.** Flush the outbox (at most 2 s); post "Agentmaster closed — the bot is offline until it
   starts again" in 🔎 Search (optional, off by default); stop the connectors and children; remove the
-  dirty-run marker.
+  dirty-run marker. *(As built, §21.18: the app quits with TerminateProcess and its engine is never
+  destroyed, so none of this runs at a quit. The app's LAST window's close stamps `messaging\run.closed`
+  instead, and the next start note says the run closed.)*
 - **Crash, kill, hot swap.** The marker (`messaging\run.marker`, rewritten every 60 s with the time and
   the version) stays; at the next start 🔎 Search gets "the previous run ended unexpectedly at <time>",
-  or "updated to <version>" when the version changed.
+  or "updated to <version>" when the version changed. *(As built, §21.18: EVERY app launch posts the start
+  note, with sound — the version and "(was <old version>)" after an update, then "The last run closed at
+  <time> · offline <span>" or "⚠ The last run did not close normally … last seen running at <time> · offline
+  about <span>".)*
 - **Sleep, network loss.** Backoff 1, 2, 4 … 60 s with jitter; poll at once on resume.
 - **Two installs.** Release and dev each run their own bot (D13).
 
@@ -490,7 +495,9 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 - **Fleet commands in 🔎 Search:** `/idle` (the idle tabs, each with [Wake]), `/board` (counts per
   state), `/newsession <folder> [model] [-- first prompt]` (a new tab + topic), `/pauseall`,
   `/resumeall`, `/status`, `/clear`, `/help`.
-- **App notes** land here: started, the previous run ended unexpectedly, updated, closed (§4.3).
+- **App notes** land here: started, the previous run ended unexpectedly, updated, closed (§4.3). As built: the
+  START NOTE of every launch, with sound (the version, how the last run ended, how long the bot was gone —
+  §21.18), and the recreation and history-replay notes (§21.8, §21.9).
 
 ## 6. Inside a session's topic: the whole session
 
@@ -508,6 +515,9 @@ Runner Paused · queue 2 — next: "also update the docs"
 ```
 
 **More ▸** opens the tab's actions as buttons (the same set as the `/commands` of §7.3).
+
+As built (§21.18): the runner line is left out while it is the common default — an Auto runner, nothing
+queued, no global pause; a Paused runner, the global pause or a queued prompt brings it back as above.
 
 ### 6.2 What it is doing, or whether it is idle
 
@@ -1173,7 +1183,8 @@ transport's failures and slow calls.
 - **The run marker's crash note**: the tick loop rewrites `messaging\run.marker` every minute and `Stop`
   deletes it; the FIRST marker write of a run copies a marker still on disk to `run.marker.last`, which the
   Search topic's start note reads (and removes) — so a run that ended without a clean stop is named in the
-  next start's note.
+  next start's note. *(Replaced on 2026-10-18 by §21.18: an app quit never runs `Stop`, so every start read
+  as a crash; the close stamp `run.closed` now tells a quit from a crash.)*
 - **Teams, webhooks, external connectors (§11–§12): not built.**
 
 ### 21.3 Check after the build (live, with the owner's bot)
@@ -2674,6 +2685,106 @@ updated 5 minutes ago
 - **Open:** a tap — only a real tap sends a callback, so it waits for the user's Android: the dot's look, the toast, the
   thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
   line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
+
+### 21.18 The start note at every launch, and the card's default runner line (2026-10-18; NOT BUILT yet)
+
+> The user's two requests (2026-10-18, session 0e4c554e): "When agentmaster launches, it should send a message on
+> telegram to Search topic mentioning that. This will help us notice restarts or regain accessability", and
+> "\"Runner Auto * queue 0\" is the common default and should be hidden (not plotted)".
+
+**What v1 did (d1d23a5ca, 2026-10-16).** A start note existed: at the first tick after the connect the bot
+posted "Agentmaster started — N topic(s) kept from the last run" in 🔎 Search, silent, plus "⚠ the previous run
+ended unexpectedly at <time>" with sound when the previous run's marker was still on disk. Four defects:
+
+- **Every end read as a crash.** The app ends with `TerminateProcess` (WindowEmperor) and the engine is never
+  destroyed, so `MessagingService::Stop` — the only code that deletes the marker — never runs at a quit: the
+  marker is always there. Neither install's hooks.log holds a `[msg] messaging stopped` line since 2026-10-16. So
+  every start note rang and claimed a crash, a quit included.
+- **The crash time was an EMPTY date-time entity** (`<tg-time unix=… format="t"></tg-time>`, no text inside):
+  an entity over no text shows nothing, so the line ended "…ended unexpectedly at".
+- **No version:** `ServiceHooks::versionWord` was never set (Engine.cpp's comment said the app layer set it;
+  nothing did).
+- **No trace of its delivery:** nothing logged the send, so the logs cannot show that a note arrived — only the
+  10-minute traffic line's `sendMessage` count (each dev start of 2026-10-17: `setMyCommands=1` and `sendMessage=1` to
+  `3` in its first 10 minutes; `messaging.log` holds no refusal of it).
+
+**What the note says now** (`AgentMaster/MessagingStartNote.h`, pure; `BuildStartNoteText`), one fact per line:
+
+```
+🟢 Agentmaster started · dev 0.0.1.29 (was dev 0.0.1.28)
+⚠ The last run did not close normally (a crash, a forced stop or a Windows shutdown): last seen running at 00:06 · offline about 1m.
+48 topics kept from the last run.
+```
+
+After a quit the second line reads "The last run closed at 23:58 · offline 9m." A note sent 2 minutes or more after
+the bot started (`kStartNoteLateMs`) adds "⏳ Sent late: the bot started at 08:01, 14m ago, and could not post until
+now (no connection to Telegram, or its topics were off)": its Telegram time is then when access came back, not the
+launch. Each time is a date-time entity WITH the PC's clock text inside (`format="t"` on the note's own day, `"dt"`
+on another), so an app that does not know the entity still shows the time. The text is built at each send attempt,
+with that attempt's clock.
+
+**Three kinds** (`ClassifyStartNote`, `StartNoteRings`):
+
+| The start | Heading | Sound |
+|---|---|---|
+| the bot's first start, within 5 minutes of the process start (`kStartNoteLaunchWindowMs`) | 🟢 **Agentmaster started** | yes |
+| the bot's first start, later (messaging switched on in a running app) | 🟢 **The Telegram bot started** + "Agentmaster has been running since …" | no |
+| a later start in the same process (a Settings save restarted the bot) | 🔄 **The Telegram bot restarted** + "Agentmaster kept running; a Settings change restarted the bot." | no |
+
+The sound is the point of the note ("notice restarts"); a start of the bot inside a running app happens while the
+user is at the PC, and a ring there would announce a restart of Agentmaster that did not happen.
+
+**Closed or crashed** (`StartNoteRunClosedCleanly`). `<profile>\messaging\run.closed` ("<unix ms>") is written when
+the app's LAST window closes: `Engine.cpp` `UnregisterLiveWindowIn` (the live window set became empty) →
+`MessagingService::NoteAppClosing`. The previous run counts as closed only when the stamp is at or after its last
+marker write. For 30 s after the stamp the tick writes no marker (`kAppClosingMarkerHoldMs`): a marker written between
+the stamp and the end of the process would make a quit read as a crash. Past the 30 s the app evidently goes on (the
+last tab torn out into a new window empties the set for a moment), the next marker write outdates the stamp, and a
+later crash reads as a crash. A crash, a hot swap's `Stop-Process`, a Windows shutdown (`WM_ENDSESSION` ends the
+process without closing the windows) and a power loss leave no stamp. Both files are read and removed when the note's
+facts are gathered (`_ensureSearchTopic`), so a later start never reports them again.
+
+**The version and "(was …)".** The run marker is "<unix ms> <version word>" now (`FormatRunMarker`); a build before
+§21.18 reads its number first with `std::stoll`, so a rollback still reads it. The version word
+(`FormatAppVersionWord`; `Engine.cpp` `AppVersionWordForMessaging`, plain Win32): the package identity's
+Major.Minor.Build.Revision, with "dev " before it in the dev package; "portable " and the `.am-version` stamp in a
+portable copy; "" in a local unpackaged build (no version shown). A different version in the previous run's marker
+adds "(was <old version>)" — the one sign that a restart was an UPDATE, since a hot swap stops the app like a crash.
+
+**Delivery** (`_pumpStartNote`, `_onStartNoteSent`), all in hooks.log:
+- `[msg] start note: the app's launch, version dev 0.0.1.29, the previous run did not close (last seen alive 00:06, dev 0.0.1.28), 48 topic(s) kept`
+  when the facts are gathered;
+- `[msg] start note queued for the Search topic (thread N, with sound)` at each attempt;
+- `[msg] start note posted in the Search topic (message N)` on arrival.
+
+A passing failure (no answer, a 5xx, a 429 that outlasted the send loop's one wait) is sent again after 30 s, the
+wait doubling up to 10 minutes, 12 sends in all. "Message thread not found" (the user deleted the Search topic)
+forgets the topic: the next tick makes a new one, with its intro, and the note goes there. Any other refusal is
+logged and dropped. Because a deleted Search topic now leads back to its creation, that call takes the call slot
+(`_awaitCallSlot`), respects a parked method (`_handleTickFlood`) and waits 60 s after a refusal
+(`kSearchCreateRetryMs`) instead of being made again on every 1.5 s tick.
+
+**The card's runner line** (`BuildCardText`): left out while it is the common default — an Auto runner, no Pending
+prompt, no global pause. A Paused runner, the global pause or a queued prompt brings the whole line back in its old
+words ("Runner Paused · queue 0", "Runner Auto (Off globally) · queue 0", "Runner Auto · queue 2 — next: “…”"). The
+place line no longer ends with a line break; each following line brings its own, so a card without the runner line
+has no empty line and no trailing break, and every card that shows the line is byte for byte what it was. Only the
+cards in the default change their text, so their hash: one edit each, once, after the upgrade, in the start's own
+burst of card edits (dev, before this change: 102–133 card edits for its 48 topics in the first 10 minutes of each start on 2026-10-17).
+
+**Tests** (`TestMessaging`, `tests_messaging.cpp`): the runner line in every combination (left out, the global
+pause, a queue, a sent-only queue, Paused, no empty line, no trailing break, the hash apart); the marker both ways,
+a torn one, non-ASCII, the rollback read and a round trip; the close stamp; the version word; the three kinds; the
+clean-close rule; the sound; the note's text after a hot swap, a quit, on another day, sent late, for the two silent
+kinds, at the first start ever, and with an escaped version.
+
+**Check after the build** (each install):
+1. The start: one ringing note in 🔎 Search; hooks.log `[msg] start note: …`, `… queued …`, `… posted … (message N)`.
+2. Quit Agentmaster (close every window), start it again: hooks.log at the quit `[msg] the app's last window
+   closed: run.closed stamped …`; the note says "The last run closed at … · offline …".
+3. A hot swap: the note says "did not close normally" and "(was <the old version>)".
+4. A card of a session in the default (Auto, nothing queued) shows no runner line; Paused, a queued prompt or the
+   global pause shows it.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

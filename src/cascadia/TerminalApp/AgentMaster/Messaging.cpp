@@ -109,9 +109,28 @@ namespace Agentmaster::Msg
         // every 20 s while it rests (nothing will appear until the user types).
         constexpr int64_t kResolveRetryMs = 20 * 1000;
         constexpr int64_t kResolveRetryBusyMs = 2 * 1000;
-        // The run marker (§4.3) is rewritten this often; a marker found at start = the previous run ended
-        // without a clean stop.
+        // The run marker (§4.3, §21.18) is rewritten this often; the marker found at start is the previous run's last minute
+        // alive, and with no run.closed stamp at or after it, that run ended without closing (a crash, a forced stop).
         constexpr int64_t kMarkerMs = 60 * 1000;
+        // §21.18: after the app's last window closed (NoteAppClosing), the marker is not rewritten for this long — the process
+        // is about to end, and a marker written between the close stamp and the end would make the stamp look older than the
+        // run's last sign of life, so a clean quit would read as a crash. Past it the app evidently goes on (the last tab was
+        // torn out into a new window), the marker is written again, and the stamp is outdated as it should be.
+        constexpr int64_t kAppClosingMarkerHoldMs = 30 * 1000;
+        // §21.18, the START NOTE's life (MessagingService::_startNoteState): not gathered yet, an attempt queued in the
+        // outbox, due (its first send, or the next after a failed one, at _startNoteRetryAtMs), done (delivered or given up).
+        constexpr int kStartNoteNone = 0;
+        constexpr int kStartNoteQueued = 1;
+        constexpr int kStartNoteDue = 2;
+        constexpr int kStartNoteDone = 3;
+        // A start note whose send failed AFTER the bot reached Telegram (getMe answered: before that the note simply waits)
+        // goes again after 30 s, the wait doubling up to 10 minutes, 12 sends in all (~1.5 h). The note is the user's one
+        // sign that Agentmaster came back, so a network that drops right after the connect must not cost it.
+        constexpr int64_t kStartNoteRetryFirstMs = 30 * 1000;
+        constexpr int64_t kStartNoteRetryMaxMs = 10 * 60 * 1000;
+        constexpr int kStartNoteMaxAttempts = 12;
+        // A Search topic whose creation was refused is asked for again this much later (_ensureSearchTopic), not every tick.
+        constexpr int64_t kSearchCreateRetryMs = 60 * 1000;
         // The state file is saved at most this often while dirty (and at once on Stop).
         constexpr int64_t kStateSaveGapMs = 2000;
         // A Search agent idle this long is parked (its claude.exe holds ~400 MB).
@@ -150,6 +169,30 @@ namespace Agentmaster::Msg
         int64_t WallMs()
         {
             return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        }
+
+        // When THIS process started, as Unix ms (0 when Windows does not say). The start note (§21.18) tells the app's launch
+        // from a start of the bot in an app that was already running by it (ClassifyStartNote), and names it in the second case.
+        // (Not ProcessInspect's ProcessStartUnixMs(pid), which reads another process by its pid.)
+        int64_t ThisProcessStartUnixMs() noexcept
+        {
+            FILETIME created{};
+            FILETIME exited{};
+            FILETIME kernel{};
+            FILETIME user{};
+            if (!::GetProcessTimes(::GetCurrentProcess(), &created, &exited, &kernel, &user))
+            {
+                return 0;
+            }
+            ULARGE_INTEGER t{};
+            t.LowPart = created.dwLowDateTime;
+            t.HighPart = created.dwHighDateTime;
+            constexpr unsigned long long kUnixEpoch100ns = 116444736000000000ULL; // 1601-01-01 to 1970-01-01 in FILETIME ticks
+            if (t.QuadPart <= kUnixEpoch100ns)
+            {
+                return 0;
+            }
+            return static_cast<int64_t>((t.QuadPart - kUnixEpoch100ns) / 10000);
         }
 
         // ----- Credential Manager: the one place a bot token is stored (M4) -----
@@ -810,6 +853,27 @@ namespace Agentmaster::Msg
             _startNotePosted = false;
             _startedMs = WallMs(); // the start-up hold on "closed" deletes counts from here
             _startupHoldLogged = false;
+            // §21.18: count this start (only the first one of the process, at its launch, rings — ClassifyStartNote), re-arm
+            // the start note, and read the app's version word for the note and the run marker HERE, before the threads run,
+            // so the tick and send threads read it without a lock. A hook that throws costs the version, never the start.
+            ++_botStarts;
+            _startNoteState.store(kStartNoteNone);
+            _startNoteAttempts.store(0);
+            _startNoteRetryAtMs.store(0);
+            _appClosingAtMs.store(0);
+            _searchCreateRetryAtMs = 0;
+            _versionWord.clear();
+            if (_hooks.versionWord)
+            {
+                try
+                {
+                    _versionWord = _hooks.versionWord();
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"MessagingService::_start (versionWord)"); // Rule #18; recovery: no version word
+                }
+            }
             {
                 std::lock_guard lk{ _mtx };
                 _mirrors.clear();
@@ -1600,23 +1664,28 @@ namespace Agentmaster::Msg
                     break;
                 }
                 const int64_t now = WallMs();
-                // The run marker (§4.3): rewritten every minute; found at start = the previous run ended
-                // without a clean stop.
-                if (now - _lastMarkerMs >= kMarkerMs)
+                // The run marker (§4.3, §21.18): rewritten every minute with the time and the version word — the previous
+                // run's last copy is when that run was last seen alive and which version it was (the start note). Held for
+                // kAppClosingMarkerHoldMs once the app's last window closed (NoteAppClosing), so the close stamp stays the
+                // newest sign of this run.
+                const int64_t closingAt = _appClosingAtMs.load();
+                const bool appClosing = closingAt != 0 && now - closingAt < kAppClosingMarkerHoldMs;
+                if (!appClosing && now - _lastMarkerMs >= kMarkerMs)
                 {
                     const std::wstring marker = _profile + L"\\messaging\\run.marker";
                     if (_lastMarkerMs == 0)
                     {
-                        // The first write of this run: a marker still on disk means the previous run ended without
-                        // a clean Stop (which deletes it). Keep its content as `.last` for the start note the Search
-                        // topic posts (_ensureSearchTopic reads and removes it).
+                        // The first write of this run: a marker still on disk is the previous run's last minute alive (a
+                        // clean Stop deletes it; an app quit never runs Stop — the app ends with TerminateProcess — so a quit
+                        // leaves it too, and run.closed tells the two apart). Keep its content as `.last` for the start note
+                        // the Search topic posts (_ensureSearchTopic reads and removes it).
                         const std::string prevText = ReadFileBytes(marker);
                         if (!prevText.empty())
                         {
                             WriteFileAtomic(marker + L".last", prevText);
                         }
                     }
-                    WriteFileAtomic(marker, std::to_string(static_cast<long long>(now)));
+                    WriteFileAtomic(marker, FormatRunMarker(now, _versionWord));
                     _lastMarkerMs = now;
                 }
                 // The traffic census: every call the send loop made since the last line, by method. Written
@@ -2838,6 +2907,14 @@ namespace Agentmaster::Msg
         }
         if (thread == 0)
         {
+            // §21.18: the start note makes a NEW Search topic when the user deleted the old one, so this call can now meet a
+            // chat under a flood verdict: it takes its turn and respects a parked method like the sync's topic calls
+            // (_awaitCallSlot, _handleTickFlood), and a refusal is tried again kSearchCreateRetryMs later — not on every 1.5 s
+            // tick, which is how a flood verdict grows.
+            if (WallMs() < _searchCreateRetryAtMs || !_awaitCallSlot(L"createForumTopic"))
+            {
+                return;
+            }
             auto p = json::Value::MkObj();
             p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
             p.Set(L"name", json::Value::MkStr(L"\U0001F50E Search"));
@@ -2845,6 +2922,8 @@ namespace Agentmaster::Msg
             const TgResult r = _api->Call(L"createForumTopic", p, 20000);
             if (!r.ok)
             {
+                _handleTickFlood(L"createForumTopic", r); // a 429: a short verdict waited out here, a long one parks the method
+                _searchCreateRetryAtMs = WallMs() + kSearchCreateRetryMs;
                 _setStatus(L"Connected, but the Search topic could not be created: " + r.description);
                 return;
             }
@@ -2920,44 +2999,53 @@ namespace Agentmaster::Msg
                 item.paced = false;
                 _enqueue(std::move(item));
             }
-            // The previous run's marker, if any, means it ended without a clean stop (§4.3).
+            // §21.18, the START NOTE (the user's request of 2026-10-18: a message in Search at every launch, "to notice
+            // restarts or regain accessibility"). Its facts are gathered once per start of the bot: the previous run's last
+            // marker (run.marker.last — when that run was last seen alive, and its version) and the close stamp
+            // (run.closed — whether the app closed or died), both read AND removed here, so no later start reports them
+            // again. The note itself goes through _pumpStartNote (below, and on later ticks until it has arrived).
+            // ⚠ The v1 note (2026-10-16..18) read every end as a crash — the app quits with TerminateProcess and never runs
+            // Stop, so the marker was always there — and put its time in an EMPTY <tg-time>, which Telegram shows as nothing.
             const std::wstring marker = _profile + L"\\messaging\\run.marker";
-            std::wstring crashed;
+            const std::wstring closedFile = _profile + L"\\messaging\\run.closed";
+            StartNoteFacts facts;
+            try
             {
-                const std::string prev = ReadFileBytes(marker + L".last");
-                if (!prev.empty())
-                {
-                    try
-                    {
-                        const long long when = std::stoll(prev);
-                        crashed = L"\n\x26A0 the previous run ended unexpectedly at <tg-time unix=\"" + std::to_wstring(when / 1000) + L"\" format=\"t\"></tg-time>";
-                    }
-                    catch (...)
-                    {
-                        crashed = L"\n\x26A0 the previous run ended unexpectedly";
-                    }
-                    ::DeleteFileW((marker + L".last").c_str());
-                }
+                facts.previous = ParseRunMarker(ReadFileBytes(marker + L".last"));
+                facts.closedMs = ParseRunClosed(ReadFileBytes(closedFile));
             }
-            size_t topics = 0;
+            catch (...)
+            {
+                // Rule #18. Recovery: no history line — a file that cannot be read costs the note its history, never the note.
+                LogSwallowedException(L"MessagingService::_ensureSearchTopic (start note files)");
+                facts.previous = RunMarker{};
+                facts.closedMs = 0;
+            }
+            ::DeleteFileW((marker + L".last").c_str());
+            ::DeleteFileW(closedFile.c_str());
+            const int64_t processStartedMs = ThisProcessStartUnixMs();
+            facts.kind = ClassifyStartNote(_botStarts, processStartedMs, _startedMs);
+            facts.version = _versionWord;
+            facts.processStartedMs = processStartedMs;
+            facts.botStartedMs = _startedMs;
             {
                 std::lock_guard lk{ _mtx };
-                topics = _state.topics.size();
+                facts.topics = _state.topics.size();
             }
-            std::wstring version;
-            if (_hooks.versionWord)
+            const wchar_t* kindWord = facts.kind == StartNoteKind::AppLaunch ? L"the app's launch" : (facts.kind == StartNoteKind::BotStarted ? L"the bot started in a running app" : L"the bot restarted in a running app");
+            std::wstring previousWord = L"no previous run known";
+            if (facts.previous.aliveMs > 0)
             {
-                try
-                {
-                    version = _hooks.versionWord();
-                }
-                catch (...)
-                {
-                    LogSwallowedException(L"MessagingService (versionWord)");
-                }
+                previousWord = std::wstring{ StartNoteRunClosedCleanly(facts) ? L"the previous run closed" : L"the previous run did not close" } + L" (last seen alive " +
+                               TgClockText(facts.previous.aliveMs, WallMs()) + (facts.previous.version.empty() ? std::wstring{} : L", " + facts.previous.version) + L")";
             }
-            _appNote(L"Agentmaster started" + (version.empty() ? std::wstring{} : L" (" + TgEscapeHtml(version) + L")") + L" \x2014 " + std::to_wstring(topics) + L" topic(s) kept from the last run" + crashed, !crashed.empty());
+            _log(L"[msg] start note: " + std::wstring{ kindWord } + L", version " + (facts.version.empty() ? std::wstring{ L"unknown" } : facts.version) + L", " + previousWord + L", " +
+                 std::to_wstring(facts.topics) + L" topic(s) kept");
+            _startNote = std::move(facts);
+            _startNoteRetryAtMs.store(0);
+            _startNoteState.store(kStartNoteDue);
         }
+        _pumpStartNote();
     }
 
     void MessagingService::_appNote(const std::wstring& html, bool sound)
@@ -2968,6 +3056,130 @@ namespace Agentmaster::Msg
             thread = _state.searchThreadId;
         }
         _sendText(thread, html, !sound, SendPriority::Final, L"", json::Value{}, nullptr);
+    }
+
+    void MessagingService::_pumpStartNote()
+    {
+        // The retry time is stored BEFORE the state (both seq_cst, _onStartNoteSent's order), so a "due" seen here comes
+        // with the wait that belongs to it.
+        if (_startNoteState.load() != kStartNoteDue)
+        {
+            return;
+        }
+        const int64_t now = WallMs();
+        if (now < _startNoteRetryAtMs.load())
+        {
+            return;
+        }
+        int64_t thread = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            thread = _state.searchThreadId;
+        }
+        if (thread == 0)
+        {
+            return; // no Search topic (yet, or again after it was deleted): _ensureSearchTopic makes it, a later tick sends
+        }
+        _startNoteState.store(kStartNoteQueued);
+        const bool rings = StartNoteRings(_startNote);
+        const int attempt = _startNoteAttempts.load() + 1;
+        // Built with THIS attempt's clock: a note that goes out late (a failed first send, a slow connect) says so itself.
+        const std::wstring html = BuildStartNoteText(_startNote, now);
+        _log(L"[msg] start note queued for the Search topic (thread " + std::to_wstring(thread) + L", " + (rings ? L"with sound" : L"silent") +
+             (attempt > 1 ? L", send " + std::to_wstring(attempt) : std::wstring{}) + L")");
+        auto self = weak_from_this();
+        _sendText(thread, html, !rings, SendPriority::Final, L"", json::Value{}, [self, thread](const TgResult& r) {
+            if (auto me = self.lock())
+            {
+                me->_onStartNoteSent(thread, r);
+            }
+        });
+    }
+
+    void MessagingService::_onStartNoteSent(int64_t threadId, const TgResult& r)
+    {
+        const int attempt = _startNoteAttempts.fetch_add(1) + 1;
+        if (r.ok)
+        {
+            _startNoteState.store(kStartNoteDone);
+            _log(L"[msg] start note posted in the Search topic (message " + std::to_wstring(r.result.I64At(L"message_id", 0)) + L")");
+            return;
+        }
+        const std::wstring why = r.description.empty() ? (r.transportFailed ? std::wstring{ L"no answer from Telegram" } : L"HTTP " + std::to_wstring(r.httpStatus)) : r.description;
+        if (attempt >= kStartNoteMaxAttempts)
+        {
+            _startNoteState.store(kStartNoteDone);
+            _log(L"[msg] start note NOT posted after " + std::to_wstring(attempt) + L" sends (" + why + L"): given up");
+            return;
+        }
+        if (r.ThreadNotFound())
+        {
+            // The user deleted the Search topic in Telegram: forget it (only if it is still the one this attempt went to — a
+            // newer topic may exist already), so the next tick's _ensureSearchTopic makes a new one with its intro, and the
+            // note goes there. The Search topic is the user's way in from the phone — the note's whole point.
+            bool forgot = false;
+            {
+                std::lock_guard lk{ _mtx };
+                if (_state.searchThreadId == threadId)
+                {
+                    _state.searchThreadId = 0;
+                    _stateDirty = true;
+                    forgot = true;
+                }
+            }
+            _log(L"[msg] start note: the Search topic (thread " + std::to_wstring(threadId) + L") is gone in Telegram" +
+                 (forgot ? std::wstring{ L"; a new one is made and the note goes there" } : std::wstring{ L"; it was replaced already" }));
+            _startNoteRetryAtMs.store(0);
+            _startNoteState.store(kStartNoteDue);
+            return;
+        }
+        // Passing failures: no answer at all (no network, a timeout), Telegram's own trouble (5xx), or a flood verdict the send
+        // loop's one wait did not outlast. Anything else is about the note itself and would be refused again.
+        const bool passing = r.transportFailed || r.httpStatus >= 500 || r.httpStatus == 429;
+        if (!passing)
+        {
+            _startNoteState.store(kStartNoteDone);
+            _log(L"[msg] start note NOT posted: Telegram refused it (" + why + L"); not sent again");
+            return;
+        }
+        int64_t wait = kStartNoteRetryFirstMs;
+        for (int i = 1; i < attempt && wait < kStartNoteRetryMaxMs; ++i)
+        {
+            wait *= 2;
+        }
+        wait = (std::min)(wait, kStartNoteRetryMaxMs); // (std::min): the <windows.h> macro
+        _startNoteRetryAtMs.store(WallMs() + wait);
+        _startNoteState.store(kStartNoteDue);
+        _log(L"[msg] start note not posted (" + why + L"): sent again in " + TgShortSpan(wait) + L" (send " + std::to_wstring(attempt) + L" of " +
+             std::to_wstring(kStartNoteMaxAttempts) + L")");
+    }
+
+    void MessagingService::NoteAppClosing() noexcept
+    {
+        try
+        {
+            if (!_running.load())
+            {
+                return; // no marker of this run: a stamp would be compared with an older run's marker and prove nothing
+            }
+            const int64_t now = WallMs();
+            // First the hold (the tick must not write a marker after the stamp), then the stamp itself.
+            _appClosingAtMs.store(now);
+            const std::wstring closedFile = _profile + L"\\messaging\\run.closed";
+            if (WriteFileAtomic(closedFile, std::to_string(static_cast<long long>(now))))
+            {
+                _log(L"[msg] the app's last window closed: run.closed stamped, so the next start note says this run closed");
+            }
+            else
+            {
+                _log(L"[msg] the app's last window closed, but run.closed could not be written (error " + std::to_wstring(::GetLastError()) +
+                     L"): the next start note will say this run did not close normally");
+            }
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"MessagingService::NoteAppClosing"); // Rule #18; recovery: no stamp (the safe side)
+        }
     }
 
     void MessagingService::_syncTopics()

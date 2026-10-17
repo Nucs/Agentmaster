@@ -12,6 +12,7 @@
 #include <deque> // the rename-budget model's call window
 
 #include "../MessagingModels.h"
+#include "../MessagingStartNote.h" // §21.18: the start note's marker, version word, kind, sound and text
 #include "../TelegramFormat.h"
 
 using namespace Agentmaster;
@@ -680,6 +681,157 @@ void TestMessaging()
         CHECK(BuildCardText(failed, 5000, 0, false).find(L"\x25B6 Reactivate restarts it") != std::wstring::npos, "a session in Error: the Reactivate line");
         CHECK(TgStripTags(L"<b>a &lt;T&gt;</b> &amp; <code>b</code>") == L"a <T> & b", "TgStripTags drops the tags and unescapes the three entities");
         CHECK(ParseRemoteCommand(L"/reactivate").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/reactivate").name == L"reactivate", "/reactivate is an Agentmaster command");
+    }
+
+    // ---- §21.18: the card leaves out the runner line while it is the common default ----
+    {
+        // An Auto runner, nothing queued, no global pause: no runner line at all, and no empty line or trailing break left
+        // behind (each line below the place line brings its own break).
+        SessionInfo s = MakeSession(L"runner-1", SessionState::WaitingForInput);
+        s.workingDir = L"K:\\source\\Agentmaster";
+        s.branch = L"agentmaster";
+        s.autorunner.mode = AutorunnerMode::Full;
+        const std::wstring plain = TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false));
+        CHECK(plain.find(L"Runner") == std::wstring::npos && plain.find(L"queue") == std::wstring::npos, "Auto + an empty queue: no runner line (the common default)");
+        CHECK(plain.find(L"\n\n") == std::wstring::npos && !plain.empty() && plain.back() != L'\n', "the left-out line leaves no empty line and no trailing break");
+        CHECK(plain.size() >= 11 && plain.compare(plain.size() - 11, 11, L"agentmaster") == 0, "the card ends with the place line (the branch)");
+        SessionInfo d = s;
+        d.pendingInput = L"half a thought";
+        CHECK(TgRenderTitleTokensClassic(BuildCardText(d, 5000, 0, false)).find(L"agentmaster\n\x270E unsent at the PC: ") != std::wstring::npos, "the draft line follows the place line directly");
+        // Any part that is not the default brings the whole line back, in its old words.
+        CHECK(BuildCardText(s, 5000, 0, true).find(L"agentmaster\nRunner Auto (Off globally) \x00B7 queue 0") != std::wstring::npos, "the global pause brings the line back");
+        SessionInfo q = s;
+        QueuedPrompt p1;
+        p1.id = L"p1";
+        p1.text = L"run the suite\nthen report";
+        q.queue.push_back(p1);
+        QueuedPrompt p2;
+        p2.id = L"p2";
+        p2.text = L"deploy";
+        q.queue.push_back(p2);
+        CHECK(BuildCardText(q, 5000, 0, false).find(L"agentmaster\nRunner Auto \x00B7 queue 2 \x2014 next: \x201C" L"run the suite\x201D") != std::wstring::npos,
+              "a queued prompt brings the line back, with the next prompt's first line");
+        SessionInfo onlySent = s;
+        QueuedPrompt done;
+        done.id = L"p0";
+        done.text = L"sent already";
+        done.status = PromptStatus::Sent;
+        onlySent.queue.push_back(done);
+        CHECK(BuildCardText(onlySent, 5000, 0, false).find(L"Runner") == std::wstring::npos, "a queue of sent prompts only is still the default (nothing pending)");
+        SessionInfo paused = s;
+        paused.autorunner.mode = AutorunnerMode::Off;
+        CHECK(BuildCardText(paused, 5000, 0, false).find(L"agentmaster\nRunner Paused \x00B7 queue 0") != std::wstring::npos, "a Paused runner brings the line back");
+        CHECK(CardTextHash(BuildCardText(s, 5000, 0, false)) != CardTextHash(BuildCardText(paused, 5000, 0, false)), "the two cards hash apart (the service edits the card on the change)");
+    }
+
+    // ---- §21.18: the start note's pure half (MessagingStartNote.h) ----
+    {
+        // The run marker both ways: the bare number older builds wrote, and the number + the version word.
+        CHECK(ParseRunMarker("1792273131650").aliveMs == 1792273131650 && ParseRunMarker("1792273131650").version.empty(), "a marker of an older build: the time, no version");
+        const RunMarker withVersion = ParseRunMarker("1792273131650 dev 0.0.1.28\r\n");
+        CHECK(withVersion.aliveMs == 1792273131650 && withVersion.version == L"dev 0.0.1.28", "a marker with its version word (the line break dropped)");
+        CHECK(ParseRunMarker("").aliveMs == 0 && ParseRunMarker("garbage").aliveMs == 0 && ParseRunMarker("  42").aliveMs == 42, "a torn or foreign marker reads as none; leading spaces are fine");
+        CHECK(FormatRunMarker(42, L"dev 0.0.1.28") == "42 dev 0.0.1.28" && FormatRunMarker(42, L"") == "42" && FormatRunMarker(42, L"   ") == "42", "the marker: the time, then the version word when there is one");
+        CHECK(FormatRunMarker(42, L"d\x00E9v 1") == "42 dv 1", "non-ASCII never reaches the marker");
+        CHECK(std::stoll(FormatRunMarker(1792273131650, L"0.6.8.21")) == 1792273131650, "an older build reads the time first (std::stoll): a rollback still reads the marker");
+        const RunMarker round = ParseRunMarker(FormatRunMarker(1792273131650, L"0.6.8.21"));
+        CHECK(round.aliveMs == 1792273131650 && round.version == L"0.6.8.21", "the marker round-trips");
+        CHECK(ParseRunClosed("1792273131650") == 1792273131650 && ParseRunClosed("x") == 0 && ParseRunClosed("") == 0, "the close stamp: a time, or none");
+        // The version word.
+        CHECK(FormatAppVersionWord(false, false, L"0.6.8.21") == L"0.6.8.21", "the release package: its version");
+        CHECK(FormatAppVersionWord(true, false, L"0.0.1.28") == L"dev 0.0.1.28", "the dev package: dev before it");
+        CHECK(FormatAppVersionWord(false, true, L"0.7.9.0") == L"portable 0.7.9.0", "a portable copy: portable before its stamp");
+        CHECK(FormatAppVersionWord(true, true, L"").empty(), "no version known: no word (never a misleading 0.0.0)");
+        // The kind: the first start near the process start is the launch; a later first start, or any second start, is not.
+        const int64_t t0 = 1792270000000;
+        CHECK(ClassifyStartNote(1, t0, t0 + 20 * 1000) == StartNoteKind::AppLaunch, "the first start, seconds after the process: the launch");
+        CHECK(ClassifyStartNote(1, t0, t0 + 2ll * 60 * 60 * 1000) == StartNoteKind::BotStarted, "the first start hours after the process: messaging was switched on later");
+        CHECK(ClassifyStartNote(2, t0, t0 + 20 * 1000) == StartNoteKind::BotRestarted, "a second start in the process: a Settings save restarted the bot");
+        CHECK(ClassifyStartNote(1, 0, t0) == StartNoteKind::AppLaunch, "an unknown process start reads as the launch");
+        // The clean-close rule: only a stamp at or after the run's last marker write proves a close.
+        StartNoteFacts f;
+        f.previous.aliveMs = t0;
+        f.closedMs = t0 + 30 * 1000;
+        CHECK(StartNoteRunClosedCleanly(f), "a close stamp after the last marker write: the run closed");
+        f.closedMs = t0 - 60 * 1000;
+        CHECK(!StartNoteRunClosedCleanly(f), "a stamp older than the last marker write (an earlier run's, or the app went on) proves nothing");
+        f.closedMs = 0;
+        CHECK(!StartNoteRunClosedCleanly(f), "no stamp: the run did not close normally");
+        f.previous.aliveMs = 0;
+        f.closedMs = t0;
+        CHECK(!StartNoteRunClosedCleanly(f), "a stamp with no marker to compare it with proves nothing");
+        // The sound: only the app's launch rings.
+        StartNoteFacts kinds;
+        kinds.kind = StartNoteKind::AppLaunch;
+        CHECK(StartNoteRings(kinds), "the launch rings");
+        kinds.kind = StartNoteKind::BotStarted;
+        CHECK(!StartNoteRings(kinds), "the bot switched on in a running app: silent");
+        kinds.kind = StartNoteKind::BotRestarted;
+        CHECK(!StartNoteRings(kinds), "the bot restarted by a Settings save: silent");
+    }
+    {
+        // The note's text. A hot swap: the app was stopped a minute ago (no close stamp) and the version changed.
+        const int64_t now = 1792273200000;
+        StartNoteFacts f;
+        f.kind = StartNoteKind::AppLaunch;
+        f.version = L"dev 0.0.1.29";
+        f.previous.aliveMs = now - 60 * 1000;
+        f.previous.version = L"dev 0.0.1.28";
+        f.botStartedMs = now - 3 * 1000;
+        f.processStartedMs = now - 5 * 1000;
+        f.topics = 48;
+        const std::wstring swap = BuildStartNoteText(f, now);
+        CHECK(swap.rfind(L"\U0001F7E2 <b>Agentmaster started</b> \x00B7 dev 0.0.1.29 (was dev 0.0.1.28)\n", 0) == 0, "the heading: started, the version, the version it replaced");
+        CHECK(swap.find(L"\n\x26A0 The last run did not close normally") != std::wstring::npos && swap.find(L"offline about 1m.") != std::wstring::npos, "no close stamp: did not close normally, offline about a minute");
+        CHECK(swap.find(L"\n48 topics kept from the last run.") != std::wstring::npos, "the topics kept");
+        CHECK(swap.find(L"Sent late") == std::wstring::npos, "a note sent seconds after the start does not say it is late");
+        CHECK(swap.find(L"</tg-time>") != std::wstring::npos && swap.find(L"\"></tg-time>") == std::wstring::npos, "every time is a date-time entity WITH its clock text inside (v1's was empty)");
+        const int64_t alive = f.previous.aliveMs;
+        const std::wstring format = TgDayKey(alive) == TgDayKey(now) ? L"t" : L"dt";
+        CHECK(swap.find(L"<tg-time unix=\"" + std::to_wstring(alive / 1000) + L"\" format=\"" + format + L"\">" + TgClockText(alive, now) + L"</tg-time>") != std::wstring::npos,
+              "the last-seen time: the entity, its format by the day, the PC clock inside");
+        // A quit and a relaunch nine minutes later: a close stamp after the last marker write.
+        f.version = L"0.6.8.21";
+        f.previous.version = L"0.6.8.21";
+        f.previous.aliveMs = now - 9 * 60 * 1000 - 20 * 1000;
+        f.closedMs = now - 9 * 60 * 1000;
+        f.topics = 1;
+        const std::wstring quit = BuildStartNoteText(f, now);
+        CHECK(quit.find(L"(was ") == std::wstring::npos, "the same version: no 'was'");
+        CHECK(quit.find(L"\nThe last run closed at ") != std::wstring::npos && quit.find(L"offline 9m.") != std::wstring::npos && quit.find(L"\x26A0") == std::wstring::npos,
+              "a close stamp: the run closed, offline 9 minutes, no warning");
+        CHECK(quit.find(L"\n1 topic kept from the last run.") != std::wstring::npos, "one topic: singular");
+        // Another day: the date goes into the entity's format.
+        f.closedMs = now - 3ll * 24 * 60 * 60 * 1000;
+        f.previous.aliveMs = f.closedMs - 1000;
+        CHECK(BuildStartNoteText(f, now).find(L"format=\"dt\"") != std::wstring::npos, "a moment on another day: short date and time");
+        // A note that waited 14 minutes for Telegram says so, with the start time.
+        f.botStartedMs = now - 14 * 60 * 1000;
+        const std::wstring late = BuildStartNoteText(f, now);
+        CHECK(late.find(L"\n\x23F3 Sent late: the bot started at ") != std::wstring::npos && late.find(L", 14m ago, and could not post until now") != std::wstring::npos,
+              "a late note names the start and the wait");
+        // The two silent kinds.
+        StartNoteFacts r = f;
+        r.kind = StartNoteKind::BotRestarted;
+        r.botStartedMs = now - 1000;
+        r.previous.version = L"0.6.8.20";
+        const std::wstring restarted = BuildStartNoteText(r, now);
+        CHECK(restarted.rfind(L"\U0001F504 <b>The Telegram bot restarted</b> \x00B7 0.6.8.21\n", 0) == 0 && restarted.find(L"Settings change restarted the bot") != std::wstring::npos,
+              "a restart of the bot: its own heading and why");
+        CHECK(restarted.find(L"The last run") == std::wstring::npos && restarted.find(L"(was ") == std::wstring::npos, "a restart of the bot tells no previous run and no version change (the app went on)");
+        StartNoteFacts later = f;
+        later.kind = StartNoteKind::BotStarted;
+        later.botStartedMs = now - 1000;
+        later.processStartedMs = now - 2ll * 60 * 60 * 1000;
+        const std::wstring started = BuildStartNoteText(later, now);
+        CHECK(started.rfind(L"\U0001F7E2 <b>The Telegram bot started</b>", 0) == 0 && started.find(L"\nAgentmaster has been running since ") != std::wstring::npos,
+              "messaging switched on later: the bot started, and since when the app runs");
+        // The first start ever: the heading alone; the version word is escaped.
+        StartNoteFacts bare;
+        bare.botStartedMs = now;
+        CHECK(BuildStartNoteText(bare, now) == L"\U0001F7E2 <b>Agentmaster started</b>", "the first start ever: the heading alone");
+        bare.version = L"a<b";
+        CHECK(BuildStartNoteText(bare, now) == L"\U0001F7E2 <b>Agentmaster started</b> \x00B7 a&lt;b", "the version word is escaped");
     }
 
     // ---- §21.8: the topic list in the side panel's MOST RECENT order, and the one-time recreation ----
