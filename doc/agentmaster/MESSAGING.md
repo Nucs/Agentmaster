@@ -321,6 +321,22 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
 
 - **🔎 Search** — created by the bot at pairing, the first topic; the user pins it at the top of the list
   in the Telegram client (the Bot API has no call to pin a topic; P0-16 checks the clients allow it).
+  - **Re-checked 2026-10-17** (the user asked whether the bot can pin it by default, and check once on an
+    existing chat that it is pinned), against the live reference and its changelog through Bot API 10.3 of
+    2026-08-24. No method pins a topic: the topic methods are create / edit / close / reopen / delete /
+    `unpinAllForumTopicMessages` and the General topic's. `ForumTopic` has no pinned field, no method reads a
+    topic back, and pinning a topic sends the bot no service message. So the bot can neither pin Search nor
+    learn whether it is pinned, and there is nothing to migrate.
+  - **A pin the user sets is kept.** The bot never deletes or recreates the Search topic: `/recreate` and a
+    `kTopicLayoutVersion` recreation queue only session topics (`orphanThreads`), and only a token for a
+    DIFFERENT bot resets `searchThreadId` (that bot's chat is another chat). Production's Search topic is
+    thread 22371 (made 2026-10-16 18:50, when @ClaudeSessionsGateBot was still the dev bot), dev's is 25027
+    (made 2026-10-17 11:24 under @ClaudeSessionsDebugGateBot).
+  - ⚠ **A Search topic the user deletes does not come back** (read from the code, not tried): nothing reads
+    a refused send's "message thread not found" (`TgResult::ThreadNotFound` is read only by the rich-fallback
+    rule and the two topic-delete paths), and `_ensureSearchTopic` makes the topic only while
+    `searchThreadId` is 0. Its sends then keep failing. The way back today: stop the app, set
+    `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
 - **One topic per tab** — for every tab, in every Agentmaster window, that hosts a **Claude Code** session
   (managed, or a hand-typed claude Agentmaster adopted), **whose state is not Idle**. Running, Waiting for
   you, Needs approval, Error and Done are listed; **Idle is the only state that is not**. A **pinned**
