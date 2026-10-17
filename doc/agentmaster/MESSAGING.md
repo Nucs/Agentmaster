@@ -337,18 +337,41 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
     rule and the two topic-delete paths), and `_ensureSearchTopic` makes the topic only while
     `searchThreadId` is 0. Its sends then keep failing. The way back today: stop the app, set
     `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
-  - **A button or command that OPENS Search is not possible** (asked 2026-10-17, "preferably in the 'all'
-    area"; checked only, nothing built). Telegram's deep links (`core.telegram.org/api/links`) link a topic only
-    in a group or channel (`t.me/<name>/<topic>`, `t.me/c/<id>/<topic>`). A topic id is the id of the message
-    that created it, and in a private chat each account numbers messages in its own message box
-    (`api/updates`: "private chats … of one user have another common event sequence"). So the bot knows only
-    ITS number for Search (22371 / 25027); the user's app numbers it differently (the same split that §21.12
-    meets with the secretary bot). No button type moves the user's view: `url` needs that link, `callback_data`
-    only reaches the bot, and a Mini App's `openTelegramLink` needs a link too. Not tried on a phone: P0-16's
-    "do links to a private-chat topic work?" is still open.
-  - **What is possible instead:** a `/search` command, or a card button, that makes the bot post one line in
-    Search. Telegram lists topics by their newest message (§21.8), so Search moves to the top of the list,
-    under the user's own pins. Tapping that post's notification should open Search (not tried). Both bots
+  - **A link that opens Search: the right number exists, and only Telegram Desktop's code opens it** (asked
+    2026-10-17, "preferably in the 'all' area"; read from the docs and the three clients' sources, nothing
+    built, nothing tried on a device). ⚠ This bullet first said (commit 01ea104cf) that the bot's number for
+    Search is not the user's. That is wrong for TOPICS. A private chat has two message-id spaces, one per
+    account (`api/updates`), but a topic's canonical id is the USER-space id of its creation message, and the
+    HTTP Bot API's `message_thread_id` already IS that id. Tested by mtcute (issue #153, layer 223, re-checked
+    2026-10-08 on layer 229): `getForumTopicsByID` finds a bot-made topic only by its user-space id, and the
+    Bot API's `createForumTopic` returns that id. So 22371 / 25027 are the numbers a link needs. Telegram's
+    deep-link page documents topic links only for groups and channels. The clients' current sources:
+    - **Telegram Desktop** (`dev`, 2026-10-15): `local_url_handlers.cpp` turns `https://t.me/<bot>?topic=<id>`
+      (or `t.me/<bot>/<id>/<id>`) into `tg://resolve?domain=<bot>&topic=<id>`. `showPeerByLinkResolved` hands
+      the topic to `showRepliesForMessage` for ANY peer, which opens it when `forumTopicFor(id)` is loaded
+      (else, for a non-channel peer, it does nothing).
+    - **Telegram Android** (13.0.2, 2026-10-13): `LaunchActivity` reads `topic` / `thread`, but for a user or
+      bot it opens the chat (at `post`, if given) and ignores the topic. Its "All" view has two native jumps
+      instead. Under the chat's LAST message, when that message belongs to a topic, it adds a "Continue last
+      thread ›" button (`ChatMessageCell`: `isAllChats && isBotForum`, `addContinueThreadKeyboard`;
+      `ChatActivity` → `topicsTabs.selectTopic`). While scrolling, a floating topic header shows, and tapping it
+      selects that topic.
+    - **Telegram iOS** (2026-10-07): `UrlHandling.swift` reads `topic` / `thread`, but for a non-channel peer
+      the link ends as a plain message link into the chat.
+    - A Search message in "All" never gets the tappable topic label of a group's "View as Messages": on
+      Android that label needs `isForum`, which is false for a bot chat.
+  - **What can be built from that (nothing built yet, nothing tried on a device):**
+    - A **URL button** `https://t.me/<bot>?topic=<searchThreadId>` on a message in "All" (or anywhere). Telegram
+      Desktop's code opens Search from it; Android and iOS open the bot chat only.
+    - A **`/search`** command, or a card button, that makes the bot post one line IN Search. It does three
+      things. That line becomes the chat's last message, so Android's "All" view puts "Continue last thread ›"
+      under it, one tap into Search. This lasts only while it stays the chat's newest message: the next post in
+      any topic takes the button over, which on a busy chat is seconds. Telegram lists topics by their newest
+      message (§21.8), so Search also moves
+      to the top of the list, under the user's own pins. And tapping the line's notification, if it is not
+      silent, should open Search on every client.
+    - Both together: the post in Search carries the URL button, which covers Desktop and Android.
+  - **How "All" takes a typed message:** both bots
     report `allows_users_to_create_topics: true` (getMe, 2026-10-17), so in the "All" view every message the
     user types becomes a NEW topic ("Type any message to create a new thread", `api/forum` → Bot forums). A
     `/search` typed there arrives in its own fresh topic, which the bot can delete as it answers. BotFather's
