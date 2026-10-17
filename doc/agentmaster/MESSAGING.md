@@ -5,8 +5,9 @@
 > rings — dev 0.0.1.16, not production; §21.11 = Claude's Markdown as Telegram RICH messages (tables render), a
 > VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
 > optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17; §21.12 = the
-> "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and the production
-> deploy of §21.12.5); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
+> "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
+> 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §22 = folder groups — the topics grouped by working
+> folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -1843,9 +1844,9 @@ showing beyond unformatted ascii".
 ### 21.12 The user's line, the reply that quotes it, the status on the prompt; one bot per install (2026-10-17)
 
 > Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.22 (`Q:\agentmaster-layouts\Debug`, a purged full
-> rebuild, 11:24), on the NEW dev bot. Production: a Release build of 46e3aad42 checked in `Q:\agentmaster-layouts\Release`
-> (11:53) and a swap onto it that switches the release bot on, run by a one-shot task at the end of session 0b1f8635's turn
-> (§21.12.5); until that swap production runs 0.6.8.20, which predates the whole Telegram feature.
+> rebuild, 11:24), on the NEW dev bot. LIVE in production 0.6.8.21 since 12:01 (`Q:\agentmaster-layouts\Release`, a
+> Release build of 46e3aad42, swapped by a one-shot task at the end of session 0b1f8635's turn, the bot switched on while
+> production was stopped — §21.12.5).
 
 **The user's requests** (2026-10-17 morning): "1. Lets introduce the changes to the user message: a. "👤 You · 14:02 · typed
 at the PC" (or "📱 from the phone", "⚙ runner")\n<the prompt>" b. Make each reply a reply to its prompt. Send Claude's
@@ -1949,4 +1950,115 @@ of telegram. The one used by debug should move to the release agentmaster … Th
   Live turns post meanwhile, slower.
 - **Rollback**: `tools\Swap-AgentmasterLayout.ps1 -LayoutDir 'Q:\agentmaster-layouts\Release-B' -PackageName Agentmaster`
   (0.6.8.20; its settings saves then drop the two messaging keys again, and its bot does not run).
-- The outcome (the swap's numbers, the bot's first lines) is added here after the run.
+- **The outcome — production 0.6.8.21 runs the bot since 12:01** (the task's log, then production's hooks.log after the
+  recorded offset): the task waited 55 s for the session's turn to end (11:59:37 → 12:00:32), took the mutex, passed the
+  gate again, found no session Running. Meanwhile the USER had quit production (12:00:15 a first "close all windows",
+  cancelled; 12:00:34 `[nav] quit confirmed (closing all windows)`), so the swap found no GUI to stop: drain 1.3 s (0 hosts
+  left), register 3.2 s at the first attempt, the settings written (`setmsg: written: messagingEnabled=true,
+  messagingTelegramOwnerId=473303454, 111 settings in all (verified)`, backup `settings.json.pre-telegram-20261017-120100`),
+  the launch at 12:01:00 — about 26 s without production, counted from the user's quit. The new instance: `[msg] messaging
+  started (owner 473303454, idle grace 10 min, topics conversation only by default, rich messages)` 12:01:03.9,
+  `[msg] connected as @ClaudeSessionsGateBot (topics enabled)` 12:01:04.8 (no Reopen dialog was seen by the watch), the four
+  windows re-homed 69 + 543 + 7 + 48 Claude tabs and 4 shells, none skipped, by 12:04:41, `[msg] start-up hold ended 229 s
+  after the start (every window restored)`; then dev's 48 old topics deleted as "closed" and **413 topics created** by
+  ~12:25 (the estimate was 411), the history replay begun most recent first; no 429 at ~40–50 calls a minute
+  (`[msg] traffic (10 min): createForumTopic=235 … sendMessage=249 … (496 calls)` at 12:21).
+
+## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
+
+> The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
+> optional? meaning we retain the view and access of all topics and optionally can open the groups view? Can two groups
+> have same topic? I am interested in having groups per (workdir ?? inferred working directory)."
+
+### 22.1 What Telegram allows (the Bot API reference and changelog up to 10.3 of 2026-08-24, read 2026-10-17)
+
+- **A bot cannot create** a group, a supergroup, a channel, a chat folder or a community, and it cannot turn Topics on in
+  a group: no such method exists in the reference or in any changelog entry from 9.0 to 10.3. The USER creates each group
+  in the app (up to 50 a day; at most 500 groups and channels joined, 1,000 with Premium).
+- **In a forum supergroup where the bot is an admin** with `can_manage_topics`, it does what it does in the private chat
+  today: `createForumTopic` / `editForumTopic` / `deleteForumTopic`, messages into a `message_thread_id`. With
+  `can_change_info` it also sets the group's title (`setChatTitle`, 1–128 chars) and photo (`setChatPhoto`). As an admin it
+  receives every message of the group.
+- **Adding the bot takes one tap**: `t.me/<bot>?startgroup=<parameter>&admin=manage_topics+delete_messages+pin_messages+change_info`
+  opens a picker of the user's groups and adds the bot as an admin with those rights; the group then gets
+  `/start@<bot> <parameter>` (up to 64 base64url characters), so the app learns which folder the group is for. Telegram
+  Desktop has a known bug where the parameter is not sent when `admin` is given (tdesktop #25924); Android sends it. The
+  other route, a `KeyboardButtonRequestChat` button (`chat_is_forum`, `chat_is_created`, `bot_administrator_rights`),
+  grants the rights the same way; whether a client's picker offers "create a new group" is not documented — to try.
+- **A topic belongs to exactly one chat** (`message_thread_id` is per chat). There is no topic shared between chats and no
+  link between two topics.
+- **Communities** (the Telegram update of 2026-07-14; Bot API 10.2 / 10.3: the `Community` class, `community` on
+  `ChatFullInfo`, the `community_chat_added` / `_removed` / `_joined` service messages — read-only for bots): "several
+  supergroups, channels, and bots linked together". The user makes one from a chat's profile ("Add Group / Bot to a
+  Community") and adds chats to it (bots can be members); the community "can appear as one expandable item in the chat
+  list" or as separate chats (the blog post; guides call the switch "Show as One Chat"). No limit on its chats is
+  published.
+- **Managed bots** (9.6: a bot asks the user to create a bot it controls, `t.me/newbot/<manager>/<username>`): a bot per
+  folder would give each folder a private chat with topics, but every such bot needs its own @BotFather topics switch and
+  its own poller, and an account owns at most 20 bots (40 with Premium), two of them taken already. Not a fit for 23+
+  folders.
+- **Flood budgets are per chat**: ~20 messages a minute in one group and ~30 per second for the whole bot
+  (limits.tginfo.me). A second chat does not slow the first.
+- **Inside one chat** the only grouping aids are the topic NAME (128 chars), the topic ICON (a custom emoji from
+  `getForumTopicIconStickers`, editable) and the icon COLOR (one of 6 values, set at creation only).
+
+### 22.2 The three answers
+
+- **Optional, with every topic kept: yes.** The private chat with the bot stays the all-topics view, unchanged, and each
+  session ALSO gets a topic in its folder's group (a mirror). The groups view is then the user's choice in Telegram: open a
+  group, or put the bot and the groups into one community and fold it into one chat-list item that opens into the
+  all-topics chat and one group per folder.
+- **Two groups with the same topic: as copies, yes; as one object, no.** Each chat gets its own topic for the session. A
+  message typed in any copy is a prompt to the same session; statuses, the card and the history are kept per copy. A copy
+  costs its own calls, but on its chat's own budget: the private chat does not get slower, and the groups replay their
+  history side by side (23 groups × ~18 messages a minute ≈ 7 calls a second, under the bot's ~30). One copy in the
+  private chat plus one in the folder group is the proposal; a session in two folder groups (launch and inferred) is
+  possible, not proposed.
+- **Which folder** — measured on the release profile on 2026-10-17 (`tgresearch\groupkeys.py`, `inferkeys.py` in session
+  0b1f8635's scratchpad; the 413 tabs that hold a topic, of 668):
+
+  | Key | Groups | Notes |
+  |---|---|---|
+  | Launch folder (`SessionInfo::workingDir`) | 25 (30 for all 668 tabs) | NumSharp 100 topics, Agentmaster 77, TraderLab-options 62, BetterClipboard 29, OptunaSharp 22, idleon 19; 3 groups with one topic |
+  | Launch folder, worktrees folded into their repo (the tab colors' `SessionColorKeyDir` in this install's mode) | **23** (27) | 1 group with one topic |
+  | Inferred folder (the app's `InferWorkingDirectory`, run offline: this install colors tabs per launch folder, so nothing is inferred) | 49 | 88 topics (21%) in another group than their launch folder — some right (a worktree's sessions to their repo, sisyphusresearch sessions that work in OptunaSharp, options sessions on `Q:\AlphaVantage`), 33 in `C:\Users\ELI\.claude` (sessions that mostly read skills and memory), a few in `C:\Windows` / `K:\source`; ~38% of the sessions change their inferred folder at least once over their path list |
+
+  A topic cannot move between chats: a session whose key changes would be deleted, re-created and replayed in the other
+  group. **Proposed key: the launch folder with worktrees folded into their repo**, fixed when the topic is made, with a
+  `/group <folder>` command to move one by hand. The inferred folder only later, opt-in, and frozen once the session has
+  settled.
+
+### 22.3 The design (a proposal)
+
+- **A setting**: Folder groups **Off** (today) / **Mirror** (the private chat keeps every topic, a copy goes to the folder's
+  group) / **Move** (folder groups only; the private chat keeps the 🔎 Search topic and a folder index).
+- **Setup, per folder** (the bot cannot create groups): a 📂 list in the private chat names the folders that hold topics,
+  each with a link that carries a one-time key (`startgroup` + `admin`). The user creates a group, turns Topics on, taps
+  the link and picks the group. The bot binds the group to the folder (`/start <key>`), renames it to the folder's name,
+  sets the folder's tab color as its photo, and fills it: topics in MOST RECENT order, history, cards. Optionally the user
+  makes an "Agentmaster" community of the bot and the groups. A folder that loses its last topic keeps its group (the app
+  never leaves a group by itself).
+- **Inbound**: route each update by chat id to its destination, then by thread to its session; the owner check as today.
+- **Code**: the one chat is hard-wired today (`chat_id = _ownerId` at ~16 send sites, `MessagingState::topics` one record
+  per session, one flood window). Needed: destinations (per-chat topic maps, pacing, cards, history pumps, re-sorts and
+  glyph renames), the bind handshake, group title and photo, the setting and its persistence (keyed by bot id and chat id),
+  tests. Not small.
+
+### 22.4 Cheaper, inside the one chat (no groups)
+
+- The folder's name in every topic name (`🟡 NumSharp · fix the GIL`) and a per-folder topic icon (a custom emoji,
+  editable; the creation color one of the 6, the nearest to the folder's tab color): the topics of a folder look alike and
+  the topic list's search finds them by name (to check in the apps). No setup; one rename per topic.
+
+### 22.5 Open decisions (the user's)
+
+- **G1** Mirror or Move. **G2** the key: launch folder with worktrees folded (proposed), launch folder exact, or inferred.
+  **G3** which folders get a group: every folder with a topic, or only the groups the user makes. **G4** a group's content:
+  like the private chat (verbose / conversation-only per topic), or conversation-only always. **G5** §22.4 first, or with
+  the groups.
+
+Sources: [the Bot API](https://core.telegram.org/bots/api), [its changelog](https://core.telegram.org/bots/api-changelog),
+[deep links](https://core.telegram.org/api/links), [bot features](https://core.telegram.org/bots/features), [request
+buttons](https://core.telegram.org/api/bots/buttons), [the Communities post](https://telegram.org/blog/communities-editor-invisible-messages),
+[a Communities guide](https://blog.invitemember.com/telegram-communities/), [Telegram limits](https://limits.tginfo.me/en),
+[tdesktop #25924](https://github.com/telegramdesktop/tdesktop/issues/25924).
