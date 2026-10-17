@@ -1966,7 +1966,9 @@ of telegram. The one used by debug should move to the release agentmaster … Th
 
 ### 21.13 The title wears the tab's color, and a line tells a new title or color (2026-10-17)
 
-> Status: written 2026-10-17 (session 13e76a66), NOT BUILT yet.
+> Status: written 2026-10-17 (session 13e76a66, commit 3a73980d9); LIVE on dev 0.0.1.23 since 13:16
+> (`Q:\agentmaster-layouts\Debug-B`); not in production (0.6.8.21 is the build of 46e3aad42) — a production build and
+> swap need the user's word.
 
 **The user's request** (2026-10-17): "Can the title have a color background in all places we print title, that matches and
 also detect change and change according / Also when title edited, can we send a message like whatsapp does for group chat
@@ -2071,8 +2073,26 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
   Scheduler integration check each time ("question cleared: the queued prompt fires", then "the held prompt self-releases
   once the status held for the full window") — timing checks on a machine busy with production's history replay; nothing
   here touches the scheduler. `/Zs /W4` of Messaging.cpp + Messaging.Inbound.cpp: clean.
-- **Open** (live): the squares on the phone and the desktop app; one tab's recolor, a rename from the PC and from the topic,
-  a mode switch (quiet), and the quiet re-square of the existing topics.
+- **The build**: Debug, HEAD 3a73980d9, into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug` — run from a
+  session INSIDE PRODUCTION, so no scheduled task was needed (the dev swap never touches production): `devbuild.ps1`
+  (relbuild.ps1 with the Debug configuration and the dev identity; this session's scratchpad `swap\`), no purge trigger
+  since the last Debug build (b669747c0 + the §21.12 work), yet a FULL rebuild of TerminalAppLib (pch.cpp first) — the
+  11:40 Release build had purged the `Generated Files` folder the two configurations share — 537 s with 3 compilers, lowest
+  free commit 26.4 GB. Checked: TerminalApp.dll bakes 3a73980d9, the unstamped AgentmasterDev 0.0.1.0, 192 icons, nothing
+  ran from the folder.
+- **The swap** (13:16:30, `Swap-AgentmasterLayout.ps1 -PackageName AgentmasterDev`, one open session, Idle): drain 2.8 s,
+  register 3.1 s at the first attempt, **downtime 6.5 s**; `[msg] connected as @ClaudeSessionsDebugGateBot` 1 s after the
+  start; the window resumed 56 tabs, none skipped; the start-up hold ended at 120 s.
+- **Checked live** (dev hooks.log after the swap, the state file): the name tick re-squared all **48** existing topics
+  QUIETLY, 13:19:23 → 13:29:01 (about five a minute, one or two seconds apart in bursts, then a wait for the call window):
+  `🟡 🟥 Agentmaster`, `🟡 🟦 docs 2`, `🟡 🟦 OptunaSharp`, `🟡 🟨 Desktop`, `🟡 🟩 chinese models`, …; no change line was sent
+  for any of them, as designed; no 429. The first 10-minute census: `deleteMessage=35 editForumTopic=34 editMessageText=131
+  sendMessage=2 setMyCommands=1 (203 calls)` — every rename's "topic renamed" notice deleted, and the card edits are the
+  restart's usual re-edit plus one per re-squared card. `messaging\telegram\state.json`: 48 topics, 48 with `nameColor`,
+  48 with a known `nameColorMode`.
+- **Open** (live, the user's): the squares on the phone and the desktop app; a tab's recolor (the line `… changed the color
+  to 🟩` about 8 s later); a rename at the PC and with `/rename` in the topic (the line at once); a mode switch in the cog
+  (quiet, `[msg] tab color mode changed`); the Search answers' squares.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
