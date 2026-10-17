@@ -1880,6 +1880,18 @@ namespace Agentmaster::Msg
         // is made — the new list is built after the old one is gone.
         std::vector<int64_t> orphanThreads;
         std::map<std::wstring, TopicRecord> topics; // session id -> its topic
+        /// <summary>
+        /// The DIRECTORY (§21.16): the one pinned message in the chat's main view that lists the dedicated topics and the
+        /// tags with their tabs. `directoryMessageId` is its message (0 = none yet: the service posts one — the first start of
+        /// a build with the directory, or after the old one was found deleted). `directoryHash` is the content hash of what it
+        /// shows (DirectoryRender::hash), `directoryRich` whether it is a rich message: an unchanged content in the wanted form
+        /// is never edited, also across a restart. `directoryPinned`: Telegram took the pin of THIS message (a refused pin is
+        /// tried again once per run). Per bot, like everything here: a different bot resets them.
+        /// </summary>
+        int64_t directoryMessageId{ 0 };
+        uint32_t directoryHash{ 0 };
+        bool directoryRich{ false };
+        bool directoryPinned{ false };
     };
 
     /// <summary>
@@ -1915,6 +1927,11 @@ namespace Agentmaster::Msg
         o.Set(L"secretaryBotId", json::Value::MkNum(static_cast<double>(s.secretaryBotId)));
         o.Set(L"secretaryUpdateOffset", json::Value::MkNum(static_cast<double>(s.secretaryUpdateOffset)));
         o.Set(L"topicLayout", json::Value::MkNum(static_cast<double>(s.topicLayout)));
+        // §21.16: the directory message (0 = none) and what it shows.
+        o.Set(L"directoryMessageId", json::Value::MkNum(static_cast<double>(s.directoryMessageId)));
+        o.Set(L"directoryHash", json::Value::MkNum(static_cast<double>(s.directoryHash)));
+        o.Set(L"directoryRich", json::Value::MkBool(s.directoryRich));
+        o.Set(L"directoryPinned", json::Value::MkBool(s.directoryPinned));
         auto orphans = json::Value::MkArr();
         for (const int64_t thread : s.orphanThreads)
         {
@@ -1995,6 +2012,11 @@ namespace Agentmaster::Msg
         s.secretaryBotId = v.I64At(L"secretaryBotId", 0);
         s.secretaryUpdateOffset = v.I64At(L"secretaryUpdateOffset", 0);
         s.topicLayout = static_cast<int>(v.I64At(L"topicLayout", 0)); // absent = topics made before §21.8
+        // §21.16 (absent in an older file: no directory message yet — the service posts and pins one).
+        s.directoryMessageId = (std::max)(int64_t{ 0 }, v.I64At(L"directoryMessageId", 0)); // (std::max): the <windows.h> macro
+        s.directoryHash = static_cast<uint32_t>(v.I64At(L"directoryHash", 0));
+        s.directoryRich = v.BoolAt(L"directoryRich", false);
+        s.directoryPinned = v.BoolAt(L"directoryPinned", false);
         if (const auto* orphans = v.Find(L"orphanThreads"); orphans && orphans->type == json::Value::Type::Arr)
         {
             for (const auto& o : orphans->arr)
@@ -2665,7 +2687,8 @@ namespace Agentmaster::Msg
     /// <summary>
     /// What an editMessageText edits, from its outbox key, for the traffic census's `edits(…)` part: "card" (a topic card,
     /// key "card:&lt;session&gt;"), "prompt" (a §21.12 prompt status, "pl:&lt;message&gt;"), "worklog" (a verbose topic's
-    /// work log, "wl:&lt;session&gt;"), else "other" (an edit with no key, or a key of a kind added later).
+    /// work log, "wl:&lt;session&gt;"), "directory" (the §21.16 pinned directory, "dir:edit"), else "other" (an edit with no
+    /// key, or a key of a kind added later).
     /// </summary>
     /// <param name="key">The outbox item's key ("" = none).</param>
     /// <returns>The kind's census name.</returns>
@@ -2682,6 +2705,10 @@ namespace Agentmaster::Msg
         if (key.starts_with(L"wl:"))
         {
             return L"worklog";
+        }
+        if (key.starts_with(L"dir:"))
+        {
+            return L"directory";
         }
         return L"other";
     }

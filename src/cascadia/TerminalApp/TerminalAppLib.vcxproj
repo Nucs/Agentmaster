@@ -215,6 +215,7 @@
     <!-- Agentmaster (MESSAGING.md): the fleet in Telegram - the bot inside this process (D1). -->
     <ClInclude Include="AgentMaster\TelegramFormat.h" />
     <ClInclude Include="AgentMaster\MessagingModels.h" />
+    <ClInclude Include="AgentMaster\MessagingDirectory.h" />
     <ClInclude Include="AgentMaster\TelegramApi.h" />
     <ClInclude Include="AgentMaster\Messaging.h" />
     <ClInclude Include="AgentMaster\RemoteLaunch.h" />

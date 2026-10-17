@@ -52,6 +52,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
 #include "MessagingModels.h"
 #include "RemoteLaunch.h"
 #include "SessionModels.h" // AppSettings, SessionInfo
@@ -549,6 +550,68 @@ namespace Agentmaster::Msg
         /// renames come after the live traffic and BEFORE the replay. Tick thread; never throws (Rule #18 inside).
         /// </summary>
         void _stateNameTick() noexcept;
+        /// <summary>
+        /// The DIRECTORY (§21.16), once per tick after the names, at most every kDirectoryCheckMs: builds the model — the fleet
+        /// counts from the sync's facts and the registry's queues, the dedicated topics (_directoryTopics), every tag of the
+        /// session store with the open tabs that carry it — renders it (RenderDirectory) and does what DecideDirectoryAction
+        /// says: POST a new message in the chat's main view and pin it (_onDirectoryPosted, _pinDirectory), or EDIT the one it
+        /// has (_editDirectory) when its content or form is not the wanted one and the edit gap has passed. Skipped while the
+        /// facts are incomplete (the start-up hold, a recreation), before the session store's start-up warm-up is done (its
+        /// first whole read opens every record file), before the bot's username is known (the links need it), and while a
+        /// 429 pause runs or a long one parks a method the directory uses. Tick thread; never throws (Rule #18 inside).
+        /// </summary>
+        void _directoryTick() noexcept;
+        /// <summary>
+        /// The chat's DEDICATED topics, in the order the directory lists them: 🔎 Search today (its thread, 0 until it is
+        /// made; its icon color). A new dedicated topic adds its entry here. Tick thread; takes `_mtx`.
+        /// </summary>
+        /// <returns>The topics.</returns>
+        /// <exception cref="std::bad_alloc">If the list cannot be allocated.</exception>
+        std::vector<DirectoryTopic> _directoryTopics() const;
+        /// <summary>
+        /// Telegram's answer to the directory's POST: a message id makes it THE directory (MessagingState's fields; its form
+        /// from the answer — a rich send that fell back to HTML is classic, and that content's rich form counts as refused)
+        /// and asks for its pin; a refusal backs off kDirectoryRetryMs. An answer of a send this run already forgot (a stall,
+        /// kDirectoryStallMs) is not taken: a message it made after all is deleted, so the chat never holds two directories.
+        /// Send thread.
+        /// </summary>
+        /// <param name="serial">The send's number (_directorySerial when it was queued).</param>
+        /// <param name="hash">The content hash of what was sent.</param>
+        /// <param name="wantRich">The rich form was asked for.</param>
+        /// <param name="r">Telegram's answer (the rich send's, or its classic fallback's).</param>
+        void _onDirectoryPosted(uint64_t serial, uint32_t hash, bool wantRich, const TgResult& r);
+        /// <summary>
+        /// Edits the directory message in place (§21.16): a RICH edit when `wantRich` (a refusal — RichEditRefusalWantsFallback —
+        /// is made again with the classic render, in its own outbox place and without a key, so it never replaces a newer
+        /// edit), else a classic edit. Keyed "dir:edit": a newer edit replaces a queued one. Tick thread.
+        /// </summary>
+        /// <param name="messageId">The directory message.</param>
+        /// <param name="r">The render.</param>
+        /// <param name="wantRich">The form to edit it into.</param>
+        /// <param name="serial">The send's number (_directorySerial when it was queued).</param>
+        /// <exception cref="std::bad_alloc">If an item cannot be allocated.</exception>
+        void _editDirectory(int64_t messageId, const DirectoryRender& r, bool wantRich, uint64_t serial);
+        /// <summary>
+        /// Telegram's answer to a directory EDIT: taken (or "not modified") records the content and the form the message
+        /// shows; "the message is gone" (DirectoryEditFoundNoMessage — the user deleted it) forgets the message and posts a
+        /// new one after kDirectoryRepostGapMs; any other refusal backs off kDirectoryRetryMs. A stale serial is ignored.
+        /// Send thread.
+        /// </summary>
+        /// <param name="serial">The edit's number.</param>
+        /// <param name="hash">The content hash of what was sent.</param>
+        /// <param name="messageId">The message that was edited.</param>
+        /// <param name="wantRich">The rich form was asked for.</param>
+        /// <param name="r">Telegram's answer.</param>
+        /// <param name="shownRich">The form the message shows when the edit took (or was found unchanged).</param>
+        void _onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich);
+        /// <summary>
+        /// Pins the directory message (pinChatMessage, silent; keyed "dir:pin"), once per message and run: a refused pin is
+        /// logged and tried again at the next start. Telegram's "pinned a message" note that the pin leaves in the chat is
+        /// deleted when it comes back through getUpdates (_handleMessage). Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="messageId">The directory message.</param>
+        /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
+        void _pinDirectory(int64_t messageId);
         /// <summary>The last sync's facts of one session (tick thread; null when the sync did not list it).</summary>
         const TabFact* _lastFact(const std::wstring& sessionId) const noexcept;
         /// <summary>The tab-color mode the last sync resolved the colors under (the settings' before the first sync). Any thread.</summary>
@@ -1086,6 +1149,25 @@ namespace Agentmaster::Msg
         /// since it means a send path that bypasses _sendText / _editText.
         /// </summary>
         std::atomic<bool> _titleTokenLeakLogged{ false };
+        /// <summary>
+        /// The DIRECTORY's run-time state (§21.16; what the message shows is persisted in MessagingState). Tick thread:
+        /// `_directoryCheckedMs`, when the last check ran (WallMs; 0 = none this run). Under `_mtx`: `_directoryInFlight` — a post
+        /// or an edit waits for its answer (since `_directoryInFlightSinceMs`, the stall clock), so no second one is queued;
+        /// `_directorySerial` numbers the sends, so an answer of a send that a stall made the service forget is recognized;
+        /// `_directoryLastSendMs` — when the last send was queued (the edit gap); `_directoryNotBeforeMs` — a refusal's back-off
+        /// (0 = none); `_directoryRichRefusedHash` — the content whose rich form Telegram refused (DirectoryShown); and
+        /// `_directoryPinTried` — this run asked to pin the current message already. All reset at each start (_start).
+        /// </summary>
+        int64_t _directoryCheckedMs{ 0 };
+        bool _directoryInFlight{ false };
+        int64_t _directoryInFlightSinceMs{ 0 };
+        uint64_t _directorySerial{ 0 };
+        int64_t _directoryLastSendMs{ 0 };
+        int64_t _directoryNotBeforeMs{ 0 };
+        uint32_t _directoryRichRefusedHash{ 0 };
+        bool _directoryPinTried{ false };
+        // The first edit of a run is logged (the later ones only when they fail): the directory may be edited every two minutes.
+        bool _directoryEditLogged{ false };
         /// <summary>
         /// Parks `method` for a long 429 (ParkForFlood under `_mtx`) and logs what is held until when (a local clock time). Takes
         /// `_mtx`.

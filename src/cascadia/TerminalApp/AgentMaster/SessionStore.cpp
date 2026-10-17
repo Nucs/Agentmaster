@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic> // the tag-change epoch (SessionTagsEpoch)
+#include <cstdio> // swprintf_s (TagPaletteHex)
 #include <cwctype>
 #include <mutex>
 #include <string>
@@ -1337,6 +1338,42 @@ namespace Agentmaster
     bool SetTagColor(const std::wstring& tag, const std::wstring& hex)
     {
         return SetTagColorIn(AgentmasterStateDir(), tag, hex);
+    }
+
+    // ===== the TAG PALETTE (see SessionStore.h) ===============================================
+
+    size_t TagPaletteIndexFor(std::wstring_view name) noexcept
+    {
+        // Byte for byte the hash AgentStatusColors.h TagColorFor computed before the palette moved here: a change
+        // of the fold, the byte order or the modulo would re-color every tag that has no picked color.
+        uint32_t h = 2166136261u; // FNV-1a over the case-folded UTF-16 code units
+        for (const wchar_t c : name)
+        {
+            const auto folded = static_cast<uint32_t>(std::towlower(c));
+            h = (h ^ (folded & 0xFF)) * 16777619u;
+            h = (h ^ ((folded >> 8) & 0xFF)) * 16777619u;
+        }
+        return static_cast<size_t>(h % kTagPaletteRgbCount);
+    }
+
+    std::wstring TagPaletteHex(size_t index)
+    {
+        const auto& p = kTagPaletteRgb[index % kTagPaletteRgbCount];
+        wchar_t buf[16];
+        swprintf_s(buf, L"#FF%02X%02X%02X", static_cast<unsigned>(p[0]), static_cast<unsigned>(p[1]), static_cast<unsigned>(p[2]));
+        return buf;
+    }
+
+    std::wstring ResolveTagDisplayHex(const std::wstring& name, const std::map<std::wstring, std::wstring>& storedByFoldedName)
+    {
+        // The stored map was shape-checked when it was read (ReadTagColorsFile), but a caller may build one by hand: a
+        // malformed value falls back to the hash, as ResolveTagDisplayColor's ParseArgbHexColor fallback does.
+        const auto it = storedByFoldedName.find(FoldTagName(name));
+        if (it != storedByFoldedName.end() && ValidTagColorHex(it->second))
+        {
+            return it->second;
+        }
+        return TagPaletteHex(TagPaletteIndexFor(name));
     }
 
     // ===== the KNOWN-TAG registry (tags.json — see SessionStore.h) ===========================

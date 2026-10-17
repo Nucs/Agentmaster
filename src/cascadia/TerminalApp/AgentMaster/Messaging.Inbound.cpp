@@ -420,6 +420,35 @@ namespace Agentmaster::Msg
                     _enqueue(std::move(del));
                 }
             }
+            // §21.16: the note of the DIRECTORY's pin ("… pinned «🔵 5 running …»") is deleted too — the directory is a fixed
+            // part of the chat's main view, and its note would be the line the user reads above every new message there. Only
+            // the directory's: the topic cards are no longer pinned (§21.5), and a pin the user makes leaves no bot note.
+            if (const auto* pinned = msg.Find(L"pinned_message"); pinned && pinned->type == json::Value::Type::Obj)
+            {
+                int64_t directory = 0;
+                {
+                    std::lock_guard lk{ _mtx };
+                    directory = _state.directoryMessageId;
+                }
+                const int64_t noteId = msg.I64At(L"message_id", 0);
+                if (directory > 0 && noteId > 0 && pinned->I64At(L"message_id", 0) == directory)
+                {
+                    OutItem del;
+                    del.prio = SendPriority::Backfill;
+                    del.method = L"deleteMessage";
+                    del.params = json::Value::MkObj();
+                    del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                    del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(noteId)));
+                    auto self = weak_from_this();
+                    del.onDone = [self](const TgResult& r) {
+                        if (auto me = self.lock(); me && !r.ok)
+                        {
+                            me->_log(L"[msg] directory: the note of its pin could not be deleted (" + r.description + L"); it stays in the chat");
+                        }
+                    };
+                    _enqueue(std::move(del));
+                }
+            }
             return;
         }
         if (from == 0 || from != _ownerId)

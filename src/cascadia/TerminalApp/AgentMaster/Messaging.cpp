@@ -23,6 +23,7 @@
 #include "ProfileBootstrap.h" // Profiles::detail::WideToUtf8 / Utf8ToWide
 #include "Scheduler.h"
 #include "SessionRegistry.h"
+#include "SessionStore.h" // the directory's tags (§21.16): LoadAllSessionTags, LoadKnownTags, LoadAllTagColors, ResolveTagDisplayHex
 #include "TelegramApi.h"
 #include "TranscriptTurns.h" // ParseTranscriptJsonl
 
@@ -533,6 +534,15 @@ namespace Agentmaster::Msg
                 return L"idle";
             }
         }
+
+        // A 0xRRGGBB color as "#RRGGBB" — a topic icon color (kTelegramTopicColors) in the form the color helpers parse (the
+        // directory's chip of a dedicated topic takes its look from it, §21.16). Throws std::bad_alloc only.
+        std::wstring RgbHex(uint32_t rgb)
+        {
+            wchar_t buf[16];
+            swprintf_s(buf, L"#%06X", static_cast<unsigned>(rgb & 0xFFFFFFu));
+            return buf;
+        }
     }
 
     // ===== construction / lifecycle ==========================================================
@@ -827,6 +837,18 @@ namespace Agentmaster::Msg
                 _resortQueue.clear();
                 _runningIds.clear();
                 _recreateStartedMs = 0;
+                // The DIRECTORY (§21.16): the outbox was cleared above, so no send of the last run is in flight; a new serial makes
+                // any answer still on its way stale. What the message shows stays in the state file (no edit for an unchanged
+                // content), and a pin the last run could not make is tried once more.
+                _directoryCheckedMs = 0;
+                _directoryInFlight = false;
+                _directoryInFlightSinceMs = 0;
+                ++_directorySerial;
+                _directoryLastSendMs = 0;
+                _directoryNotBeforeMs = 0;
+                _directoryRichRefusedHash = 0;
+                _directoryPinTried = false;
+                _directoryEditLogged = false;
             }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
@@ -1670,6 +1692,16 @@ namespace Agentmaster::Msg
                                     _cards.clear();
                                     _reacted.clear();
                                     _backfill = BackfillBatch{}; // its topics are the old bot's
+                                    // §21.16: the directory message is a message of the OLD bot's chat; the new bot posts its own.
+                                    _state.directoryMessageId = 0;
+                                    _state.directoryHash = 0;
+                                    _state.directoryRich = false;
+                                    _state.directoryPinned = false;
+                                    _directoryInFlight = false;
+                                    ++_directorySerial;
+                                    _directoryNotBeforeMs = 0;
+                                    _directoryRichRefusedHash = 0;
+                                    _directoryPinTried = false;
                                     _stateDirty = true;
                                 }
                                 if (id != 0 && _state.botId != id)
@@ -1761,6 +1793,7 @@ namespace Agentmaster::Msg
                 }
                 _syncTopics();
                 _stateNameTick(); // §21.11 + §21.13: at most one topic name follows its session's state and color per tick, within the budget
+                _directoryTick(); // §21.16: the pinned directory follows the fleet (a check every 15 s, an edit at most every 2 min)
 
                 // The mirror and the cards, per topic. The topic set is copied under the lock; each
                 // session's work reads the registry and the transcript outside it.
@@ -4431,6 +4464,438 @@ namespace Agentmaster::Msg
             // Rule #18. Recovery: no rename this tick; the next tick picks again.
             LogSwallowedException(L"MessagingService::_stateNameTick");
         }
+    }
+
+    // ===== the directory (§21.16) ===========================================================
+
+    std::vector<DirectoryTopic> MessagingService::_directoryTopics() const
+    {
+        // The dedicated topics, in the order the directory lists them. 🔎 Search is the only one today; a new dedicated topic
+        // (one the service makes for a purpose, not for a tab) adds its entry here, with its label, its thread and its icon color.
+        std::vector<DirectoryTopic> topics;
+        DirectoryTopic search;
+        search.label = L"\U0001F50E Search";
+        {
+            std::lock_guard lk{ _mtx };
+            search.threadId = _state.searchThreadId; // 0 until _ensureSearchTopic made it: a chip that opens nothing
+        }
+        search.colorHex = RgbHex(kTelegramTopicColors[0]); // the icon color _ensureSearchTopic gives it (blue): a blue chip
+        topics.push_back(std::move(search));
+        return topics;
+    }
+
+    void MessagingService::_directoryTick() noexcept
+    {
+        try
+        {
+            const int64_t now = WallMs();
+            if (_directoryCheckedMs != 0 && now - _directoryCheckedMs < kDirectoryCheckMs)
+            {
+                return;
+            }
+            // The facts are incomplete during the start-up hold (every session reads closed until its window re-homes it) and a
+            // recreation (every topic is made anew): a directory built then would list half the fleet, then edit itself again.
+            if (_startupHoldOpen || _recreating || _lastFacts.empty())
+            {
+                return;
+            }
+            // The session store's FIRST whole read of a run opens every record file (seconds on a profile of thousands); the
+            // engine makes it on a background thread at start-up, and the directory waits for it instead of making it here.
+            if (!SessionStoreScanIsWarm())
+            {
+                return;
+            }
+            _directoryCheckedMs = now;
+            std::wstring bot;
+            DirectoryShown shown;
+            bool inFlight = false;
+            int64_t lastSendMs = 0;
+            int64_t notBeforeMs = 0;
+            bool pinNeeded = false;
+            bool stallForgotten = false;
+            {
+                std::lock_guard lk{ _mtx };
+                if (!_state.orphanThreads.empty())
+                {
+                    return; // a recreation's deletes come first
+                }
+                // Not for kHistoryFloodPauseMs after a 429, and not while a long one parks a method the directory calls: Telegram
+                // then holds the whole chat (MESSAGING.md §21.14.5), and the directory is the least urgent message the bot has.
+                const int64_t tick = static_cast<int64_t>(::GetTickCount64());
+                if ((_floodAtMs != 0 && tick - _floodAtMs < kHistoryFloodPauseMs) || FloodParkedUntil(_floodParking, L"editMessageText", tick) > 0 ||
+                    FloodParkedUntil(_floodParking, L"sendRichMessage", tick) > 0 || FloodParkedUntil(_floodParking, L"sendMessage", tick) > 0)
+                {
+                    return;
+                }
+                if (_directoryInFlight && now - _directoryInFlightSinceMs >= kDirectoryStallMs)
+                {
+                    // An answer that never came (an exception in the send loop before its onDone): the send is forgotten, and an
+                    // answer that still comes is told apart by its serial. Every directory send carries its key, so the next one
+                    // replaces a twin that is still queued.
+                    _directoryInFlight = false;
+                    ++_directorySerial;
+                    stallForgotten = true;
+                }
+                bot = _botUsername;
+                shown.messageId = _state.directoryMessageId;
+                shown.hash = _state.directoryHash;
+                shown.rich = _state.directoryRich;
+                shown.richRefusedHash = _directoryRichRefusedHash;
+                inFlight = _directoryInFlight;
+                lastSendMs = _directoryLastSendMs;
+                notBeforeMs = _directoryNotBeforeMs;
+                pinNeeded = _state.directoryMessageId > 0 && !_state.directoryPinned && !_directoryPinTried;
+            }
+            if (stallForgotten)
+            {
+                _log(L"[msg] directory: a send got no answer for " + std::to_wstring(kDirectoryStallMs / 60000) + L" min; it is forgotten and sent again");
+            }
+            if (bot.empty())
+            {
+                return; // the links need the bot's username, which getMe gives
+            }
+
+            // ---- the model ----
+            DirectoryModel m;
+            m.botUsername = bot;
+            m.topics = _directoryTopics();
+            // The tags: every tag a session carries (an archived session's too) and the registry's 0-carrier ones, each with the
+            // OPEN tabs that carry it. The store's reads are cached (a directory listing, one stat per small file): milliseconds.
+            const auto tagsBySession = LoadAllSessionTags();
+            const auto knownTags = LoadKnownTags();
+            const auto tagColors = LoadAllTagColors();
+            std::vector<std::pair<std::wstring, std::wstring>> universe;
+            for (const auto& g : CollectGlobalTags(tagsBySession, {}, knownTags))
+            {
+                universe.emplace_back(g.name, ResolveTagDisplayHex(g.name, tagColors)); // the tag's color as every app surface paints it
+            }
+            std::vector<std::pair<DirectoryTab, std::vector<std::wstring>>> openTabs;
+            {
+                std::lock_guard lk{ _mtx }; // the topic map: each tab's thread
+                for (const auto& f : _lastFacts)
+                {
+                    if (!(f.live && f.inTab))
+                    {
+                        continue;
+                    }
+                    const auto tg = tagsBySession.find(f.sessionId);
+                    if (tg == tagsBySession.end() || tg->second.empty())
+                    {
+                        continue;
+                    }
+                    DirectoryTab t;
+                    t.sessionId = f.sessionId;
+                    t.title = f.title;
+                    t.state = f.state;
+                    t.colorHex = f.colorHex; // the sync resolved it like the tab (§21.13)
+                    if (const auto topic = _state.topics.find(f.sessionId); topic != _state.topics.end())
+                    {
+                        t.threadId = topic->second.threadId;
+                        if (t.title.empty())
+                        {
+                            t.title = topic->second.title;
+                        }
+                    }
+                    openTabs.emplace_back(std::move(t), tg->second);
+                }
+            }
+            m.tags = JoinDirectoryTags(universe, openTabs);
+            // The counts: the sync's facts for the states, the registry's queues for the backlog — the lean live copy the scanner
+            // takes every pass (open prompts only), over the same tabs the states are counted on.
+            size_t queued = 0;
+            for (const auto& s : _registry->SnapshotLiveForScan())
+            {
+                if (s.kind != AgentKind::Claude || s.tabToken.empty())
+                {
+                    continue;
+                }
+                for (const auto& q : s.queue)
+                {
+                    queued += (q.status == PromptStatus::Pending || q.status == PromptStatus::Held) ? 1 : 0;
+                }
+            }
+            m.stats = CountDirectoryStats(_lastFacts, queued, _scheduler ? _scheduler->GlobalPaused() : false);
+            const DirectoryRender r = RenderDirectory(m, now, now);
+
+            // ---- the decision ----
+            const bool wantRich = _titleChipsWanted();
+            const DirectoryAction action = DecideDirectoryAction(shown, r.hash, wantRich, inFlight, now, lastSendMs, notBeforeMs);
+            if (action == DirectoryAction::None)
+            {
+                if (pinNeeded && !inFlight)
+                {
+                    _pinDirectory(shown.messageId); // the message the last run could not pin, or one posted before its pin was made
+                }
+                return;
+            }
+            uint64_t serial = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                serial = ++_directorySerial;
+                _directoryInFlight = true;
+                _directoryInFlightSinceMs = now;
+                _directoryLastSendMs = now;
+            }
+            if (action == DirectoryAction::Edit)
+            {
+                _editDirectory(shown.messageId, r, wantRich && shown.richRefusedHash != r.hash, serial);
+                return;
+            }
+            auto self = weak_from_this();
+            const uint32_t hash = r.hash;
+            std::function<void(const TgResult&)> done = [self, serial, hash, wantRich](const TgResult& res) {
+                if (auto me = self.lock())
+                {
+                    me->_onDirectoryPosted(serial, hash, wantRich, res);
+                }
+            };
+            // In the chat's main view (no thread): the directory belongs to no topic. Silent; keyed, so a send after a stall
+            // replaces a twin still queued; at the Backfill priority, after the conversation and the cards.
+            if (wantRich)
+            {
+                _sendTitledRich(0, r.rich, r.classic, true, SendPriority::Backfill, L"dir:post", json::Value{}, std::move(done), 0, nullptr);
+            }
+            else
+            {
+                for (auto& item : _htmlItems(0, r.classic, true, SendPriority::Backfill, L"dir:post", json::Value{}, std::move(done), 0, _takeOutSeq(), 0))
+                {
+                    _enqueue(std::move(item));
+                }
+            }
+            _log(L"[msg] directory: posting it in the chat's main view (" + std::to_wstring(r.tagsShown) + L" tag(s), " + std::to_wstring(r.tabsShown) + L" tab chip(s)" +
+                 (r.tagsHidden > 0 ? L", " + std::to_wstring(r.tagsHidden) + L" tag(s) left out: the message is full" : std::wstring{}) + (wantRich ? L", rich)" : L", HTML)"));
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing sent on this check; the next check builds the directory again.
+            LogSwallowedException(L"MessagingService::_directoryTick");
+        }
+    }
+
+    void MessagingService::_onDirectoryPosted(uint64_t serial, uint32_t hash, bool wantRich, const TgResult& r)
+    {
+        const int64_t messageId = r.ok ? r.result.I64At(L"message_id", 0) : 0;
+        const bool rich = ResultIsRichMessage(r);
+        bool stale = false;
+        {
+            std::lock_guard lk{ _mtx };
+            stale = serial != _directorySerial;
+            if (!stale)
+            {
+                _directoryInFlight = false;
+                if (messageId > 0)
+                {
+                    _state.directoryMessageId = messageId;
+                    _state.directoryHash = hash;
+                    _state.directoryRich = rich;
+                    _state.directoryPinned = false;
+                    _stateDirty = true;
+                    _directoryNotBeforeMs = 0;
+                    _directoryPinTried = false; // the new message gets its pin below
+                    if (wantRich && !rich)
+                    {
+                        _directoryRichRefusedHash = hash; // the rich send fell back to HTML: this content stays HTML (DirectoryShown)
+                    }
+                }
+                else
+                {
+                    _directoryNotBeforeMs = WallMs() + kDirectoryRetryMs;
+                }
+            }
+        }
+        if (stale)
+        {
+            if (messageId > 0)
+            {
+                // A post this run had given up on (a stall) went after all, and a newer one is, or will be, the directory: delete
+                // this one, so the chat never holds two directories.
+                OutItem del;
+                del.prio = SendPriority::Backfill;
+                del.method = L"deleteMessage";
+                del.params = json::Value::MkObj();
+                del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(messageId)));
+                _enqueue(std::move(del));
+                _log(L"[msg] directory: a post given up on went after all (message " + std::to_wstring(messageId) + L"); it is deleted");
+            }
+            return;
+        }
+        if (messageId > 0)
+        {
+            _log(L"[msg] directory posted (message " + std::to_wstring(messageId) + (rich ? L", rich" : L", HTML") + L"); pinning it");
+            _pinDirectory(messageId);
+            return;
+        }
+        _log(L"[msg] directory: Telegram refused the post (" + (r.description.empty() ? std::wstring{ L"no answer" } : r.description) + L"); tried again in " +
+             std::to_wstring(kDirectoryRetryMs / 60000) + L" min");
+    }
+
+    void MessagingService::_editDirectory(int64_t messageId, const DirectoryRender& r, bool wantRich, uint64_t serial)
+    {
+        auto self = weak_from_this();
+        const uint32_t hash = r.hash;
+        // Every answer, whichever form went, ends in _onDirectoryEdited with the form the message shows then.
+        const auto finish = [self, serial, hash, messageId, wantRich](const TgResult& res, bool shownRich) {
+            if (auto me = self.lock())
+            {
+                me->_onDirectoryEdited(serial, hash, messageId, wantRich, res, shownRich);
+            }
+        };
+        if (!wantRich)
+        {
+            OutItem item = _classicEditItem(messageId, r.classic, SendPriority::Backfill, L"dir:edit", json::Value{});
+            item.onDone = [finish](const TgResult& res) { finish(res, false); };
+            _enqueue(std::move(item));
+            return;
+        }
+        const uint64_t seq = _takeOutSeq(); // the rich edit and its classic fallback keep one place in the order
+        OutItem item;
+        item.prio = SendPriority::Backfill;
+        item.seq = seq;
+        item.subSeq = 0;
+        item.key = L"dir:edit";
+        item.method = L"editMessageText";
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        item.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(messageId)));
+        {
+            auto richMessage = json::Value::MkObj();
+            richMessage.Set(L"html", json::Value::MkStr(r.rich));
+            item.params.Set(L"rich_message", std::move(richMessage));
+        }
+        item.onDone = [self, messageId, classic = r.classic, seq, finish](const TgResult& res) {
+            if (RichEditRefusalWantsFallback(res))
+            {
+                if (auto me = self.lock())
+                {
+                    if (res.httpStatus == 404 && !me->_richUnavailable.exchange(true))
+                    {
+                        me->_log(L"[msg] the Bot API has no rich messages (404: " + res.description + L"): the directory and the titles go as HTML for the rest of this run");
+                    }
+                    else if (res.httpStatus != 404)
+                    {
+                        me->_log(L"[msg] Telegram refused the directory as a rich message (" + res.description + L"); it is edited as HTML");
+                    }
+                    // The classic render in the rich edit's place, WITHOUT a key: queued from this answer, a key would erase a newer
+                    // edit queued meanwhile, and the stale text would win.
+                    OutItem fb = me->_classicEditItem(messageId, classic, SendPriority::Backfill, L"", json::Value{});
+                    fb.seq = seq;
+                    fb.subSeq = 1;
+                    fb.onDone = [finish](const TgResult& r2) { finish(r2, false); };
+                    me->_enqueue(std::move(fb));
+                }
+                return;
+            }
+            finish(res, res.ok ? ResultIsRichMessage(res) : true); // "not modified": it shows this rich content already
+        };
+        _enqueue(std::move(item));
+    }
+
+    void MessagingService::_onDirectoryEdited(uint64_t serial, uint32_t hash, int64_t messageId, bool wantRich, const TgResult& r, bool shownRich)
+    {
+        const bool taken = r.ok || r.NotModified();
+        const bool gone = !taken && DirectoryEditFoundNoMessage(r.ok, r.httpStatus, r.description);
+        bool firstLog = false;
+        {
+            std::lock_guard lk{ _mtx };
+            if (serial != _directorySerial)
+            {
+                return; // an edit this run gave up on (a stall): the next check compares what the message shows anyway
+            }
+            _directoryInFlight = false;
+            if (taken)
+            {
+                if (_state.directoryMessageId == messageId)
+                {
+                    _state.directoryHash = hash;
+                    _state.directoryRich = shownRich;
+                    _stateDirty = true;
+                }
+                if (wantRich && !shownRich)
+                {
+                    _directoryRichRefusedHash = hash; // the rich form was refused for this content: it stays HTML until it changes
+                }
+                _directoryNotBeforeMs = 0;
+                firstLog = !_directoryEditLogged;
+                _directoryEditLogged = true;
+            }
+            else if (gone)
+            {
+                // Deleted by the user, or an id that names no message of this chat: forget it; a new one is posted after the gap.
+                if (_state.directoryMessageId == messageId)
+                {
+                    _state.directoryMessageId = 0;
+                    _state.directoryHash = 0;
+                    _state.directoryRich = false;
+                    _state.directoryPinned = false;
+                    _stateDirty = true;
+                }
+                _directoryPinTried = false;
+                _directoryNotBeforeMs = WallMs() + kDirectoryRepostGapMs;
+            }
+            else
+            {
+                _directoryNotBeforeMs = WallMs() + kDirectoryRetryMs;
+            }
+        }
+        if (gone)
+        {
+            const int64_t wall = WallMs();
+            _log(L"[msg] directory message " + std::to_wstring(messageId) + L" is gone (" + r.description + L"); a new one is posted and pinned at " +
+                 TgClockText(wall + kDirectoryRepostGapMs, wall));
+        }
+        else if (!taken)
+        {
+            _log(L"[msg] directory: Telegram refused the edit (" + (r.description.empty() ? std::wstring{ L"no answer" } : r.description) + L"); tried again in " +
+                 std::to_wstring(kDirectoryRetryMs / 60000) + L" min");
+        }
+        else if (firstLog)
+        {
+            _log(L"[msg] directory edited (message " + std::to_wstring(messageId) + (shownRich ? L", rich" : L", HTML") + L"); later edits are logged only when one fails");
+        }
+    }
+
+    void MessagingService::_pinDirectory(int64_t messageId)
+    {
+        if (messageId <= 0)
+        {
+            return;
+        }
+        {
+            std::lock_guard lk{ _mtx };
+            _directoryPinTried = true; // once per message and run: a refused pin is tried again at the next start
+        }
+        OutItem item;
+        item.prio = SendPriority::Backfill;
+        item.key = L"dir:pin";
+        item.method = L"pinChatMessage";
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        item.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(messageId)));
+        item.params.Set(L"disable_notification", json::Value::MkBool(true)); // a private chat never notifies a pin anyway
+        auto self = weak_from_this();
+        item.onDone = [self, messageId](const TgResult& r) {
+            auto me = self.lock();
+            if (!me)
+            {
+                return;
+            }
+            if (r.ok)
+            {
+                {
+                    std::lock_guard lk{ me->_mtx };
+                    if (me->_state.directoryMessageId == messageId)
+                    {
+                        me->_state.directoryPinned = true;
+                        me->_stateDirty = true;
+                    }
+                }
+                me->_log(L"[msg] directory pinned (message " + std::to_wstring(messageId) + L")");
+                return;
+            }
+            me->_log(L"[msg] directory: Telegram refused the pin (" + (r.description.empty() ? std::wstring{ L"no answer" } : r.description) + L"); it is tried again at the next start");
+        };
+        _enqueue(std::move(item));
     }
 
     const TabFact* MessagingService::_lastFact(const std::wstring& sessionId) const noexcept

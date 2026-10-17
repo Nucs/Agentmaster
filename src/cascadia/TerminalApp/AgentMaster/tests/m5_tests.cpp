@@ -155,6 +155,7 @@ int wmain()
     TestSessionDb(); // SESSIONS_DB.md — the session database's shared parts (tests_sessiondb.cpp)
     TestMessaging(); // MESSAGING.md — the fleet in Telegram, the pure core (tests_messaging.cpp)
     TestMessagingSearch(); // MESSAGING.md §5.4 / §21.7 — the Search topic's verbs, pick buttons and pick states (tests_messaging_search.cpp)
+    TestMessagingDirectory(); // MESSAGING.md §21.16 — the pinned directory (tests_messaging_directory.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)
