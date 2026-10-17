@@ -1934,6 +1934,221 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster (SESSIONS.md §9.14): see Engine.h. The AI search's window-tool sinks and their ANSWERED fan-outs.
+    namespace
+    {
+        /// <summary>
+        /// The answers of one agent-tool fan-out. Shared by the waiting caller and every reply callback through a
+        /// shared_ptr, because a window may answer AFTER the caller stopped waiting (its UI thread was busy past the
+        /// timeout): its reply then fills a slot nobody reads, and the state is freed with the last callback that holds it.
+        /// </summary>
+        struct AgentToolFanOut
+        {
+            std::mutex mutex; // guards everything below
+            std::condition_variable answered; // raised by every reply
+            std::vector<std::optional<WindowToolOutcome>> slots; // one per sink, in sink (= registration) order
+            // Per sink: it is done — it answered, or it threw. Only the FIRST of the two counts, so a sink that answers
+            // twice, or answers and then throws, is never counted twice (that would end the wait before another window
+            // answered).
+            std::vector<bool> settled;
+            size_t replies{ 0 }; // settled sinks so far
+            bool handledReply{ false }; // some answer has handled == true (the host of a Deactivate)
+        };
+
+        /// <summary>
+        /// Send `request` to the registered agent-tool sinks (all of them, or the one of `onlyWindowId`) and wait for
+        /// their answers: until every sink answered, until one answered handled == true (when `stopOnHandled`), or until
+        /// `timeoutMs` passed — whichever comes first.
+        /// </summary>
+        /// <param name="e">The engine whose sinks to use (SharedEngine(), or a test's local Engine).</param>
+        /// <param name="request">What to ask.</param>
+        /// <param name="onlyWindowId">"" = every window; else only the sink of that window.</param>
+        /// <param name="stopOnHandled">Stop waiting at the first handled answer (a Deactivate's host).</param>
+        /// <param name="timeoutMs">The longest wait.</param>
+        /// <param name="windowIds">Receives the sinks' window ids, index-aligned with the returned slots.</param>
+        /// <returns>One slot per sink that was asked: its answer, or nullopt when it had not answered (or threw).</returns>
+        /// <exception cref="std::bad_alloc">If the snapshot or the state cannot be allocated.</exception>
+        /// <exception cref="std::system_error">If a mutex cannot be locked.</exception>
+        /// <remarks>
+        /// The sinks are invoked OUTSIDE agentToolMutex (each hops into its own window's dispatcher and must return at
+        /// once), and the wait holds only the fan-out's own mutex — so a window that registers or unregisters during the
+        /// wait never blocks on it. A sink that throws (it must not, but a dead dispatcher can) is counted as answered
+        /// with nothing, so one broken window costs nobody the whole timeout.
+        /// </remarks>
+        std::vector<std::optional<WindowToolOutcome>> FanOutAgentTool(Engine& e, const WindowToolRequest& request, const std::wstring& onlyWindowId, bool stopOnHandled, uint32_t timeoutMs, std::vector<std::wstring>& windowIds)
+        {
+            std::vector<std::function<void(const WindowToolRequest&, std::function<void(WindowToolOutcome)>)>> sinks;
+            windowIds.clear();
+            {
+                std::lock_guard<std::mutex> lk(e.agentToolMutex);
+                sinks.reserve(e.agentToolSinks.size());
+                for (const auto& s : e.agentToolSinks)
+                {
+                    if (s.fn && (onlyWindowId.empty() || s.windowId == onlyWindowId))
+                    {
+                        sinks.push_back(s.fn);
+                        windowIds.push_back(s.windowId);
+                    }
+                }
+            }
+            auto state = std::make_shared<AgentToolFanOut>();
+            state->slots.resize(sinks.size());
+            state->settled.resize(sinks.size(), false);
+            for (size_t i = 0; i < sinks.size(); ++i)
+            {
+                // The reply owns the state (not the caller's frame): it may run after this function returned.
+                auto reply = [state, i](WindowToolOutcome outcome) {
+                    std::lock_guard<std::mutex> lk(state->mutex);
+                    if (i < state->settled.size() && !state->settled[i])
+                    {
+                        state->settled[i] = true;
+                        state->handledReply = state->handledReply || outcome.handled;
+                        state->slots[i] = std::move(outcome);
+                        ++state->replies;
+                    }
+                    state->answered.notify_all();
+                };
+                try
+                {
+                    sinks[i](request, std::move(reply));
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: this window is counted as answered with nothing, so the wait below ends as
+                    // soon as the others answered instead of running out the timeout.
+                    LogSwallowedException(L"FanOutAgentTool: a window's agent-tool sink");
+                    std::lock_guard<std::mutex> lk(state->mutex);
+                    if (!state->settled[i])
+                    {
+                        state->settled[i] = true;
+                        ++state->replies;
+                    }
+                    state->answered.notify_all();
+                }
+            }
+            std::unique_lock<std::mutex> lk(state->mutex);
+            state->answered.wait_for(lk, std::chrono::milliseconds{ timeoutMs }, [&state, stopOnHandled] {
+                return state->replies >= state->slots.size() || (stopOnHandled && state->handledReply);
+            });
+            return state->slots; // a copy under the lock: a late reply may still write into the shared state
+        }
+    }
+
+    uint64_t RegisterWindowAgentToolHandler(const std::wstring& windowId, std::function<void(const WindowToolRequest& request, std::function<void(WindowToolOutcome)> reply)> handler)
+    {
+        return RegisterWindowAgentToolHandlerIn(SharedEngine(), windowId, std::move(handler));
+    }
+
+    uint64_t RegisterWindowAgentToolHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(const WindowToolRequest& request, std::function<void(WindowToolOutcome)> reply)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        std::lock_guard<std::mutex> lk(e.agentToolMutex);
+        const auto token = e.nextAgentToolToken++;
+        e.agentToolSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowAgentToolHandler(uint64_t token)
+    {
+        UnregisterWindowAgentToolHandlerIn(SharedEngine(), token);
+    }
+
+    void UnregisterWindowAgentToolHandlerIn(Engine& e, uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(e.agentToolMutex);
+        for (auto it = e.agentToolSinks.begin(); it != e.agentToolSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.agentToolSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    std::vector<WindowCensus> CollectWindowCensus(uint32_t timeoutMs)
+    {
+        return CollectWindowCensusIn(SharedEngine(), timeoutMs);
+    }
+
+    std::vector<WindowCensus> CollectWindowCensusIn(Engine& e, uint32_t timeoutMs)
+    {
+        WindowToolRequest request;
+        request.kind = WindowToolRequest::Kind::Census;
+        std::vector<std::wstring> windowIds;
+        const auto slots = FanOutAgentTool(e, request, {}, false, timeoutMs, windowIds);
+        std::wstring lastActive;
+        {
+            std::lock_guard<std::mutex> lk(e.launchMutex);
+            lastActive = e.lastActiveWindowId;
+        }
+        std::vector<WindowCensus> out;
+        out.reserve(slots.size());
+        for (size_t i = 0; i < slots.size(); ++i)
+        {
+            if (!slots[i] || !slots[i]->handled)
+            {
+                continue; // no answer in time: the window is left out rather than reported empty
+            }
+            WindowCensus c = slots[i]->census;
+            // The sink's own id is the truth for routing (a window's census may come back with an empty id if it
+            // answered before its id was set): RunWindowTool targets exactly this string.
+            c.windowId = windowIds[i];
+            c.lastActive = !lastActive.empty() && c.windowId == lastActive;
+            out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    std::optional<WindowToolOutcome> RunWindowTool(const std::wstring& windowId, const WindowToolRequest& request, uint32_t timeoutMs)
+    {
+        return RunWindowToolIn(SharedEngine(), windowId, request, timeoutMs);
+    }
+
+    std::optional<WindowToolOutcome> RunWindowToolIn(Engine& e, const std::wstring& windowId, const WindowToolRequest& request, uint32_t timeoutMs)
+    {
+        if (windowId.empty())
+        {
+            return std::nullopt; // "every window" is RunWindowToolOnHost's job, never a silent broadcast of an open
+        }
+        std::vector<std::wstring> windowIds;
+        const auto slots = FanOutAgentTool(e, request, windowId, false, timeoutMs, windowIds);
+        for (const auto& slot : slots)
+        {
+            if (slot)
+            {
+                return slot;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<WindowToolOutcome> RunWindowToolOnHost(const WindowToolRequest& request, uint32_t timeoutMs)
+    {
+        return RunWindowToolOnHostIn(SharedEngine(), request, timeoutMs);
+    }
+
+    std::optional<WindowToolOutcome> RunWindowToolOnHostIn(Engine& e, const WindowToolRequest& request, uint32_t timeoutMs)
+    {
+        std::vector<std::wstring> windowIds;
+        const auto slots = FanOutAgentTool(e, request, {}, true, timeoutMs, windowIds);
+        for (const auto& slot : slots)
+        {
+            if (slot && slot->handled)
+            {
+                return slot;
+            }
+        }
+        return std::nullopt;
+    }
+
     uint64_t RegisterWindowDockTarget(const std::wstring& windowId, void* topLevelHwnd, std::function<DockProbeResult(long, long, DockProbeMode)> probe)
     {
         if (!probe || !topLevelHwnd)

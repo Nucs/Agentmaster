@@ -17,6 +17,20 @@
 > program and no MCP server; the database builds from scratch in under 30 s and then only adds the difference. The
 > build of §16 meets only the last part (it builds in 37 min, through a second program). §17.2 has the measurements
 > (the existing extractor parses the whole corpus in 16.4 s on 16 threads), and §17.3 the recommended redesign.
+>
+> **2026-10-17 (NOT BUILT yet): the database could never start on this machine, and the AI search now checks.** Every
+> loose layout — the stock `bin\x64\<Config>` and every `Q:\agentmaster-layouts` hot-deploy slot — shipped
+> `agentmaster-sessiondb.exe` WITHOUT `duckdb.dll`: the wapproj's `<Content Include="$(DuckDbDir)duckdb.dll">` never
+> reached a build folder that is registered as it is, so `EnsureServiceBinaries` refused ("The package has no
+> duckdb.dll") and the database could not run on any install here. `CascadiaPackage.wapproj`'s new
+> `CopyAgentmasterDuckDbToLayout` target copies it beside the service after every build (the
+> `CopyAgentmasterImagesToLayout` twin), and `tools\Swap-AgentmasterLayout.ps1` warns about a layout without it. Both AI
+> search conversations (the Sessions page's and the Telegram Search topic's) take the database's tools only when the
+> mode is On AND the service can start (`SearchDatabaseProfileIfUsable` → `SessionDbServiceInstalled`); else they keep
+> the page search and log why. In either mode they now also get the window and tab tools and the three-part system
+> prompt ([`SESSIONS.md`](./SESSIONS.md) §9.14). The default stays Off; the user asked to enable the database for both
+> conversations — on this machine that is a deploy step (the two profiles' `sessionDbMode` set On once a build with the
+> copy target is installed), not done yet.
 
 ## 0. Summary
 

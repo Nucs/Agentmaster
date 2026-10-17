@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "AgentHarness.h" // HarnessState / HarnessUsage
@@ -74,9 +75,21 @@ namespace Agentmaster
         // `agentmaster`, each call forwarded to the profile's service (agentmaster-sessiondb.exe,
         // started when none runs), and DatabaseSystemPrompt(); no session index is read (no index
         // keeper, no sidecar gather) except the few sidecar files of the sessions it shows. The app
-        // sets it when AppSettings::sessionDbMode is On at the agent's creation, so a change of the
-        // mode reaches the AI search at the next start of the app (the agent lives for the process).
+        // sets it when AppSettings::sessionDbMode is On at the agent's creation AND the service is
+        // installed (SearchDatabaseProfileIfUsable), so a change of the mode reaches the AI search at
+        // the next start of the app (the agent lives for the process).
         std::wstring sessionDbProfile;
+
+        /// <summary>
+        /// The window and tab tools (SESSIONS.md §9.14): with `census` set, the model gets the server `tabs` (list,
+        /// resume, fork, deactivate). The app passes MakeEngineTabTools(); a test passes fakes; empty = no tabs server.
+        /// </summary>
+        /// <remarks>
+        /// Its `originWindowId` member is IGNORED: the agent itself answers it with the window of the running request
+        /// (Ask's originWindowId), since only the agent knows which request is running. The other members are called on
+        /// the SDK's reader thread and must be thread-safe.
+        /// </remarks>
+        SessionSearchToolset::Callbacks::TabTools tabTools;
     };
 
     // What an event reports.
@@ -91,6 +104,11 @@ namespace Agentmaster
         Failed, // the request or the start failed: `text` says why
         Compacting, // Claude Code compacts the conversation (the request pauses for seconds)
         Reset, // the conversation was thrown away: clear everything shown
+        // The model wrote text BEFORE a tool call — normally its plan ("I'll 1. ... 2. ... 3. ...", the system prompt's
+        // first Instructional Behavior): `text` is the new block, snapshot.narration all of them so far. A page shows it
+        // while the request runs; the Telegram bridge puts it above the answer. Appended LAST: a listener's switch that
+        // predates it falls to its default and ignores it.
+        Narration,
     };
 
     // The conversation as a page shows it. One consistent copy (Snapshot()).
@@ -113,6 +131,11 @@ namespace Agentmaster
         std::wstring note; // the model's caption for the shown list
         std::wstring answer; // the newest reply, or the failure text
         bool answerIsError{ false };
+        // The NEWEST request's narration: every text block the model wrote before one of its tool calls, in order, joined
+        // by line breaks (kSessionSearchMaxNarrationChars at most, the start kept) — its "I'll 1. ... 2. ... 3." plan, and
+        // any later "now I'll ..." line. Cleared when a request starts or the conversation is reset; kept after the answer
+        // (a surface may show it above the reply). Not persisted: it describes a request that is over after a restart.
+        std::wstring narration;
         std::wstring model; // the model that answers (known after the first request)
         int compactions{ 0 };
         HarnessUsage usage;
@@ -185,10 +208,13 @@ namespace Agentmaster
         void Prewarm(bool readIndex = true);
 
         // Ask. The newest request wins: a request that is still running is interrupted.
-        //   text    — what the user wrote; an empty text is ignored.
-        //   returns — the request's turn id (1, 2, ...); 0 when it was ignored.
-        //   throws  — std::bad_alloc.
-        uint64_t Ask(std::wstring text);
+        //   text           — what the user wrote; an empty text is ignored.
+        //   originWindowId — the window whose Sessions page asked ("" = no window: the Telegram topic, a test). The
+        //                    tabs server tells the model which window the request came from (asked_from), so it can
+        //                    offer that one when it must ask the user to pick a window; it never picks it alone.
+        //   returns        — the request's turn id (1, 2, ...); 0 when it was ignored.
+        //   throws         — std::bad_alloc.
+        uint64_t Ask(std::wstring text, std::wstring originWindowId = {});
 
         // Stop the running request. The conversation keeps what was said so far.
         void Interrupt();
@@ -269,4 +295,40 @@ namespace Agentmaster
     //   SharedEngine(), which starts the hooks bridge and the observers. Tests construct their
     //   own SessionSearchAgent.
     SessionSearchAgent& SharedSessionSearchAgent();
+
+    /// <summary>The longest narration a snapshot keeps (SessionSearchSnapshot::narration): the plan and a few progress
+    /// lines fit; a model that writes pages between its calls is cut, its start (the plan) kept.</summary>
+    inline constexpr size_t kSessionSearchMaxNarrationChars = 2000;
+
+    /// <summary>
+    /// The window and tab tools over the app's windows (SESSIONS.md §9.14): a census through Engine.h
+    /// CollectWindowCensus with each tab's session facts read from the shared registry (one lean SnapshotLiveForCards,
+    /// off the UI thread), a resume / fork through RunWindowTool after the request got the session's folder and title
+    /// (the registry's record, else the session's own transcript index), a deactivate through RunWindowToolOnHost, and a
+    /// focus through ActivateSessionInOtherWindows. Both search conversations of the app use it (the Sessions page's
+    /// SharedSessionSearchAgent and the Telegram Search topic's).
+    /// </summary>
+    /// <returns>The callbacks, every member set except originWindowId (the agent answers that one).</returns>
+    /// <exception cref="std::bad_alloc">If the callbacks cannot be allocated.</exception>
+    /// <remarks>⚠ App-only, like SharedSessionSearchAgent: the callbacks use SharedEngine(). Every callback blocks its
+    /// caller for at most a few seconds (the windows answer on their UI thread) and must never run on a UI thread.</remarks>
+    SessionSearchToolset::Callbacks::TabTools MakeEngineTabTools();
+
+    /// <summary>
+    /// The profile whose session database an AI search conversation should search, or "" for the page search: the
+    /// active profile when the database mode is On AND its service can start (agentmaster-sessiondb.exe with duckdb.dll
+    /// beside it, SessionDbServiceInstalled), else "".
+    /// </summary>
+    /// <param name="databaseModeOn">AppSettings::sessionDbMode == On.</param>
+    /// <param name="who">The conversation, for the log line ("sessions-search", "telegram-search").</param>
+    /// <returns>The profile directory, or "".</returns>
+    /// <exception cref="std::bad_alloc">If the strings cannot be allocated.</exception>
+    /// <remarks>
+    /// The fallback is the point: a build that ships the service without duckdb.dll (every loose layout built before
+    /// 2026-10-17, stock or -LayoutDir) cannot start the database, and a conversation handed the database's tools then
+    /// answers every request with "the session database is not running". With the page search instead, the AI search
+    /// keeps working, and hooks.log says why ([ai-search] ... the session database mode is On, but its service is not
+    /// installed).
+    /// </remarks>
+    std::wstring SearchDatabaseProfileIfUsable(bool databaseModeOn, std::wstring_view who);
 }

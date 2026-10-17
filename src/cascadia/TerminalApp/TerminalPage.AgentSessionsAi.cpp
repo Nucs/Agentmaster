@@ -316,8 +316,18 @@ namespace winrt::TerminalApp::implementation
         lines.Children().Append(_sessAiQuestionText);
         _sessAiStatusText = SessText(L"", 12, false, 0.95);
         _sessAiStatusText.TextWrapping(TextWrapping::Wrap);
-        _sessAiStatusText.MaxLines(4); // the answer is one sentence; a failure text can be longer
-        lines.Children().Append(_sessAiStatusText);
+        // SESSIONS.md §9.14: the model's plan while it works ("I'll 1. ... 2. ... 3."), then its descriptive reply —
+        // several numbered lines, up to ~1,200 characters, no longer the one sentence MaxLines(4) was sized for. Every
+        // line shows, and the text can be selected and copied; the box below caps the strip's height instead.
+        _sessAiStatusText.MaxLines(0);
+        _sessAiStatusText.IsTextSelectionEnabled(true);
+        // A long reply scrolls inside the strip rather than pushing the session table down the page.
+        ScrollViewer statusScroll;
+        statusScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        statusScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        statusScroll.MaxHeight(180);
+        statusScroll.Content(_sessAiStatusText);
+        lines.Children().Append(statusScroll);
         Grid::SetColumn(lines, 1);
         inner.Children().Append(lines);
 
@@ -606,7 +616,9 @@ namespace winrt::TerminalApp::implementation
             auto& agent = ::Agentmaster::SharedSessionSearchAgent();
             agent.SetClaudeExePath(::Agentmaster::SharedEngine().claudeExePath);
             _SessionsAiSetInUse(true); // a request is use, whatever the tally thought
-            const uint64_t turn = agent.Ask(text);
+            // The window the request comes from: the tabs server tells the model (asked_from), so with several windows it
+            // can offer this one when it asks the user where to open a session (SESSIONS.md §9.14).
+            const uint64_t turn = agent.Ask(text, _windowId);
             // The words stay out of the nav trail (the agent's own [ai-search] line has them).
             ::Agentmaster::LogNav(L"sessions ai-ask turn=" + std::to_wstring(turn) + L" chars=" + std::to_wstring(text.size()));
             _sessionsSearchBox.Text(L"");
@@ -1056,6 +1068,12 @@ namespace winrt::TerminalApp::implementation
             {
                 status += L" \x2014 " + std::to_wstring(_sessionsAiShownIds.size()) + (_sessionsAiShownIds.size() == 1 ? L" candidate, choosing\x2026" : L" candidates, choosing\x2026");
             }
+            // SESSIONS.md §9.14: the plan the model wrote before its first call ("I'll 1. ... 2. ... 3."), above what it
+            // does right now — the user sees what it set out to do while it works.
+            if (!snapshot.narration.empty())
+            {
+                status = snapshot.narration + L"\n" + status;
+            }
             dot = ColorHelper::FromArgb(0xFF, 0x4E, 0xA1, 0xFF);
             ink = ColorHelper::FromArgb(0xFF, 0x8A, 0xB4, 0xF8);
         }
@@ -1078,7 +1096,9 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
-            status = L"Describe the session you are looking for and press Enter. A follow-up refines the list; the crossed circle starts over.";
+            // SESSIONS.md §9.14: the assistant also lists the windows' tabs, resumes or forks a session next to a tab
+            // you choose, and deactivates a tab you name — say so where the user starts.
+            status = L"Describe the session you are looking for, or ask what is open, to resume or fork a session next to a tab, or to deactivate a tab, and press Enter. A follow-up refines the list; the crossed circle starts over.";
             if (snapshot.state == State::Ready)
             {
                 dot = ColorHelper::FromArgb(0xFF, 0x5C, 0xB8, 0x5C);
@@ -1172,5 +1192,207 @@ namespace winrt::TerminalApp::implementation
         r.tools = entry.stats.toolUses;
         r.contextTokens = entry.stats.contextTokens;
         return r;
+    }
+
+    // ===== the AI search's window and tab tools, this window's half (SESSIONS.md §9.14) =====
+
+    ::Agentmaster::WindowToolOutcome TerminalPage::_RunAgentWindowTool(const ::Agentmaster::WindowToolRequest& request) noexcept
+    {
+        using Kind = ::Agentmaster::WindowToolRequest::Kind;
+        ::Agentmaster::WindowToolOutcome outcome;
+        try
+        {
+            // Where a session's tab is in THIS window's strip (nullopt: not hosted here). _claudeTabs is the window's
+            // own binding map, so a session another window hosts is never mistaken for one of ours.
+            const auto indexOfSession = [this](const std::wstring& id) -> std::optional<uint32_t> {
+                if (id.empty())
+                {
+                    return std::nullopt;
+                }
+                const auto it = _claudeTabs.find(id);
+                const auto tab = it != _claudeTabs.end() ? it->second.get() : nullptr;
+                uint32_t idx = 0;
+                if (tab && _tabs.IndexOf(tab, idx))
+                {
+                    return idx;
+                }
+                return std::nullopt;
+            };
+
+            switch (request.kind)
+            {
+            case Kind::Census:
+            {
+                // One pass over _claudeTabs into a tab -> session map, then one over the strip: a window of 400+ tabs
+                // must not pay _ClaudeSessionForTab's own pass per tab (quadratic on the UI thread).
+                std::unordered_map<void*, std::wstring> sessionByTab;
+                sessionByTab.reserve(_claudeTabs.size());
+                for (const auto& [id, weakTab] : _claudeTabs)
+                {
+                    if (const auto t = weakTab.get())
+                    {
+                        sessionByTab.emplace(winrt::get_abi(t), id);
+                    }
+                }
+                ::Agentmaster::WindowCensus& census = outcome.census;
+                census.windowId = _windowId;
+                census.title = std::wstring{ Title() };
+                census.managerPageVisible = _managerPageVisible;
+                const auto focused = _GetFocusedTabIndex(); // nullopt while the Agent Manager page is up
+                const uint32_t count = _tabs.Size();
+                census.tabs.reserve(count);
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const auto tab = _tabs.GetAt(i);
+                    ::Agentmaster::WindowTabInfo info;
+                    info.index = i;
+                    info.title = std::wstring{ tab.Title() };
+                    if (const auto it = sessionByTab.find(winrt::get_abi(tab)); it != sessionByTab.end())
+                    {
+                        info.sessionId = it->second;
+                    }
+                    info.selected = focused && *focused == i;
+                    census.tabs.push_back(std::move(info));
+                }
+                // Only the strip half: the caller reads each session's facts from the registry off this thread.
+                outcome.handled = true;
+                outcome.ok = true;
+                break;
+            }
+            case Kind::Resume:
+            case Kind::Fork:
+            {
+                outcome.handled = true; // the engine routed it to this window: its answer is ours, whatever it says
+                const bool fork = request.kind == Kind::Fork;
+                // The slot (InsertAt index) for the new tab: right after the asked tab; a fork's default right after its
+                // source when the source is here (the tab menu's "Fork session" placement); else the END of the strip —
+                // an explicit slot rather than Terminal's newTabPosition (which may mean "after the current tab"), so
+                // what the model is told about the tab's place stays true. Clamped to the strip: InsertAt past the end
+                // throws.
+                const uint32_t size = _tabs.Size();
+                uint32_t slot = size;
+                if (!request.afterSessionId.empty())
+                {
+                    const auto at = indexOfSession(request.afterSessionId);
+                    if (!at)
+                    {
+                        outcome.message = L"the tab to put it after is not in this window any more; list the tabs again and choose another.";
+                        break;
+                    }
+                    slot = *at + 1;
+                }
+                else if (request.afterIndex >= 0)
+                {
+                    slot = (std::min)(static_cast<uint32_t>(request.afterIndex) + 1, size);
+                }
+                else if (fork)
+                {
+                    if (const auto at = indexOfSession(request.sessionId))
+                    {
+                        slot = *at + 1;
+                    }
+                }
+                ::Agentmaster::LogNav(std::wstring{ L"ai-tool " } + (fork ? L"fork " : L"resume ") + ::Agentmaster::ShortId(request.sessionId) + L" slot=" + std::to_wstring(slot) + L"/" + std::to_wstring(size) +
+                                      (request.focus ? L" [focus]" : L" [bg]") + (request.model.empty() ? std::wstring{} : L" model=" + request.model));
+                // A background tab unless the request asks for focus: the bulk-open latch keeps the Sessions page up and
+                // the selection where it is (a phone's request must not change the PC's screen; a page request must
+                // not hide the page that is talking to the user). Restored on every exit.
+                const bool previous = _openClaudeTabInBackground;
+                _openClaudeTabInBackground = !request.focus;
+                auto restore = wil::scope_exit([this, previous] { _openClaudeTabInBackground = previous; });
+                std::wstring opened;
+                if (!fork)
+                {
+                    opened = _ResumeSessionFromDisk(request.sessionId, request.dir, request.title, slot);
+                }
+                else
+                {
+                    // The tab menu's fork for a session the registry knows (Codex-aware, the unsent draft carried); the
+                    // Sessions page's fork for one it never knew.
+                    std::wstring forked;
+                    if (!_ForkManagedSessionById(request.sessionId, slot, request.model, &forked))
+                    {
+                        forked = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model, slot);
+                    }
+                    opened = std::move(forked);
+                }
+                if (opened.empty())
+                {
+                    // The seams log why ([nav] ...-done); a missing claude.exe also put its install prompt on this window.
+                    outcome.message = L"no tab opened: Claude Code may be missing (this window then shows its install prompt), or the launch failed (hooks.log has the details).";
+                    break;
+                }
+                outcome.ok = true;
+                outcome.sessionId = opened;
+                if (const auto at = indexOfSession(opened))
+                {
+                    outcome.index = static_cast<int32_t>(*at);
+                }
+                if (request.focus)
+                {
+                    _FocusClaudeSessionTab(opened, /*bringWindowToFront*/ true); // the open selected it; this brings the window up
+                }
+                break;
+            }
+            case Kind::Deactivate:
+            {
+                const auto it = _claudeTabs.find(request.sessionId);
+                const auto tab = it != _claudeTabs.end() ? it->second.get() : nullptr;
+                if (!tab)
+                {
+                    break; // not hosted here: handled stays false, and the engine waits for the host
+                }
+                outcome.handled = true;
+                const auto before = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(request.sessionId) : std::nullopt;
+                if (!before)
+                {
+                    outcome.message = L"the app does not know that session.";
+                    break;
+                }
+                // The park's own rules (_DeactivateTabsFromMenu skips these silently), said to the model instead.
+                if (before->external)
+                {
+                    outcome.message = L"the tab runs a claude the user started by hand in a shell tab; Deactivate never parks it.";
+                    break;
+                }
+                if (!before->started)
+                {
+                    outcome.ok = true;
+                    outcome.message = L"It was already dormant.";
+                    break;
+                }
+                if (_sessionRegistry->DeliveryGateHeld(request.sessionId))
+                {
+                    outcome.message = L"a prompt is being typed into that tab right now; try again in a few seconds.";
+                    break;
+                }
+                ::Agentmaster::LogNav(L"ai-tool deactivate " + ::Agentmaster::ShortId(request.sessionId) + L" (the AI search, on the user's request)");
+                // The tab menu's "Deactivate ▸ Deactivate Tab": the focused-tab rule (this window leaves the tab for its
+                // Agent Manager page first, so the fresh control is not laid out and restarted) and the strip keeper.
+                _DeactivateTabsFromMenu(tab, implementation::Tab::kDeactivateScopeThisTab);
+                const auto after = _sessionRegistry->GetWithoutQueue(request.sessionId);
+                outcome.ok = after && !after->started;
+                if (!outcome.ok)
+                {
+                    outcome.message = L"the tab was not deactivated (hooks.log's [nav] deactivate-done line says why).";
+                }
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the model is told it failed. `handled` keeps its value, so an open that threw after its
+            // launch still counts as this window's (and the engine stops waiting).
+            ::Agentmaster::AgentLogCaughtException(L"_RunAgentWindowTool");
+            outcome.ok = false;
+            if (outcome.message.empty())
+            {
+                outcome.message = L"the window failed while doing it (hooks.log has the details).";
+            }
+        }
+        return outcome;
     }
 }

@@ -35,6 +35,7 @@
 
 #include "RemoteLaunch.h" // RemoteLaunchRequest — what a remote surface asks a window to open (MESSAGING.md)
 #include "SessionModels.h" // WindowRecord (M10 window-record claiming)
+#include "WindowTabTools.h" // WindowToolRequest / WindowToolOutcome / WindowCensus — the AI search's window and tab tools (SESSIONS.md §9.14)
 
 namespace Agentmaster
 {
@@ -416,6 +417,30 @@ namespace Agentmaster
         std::vector<WindowLaunchSink> launchSinks;
         uint64_t nextLaunchToken{ 1 };
         std::wstring lastActiveWindowId; // the window the user activated last (NoteWindowActivated); "" until one did
+
+        // Agentmaster (SESSIONS.md §9.14 — the AI search's WINDOW AND TAB TOOLS): per-window AGENT-TOOL sinks. The
+        // two search conversations (the Sessions page's, the Telegram Search topic's) list the windows' tabs, open a
+        // resumed / forked session at a chosen place in a chosen window, and park one tab — and each of those needs the
+        // window's own UI thread. Unlike the fire-and-forget sinks above, every request here is ANSWERED: the sink hops
+        // to its UI thread, acts, and calls `reply` with a WindowToolOutcome, because the model must be told what
+        // happened (which window, which position, the fork's new id, why a park was refused). The engine's
+        // CollectWindowCensus / RunWindowTool / RunWindowToolOnHost wait for those replies with a timeout, OFF the UI
+        // thread (the SDK's reader thread): called on the UI thread they would wait out their timeout, since the
+        // replies run on that very thread. Registration order is the windows' creation order in this run, which is
+        // the order the model numbers them in (window 1, 2, ...). Same lifetime as the other sinks (registered at
+        // engine init, detached in ~TerminalPage, Rule #10); snapshot-under-lock / invoke-outside-it. Placed LAST
+        // (layout-safe incremental rebuilds, like launchSinks).
+        struct WindowAgentToolSink
+        {
+            uint64_t token{ 0 }; // the handle RegisterWindowAgentToolHandler returned; 0 is never issued
+            std::wstring windowId; // the registering window (what RunWindowTool targets, and the census's windowId)
+            // Called from ANY thread; must marshal to its own UI thread, act, call `reply` exactly once (an outcome with
+            // handled == false when the request is not this window's business), and must not throw.
+            std::function<void(const WindowToolRequest& request, std::function<void(WindowToolOutcome)> reply)> fn;
+        };
+        std::mutex agentToolMutex; // guards agentToolSinks + nextAgentToolToken; never held while a sink runs
+        std::vector<WindowAgentToolSink> agentToolSinks; // registration order == the windows' creation order
+        uint64_t nextAgentToolToken{ 1 }; // monotonic, never reused, so a stale token can never detach a younger sink
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -766,6 +791,68 @@ namespace Agentmaster
     /// <param name="windowId">The activated window's id; empty is ignored.</param>
     void NoteWindowActivated(const std::wstring& windowId) noexcept;
 
+    /// <summary>
+    /// Agentmaster (SESSIONS.md §9.14): register THIS window's agent-tool sink — the receiving half of the AI search's
+    /// window and tab tools (list the strip, open a resumed / forked session at a chosen place, park one tab). The
+    /// registry-token pattern: keep the token for UnregisterWindowAgentToolHandler at teardown (Rule #10).
+    /// </summary>
+    /// <param name="windowId">The registering window's id; RunWindowTool targets a window by it.</param>
+    /// <param name="handler">Called from ANY thread with (request, reply). It must marshal to its own UI thread, act,
+    /// call `reply` exactly once — with handled == false when the request is not this window's business (a Deactivate
+    /// of a session another window hosts) — and must not throw. A handler that never replies costs its caller the
+    /// whole timeout.</param>
+    /// <returns>A non-zero token, or 0 when `handler` is empty (nothing was registered).</returns>
+    /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    uint64_t RegisterWindowAgentToolHandler(const std::wstring& windowId, std::function<void(const WindowToolRequest& request, std::function<void(WindowToolOutcome)> reply)> handler);
+
+    /// <summary>Agentmaster (SESSIONS.md §9.14): detach an agent-tool sink; 0 and a removed token are no-ops.</summary>
+    /// <param name="token">The token RegisterWindowAgentToolHandler returned.</param>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    void UnregisterWindowAgentToolHandler(uint64_t token);
+
+    /// <summary>
+    /// Agentmaster (SESSIONS.md §9.14): every window's tab strip, for the AI search's `list` tool and for its window
+    /// choice. Sends a Census request to every registered window and waits for their answers.
+    /// </summary>
+    /// <param name="timeoutMs">How long to wait for the slowest window. A window whose UI thread is busy longer is left
+    /// out of the answer (the tool then names fewer windows than are open — better than a model that waits on a
+    /// wedged window).</param>
+    /// <returns>The windows that answered, in registration (= creation) order, the last-activated one flagged
+    /// (WindowCensus::lastActive). Empty when no window is registered or none answered in time.</returns>
+    /// <exception cref="std::bad_alloc">If the answers cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If a mutex cannot be locked.</exception>
+    /// <remarks>⚠ Never call it on a window's UI thread: the windows answer on that thread, so the call would wait out
+    /// its whole timeout and then return nothing. The AI search calls it on the SDK's reader thread.</remarks>
+    std::vector<WindowCensus> CollectWindowCensus(uint32_t timeoutMs);
+
+    /// <summary>
+    /// Agentmaster (SESSIONS.md §9.14): run one request (Census, Resume, Fork) in ONE window and wait for its answer —
+    /// the AI search's `resume` and `fork` tools after the model (or the user) chose the window.
+    /// </summary>
+    /// <param name="windowId">The target window's id (WindowCensus::windowId).</param>
+    /// <param name="request">What to do there.</param>
+    /// <param name="timeoutMs">How long to wait for the window's answer.</param>
+    /// <returns>The window's outcome; nullopt when no such window is registered (it closed meanwhile) or it did not
+    /// answer in time — the caller must then not assume that nothing happened: a late open still lands.</returns>
+    /// <exception cref="std::bad_alloc">If the answer cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If a mutex cannot be locked.</exception>
+    /// <remarks>⚠ Never on a UI thread (see CollectWindowCensus).</remarks>
+    std::optional<WindowToolOutcome> RunWindowTool(const std::wstring& windowId, const WindowToolRequest& request, uint32_t timeoutMs);
+
+    /// <summary>
+    /// Agentmaster (SESSIONS.md §9.14): run a request in every window and return the answer of the one that HOSTS the
+    /// request's session (handled == true) — the AI search's `deactivate` tool. Exactly one window hosts a session's
+    /// tab, so at most one answer is handled; the wait ends at that answer, or when every window said "not mine".
+    /// </summary>
+    /// <param name="request">What to do (a Deactivate with its sessionId).</param>
+    /// <param name="timeoutMs">How long to wait for the host's answer.</param>
+    /// <returns>The host's outcome; nullopt when no window hosts the session's tab or none answered in time.</returns>
+    /// <exception cref="std::bad_alloc">If the answers cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If a mutex cannot be locked.</exception>
+    /// <remarks>⚠ Never on a UI thread (see CollectWindowCensus).</remarks>
+    std::optional<WindowToolOutcome> RunWindowToolOnHost(const WindowToolRequest& request, uint32_t timeoutMs);
+
     // Agentmaster (cross-window tab DOCKING): register THIS window as a dock TARGET — its top-level
     // HWND + a probe ("is this screen point over MY tab-strip row, and at which insertion slot?";
     // Preview mode also lights the target's own insertion caret, HideCaret clears it). Monotonic
@@ -875,4 +962,12 @@ namespace Agentmaster
     uint32_t CurrentUnreadCountIn(Engine& e) noexcept;
     uint64_t RegisterUnreadCountHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(uint32_t count)> handler);
     void UnregisterUnreadCountHandlerIn(Engine& e, uint64_t token) noexcept;
+    // The AI search's window-tool fan-outs on a LOCAL Engine (tests_tabtools.cpp): same contracts as the SharedEngine()
+    // forms above (RegisterWindowAgentToolHandler ... RunWindowToolOnHost). The test registers fake windows whose
+    // sinks answer on another thread, late, twice or never, and pins the waits, the order and the host rule.
+    uint64_t RegisterWindowAgentToolHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(const WindowToolRequest& request, std::function<void(WindowToolOutcome)> reply)> handler);
+    void UnregisterWindowAgentToolHandlerIn(Engine& e, uint64_t token);
+    std::vector<WindowCensus> CollectWindowCensusIn(Engine& e, uint32_t timeoutMs);
+    std::optional<WindowToolOutcome> RunWindowToolIn(Engine& e, const std::wstring& windowId, const WindowToolRequest& request, uint32_t timeoutMs);
+    std::optional<WindowToolOutcome> RunWindowToolOnHostIn(Engine& e, const WindowToolRequest& request, uint32_t timeoutMs);
 }

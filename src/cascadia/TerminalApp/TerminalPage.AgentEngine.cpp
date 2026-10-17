@@ -599,6 +599,13 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowLaunchHandler(_windowLaunchToken);
         }
+        // Agentmaster (SESSIONS.md §9.14): drop this window's agent-tool sink too (Rule #10) — a closed window must not
+        // be counted in the AI search's census or asked to open a tab. Bare like its neighbors: thread-safe engine work
+        // that must never be skipped by a guarded throw.
+        if (_windowAgentToolsToken)
+        {
+            ::Agentmaster::UnregisterWindowAgentToolHandler(_windowAgentToolsToken);
+        }
         // Agentmaster (cross-window tab DOCKING): drop this window's dock-target sink too (Rule #10) —
         // a torn-down window must never be offered as a drop target.
         if (_windowDockTargetToken)
@@ -1534,6 +1541,45 @@ namespace winrt::TerminalApp::implementation
                         }
                     }
                 });
+            });
+        }
+
+        // Agentmaster (SESSIONS.md §9.14): the AI search's AGENT-TOOL sink — its window and tab tools (list this window's
+        // strip, open a resumed / forked session at a chosen place here, park a tab this window hosts). The engine waits
+        // for the REPLY on the SDK's reader thread, so every path must reply exactly once: a page that is gone, a
+        // dispatcher that refused the item, or a throw all reply with an outcome (handled == false: "not this window")
+        // instead of leaving the caller to wait out its timeout. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowAgentToolsToken = ::Agentmaster::RegisterWindowAgentToolHandler(_windowId, [weakThis, dispatcher](const ::Agentmaster::WindowToolRequest& request, std::function<void(::Agentmaster::WindowToolOutcome)> reply) {
+                // The reply may run once only (the engine ignores a second one); a shared flag keeps the dispatcher item
+                // and the RunAsync failure path below from both answering.
+                auto answered = std::make_shared<std::atomic<bool>>(false);
+                auto answer = [reply, answered](::Agentmaster::WindowToolOutcome outcome) {
+                    if (!answered->exchange(true) && reply)
+                    {
+                        reply(std::move(outcome));
+                    }
+                };
+                try
+                {
+                    dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, request, answer]() {
+                        ::Agentmaster::WindowToolOutcome outcome; // handled == false: the window closed meanwhile
+                        if (auto self = weakThis.get())
+                        {
+                            outcome = self->_RunAgentWindowTool(request); // noexcept: failures come back as outcomes
+                        }
+                        answer(std::move(outcome));
+                    });
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: a dispatcher that refused the item (a window being torn down) answers "not this
+                    // window" at once, so the engine does not wait out its timeout for it.
+                    ::Agentmaster::AgentLogCaughtException(L"agent-tool sink: RunAsync");
+                    answer(::Agentmaster::WindowToolOutcome{});
+                }
             });
         }
 

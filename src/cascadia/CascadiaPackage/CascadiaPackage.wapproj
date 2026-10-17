@@ -285,4 +285,28 @@
           DestinationFiles="@(_AgentmasterImages->'$(_AgentmasterLayoutRoot)Images\%(RecursiveDir)%(FileName)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
+
+  <!-- Agentmaster (SESSIONS_DB.md §4.2, 2026-10-17): copy duckdb.dll into the deployment layout root, beside
+       agentmaster-sessiondb.exe (which imports it) - for the same reason as CopyAgentmasterImagesToLayout above. The
+       Content item near the top of this file is for the package payload; the manual build + register workflow
+       (tools\Build-Agentmaster.ps1, the -LayoutDir hot deploys) registers the build folder as it is, and that folder
+       got the service (a project reference) without its import. Every loose layout until 2026-10-17 - the stock
+       bin\x64\<Config> and every Q:\agentmaster-layouts slot - had agentmaster-sessiondb.exe and NO duckdb.dll, so the
+       session database could never start there (EnsureServiceBinaries: "The package has no duckdb.dll") and the AI
+       search could not use its tools. The layout root is $(TargetDir), exactly as for the images (the hot-deploy slot
+       when AgentmasterLayoutDir redirected OutputPath). Same platform rule as the Content item: DuckDB publishes no
+       32-bit library, so an x86 build carries none. tools\Swap-AgentmasterLayout.ps1 refuses a layout that has the
+       service without the DLL. -->
+  <Target Name="CopyAgentmasterDuckDbToLayout"
+          AfterTargets="Build"
+          Condition="'$(Platform)'!='x86' and '$(Platform)'!='Win32' and Exists('$(DuckDbDir)duckdb.dll')">
+    <PropertyGroup>
+      <_AgentmasterDuckDbLayoutRoot>$(TargetDir)</_AgentmasterDuckDbLayoutRoot>
+      <!-- Belt only, like the images target: TargetDir is empty solely when OutDir is. -->
+      <_AgentmasterDuckDbLayoutRoot Condition="'$(_AgentmasterDuckDbLayoutRoot)' == ''">$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</_AgentmasterDuckDbLayoutRoot>
+    </PropertyGroup>
+    <Copy SourceFiles="$(DuckDbDir)duckdb.dll"
+          DestinationFolder="$(_AgentmasterDuckDbLayoutRoot)"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

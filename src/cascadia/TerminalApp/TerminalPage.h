@@ -48,6 +48,7 @@ namespace winrt::Microsoft::Terminal::Settings
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
+#include "AgentMaster/WindowTabTools.h" // Agentmaster (SESSIONS.md §9.14): WindowToolRequest / WindowToolOutcome — the AI search's window and tab tools
 #include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the Sessions page's designated-area tooltip panel (by-value member)
 #include <optional>
 namespace Agentmaster
@@ -520,6 +521,11 @@ namespace winrt::TerminalApp::implementation
         // activated window). 0 until engine init registered them; detached in ~TerminalPage (Rule #10).
         uint64_t _windowSessionActionToken{ 0 };
         uint64_t _windowLaunchToken{ 0 };
+        // Agentmaster (SESSIONS.md §9.14): this window's agent-tool sink on the shared engine — the AI search's window and
+        // tab tools (a census of this window's strip, a resume / fork placed at a chosen position here, a park of a tab
+        // this window hosts), each ANSWERED from this window's UI thread (_RunAgentWindowTool). 0 until engine init
+        // registered it; detached in ~TerminalPage (Rule #10).
+        uint64_t _windowAgentToolsToken{ 0 };
         // Agentmaster (eager-init / "Activate All Tabs"): this window's "wake all dormant tabs" sink on
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
@@ -1939,6 +1945,20 @@ namespace winrt::TerminalApp::implementation
         // bulk-open latch _openClaudeTabInBackground is set around the call). Resume and Fork need the folder; a
         // request without one is logged and dropped. UI thread; never throws.
         void _RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request);
+        /// <summary>
+        /// Agentmaster (SESSIONS.md §9.14 — TerminalPage.AgentSessionsAi.cpp): the receiving half of the AI search's window
+        /// and tab tools. Census: this window's strip (title, session, selected tab per tab). Resume / Fork: open the
+        /// session as a tab HERE through the very seams a click runs (_ResumeSessionFromDisk; _ForkManagedSessionById for
+        /// a session the registry knows, else _ForkSessionFromDisk), placed right after the requested tab (default: a
+        /// fork after its source when the source is here, else the end of the strip), in the background unless the
+        /// request asks for focus. Deactivate: park the session's tab when THIS window hosts it (the tab menu's
+        /// Deactivate ▸ Deactivate Tab), answering handled == false otherwise.
+        /// </summary>
+        /// <param name="request">What the tool asked; the engine routed it here.</param>
+        /// <returns>The outcome the model is told: what happened, the opened session and its position, or why not.</returns>
+        /// <remarks>UI thread only (it reads and changes the strip). Never throws: every failure becomes an outcome with
+        /// ok == false and a message (Rule #18 inside), because the caller waits for this answer.</remarks>
+        ::Agentmaster::WindowToolOutcome _RunAgentWindowTool(const ::Agentmaster::WindowToolRequest& request) noexcept;
         // Agentmaster (MESSAGING.md §7.3 — /screen): the last `maxLines` lines of the session's terminal buffer as plain
         // text — what the owner would see on the screen — with trailing blank lines dropped. "" when this window does
         // not host the session, the tab is dormant, or the read threw (logged). UI thread.
@@ -1947,7 +1967,7 @@ namespace winrt::TerminalApp::implementation
         safe_void_coroutine _ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (the SINGLE folder-close confirm+close entry — Manager board/tree menu AND the WT tab-strip "Close ▸" submenu): show ONE confirm LISTING the tab titles, then _CloseClaudeSessionsInFolder. `excludeId` non-empty == "Other of Same Folder" (keep the clicked one open)
         void _CloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (board/tree "Close ▸ Of Same Folder" / "Other of Same Folder"): close every live managed session whose effective work dir == `folder`, SKIPPING `excludeId` when non-empty ("Other …" keeps the clicked one open) — local tabs directly (skip-confirm; _ConfirmAndClose… already showed the one confirm), remote ones fanned out via CloseSessionInOtherWindows
         bool _CloseClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-close): close the session's tab IN THIS WINDOW (skip-confirm), the receiving half of the close-session sink. Returns false when this window doesn't host the session's tab.
-        TerminalApp::Tab _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware; returns the created tab (null on gate/no-op) so the resume nav-END can log the actually-launched id
+        TerminalApp::Tab _RestoreArchivedSession(winrt::hstring sessionId, uint32_t insertPosition = static_cast<uint32_t>(-1)); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware; returns the created tab (null on gate/no-op) so the resume nav-END can log the actually-launched id. insertPosition: the 0-based strip slot for the tab (-1 = the end / Terminal's newTabPosition; the AI search's resume places it after a chosen tab, SESSIONS.md §9.14)
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork); // Agentmaster (Fleet Observer): bring an EXTERNAL claude's conversation under management (fork==true => --fork-session into a NEW transcript [safe on a live external]; else --resume the same; fresh if none)
         // Agentmaster (PRESETS, HARNESSES.md §6.4): tell the user why a preset session did not start — no key,
         // no Base URL, or the picked preset was deleted. Buttons-only (XAML-Islands-safe), agentmaster-dark,
@@ -2068,7 +2088,7 @@ namespace winrt::TerminalApp::implementation
         //       known state says the turn was in flight or had failed (Error / midTurnAtRestore): a 600-tab window restore
         //       must not read 600 transcripts. Off with AppSettings::resumeApiErrorTurns. Logs every non-trivial outcome.
         void _RewindApiErrorBeforeRestore(const ::Agentmaster::SessionInfo& restored, const ::Agentmaster::AppSettings& settings);
-        bool _ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}); // Agentmaster (Triage Board / Explorer-tree "Fork session"): fork a managed session by id — the kind-aware fork shared with _DuplicateTab (Claude: `--resume <id> --fork-session`; Codex: `codex fork <rolloutUuid>`; both transcript/rollout-gated -> fresh). Opens the fork in THIS window (window-agnostic: reads the shared registry, no live tab needed). Returns false if the id isn't a known managed session. modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork session" submenu ("" = Default; Claude only — a codex fork takes no --model)
+        bool _ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, std::wstring* forkedIdOut = nullptr); // Agentmaster (Triage Board / Explorer-tree "Fork session"): fork a managed session by id — the kind-aware fork shared with _DuplicateTab (Claude: `--resume <id> --fork-session`; Codex: `codex fork <rolloutUuid>`; both transcript/rollout-gated -> fresh). Opens the fork in THIS window (window-agnostic: reads the shared registry, no live tab needed). Returns false if the id isn't a known managed session. modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork session" submenu ("" = Default; Claude only — a codex fork takes no --model). forkedIdOut (optional): receives the NEW session's id ("" when no tab opened: the native-exe gate, a failed launch) — the AI search's fork tool reports it to the model (SESSIONS.md §9.14)
         void _DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab); // Agentmaster (cross-window move): a Claude tab is moving to ANOTHER window (tear-out / moveTab) — evict this window's per-window binding (NOT the injector/live) so teardown can't archive a session now alive elsewhere; the destination re-homes it
         void _DetachClaudePaneForMove(const winrt::com_ptr<Tab>& tab, const std::shared_ptr<Pane>& movingPane); // Agentmaster (cross-window move, pane-level): the movePane-to-window case — evict only if the LEAVING pane is the session's bound (first-terminal) pane; the tab may survive with its other panes
         void _RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title); // Agentmaster: Explorer-tree rename -> registry title (persist) + retitle the session's tab
@@ -2203,8 +2223,8 @@ namespace winrt::TerminalApp::implementation
         void _CycleSessionsWindow(); // [1 month] click: 1d -> 3d -> 7d -> 14d -> 1mo -> 3mo -> wrap (clears a custom range)
         void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)
-        void _ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title); // resume ANY on-disk session into a managed tab: live here -> Jump; archived -> Restore; unknown -> minimal record + the transcript-gated resume seam
-        void _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride = {}); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)"). modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork here" submenu ("" = Default)
+        std::wstring _ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title, uint32_t insertPosition = static_cast<uint32_t>(-1)); // resume ANY on-disk session into a managed tab: live here -> Jump; archived -> Restore; unknown -> minimal record + the transcript-gated resume seam. insertPosition: the 0-based strip slot (-1 = the end / Terminal's newTabPosition). Returns the session whose tab is open now — the target, or the FRESH id a resume without a transcript degraded to (Rule #6) — or "" when nothing opened (a gate, a failed launch, missing arguments); callers that do not need it ignore it (SESSIONS.md §9.14's resume tool reports it)
+        std::wstring _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride = {}, uint32_t insertPosition = static_cast<uint32_t>(-1)); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)"). modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork here" submenu ("" = Default). insertPosition: the 0-based strip slot (-1 = the end / Terminal's newTabPosition). Returns the NEW session's id, or "" when no tab opened
         winrt::fire_and_forget _PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle); // Sessions-page double-click on a NOT-live row: a Resume / Fork / Cancel ContentDialog (the adopt dialog's idiom) instead of resuming silently. Primary=Resume (claude --resume), Secondary=Fork (--fork-session, parent untouched), Close=Cancel; forkTitle is empty for a never-prompted row so the fork seam derives a smart name
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends

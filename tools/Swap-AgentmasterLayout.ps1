@@ -232,6 +232,19 @@ if ($missingImages.Count -gt 0) {
     throw "Layout '$newDir' lacks the icon files its manifest names ($($missingImages -join ', ')), so Agentmaster would get a BLANK taskbar and Start icon. Rebuild it with the current CascadiaPackage.wapproj (its CopyAgentmasterImagesToLayout target fills Images\), or copy res\terminal\images-Dev\* into '$(Join-Path $newDir 'Images')'."
 }
 
+# The session database's import (SESSIONS_DB.md §4.2). A layout with agentmaster-sessiondb.exe but no duckdb.dll
+# beside it registers and runs, but the session database can never start there (the GUI's copy-out refuses: "The
+# package has no duckdb.dll"), so the AI search falls back to reading the transcripts and the cog's "On" does nothing.
+# Every loose layout until 2026-10-17 was like that; CascadiaPackage.wapproj's CopyAgentmasterDuckDbToLayout target
+# copies the DLL now. A WARNING, not a refusal: a ROLLBACK to an older slot (all of which lack the DLL) must stay
+# possible, and a build from 2026-10-17 on falls back to reading the transcripts by itself
+# (SearchDatabaseProfileIfUsable). Checked before anything is stopped, like the icons; -WhatIf reports it too.
+$sessionDbExe = Join-Path $newDir 'agentmaster-sessiondb.exe'
+$duckDbDll = Join-Path $newDir 'duckdb.dll'
+if ((Test-Path -LiteralPath $sessionDbExe -PathType Leaf) -and -not (Test-Path -LiteralPath $duckDbDll -PathType Leaf)) {
+    Write-Warning "Layout '$newDir' has agentmaster-sessiondb.exe but no duckdb.dll beside it, so the session database cannot start in this build (the AI search reads the transcripts instead). Rebuild it with the current CascadiaPackage.wapproj (its CopyAgentmasterDuckDbToLayout target copies the DLL), or copy dep\duckdb\<version>\<arch>\duckdb.dll into '$newDir'."
+}
+
 $apps = @($manifestXml.Package.Applications.Application)
 $appId = $apps[0].Id
 

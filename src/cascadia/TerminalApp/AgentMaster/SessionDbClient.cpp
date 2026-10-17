@@ -480,6 +480,23 @@ namespace Agentmaster::SessionDb
         }
     }
 
+    bool SessionDbServiceInstalled(const std::wstring& profileDir) noexcept
+    {
+        try
+        {
+            // The very exe a start would run, then its import beside it: a copied-out pair can only be complete (both
+            // are copied together), so a missing dll means the package itself lacks it.
+            const std::wstring exe = ServiceClient::FindServiceExe(profileDir);
+            return !exe.empty() && FileExists(DirOf(exe) + L"\\" + std::wstring{ Proto::kDuckDbDllLeaf });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "not installed" — the caller keeps the page search, which always works.
+            LogSwallowedException(L"SessionDb SessionDbServiceInstalled");
+            return false;
+        }
+    }
+
     bool EnsureServiceBinaries(const std::wstring& profileDir, const std::wstring& sourceDir, std::wstring& error)
     {
         try

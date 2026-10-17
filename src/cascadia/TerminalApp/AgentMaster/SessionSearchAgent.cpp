@@ -25,6 +25,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 namespace
 {
@@ -339,6 +340,105 @@ namespace
             // logging path; reporting its own failure would call AppendStateLog again.
         }
     }
+
+    // ===== the window and tab tools over the app's windows (SESSIONS.md §9.14) =====
+
+    // How long the tools wait for the windows' UI thread (every window runs on the Emperor's one UI thread). A census
+    // is one pass over each strip; an open spawns a ConPTY and may wait behind a busy dispatcher; a park swaps a
+    // terminal control. Past these the model is told that a window did not answer — better than a model that waits
+    // on a wedged UI thread (a late open still lands, and the tool says so).
+    constexpr uint32_t kWindowCensusTimeoutMs = 4000;
+    constexpr uint32_t kWindowOpenTimeoutMs = 15000;
+    constexpr uint32_t kWindowDeactivateTimeoutMs = 10000;
+
+    /// <summary>The Triage Board's word for a state — what the model reads as a tab's `state`, and what the deactivate
+    /// guard compares ("running" / "needs approval" mean a turn is in flight).</summary>
+    /// <param name="state">The session's state.</param>
+    /// <returns>A static, NUL-terminated word.</returns>
+    const wchar_t* TabStateWord(SessionState state) noexcept
+    {
+        switch (state)
+        {
+        case SessionState::Running:
+            return L"running";
+        case SessionState::WaitingForInput:
+            return L"waiting for you";
+        case SessionState::NeedsApproval:
+            return L"needs approval";
+        case SessionState::Error:
+            return L"error";
+        case SessionState::Done:
+            return L"done";
+        case SessionState::Idle:
+        default:
+            return L"idle";
+        }
+    }
+
+    /// <summary>
+    /// Fill the session half of every tab of a census (WindowTabInfo) from the shared registry: one lean snapshot of
+    /// the LIVE sessions (SnapshotLiveForCards: no queues, no transcript texts), and a queue-less read for a tab whose
+    /// session is not in it (a tab mid-bind).
+    /// </summary>
+    /// <param name="windows">The census the windows answered (their strip halves).</param>
+    /// <exception cref="std::bad_alloc">If the snapshot cannot be allocated.</exception>
+    /// <remarks>
+    /// Done here, on the tool-call thread, rather than in the windows: each window then only walks its strip on its UI
+    /// thread, and a census of hundreds of tabs costs the UI thread no registry copy (UI_THREAD.md §10e — the full
+    /// copies of every record were the release's measured cost).
+    /// </remarks>
+    void EnrichWindowCensus(std::vector<WindowCensus>& windows)
+    {
+        const auto registry = SharedEngine().registry;
+        if (!registry)
+        {
+            return;
+        }
+        std::unordered_map<std::wstring, SessionInfo> live;
+        for (auto& s : registry->SnapshotLiveForCards())
+        {
+            std::wstring id = s.id;
+            live.emplace(std::move(id), std::move(s));
+        }
+        for (auto& window : windows)
+        {
+            for (auto& tab : window.tabs)
+            {
+                if (tab.sessionId.empty())
+                {
+                    continue; // a shell tab: no session facts
+                }
+                std::optional<SessionInfo> fallback;
+                const SessionInfo* s = nullptr;
+                if (const auto it = live.find(tab.sessionId); it != live.end())
+                {
+                    s = &it->second;
+                }
+                else
+                {
+                    fallback = registry->GetWithoutQueue(tab.sessionId);
+                    if (fallback)
+                    {
+                        s = &*fallback;
+                    }
+                }
+                if (!s)
+                {
+                    continue; // unknown to the registry (a tab whose binding is in flight): only its strip facts
+                }
+                tab.codex = s->kind == AgentKind::Codex;
+                tab.state = TabStateWord(s->state);
+                tab.started = s->started;
+                tab.external = s->external;
+                tab.dir = s->workingDir;
+                tab.worksIn = s->inferredWorkingDir; // stored empty when it is the launch folder
+                tab.branch = s->branch;
+                tab.lastTurnUnixMs = s->turnStartUnixMs;
+                // The newest activity of any kind: the transcript's own (line-derived), the decay anchor, a turn's end.
+                tab.lastActivityUnixMs = (std::max)({ s->convLastActivityUnixMs, s->lastActivityUnixMs, s->turnEndUnixMs });
+            }
+        }
+    }
 }
 
 namespace Agentmaster
@@ -361,6 +461,13 @@ namespace Agentmaster
         uint64_t nextListenerToken{ 1 };
         std::wstring claudeExePath;
         bool shuttingDown{ false };
+        // The window the RUNNING request came from (Ask's originWindowId; "" = the Telegram topic or none) — what the
+        // tabs server reports as asked_from (SESSIONS.md §9.14). Replaced by every Ask, cleared by Reset.
+        std::wstring requestOrigin;
+        // The newest request's text blocks that no tool call has followed YET. A tool call moves them into
+        // snapshot.narration (they were written before acting: the plan); the turn's end drops them (they are the
+        // answer, which TurnCompleted carries).
+        std::wstring pendingAssistantText;
         // ---- the index keeper (see KeeperRun) ----
         std::shared_ptr<const SessionCatalog> catalog; // the newest session index, or null
         // The earliest instant a search of this run asked for; 0 = nobody asked since the index
@@ -393,6 +500,38 @@ namespace Agentmaster
         SessionCatalogSources Sources() const
         {
             return SessionCatalogSources{ options.openSessions };
+        }
+
+        /// <summary>
+        /// Append one text block to snapshot.narration, within kSessionSearchMaxNarrationChars: the START is what
+        /// matters (the plan), so a block that would pass the cap is cut and later blocks are dropped.
+        /// </summary>
+        /// <param name="block">The text the model wrote before a tool call.</param>
+        /// <exception cref="std::bad_alloc">If the narration cannot grow.</exception>
+        /// <remarks>The caller holds `mutex`.</remarks>
+        void AppendNarrationLocked(const std::wstring& block)
+        {
+            std::wstring& narration = snapshot.narration;
+            if (block.empty() || narration.size() >= kSessionSearchMaxNarrationChars)
+            {
+                return;
+            }
+            if (!narration.empty())
+            {
+                narration += L"\n";
+            }
+            narration += block;
+            if (narration.size() > kSessionSearchMaxNarrationChars)
+            {
+                size_t keep = kSessionSearchMaxNarrationChars - 3;
+                // Never split a surrogate pair: a lone high surrogate would reach the page and the Telegram API.
+                if (keep > 0 && narration[keep - 1] >= 0xD800 && narration[keep - 1] <= 0xDBFF)
+                {
+                    --keep;
+                }
+                narration.resize(keep);
+                narration += L"...";
+            }
         }
 
         // Tell every listener. Fills e.snapshot. Never throws: a listener that throws is logged.
@@ -878,12 +1017,37 @@ namespace Agentmaster
                     e.kind = SessionSearchEventKind::StateChanged;
                     notify = true;
                     break;
+                case HarnessEventKind::AssistantText:
+                    // A text block of the newest request. Held until it is known whether a tool call follows it (then it
+                    // was written BEFORE acting — the plan the system prompt asks for, shown as the narration) or the
+                    // turn ends (then it is the answer, which TurnCompleted carries).
+                    if (h.turn >= latestTurn && !h.text.empty())
+                    {
+                        if (!pendingAssistantText.empty())
+                        {
+                            pendingAssistantText += L"\n";
+                        }
+                        pendingAssistantText += h.text;
+                    }
+                    break;
+                case HarnessEventKind::ToolCall:
+                    // The text before this call is narration. (The toolset's callbacks report the call itself.)
+                    if (h.turn >= latestTurn && !pendingAssistantText.empty())
+                    {
+                        e.kind = SessionSearchEventKind::Narration;
+                        e.text = std::move(pendingAssistantText);
+                        pendingAssistantText.clear();
+                        AppendNarrationLocked(e.text);
+                        notify = true;
+                    }
+                    break;
                 case HarnessEventKind::TurnCompleted:
                     if (h.turn < latestTurn)
                     {
                         break; // an older request (interrupted or replaced): the newest one owns the answer
                     }
                     latestTurn = h.turn;
+                    pendingAssistantText.clear(); // the turn's last text is its answer, not narration
                     snapshot.busy = false;
                     snapshot.activity.clear();
                     snapshot.answerIsError = h.isError;
@@ -915,9 +1079,7 @@ namespace Agentmaster
                     break;
                 case HarnessEventKind::UserMessage: // Ask already reported it
                 case HarnessEventKind::AssistantDelta:
-                case HarnessEventKind::AssistantText: // the turn's end carries the final text
-                case HarnessEventKind::ToolCall: // the toolset's callbacks report searches and shows
-                case HarnessEventKind::ToolResult:
+                case HarnessEventKind::ToolResult: // the toolset's callbacks report what the calls did
                 default:
                     break;
                 }
@@ -949,6 +1111,16 @@ namespace Agentmaster
         callbacks.onSearching = [impl](const std::wstring& summary) { impl->OnSearching(summary); };
         callbacks.onCandidates = [impl](const std::vector<std::wstring>& ids) { impl->OnCandidates(ids); };
         callbacks.onShow = [impl](const std::vector<std::wstring>& ids, const std::wstring& note, const std::vector<std::wstring>& whys) { impl->OnShow(ids, note, whys); };
+        // The window and tab tools (SESSIONS.md §9.14): the host's implementations as they are, except the request's
+        // origin, which only this object knows (Ask records it per request).
+        callbacks.tabs = impl->options.tabTools;
+        if (callbacks.tabs.census)
+        {
+            callbacks.tabs.originWindowId = [impl] {
+                std::lock_guard lock{ impl->mutex };
+                return impl->requestOrigin;
+            };
+        }
         const bool database = !impl->options.sessionDbProfile.empty();
         if (database)
         {
@@ -976,11 +1148,13 @@ namespace Agentmaster
         h.toolServers = impl->toolset->Servers();
         h.autoCompactTokens = impl->options.autoCompactTokens;
         h.persistRecord = impl->options.persist;
-        // One request = search (maybe a few) + read the candidates (and a grep for the user's own
-        // words) + show + one sentence: about five model steps since the read-before-show rule of
-        // 2026-10-17 (SESSIONS.md 9.12). A model that keeps searching is stopped here, with
+        // One request = the plan and its searches (maybe a few) + read the candidates (and a grep for
+        // the user's own words) + show + the reply: about five model steps since the read-before-show
+        // rule of 2026-10-17 (SESSIONS.md 9.12). A request that also opens a tab adds list + resume /
+        // fork (SESSIONS.md 9.14), and a refused call (no window named, a turn in flight) one more
+        // step, so the cap rose from 12 to 16. A model that keeps searching is stopped here, with
         // whatever it showed so far.
-        h.maxTurnsPerMessage = 12;
+        h.maxTurnsPerMessage = 16;
         h.apiMaxRetries = 2;
         h.turnSilenceTimeoutMs = 90000;
         impl->conversation = std::make_unique<HarnessConversation>(std::move(h), [impl](const HarnessEvent& e) { impl->OnHarnessEvent(e); });
@@ -1058,7 +1232,7 @@ namespace Agentmaster
         _impl->conversation->Prewarm();
     }
 
-    uint64_t SessionSearchAgent::Ask(std::wstring text)
+    uint64_t SessionSearchAgent::Ask(std::wstring text, std::wstring originWindowId)
     {
         if (text.find_first_not_of(L" \t\r\n") == std::wstring::npos)
         {
@@ -1075,6 +1249,10 @@ namespace Agentmaster
             _impl->snapshot.answer.clear();
             _impl->snapshot.answerIsError = false;
             _impl->snapshot.activity = L"Thinking\x2026";
+            // A new request: its own plan, and the window it came from (the tabs server's asked_from).
+            _impl->snapshot.narration.clear();
+            _impl->pendingAssistantText.clear();
+            _impl->requestOrigin = std::move(originWindowId);
         }
         // The index is read while the model reads the request: by the time it calls the search
         // tool (about a second later) the catalog is there.
@@ -1158,6 +1336,9 @@ namespace Agentmaster
             _impl->snapshot.thinkingLevel = thinkingLevel;
             _impl->snapshot.supportedEfforts = std::move(supportedEfforts);
             _impl->latestTurn = 0;
+            // The thrown-away conversation's half-written text and its request's window go with it.
+            _impl->pendingAssistantText.clear();
+            _impl->requestOrigin.clear();
         }
         _impl->SaveView(); // an empty conversation: deletes the file
         LogAgent(L"reset");
@@ -1262,17 +1443,17 @@ namespace Agentmaster
                 // SESSIONS_DB.md §8.2: with the session database On, the AI search searches it (its read tools, no
                 // index keeper). Read once: the agent lives for the process, so a later change applies at the next
                 // start of the app (the cog's tooltip says so). Shadow keeps the page search (nothing on screen
-                // changes in Shadow).
-                if (settings.sessionDbMode == SessionDbMode::On)
-                {
-                    options.sessionDbProfile = AgentmasterStateDir();
-                }
+                // changes in Shadow). A service that cannot start (no duckdb.dll beside it) keeps the page search too:
+                // a conversation handed the database's tools would answer every request "the database is not running".
+                options.sessionDbProfile = SearchDatabaseProfileIfUsable(settings.sessionDbMode == SessionDbMode::On, L"sessions-search");
             }
             catch (...)
             {
                 // Rule #18. Recovery: the agent starts at Off with the page search; the page's toggle still sets a level.
                 LogSwallowedException(L"SharedSessionSearchAgent: read the settings");
             }
+            // SESSIONS.md §9.14: the window and tab tools over the app's windows (list, resume, fork, deactivate).
+            options.tabTools = MakeEngineTabTools();
             options.openSessions = [] {
                 std::vector<std::pair<std::wstring, std::wstring>> open;
                 const auto registry = SharedEngine().registry;
@@ -1296,5 +1477,90 @@ namespace Agentmaster
             return new SessionSearchAgent{ std::move(options) };
         }();
         return *agent;
+    }
+
+    SessionSearchToolset::Callbacks::TabTools MakeEngineTabTools()
+    {
+        SessionSearchToolset::Callbacks::TabTools tools;
+        tools.census = [] {
+            // The strips from the windows (their UI thread), the session facts from the registry (here).
+            std::vector<WindowCensus> windows = CollectWindowCensus(kWindowCensusTimeoutMs);
+            EnrichWindowCensus(windows);
+            return windows;
+        };
+        tools.open = [](const std::wstring& windowId, const WindowToolRequest& request) -> WindowToolOutcome {
+            WindowToolRequest filled = request;
+            // The folder and the title a launch needs, read HERE (the tool-call thread) so the window's UI thread does
+            // no file work: the registry's record when it knows the session, else the session's own transcript index (a
+            // session that was never managed, found by a search). A known session's record wins in the window anyway.
+            const auto registry = SharedEngine().registry;
+            const std::optional<SessionInfo> known = registry ? registry->GetWithoutQueue(filled.sessionId) : std::nullopt;
+            if (known)
+            {
+                if (filled.dir.empty())
+                {
+                    filled.dir = known->workingDir;
+                }
+                if (filled.title.empty())
+                {
+                    filled.title = known->title;
+                }
+            }
+            else if (const auto entry = IndexEntryForSession(filled.sessionId))
+            {
+                if (filled.dir.empty())
+                {
+                    filled.dir = entry->stats.cwd;
+                }
+                if (filled.title.empty())
+                {
+                    // The Sessions page's precedence; "" lets the window derive a name from the folder.
+                    filled.title = !entry->liveTitle.empty() ? entry->liveTitle : PickDisplayTitle(entry->stats.customTitle, entry->stats.aiTitle, entry->stats.summary, entry->stats.firstUserPrompt);
+                }
+            }
+            if (!known && filled.dir.empty())
+            {
+                WindowToolOutcome refused;
+                refused.handled = true;
+                refused.message = L"its folder is not known: the session's transcript was not found on this computer (it may have been deleted), so it cannot be opened.";
+                return refused;
+            }
+            const auto outcome = RunWindowTool(windowId, filled, kWindowOpenTimeoutMs);
+            LogAgent(std::wstring{ filled.kind == WindowToolRequest::Kind::Fork ? L"tool fork " : L"tool resume " } + ShortId(filled.sessionId) + L" -> window " + ShortId(windowId) +
+                     (outcome ? (outcome->ok ? L": opened " + ShortId(outcome->sessionId) + L" at index " + std::to_wstring(outcome->index) : L": refused (" + outcome->message + L")") : std::wstring{ L": no answer in time" }));
+            return outcome ? *outcome : WindowToolOutcome{};
+        };
+        tools.deactivate = [](const std::wstring& sessionId) -> WindowToolOutcome {
+            WindowToolRequest request;
+            request.kind = WindowToolRequest::Kind::Deactivate;
+            request.sessionId = sessionId;
+            const auto outcome = RunWindowToolOnHost(request, kWindowDeactivateTimeoutMs);
+            LogAgent(L"tool deactivate " + ShortId(sessionId) + (outcome ? (outcome->ok ? std::wstring{ L": parked" } : L": refused (" + outcome->message + L")") : std::wstring{ L": no window hosts it, or none answered in time" }));
+            return outcome ? *outcome : WindowToolOutcome{};
+        };
+        tools.focus = [](const std::wstring& sessionId) {
+            // Every window's activate sink; the one that hosts the tab selects it and comes to the front. Fire-and-
+            // forget: the tool says it asked, and the next list shows the result.
+            ActivateSessionInOtherWindows(sessionId, std::wstring{});
+            return true;
+        };
+        return tools;
+    }
+
+    std::wstring SearchDatabaseProfileIfUsable(bool databaseModeOn, std::wstring_view who)
+    {
+        if (!databaseModeOn)
+        {
+            return {};
+        }
+        const std::wstring profile = AgentmasterStateDir();
+        if (SessionDb::SessionDbServiceInstalled(profile))
+        {
+            return profile;
+        }
+        // The mode is On but the service cannot start: the page search keeps the AI search useful, and the log says why.
+        LogAgent(std::wstring{ who } + L": the session database mode is On, but its service is not installed (agentmaster-sessiondb.exe with duckdb.dll beside it, in the package or in " + profile +
+                 L"\\sessiondb\\bin): this conversation reads the transcripts directly");
+        return {};
     }
 }

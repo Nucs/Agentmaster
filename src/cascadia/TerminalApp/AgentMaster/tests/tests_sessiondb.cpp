@@ -368,18 +368,12 @@ namespace
             return;
         }
 
-        // The database prompt: nine rules, every database tool named as the model calls it.
+        // The database prompt (SESSIONS.md 9.14's structure, pinned in full by tests_tabtools.cpp): the behaviors and the
+        // workflows, every database tool named as the model calls it, its own read before a show.
         const std::wstring prompt = SessionSearchToolset::DatabaseSystemPrompt();
-        int rules = 0;
-        for (int r = 1; r <= 12; ++r)
-        {
-            if (prompt.find(L"\n" + std::to_wstring(r) + L". ") != std::wstring::npos)
-            {
-                ++rules;
-            }
-        }
-        CHECK(rules == 9, "the database prompt has nine rules");
-        CHECK(prompt.find(L"mcp__agentmaster__read") != std::wstring::npos && prompt.find(L"read every session you intend to show") != std::wstring::npos, "the database prompt confirms candidates with its read");
+        CHECK(prompt.find(L"# Instructional Behaviors") != std::wstring::npos && prompt.find(L"## Tools") != std::wstring::npos && prompt.find(L"## Workflow Guidelines") != std::wstring::npos,
+              "the database prompt has the behaviors, the tools and the workflows");
+        CHECK(prompt.find(L"mcp__agentmaster__read") != std::wstring::npos && prompt.find(L"Read a session before you show it") != std::wstring::npos, "the database prompt confirms candidates with its read");
         bool allNamed = true;
         for (const auto& t : SessionDbToolDefs::kTools)
         {
