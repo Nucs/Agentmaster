@@ -37,7 +37,8 @@
 //     another thread, given twice, delivered once; a window that drops the request unanswered -> WindowClosed from the
 //     engine; the last-activated window first, a refusing or throwing sink skipped for the next; every sink refusing ->
 //     false, and no answer even when a refusing sink's copy of the reply dies later; a throwing requester contained; an
-//     empty reply.
+//     empty reply; and (§21.25) a request that NAMES its window goes to that window only — with its anchor session — and a
+//     named window that is not open answers false with no other window asked.
 
 #include "m5_tests.h"
 
@@ -923,6 +924,56 @@ namespace
         CHECK(!threw, "routing: nothing a requester's reply throws reaches the caller");
         UnregisterWindowLaunchHandlerIn(e, tokOk);
         CHECK(!RequestLaunchInWindowIn(e, req, RecordingReply(std::make_shared<LaunchAnswersSeen>())), "routing: no window left -> false");
+
+        // ----- MESSAGING.md §21.25: a request that NAMES its window (the new-thread wizard's window step) -----
+        {
+            auto namedAsked = std::make_shared<std::vector<std::wstring>>();
+            auto namedMutex = std::make_shared<std::mutex>();
+            // A sink that records who was asked and with which anchor session, and answers Opened from its own window.
+            const auto recordingSink = [namedAsked, namedMutex](const std::wstring& who) {
+                return [namedAsked, namedMutex, who](const RemoteLaunchRequest& r, RemoteLaunchReply reply) -> bool {
+                    {
+                        std::lock_guard<std::mutex> lk(*namedMutex);
+                        namedAsked->push_back(who + L"|" + r.afterSessionId);
+                    }
+                    RemoteLaunchOutcome out;
+                    out.result = R::Opened;
+                    out.sessionId = kS7;
+                    out.windowId = who;
+                    reply(out);
+                    return true;
+                };
+            };
+            const uint64_t tokNamedA = RegisterWindowLaunchHandlerIn(e, kWinA, recordingSink(kWinA));
+            const uint64_t tokNamedB = RegisterWindowLaunchHandlerIn(e, kWinB, recordingSink(kWinB));
+            {
+                std::lock_guard<std::mutex> lk(e.launchMutex);
+                e.lastActiveWindowId = kWinA; // the OTHER window was used last
+            }
+            RemoteLaunchRequest named = req;
+            named.windowId = kWinB;
+            named.afterSessionId = kS1;
+            seen = std::make_shared<LaunchAnswersSeen>();
+            CHECK(RequestLaunchInWindowIn(e, named, RecordingReply(seen)) && seen->count.load() == 1 && AnswerAt(seen, 0).windowId == kWinB,
+                  "named window: that window takes it, though another one was used last");
+            {
+                std::lock_guard<std::mutex> lk(*namedMutex);
+                CHECK(namedAsked->size() == 1 && (*namedAsked)[0] == kWinB + L"|" + kS1, "named window: only it was asked, and the request reached it whole (its anchor session too)");
+            }
+            named.windowId = L"{GONE-0000}";
+            seen = std::make_shared<LaunchAnswersSeen>();
+            CHECK(!RequestLaunchInWindowIn(e, named, RecordingReply(seen)) && seen->count.load() == 0,
+                  "named window that is not open: false and no answer (the wizard asks again) - never another window");
+            {
+                std::lock_guard<std::mutex> lk(*namedMutex);
+                CHECK(namedAsked->size() == 1, "named window that is not open: no other window was asked");
+            }
+            named.windowId.clear();
+            seen = std::make_shared<LaunchAnswersSeen>();
+            CHECK(RequestLaunchInWindowIn(e, named, RecordingReply(seen)) && AnswerAt(seen, 0).windowId == kWinA, "no name: the window used last, as before");
+            UnregisterWindowLaunchHandlerIn(e, tokNamedA);
+            UnregisterWindowLaunchHandlerIn(e, tokNamedB);
+        }
         ::Sleep(60); // let the detached sink threads finish before the Engine goes away (they hold only their own copies)
     }
 }

@@ -558,6 +558,9 @@ namespace Agentmaster
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
                 hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
                 hooks.versionWord = []() { return AppVersionWordForMessaging(); };
+                // §21.25: the new-thread wizard's window step lists every window's strip (the AI search's census, answered by
+                // each window's UI thread). The service calls it on a worker thread of its own, never on a UI thread.
+                hooks.windowCensus = [](uint32_t timeoutMs) { return CollectWindowCensus(timeoutMs); };
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
                 e->messaging->Apply(LoadAppSettings());
             }
@@ -2054,20 +2057,40 @@ namespace Agentmaster
         {
             std::lock_guard<std::mutex> lk(e.launchMutex);
             sinks.reserve(e.launchSinks.size());
-            for (const auto& s : e.launchSinks)
+            if (!request.windowId.empty())
             {
-                if (s.fn && !e.lastActiveWindowId.empty() && s.windowId == e.lastActiveWindowId)
+                // MESSAGING.md §21.25: the requester named the window (the new-thread wizard's window step, by the number the user
+                // picked). Only that window is asked: a tab opened elsewhere would not be where the user chose, and a window that
+                // closed since the census leaves no candidate — the request then returns false and the wizard asks again.
+                for (const auto& s : e.launchSinks)
                 {
-                    sinks.emplace_back(s.windowId, s.fn);
+                    if (s.fn && s.windowId == request.windowId)
+                    {
+                        sinks.emplace_back(s.windowId, s.fn);
+                    }
                 }
             }
-            for (const auto& s : e.launchSinks)
+            else
             {
-                if (s.fn && (e.lastActiveWindowId.empty() || s.windowId != e.lastActiveWindowId))
+                for (const auto& s : e.launchSinks)
                 {
-                    sinks.emplace_back(s.windowId, s.fn);
+                    if (s.fn && !e.lastActiveWindowId.empty() && s.windowId == e.lastActiveWindowId)
+                    {
+                        sinks.emplace_back(s.windowId, s.fn);
+                    }
+                }
+                for (const auto& s : e.launchSinks)
+                {
+                    if (s.fn && (e.lastActiveWindowId.empty() || s.windowId != e.lastActiveWindowId))
+                    {
+                        sinks.emplace_back(s.windowId, s.fn);
+                    }
                 }
             }
+        }
+        if (sinks.empty() && !request.windowId.empty())
+        {
+            AppendStateLog(L"hooks.log", L"[remote-launch] window " + request.windowId + L" was asked for by name and is not open: nothing opened\n");
         }
         size_t refused = 0;
         for (const auto& [windowId, fn] : sinks)

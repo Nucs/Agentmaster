@@ -1226,6 +1226,13 @@ namespace winrt::TerminalApp::implementation
             {
                 info.lastActivityUnixMs = createdNowMs;
             }
+            // Agentmaster (MESSAGING.md §21.25): the session's CREATION stamp, set once and never moved — the Telegram bot's
+            // new-thread wizard ranks tabs by it ("the newest tab in this folder", a window's "last tab created"). A record
+            // that already carries one keeps it (a caller-chosen id the registry knew).
+            if (info.createdUnixMs == 0)
+            {
+                info.createdUnixMs = createdNowMs;
+            }
         }
         else
         {
@@ -2401,6 +2408,11 @@ namespace winrt::TerminalApp::implementation
             if (createdNowMs > info.lastActivityUnixMs)
             {
                 info.lastActivityUnixMs = createdNowMs;
+            }
+            // Agentmaster (MESSAGING.md §21.25): the creation stamp, as for a Claude session (_LaunchClaudeSession) — set once.
+            if (info.createdUnixMs == 0)
+            {
+                info.createdUnixMs = createdNowMs;
             }
         }
         _sessionRegistry->Upsert(info);

@@ -13,8 +13,13 @@
 //   3. §21.17.4's side fixes: the BOUNDED folder check (FolderProbe.h — a hung probe never holds the caller past its wait, one
 //      probe per path, the cap, the kept answers), its "did not answer" text, and when a held message counts as deleted
 //      (HeldMessageGone).
+//   4. §21.25, the NEW-THREAD WIZARD (MessagingNewThreadWizard.h, TestMessagingNewThreadWizard): the steps' buttons, the
+//      case-insensitive folder resolution over a fake file system (a case-sensitive folder included), "create it?", the model
+//      choices and a typed id, the window choices and their default (the window of the newest tab in the folder), whole
+//      lifecycles through the reducers — forward, back, stale, refused (never retried by itself) and cancelled at every step —
+//      the views, the persisted records (a restart resumes them), the abort line and the session's creation stamp.
 // The service's sends, the binding of the thread and the launch with a chosen id need Telegram and a window: the live check is the
-// dev bot (BuildClaudeSpawn's chosen id is pinned in tests_spawn_sched.cpp).
+// dev bot (BuildClaudeSpawn's chosen id is pinned in tests_spawn_sched.cpp; the wizard's window routing in tests_tabtools.cpp).
 
 #include "m5_tests.h"
 
@@ -26,12 +31,17 @@
 #include <mutex>
 #include <stdexcept> // a probe that throws (section 3)
 #include <vector>
+#include <cwctype> // std::towlower (the wizard tests' fake file system)
+#include <map> // the wizard records (NewThreadsToJson)
+#include <optional>
+#include <unordered_map> // the window step's facts
 
 #include "../MessagingDirectory.h" // DirectoryTopicUrl (one link builder with TgTopicUrl)
 #include "../MessagingModels.h"
 #include "../MessagingNewThread.h"
 #include "../SessionRegistry.h" // PlaceSamples
 #include "../TelegramFormat.h"
+#include "../MessagingNewThreadWizard.h" // §21.25: the wizard (TestMessagingNewThreadWizard)
 // LAST: it brings <windows.h>, whose min / max macros must not reach the headers above.
 #include "../FolderProbe.h" // FolderProber, FolderProbeAnswer (section 3)
 
@@ -70,6 +80,722 @@ namespace
         f.inferredDir = inferred;
         f.lastActivityMs = ms;
         return f;
+    }
+}
+
+namespace
+{
+    // ===== §21.25: the new-thread wizard's fixtures ===========================================================================
+
+    // One entry of the fake file system: its parent folder (no trailing separator: "K:" for a root's child), its name as the
+    // disk spells it, and whether it is a folder.
+    struct WzEntry
+    {
+        std::wstring parent;
+        std::wstring name;
+        bool dir{ true };
+    };
+
+    // Lower case, for the fake's case-insensitive folders.
+    std::wstring WzLower(std::wstring s)
+    {
+        for (auto& c : s)
+        {
+            c = static_cast<wchar_t>(std::towlower(c));
+        }
+        return s;
+    }
+
+    // A folder's key in the fake: lower case, no trailing separator ("K:\" -> "k:").
+    std::wstring WzKey(std::wstring folder)
+    {
+        while (!folder.empty() && folder.back() == L'\\')
+        {
+            folder.pop_back();
+        }
+        return WzLower(std::move(folder));
+    }
+
+    // The fake file system ResolveNewThreadFolder walks: K:\ and \\nas\share\ exist; K:\source holds Agentmaster (a folder),
+    // notes.txt (a file) and CaseSens, a CASE-SENSITIVE folder that holds "Foo" (a folder) and "foo" (a file) — a lookup there
+    // answers only the exact spelling, as a folder WSL marked case-sensitive does. `listed` counts the listing fallback's calls.
+    FolderFs WzFs(const std::shared_ptr<std::vector<WzEntry>>& entries, const std::shared_ptr<int>& listed)
+    {
+        const std::wstring caseSensitive = WzKey(L"K:\\source\\CaseSens");
+        FolderFs fs;
+        fs.rootExists = [](const std::wstring& root) { return root == L"K:\\" || root == L"\\\\nas\\share\\"; };
+        fs.stat = [entries, caseSensitive](const std::wstring& path) {
+            FolderStat st;
+            const size_t sep = path.rfind(L'\\');
+            if (sep == std::wstring::npos)
+            {
+                return st;
+            }
+            const std::wstring parentKey = WzKey(path.substr(0, sep));
+            const std::wstring name = path.substr(sep + 1);
+            for (const auto& e : *entries)
+            {
+                if (WzKey(e.parent) != parentKey)
+                {
+                    continue;
+                }
+                const bool match = parentKey == caseSensitive ? e.name == name : WzLower(e.name) == WzLower(name);
+                if (match)
+                {
+                    st.exists = true;
+                    st.directory = e.dir;
+                    st.name = e.name;
+                    return st;
+                }
+            }
+            return st;
+        };
+        fs.list = [entries, listed](const std::wstring& folder) -> std::optional<std::vector<FolderStat>> {
+            ++*listed;
+            std::vector<FolderStat> out;
+            for (const auto& e : *entries)
+            {
+                if (WzKey(e.parent) == WzKey(folder))
+                {
+                    out.push_back(FolderStat{ true, e.dir, e.name });
+                }
+            }
+            return out;
+        };
+        return fs;
+    }
+
+    // A window census tab: its strip index, title and session ("" = a shell tab).
+    WindowTabInfo WzTab(uint32_t index, const std::wstring& title, const std::wstring& sessionId)
+    {
+        WindowTabInfo t;
+        t.index = index;
+        t.title = title;
+        t.sessionId = sessionId;
+        return t;
+    }
+
+    // A session's facts for the window step: its launch folder, its inferred folder ("" = none), its creation stamp and its
+    // MOST RECENT key.
+    NewThreadTabFacts WzFacts(const std::wstring& dir, const std::wstring& worksIn, int64_t created, int64_t recent)
+    {
+        NewThreadTabFacts f;
+        f.dirKey = NormDirKey(dir);
+        f.worksInKey = worksIn.empty() ? std::wstring{} : NormDirKey(worksIn);
+        f.createdMs = created;
+        f.recentMs = recent;
+        return f;
+    }
+
+    // The two windows of the window-step checks: window 1 holds a shell, "alpha" (in K:\proj, created at 100), "beta" (launched
+    // in K:\other but WORKING in K:\proj, created at 300) and "gamma" (no stamp, used recently); window 2 — the one used last —
+    // holds "delta" (K:\proj, 200) and "eps" (K:\y, 500).
+    std::vector<WindowCensus> WzCensus()
+    {
+        WindowCensus w1;
+        w1.windowId = L"{W1}";
+        w1.tabs = { WzTab(0, L"pwsh", L""), WzTab(1, L"alpha", L"a"), WzTab(2, L"beta", L"b"), WzTab(3, L"gamma", L"c") };
+        WindowCensus w2;
+        w2.windowId = L"{W2}";
+        w2.lastActive = true;
+        w2.tabs = { WzTab(0, L"delta", L"d"), WzTab(1, L"eps", L"e") };
+        return { w1, w2 };
+    }
+
+    std::unordered_map<std::wstring, NewThreadTabFacts> WzTabFacts()
+    {
+        return {
+            { L"a", WzFacts(L"K:\\proj", L"", 100, 10) },
+            { L"b", WzFacts(L"K:\\other", L"K:\\proj", 300, 20) },
+            { L"c", WzFacts(L"K:\\x", L"", 0, 900) },
+            { L"d", WzFacts(L"K:\\proj", L"", 200, 30) },
+            { L"e", WzFacts(L"K:\\y", L"", 500, 40) },
+        };
+    }
+
+    // The action a callback data string parses to (the wizard's checks press buttons through their data, as Telegram does).
+    NewThreadAction WzPress(const std::vector<std::vector<NewThreadButton>>& rows, const std::wstring& label)
+    {
+        for (const auto& row : rows)
+        {
+            for (const auto& b : row)
+            {
+                if (b.text.find(label) != std::wstring::npos)
+                {
+                    return ParseNewThreadCallbackData(b.data);
+                }
+            }
+        }
+        return NewThreadAction{};
+    }
+
+    // A held message as Telegram sends it (a Message object with an id and a text).
+    json::Value WzMessage(int64_t id, const std::wstring& text)
+    {
+        auto m = json::Value::MkObj();
+        m.Set(L"message_id", json::Value::MkNum(static_cast<double>(id)));
+        m.Set(L"text", json::Value::MkStr(text));
+        return m;
+    }
+
+    /// <summary>
+    /// MESSAGING.md §21.25: the NEW-THREAD WIZARD's pure half (MessagingNewThreadWizard.h) — the steps' buttons, the
+    /// case-insensitive folder resolution, the model choices and a typed id, the window choices and their default, whole
+    /// lifecycles through the reducers (every way forward, back, stale and aborted), the views, the persisted records and the
+    /// abort line.
+    /// </summary>
+    void TestMessagingNewThreadWizard()
+    {
+        wprintf(L"== TestMessagingNewThreadWizard (MESSAGING.md 21.25: create a folder, a model, a window; the lifecycle; persistence) ==\n");
+        using K = NewThreadAction::Kind;
+        using O = NewThreadOutcome::Kind;
+
+        // ===== W1. the wizard's buttons (callback data) ======================================================================
+        {
+            CHECK((NewThreadCallbackData(K::CreateFolder, 7) == L"nt:cf" && NewThreadCallbackData(K::BackToFolders, 0) == L"nt:bf" &&
+                      NewThreadCallbackData(K::ModelDefault, 0) == L"nt:md" && NewThreadCallbackData(K::ModelPick, 4) == L"nt:mo:4" &&
+                      NewThreadCallbackData(K::ModelSpecify, 0) == L"nt:ms" && NewThreadCallbackData(K::BackToModels, 0) == L"nt:bm" &&
+                      NewThreadCallbackData(K::WindowPick, 1) == L"nt:w:1" && NewThreadCallbackData(K::WindowDefault, 0) == L"nt:wd" &&
+                      NewThreadCallbackData(K::WindowRefresh, 0) == L"nt:wr"),
+                  "W1: each wizard button's data (a valueless kind ignores its value)");
+            const K all[] = { K::CreateFolder, K::BackToFolders, K::ModelDefault, K::ModelPick, K::ModelSpecify, K::BackToModels, K::WindowPick, K::WindowDefault, K::WindowRefresh, K::Cancel };
+            bool roundTrip = true;
+            for (const K k : all)
+            {
+                const NewThreadAction back = ParseNewThreadCallbackData(NewThreadCallbackData(k, 12));
+                const bool valued = k == K::ModelPick || k == K::WindowPick;
+                roundTrip = roundTrip && back.kind == k && back.value == (valued ? 12u : 0u) && NewThreadCallbackData(k, 999999999).size() <= 64;
+            }
+            CHECK((roundTrip), "W1: every wizard button parses back to its kind (and value), within 64 bytes");
+            CHECK((ParseNewThreadCallbackData(L"nt:cf:1").kind == K::None && ParseNewThreadCallbackData(L"nt:mo:").kind == K::None &&
+                      ParseNewThreadCallbackData(L"nt:w:x").kind == K::None && ParseNewThreadCallbackData(L"nt:mo:1234567890").kind == K::None &&
+                      ParseNewThreadCallbackData(L"nt:md:").kind == K::None && ParseNewThreadCallbackData(L"nt:wdx").kind == K::None),
+                  "W1: a value on a valueless kind, a valued kind without its value, a bad number: none");
+        }
+
+        // ===== W2. folder names and paths ====================================================================================
+        {
+            CHECK((!NewThreadFolderNameIllegal(L"a<b").empty() && !NewThreadFolderNameIllegal(L"a|b").empty() && !NewThreadFolderNameIllegal(L"q?").empty() &&
+                      !NewThreadFolderNameIllegal(std::wstring(1, L'\x01')).empty()),
+                  "W2: a character no Windows name takes is illegal (a wildcard to the lookup, too)");
+            CHECK((!NewThreadFolderNameIllegal(L"CON").empty() && !NewThreadFolderNameIllegal(L"con.txt").empty() && !NewThreadFolderNameIllegal(L"Com1").empty() &&
+                      !NewThreadFolderNameIllegal(L"LPT9.log").empty() && !NewThreadFolderNameIllegal(L"nul ").empty()),
+                  "W2: the device names, any case, with an extension or blanks: illegal");
+            CHECK((NewThreadFolderNameIllegal(L"COM10").empty() && NewThreadFolderNameIllegal(L"console").empty() && NewThreadFolderNameIllegal(L"a.").empty() &&
+                      NewThreadFolderNameIllegal(L"my project").empty()),
+                  "W2: COM10, a longer word, a trailing dot (a lookup drops it), a space inside: possible names");
+            CHECK((!NewThreadFolderNameIllegal(std::wstring(256, L'x')).empty() && NewThreadFolderNameIllegal(std::wstring(255, L'x')).empty()), "W2: at most 255 characters");
+            CHECK((!NewThreadFolderNameProblem(L"a.").empty() && !NewThreadFolderNameProblem(L"a ").empty() && NewThreadFolderNameProblem(L"a.b").empty() &&
+                      !NewThreadFolderNameProblem(L"CON").empty()),
+                  "W2: a creation also refuses a trailing dot or space (Windows would drop it)");
+            const auto parts = SplitFolderPath(L"  \"k:/Source//x/./y\\\"  ");
+            CHECK((parts && parts->root == L"K:\\" && !parts->unc && parts->components == std::vector<std::wstring>{ L"Source", L"x", L"y" } && !parts->parentRef),
+                  "W2: a path split: the drive upper case, doubled and trailing separators and \".\" dropped, quotes off");
+            const auto unc = SplitFolderPath(L"\\\\nas\\share\\proj\\sub");
+            CHECK((unc && unc->unc && unc->root == L"\\\\nas\\share\\" && unc->components == std::vector<std::wstring>{ L"proj", L"sub" }), "W2: a share's root and parts");
+            CHECK((SplitFolderPath(L"K:\\a\\..\\b") && SplitFolderPath(L"K:\\a\\..\\b")->parentRef && !SplitFolderPath(L"src\\x") && !SplitFolderPath(L"")),
+                  "W2: \"..\" is flagged; a relative path or nothing is no path");
+            CHECK((JoinFolderPath(L"K:\\", L"x") == L"K:\\x" && JoinFolderPath(L"K:\\a", L"x") == L"K:\\a\\x" && JoinFolderPath(L"\\\\nas\\share\\", L"p") == L"\\\\nas\\share\\p"),
+                  "W2: one separator between a folder and a name");
+            CHECK((NewThreadFolderLeaf(L"K:\\source\\Agentmaster") == L"Agentmaster" && NewThreadFolderLeaf(L"K:\\") == L"K:" && NewThreadFolderLeaf(L"K:\\a\\") == L"a"),
+                  "W2: a folder's last name; a drive root's letter");
+        }
+
+        // ===== W3. the case-insensitive resolution of a typed folder =========================================================
+        {
+            const auto entries = std::make_shared<std::vector<WzEntry>>(std::vector<WzEntry>{
+                { L"K:", L"source", true },
+                { L"K:\\source", L"Agentmaster", true },
+                { L"K:\\source", L"notes.txt", false },
+                { L"K:\\source", L"CaseSens", true },
+                { L"K:\\source\\CaseSens", L"Foo", true },
+                { L"K:\\source\\CaseSens", L"foo", false },
+            });
+            const auto listed = std::make_shared<int>(0);
+            const FolderFs fs = WzFs(entries, listed);
+
+            auto r = ResolveNewThreadFolder(L"k:\\SOURCE\\agentmaster", fs);
+            CHECK((r.kind == FolderResolveKind::Exists && r.path == L"K:\\source\\Agentmaster"), "W3: a typed folder in another case IS the existing one, in the disk's spelling");
+            r = ResolveNewThreadFolder(L"K:/source/agentmaster/new/deeper", fs);
+            CHECK((r.kind == FolderResolveKind::Missing && r.existingPrefix == L"K:\\source\\Agentmaster" && r.missing == std::vector<std::wstring>{ L"new", L"deeper" } &&
+                      r.path == L"K:\\source\\Agentmaster\\new\\deeper"),
+                  "W3: a missing folder: what exists (disk spelling), what a Create makes (the user's spelling), outermost first");
+            r = ResolveNewThreadFolder(L"K:\\source\\notes.txt\\x", fs);
+            CHECK((r.kind == FolderResolveKind::IsFile && r.path == L"K:\\source\\notes.txt" && r.reason.find(L"file") != std::wstring::npos), "W3: a file in the way");
+            *listed = 0;
+            r = ResolveNewThreadFolder(L"K:\\source\\casesens\\FOO", fs);
+            CHECK((r.kind == FolderResolveKind::Exists && r.path == L"K:\\source\\CaseSens\\Foo" && *listed == 1),
+                  "W3: in a case-sensitive folder the lookup misses, the listing finds the folder in another case (never a second folder)");
+            r = ResolveNewThreadFolder(L"K:\\source\\CaseSens\\foo", fs);
+            CHECK((r.kind == FolderResolveKind::IsFile && r.path == L"K:\\source\\CaseSens\\foo"), "W3: the EXACT spelling wins over a case variant (here a file)");
+            r = ResolveNewThreadFolder(L"Q:\\x", fs);
+            CHECK((r.kind == FolderResolveKind::NoRoot && r.reason.find(L"Q:") != std::wstring::npos), "W3: a drive that is not there");
+            r = ResolveNewThreadFolder(L"\\\\down\\share\\x", fs);
+            CHECK((r.kind == FolderResolveKind::NoRoot && r.reason.find(L"\\\\down\\share") != std::wstring::npos), "W3: a share that is not reachable");
+            r = ResolveNewThreadFolder(L"\\\\nas\\share\\proj", fs);
+            CHECK((r.kind == FolderResolveKind::Missing && r.existingPrefix == L"\\\\nas\\share\\" && r.path == L"\\\\nas\\share\\proj"), "W3: a missing folder on a share");
+            CHECK((ResolveNewThreadFolder(L"K:\\source\\..\\x", fs).kind == FolderResolveKind::Invalid), "W3: \"..\" is refused");
+            CHECK((ResolveNewThreadFolder(L"K:\\a*b", fs).kind == FolderResolveKind::Invalid && ResolveNewThreadFolder(L"K:\\source\\a<b", fs).kind == FolderResolveKind::Invalid),
+                  "W3: a wildcard or a character Windows refuses: refused before any lookup");
+            CHECK((ResolveNewThreadFolder(L"K:\\source\\CON\\x", fs).kind == FolderResolveKind::Invalid), "W3: a device name is refused");
+            r = ResolveNewThreadFolder(L"K:\\source\\new.", fs);
+            CHECK((r.kind == FolderResolveKind::Invalid && r.reason.find(L"cannot be created") != std::wstring::npos), "W3: a missing name Windows cannot make as written");
+            CHECK((ResolveNewThreadFolder(L"K:\\source\\" + std::wstring(240, L'z'), fs).kind == FolderResolveKind::Invalid), "W3: a creation past the path cap is refused");
+            CHECK((ResolveNewThreadFolder(L"src\\x", fs).kind == FolderResolveKind::Invalid && ResolveNewThreadFolder(L"K:\\x", FolderFs{}).kind == FolderResolveKind::NoRoot),
+                  "W3: a relative path; an empty file system has no root");
+        }
+
+        // ===== W4. the model step's choices, a typed id, /model ==============================================================
+        {
+            const std::vector<std::pair<std::wstring, std::wstring>> menu = { { L"Opus", L"opus" }, { L"Sonnet", L"sonnet" }, { L"OPUS again", L"OPUS" },
+                                                                                { L"", L"haiku" }, { L"broken", L"" }, { L"MiMo Pro", L"@mimo-pro" } };
+            auto choices = BuildNewThreadModelChoices(menu, L"claude-opus-5-5[1m]");
+            CHECK((choices.size() == 5 && choices[0].last && choices[0].target == L"claude-opus-5-5[1m]" && choices[1].label == L"Opus" && choices[2].target == L"sonnet" &&
+                      choices[3].label == L"haiku" && choices[4].preset && choices[4].target == L"@mimo-pro"),
+                  "W4: the last typed model first, then the menu's order; a twin in another case and an empty target left out; no label = the id");
+            choices = BuildNewThreadModelChoices(menu, L"SONNET");
+            CHECK((choices.size() == 4 && !choices[0].last && choices[0].target == L"opus"), "W4: a last typed model the menu lists is not shown twice");
+            CHECK((BuildNewThreadModelChoices({}, L"").empty()), "W4: nothing configured, nothing typed: no choice (Default and Specify remain)");
+            std::vector<std::pair<std::wstring, std::wstring>> many;
+            for (int i = 0; i < 60; ++i)
+            {
+                many.emplace_back(L"m" + std::to_wstring(i), L"model-" + std::to_wstring(i));
+            }
+            CHECK((BuildNewThreadModelChoices(many, L"").size() == kNewThreadModelChoicesMax), "W4: at most kNewThreadModelChoicesMax choices");
+            std::wstring why;
+            CHECK((ParseNewThreadModelId(L"  claude-opus-5-5[1m] ", &why) == std::optional<std::wstring>{ L"claude-opus-5-5[1m]" } &&
+                      ParseNewThreadModelId(L"anthropic/claude-sonnet-5.5", nullptr) && ParseNewThreadModelId(L"qwen3:32b", nullptr) && ParseNewThreadModelId(L"sonnet[1m]", nullptr)),
+                  "W4: model ids as the user types them (the [1m] window, a provider path, a tag)");
+            CHECK((!ParseNewThreadModelId(L"two words", &why) && why.find(L"one word") != std::wstring::npos), "W4: two words are no id, and the reason says so");
+            CHECK((!ParseNewThreadModelId(L"x;calc", nullptr) && !ParseNewThreadModelId(L"$(evil)", nullptr) && !ParseNewThreadModelId(L"a`b", nullptr) &&
+                      !ParseNewThreadModelId(L"\"q\"", nullptr) && !ParseNewThreadModelId(L"-flag", nullptr) && !ParseNewThreadModelId(L"@preset", nullptr)),
+                  "W4: nothing that could leave the pwsh command line's word: ; $ ` quotes, a leading - or @");
+            CHECK((!ParseNewThreadModelId(L"", &why) && !ParseNewThreadModelId(std::wstring(121, L'a'), nullptr) && ParseNewThreadModelId(std::wstring(120, L'a'), nullptr)),
+                  "W4: empty, and the length cap");
+            CHECK((NewThreadModelCommandArg(L"/model claude-opus-5-5[1m]") == std::optional<std::wstring>{ L"claude-opus-5-5[1m]" } &&
+                      NewThreadModelCommandArg(L"  /MODEL@SomeBot   opus  ") == std::optional<std::wstring>{ L"opus" } &&
+                      NewThreadModelCommandArg(L"/model") == std::optional<std::wstring>{ L"" }),
+                  "W4: /model <id>, any case, addressed to the bot or not; a bare /model");
+            CHECK((!NewThreadModelCommandArg(L"/models x") && !NewThreadModelCommandArg(L"use /model x") && !NewThreadModelCommandArg(L"")), "W4: /models, a mention, nothing: not /model");
+        }
+
+        // ===== W5. the window step's choices and their default ===============================================================
+        {
+            const auto facts = WzTabFacts();
+            auto plan = BuildNewThreadWindowPlan(WzCensus(), facts, NormDirKey(L"K:\\proj"), L"proj");
+            CHECK((plan.windows.size() == 2 && plan.windows[0].number == 1 && plan.windows[1].number == 2 && plan.windows[0].windowId == L"{W1}" && plan.leftOut == 0),
+                  "W5: the windows in census order, numbered from 1");
+            const auto& w1 = plan.windows[0];
+            CHECK((w1.tabCount == 4 && w1.newestTitle == L"beta" && w1.newestCreatedMs == 300), "W5: a window's tab count and its newest tab (the user's \"last tab created\")");
+            CHECK((w1.titles == std::vector<std::wstring>{ L"beta", L"alpha", L"gamma", L"pwsh" }), "W5: the titles newest first: a stamp beats none, then the MOST RECENT key, then the strip place");
+            CHECK((w1.folderTabs == 2 && w1.anchorSessionId == L"b" && w1.anchorTitle == L"beta"),
+                  "W5: a tab counts for the folder by its launch folder OR its inferred one; the newest such tab is the anchor");
+            CHECK((plan.windows[1].folderTabs == 1 && plan.windows[1].anchorSessionId == L"d" && plan.windows[1].lastActive), "W5: the second window's folder tab");
+            CHECK((plan.defaultIndex == 0 && plan.defaultReason.find(L"beta") != std::wstring::npos && plan.defaultReason.find(L"proj") != std::wstring::npos),
+                  "W5: the default is the window of the NEWEST folder tab over every window (beta, 300, over delta, 200), though window 2 was used last");
+            plan = BuildNewThreadWindowPlan(WzCensus(), facts, NormDirKey(L"K:\\none"), L"none");
+            CHECK((plan.defaultIndex == 1 && plan.defaultReason.find(L"used last") != std::wstring::npos && plan.windows[0].anchorSessionId.empty()),
+                  "W5: no tab in the folder: the window used last");
+            auto census = WzCensus();
+            census[1].lastActive = false;
+            plan = BuildNewThreadWindowPlan(census, facts, NormDirKey(L"K:\\none"), L"none");
+            CHECK((plan.defaultIndex == 0), "W5: no folder tab and no window used last: the first window");
+            CHECK((BuildNewThreadWindowPlan({}, facts, NormDirKey(L"K:\\proj"), L"proj").defaultIndex == -1), "W5: no window: no default");
+            auto tie = WzTabFacts();
+            tie[L"d"].createdMs = 300; // delta as new as beta
+            tie[L"d"].recentMs = 20;
+            plan = BuildNewThreadWindowPlan(WzCensus(), tie, NormDirKey(L"K:\\proj"), L"proj");
+            CHECK((plan.defaultIndex == 1), "W5: a tie on both clocks goes to the window used last");
+            std::vector<WindowCensus> crowd;
+            for (int i = 0; i < 23; ++i)
+            {
+                WindowCensus w;
+                w.windowId = L"{X" + std::to_wstring(i) + L"}";
+                for (uint32_t t = 0; t < 12; ++t)
+                {
+                    w.tabs.push_back(WzTab(t, L"tab " + std::to_wstring(t) + L" " + std::wstring(50, L'x'), L""));
+                }
+                crowd.push_back(std::move(w));
+            }
+            plan = BuildNewThreadWindowPlan(crowd, {}, NormDirKey(L"K:\\proj"), L"proj");
+            CHECK((plan.windows.size() == kNewThreadWindowsMax && plan.leftOut == 3 && plan.windows[0].titles.size() == kNewThreadWindowTitles),
+                  "W5: at most kNewThreadWindowsMax windows (the rest counted), at most ten titles each");
+            CHECK((plan.windows[0].titles[0].size() <= kNewThreadWindowTitleChars && plan.windows[0].titles[0].back() == L'\x2026'), "W5: a long title is cut, with an ellipsis");
+            CHECK((ParseNewThreadWindowNumber(L"2", 3) == std::optional<size_t>{ 1 } && ParseNewThreadWindowNumber(L" #2 ", 3) == std::optional<size_t>{ 1 } &&
+                      ParseNewThreadWindowNumber(L"w2", 3) == std::optional<size_t>{ 1 } && ParseNewThreadWindowNumber(L"Window 3", 3) == std::optional<size_t>{ 2 } &&
+                      ParseNewThreadWindowNumber(L"W 1", 3) == std::optional<size_t>{ 0 }),
+                  "W5: a window number as typed: 2, #2, w2, Window 3, W 1");
+            CHECK((!ParseNewThreadWindowNumber(L"0", 3) && !ParseNewThreadWindowNumber(L"4", 3) && !ParseNewThreadWindowNumber(L"2x", 3) && !ParseNewThreadWindowNumber(L"window", 3) &&
+                      !ParseNewThreadWindowNumber(L"", 3) && !ParseNewThreadWindowNumber(L"fix the tests", 3)),
+                  "W5: 0, out of range, a number with more, no number, words: none");
+        }
+
+        // ===== W6. a whole lifecycle: a list pick, a preset, the default window ==============================================
+        NewThreadRecord rec;
+        rec.listsBuilt = true;
+        rec.lists.recent = { NewThreadFolder{ L"K:\\proj", 3, 1000 } };
+        rec.lists.mostUsed = { NewThreadFolder{ L"K:\\proj", 3, 1000 }, NewThreadFolder{ L"K:\\other", 1, 900 } };
+        rec.topicName = L"my work";
+        {
+            NewThreadView v = BuildNewThreadView(rec, 2000);
+            CHECK((v.html.find(L"pick the folder") != std::wstring::npos && v.html.find(L"Cancel deletes this thread") != std::wstring::npos && v.rows.back().back().data == L"nt:x"),
+                  "W6: the folder step is the 21.17 picker, saying what follows and what Cancel does");
+            NewThreadOutcome out = ApplyNewThreadButton(rec, WzPress(v.rows, L"1 \x00B7 proj"));
+            CHECK((out.kind == O::CheckFolder && out.path == L"K:\\proj" && !out.typed), "W6: a list folder's button: check it (not typed: it is never offered for creation)");
+            FolderResolution exists;
+            exists.kind = FolderResolveKind::Exists;
+            exists.path = L"K:\\proj";
+            out = ApplyNewThreadFolderResolved(rec, exists, false);
+            CHECK((out.kind == O::EnterModel && rec.wizard.folder == L"K:\\proj"), "W6: an existing folder is chosen: the model step comes next");
+            EnterNewThreadModelStep(rec.wizard, BuildNewThreadModelChoices({ { L"Opus", L"opus" }, { L"MiMo Pro", L"@mimo-pro" } }, L""), false, L"opus");
+            v = BuildNewThreadView(rec, 2000);
+            CHECK((rec.wizard.step == NewThreadStep::Model && v.html.find(L"<code>opus</code>") != std::wstring::npos && v.html.find(L"claude-opus-5-5[1m]") != std::wstring::npos),
+                  "W6: the model step names the settings model Default stands for, and how to type an id");
+            CHECK((v.rows.size() >= 3 && ParseNewThreadCallbackData(v.rows[0][0].data).kind == K::ModelDefault && ParseNewThreadCallbackData(v.rows[0][1].data).kind == K::ModelSpecify &&
+                      ParseNewThreadCallbackData(v.rows.back()[0].data).kind == K::BackToFolders && ParseNewThreadCallbackData(v.rows.back()[1].data).kind == K::Cancel),
+                  "W6: the PC menus' order: Default and Specify first; Back and Cancel last");
+            CHECK((ApplyNewThreadButton(rec, NewThreadAction{ K::PickRecent, 0 }).kind == O::Stale && rec.wizard.step == NewThreadStep::Model),
+                  "W6: a folder button tapped at the model step is stale and changes nothing");
+            out = ApplyNewThreadButton(rec, WzPress(v.rows, L"MiMo Pro"));
+            CHECK((out.kind == O::CollectWindows && rec.wizard.step == NewThreadStep::Window && rec.wizard.modelTarget == L"@mimo-pro" && rec.wizard.modelLabel == L"MiMo Pro" &&
+                      out.rememberModel.empty()),
+                  "W6: a preset's button: the window step comes next (a preset is not remembered as a typed id)");
+            v = BuildNewThreadView(rec, 2000);
+            CHECK((v.html.find(L"Looking at the open windows") != std::wstring::npos && ApplyNewThreadButton(rec, NewThreadAction{ K::WindowDefault, 0 }).kind == O::Stale &&
+                      ApplyNewThreadButton(rec, NewThreadAction{ K::WindowPick, 0 }).kind == O::Stale),
+                  "W6: while the windows are looked at, the window buttons are stale");
+            out = ApplyNewThreadWindows(rec.wizard, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            CHECK((out.kind == O::Render && rec.wizard.windowsCollected && rec.wizard.defaultWindow == 0), "W6: two windows: the step shows them");
+            v = BuildNewThreadView(rec, 2000);
+            CHECK((v.html.find(L"newest: \x201C" L"beta\x201D") != std::wstring::npos && v.html.find(L"2 in proj") != std::wstring::npos &&
+                      v.html.find(L"used last") != std::wstring::npos && v.html.find(L"MiMo Pro") != std::wstring::npos && v.html.find(L"Default: <b>window 1</b>") != std::wstring::npos),
+                  "W6: the window step: each window's tabs, newest tab, folder tabs; the default and why; the chosen model");
+            CHECK((WzPress(v.rows, L"Default \x2014 window 1").kind == K::WindowDefault && WzPress(v.rows, L"\U0001FA9F 2").kind == K::WindowPick &&
+                      WzPress(v.rows, L"Refresh").kind == K::WindowRefresh && WzPress(v.rows, L"Back").kind == K::BackToModels),
+                  "W6: the window step's buttons");
+            out = ApplyNewThreadButton(rec, WzPress(v.rows, L"Default \x2014 window 1"));
+            CHECK((out.kind == O::Launch && rec.wizard.windowId == L"{W1}" && rec.wizard.windowNumber == 1 && rec.wizard.anchorSessionId == L"b"),
+                  "W6: the default: window 1, right after the newest tab of the folder");
+            const NewThreadLaunchPlan plan = BuildNewThreadLaunchPlan(rec);
+            CHECK((plan.dir == L"K:\\proj" && plan.title == L"my work" && plan.model == L"@mimo-pro" && plan.windowId == L"{W1}" && plan.afterSessionId == L"b"),
+                  "W6: the launch: folder, the thread's name as the title, the model target, the window, the anchor");
+            CHECK((plan.summaryText == L"Opening a new session in proj \x00B7 MiMo Pro \x00B7 window 1, next to \x201C" L"beta\x201D\x2026" &&
+                      plan.summaryHtml.find(L"<b>proj</b>") != std::wstring::npos),
+                  "W6: the opening line says what opens where");
+        }
+
+        // ===== W7. a launch that did not go through comes back, never retried by itself ======================================
+        {
+            NewThreadWizard w = rec.wizard;
+            CHECK((NewThreadStepAfterRefusal(w, RemoteLaunchResult::PresetRefused) == NewThreadStep::Model), "W7: a refused preset: back to the model step");
+            CHECK((NewThreadStepAfterRefusal(w, RemoteLaunchResult::WindowClosed) == NewThreadStep::Window && NewThreadStepAfterRefusal(w, RemoteLaunchResult::Failed) == NewThreadStep::Window),
+                  "W7: a closed window, a failed tab: back to the window step");
+            w.windowAuto = true;
+            CHECK((NewThreadStepAfterRefusal(w, RemoteLaunchResult::WindowClosed) == NewThreadStep::Model), "W7: a skipped window step goes back to the model step (it would skip again)");
+            NewThreadRecord back = rec;
+            back.wizard.windowsSerial = 41; // the census that made the list it launched with
+            ReturnNewThreadToStep(back.wizard, NewThreadStep::Window, L"\x26A0 That window is not open any more.");
+            CHECK((back.wizard.step == NewThreadStep::Window && back.wizard.askWindow && !back.wizard.windowsCollected && !back.wizard.windowChosen),
+                  "W7: back at the window step: its list is read again, and it MUST be shown");
+            CHECK((back.wizard.windowsSerial == 0), "W7: ...with no census in flight (0), so the service's render starts one instead of waiting for an old one");
+            WindowCensus only;
+            only.windowId = L"{W2}";
+            only.tabs = { WzTab(0, L"delta", L"d") };
+            NewThreadOutcome out = ApplyNewThreadWindows(back.wizard, BuildNewThreadWindowPlan({ only }, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            CHECK((out.kind == O::Render && back.wizard.windows.size() == 1), "W7: after a refusal ONE window is shown, not launched into (a refusal is never retried without a tap)");
+            CHECK((BuildNewThreadView(back, 2000).html.find(L"That window is not open any more") != std::wstring::npos), "W7: the step says why it came back");
+            out = ApplyNewThreadWindows(back.wizard, NewThreadWindowPlan{});
+            NewThreadView v = BuildNewThreadView(back, 2000);
+            CHECK((out.kind == O::Render && v.html.find(L"No window answered") != std::wstring::npos && WzPress(v.rows, L"Refresh").kind == K::WindowRefresh),
+                  "W7: after a refusal NO window answering is said, with Refresh");
+            out = ApplyNewThreadButton(back, WzPress(v.rows, L"Refresh"));
+            CHECK((out.kind == O::CollectWindows && !back.wizard.windowsCollected && back.wizard.notice.empty() && back.wizard.askWindow),
+                  "W7: Refresh asks the windows again (the notice goes with the user's next choice; the step still must ask)");
+            out = ApplyNewThreadButton(back, NewThreadAction{ K::BackToModels, 0 });
+            CHECK((out.kind == O::Render && back.wizard.step == NewThreadStep::Model && !back.wizard.modelChosen), "W7: Back from the window step: the model step");
+            out = ApplyNewThreadButton(back, NewThreadAction{ K::ModelDefault, 0 });
+            CHECK((out.kind == O::CollectWindows && !back.wizard.askWindow && back.wizard.modelTarget.empty() && back.wizard.modelLabel == L"Default"),
+                  "W7: a new model choice (Default) is a fresh pass: the window step may skip again");
+            out = ApplyNewThreadWindows(back.wizard, BuildNewThreadWindowPlan({ only }, WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            CHECK((out.kind == O::Launch && back.wizard.windowAuto && back.wizard.windowId == L"{W2}" && back.wizard.anchorSessionId == L"d"),
+                  "W7: a fresh pass with one window skips the step: that window, after its folder tab");
+            CHECK((BuildNewThreadLaunchPlan(back).summaryText.find(L"window") == std::wstring::npos), "W7: a skipped window step is not named in the opening line");
+            NewThreadWizard none;
+            none.step = NewThreadStep::Window;
+            out = ApplyNewThreadWindows(none, NewThreadWindowPlan{});
+            CHECK((out.kind == O::Launch && none.windowAuto && none.windowChosen && none.windowId.empty()), "W7: a fresh pass with no window answering: the engine's choice");
+        }
+
+        // ===== W8. a typed folder that does not exist: create it, or go back =================================================
+        {
+            NewThreadRecord r;
+            NewThreadOutcome out = ApplyNewThreadText(r, L"K:/brand/new");
+            CHECK((out.kind == O::CheckFolder && out.typed && out.path == L"K:\\brand\\new"), "W8: a typed path is a folder choice (typed: it may be created)");
+            FolderResolution missing;
+            missing.kind = FolderResolveKind::Missing;
+            missing.path = L"K:\\brand\\new";
+            missing.existingPrefix = L"K:\\";
+            missing.missing = { L"brand", L"new" };
+            out = ApplyNewThreadFolderResolved(r, missing, true);
+            NewThreadView v = BuildNewThreadView(r, 0);
+            CHECK((out.kind == O::Render && r.wizard.step == NewThreadStep::CreateFolder && r.wizard.createPath == L"K:\\brand\\new" &&
+                      v.html.find(L"does not exist yet") != std::wstring::npos && v.html.find(L"brand\\new") != std::wstring::npos && v.html.find(L"2 new folders") != std::wstring::npos),
+                  "W8: a missing typed folder: \"create it?\" with what exists and what a Create makes");
+            CHECK((WzPress(v.rows, L"Create").kind == K::CreateFolder && WzPress(v.rows, L"Back to the folders").kind == K::BackToFolders && WzPress(v.rows, L"Cancel").kind == K::Cancel),
+                  "W8: Create, Back, Cancel");
+            out = ApplyNewThreadButton(r, WzPress(v.rows, L"Create"));
+            CHECK((out.kind == O::CreateFolder && out.path == L"K:\\brand\\new"), "W8: Create makes the checked folder");
+            out = ApplyNewThreadFolderCreated(r, false, L"Access is denied. (error 5)");
+            CHECK((out.kind == O::Render && r.wizard.step == NewThreadStep::CreateFolder && r.wizard.notice.find(L"Access is denied") != std::wstring::npos),
+                  "W8: a refused creation stays at the step with Windows' reason");
+            out = ApplyNewThreadFolderCreated(r, true, L"");
+            CHECK((out.kind == O::EnterModel && r.wizard.folder == L"K:\\brand\\new" && r.wizard.folderCreated && r.wizard.createPath.empty()),
+                  "W8: made: the folder is chosen (and marked created); the model step comes next");
+            NewThreadRecord r2;
+            ApplyNewThreadFolderResolved(r2, missing, true);
+            out = ApplyNewThreadButton(r2, NewThreadAction{ K::BackToFolders, 0 });
+            CHECK((out.kind == O::Render && r2.wizard.step == NewThreadStep::Folder && r2.wizard.createPath.empty() && r2.wizard.createMissing.empty()),
+                  "W8: Back from \"create it?\": the folder lists, nothing to create");
+            NewThreadRecord gone;
+            gone.listsBuilt = true;
+            ApplyNewThreadFolderResolved(gone, missing, false);
+            CHECK((gone.wizard.step == NewThreadStep::Folder && !gone.listsBuilt && gone.wizard.notice.find(L"gone") != std::wstring::npos),
+                  "W8: a LIST pick that is gone is never offered for creation: the lists are read again");
+            FolderResolution bad;
+            bad.kind = FolderResolveKind::NoRoot;
+            bad.reason = L"The drive Q: is not available on the PC.";
+            ApplyNewThreadFolderResolved(gone, bad, true);
+            CHECK((gone.wizard.step == NewThreadStep::Folder && gone.wizard.notice.find(L"Q:") != std::wstring::npos), "W8: a folder that cannot be: the reason above the lists");
+            FolderResolution slow;
+            slow.kind = FolderResolveKind::NoAnswer;
+            slow.path = L"\\\\nas\\x";
+            ApplyNewThreadFolderResolved(gone, slow, true);
+            CHECK((gone.wizard.notice.find(L"did not answer") != std::wstring::npos), "W8: a folder that did not answer: said so");
+            out = ApplyNewThreadButton(gone, NewThreadAction{ K::PageLabelUsed, 0 });
+            CHECK((out.kind == O::Toast && !gone.wizard.notice.empty()), "W8: a page label is a toast and keeps the notice");
+            out = ApplyNewThreadButton(gone, NewThreadAction{ K::PageUsed, 0 });
+            CHECK((out.kind == O::Render && gone.wizard.notice.empty()), "W8: the next choice clears the notice");
+        }
+
+        // ===== W9. typed choices: a model id, /model, a preset, a window number; the user's own words ========================
+        {
+            NewThreadRecord r;
+            r.wizard.folder = L"K:\\proj";
+            EnterNewThreadModelStep(r.wizard, BuildNewThreadModelChoices({ { L"Opus", L"opus" }, { L"MiMo Pro", L"@mimo-pro" } }, L""), true, L"");
+            NewThreadView v = BuildNewThreadView(r, 0);
+            CHECK((v.html.find(L"No presets yet") != std::wstring::npos && v.html.find(L"Claude Code\x2019s own default model") != std::wstring::npos),
+                  "W9: no preset: the step says where to add one; no settings model: Default is Claude Code's own");
+            NewThreadOutcome out = ApplyNewThreadText(r, L"fix the build please");
+            CHECK((out.kind == O::Hold && r.wizard.step == NewThreadStep::Model), "W9: words at the model step are the user's message, held");
+            out = ApplyNewThreadText(r, L"/model claude-opus-5-5[1m]");
+            CHECK((out.kind == O::CollectWindows && r.wizard.modelTarget == L"claude-opus-5-5[1m]" && out.rememberModel == L"claude-opus-5-5[1m]"),
+                  "W9: /model <id> at the model step: that model (remembered for the next time)");
+            ApplyNewThreadButton(r, NewThreadAction{ K::BackToModels, 0 });
+            out = ApplyNewThreadText(r, L"/model");
+            CHECK((out.kind == O::Render && r.wizard.step == NewThreadStep::ModelSpecify), "W9: a bare /model asks for the id");
+            v = BuildNewThreadView(r, 0);
+            CHECK((v.html.find(L"Send the model id") != std::wstring::npos && WzPress(v.rows, L"Use Default").kind == K::ModelDefault &&
+                      WzPress(v.rows, L"Back to the list").kind == K::BackToModels && WzPress(v.rows, L"Cancel").kind == K::Cancel),
+                  "W9: the model-id prompt: Default, back to the list, Cancel");
+            out = ApplyNewThreadText(r, L"bad;id");
+            CHECK((out.kind == O::Reply && out.text.find(L"letters, digits") != std::wstring::npos && r.wizard.step == NewThreadStep::ModelSpecify), "W9: a bad id is answered; the step stays");
+            out = ApplyNewThreadText(r, L"please use opus for this");
+            CHECK((out.kind == O::Hold && r.wizard.notice.find(L"Kept as a message") != std::wstring::npos), "W9: words at the id prompt are held, and the prompt says what it still waits for");
+            out = ApplyNewThreadText(r, L"opus");
+            CHECK((out.kind == O::CollectWindows && r.wizard.modelLabel == L"Opus" && r.wizard.notice.empty()), "W9: a listed model typed by its id is that choice (its name)");
+            ApplyNewThreadButton(r, NewThreadAction{ K::BackToModels, 0 });
+            ApplyNewThreadButton(r, NewThreadAction{ K::ModelSpecify, 0 });
+            out = ApplyNewThreadText(r, L"@mimo-pro");
+            CHECK((out.kind == O::CollectWindows && r.wizard.modelTarget == L"@mimo-pro" && out.rememberModel.empty()), "W9: a listed preset typed as @id");
+            ApplyNewThreadButton(r, NewThreadAction{ K::BackToModels, 0 });
+            ApplyNewThreadButton(r, NewThreadAction{ K::ModelSpecify, 0 });
+            out = ApplyNewThreadText(r, L"@nope");
+            CHECK((out.kind == O::Reply && out.text.find(L"No preset") != std::wstring::npos), "W9: an unknown preset is answered");
+            out = ApplyNewThreadText(r, L"K:\\elsewhere");
+            CHECK((out.kind == O::CheckFolder && out.typed), "W9: a typed folder at a later step changes the folder");
+            ApplyNewThreadButton(r, NewThreadAction{ K::ModelDefault, 0 });
+            ApplyNewThreadWindows(r.wizard, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            out = ApplyNewThreadText(r, L"2");
+            CHECK((out.kind == O::Launch && r.wizard.windowId == L"{W2}" && r.wizard.anchorSessionId == L"d"), "W9: a window number typed at the window step: that window");
+            NewThreadRecord w;
+            w.wizard.step = NewThreadStep::Window;
+            ApplyNewThreadWindows(w.wizard, BuildNewThreadWindowPlan(WzCensus(), WzTabFacts(), NormDirKey(L"K:\\proj"), L"proj"));
+            CHECK((ApplyNewThreadText(w, L"5").kind == O::Hold && ApplyNewThreadText(w, L"what about window three").kind == O::Hold),
+                  "W9: a number out of range or words at the window step: held");
+            NewThreadRecord atFolder;
+            CHECK((ApplyNewThreadText(atFolder, L"2").kind == O::Hold && atFolder.wizard.step == NewThreadStep::Folder),
+                  "W9: a lone number at the folder step is the user's message (only the window step reads numbers)");
+        }
+
+        // ===== W10. Cancel at every step, the stale guard ====================================================================
+        {
+            const NewThreadStep steps[] = { NewThreadStep::Folder, NewThreadStep::CreateFolder, NewThreadStep::Model, NewThreadStep::ModelSpecify, NewThreadStep::Window };
+            bool aborts = true;
+            for (const NewThreadStep s : steps)
+            {
+                NewThreadRecord r;
+                r.wizard.step = s;
+                aborts = aborts && ApplyNewThreadButton(r, NewThreadAction{ K::Cancel, 0 }).kind == O::Abort;
+                aborts = aborts && BuildNewThreadView(r, 0).rows.back().back().data == L"nt:x";
+            }
+            CHECK((aborts), "W10: every step has Cancel, and Cancel aborts (the service deletes the thread)");
+            CHECK((!NewThreadStepTakes(NewThreadStep::Folder, K::ModelPick) && !NewThreadStepTakes(NewThreadStep::Model, K::CreateFolder) &&
+                      !NewThreadStepTakes(NewThreadStep::Window, K::PickRecent) && !NewThreadStepTakes(NewThreadStep::ModelSpecify, K::ModelPick) &&
+                      NewThreadStepTakes(NewThreadStep::ModelSpecify, K::ModelDefault) && NewThreadStepTakes(NewThreadStep::Window, K::BackToModels)),
+                  "W10: which step takes which button");
+            NewThreadRecord r;
+            r.wizard.step = NewThreadStep::Model;
+            r.wizard.modelChoices = { NewThreadModelChoice{ L"Opus", L"opus", false, false } };
+            CHECK((ApplyNewThreadButton(r, NewThreadAction{ K::ModelPick, 3 }).kind == O::Stale && r.wizard.step == NewThreadStep::Model), "W10: a model index past the shown list is stale");
+            CHECK((ApplyNewThreadButton(r, NewThreadAction{ K::None, 0 }).kind == O::Stale), "W10: a malformed button is stale");
+        }
+
+        // ===== W11. the window step's text stays one message =================================================================
+        {
+            NewThreadRecord r;
+            r.wizard.folder = L"K:\\proj";
+            r.wizard.step = NewThreadStep::Window;
+            std::vector<WindowCensus> crowd;
+            for (int i = 0; i < 20; ++i)
+            {
+                WindowCensus w;
+                w.windowId = L"{C" + std::to_wstring(i) + L"}";
+                for (uint32_t t = 0; t < 12; ++t)
+                {
+                    w.tabs.push_back(WzTab(t, L"a rather long tab title number " + std::to_wstring(t) + L" <x>", L""));
+                }
+                crowd.push_back(std::move(w));
+            }
+            ApplyNewThreadWindows(r.wizard, BuildNewThreadWindowPlan(crowd, {}, NormDirKey(L"K:\\proj"), L"proj"));
+            const NewThreadView v = BuildNewThreadView(r, 0);
+            CHECK((v.html.size() <= kNewThreadWindowTextBudget && v.html.find(L"<b>20</b>") != std::wstring::npos),
+                  "W11: twenty windows of twelve long titles fit the budget (the titles shrink; every window is still listed)");
+            NewThreadRecord few;
+            few.wizard.folder = L"K:\\proj";
+            few.wizard.step = NewThreadStep::Window;
+            ApplyNewThreadWindows(few.wizard, BuildNewThreadWindowPlan({ crowd[0], crowd[1] }, {}, NormDirKey(L"K:\\proj"), L"proj"));
+            const NewThreadView fv = BuildNewThreadView(few, 0);
+            CHECK((fv.html.find(L"&lt;x&gt;") != std::wstring::npos && fv.html.find(L"number 9 ") != std::wstring::npos), "W11: two windows show their ten titles, escaped");
+        }
+
+        // ===== W12. persistence: the wizards and launches survive a restart ===================================================
+        {
+            std::map<int64_t, NewThreadRecord> records;
+            NewThreadRecord a = rec; // the W6 record: every step answered
+            a.pickerMessageId = 4321;
+            a.held = { WzMessage(11, L"first prompt"), WzMessage(12, L"second <one>") };
+            a.lastUseMs = 1000;
+            a.wizard.notice = L"\x26A0 a notice";
+            a.wizard.askWindow = true;
+            records[777] = a;
+            NewThreadRecord b;
+            b.pickerMessageId = -1; // a post in flight
+            b.lastUseMs = 0; // unknown: the day's grace starts at the restore
+            records[778] = b;
+            std::vector<NewThreadBind> binds(1);
+            binds[0].launchToken = 9;
+            binds[0].answered = true;
+            binds[0].sessionId = L"sess-1";
+            binds[0].threadId = 779;
+            binds[0].dir = L"K:\\proj";
+            binds[0].title = L"t";
+            binds[0].held = { WzMessage(21, L"held in the bind") };
+            binds[0].requestedMs = 5;
+            binds[0].replyTo = 21;
+            binds[0].wizard = a.wizard;
+            const json::Value doc = NewThreadsToJson(records, binds);
+            std::map<int64_t, NewThreadRecord> rr;
+            std::vector<NewThreadBind> rb;
+            NewThreadsFromJson(doc, rr, rb, 50000);
+            CHECK((rr.size() == 2 && rb.size() == 1), "W12: every record and bind comes back");
+            const auto& ra = rr[777];
+            CHECK((ra.topicName == L"my work" && ra.listsBuilt && ra.lists.mostUsed.size() == 2 && ra.lists.mostUsed[1].path == L"K:\\other" && ra.pickerMessageId == 4321 &&
+                      ra.held.size() == 2 && ra.held[1].StrAt(L"text") == L"second <one>" && ra.lastUseMs == 1000),
+                  "W12: a record's lists, picker, held messages and clock");
+            const auto& wz = ra.wizard;
+            CHECK((wz.step == NewThreadStep::Window && wz.folder == L"K:\\proj" && wz.modelTarget == L"@mimo-pro" && wz.modelChoices.size() == 2 && wz.modelChoices[1].preset &&
+                      wz.windowsCollected && wz.windows.size() == 2 && wz.windows[0].anchorSessionId == L"b" && wz.windows[0].titles.size() == 4 && wz.defaultWindow == 0 &&
+                      wz.windowId == L"{W1}" && wz.anchorSessionId == L"b" && wz.notice == L"\x26A0 a notice" && wz.askWindow && wz.windowsSerial == 0),
+                  "W12: the wizard's step, answers and the choices it showed (its census serial is not persisted)");
+            CHECK((rr[778].pickerMessageId == 0 && rr[778].lastUseMs == 50000), "W12: a post in flight comes back as no picker; an unknown clock starts at the restore");
+            CHECK((rb[0].sessionId == L"sess-1" && rb[0].threadId == 779 && rb[0].held.size() == 1 && rb[0].launchToken == 0 && !rb[0].answered && rb[0].requestedMs == 50000 &&
+                      rb[0].replyTo == 21 && rb[0].wizard.modelTarget == L"@mimo-pro"),
+                  "W12: a bind comes back with its wizard, but no token and no answer, its clock started at the restore");
+            // Malformed entries: skipped, or read as their defaults; a choice index can never point outside its list.
+            auto broken = json::Value::MkObj();
+            auto threads = json::Value::MkArr();
+            threads.Push(json::Value::MkStr(L"not an object"));
+            auto noId = json::Value::MkObj();
+            noId.Set(L"topicName", json::Value::MkStr(L"x"));
+            threads.Push(noId);
+            auto odd = json::Value::MkObj();
+            odd.Set(L"threadId", json::Value::MkNum(5));
+            auto oddWizard = json::Value::MkObj();
+            oddWizard.Set(L"step", json::Value::MkNum(99));
+            oddWizard.Set(L"defaultWindow", json::Value::MkNum(3));
+            odd.Set(L"wizard", oddWizard);
+            threads.Push(odd);
+            auto win = json::Value::MkObj();
+            win.Set(L"threadId", json::Value::MkNum(6));
+            auto winWizard = json::Value::MkObj();
+            winWizard.Set(L"step", json::Value::MkNum(4));
+            winWizard.Set(L"windowsCollected", json::Value::MkBool(true));
+            win.Set(L"wizard", winWizard);
+            threads.Push(win);
+            broken.Set(L"threads", threads);
+            auto badBinds = json::Value::MkArr();
+            auto noSession = json::Value::MkObj();
+            noSession.Set(L"threadId", json::Value::MkNum(9));
+            badBinds.Push(noSession);
+            broken.Set(L"binds", badBinds);
+            NewThreadsFromJson(broken, rr, rb, 1);
+            CHECK((rr.size() == 2 && rb.empty()), "W12: a record without an object or a thread id, a bind without a session: skipped");
+            CHECK((rr[5].wizard.step == NewThreadStep::Folder && rr[5].wizard.defaultWindow == -1), "W12: an unknown step reads as the folder step; a default outside the list as none");
+            CHECK((rr[6].wizard.step == NewThreadStep::Window && !rr[6].wizard.windowsCollected), "W12: a window step whose list did not survive is read again");
+            NewThreadsFromJson(json::Value{}, rr, rb, 1);
+            CHECK((rr.empty() && rb.empty()), "W12: no document: nothing");
+            // Through the state file (MessagingState::newThreads, opaque there).
+            MessagingState st;
+            st.newThreads = doc;
+            const auto back = StateFromJson(StateToJson(st));
+            std::map<int64_t, NewThreadRecord> sr;
+            std::vector<NewThreadBind> sb;
+            CHECK((back.has_value() && back->newThreads.type == json::Value::Type::Obj), "W12: the state file carries the wizards");
+            if (back)
+            {
+                NewThreadsFromJson(back->newThreads, sr, sb, 7);
+            }
+            CHECK((sr.size() == 2 && sb.size() == 1 && sr[777].wizard.windows.size() == 2 && sb[0].held[0].StrAt(L"text") == L"held in the bind"), "W12: ...and gives them back whole");
+            const auto plain = StateToJson(MessagingState{});
+            CHECK((plain.Find(L"newThreads") == nullptr && StateFromJson(plain)->newThreads.type == json::Value::Type::Null),
+                  "W12: a state without wizards writes no key (a file as before 21.25), and reads none");
+        }
+
+        // ===== W13. the abort line in the main view ==========================================================================
+        {
+            std::wstring html = BuildNewThreadAbortHtml(L"my <work>", { L"first <b>", L"", L"second" }, true, L"");
+            CHECK((html.find(L"Cancelled") != std::wstring::npos && html.find(L"\x201Cmy &lt;work&gt;\x201D") != std::wstring::npos && html.find(L"2 messages") != std::wstring::npos &&
+                      html.find(L"<blockquote expandable>first &lt;b&gt;\n\nsecond</blockquote>") != std::wstring::npos),
+                  "W13: a cancelled thread: its name, every text it held (escaped, the empty one skipped) in one quote");
+            html = BuildNewThreadAbortHtml(L"", {}, false, L"nothing was chosen in it for 24 hours");
+            CHECK((html.find(L"a new thread") != std::wstring::npos && html.find(L"24 hours") != std::wstring::npos && html.find(L"blockquote") == std::wstring::npos &&
+                      html.find(L"Cancelled") == std::wstring::npos),
+                  "W13: an abandoned thread with nothing held: why, no quote");
+            std::vector<std::wstring> lots(6, std::wstring(1500, L'q'));
+            html = BuildNewThreadAbortHtml(L"t", lots, false, L"x");
+            CHECK((html.find(L"6 messages") != std::wstring::npos && html.find(L"more not shown") != std::wstring::npos && html.size() < kNewThreadAbortTotalChars + 400),
+                  "W13: long texts are cut, and past the total the rest is counted");
+        }
+
+        // ===== W14. the session's creation stamp is persisted =================================================================
+        {
+            SessionInfo s = MakeSession(L"created-1");
+            s.createdUnixMs = 1234567;
+            const SessionInfo back = SessionFromJson(ToJson(s));
+            CHECK((back.createdUnixMs == 1234567), "W14: SessionInfo::createdUnixMs round-trips through sessions.json");
+            const json::Value none = ToJson(MakeSession(L"created-0"));
+            CHECK((none.Find(L"createdUnixMs") == nullptr && SessionFromJson(none).createdUnixMs == 0), "W14: an unstamped session writes no key (sessions.json byte-unchanged)");
+        }
     }
 }
 
@@ -500,4 +1226,5 @@ void TestMessagingNewThread()
                   waitFor([&] { return thrower.InFlight() == 0; }) && *throws == 2,
               "...its failure is not kept as an answer: the next ask probes again");
     }
+    TestMessagingNewThreadWizard(); // §21.25: the new-thread wizard (its own header line)
 }

@@ -1416,6 +1416,14 @@ namespace Agentmaster
         // below): a launch/adopt/resume SessionStart, a creation stamp or a triage move stamps this
         // "now" with zero API traffic, which was exactly the reported ⚡ false positive.
         int64_t lastActivityUnixMs{ 0 };
+        // Agentmaster (MESSAGING.md §21.25): when THIS session was CREATED (wall-clock ms, PERSISTED; 0 = created before the
+        // stamp existed, or adopted / restored without one). Stamped once, at the launch seam of a NEW session — a fresh spawn
+        // or a fork, Claude or Codex (TerminalPage::_LaunchClaudeSession / _LaunchCodexSession; never a restore, a resume or an
+        // adoption, which keep what the record has) — and never moved again, unlike lastActivityUnixMs above, which every hook
+        // and triage move restarts. The Telegram bot's new-thread wizard reads it for a window's "last tab created" and for
+        // the NEWEST tab working in a folder (where its default places the new tab); it falls back to the transcript's age
+        // (convCreatedUnixMs) and the MOST RECENT key for a session without it. No other surface reads it yet.
+        int64_t createdUnixMs{ 0 };
         // Agentmaster (⚡ server-cache hint): the last hook-time EVIDENCE OF A REAL API TURN —
         // stamped monotonically by SessionRegistry::OnHookEvent from the wire `ts`, but ONLY for
         // events that mean THIS conversation actually just made an API request (IsApiTurnEvidence,

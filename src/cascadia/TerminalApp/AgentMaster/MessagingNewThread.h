@@ -11,14 +11,21 @@
 //      PICKER there — two lists of folders, RECENT (the folder whose newest session was active last, first) and MOST USED (the
 //      folder more sessions worked in, first), ten a page, each with its own PAGER row (the page number between a ◀ and a ▶, each
 //      arrow only where it leads somewhere) — and holds what the user writes there.
-//   2. A tap on a folder (or a folder path the user sends) deletes the picker and opens a new Claude tab there, with a session id
-//      the service chose, in the background of the most recently active window.
+//   2. A tap on a folder (or a folder path the user sends) leads through the WIZARD's further steps (§21.25,
+//      MessagingNewThreadWizard.h): a typed folder that does not exist is offered for creation (checked case-insensitively), then
+//      an optional model (the right-click menu's list, or a typed id), then a window by number (the default: the window of the
+//      newest tab working in that folder). The launch deletes the picker and opens a new Claude tab, with a session id the
+//      service chose, in the background of the chosen window, right after that newest tab.
 //   3. When the session is live, the service ADOPTS the user's thread as the session's topic (no new topic is made), renames it like
 //      every topic (state glyph, color square, title), and hands it the held messages as if they had been sent in the topic: the
 //      first becomes the session's first prompt. A held message the user deleted meanwhile is left out (HeldMessageGone), and
 //      each one's 👀 "seen" mark comes off as it is handed over.
 //   4. The title: the thread's name when the user named it (forum_topic_created's is_name_implicit false), else the folder-derived
-//      default; renaming the thread later renames the session (forum_topic_edited), like /rename.
+//      default; renaming the thread later renames the session (forum_topic_edited), like /rename — and since §21.25 a rename
+//      during the wizard or while the launch runs is the title too.
+//   5. §21.25: ABORTING the creation deletes the thread (the user's rule) — ✖ Cancel at any step, or a wizard nobody touched for
+//      kNewThreadPickerIdleMs. A refused launch is not an abort: the wizard goes back to the step that can fix it. The wizards
+//      and launches are persisted in state.json, so a restart resumes them where they stood.
 //
 // This header is the PURE half: the folder lists from the registry's facts, the picker's text and buttons, the buttons' callback
 // data, the name a button shows, a topic name without its decoration, and a typed folder path. Header-only, no I/O (the folder
@@ -35,6 +42,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility> // std::pair (ParseNewThreadCallbackData's table of bare tags)
 #include <vector>
 
 #include "MessagingModels.h" // StateGlyph (StripTopicNameDecoration), TgShortSpan / TgEscapeHtml via TelegramFormat.h
@@ -50,12 +58,14 @@ namespace Agentmaster::Msg
     // The most folders a list keeps (ten pages): a picker is a choice, not an index of every folder ever used, and the probe that
     // drops a deleted folder runs once per kept folder.
     inline constexpr size_t kNewThreadListMax = 100;
-    // A picked launch whose session has not come up live after this long is given up: the thread is told, and its held messages
-    // are not delivered (the user still sees them in the chat). A background tab registers in about a second; three minutes
-    // covers a window that was busy re-homing a large workspace.
+    // A picked launch whose session has not come up live after this long is given up: the thread is told and goes back to its
+    // wizard's window step (§21.25), with the messages it held. A background tab registers in about a second; three minutes
+    // covers a window that was busy re-homing a large workspace. While windows are still restoring their tabs at a start, a
+    // launch restored from state.json is not given up (its session may only be waiting to be re-homed).
     inline constexpr int64_t kNewThreadBindTimeoutMs = 3 * 60 * 1000;
-    // A picker nobody used for this long is forgotten (its thread can start a new one with the next message): the service keeps
-    // the pickers in memory only, so this bounds them.
+    // §21.25: a wizard nobody used for this long is ABORTED — its thread is deleted (the user's rule: an aborted creation deletes
+    // its new topic), and a silent line in the chat's main view keeps what the user had written there. The wizards are persisted
+    // with the state file, so the clock counts across restarts. Before §21.25 an idle picker was only forgotten (in memory).
     inline constexpr int64_t kNewThreadPickerIdleMs = 24 * 60 * 60 * 1000;
     // The most messages one picker holds; a message past it is answered and not held (the picker is a doorway, not a queue).
     inline constexpr size_t kNewThreadHeldMax = 20;
@@ -216,8 +226,9 @@ namespace Agentmaster::Msg
 
     // ===== the buttons' callback data ================================================================================
 
-    /// <summary>What a picker button asks for (§21.17). The data names the list and a GLOBAL index (or a page), never a path: a
-    /// path can pass the Bot API's 64-byte limit for callback data, and the lists live in the service's picker state.</summary>
+    /// <summary>What a picker button asks for (§21.17; the wizard's steps, §21.25). The data names the list and a GLOBAL index (or a
+    /// page), never a path or a model id: a path can pass the Bot API's 64-byte limit for callback data, and the lists live in the
+    /// service's picker state (persisted with it, so a button of a picker from before a restart still maps to what it showed).</summary>
     struct NewThreadAction
     {
         enum class Kind
@@ -229,15 +240,29 @@ namespace Agentmaster::Msg
             PageUsed, // value = the Most used list's 0-based page to show
             PageLabelRecent, // the Recent pager's page label: nothing changes, the toast says the page; value = the 0-based page it shows
             PageLabelUsed, // the Most used pager's page label (as PageLabelRecent)
-            Cancel, // the picker goes; the held messages are dropped
+            Cancel, // §21.25: the creation is aborted at any step — the THREAD is deleted with everything in it (the user's rule)
+            // §21.25, the wizard's steps after the folder (MessagingNewThreadWizard.h):
+            CreateFolder, // the CreateFolder step: make the typed folder that does not exist, and go on in it
+            BackToFolders, // back to the folder lists (from the CreateFolder or the model step)
+            ModelDefault, // the model step: Default (the settings model, else Claude Code's own) — skipping the step
+            ModelPick, // value = the model step's 0-based choice (NewThreadWizard::modelChoices, as the step showed them)
+            ModelSpecify, // the model step: ✏ Specify… — the next message is a typed model id
+            BackToModels, // back to the model step (from the model-id prompt or the window step)
+            WindowPick, // value = the window step's 0-based window (NewThreadWizard::windows, as the step showed them)
+            WindowDefault, // the window step: its default (the window of the newest tab in the chosen folder)
+            WindowRefresh, // the window step: read the windows again
         };
         Kind kind{ Kind::None };
         size_t value{ 0 };
     };
 
-    /// <summary>The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:rl:1", "nt:ml:0", "nt:x".</summary>
+    /// <summary>
+    /// The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:rl:1", "nt:ml:0", "nt:x"; the wizard's
+    /// (§21.25) "nt:cf", "nt:bf", "nt:md", "nt:mo:4", "nt:ms", "nt:bm", "nt:w:1", "nt:wd", "nt:wr".
+    /// </summary>
     /// <param name="kind">The action (None gives "").</param>
-    /// <param name="value">The index or page (ignored for Cancel).</param>
+    /// <param name="value">The index or page (ignored by the kinds that carry none: Cancel, CreateFolder, BackToFolders,
+    /// ModelDefault, ModelSpecify, BackToModels, WindowDefault, WindowRefresh).</param>
     /// <returns>The data, at most 26 characters ("nt:", a three-character tag, a 64-bit value's 20 digits): far under the Bot API's
     /// 64 bytes. Only a value of at most 9 digits parses back (ParseNewThreadCallbackData), which every real index and page is.</returns>
     /// <exception cref="std::bad_alloc">If the data cannot be allocated.</exception>
@@ -260,6 +285,24 @@ namespace Agentmaster::Msg
             return prefix + L"ml:" + std::to_wstring(value);
         case NewThreadAction::Kind::Cancel:
             return prefix + L"x";
+        case NewThreadAction::Kind::CreateFolder:
+            return prefix + L"cf";
+        case NewThreadAction::Kind::BackToFolders:
+            return prefix + L"bf";
+        case NewThreadAction::Kind::ModelDefault:
+            return prefix + L"md";
+        case NewThreadAction::Kind::ModelPick:
+            return prefix + L"mo:" + std::to_wstring(value);
+        case NewThreadAction::Kind::ModelSpecify:
+            return prefix + L"ms";
+        case NewThreadAction::Kind::BackToModels:
+            return prefix + L"bm";
+        case NewThreadAction::Kind::WindowPick:
+            return prefix + L"w:" + std::to_wstring(value);
+        case NewThreadAction::Kind::WindowDefault:
+            return prefix + L"wd";
+        case NewThreadAction::Kind::WindowRefresh:
+            return prefix + L"wr";
         case NewThreadAction::Kind::None:
         default:
             return {};
@@ -269,7 +312,7 @@ namespace Agentmaster::Msg
     /// <summary>Reads a picker button's callback data back (NewThreadCallbackData's inverse).</summary>
     /// <param name="data">The callback data.</param>
     /// <returns>The action; Kind::None for data that is not a well-formed picker button's (a number with anything but digits, or
-    /// more than 9 of them, is malformed).</returns>
+    /// more than 9 of them, is malformed; so is a value on a kind that carries none, or a valued kind without its value).</returns>
     inline NewThreadAction ParseNewThreadCallbackData(std::wstring_view data) noexcept
     {
         NewThreadAction a;
@@ -278,10 +321,25 @@ namespace Agentmaster::Msg
             return a;
         }
         data.remove_prefix(kNewThreadCallbackPrefix.size());
-        if (data == L"x")
+        // The kinds that carry no value: the whole rest is their tag ("x", "cf", …). A tag followed by ":<digits>" is malformed
+        // for them — it falls through to the valued tags below, none of which matches, and reads as None.
+        static constexpr std::pair<std::wstring_view, NewThreadAction::Kind> kBare[] = {
+            { L"x", NewThreadAction::Kind::Cancel },
+            { L"cf", NewThreadAction::Kind::CreateFolder },
+            { L"bf", NewThreadAction::Kind::BackToFolders },
+            { L"md", NewThreadAction::Kind::ModelDefault },
+            { L"ms", NewThreadAction::Kind::ModelSpecify },
+            { L"bm", NewThreadAction::Kind::BackToModels },
+            { L"wd", NewThreadAction::Kind::WindowDefault },
+            { L"wr", NewThreadAction::Kind::WindowRefresh },
+        };
+        for (const auto& [tag, kind] : kBare)
         {
-            a.kind = NewThreadAction::Kind::Cancel;
-            return a;
+            if (data == tag)
+            {
+                a.kind = kind;
+                return a;
+            }
         }
         const size_t colon = data.find(L':');
         if (colon == std::wstring_view::npos)
@@ -326,6 +384,14 @@ namespace Agentmaster::Msg
         else if (what == L"ml")
         {
             a.kind = NewThreadAction::Kind::PageLabelUsed;
+        }
+        else if (what == L"mo")
+        {
+            a.kind = NewThreadAction::Kind::ModelPick; // §21.25
+        }
+        else if (what == L"w")
+        {
+            a.kind = NewThreadAction::Kind::WindowPick; // §21.25
         }
         else
         {
@@ -418,9 +484,11 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The PICKER's text (§21.17): what it is for, what happens to the user's messages, how the title is chosen, then the two
-    /// lists' current pages — each line the folder's number (the button's), its full path and, for Recent, how long ago it was
-    /// used, for Most used how many sessions worked there. Classic Telegram HTML (no title token: it is sent and edited as is).
+    /// The PICKER's text (§21.17): what it is for, what happens to the user's messages, how the title is chosen, the steps that
+    /// follow and what Cancel does (§21.25), then the two lists' current pages — each line the folder's number (the button's), its
+    /// full path and, for Recent, how long ago it was used, for Most used how many sessions worked there. Classic Telegram HTML (no
+    /// title token: it is sent and edited as is). The wizard's folder step (MessagingNewThreadWizard.h BuildNewThreadView) shows it
+    /// under its notice line.
     /// </summary>
     /// <param name="lists">The picker's lists.</param>
     /// <param name="recentPage">The Recent page shown (clamped here).</param>
@@ -448,6 +516,9 @@ namespace Agentmaster::Msg
         html += topicName.empty() ? std::wstring{ L"\n<i>Its title: the folder's name \x2014 rename this thread to change it.</i>" }
                                   : L"\n<i>Its title: <b>" + TgEscapeHtml(TgTitleLine(topicName, 120)) + L"</b> \x2014 rename this thread to change it.</i>"; // a title: on one line (TgTitleLine), like every title the bot prints
         html += L"\n<i>Or send a folder's full path.</i>";
+        // §21.25: the folder is the wizard's FIRST step — say what follows, and that the creation's abort takes the thread with it
+        // (the user's rule: an aborted creation deletes its new topic), so a Cancel never surprises.
+        html += L"\n<i>Then a model (optional) and a window. \x2716 Cancel deletes this thread.</i>";
         const auto section = [&](const wchar_t* glyph, const wchar_t* name, const std::vector<NewThreadFolder>& list, size_t page, bool recency) {
             html += L"\n\n";
             html += glyph;

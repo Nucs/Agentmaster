@@ -803,7 +803,9 @@ namespace Agentmaster
     /// <summary>
     /// Agentmaster (MESSAGING.md D27 / §21.23): open a session into ONE window — the most recently activated one
     /// (NoteWindowActivated), else the other windows in registration order (a window whose sink cannot take the request is
-    /// skipped) — and hand the launch's ANSWER to `reply`: the session the new tab hosts, or why nothing opened.
+    /// skipped) — and hand the launch's ANSWER to `reply`: the session the new tab hosts, or why nothing opened. §21.25: a
+    /// request that names its window (RemoteLaunchRequest::windowId — the new-thread wizard's window step) is offered to THAT
+    /// window only; when it is not registered any more (it closed since the census), nothing opens and this returns false.
     /// </summary>
     /// <param name="request">What to open.</param>
     /// <param name="reply">The answer's receiver (may be empty: the launch still runs, its answer is dropped). Called EXACTLY
