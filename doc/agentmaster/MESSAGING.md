@@ -2897,6 +2897,26 @@ updated 5 minutes ago
   `_handleTopicMessage(…, held = true)` — as if sent in the topic (the first is the session's first prompt; a `/rename` among
   them renames), never asked about as backlog however long the pick took. A message sent while the launch runs is held for it
   too. A bind whose session is not live after 3 minutes (`kNewThreadBindTimeoutMs`) is dropped and the thread is told.
+- **While a thread is being bound** (2026-10-18, NOT BUILT yet). The bind stays in `_threadBinds` until its topic is recorded
+  AND every message it holds has been handed over: the record goes in and the held messages come out in ONE lock scope, and
+  the bind leaves the list only in a scope that finds it empty. A message the user sends in the meantime (the rename and the
+  card are Telegram calls, a second or more) joins the bind and reaches the session after the held ones, in the order the user
+  wrote them: `_handleMessage` sends a message of a thread that has a topic AND a bind to `_holdForNewThread`, which reads the
+  binds and the topics in one lock scope and gives a message whose bind has just gone to the topic. An edit of a message the
+  bind still holds replaces it there. Before, the bind left the list first and the record went in after the registry write
+  and the transcript seed: a message between the two found neither and got a stray folder picker inside the new topic, and a
+  message sent during the rename was queued AHEAD of the held ones (`_queueRemotePrompt` puts a remote prompt after the
+  earlier remote ones).
+- **The first name's color** (2026-10-18, NOT BUILT yet) is resolved fresh from the session's record and made the sync's
+  settled fact before the rename reads it, as `_createTopic` resolves a created topic's color. The sync resolves every color
+  from ONE `dir-colors.json` snapshot taken before its registry copy, and a session launched from the phone is often in that
+  copy before its tab's first paint has given its folder a color (`_LaunchClaudeSession` records the session, then paints the
+  tab, which persists the color): the first name took the folder's preview color, and the name tick re-squared the topic
+  once the persisted color showed (seen on dev, 2026-10-18: 91d8d3d1 renamed to “🟡 🟩 BetterClipboard” at 12:45:45.9, then
+  to “🟡 🟪 BetterClipboard” at 12:46:34). Of the 616 topics the two installs' logs show made, no other one was re-squared
+  within 3 minutes of its creation: a created topic already took its color fresh. The window's launch line of such a session
+  is `[spawn] <sid> … (under the id its caller chose)`; until 2026-10-18 it read `[refork]`, as if a never-messaged fork had
+  been restored.
 - **The title.** The thread's name when the user gave one; else the folder-derived default (`DeriveSessionTitle`). RENAMING the
   thread later renames the session (`forum_topic_edited` from the owner → `_onUserTopicRenamed`: the name without the state
   glyph and color square, `StripTopicNameDecoration`, through `sessionAction "rename"` like `/rename`); the sync then renames
@@ -2906,7 +2926,9 @@ updated 5 minutes ago
   the thread's next message posts a new picker. A picker no one used for a day is forgotten. A start of the bot (a token
   change) clears both.
 - **Logs:** `[msg] new thread <id> opened by the user …`, `… opening session <sid8> in <folder> …`, `… is now the topic of
-  <sid8> “title” in <folder> 🟦 (N held message(s) handed over)`, `… did not come up within 3 min; the thread is free again`,
+  <sid8> “title” in <folder> 🟦 (N held message(s) handed over)`, `… : N more message(s), sent while it was being bound, handed
+  over after the held ones`, `… not bound to <sid8>: the thread or the session has a topic already (N held message(s)
+  dropped)`, `… did not come up within 3 min; the thread is free again`,
   `[msg] <sid8> renamed from its thread …`; `[nav] remote telegram new-thread <id>` (`held` / `-> launch <sid8>` / `cancelled`
   / `bound <sid8>`), `[nav] remote telegram topic-rename <sid8>`, `[nav] remote launch new … id=<sid8>`.
 
