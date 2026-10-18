@@ -4055,13 +4055,41 @@ namespace Agentmaster::Msg
             // earlier one was handed over before that look: the session gets them in the order the user wrote them (straight
             // to the topic, a message sent during the rename would be queued ahead of the held ones).
             size_t later = 0; // the messages the bind took after the topic was recorded
+            // §21.17.4: one held message's hand-over. Telegram tells a bot nothing when the user DELETES a message, so a held
+            // message the user deleted while it waited was delivered anyway; and its 👀 (the hold's "seen" mark) stayed on a held
+            // COMMAND for good — only a queued prompt's ✍ replaced it. One call settles both: the reaction call that takes the 👀
+            // off, made directly (not through the outbox) because its ANSWER is the only sign of a deletion — "message to react
+            // not found" (HeldMessageGone) leaves the message out. Any other answer hands it over, and so does a call that could
+            // not be made (stopping, or a flood pause on reactions): a lost prompt costs more than a stray one. The same removal
+            // is then QUEUED under the reaction's own outbox key, so a 👀 still waiting in the outbox (it is replaced) or in flight
+            // (it is sent first) can never come back after it; a prompt's ✍ (_queueRemotePrompt) replaces the removal in turn.
+            const auto handOver = [&](const json::Value& msg) {
+                const int64_t msgId = msg.I64At(L"message_id", 0);
+                if (msgId > 0 && _awaitCallSlot(L"setMessageReaction"))
+                {
+                    auto p = json::Value::MkObj();
+                    p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+                    p.Set(L"message_id", json::Value::MkNum(static_cast<double>(msgId)));
+                    p.Set(L"reaction", json::Value::MkArr()); // an empty list takes the bot's reaction off
+                    const TgResult r = _api->Call(L"setMessageReaction", p, 15000);
+                    if (HeldMessageGone(r.ok, r.httpStatus, r.description))
+                    {
+                        _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": held message " + std::to_wstring(msgId) + L" was deleted in Telegram before " +
+                             ShortId(s.id) + L" took it; left out (" + r.description + L")");
+                        return;
+                    }
+                    _handleTickFlood(L"setMessageReaction", r); // a 429 paces the next direct calls; the message goes either way
+                }
+                _react(msgId, L""); // the queued removal (above); a no-op without an id
+                _handleTopicMessage(s.id, msg, b.threadId, true);
+            };
             for (;;)
             {
                 for (const auto& msg : held)
                 {
                     try
                     {
-                        _handleTopicMessage(s.id, msg, b.threadId, true);
+                        handOver(msg);
                     }
                     catch (...)
                     {

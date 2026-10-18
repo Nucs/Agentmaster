@@ -9,20 +9,31 @@
 //      (TopicRecord::historyPromptMessageId), and the card's link is a FORM like its rich-ness (TopicRecord::cardLinked);
 //   2. a thread the user opens starts a NEW SESSION: the folder picker (MessagingNewThread.h — the two lists from the registry's
 //      facts, the pages, the text, the keyboard, the buttons' data, a typed folder, a topic name without its decoration), the
-//      registry's lean read behind it (SessionRegistry::PlaceSamples).
+//      registry's lean read behind it (SessionRegistry::PlaceSamples);
+//   3. §21.17.4's side fixes: the BOUNDED folder check (FolderProbe.h — a hung probe never holds the caller past its wait, one
+//      probe per path, the cap, the kept answers), its "did not answer" text, and when a held message counts as deleted
+//      (HeldMessageGone).
 // The service's sends, the binding of the thread and the launch with a chosen id need Telegram and a window: the live check is the
 // dev bot (BuildClaudeSpawn's chosen id is pinned in tests_spawn_sched.cpp).
 
 #include "m5_tests.h"
 
 #include <algorithm> // std::find / find_if / any_of / none_of
+#include <chrono> // the bounded probe's waits (section 3)
+#include <condition_variable> // the hanging probe's gate (section 3)
 #include <cstdio> // swprintf (the test folders' names)
+#include <memory> // the gate, shared with the probe threads (section 3)
+#include <mutex>
+#include <stdexcept> // a probe that throws (section 3)
+#include <vector>
 
 #include "../MessagingDirectory.h" // DirectoryTopicUrl (one link builder with TgTopicUrl)
 #include "../MessagingModels.h"
 #include "../MessagingNewThread.h"
 #include "../SessionRegistry.h" // PlaceSamples
 #include "../TelegramFormat.h"
+// LAST: it brings <windows.h>, whose min / max macros must not reach the headers above.
+#include "../FolderProbe.h" // FolderProber, FolderProbeAnswer (section 3)
 
 using namespace Agentmaster;
 using namespace Agentmaster::Msg;
@@ -395,5 +406,98 @@ void TestMessagingNewThread()
         CHECK(samples.size() == 2 && samples[0].workingDir == L"K:\\x" && samples[0].inferredWorkingDir == L"K:\\y" && samples[0].lastActivityUnixMs == 9 &&
                   samples[1].workingDir == L"K:\\z" && samples[1].lastActivityUnixMs == 7,
               "PlaceSamples: every record in insertion order, the newer activity stamp");
+    }
+
+    // ===== 3. the bounded folder check's text, and a deleted held message (§21.17.4) ==========================================
+    {
+        const std::wstring share = L"\\\\nas\\x";
+        const std::wstring noAnswer = NewThreadFolderNoAnswerText(share);
+        CHECK(noAnswer.rfind(L"The folder did not answer within 2 s (an offline network share?)", 0) == 0 && noAnswer.size() > share.size() &&
+                  noAnswer.compare(noAnswer.size() - share.size(), share.size(), share) == 0,
+              "the no-answer text: the reason first, the folder last (a button's toast is cut at 190 characters)");
+        CHECK(HeldMessageGone(false, 400, L"Bad Request: message to react not found"), "a deleted held message: the Bot API's words for it");
+        CHECK(HeldMessageGone(false, 400, L"Bad Request: MESSAGE_ID_INVALID") && HeldMessageGone(false, 400, L"Bad Request: message not found"),
+              "...and the raw forms of the same answer");
+        CHECK(!HeldMessageGone(true, 200, L"") && !HeldMessageGone(false, 429, L"Too Many Requests: retry after 5") && !HeldMessageGone(false, 0, L"transport failure 12007"),
+              "a success, a flood refusal, a lost connection: no proof, so the message is handed over");
+        CHECK(!HeldMessageGone(false, 400, L"Bad Request: message thread not found") && !HeldMessageGone(false, 400, L"Bad Request: chat not found") &&
+                  !HeldMessageGone(false, 400, L"Bad Request: REACTION_INVALID"),
+              "a missing topic, a missing chat, a refused reaction: none says the message was deleted");
+    }
+
+    // ===== 3. the bounded folder probe (FolderProbe.h) ========================================================================
+    {
+        // A probe that answers at once for local paths and HANGS for the share "\\nas\…" until the test opens the gate — the
+        // offline share of the report. Its own wait is bounded too, so a failed check cannot hang the suite. Every path it is
+        // run for is recorded (under the gate's lock), so the checks can count probes per path.
+        struct Gate
+        {
+            std::mutex m;
+            std::condition_variable cv;
+            bool open{ false };
+            std::vector<std::wstring> asked;
+        };
+        const auto gate = std::make_shared<Gate>();
+        const auto askedFor = [&gate](const std::wstring& path) {
+            std::lock_guard lk{ gate->m };
+            return static_cast<int>(std::count(gate->asked.begin(), gate->asked.end(), path));
+        };
+        // Polls `done` for up to 10 s: the probe threads start and end on their own clock.
+        const auto waitFor = [](const auto& done) {
+            const uint64_t until = ::GetTickCount64() + 10000;
+            while (!done() && ::GetTickCount64() < until)
+            {
+                ::Sleep(5);
+            }
+            return done();
+        };
+        FolderProber prober{ [gate](const std::wstring& path) {
+                                {
+                                    std::lock_guard lk{ gate->m };
+                                    gate->asked.push_back(path);
+                                }
+                                if (path.rfind(L"\\\\nas\\", 0) == 0)
+                                {
+                                    std::unique_lock lk{ gate->m };
+                                    gate->cv.wait_for(lk, std::chrono::seconds{ 20 }, [&gate] { return gate->open; });
+                                    return true;
+                                }
+                                return path == L"K:\\here";
+                            },
+                             2 };
+        CHECK(prober.Probe(L"K:\\here", 2000) == FolderProbeAnswer::Folder && prober.Probe(L"K:\\gone", 2000) == FolderProbeAnswer::NotFolder,
+              "a probe that answers: Folder, NotFolder");
+        CHECK(prober.Probe(L"", 2000) == FolderProbeAnswer::NotFolder && askedFor(L"") == 0, "an empty path is no folder, and nothing is asked");
+        const uint64_t t0 = ::GetTickCount64();
+        CHECK(prober.Probe(L"\\\\nas\\off", 100) == FolderProbeAnswer::NoAnswer, "a share that hangs: NoAnswer once the caller's wait is up");
+        CHECK(::GetTickCount64() - t0 < 5000, "...the CALLER's wait, not the share's timeout");
+        CHECK(waitFor([&] { return askedFor(L"\\\\nas\\off") == 1; }), "the hung probe runs on its own thread");
+        CHECK(prober.Probe(L"\\\\nas\\off", 50) == FolderProbeAnswer::NoAnswer && askedFor(L"\\\\nas\\off") == 1 && prober.InFlight() == 1,
+              "a second ask joins the probe in flight: never a second thread for one path");
+        CHECK(prober.Probe(L"\\\\nas\\other", 0) == FolderProbeAnswer::NoAnswer && prober.InFlight() == 2, "a 0 wait starts a probe and returns at once");
+        const uint64_t t1 = ::GetTickCount64();
+        CHECK(prober.Probe(L"\\\\nas\\third", 2000) == FolderProbeAnswer::NoAnswer && ::GetTickCount64() - t1 < 1000 && prober.InFlight() == 2,
+              "past the cap (2 hung probes): NoAnswer at once, and no third thread");
+        CHECK(waitFor([&] { return askedFor(L"\\\\nas\\other") == 1; }) && askedFor(L"\\\\nas\\third") == 0, "the capped path was never probed");
+        {
+            std::lock_guard lk{ gate->m };
+            gate->open = true; // the share comes back: both hung probes answer
+        }
+        gate->cv.notify_all();
+        CHECK(waitFor([&] { return prober.InFlight() == 0; }), "both probes end once the share answers");
+        CHECK(prober.Probe(L"\\\\nas\\off", 0, 60000) == FolderProbeAnswer::Folder && askedFor(L"\\\\nas\\off") == 1,
+              "the late answer was kept: an ask that accepts it (a picker's list) takes it without a probe");
+        CHECK(prober.Probe(L"\\\\nas\\off", 2000, 0) == FolderProbeAnswer::Folder && askedFor(L"\\\\nas\\off") == 2, "maxAgeMs 0 (a pick) asks the folder again");
+
+        // A probe that THROWS (only an injected one can; GetFileAttributesW does not): NoAnswer, and the next ask probes again.
+        const auto throws = std::make_shared<int>(0);
+        FolderProber thrower{ [throws](const std::wstring&) -> bool {
+            ++*throws;
+            throw std::runtime_error{ "probe failed" };
+        } };
+        CHECK(thrower.Probe(L"K:\\x", 2000, 60000) == FolderProbeAnswer::NoAnswer, "a probe that throws reads NoAnswer");
+        CHECK(waitFor([&] { return thrower.InFlight() == 0; }) && thrower.Probe(L"K:\\x", 2000, 60000) == FolderProbeAnswer::NoAnswer &&
+                  waitFor([&] { return thrower.InFlight() == 0; }) && *throws == 2,
+              "...its failure is not kept as an answer: the next ask probes again");
     }
 }

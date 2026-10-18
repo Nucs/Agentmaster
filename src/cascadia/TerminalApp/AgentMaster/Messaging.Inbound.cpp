@@ -19,6 +19,7 @@
 #include <tuple> // the /idle list's (id, title, color square) rows (§21.13)
 
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException
+#include "FolderProbe.h" // §21.17.4: SharedFolderProber — the poll thread's folder checks wait a bounded time
 #include "Persistence.h" // DeriveSessionTitle
 #include "ProcessInspect.h" // AnalyzeSessionTranscript, ReadGitBranchForDir
 #include "ProfileBootstrap.h" // Profiles::detail::WideToUtf8
@@ -1695,8 +1696,15 @@ namespace Agentmaster::Msg
                 _reply(threadId, L"Usage: /newsession &lt;folder&gt; [model]", false);
                 return;
             }
-            const DWORD attrs = ::GetFileAttributesW(folder.c_str());
-            if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+            // §21.17.4: the folder check is BOUNDED (FolderProbe.h), like a new thread's pick — this runs on the poll thread, the
+            // one that reads Telegram, which an offline network share held for the network's timeout.
+            const FolderProbeAnswer probe = SharedFolderProber().Probe(folder, kNewThreadPickProbeWaitMs, 0);
+            if (probe == FolderProbeAnswer::NoAnswer)
+            {
+                _reply(threadId, NewThreadFolderNoAnswerText(L"<code>" + TgEscapeHtml(folder) + L"</code>"), false);
+                return;
+            }
+            if (probe != FolderProbeAnswer::Folder)
             {
                 _reply(threadId, L"Not a folder on this PC: <code>" + TgEscapeHtml(folder) + L"</code>", false);
                 return;
@@ -2987,7 +2995,11 @@ namespace Agentmaster::Msg
         }
         // The lists, once per picker and outside the lock: a registry copy of where every session worked, and one probe per
         // listed folder (a folder deleted since is not offered). A UNC path is kept unprobed — an offline share would hold the
-        // poll thread for the network's timeout; the pick checks it again.
+        // poll thread for the network's timeout; the pick checks it again. Every other folder is probed with a BOUND
+        // (FolderProbe.h, §21.17.4), since a drive letter mapped to a share, or a removable or sleeping disk, can hold a probe
+        // just as long: each waits at most kNewThreadListProbeEachMs and all of them together at most kNewThreadListProbeBudgetMs,
+        // an answer up to kNewThreadListProbeMaxAgeMs old is taken as it is, and a folder that did not answer is listed like a
+        // UNC one (the pick checks it; its probe goes on in the background and leaves its answer for the next picker).
         NewThreadLists lists;
         if (needLists)
         {
@@ -3009,13 +3021,18 @@ namespace Agentmaster::Msg
                 // Rule #18. Recovery: no scratch roots — a temp folder a session ran in may be offered; nothing else changes.
                 LogSwallowedException(L"MessagingService::_showNewThreadPicker (temp roots)");
             }
-            lists = BuildNewThreadLists(facts, scratchRoots, [](const std::wstring& path) {
+            const uint64_t probeStartTick = ::GetTickCount64(); // the list's whole budget counts from here
+            lists = BuildNewThreadLists(facts, scratchRoots, [probeStartTick](const std::wstring& path) {
                 if (path.size() >= 2 && (path[0] == L'\\' || path[0] == L'/') && (path[1] == L'\\' || path[1] == L'/'))
                 {
                     return true;
                 }
-                const DWORD attrs = ::GetFileAttributesW(path.c_str());
-                return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                // What is left of the budget, at most one folder's share; 0 once it is spent (the probe only starts then).
+                const uint64_t spentMs = ::GetTickCount64() - probeStartTick;
+                const uint32_t waitMs = spentMs >= kNewThreadListProbeBudgetMs ?
+                                            0 :
+                                            static_cast<uint32_t>((std::min<uint64_t>)(kNewThreadListProbeEachMs, kNewThreadListProbeBudgetMs - spentMs)); // (std::min): the <windows.h> macro
+                return SharedFolderProber().Probe(path, waitMs, kNewThreadListProbeMaxAgeMs) != FolderProbeAnswer::NotFolder;
             });
         }
         std::wstring html;
@@ -3194,8 +3211,16 @@ namespace Agentmaster::Msg
 
     std::wstring MessagingService::_startNewThreadSession(int64_t threadId, const std::wstring& folder, int64_t replyTo)
     {
-        const DWORD attrs = ::GetFileAttributesW(folder.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        // §21.17.4: the folder check is BOUNDED (FolderProbe.h) — this runs on the poll thread, the one that reads Telegram, and
+        // an offline network share held every update of the bot for the network's timeout. A FRESH probe (a pick must see the
+        // folder as it is now; one still running from the picker's lists is joined, never doubled), waited for at most
+        // kNewThreadPickProbeWaitMs; past it the user is told, and the probe goes on in the background.
+        const FolderProbeAnswer probe = SharedFolderProber().Probe(folder, kNewThreadPickProbeWaitMs, 0);
+        if (probe == FolderProbeAnswer::NoAnswer)
+        {
+            return NewThreadFolderNoAnswerText(folder);
+        }
+        if (probe != FolderProbeAnswer::Folder)
         {
             return L"Not a folder on this PC: " + folder;
         }

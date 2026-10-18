@@ -2874,7 +2874,8 @@ updated 5 minutes ago
   archived ones too ("top 10 used overall") — read through a new lean read, `SessionRegistry::PlaceSamples` (two folder
   strings and a stamp per record, never the queues). The machine's temp roots are left out (`CollectMachineTempRoots`), and
   every listed folder is probed once (`GetFileAttributesW`: a deleted folder is not offered; a UNC path is kept unprobed, an
-  offline share would hold the poll thread). At most 100 folders a list.
+  offline share would hold the poll thread; since 2026-10-18 every other folder through the BOUNDED probe below, so a drive
+  letter mapped to a share cannot hold it either). At most 100 folders a list.
   - **How many pages that is** (counted 2026-10-18 from each profile's `sessions.json`, the registry's own store): DEV's 217
     sessions worked in 20 folders that still exist, so each of its lists has exactly TWO pages — one tap of `Recent ▶` reached
     the last page, which is why "it only shows one page" on the dev bot; production's 1,724 sessions give 37 folders (4 pages).
@@ -2888,6 +2889,18 @@ updated 5 minutes ago
   deleted (the user's "once picked, removed"); the toast says "Opening a new session in Agentmaster…". A typed folder path
   (`NewThreadTypedFolder`: one line, absolute, quotes and `/` allowed) is a pick too. A refused launch (no window) keeps the
   picker. Cancel deletes the picker and drops what it held (the messages stay in the chat).
+- **The folder checks are bounded** (2026-10-18, NOT BUILT yet; `FolderProbe.h`). Every check of a folder runs on the POLL
+  thread, the one that reads Telegram — a pick (a button, a typed path), the picker's lists, and the 🔎 Search topic's
+  `/newsession <folder>` — and `GetFileAttributesW` on an offline network share waits for the network's timeout, tens of
+  seconds, while the whole bot reads nothing (every topic, Search, every button). A file call cannot be cancelled, so
+  `FolderProber` runs each probe on a thread of its own and the caller waits only as long as it chooses: a pick waits at most
+  2 s (`kNewThreadPickProbeWaitMs`) for a FRESH probe, the lists at most 250 ms a folder and 1.5 s for all of them
+  (`kNewThreadListProbeEachMs`, `kNewThreadListProbeBudgetMs`) and take an answer up to a minute old. A probe that outlasts
+  its wait goes on in the background and leaves its answer for the next ask; one path never has two probes (a second ask
+  joins the first); at most 16 run at once (`kFolderProbeMaxInFlight`; past it an ask answers at once, unprobed). A folder
+  that did not answer is listed like a UNC one, and its pick says "The folder did not answer within 2 s (an offline network
+  share?) — try again once it is reachable: <folder>" (`NewThreadFolderNoAnswerText`; the reason first, since a button's toast
+  is cut at 190 characters); the picker stays.
 - **The binding** (`_adoptBoundThreads`, the tick thread, BEFORE the topic sync's plan): the first sync that sees the session
   live makes the user's thread its topic — a `TopicRecord` with the user's thread id, seeded like a created topic
   (`_seedFromTranscript`: a fresh session, mirrored from its first line), so the plan makes no topic of its own for it. The
@@ -2920,6 +2933,15 @@ updated 5 minutes ago
   within 3 minutes of its creation: a created topic already took its color fresh. The window's launch line of such a session
   is `[spawn] <sid> … (under the id its caller chose)`; until 2026-10-18 it read `[refork]`, as if a never-messaged fork had
   been restored.
+- **Held messages at the hand-over** (2026-10-18, NOT BUILT yet). Telegram sends a bot no update when the user DELETES a
+  message, so a held message the user deleted while it waited was delivered anyway; and its 👀 stayed on a held COMMAND for
+  good (only a queued prompt's ✍ replaced it). Each held message's hand-over now starts with one direct `setMessageReaction`
+  that takes the 👀 off, and its answer is the deletion's only sign: "message to react not found" (or MESSAGE_ID_INVALID,
+  `HeldMessageGone`) leaves the message out. Any other answer hands it over — a failed call proves nothing, and a lost
+  prompt costs more than a stray one —, as does a call that could not be made (the bot stopping, a flood pause on
+  reactions). The same removal is then queued under the reaction's outbox key, so a 👀 still waiting there (replaced) or in
+  flight (sent first) cannot come back after it; a prompt's ✍ replaces that removal in turn. A message the user deleted
+  "for me" only stays with the bot and is still delivered: nothing tells it apart.
 - **The title.** The thread's name when the user gave one; else the folder-derived default (`DeriveSessionTitle`). RENAMING the
   thread later renames the session (`forum_topic_edited` from the owner → `_onUserTopicRenamed`: the name without the state
   glyph and color square, `StripTopicNameDecoration`, through `sessionAction "rename"` like `/rename`); the sync then renames
@@ -2931,7 +2953,8 @@ updated 5 minutes ago
 - **Logs:** `[msg] new thread <id> opened by the user …`, `… opening session <sid8> in <folder> …`, `… is now the topic of
   <sid8> “title” in <folder> 🟦 (N held message(s) handed over)`, `… : N more message(s), sent while it was being bound, handed
   over after the held ones`, `… not bound to <sid8>: the thread or the session has a topic already (N held message(s)
-  dropped)`, `… did not come up within 3 min; the thread is free again`,
+  dropped)`, `… : held message <n> was deleted in Telegram before <sid8> took it; left out (…)`, `… did not come up within
+  3 min; the thread is free again`,
   `[msg] <sid8> renamed from its thread …`; `[nav] remote telegram new-thread <id>` (`held` / `-> launch <sid8>` / `cancelled`
   / `bound <sid8>`), `[nav] remote telegram topic-rename <sid8>`, `[nav] remote launch new … id=<sid8>`.
 
@@ -2941,7 +2964,9 @@ updated 5 minutes ago
   `TgRichHtmlFromClassic`'s username); MessagingDirectory.h (`DirectoryTopicUrl` → `TgTopicUrl`); MessagingModels.h
   (`UserLineTitleRow`, the builders' `titleRow`, `RenderHistory` / `PlanHistoryPosts`, `CardExtras::threadId`,
   `SearchCard::threadId`, the change line's `threadId`, `TopicRecord::cardLinked` / `historyPromptMessageId`); the new
-  MessagingNewThread.h (the picker's pure half); Messaging.h / Messaging.cpp (`_linkBot`, `_threadOf`, the card's link form,
+  MessagingNewThread.h (the picker's pure half; since 2026-10-18 also the probe waits, `NewThreadFolderNoAnswerText` and
+  `HeldMessageGone`); the new FolderProbe.h (2026-10-18: `FolderProber`, the bounded folder probe, and `SharedFolderProber`);
+  Messaging.h / Messaging.cpp (`_linkBot`, `_threadOf`, the card's link form,
   the live and history chains, `_adoptBoundThreads`); Messaging.Inbound.cpp (the routing, the picker, the pick, the rename);
   SessionRegistry (`PlaceSamples`); RemoteLaunch.h (`newSessionId`); ClaudeSpawn (`targetSessionId`); TerminalPage
   (`_SpawnClaudeSession` / `_LaunchClaudeSession`'s `presetSessionId`, `_RemoteLaunch`).
@@ -2950,7 +2975,10 @@ updated 5 minutes ago
   the copy chip; a title in a quote links, in code not; the card, the change line and the Search cards; the "You" row in the
   three builders and the replay; the record's two fields round-trip; the lists (recency and use orders with their ties, the
   scratch root, a gone folder, one probe per folder, the cap); pages, the callback data and its malformed forms; labels; the
-  picker's text and keyboard; a typed folder; a name without its decoration; `PlaceSamples`. `TestSpawnBuilders`: a fresh launch
+  picker's text and keyboard; a typed folder; a name without its decoration; `PlaceSamples`; and (2026-10-18) the bounded
+  probe over an injected probe that hangs on cue — a hung probe answers NoAnswer after the CALLER's wait, a second ask joins it,
+  the cap starts no third one, the late answer is kept, `maxAgeMs` 0 asks again, a throwing probe is not kept —, the no-answer
+  text, and `HeldMessageGone`'s yes and no answers. `TestSpawnBuilders`: a fresh launch
   takes a chosen id (`--session-id`, no `--resume`), and mints one without. The isolated m5 run (HEAD f2fb06549 + this work):
   7,949 checks, only the 3 known TestTaskbarBadge failures (a first run before the rebase also failed TestCmdPathLimit's
   real-cmd.exe end-to-end once, which this work does not touch; it passed on the re-run). `cl /Zs` with the last Debug build's
