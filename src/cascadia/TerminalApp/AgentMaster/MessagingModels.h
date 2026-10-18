@@ -3191,6 +3191,7 @@ namespace Agentmaster::Msg
         L"draft", L"summary", L"transcript", L"screen", L"restartsession", L"deactivate", L"activate", L"forksession",
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
         L"reactivate", L"recreate", L"verbose",
+        L"screenimage", // §21.24: the terminal's screen as a picture (the card's 🖼 Screen Image; /screen is the text)
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search" // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
     };
@@ -4122,10 +4123,10 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// Whether ▶ Reactivate has something to do for this session (the card's first button, `/reactivate`): its
-    /// tab is parked (restored, deactivated, cut off with the app — its claude is not running), or its claude ran
-    /// into an Error (a cut-off or failed turn), or claude exited (Done). A running or waiting session has nothing
-    /// to reactivate.
+    /// Whether ▶ Reactivate has something to do for this session (`/reactivate`, and the card's first button — named
+    /// 🔧 Resume Session for a session in Error since §21.24): its tab is parked (restored, deactivated, cut off with the
+    /// app — its claude is not running), or its claude ran into an Error (a cut-off or failed turn), or claude exited
+    /// (Done). A running or waiting session has nothing to reactivate.
     /// </summary>
     /// <param name="s">The session.</param>
     /// <returns>True when Reactivate applies.</returns>
@@ -4134,10 +4135,129 @@ namespace Agentmaster::Msg
         return s.live && ((!s.started && !s.external) || s.state == SessionState::Error || s.state == SessionState::Done);
     }
 
+    // ===== the card's buttons: two pages (§21.24) ==============================================
+
+    /// <summary>
+    /// The two pages of buttons a sticky card can show (MESSAGING.md §21.24). MAIN is what every card shows by default: the
+    /// lifecycle actions a phone needs at once - ⑂ Fork, 🆕 New Session in the folder, 🔄 Restart Session - and ⚙ Session,
+    /// which turns the card's keyboard into the SESSION page: every button the card had before (the runner, the queue, the
+    /// pin, the transcript, the screen as text) plus the screen as a picture, and ◀ Back.
+    /// </summary>
+    /// <remarks>
+    /// The page belongs to the card the button sits on: the service remembers the sticky card's page per topic in memory
+    /// (a re-post keeps it; a card that starts to RING - a session that now needs the user - goes back to Main, where the
+    /// state's own action is, and a page opened after that is kept), and a typed /status copy starts on Main and flips by
+    /// itself. Nothing persists: after a restart every card is on Main again.
+    /// </remarks>
+    enum class CardPage
+    {
+        Main, // ⚙ Session · ⑂ Fork · 🆕 New Session · 🔄 Restart Session
+        Session, // the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
+    };
+
+    /// <summary>What the card's buttons depend on, read from the session at render time (CardButtonFactsFor).</summary>
+    struct CardButtonFacts
+    {
+        bool pinned{ false }; // 📌 Unpin rather than 📌 Pin
+        bool runnerAuto{ false }; // ⏸ Pause runner (the runner is Auto) rather than ▶ Runner auto (it is Paused)
+        bool reactivatable{ false }; // ▶ Reactivate first on both pages: a parked tab, or a claude that exited (SessionIsReactivatable)
+        bool error{ false }; // 🔧 Resume Session first instead: the session is in Error (§21.24 - the user's "in case of error")
+    };
+
+    /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, and whether its state has an action of its own.</summary>
+    /// <param name="s">The session (a lean record is enough: no queue is read).</param>
+    /// <returns>The facts.</returns>
+    inline CardButtonFacts CardButtonFactsFor(const SessionInfo& s) noexcept
+    {
+        CardButtonFacts f;
+        f.pinned = s.pinned;
+        f.runnerAuto = s.autorunner.mode == AutorunnerMode::Full;
+        f.error = s.live && s.state == SessionState::Error;
+        f.reactivatable = SessionIsReactivatable(s);
+        return f;
+    }
+
+    // The card's callback verbs. A card button's data is "c:<verb>:<session id>" - STABLE data, no token: the verb acts on the
+    // session's CURRENT state when it is tapped, so a button on an old card does what it does now (M5's stale-button rule is
+    // about answers and queue items, which carry tokens). The longest ("c:newsession:", "c:reactivate:", "c:transcript:") with
+    // a 36-character id is 49 bytes of Telegram's 64. The verbs of the cards before §21.24 stay understood (runner, queue, pin,
+    // transcript, screen, reactivate, sendnow), so a card that still shows the old keyboard keeps working until its next edit.
+    /// <summary>⚙ Session: shows the Session page on the card the button sits on.</summary>
+    inline constexpr std::wstring_view kCardVerbSessionPage = L"panel";
+    /// <summary>◀ Back: shows the Main page again.</summary>
+    inline constexpr std::wstring_view kCardVerbMainPage = L"main";
+    /// <summary>⑂ Fork: the topic's /forksession (a fork in a new background tab, held in Waiting for you once it is live).</summary>
+    inline constexpr std::wstring_view kCardVerbFork = L"fork";
+    /// <summary>🆕 New Session: the topic's /newsession (a fresh session in the same folder, a new background tab).</summary>
+    inline constexpr std::wstring_view kCardVerbNewSession = L"newsession";
+    /// <summary>🔄 Restart Session: the topic's /restartsession (it asks first while a turn runs: the turn would be cut off).</summary>
+    inline constexpr std::wstring_view kCardVerbRestart = L"restart";
+    /// <summary>🔧 Resume Session: what ▶ Reactivate does, for a session in Error (a parked tab is started, a claude that is up is restarted).</summary>
+    inline constexpr std::wstring_view kCardVerbResume = L"resume";
+    /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
+    inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
+
+    /// <summary>The callback data of a card button: "c:&lt;verb&gt;:&lt;session id&gt;".</summary>
+    /// <param name="verb">The verb (kCardVerb*, or one of the older verbs).</param>
+    /// <param name="sessionId">The card's session.</param>
+    /// <returns>The data.</returns>
+    /// <exception cref="std::bad_alloc">If the data cannot be allocated.</exception>
+    inline std::wstring CardCallbackData(std::wstring_view verb, std::wstring_view sessionId)
+    {
+        std::wstring data = L"c:";
+        data += verb;
+        data += L':';
+        data += sessionId;
+        return data;
+    }
+
+    /// <summary>
+    /// The sticky card's buttons on one page, as rows of (label, callback data) - the service turns them into Telegram's
+    /// inline keyboard. Both pages START with the state's own action when it has one, because that is what a card in that
+    /// state is for: 🔧 Resume Session for a session in Error, else ▶ Reactivate for a parked tab or a claude that exited.
+    /// Main then holds ⚙ Session · ⑂ Fork and 🆕 New Session · 🔄 Restart Session; Session holds the runner · 📋 Queue,
+    /// 📌 Pin · 📄 Transcript, 🖥 Screen Text · 🖼 Screen Image, and ◀ Back.
+    /// </summary>
+    /// <param name="sessionId">The card's session (it goes into every button's data).</param>
+    /// <param name="facts">The facts the labels and the first row depend on (CardButtonFactsFor).</param>
+    /// <param name="page">The page.</param>
+    /// <returns>The rows, top to bottom; two buttons a row at most, so a phone shows every label whole.</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<std::pair<std::wstring, std::wstring>>> BuildCardButtonRows(std::wstring_view sessionId, const CardButtonFacts& facts, CardPage page)
+    {
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
+        if (facts.error)
+        {
+            rows.push_back({ { L"\U0001F527 Resume Session", CardCallbackData(kCardVerbResume, sessionId) } });
+        }
+        else if (facts.reactivatable)
+        {
+            rows.push_back({ { L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) } });
+        }
+        if (page == CardPage::Main)
+        {
+            // The cog carries U+FE0F so every app draws it as the emoji (U+2699 alone may be drawn as a text glyph).
+            rows.push_back({ { L"\x2699\xFE0F Session", CardCallbackData(kCardVerbSessionPage, sessionId) },
+                             { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) } });
+            rows.push_back({ { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) },
+                             { L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) } });
+            return rows;
+        }
+        rows.push_back({ { facts.runnerAuto ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", CardCallbackData(L"runner", sessionId) },
+                         { L"\U0001F4CB Queue", CardCallbackData(L"queue", sessionId) } });
+        rows.push_back({ { facts.pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", CardCallbackData(L"pin", sessionId) },
+                         { L"\U0001F4C4 Transcript", CardCallbackData(L"transcript", sessionId) } });
+        rows.push_back({ { L"\U0001F5A5 Screen Text", CardCallbackData(L"screen", sessionId) },
+                         { L"\U0001F5BC Screen Image", CardCallbackData(kCardVerbScreenImage, sessionId) } });
+        rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbMainPage, sessionId) } });
+        return rows;
+    }
+
     /// <summary>
     /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6), as Telegram HTML: the title, the state and since
-    /// when (a clock time from persisted stamps, CardStateSinceMs), a Reactivate line for a parked tab, a session
-    /// in Error or a claude that exited, folder · branch · model · context, the runner and the queue unless they are the
+    /// when (a clock time from persisted stamps, CardStateSinceMs), a line naming the state's own action — 🔧 Resume Session
+    /// for a session in Error (§21.24), ▶ Reactivate for a parked tab or a claude that exited —, folder · branch · model ·
+    /// context, the runner and the queue unless they are the
     /// common default (an Auto runner with nothing queued and no global pause: no line — §21.18), the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
     /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
@@ -4175,16 +4295,19 @@ namespace Agentmaster::Msg
             out += L" \U0001F4CC";
         }
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
-        // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand — also for a
-        // session in Error (a cut-off or failed turn) or a claude that exited, which a restart of the same
-        // conversation recovers.
-        if (s.live && !s.started && !s.external)
+        // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand — also for a claude
+        // that exited, which a restart of the same conversation recovers. §21.24: a session in ERROR names the card's
+        // 🔧 Resume Session instead (the same action: a parked tab is started in place, a claude that is up is restarted),
+        // and Error is read FIRST: a tab restored after a crash with its turn cut off is parked AND in Error, and resuming
+        // the turn is what it needs, not a bare "not running".
+        if (s.live && s.state == SessionState::Error)
+        {
+            out += (!s.started && !s.external) ? L"\n\U0001F527 Resume Session starts it in its tab (a cut-off turn goes on by itself)" :
+                                                 L"\n\U0001F527 Resume Session restarts it (the same conversation goes on)";
+        }
+        else if (s.live && !s.started && !s.external)
         {
             out += L"\n\U0001F4A4 not running \x2014 a message here or \x25B6 Reactivate resumes it";
-        }
-        else if (s.live && s.state == SessionState::Error)
-        {
-            out += L"\n\x25B6 Reactivate restarts it (the same conversation goes on)";
         }
         else if (s.live && s.state == SessionState::Done)
         {

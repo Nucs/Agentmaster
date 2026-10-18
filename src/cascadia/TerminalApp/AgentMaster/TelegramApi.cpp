@@ -135,6 +135,17 @@ namespace Agentmaster::Msg
 
     TgResult TelegramApi::SendDocument(const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept
     {
+        return _upload(L"sendDocument", "document", "application/octet-stream", params, fileName, bytes, timeoutMs);
+    }
+
+    TgResult TelegramApi::SendPhoto(const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept
+    {
+        // §21.24: the screen's picture is a PNG; the content type lets Telegram read it as one without sniffing.
+        return _upload(L"sendPhoto", "photo", "image/png", params, fileName, bytes, timeoutMs);
+    }
+
+    TgResult TelegramApi::_upload(std::wstring_view method, std::string_view field, std::string_view fileContentType, const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept
+    {
         try
         {
             // A boundary no file content can hold: the tick count plus a fixed tag.
@@ -156,16 +167,16 @@ namespace Agentmaster::Msg
                     c = '_';
                 }
             }
-            body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"document\"; filename=\"" + name +
-                    "\"\r\nContent-Type: application/octet-stream\r\n\r\n";
+            body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + std::string{ field } + "\"; filename=\"" + name +
+                    "\"\r\nContent-Type: " + std::string{ fileContentType } + "\r\n\r\n";
             body += bytes;
             body += "\r\n--" + boundary + "--\r\n";
             const std::wstring contentType = L"Content-Type: multipart/form-data; boundary=" + Profiles::detail::Utf8ToWide(boundary) + L"\r\n";
-            return _request(L"sendDocument", body, contentType, timeoutMs);
+            return _request(method, body, contentType, timeoutMs);
         }
         catch (...)
         {
-            LogSwallowedException(L"TelegramApi::SendDocument");
+            LogSwallowedException(L"TelegramApi::_upload");
             TgResult r;
             r.transportFailed = true;
             r.description = L"exception while building the upload";

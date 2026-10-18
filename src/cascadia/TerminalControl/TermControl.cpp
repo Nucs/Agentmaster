@@ -3245,6 +3245,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return _core.ReadPendingInputDraft();
     }
 
+    // Agentmaster (MESSAGING.md section 21.24 - the Telegram card's Screen Image): the live screen as a styled snapshot
+    // (ScreenSnapshot.h's text format), read-only. Empty => the terminal is not initialized. Pure passthrough.
+    winrt::hstring TermControl::ReadScreenSnapshot()
+    {
+        return _core.ReadScreenSnapshot();
+    }
+
     // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan. Pure passthrough.
     int32_t TermControl::ReadPendingInputBoxState()
     {

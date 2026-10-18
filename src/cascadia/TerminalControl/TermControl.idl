@@ -186,6 +186,9 @@ namespace Microsoft.Terminal.Control
         Int32 ScrollToAdjacentConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, Boolean up);
         // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box (read-only); "" => none.
         String ReadPendingInputDraft();
+        // Agentmaster (MESSAGING.md section 21.24): the live screen as a styled snapshot (ScreenSnapshot.h's text format: every
+        // cell's glyph, width and resolved colors), for the Telegram card's Screen Image; "" => not initialized. Read-only.
+        String ReadScreenSnapshot();
         // Agentmaster (DELIVERY_PLAN.md R5): the tri-state verdict of that same cached scan (Int32
         // InputBoxState — 0 Unknown / 1 NoBox / 2 Empty / 3 Draft / 4 MenuOpen).
         Int32 ReadPendingInputBoxState();

@@ -386,6 +386,12 @@ namespace Agentmaster::Msg
             /// <summary>Sent with the SECRETARY bot's client (§21.11): a send as the user through its business connection.</summary>
             bool asSecretary{ false };
             /// <summary>
+            /// §21.24: with `document`, the file goes up as a PHOTO (sendPhoto, the multipart field "photo") instead of a document:
+            /// the card's 🖼 Screen Image, which the apps show inline and zoomable. Telegram recompresses a photo, so a refused
+            /// photo is sent again as a document by the item's onDone (_sendPhoto).
+            /// </summary>
+            bool photo{ false };
+            /// <summary>
             /// Called on the send thread right before the call (may be empty): a final reply sets its reply_parameters here, from
             /// the turn's PromptRef — its prompt was queued before it and has answered with its id by the time this item goes
             /// (the send loop makes one call at a time, in order; §21.12).
@@ -401,7 +407,7 @@ namespace Agentmaster::Msg
         /// <exception cref="std::bad_alloc">If the name cannot be copied.</exception>
         static std::wstring _outItemMethod(const OutItem& item)
         {
-            return item.document ? std::wstring{ L"sendDocument" } : item.method;
+            return item.document ? std::wstring{ item.photo ? L"sendPhoto" : L"sendDocument" } : item.method;
         }
         /// <summary>Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).</summary>
         void _enqueue(OutItem item);
@@ -539,8 +545,18 @@ namespace Agentmaster::Msg
         void _react(int64_t messageId, std::wstring_view emoji);
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
-        /// <summary>The card's buttons; `reactivatable` adds a leading ▶ Reactivate row (a parked tab, a cut-off or failed turn).</summary>
-        std::wstring _cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut, bool reactivatable = false) const;
+        /// <summary>
+        /// The card's buttons on one page (§21.24 - Main: ⚙ Session · ⑂ Fork · 🆕 New Session · 🔄 Restart Session; Session: the
+        /// card's buttons of before, 🖼 Screen Image and ◀ Back), each page led by the state's own action (🔧 Resume Session for a
+        /// session in Error, ▶ Reactivate for a parked tab or a claude that exited). BuildCardButtonRows lays them out.
+        /// </summary>
+        /// <param name="sessionId">The card's session (it goes into every button's data).</param>
+        /// <param name="facts">What the labels and the first row depend on (CardButtonFactsFor).</param>
+        /// <param name="page">The page to show.</param>
+        /// <param name="markupOut">The inline keyboard (Telegram's reply_markup).</param>
+        /// <returns>Always "" (the keyboard is the output).</returns>
+        /// <exception cref="std::bad_alloc">If the keyboard cannot be allocated.</exception>
+        std::wstring _cardMarkupFor(const std::wstring& sessionId, const CardButtonFacts& facts, CardPage page, json::Value& markupOut) const;
         /// <summary>
         /// Sends a fresh card at the bottom of the topic, deleting the old card message first when `deleteFirst` is
         /// a message id (the STICKY CARD, §21.5). Marks the record's card "in flight" (-1) until Telegram answers;
@@ -797,8 +813,16 @@ namespace Agentmaster::Msg
         /// the card's classic render, so it does not move with the form; a card whose text is unchanged but whose FORM is not the
         /// wanted one (TopicRecord::cardRich — every card posted before the chips, or after the rich switch flipped) is re-edited
         /// only when _takeCardFormatSlot gives it the turn: one card per kCardFormatGapMs, within the chat's call budget.
+        /// §21.24: the card shows the page its CardState holds (CardPage: Main unless ⚙ Session was tapped), and raising a ping
+        /// takes it back to Main, where the state's own action is. `tapped`: the user tapped a button that changes the card itself (its
+        /// page), so the edit goes at the priority of an answer to the user (SendPriority::Final) instead of the cards' own, and
+        /// the keyboard flips at once even behind a busy outbox.
         /// </remarks>
-        void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false);
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="force">Edit now, past the edit gap.</param>
+        /// <param name="ping">Re-post the card with sound (kept until a post can carry it).</param>
+        /// <param name="tapped">A button on the card changed it: edit at the priority of an answer.</param>
+        void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false, bool tapped = false);
         /// <summary>
         /// The SLOW FORM UPGRADE's gate (§21.15): whether the card of `sessionId`, unchanged but shown in the other form, may be
         /// re-edited now. One such edit per kCardFormatGapMs across all topics, none while a 429 pause runs or a long one parks
@@ -877,6 +901,9 @@ namespace Agentmaster::Msg
             SessionState lastState{ SessionState::Idle }; // the state the card last showed (a change edits at once)
             bool pingWanted{ false }; // a re-post WITH SOUND is owed (see _refreshCard)
             bool repostWanted{ false }; // a SILENT re-post is owed: the list's re-sort (§21.9) moves this topic up
+            // §21.24: the page of buttons the sticky card shows (⚙ Session flips it to Session; ◀ Back and a ping take it back to
+            // Main). In memory only, like the rest of this state: after a restart every card shows Main again.
+            CardPage page{ CardPage::Main };
             // §21.15: the classic hash (TopicRecord::cardTextHash) of the card text whose RICH form Telegram refused (it went as
             // HTML). The slow form upgrade skips the card while its text is that one, so a refusal is not retried every gap; a
             // changed text tries the rich form again. 0 = none refused.
@@ -953,8 +980,8 @@ namespace Agentmaster::Msg
         /// REACTIVATE (§21.5, §21.6): a parked tab's claude is started in place; a session in Error, or one whose
         /// claude exited (Done), is restarted (the same conversation resumes in the same tab; with
         /// CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes on by itself). A running session is left alone.
-        /// The card's ▶ button shows the outcome as the button's toast (nothing is posted in the thread, which is the
-        /// conversation); `/reactivate` replies with it.
+        /// The card's ▶ Reactivate and 🔧 Resume Session (§21.24) buttons show the outcome as the button's toast (nothing is
+        /// posted in the thread, which is the conversation); `/reactivate` replies with it.
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <returns>The outcome, plain text (one sentence).</returns>
@@ -1069,6 +1096,55 @@ namespace Agentmaster::Msg
         /// <param name="s">A session the tick looked at (a topic's, or the one an answer named).</param>
         /// <exception cref="std::bad_alloc">If the matched copies or the reply cannot be allocated.</exception>
         void _sweepRevives(const SessionInfo& s);
+        /// <summary>
+        /// The card's ⚙ Session and ◀ Back (§21.24): shows `page` on the message the button sits on. On the topic's sticky card
+        /// the page is remembered (CardState::page, so a re-post keeps it) and the card is edited through _refreshCard (its
+        /// hash covers the buttons); on any other message - a /status copy of the card - only that message's buttons change.
+        /// </summary>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="messageId">The message the tapped button sits on.</param>
+        /// <param name="page">The page to show.</param>
+        void _showCardPage(const std::wstring& sessionId, int64_t messageId, CardPage page);
+        /// <summary>
+        /// The card's ⑂ Fork and 🆕 New Session (§21.24): the topic's /forksession and /newsession with no model - a fork, or a
+        /// fresh session in the session's folder, opened as a background tab - through the commands' own path (their replies go in
+        /// the thread, so the button and the typed command never differ); the toast only says it was asked for.
+        /// </summary>
+        /// <param name="sessionId">The card's session (the fork's source; the folder of the new session).</param>
+        /// <param name="fork">True for ⑂ Fork, false for 🆕 New Session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>The toast, one plain sentence.</returns>
+        std::wstring _launchFromCard(const std::wstring& sessionId, bool fork, int64_t threadId);
+        /// <summary>
+        /// The card's 🔄 Restart Session (§21.24): the topic's /restartsession. A session at rest is restarted at once (the same
+        /// conversation resumes in its tab) and the toast says so; while a turn runs, the restart asks first in the thread (the
+        /// turn would be cut off), exactly as /restartsession does, and the toast points at that question.
+        /// </summary>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>The toast, one plain sentence.</returns>
+        std::wstring _restartFromCard(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>
+        /// The second half of 🖼 Screen Image and /screenimage (§21.24), called with the hosting window's answer on ITS UI thread:
+        /// parses the snapshot (ScreenSnapshot.h) and draws it as a PNG on a worker thread of its own (ScreenImage.h - ~90 to
+        /// ~185 ms of drawing for a 200 x 60 to 300 x 80 screen, measured; never on a UI thread), then sends the picture into
+        /// the topic (_sendPhoto). At most kScreenImageMaxRenders pictures are drawn at once; a request past that is answered in
+        /// the thread instead.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic the picture goes to.</param>
+        /// <param name="snapshot">The window's answer: the serialized snapshot, or "" when the screen could not be read.</param>
+        void _startScreenImage(const std::wstring& sessionId, int64_t threadId, std::wstring snapshot);
+        /// <summary>
+        /// Sends a picture into a topic as a PHOTO (sendPhoto, silent, at `prio`); when Telegram refuses it as a photo (a size
+        /// it will not take as one, a picture it cannot read), the same bytes go again as a document, in its place.
+        /// </summary>
+        /// <param name="threadId">The topic (0 = the chat's main view).</param>
+        /// <param name="fileName">The file's name (screen-TITLE.png).</param>
+        /// <param name="bytes">The PNG.</param>
+        /// <param name="caption">The caption, plain text (cut at 1,000 characters).</param>
+        /// <param name="prio">The send priority.</param>
+        void _sendPhoto(int64_t threadId, std::wstring fileName, std::string bytes, std::wstring caption, SendPriority prio);
 
         // ----- §21.17: a thread the user opens starts a new session (Messaging.Inbound.cpp) -----
         /// <summary>
@@ -1599,6 +1675,12 @@ namespace Agentmaster::Msg
             int64_t threadId{ 0 }; // where to report
         };
         std::vector<Revive> _revives;
+        // §21.24: the pictures of screens being drawn right now (_startScreenImage's worker threads) - at most
+        // kScreenImageMaxRenders at once, each one ~90 to ~185 ms of drawing (measured for a 200 x 60 to 300 x 80 screen).
+        std::atomic<int> _screenImageRenders{ 0 };
+        // §21.24, under `_mtx`: when each session's screen picture was last asked for (WallMs). A second request within
+        // kScreenImageTapGapMs asks nothing new: a double tap must not draw and send two pictures on the chat's call budget.
+        std::unordered_map<std::wstring, int64_t> _screenImageTapMs;
 
         /// <summary>
         /// §21.17, under `_mtx`: a thread the user opened that no session owns yet, and its PICKER. In memory only: after a restart

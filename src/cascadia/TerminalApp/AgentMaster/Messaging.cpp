@@ -1578,7 +1578,9 @@ namespace Agentmaster::Msg
                 const auto call = [this, &item]() {
                     if (item.document)
                     {
-                        return _api->SendDocument(item.params, item.fileName, item.fileBytes, 60000);
+                        // §21.24: a picture goes up as a photo (the apps show it inline and zoomable); any other file as a document.
+                        return item.photo ? _api->SendPhoto(item.params, item.fileName, item.fileBytes, 60000) :
+                                            _api->SendDocument(item.params, item.fileName, item.fileBytes, 60000);
                     }
                     if (item.asSecretary)
                     {
@@ -2911,23 +2913,53 @@ namespace Agentmaster::Msg
         _enqueue(std::move(item));
     }
 
-    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, bool pinned, AutorunnerMode mode, json::Value& markupOut, bool reactivatable) const
+    void MessagingService::_sendPhoto(int64_t threadId, std::wstring fileName, std::string bytes, std::wstring caption, SendPriority prio)
     {
-        // Card buttons use STABLE callback data ("c:<verb>:<session id>", 45 bytes of the 64 allowed):
-        // each verb acts on the session's CURRENT state (a toggle reads it first), so a stale button
-        // cannot do something old (M5 is about answers and queue items, which use tokens).
-        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
-        if (reactivatable)
+        OutItem item;
+        item.prio = prio;
+        item.document = true;
+        item.photo = true;
+        item.fileName = fileName;
+        // A copy for the fallback: a photo Telegram refuses goes again as a document. A very wide terminal can pass a photo's
+        // limits (width + height at most 10,000 pixels, one side at most 20 times the other); a document has none of them.
+        auto kept = std::make_shared<std::string>(bytes);
+        item.fileBytes = std::move(bytes);
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        if (threadId > 0)
         {
-            // A parked tab or a session in Error: the one action the user wants first (§21.5).
-            rows.push_back({ { L"\x25B6 Reactivate", L"c:reactivate:" + sessionId } });
+            item.params.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(threadId)));
         }
-        rows.push_back({ { mode == AutorunnerMode::Full ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", L"c:runner:" + sessionId },
-                         { L"\U0001F4CB Queue", L"c:queue:" + sessionId } });
-        rows.push_back({ { pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", L"c:pin:" + sessionId },
-                         { L"\U0001F4C4 Transcript", L"c:transcript:" + sessionId },
-                         { L"\U0001F5A5 Screen", L"c:screen:" + sessionId } });
-        markupOut = _buttons(rows);
+        if (!caption.empty())
+        {
+            item.params.Set(L"caption", json::Value::MkStr(caption.size() > 1000 ? caption.substr(0, 1000) : caption));
+        }
+        item.params.Set(L"disable_notification", json::Value::MkBool(true)); // an answer to the user's own tap: silent (D5)
+        auto self = weak_from_this();
+        item.onDone = [self, threadId, fileName, kept, caption, prio](const TgResult& r) {
+            // Only a refusal OF THE PHOTO falls back: a deleted topic would refuse the document too, and a transport failure or a
+            // 429 is the send loop's (a fallback there would send the picture twice once the first one gets through).
+            if (r.ok || r.httpStatus != 400 || r.ThreadNotFound())
+            {
+                return;
+            }
+            auto me = self.lock();
+            if (!me)
+            {
+                return;
+            }
+            me->_log(L"[msg] screen picture: Telegram refused it as a photo (" + r.description + L"); it goes as a document");
+            me->_sendDocument(threadId, fileName, std::move(*kept), caption, prio);
+        };
+        _enqueue(std::move(item));
+    }
+
+    std::wstring MessagingService::_cardMarkupFor(const std::wstring& sessionId, const CardButtonFacts& facts, CardPage page, json::Value& markupOut) const
+    {
+        // Card buttons use STABLE callback data ("c:<verb>:<session id>", at most 49 bytes of the 64 allowed): each verb acts
+        // on the session's CURRENT state (a toggle reads it first), so a stale button cannot do something old (M5 is about
+        // answers and queue items, which use tokens). §21.24: two pages - BuildCardButtonRows lays them out.
+        markupOut = _buttons(BuildCardButtonRows(sessionId, facts, page));
         return {};
     }
 
@@ -2998,6 +3030,7 @@ namespace Agentmaster::Msg
                     { L"transcript", L"the session as a .md file [minimal|compact|default|full|max]" },
                     { L"summary", L"the session's summary" },
                     { L"screen", L"the terminal's visible text" },
+                    { L"screenimage", L"the terminal's screen as a picture" }, // §21.24 (the card's 🖼 Screen Image)
                     { L"status", L"the session's card / the fleet" },
                     { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19
                     // §21.19: a menu command's name holds only a-z, 0-9 and "_" (Telegram refuses the WHOLE list otherwise), so
@@ -5792,7 +5825,7 @@ namespace Agentmaster::Msg
         return TopicIsVerbose(t, _defaultVerbose.load());
     }
 
-    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping)
+    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping, bool tapped)
     {
         const auto s = _session(sessionId);
         if (!s)
@@ -5802,6 +5835,7 @@ namespace Agentmaster::Msg
         TopicRecord topic;
         bool pingWanted = false;
         bool repostWanted = false;
+        CardPage page = CardPage::Main; // §21.24: the page of buttons this card shows (CardState::page)
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
@@ -5814,9 +5848,15 @@ namespace Agentmaster::Msg
             if (ping)
             {
                 card.pingWanted = true; // kept until a post can carry it (below)
+                // §21.24: a card that starts to RING (a session that exited, errs or needs approval - a state CHANGE, so once
+                // per episode) goes back to its Main page, where the state's own action is (🔧 Resume Session, ▶ Reactivate).
+                // Only when the ring is raised: a page the user opens after that is kept, the ringing re-post included - the
+                // tap is the newer word.
+                card.page = CardPage::Main;
             }
             pingWanted = card.pingWanted;
             repostWanted = card.repostWanted; // the list's re-sort (_resortTick), kept until a post can carry it
+            page = card.page; // §21.24: the page the user opened (Main unless ⚙ Session was tapped); a re-post keeps it
         }
         if (topic.cardMessageId < 0)
         {
@@ -5842,7 +5882,7 @@ namespace Agentmaster::Msg
         extras.threadId = topic.threadId; // §21.17: the card's title links to its topic (in the chat's "All" view, the way in)
         const std::wstring text = BuildCardText(*s, now, idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras);
         json::Value markup;
-        _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
+        _cardMarkupFor(sessionId, CardButtonFactsFor(*s), page, markup);
         // The text AND the buttons: a card whose text is unchanged but whose buttons differ is a change too. §21.15: over the
         // card's CLASSIC render (its title token as the §21.13 square and title), so the hash does not move with the form the
         // card is shown in — an unchanged card keeps the hash its record holds, and the upgrade to chips edits no card at once.
@@ -5917,7 +5957,8 @@ namespace Agentmaster::Msg
             auto self = weak_from_this();
             const int64_t thread = topic.threadId;
             const int64_t cardId = topic.cardMessageId;
-            _editText(topic.cardMessageId, text, SendPriority::CardEdit, L"card:" + sessionId, markup, [self, thread, cardId](const TgResult& r) {
+            // §21.24: a tap on the card's own buttons (⚙ Session, ◀ Back) is answered at once: the edit takes an answer's priority.
+            _editText(topic.cardMessageId, text, tapped ? SendPriority::Final : SendPriority::CardEdit, L"card:" + sessionId, markup, [self, thread, cardId](const TgResult& r) {
                 if (r.ok || r.NotModified() || r.httpStatus != 400 || r.description.find(L"message to edit not found") == std::wstring::npos)
                 {
                     return;

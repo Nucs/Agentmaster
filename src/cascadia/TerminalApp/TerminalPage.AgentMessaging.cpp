@@ -41,6 +41,12 @@ namespace winrt::TerminalApp::implementation
             {
                 answer = _ReadScreenTextForSession(sessionId, 60);
             }
+            else if (action == L"screen-snapshot")
+            {
+                // MESSAGING.md §21.24 (the card's 🖼 Screen Image): the live screen with every cell's colors, for the bot to draw
+                // as a picture off this UI thread. The read itself is one pass over the viewport's cells under the terminal's read lock.
+                answer = _ReadScreenSnapshotForSession(sessionId);
+            }
             else if (action == L"markunread")
             {
                 _MarkSessionUnread(sessionId);
@@ -74,6 +80,28 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AgentLogCaughtException(L"_RemoteSessionAction");
             return false;
+        }
+    }
+
+    std::wstring TerminalPage::_ReadScreenSnapshotForSession(const std::wstring& sessionId)
+    {
+        try
+        {
+            // The same gate as the text read below: a session another window hosts has no control here, and a dormant tab
+            // (a restored or parked one, its claude not started) has nothing on its screen yet.
+            const auto control = _ControlForSession(sessionId);
+            if (!control || control.ConnectionState() == winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected)
+            {
+                return {};
+            }
+            const auto snapshot = control.ReadScreenSnapshot();
+            return std::wstring{ snapshot.c_str(), snapshot.size() };
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "" - the bot answers that the screen could not be read.
+            ::Agentmaster::AgentLogCaughtException(L"_ReadScreenSnapshotForSession");
+            return {};
         }
     }
 
