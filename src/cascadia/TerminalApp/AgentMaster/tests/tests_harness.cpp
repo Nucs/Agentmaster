@@ -1192,10 +1192,18 @@ void TestSessionSearchTools()
         };
         // (Each comparison in parentheses: the commas of a braced list would split CHECK's macro arguments.)
         CHECK((keys(L"tab drag", false) == std::vector<std::wstring>{ L"tab drag" }), "keys: plain text is its own key");
-        CHECK((keys(L"TabDragMath\\.h", false) == std::vector<std::wstring>{ L"TabDragMath", L"TabDragMath.h" }), "keys: plain text with a regex escape - its verbatim piece, and its unescaped spelling");
+        CHECK((keys(L"TabDragMath\\.h", false) == std::vector<std::wstring>{ L"TabDragMath" }), "keys: plain text with a regex escape - its verbatim piece, which its unescaped spelling TabDragMath.h holds too (one key selects both)");
         CHECK((keys(L"0xC0000374|heap.?corrupt", true) == std::vector<std::wstring>{ L"0xC0000374", L"corrupt" }), "keys: one key per alternative of a top-level alternation, each the alternative's longest piece");
         CHECK((keys(L"qm (create|start)", true) == std::vector<std::wstring>{ L"qm create", L"qm start" }), "keys: a required group of plain alternatives multiplies the segment");
-        CHECK((keys(L"drag(ged|ging)?", true) == std::vector<std::wstring>{ L"drag" }) && keys(L"\\d+|foo", true).empty(), "keys: an optional group ends the segment; an alternative with no piece gives no key at all");
+        CHECK((keys(L"drag(ged|ging)?", true) == std::vector<std::wstring>{ L"drag" }) && keys(L"\\d+|foo", true).empty(), "keys: an optional group's spellings all hold drag, so drag alone; an alternative with no piece gives no key at all");
+        // Optional spellings (2026-10-18): the prompt teaches tab[ _-]?drag, and better[ _-]?clip[ _-]?board was keyed
+        // on "better" alone - in half of the machine's transcripts.
+        CHECK((keys(L"tab[ _-]?drag", true) == std::vector<std::wstring>{ L"tab drag", L"tab-drag", L"tab_drag", L"tabdrag" }), "keys: an optional class of plain characters gives each spelling");
+        CHECK((keys(L"colou?r", true) == std::vector<std::wstring>{ L"color", L"colour" }) && (keys(L"(re)?compile", true) == std::vector<std::wstring>{ L"compile" }), "keys: an optional character gives both spellings; an optional prefix group leaves the word they share");
+        const std::vector<std::wstring> clip = keys(L"better[ _-]?clip[ _-]?board", true);
+        CHECK(clip.size() == 16 && std::all_of(clip.begin(), clip.end(), [](const std::wstring& k) { return k.find(L"better") == 0 && k.find(L"board") == k.size() - 5; }), "keys: two optional classes multiply into 16 spellings, every one a whole name");
+        CHECK((keys(L"[Tt]ab[Dd]rag", true) == std::vector<std::wstring>{ L"TabDrag" }) && (keys(L"x[a-z]crash", true) == std::vector<std::wstring>{ L"crash" }) && (keys(L"crash[ _-]+dump", true) == std::vector<std::wstring>{ L"crash" }),
+              "keys: a class that differs only in case is one spelling; a range and a repeated class are varying text");
         CHECK(GrepUnescapePlainPattern(L"TabDragMath\\.h") == L"TabDragMath.h" && GrepUnescapePlainPattern(L"foo\\(\\)") == L"foo()" && GrepUnescapePlainPattern(L"K:\\source\\x") == L"K:\\source\\x",
               "unescape: a regex escape in plain text is undone, a path's backslashes stay");
         const auto gr = ParseSessionGrepParams(J(LR"({"pattern":" a b ","regex":true,"in":"claude","context":900,"days":7})"), err);
@@ -1409,6 +1417,28 @@ void TestSessionSearchTools()
             const json::Value gCwd = J(grep(J(LR"({"pattern":"needlefolder"})")).text);
             const auto cwdRows = rowsOf(gCwd);
             CHECK(cwdRows.size() == 1 && cwdRows[0].StrAt(L"id") == L"eaeaeaea", "grep: a word only in a session's cwd field matches nothing; a message that says it still matches");
+
+            // A regex of optional spellings (the 16 keys of better[ _-]?clip[ _-]?board, searched through their shared
+            // anchor "better"): each spelling in a message matches, a copy in the cwd field does not, and "better" alone
+            // passes the line reader's anchor but no key.
+            const std::wstring idClipDash = L"ebebebeb-1111-4222-8333-444444444444";
+            const std::wstring idClipUnder = L"ecececec-1111-4222-8333-444444444444";
+            const std::wstring idClipCwd = L"edededed-1111-4222-8333-444444444444";
+            const std::wstring idBetter = L"eeeeeeee-1111-4222-8333-444444444444";
+            const bool wroteClip = WriteFileWithMtime(projects / (idClipDash + L".jsonl"), plainUserLine(idClipDash, "ship the better-clipboard fix", "K:\\proj", "c1", 44), wallNow - 44 * 60000) &&
+                                   WriteFileWithMtime(projects / (idClipUnder + L".jsonl"), plainUserLine(idClipUnder, "why does Better_Clip Board crash", "K:\\proj", "c2", 43), wallNow - 43 * 60000) &&
+                                   WriteFileWithMtime(projects / (idClipCwd + L".jsonl"), plainUserLine(idClipCwd, "list the disks", "K:\\betterclipboard", "c3", 42), wallNow - 42 * 60000) &&
+                                   WriteFileWithMtime(projects / (idBetter + L".jsonl"), plainUserLine(idBetter, "a better clip on the board", "K:\\proj", "c4", 41), wallNow - 41 * 60000);
+            CHECK(wroteClip, "grep: the spelling scratch transcripts were written");
+            const json::Value gClip = J(grep(J(LR"({"pattern":"better[ _-]?clip[ _-]?board","regex":true})")).text);
+            std::vector<std::wstring> clipIds;
+            for (const auto& row : rowsOf(gClip))
+            {
+                clipIds.push_back(row.StrAt(L"id"));
+            }
+            std::sort(clipIds.begin(), clipIds.end());
+            CHECK((clipIds == std::vector<std::wstring>{ L"ebebebeb", L"ecececec" }) && gClip.Find(L"stopped") == nullptr,
+                  "grep regex of optional spellings: both spellings in messages match; a copy only in the cwd field and the words apart do not");
         }
 
         // Ten more sessions in another folder, each with the word "fleetword", and the drag session saying it too: a grep

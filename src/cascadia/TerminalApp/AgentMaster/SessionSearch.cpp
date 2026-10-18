@@ -27,6 +27,15 @@ namespace
     constexpr size_t kMaxCmdlineChars = 12000;
     // Bound a single rg run (a wedge must never hang the search thread forever).
     constexpr DWORD kRgTimeoutMs = 30000;
+    // The folder-wide ripgrep (RgFilesWithMatchesInTree) reads EVERY transcript of the projects folder (12 GB here): 0.7
+    // to 2.7 s while Windows keeps the files cached, but more than 30 s when it has dropped them (after a build, with a
+    // few GB of RAM free). The 2026-10-18 eval's grep for "better[ _-]?clipboard" hit kRgTimeoutMs there, the prefilter
+    // was killed, and the grep read NOTHING ("stopped", 0 of 3,696). Its own, longer bound: a slow prefilter now costs
+    // time, never the result (a grep's read budget starts after it).
+    constexpr DWORD kRgTreeTimeoutMs = 120000;
+    // A folder-wide ripgrep at least this slow is logged (hooks.log `[grep]`): the cold-cache case, to be told from a
+    // slow read phase when a grep answers late.
+    constexpr ULONGLONG kRgTreeSlowLogMs = 5000;
     // Per-line text budgets for the in-process content scan (snippets only need the head).
     constexpr size_t kScanTextBudget = 4096;
 
@@ -192,26 +201,42 @@ namespace
     // ONE `rg -il` over a whole projects folder: every transcript directly in a project folder
     // (`<root>\<project>\<id>.jsonl`, depth 2 — never a subagent's file, which sits deeper) that
     // holds a match of ANY of `regexes`. One process instead of one per 64 files: rg reads the
-    // folder with all its threads (9.3 GB in 1.3 s warm, measured 2026-10-18). False on spawn
-    // failure, a timeout, or an error with no output; the caller then filters in batches.
+    // folder with all its threads (9.3 GB in 1.3 s warm, measured 2026-10-18), bounded by
+    // kRgTreeTimeoutMs (a cold read of the whole folder takes far longer than one batch). A run
+    // of kRgTreeSlowLogMs or more, or one that failed, is logged as `[grep]` in hooks.log. False
+    // on spawn failure, a timeout, or an error with no output; the caller then filters in batches.
     bool RgFilesWithMatchesInTree(const std::wstring& rg, const std::vector<std::wstring>& regexes, const std::wstring& root, std::vector<std::wstring>& matched)
     {
         const std::wstring args = L"-il --no-config --no-messages --max-depth 2 -g " + QuoteArg(L"*.jsonl") + RgRegexpArgs(regexes) + L" -- " + QuoteArg(root);
         std::string out;
         DWORD exitCode = 0;
-        if (!RunToolCapture(rg, args, kRgTimeoutMs, out, &exitCode))
+        const ULONGLONG started = ::GetTickCount64();
+        const bool ran = RunToolCapture(rg, args, kRgTreeTimeoutMs, out, &exitCode);
+        const ULONGLONG tookMs = ::GetTickCount64() - started;
+        const bool usable = ran && !(exitCode == 2 && out.empty()); // exit 2 with no output: rg could not search at all (RgFilesWithMatchesAny's rule)
+        if (usable)
         {
-            return false;
+            for (auto& line : CaptureLines(out))
+            {
+                matched.push_back(std::move(line));
+            }
         }
-        if (exitCode == 2 && out.empty())
+        if (!usable || tookMs >= kRgTreeSlowLogMs)
         {
-            return false; // rg could not search at all (RgFilesWithMatchesAny's rule)
+            // Best effort, and never a reason to fail the filter: a log line that cannot be written changes nothing.
+            try
+            {
+                AppendStateLog(L"hooks.log", L"[grep] ripgrep over the projects folder: " +
+                                                 (usable ? std::to_wstring(matched.size()) + L" file(s) in " + std::to_wstring(tookMs) + L" ms (slow: the transcripts were not in the file cache)" :
+                                                           std::wstring{ ran ? L"rg could not search (exit 2, no output)" : L"timed out or could not start" } + L" after " + std::to_wstring(tookMs) + L" ms; the files are filtered in batches instead") +
+                                                 L"\n");
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"RgFilesWithMatchesInTree: the [grep] log line");
+            }
         }
-        for (auto& line : CaptureLines(out))
-        {
-            matched.push_back(std::move(line));
-        }
-        return true;
+        return usable;
     }
 
     bool RgFilesWithMatchesAny(const std::wstring& rg, const std::vector<std::wstring>& regexes, const std::vector<std::wstring>& paths, std::vector<std::wstring>& matched)
@@ -848,6 +873,103 @@ namespace
         return true;
     }
 
+    // A class of more distinct characters than this is read as varying text (it would multiply a segment past its use).
+    constexpr size_t kMaxPlainClassMembers = 8;
+
+    // The members of a character class that lists PLAIN characters only — `[ _-]`, `[Bb]`, `[.\-]` — each as a
+    // one-character string, once per spelling that differs other than in case (the grep ignores case, so `[Bb]` is one
+    // member). False for anything else: a negated class, a range (`a-z`; a `-` first or last is the character), a class
+    // escape (`\d`, `\s`, `\w`, `\b` and every other escaped letter or digit), a POSIX bracket expression, or more than
+    // kMaxPlainClassMembers members. An escaped non-alphanumeric character (`\-`, `\]`, `\\`) stands for itself.
+    //   cls    — the class from its `[` through its closing `]` (SkipRegexClass's answer).
+    //   out    — receives the members when it returns true.
+    //   throws — std::bad_alloc.
+    bool PlainClassMembers(std::wstring_view cls, std::vector<std::wstring>& out)
+    {
+        out.clear();
+        if (cls.size() < 3 || cls.front() != L'[' || cls.back() != L']' || cls[1] == L'^')
+        {
+            return false;
+        }
+        const std::wstring_view body = cls.substr(1, cls.size() - 2);
+        std::vector<std::wstring> folded; // the members' folded spellings, for the once-per-character rule
+        for (size_t i = 0; i < body.size(); ++i)
+        {
+            wchar_t c = body[i];
+            if (c == L'\\')
+            {
+                if (i + 1 >= body.size())
+                {
+                    return false;
+                }
+                const wchar_t e = body[i + 1];
+                if ((e >= L'0' && e <= L'9') || (e >= L'a' && e <= L'z') || (e >= L'A' && e <= L'Z'))
+                {
+                    return false; // \d \s \w, \b (a backspace in a class), \n, \x41, \cX and every other escaped letter or digit: not a plain character
+                }
+                c = e;
+                ++i;
+            }
+            else if (c == L'-' && i != 0 && i + 1 != body.size())
+            {
+                return false; // a range: its members are not listed one by one
+            }
+            else if (c == L'[' && i + 1 < body.size() && (body[i + 1] == L':' || body[i + 1] == L'.' || body[i + 1] == L'='))
+            {
+                return false; // [:alpha:], [.x.], [=e=]
+            }
+            std::wstring member(1, c);
+            std::wstring key = FoldLower(member);
+            if (std::find(folded.begin(), folded.end(), key) != folded.end())
+            {
+                continue;
+            }
+            if (out.size() == kMaxPlainClassMembers)
+            {
+                return false;
+            }
+            folded.push_back(std::move(key));
+            out.push_back(std::move(member));
+        }
+        return !out.empty();
+    }
+
+    // Drops every member of an any-of key set that holds another member (case ignored): a text that holds the longer one
+    // holds the shorter one too, so the longer one adds a search and never a match ("drag(ged|ging)?" spells drag,
+    // dragged and dragging, and drag alone selects the same lines). The first spelling of each kept member stays, in
+    // order.
+    //   set    — the keys; rewritten in place.
+    //   throws — std::bad_alloc.
+    void DropImpliedPieces(std::vector<std::wstring>& set)
+    {
+        std::vector<std::wstring> folded;
+        folded.reserve(set.size());
+        for (const auto& member : set)
+        {
+            folded.push_back(FoldLower(member));
+        }
+        std::vector<std::wstring> kept;
+        kept.reserve(set.size());
+        for (size_t a = 0; a < set.size(); ++a)
+        {
+            bool implied = false;
+            for (size_t b = 0; b < set.size() && !implied; ++b)
+            {
+                if (a == b)
+                {
+                    continue;
+                }
+                // b inside a: a goes. Two equal spellings: only the first is kept.
+                implied = folded[a].find(folded[b]) != std::wstring::npos && (folded[a].size() != folded[b].size() || b < a);
+            }
+            if (!implied)
+            {
+                kept.push_back(std::move(set[a]));
+            }
+        }
+        set = std::move(kept);
+    }
+
     std::vector<std::wstring> RegexAnyOfLiterals(std::wstring_view p, int depth);
 
     // The any-of keys of ONE alternative (a pattern with no top-level `|`), found by walking its
@@ -901,6 +1023,9 @@ namespace
             }
             if (usable)
             {
+                // A member that holds another one selects nothing more (a segment cut short by a verbatim run, or an
+                // optional atom's spellings: drag and dragged), and every key costs the line reader a search.
+                DropImpliedPieces(set);
                 consider(std::move(set));
             }
             cur.assign(1, std::wstring{});
@@ -910,6 +1035,31 @@ namespace
             {
                 member.push_back(ch);
             }
+        };
+        // The segment goes on with exactly ONE of `options` (an optional atom's options include ""): every member times
+        // every option, each spelling once. `colou?r` gives color and colour, `tab[ _-]?drag` tab drag, tab-drag,
+        // tab_drag and tabdrag - each far more selective than its longest plain word alone (the 2026-10-18 eval's
+        // better[ _-]?clip[ _-]?board was keyed on "better", which 1,889 of 3,696 transcripts hold; its 16 spellings,
+        // 363). Past kMaxProduct members the segment is closed first, and the options start the next one.
+        const auto multiply = [&](const std::vector<std::wstring>& options) {
+            if (cur.size() * options.size() > kMaxProduct)
+            {
+                flush();
+            }
+            std::vector<std::wstring> product;
+            product.reserve(cur.size() * options.size());
+            for (const auto& head : cur)
+            {
+                for (const auto& tail : options)
+                {
+                    std::wstring member = head + tail;
+                    if (std::find(product.begin(), product.end(), member) == product.end())
+                    {
+                        product.push_back(std::move(member));
+                    }
+                }
+            }
+            cur = std::move(product);
         };
         size_t i = 0;
         while (i < p.size())
@@ -957,23 +1107,17 @@ namespace
                     }
                     plain.push_back(std::move(text));
                 }
-                if (allPlain && !quantified && !plain.empty())
+                // `(…)?` (or the lazy `??`): one of the alternatives or nothing. Any other quantifier repeats the group.
+                const bool optional = quantified && p[close + 1] == L'?';
+                if (allPlain && (!quantified || optional) && !plain.empty())
                 {
-                    // Exactly one of the alternatives, right here: the segment goes on as the product.
-                    if (cur.size() * plain.size() > kMaxProduct)
+                    // Exactly one of the alternatives (or, optional, none), right here: the segment goes on as the
+                    // product.
+                    if (optional)
                     {
-                        flush();
+                        plain.emplace_back();
                     }
-                    std::vector<std::wstring> product;
-                    product.reserve(cur.size() * plain.size());
-                    for (const auto& head : cur)
-                    {
-                        for (const auto& tail : plain)
-                        {
-                            product.push_back(head + tail);
-                        }
-                    }
-                    cur = std::move(product);
+                    multiply(plain);
                 }
                 else
                 {
@@ -994,14 +1138,29 @@ namespace
                 {
                     return {};
                 }
-                flush(); // varying text
                 size_t next = j + 1;
                 size_t minCount = 1;
                 bool quantifierOk = true;
-                ReadRegexQuantifier(p, j + 1, next, minCount, quantifierOk);
+                const bool quantified = ReadRegexQuantifier(p, j + 1, next, minCount, quantifierOk);
                 if (!quantifierOk)
                 {
                     return {};
+                }
+                // A class of a few plain characters, once (`[ _-]`) or optionally (`[ _-]?`), is a choice of spellings
+                // and the segment goes on with each; any other class, or a repeated one, is varying text.
+                const bool optional = quantified && p[j + 1] == L'?';
+                std::vector<std::wstring> members;
+                if ((!quantified || optional) && PlainClassMembers(p.substr(i, j - i + 1), members))
+                {
+                    if (optional)
+                    {
+                        members.emplace_back();
+                    }
+                    multiply(members);
+                }
+                else
+                {
+                    flush(); // varying text
                 }
                 i = next;
                 continue;
@@ -1073,9 +1232,13 @@ namespace
             {
                 return {};
             }
-            if (!literal || (quantified && minCount == 0))
+            if (literal && quantified && p[next] == L'?')
             {
-                flush(); // varying, or a character that may be absent
+                multiply({ std::wstring{}, std::wstring(1, ch) }); // `u?` (or the lazy `u??`): with it and without it
+            }
+            else if (!literal || (quantified && minCount == 0))
+            {
+                flush(); // varying, or a character that may be absent any number of times
             }
             else
             {
@@ -1127,6 +1290,7 @@ namespace
                 }
             }
         }
+        DropImpliedPieces(any); // drag|dragging: drag alone selects the same lines
         return any;
     }
 
@@ -1222,6 +1386,44 @@ namespace
         }
     }
 
+    // The shortest shared anchor worth one search per line (GrepRun::anchor): below three bytes a
+    // hit on nearly every line would cost more checks than the needles' own searches save.
+    constexpr size_t kGrepMinAnchorBytes = 3;
+
+    // The longest byte string that EVERY needle holds (somewhere; the first such string of the
+    // shortest needle when several are as long), or empty when there are fewer than two needles or
+    // they share nothing of kGrepMinAnchorBytes. The needles are short (a key set has at most 32
+    // members), so a plain walk over the shortest one's pieces, longest first, is cheap.
+    //   throws — std::bad_alloc.
+    std::string LongestSharedNeedlePiece(const std::vector<std::string>& needles)
+    {
+        if (needles.size() < 2)
+        {
+            return {};
+        }
+        const std::string* shortest = &needles.front();
+        for (const auto& needle : needles)
+        {
+            if (needle.size() < shortest->size())
+            {
+                shortest = &needle;
+            }
+        }
+        for (size_t len = shortest->size(); len >= kGrepMinAnchorBytes; --len)
+        {
+            for (size_t at = 0; at + len <= shortest->size(); ++at)
+            {
+                const std::string_view piece{ shortest->data() + at, len };
+                const bool everywhere = std::all_of(needles.begin(), needles.end(), [piece](const std::string& n) { return n.find(piece) != std::string::npos; });
+                if (everywhere)
+                {
+                    return std::string{ piece };
+                }
+            }
+        }
+        return {};
+    }
+
     // One grep's fixed parts, shared by its per-file reads — and, since 2026-10-18, by its reader
     // THREADS: everything here is read-only while the files are read (a const std::wregex and the
     // searchers' const operator() are safe to share), except tooComplex, which is atomic. Not
@@ -1240,6 +1442,15 @@ namespace
         // holds ONE of them (any-of). Empty = parse every line.
         std::vector<std::string> needles;
         std::vector<Searcher> searchers; // one per needle, pointing into it
+        // The needles' shared ANCHOR (2026-10-18): the longest piece of text every needle holds,
+        // kGrepMinAnchorBytes or more, searched for ONCE per line instead of each needle on its own
+        // (the 16 spellings of better[ _-]?clip[ _-]?board all hold "better"); a hit is then
+        // checked against each needle where the anchor sits in it. Empty when the needles share
+        // nothing that long (an alternation such as proxmox|qm start) or there is one needle: each
+        // needle is searched for on its own.
+        std::string anchor;
+        std::vector<Searcher> anchorSearcher; // the anchor's searcher (0 or 1), pointing into `anchor`
+        std::vector<std::vector<size_t>> anchorOffsets; // [k] = every offset of the anchor in needles[k]
         std::atomic<int> tooComplex{ 0 };
 
         GrepRun() = default;
@@ -1291,19 +1502,89 @@ namespace
         return false;
     }
 
+    // True when the byte at `pos` of a raw transcript line sits inside the value of its `cwd`
+    // field: the nearest `"cwd":"` before it has no closing quote between it and `pos`. A quote
+    // inside a JSON string is escaped (\"), and an escape is told from a path's own trailing
+    // backslash ("K:\\" ends in an escaped backslash) by the parity of the backslashes before it:
+    // an odd run escapes the quote.
+    bool HitInsideCwd(std::string_view line, size_t pos) noexcept
+    {
+        static constexpr std::string_view kCwdKey = "\"cwd\":\"";
+        const size_t key = line.substr(0, pos).rfind(kCwdKey);
+        if (key == std::string_view::npos)
+        {
+            return false;
+        }
+        for (size_t j = key + kCwdKey.size(); j < pos; ++j)
+        {
+            if (line[j] != '"')
+            {
+                continue;
+            }
+            size_t slashes = 0;
+            for (size_t b = j; b > key + kCwdKey.size() && line[b - 1] == '\\'; --b)
+            {
+                ++slashes;
+            }
+            if (slashes % 2 == 0)
+            {
+                return false; // the value closed before the hit
+            }
+        }
+        return true;
+    }
+
     // True when `line` (a raw transcript line) holds one of the run's needles OUTSIDE its `cwd`
     // field. Every line of a session launched in a folder carries that folder's path as "cwd", so a
     // folder name used as a grep word ("proxmox") would otherwise send EVERY line of every such
     // session through the decode and the JSON parse — the reason a grep for a project's name ran
     // out of time (SESSIONS.md §9.15). The cwd value never holds message text, so skipping a line
-    // whose only copies sit in it loses no match. True for a run without needles (parse it).
+    // whose only copies sit in it loses no match. True for a run without needles (parse it). With
+    // a shared anchor (GrepRun::anchor) the line is searched once for it, else once per needle.
     bool LineHoldsNeedleOutsideCwd(const GrepRun& run, std::string_view line)
     {
         if (run.searchers.empty())
         {
             return true;
         }
-        static constexpr std::string_view kCwdKey = "\"cwd\":\"";
+        if (!run.anchorSearcher.empty())
+        {
+            // One search for the shared anchor; at each of its hits, each needle is compared where the anchor sits in
+            // it (every copy of a needle holds the anchor, so it is found at that copy's anchor). The same lines pass
+            // as with a search per needle, for one pass over the line.
+            auto from = line.begin();
+            for (;;)
+            {
+                const auto hit = std::search(from, line.end(), run.anchorSearcher.front());
+                if (hit == line.end())
+                {
+                    return false;
+                }
+                const size_t at = static_cast<size_t>(hit - line.begin());
+                for (size_t k = 0; k < run.needles.size(); ++k)
+                {
+                    const std::string& needle = run.needles[k];
+                    for (const size_t offset : run.anchorOffsets[k])
+                    {
+                        if (offset > at || at - offset + needle.size() > line.size())
+                        {
+                            continue;
+                        }
+                        const size_t start = at - offset;
+                        bool equal = true;
+                        for (size_t b = 0; b < needle.size() && equal; ++b)
+                        {
+                            equal = FoldAsciiByte(line[start + b]) == needle[b]; // the needles are ASCII-lowered
+                        }
+                        if (equal && !HitInsideCwd(line, start))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                from = hit + 1;
+            }
+        }
         for (size_t k = 0; k < run.searchers.size(); ++k)
         {
             auto from = line.begin();
@@ -1314,35 +1595,7 @@ namespace
                 {
                     break;
                 }
-                const size_t pos = static_cast<size_t>(hit - line.begin());
-                // Inside the cwd value when the nearest `"cwd":"` before the hit has no closing quote
-                // between it and the hit. A quote inside a JSON string is escaped (\"), and an escape
-                // is told from a path's own trailing backslash ("K:\\" ends in an escaped backslash)
-                // by the parity of the backslashes before it: an odd run escapes the quote.
-                const size_t key = line.substr(0, pos).rfind(kCwdKey);
-                bool insideCwd = false;
-                if (key != std::string_view::npos)
-                {
-                    insideCwd = true;
-                    for (size_t j = key + kCwdKey.size(); j < pos; ++j)
-                    {
-                        if (line[j] != '"')
-                        {
-                            continue;
-                        }
-                        size_t slashes = 0;
-                        for (size_t b = j; b > key + kCwdKey.size() && line[b - 1] == '\\'; --b)
-                        {
-                            ++slashes;
-                        }
-                        if (slashes % 2 == 0)
-                        {
-                            insideCwd = false; // the value closed before the hit
-                            break;
-                        }
-                    }
-                }
-                if (!insideCwd)
+                if (!HitInsideCwd(line, static_cast<size_t>(hit - line.begin())))
                 {
                     return true;
                 }
@@ -2301,6 +2554,9 @@ namespace Agentmaster
                     out.push_back(std::move(piece));
                 }
             }
+            // "TabDragMath\.h": its verbatim piece TabDragMath is in its unescaped spelling TabDragMath.h, so that key
+            // alone selects every line either spelling does.
+            DropImpliedPieces(out);
             return out;
         }
         return RegexAnyOfLiterals(pattern, 0);
@@ -2409,13 +2665,50 @@ namespace Agentmaster
         {
             run.needles.clear();
         }
+        // Each needle once, and none that holds another: two keys can share one ASCII run (AsciiLowerNeedle keeps a
+        // key's longest one), and a needle holding another passes no line the shorter one does not.
+        {
+            std::vector<std::string> kept;
+            kept.reserve(run.needles.size());
+            for (size_t a = 0; a < run.needles.size(); ++a)
+            {
+                bool implied = false;
+                for (size_t b = 0; b < run.needles.size() && !implied; ++b)
+                {
+                    implied = a != b && run.needles[a].find(run.needles[b]) != std::string::npos && (run.needles[a].size() != run.needles[b].size() || b < a);
+                }
+                if (!implied)
+                {
+                    kept.push_back(run.needles[a]);
+                }
+            }
+            run.needles = std::move(kept);
+        }
         run.searchers.reserve(run.needles.size());
         for (const auto& needle : run.needles)
         {
             run.searchers.emplace_back(needle.cbegin(), needle.cend()); // `needles` is not resized after this: the searchers' pointers stay good
         }
+        // The needles' shared anchor, when they have one (GrepRun::anchor): a line is then searched once, not once per
+        // needle - a regex's spellings (16 for better[ _-]?clip[ _-]?board) would otherwise cost 16 passes per line.
+        run.anchor = LongestSharedNeedlePiece(run.needles);
+        if (!run.anchor.empty())
+        {
+            run.anchorOffsets.reserve(run.needles.size());
+            for (const auto& needle : run.needles)
+            {
+                std::vector<size_t> offsets;
+                for (size_t at = needle.find(run.anchor); at != std::string::npos; at = needle.find(run.anchor, at + 1))
+                {
+                    offsets.push_back(at);
+                }
+                run.anchorOffsets.push_back(std::move(offsets));
+            }
+            run.anchorSearcher.emplace_back(run.anchor.cbegin(), run.anchor.cend()); // `anchor` is not changed after this
+        }
 
-        // When the budget started. Not const: the ONE tree-wide ripgrep below restarts it (see there).
+        // When the budget started. Not const: the ONE tree-wide ripgrep below restarts it when it ends, whether it
+        // filtered or failed (see there), so the reads never pay for the prefilter's time.
         ULONGLONG started = ::GetTickCount64();
         std::atomic<bool> stopped{ false }; // a reader saw the budget end or the cancel: the others stop at their next check
         const auto stop = [&]() -> bool {
@@ -2476,7 +2769,16 @@ namespace Agentmaster
                 }
             }
             std::vector<std::wstring> matched;
-            if (oneRoot && !root.empty() && RgFilesWithMatchesInTree(rg, rgRegexes, root, matched))
+            const bool treeTried = oneRoot && !root.empty();
+            const bool treeFiltered = treeTried && RgFilesWithMatchesInTree(rg, rgRegexes, root, matched);
+            if (treeTried && !treeFiltered)
+            {
+                // The folder-wide run failed (it timed out on a cold cache, or rg could not search): the batches below
+                // filter instead, and they get the WHOLE read budget. Counted from the call's start, the budget was
+                // already spent here, and the grep answered "stopped" having read nothing (the 2026-10-18 eval, q6).
+                started = ::GetTickCount64();
+            }
+            if (treeFiltered)
             {
                 std::unordered_set<std::wstring> hits;
                 hits.reserve(matched.size());
@@ -2494,8 +2796,8 @@ namespace Agentmaster
                 filteredUpTo = refs.size();
                 out.prefiltered = true;
                 // The read budget starts NOW. That ripgrep reads every transcript of the folder (12 GB here) and has its
-                // own timeout (kRgTimeoutMs); with the files out of the cache it can take as long as the whole budget, and
-                // the readers then started with none left: the 2026-10-18 eval's grep for "proxmox" over every session
+                // own timeout (kRgTreeTimeoutMs); with the files out of the cache it can take as long as the whole budget,
+                // and the readers then started with none left: the 2026-10-18 eval's grep for "proxmox" over every session
                 // answered "stopped" having read 0 of its 346 candidates, where the same call reads them all in 3 s warm.
                 started = ::GetTickCount64();
             }

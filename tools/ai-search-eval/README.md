@@ -9,7 +9,7 @@ the engine fixes and the Search Procedure are in [`doc/agentmaster/SESSIONS.md`]
 
 | File | What it is |
 |---|---|
-| `queries.json` | The five queries the prompt was tuned on, one of each kind: a subject that is also a folder, words the user remembers, an error code within one project, a file CHANGED, a period with a folder. |
+| `queries.json` | The five queries the prompt was tuned on, one of each kind: a subject that is also a folder, words the user remembers, an error code within one project, a file CHANGED, a period with a folder; and q6, "find betterclipboard session", the Telegram request of 2026-10-18 that the dev bot first answered with nothing (a project word that is also a folder; added after the tuning, never tuned on). |
 | `heldout_queries.json` | Four more the prompt was never tuned on: a file changed, a day, an error, the user's words. |
 | `score.py` | Scores one round's results against a keys file (`--miss`: every missed session, seen by a tool or never; `--calls`: every tool call with its counts). |
 | `pieces.txt` | **The prompt's source.** The `AM_PROMPT_*` macros of `SessionSearchTools.cpp` ("the system prompts") are generated from it; the page prompt and the database prompt are two orders of the same pieces. |
@@ -46,7 +46,12 @@ python -I tools\ai-search-eval\score.py Q:\tmp\am-eval\r1.json --keys <keys.json
   set twice and the held-out set once per candidate, since one run can be lucky.
 - `harness_live.exe --tool <search|grep|read> '<arguments JSON>' [--tool-out <file>]` runs ONE tool call over the
   machine's sessions with no model, timed — the way to take a slow or empty result apart (a grep is then timed per
-  candidate file too).
+  candidate file too). `--eval-only q6` (comma-separated ids) runs only those queries.
+- Time the tools in the configuration the bot runs. The run-harness-live.bat build is optimized, like production;
+  the DEV install is a Debug build, about 14 times slower per transcript, and its grep and read threads gain nothing
+  from running in parallel (the debug heap serializes their allocations). 2026-10-18: a grep that reads 363 files in
+  4.5 s optimized read 1 in its 20 s there, and a read of 8 sessions that takes 0.6 s optimized left 2 to 5 unread.
+  A Debug harness: the same `cl` line with `/Od /Ob1 /MDd /RTC1 /D_DEBUG /DDBG` instead of `/O2`.
 
 ## Changing the prompt
 

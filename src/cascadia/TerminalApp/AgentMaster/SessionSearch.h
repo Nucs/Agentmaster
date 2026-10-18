@@ -213,7 +213,10 @@ namespace Agentmaster
     // launched in a folder of that name) is not parsed either. Since 2026-10-18 the candidates are
     // read by several threads at once, and a grep over many sessions of one projects folder asks
     // ripgrep ONCE for the whole folder instead of once per 64 files (SESSIONS.md §9.15: one run
-    // over 9.3 GB took 1.3 s warm, the batches about 20 s and more). A time budget bounds a call;
+    // over 9.3 GB took 1.3 s warm, the batches about 20 s and more; with the transcripts out of
+    // the file cache it took 37 s, so that run has its own 120 s bound and the read budget starts
+    // after it). The keys of a regex with optional spellings (`[ _-]?`) are its spellings, and the
+    // line reader searches each line once for the text they share. A time budget bounds a call;
     // the outcome says when it ran out.
 
     // How much of one message's text a grep reads, in UTF-16 units: the head of a long tool result
@@ -236,9 +239,10 @@ namespace Agentmaster
         size_t contextChars{ 120 }; // characters kept on each side of a match in an excerpt
         size_t maxExcerpts{ 3 }; // excerpts kept per session (every match still counts)
         // 0 = no time limit. Else stop reading files this many milliseconds after the call
-        // started — or, when the one tree-wide ripgrep prefilter ran, after IT ended (it has its own
-        // timeout, and cold it can take as long as the whole budget): the outcome then has
-        // complete == false and the sessions read so far.
+        // started — or, when the one tree-wide ripgrep prefilter ran, after IT ended, whether it
+        // filtered or failed (it has its own 120 s timeout, and cold it can take longer than the
+        // whole budget; a failed run leaves the batches to filter, with the whole budget): the
+        // outcome then has complete == false and the sessions read so far.
         int64_t budgetMs{};
         // true: match the pattern only against the PATHS of the files Claude changed — the
         // file_path / notebook_path of every Edit, Write, MultiEdit and NotebookEdit call — so a
@@ -297,17 +301,22 @@ namespace Agentmaster
 
     // The prefilter keys of `pattern`: pieces of text of which EVERY match contains AT LEAST ONE,
     // each held verbatim by a transcript's raw JSON line (GrepRequiredLiteral's rule). A regex is
-    // walked atom by atom: plain characters make a SEGMENT that every match holds in one piece, a
-    // required group of plain alternatives multiplies it ("qm (create|start)" gives "qm create"
-    // and "qm start", not the common words alone), and anything that varies ends it; the segment
-    // set whose shortest member is longest wins. A top-level alternation (`0xC0000374|heap
+    // walked atom by atom: plain characters make a SEGMENT that every match holds in one piece; a
+    // choice of spellings multiplies it — a required or optional group of plain alternatives ("qm
+    // (create|start)" gives "qm create" and "qm start", not the common words alone), a class of a
+    // few plain characters once or optionally ("tab[ _-]?drag" gives tab drag, tab-drag, tab_drag
+    // and tabdrag, not "drag" alone), an optional character ("colou?r": color and colour) — up to
+    // 32 spellings; anything else that varies (a range, `.`, a class escape, a repeat) ends it. The
+    // segment set whose shortest member is longest wins. A top-level alternation (`0xC0000374|heap
     // corruption`) is the union of its alternatives' sets (nested up to 3 levels). Plain text
     // gives itself, and — when it holds a regex escape such as `\.` or `\(` (the model escaped a
     // dot in plain text: "TabDragMath\.h") — its unescaped form too, so both spellings are found.
-    // Empty when some alternative has no piece: the grep then reads every candidate.
+    // A member that holds another member is dropped (it selects nothing more: drag(ged|ging)? is
+    // keyed on drag alone). Empty when some alternative has no piece: the grep then reads every
+    // candidate.
     //   pattern — the grep's pattern.
     //   regex   — true: an ECMAScript regex.
-    //   returns — the pieces (original case, each once), or none.
+    //   returns — the pieces (original case, each once, none holding another), or none.
     //   throws  — std::bad_alloc.
     std::vector<std::wstring> GrepRequiredLiterals(std::wstring_view pattern, bool regex);
 
