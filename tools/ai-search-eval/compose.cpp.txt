@@ -1,0 +1,65 @@
+    // The page search's prompt: the shared pieces with the sessions server's tools, its way of casting the net (every
+    // session by default, `more` / `also`, in:edits, in_period) and the workflows that use them.
+    const wchar_t kSystemPrompt[] =
+        AM_PROMPT_INTRO
+        AM_PROMPT_BEHAVIORS
+        AM_PROMPT_PROC_HEAD
+        AM_PROMPT_PROC_NET_PAGE
+        AM_PROMPT_PROC_TAIL
+        AM_PROMPT_TOOLS_HEAD
+        AM_PROMPT_TOOLS_PAGE
+        AM_PROMPT_SHOW_AND_TABS
+        AM_PROMPT_WORKFLOWS_HEAD
+        AM_PROMPT_WORKFLOW_3_PAGE
+        AM_PROMPT_WORKFLOW_4_PAGE
+        AM_PROMPT_WORKFLOWS_5_TO_7
+        AM_PROMPT_WORKFLOW_8_PAGE
+        AM_PROMPT_WORKFLOWS_9_TO_15
+        AM_PROMPT_WORKFLOW_16_PAGE
+        AM_PROMPT_WORKFLOWS_TAIL;
+
+    // The session database's prompt: the same shared pieces with the database's tools, its way of casting the net
+    // (days:3650, the `next` cursor, who_touched, timeline) and the workflows that use them (more scopes, usage, related).
+    // ⚠ It must never contain the word deep (the database's search has scopes).
+    const wchar_t kDatabaseSystemPrompt[] =
+        AM_PROMPT_INTRO
+        AM_PROMPT_BEHAVIORS
+        AM_PROMPT_PROC_HEAD
+        AM_PROMPT_PROC_NET_DATABASE
+        AM_PROMPT_PROC_TAIL
+        AM_PROMPT_TOOLS_HEAD
+        AM_PROMPT_TOOLS_DATABASE
+        AM_PROMPT_SHOW_AND_TABS
+        AM_PROMPT_WORKFLOWS_HEAD
+        AM_PROMPT_WORKFLOW_3_DATABASE
+        AM_PROMPT_WORKFLOW_4_DATABASE
+        AM_PROMPT_WORKFLOWS_5_TO_7
+        AM_PROMPT_WORKFLOW_8_DATABASE
+        AM_PROMPT_WORKFLOWS_9_TO_15
+        AM_PROMPT_WORKFLOW_16_DATABASE
+        AM_PROMPT_WORKFLOWS_TAIL;
+
+    // The pieces are text, not an interface: nothing else may use them.
+#undef AM_PROMPT_INTRO
+#undef AM_PROMPT_BEHAVIORS
+#undef AM_PROMPT_PROC_HEAD
+#undef AM_PROMPT_PROC_NET_PAGE
+#undef AM_PROMPT_PROC_NET_DATABASE
+#undef AM_PROMPT_PROC_TAIL
+#undef AM_PROMPT_TOOLS_HEAD
+#undef AM_PROMPT_READ_BODY
+#undef AM_PROMPT_TOOLS_PAGE
+#undef AM_PROMPT_TOOLS_DATABASE
+#undef AM_PROMPT_SHOW_AND_TABS
+#undef AM_PROMPT_WORKFLOWS_HEAD
+#undef AM_PROMPT_WORKFLOW_3_PAGE
+#undef AM_PROMPT_WORKFLOW_3_DATABASE
+#undef AM_PROMPT_WORKFLOW_4_PAGE
+#undef AM_PROMPT_WORKFLOW_4_DATABASE
+#undef AM_PROMPT_WORKFLOWS_5_TO_7
+#undef AM_PROMPT_WORKFLOW_8_PAGE
+#undef AM_PROMPT_WORKFLOW_8_DATABASE
+#undef AM_PROMPT_WORKFLOWS_9_TO_15
+#undef AM_PROMPT_WORKFLOW_16_PAGE
+#undef AM_PROMPT_WORKFLOW_16_DATABASE
+#undef AM_PROMPT_WORKFLOWS_TAIL

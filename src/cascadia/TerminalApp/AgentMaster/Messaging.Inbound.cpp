@@ -1850,6 +1850,32 @@ namespace Agentmaster::Msg
         buttons.push_back({ { L"\x2298 Clear", std::wstring{ kSearchClearCallbackData } } });
         // With sound: the answer is the request's final message (D5).
         _reply(thread, html, true, _buttons(buttons));
+        // Every shown session reaches the phone (the user's rule of 2026-10-18, "searches must never miss"): the rows past the
+        // cards follow as one line each, in as few silent messages as fit (BuildSearchMoreLinesHtml). The facts are the rows'
+        // own; where each session stands is read now, like the cards' glyphs.
+        if (rows.size() > listed)
+        {
+            std::vector<SearchCard> rest;
+            rest.reserve(rows.size() - listed);
+            for (size_t i = listed; i < rows.size(); ++i)
+            {
+                const auto& row = rows[i];
+                const auto s = _registry->Get(row.sessionId);
+                SearchCard card;
+                card.number = i + 1;
+                card.sessionId = row.sessionId;
+                card.title = row.title;
+                card.dir = row.dir;
+                card.lastActivityMs = row.lastActivityMs;
+                card.colorSquare = _titleSquare(s ? &*s : nullptr, row.dir);
+                card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+                rest.push_back(std::move(card));
+            }
+            for (const auto& more : BuildSearchMoreLinesHtml(rest, WallMs()))
+            {
+                _reply(thread, more, false);
+            }
+        }
     }
 
     void MessagingService::_showSearchPick(const SearchPick& pick, int64_t threadId, int64_t answerMessageId)

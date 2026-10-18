@@ -7,6 +7,8 @@ REM
 REM   run-harness-live.bat [arguments for harness_live.exe]
 REM   e.g.  run-harness-live.bat --agent "the session where I fixed the tab drag crash"
 REM         run-harness-live.bat --only-agent --agent "sessions about the taskbar badge"
+REM         run-harness-live.bat --tool grep "{\"pattern\":\"proxmox\",\"in\":\"user\"}"   (one tool call, no model, timed)
+REM         run-harness-live.bat --eval queries.json --eval-out results.json --agent-thinking medium   (SESSIONS.md 9.15)
 REM
 REM Environment variables it reads:
 REM   AM_NLOHMANN_INCLUDE  a folder that holds nlohmann\json.hpp. Needed only until a full app build has installed the
@@ -55,8 +57,10 @@ cd /d "%AM_TESTS%"
 REM The same switches as run-m5-tests.bat (/utf-8, UNICODE: parity with the app build), plus the SDK's include folders
 REM and /O2: this test PRINTS latencies (process start, time to the first result, the index read), and an unoptimized
 REM build reads the session index several times slower than the Release app does.
-REM The engine list is m5's: the search agent reads the session index, the session store and the registry.
-cl /std:c++20 /EHsc /nologo /W3 /O2 /utf-8 /MP /DUNICODE /D_UNICODE %AM_AGENT_FLAGS% /I"%AM_SDK%\include" /I"%AM_SDK%\src" /I"%AM_JSON_INC%" /Fo"%AM_LIVE_OUT%\\" /Fd"%AM_LIVE_OUT%\harness_live.pdb" /Fe:"%AM_LIVE_OUT%\harness_live.exe" harness_live.cpp ..\AgentHarness.cpp ..\AgentHarnessCore.cpp ..\ClaudeSdkUnity.cpp ..\ClaudeSdkProcessWin32.cpp %AM_AGENT_SRC% ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ole32.lib user32.lib oleaut32.lib icu.lib shell32.lib
+REM The engine list is m5's: the search agent reads the session index, the session store and the registry. Since the
+REM Telegram service lives in the engine (Engine.cpp starts it), the messaging files are in it too, or the link fails
+REM (MessagingService, TelegramApi and the rewind helper unresolved; found 2026-10-18 by the prompt eval's build).
+cl /std:c++20 /EHsc /nologo /W3 /O2 /utf-8 /MP /DUNICODE /D_UNICODE %AM_AGENT_FLAGS% /I"%AM_SDK%\include" /I"%AM_SDK%\src" /I"%AM_JSON_INC%" /Fo"%AM_LIVE_OUT%\\" /Fd"%AM_LIVE_OUT%\harness_live.pdb" /Fe:"%AM_LIVE_OUT%\harness_live.exe" harness_live.cpp ..\AgentHarness.cpp ..\AgentHarnessCore.cpp ..\ClaudeSdkUnity.cpp ..\ClaudeSdkProcessWin32.cpp %AM_AGENT_SRC% ..\ApiErrorRewind.cpp ..\TranscriptTurns.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\TranscriptWatcher.cpp ..\CommandWatch.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\SessionDbRefresher.cpp ..\SessionDbClient.cpp ..\Messaging.cpp ..\Messaging.Inbound.cpp ..\TelegramApi.cpp ..\ProcessObserver.cpp ..\ClaudeInvisibleChars.cpp ole32.lib user32.lib oleaut32.lib icu.lib shell32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

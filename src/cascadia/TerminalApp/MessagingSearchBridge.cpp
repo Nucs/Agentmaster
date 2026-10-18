@@ -110,6 +110,9 @@ namespace Agentmaster::Msg
                 // SESSIONS.md §9.14: the window and tab tools over the app's windows — the same as the page's agent. From a
                 // phone no request has an origin window, so with several windows open the model must ask which one.
                 options.tabTools = MakeEngineTabTools();
+                // SESSIONS.md §9.13: the process's ONE session index, shared with the Sessions page's conversation and kept
+                // for the run, so a search after a pause never answers from a rebuild that reached a few sessions.
+                options.catalogKeeper = SharedSessionCatalogKeeper();
                 options.claudeExe = [] { return SharedEngine().claudeExePath; };
                 options.openSessions = [] {
                     std::vector<std::pair<std::wstring, std::wstring>> open;
@@ -215,6 +218,10 @@ namespace Agentmaster::Msg
             {
                 _state->sink = std::move(sink);
                 SessionSearchAgent& agent = TelegramSearchAgent();
+                // The bot is up for the whole run: read the session index now, in the background, so the first search
+                // finds it complete. Every session (0): the search tool's default period (kSessionSearchDefaultDays == 0).
+                static_assert(kSessionSearchDefaultDays == 0, "the index read at the bot's start covers the search's default period");
+                SharedSessionCatalogKeeper()->Ensure(0);
                 // The level the cog holds NOW: an earlier start of the bot may have made the conversation with another one.
                 // Before the listener, so the StateChanged event this raises reaches nobody.
                 agent.SetThinkingLevel(ThinkingLevelFromWord(thinkingWord));
@@ -256,6 +263,8 @@ namespace Agentmaster::Msg
 
             void Park(int64_t delayMs) override
             {
+                // Only the idle claude.exe ends: the session index is the process's (SharedSessionCatalogKeeper), kept for
+                // the next search of either conversation (ReleaseCatalog frees nothing with a shared index).
                 SessionSearchAgent& agent = TelegramSearchAgent();
                 agent.ReleaseCatalog();
                 agent.ParkProcessAfter(delayMs);

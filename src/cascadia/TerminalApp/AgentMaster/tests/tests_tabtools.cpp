@@ -492,12 +492,24 @@ namespace
         {
             const std::wstring& p = *prompt;
             const size_t h1 = p.find(L"\n# Instructional Behaviors\n");
+            const size_t hp = p.find(L"\n## The Search Procedure\n");
             const size_t h2 = p.find(L"\n## Tools\n");
             const size_t h3 = p.find(L"\n## Workflow Guidelines\n");
-            CHECK(h1 != std::wstring::npos && h2 != std::wstring::npos && h3 != std::wstring::npos && h1 < h2 && h2 < h3, "prompt: # Instructional Behaviors, then ## Tools, then ## Workflow Guidelines");
-            const std::wstring behaviors = Section(p, L"# Instructional Behaviors", L"## Tools");
+            CHECK(h1 != std::wstring::npos && hp != std::wstring::npos && h2 != std::wstring::npos && h3 != std::wstring::npos && h1 < hp && hp < h2 && h2 < h3,
+                  "prompt: # Instructional Behaviors, then ## The Search Procedure (2026-10-18), then ## Tools, then ## Workflow Guidelines");
+            const std::wstring behaviors = Section(p, L"# Instructional Behaviors", L"## The Search Procedure");
+            const std::wstring procedure = Section(p, L"## The Search Procedure", L"## Tools");
             const std::wstring workflows = Section(p, L"## Workflow Guidelines", L"");
             CHECK(CountNumbered(behaviors) == 10 && behaviors.find(L"\n11. ") == std::wstring::npos, "prompt: ten numbered behaviors");
+            // The procedure the prompt eval of 2026-10-18 tuned (SESSIONS.md 9.15): seven steps, completeness first.
+            CHECK(CountNumbered(procedure) == 7 && procedure.find(L"\n8. ") == std::wstring::npos, "prompt: seven numbered steps of the Search Procedure");
+            CHECK(p.find(L"Your first duty is COMPLETENESS") != std::wstring::npos && procedure.find(L"Cast a wide net") != std::wstring::npos &&
+                      procedure.find(L"Make every list complete before you judge it") != std::wstring::npos && procedure.find(L"Sort the candidates by their evidence") != std::wstring::npos &&
+                      procedure.find(L"Before you show, check:") != std::wstring::npos && procedure.find(L"in ONE show call") != std::wstring::npos,
+                  "prompt: the procedure's steps - read the facets, cast a wide net, make every list complete, sort by evidence, check, show all in one call, reply");
+            CHECK(procedure.find(L"never leave a candidate out on a guess") != std::wstring::npos && procedure.find(L"Your candidates are the union of EVERY list you got") != std::wstring::npos &&
+                      procedure.find(L"never a sample or one representative") != std::wstring::npos && procedure.find(L"The user's words count in whatever form they wrote them") != std::wstring::npos,
+                  "prompt: the eval's rules - no candidate left out on a guess, the union of every list, never a sample of similar sessions, the user's words in any form");
             CHECK(CountNumbered(workflows) == 19 && workflows.find(L"\n20. ") == std::wstring::npos, "prompt: nineteen numbered workflows");
             CHECK(behaviors.find(L"\n1. Be descriptive and helpful, never hasty.") != std::wstring::npos && behaviors.find(L"before your first tool call and in the same message") != std::wstring::npos &&
                       behaviors.find(L"I'll 1. ") != std::wstring::npos,
@@ -624,9 +636,11 @@ namespace
             CHECK(search->inputSchemaJson.find(L"also matches inside longer words") != npos && search->inputSchemaJson.find(L"put a folder in dir and a branch in branch") != npos &&
                       search->description.find(L"inside longer words") != npos,
                   "schema: search's query states the stem, the one-place and the folder / branch rules");
-            CHECK(grep->inputSchemaJson.find(L"drag(ged|ging)?") != npos && grep->inputSchemaJson.find(L"outside its groups and alternatives is slow") != npos &&
-                      grep->description.find(L"every form of a word") != npos,
-                  "schema: grep's regex and its description state the forms rule and its cost");
+            CHECK(grep->inputSchemaJson.find(L"drag(ged|ging)?") != npos && grep->inputSchemaJson.find(L"A pattern with an alternative that has no such piece is slow") != npos &&
+                      grep->inputSchemaJson.find(L"(0xC0000374|heap.?corrupt)") != npos && grep->description.find(L"every form of a word") != npos,
+                  "schema: grep's regex and its description state the forms rule and its cost (an alternation whose every alternative keeps a piece is fast)");
+            CHECK(search->description.find(L"every session by default") != npos && grep->description.find(L"in:edits") != npos && grep->description.find(L"`also`") != npos,
+                  "description: search covers every session by default; grep's in:edits and its `also` list");
         }
     }
 }

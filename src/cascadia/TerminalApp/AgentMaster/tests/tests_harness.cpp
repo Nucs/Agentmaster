@@ -135,7 +135,9 @@ namespace
     SessionCatalog TestCatalog()
     {
         SessionCatalog c;
-        c.sinceUnixMs = kNow - 400 * kDay;
+        // Every session, as the app's index keeper reads it since 2026-10-18 (kSessionSearchDefaultDays 0): a catalog
+        // that reached back only 400 days would be a PART for a search of every session, and the tools refuse a part.
+        c.sinceUnixMs = 0;
         c.coveredSinceUnixMs = c.sinceUnixMs;
         c.gatheredUnixMs = kNow;
         c.entries.push_back(Entry(kIdDrag, L"Fix tab drag crash", L"K:\\source\\Agentmaster", 1));
@@ -572,12 +574,14 @@ void TestSessionSearchTools()
     // ---- the search tool's arguments ----
     {
         const auto defaults = ParseSessionSearchParams(J(L"{}"), kNow, error);
-        CHECK(defaults && error.empty() && defaults->query.empty() && defaults->days == kSessionSearchDefaultDays && defaults->limit == 15 && defaults->sort == L"relevance" && !defaults->deep && !defaults->openOnly && !defaults->favoriteOnly, "arguments: the defaults");
-        CHECK(defaults && SessionSearchSinceMs(*defaults, kNow) == kNow - kSessionSearchDefaultDays * kDay, "arguments: the default period is the last kSessionSearchDefaultDays days");
+        CHECK(defaults && error.empty() && defaults->query.empty() && defaults->days == kSessionSearchDefaultDays && defaults->limit == kSessionSearchDefaultLimit && defaults->sort == L"relevance" && !defaults->deep && !defaults->openOnly && !defaults->favoriteOnly, "arguments: the defaults");
+        CHECK(defaults && kSessionSearchDefaultDays == 0 && SessionSearchSinceMs(*defaults, kNow) == 0, "arguments: the default period is EVERY session (the user's rule of 2026-10-18: a search never misses an old session)");
+        const auto zero = ParseSessionSearchParams(J(LR"({"days":0})"), kNow, error);
+        CHECK(zero && zero->days == 0 && SessionSearchSinceMs(*zero, kNow) == 0, "arguments: days 0 is every session too");
         const auto full = ParseSessionSearchParams(J(LR"({"query":"  tab drag  ","days":7,"dir":" Agentmaster ","branch":"main","tag":"release","favorite":true,"open":true,"deep":true,"sort":"created","limit":3})"), kNow, error);
         CHECK(full && full->query == L"tab drag" && full->days == 7 && full->dir == L"Agentmaster" && full->branch == L"main" && full->tag == L"release" && full->favoriteOnly && full->openOnly && full->deep && full->sort == L"created" && full->limit == 3, "arguments: every field, trimmed");
-        const auto clamped = ParseSessionSearchParams(J(LR"({"days":0,"limit":500,"sort":"upside down"})"), kNow, error);
-        CHECK(clamped && clamped->days == 1 && clamped->limit == 50 && clamped->sort == L"relevance", "arguments: out-of-range numbers are clamped, an unknown sort is the default");
+        const auto clamped = ParseSessionSearchParams(J(LR"({"days":-5,"limit":500,"sort":"upside down"})"), kNow, error);
+        CHECK(clamped && clamped->days == 0 && clamped->limit == kSessionSearchMaxLimit && kSessionSearchMaxLimit == 200 && clamped->sort == L"relevance", "arguments: a negative days reads as 0 (every session), a limit past the most as the most (200), an unknown sort as the default");
         const auto huge = ParseSessionSearchParams(J(LR"({"days":99999,"limit":-4})"), kNow, error);
         CHECK(huge && huge->days == 3650 && huge->limit == 1, "arguments: the upper clamp of days, the lower clamp of limit");
         CHECK(!ParseSessionSearchParams(J(LR"({"query":7})"), kNow, error) && error.find(L"\"query\"") != std::wstring::npos && error.find(L"string") != std::wstring::npos, "arguments: a wrong type is an error that names the argument and what it must be");
@@ -652,23 +656,25 @@ void TestSessionSearchTools()
     // ---- one search ----
     {
         const auto listed = RunSessionSearch(catalog, params(L"{}"), kNow, content);
-        CHECK(listed.searched == 4 && listed.matched == 4 && listed.rows.size() == 4, "no query: every session of the period is listed (the 200-day-old one is outside 90 days)");
-        CHECK(idOf(listed, 0) == kIdDrag && idOf(listed, 3) == kIdNum && listed.rows[0].tier == SessionMatchTier::Listed, "no query: newest first");
+        CHECK(listed.searched == 5 && listed.matched == 5 && listed.rows.size() == 5, "no query: every session is listed (the default period is every session: the 200-day-old one too)");
+        CHECK(idOf(listed, 0) == kIdDrag && idOf(listed, 3) == kIdNum && idOf(listed, 4) == kIdOld && listed.rows[0].tier == SessionMatchTier::Listed, "no query: newest first");
         CHECK(promptCalls == 0 && transcriptCalls == 0, "no query: no content search runs");
 
         const auto drag = RunSessionSearch(catalog, params(LR"({"query":"drag"})"), kNow, content);
-        CHECK(drag.searched == 4 && drag.matched == 3, "query: title, path and prompt matches (the text match needs deep)");
-        CHECK(idOf(drag, 0) == kIdDrag && drag.rows[0].tier == SessionMatchTier::Name, "tier 1: the title match");
-        CHECK(idOf(drag, 1) == kIdDragTwin && drag.rows[1].tier == SessionMatchTier::Path, "tier 2: a file the session touched");
-        CHECK(idOf(drag, 2) == kIdTags && drag.rows[2].tier == SessionMatchTier::Prompt && drag.rows[2].hits == 2 && drag.rows[2].snippets.size() == 2, "tier 3: a typed prompt, with its hit count and two snippets");
+        CHECK(drag.searched == 5 && drag.matched == 4, "query: title, path and prompt matches over every session (the text match needs deep)");
+        CHECK(idOf(drag, 0) == kIdDrag && drag.rows[0].tier == SessionMatchTier::Name && idOf(drag, 1) == kIdOld && drag.rows[1].tier == SessionMatchTier::Name, "tier 1: the title matches, newest first (the 200-day-old one too)");
+        CHECK(idOf(drag, 2) == kIdDragTwin && drag.rows[2].tier == SessionMatchTier::Path, "tier 2: a file the session touched");
+        CHECK(idOf(drag, 3) == kIdTags && drag.rows[3].tier == SessionMatchTier::Prompt && drag.rows[3].hits == 2 && drag.rows[3].snippets.size() == 2, "tier 3: a typed prompt, with its hit count and two snippets");
         CHECK(promptCalls == 1 && transcriptCalls == 0, "query: the prompts are searched, the transcripts are not");
 
         const auto deep = RunSessionSearch(catalog, params(LR"({"query":"drag","deep":true})"), kNow, content);
-        CHECK(deep.matched == 4 && idOf(deep, 3) == kIdNum && deep.rows[3].tier == SessionMatchTier::Text && deep.rows[3].hits == 4, "deep: the conversation text is searched too, and ranks last");
-        CHECK(transcriptCalls == 1 && transcriptRefs == 4, "deep: only the sessions in scope are scanned");
+        CHECK(deep.matched == 5 && idOf(deep, 4) == kIdNum && deep.rows[4].tier == SessionMatchTier::Text && deep.rows[4].hits == 4, "deep: the conversation text is searched too, and ranks last");
+        CHECK(transcriptCalls == 1 && transcriptRefs == 5, "deep: only the sessions in scope are scanned (every session by default)");
+        const auto quarter = RunSessionSearch(catalog, params(LR"({"query":"drag","days":90})"), kNow, content);
+        CHECK(quarter.searched == 4 && quarter.matched == 3 && idOf(quarter, 1) == kIdDragTwin, "a period the model gives still bounds the search: 90 days leave the 200-day-old session out");
 
         const auto year = RunSessionSearch(catalog, params(LR"({"query":"drag","days":365})"), kNow, content);
-        CHECK(year.searched == 5 && year.matched == 4 && idOf(year, 1) == kIdOld, "a longer period brings the old session in; inside the title tier, newest first");
+        CHECK(year.searched == 5 && year.matched == 4 && idOf(year, 1) == kIdOld, "a 365-day period holds the 200-day-old session; inside the title tier, newest first");
         const auto byActive = RunSessionSearch(catalog, params(LR"({"query":"drag","days":365,"sort":"active"})"), kNow, content);
         CHECK(idOf(byActive, 0) == kIdDrag && idOf(byActive, 1) == kIdDragTwin && idOf(byActive, 3) == kIdOld, "sort active: by time alone, the tiers ignored");
         const auto limited = RunSessionSearch(catalog, params(LR"({"query":"drag","days":365,"limit":2})"), kNow, content);
@@ -686,7 +692,7 @@ void TestSessionSearchTools()
 
         transcriptCalls = 0;
         const auto cancelledSearch = RunSessionSearch(catalog, params(LR"({"query":"drag","deep":true})"), kNow, content, [] { return true; });
-        CHECK(transcriptCalls == 0 && cancelledSearch.matched == 3, "a cancelled search does not start the transcript scan");
+        CHECK(transcriptCalls == 0 && cancelledSearch.matched == 4, "a cancelled search does not start the transcript scan");
     }
 
     // ---- the result text ----
@@ -712,7 +718,7 @@ void TestSessionSearchTools()
         CHECK(J(FormatSessionSearchResult(catalog, params(LR"({"query":"zebra"})"), none, kNow)).StrAt(L"hint").find(L"deep:true") != std::wstring::npos, "result: nothing matched -> a hint that names the next steps");
         CHECK(J(FormatSessionSearchResult(catalog, params(LR"({"query":"zebra","deep":true})"), none, kNow)).StrAt(L"hint").find(L"deep:true") == std::wstring::npos, "result: ... and does not suggest deep to a deep search");
 
-        // A catalog that stops 10 days back: a 90-day search must say what it lacks.
+        // A catalog that stops 10 days back: a search of every session (the default) must say what it lacks.
         SessionCatalog partial = TestCatalog();
         partial.coveredSinceUnixMs = kNow - 10 * kDay;
         CHECK(!partial.Complete() && catalog.Complete(), "Complete(): the catalog reaches as far back as it was asked");
@@ -747,6 +753,115 @@ void TestSessionSearchTools()
 
         CHECK(DescribeSessionSearch(params(LR"({"query":"tab drag","days":7,"dir":"Agentmaster","open":true,"deep":true})")) == L"\x201Ctab drag\x201D \x00B7 last 7 days \x00B7 in Agentmaster \x00B7 open \x00B7 full text", "the one-line description of a search, for the user");
         CHECK(DescribeSessionSearch(params(L"{}")).rfind(L"all sessions", 0) == 0 && DescribeSessionSearch(params(LR"({"days":1})")).find(L"last 1 day") != std::wstring::npos, "description: no query, and the singular day");
+        CHECK(DescribeSessionSearch(params(L"{}")).find(L"every session") != std::wstring::npos, "description: the default period reads 'every session'");
+    }
+
+    // ---- a period OVERLAPS a session's activity (SESSIONS.md 9.15) ----
+    {
+        // kNow is 2026-10-10 12:00 UTC: in every time zone from UTC-11 to UTC+11 the days below are the same local days,
+        // and October 1 to 10 holds no clock change. The period is October 5 to 7.
+        SessionCatalog spans = TestCatalog();
+        SessionIndexEntry span = Entry(L"ffff6666-0000-4000-8000-000000000007", L"long migration", L"K:\\source\\Agentmaster", 1);
+        span.stats.firstTimestampMs = kNow - 9 * kDay; // began October 1, last active October 9: it spans the period
+        span.birthMs = span.stats.firstTimestampMs;
+        spans.entries.push_back(span);
+        const auto p = params(LR"({"after":"2026-10-05","before":"2026-10-07"})");
+        const auto o = RunSessionSearch(spans, p, kNow, content);
+        std::vector<std::wstring> ids;
+        for (const auto& row : o.rows)
+        {
+            ids.push_back(spans.entries[row.entryIndex].sessionId);
+        }
+        std::sort(ids.begin(), ids.end());
+        CHECK(o.matched == 2 && (ids == std::vector<std::wstring>{ kIdTags, span.sessionId }),
+              "period: a session active inside it, and one that began before it and went on after it; not one that began after it (drag, twin) or ended before it (num, old)");
+
+        // The row's in_period, as a dated search prints it (CheckSessionSearchPeriodActivity fills it from the transcript).
+        SessionSearchOutcome checked = o;
+        for (auto& row : checked.rows)
+        {
+            row.periodChecked = true;
+            row.period.read = true;
+            row.period.messages = spans.entries[row.entryIndex].sessionId == kIdTags ? 3 : 0;
+            row.period.prompts = row.period.messages > 0 ? 1 : 0;
+        }
+        const json::Value j = J(FormatSessionSearchResult(spans, p, checked, kNow));
+        const auto* rows = j.Find(L"sessions");
+        bool sawActive = false;
+        bool sawSpan = false;
+        for (size_t k = 0; rows && k < rows->arr.size(); ++k)
+        {
+            const json::Value& r = rows->arr[k];
+            const json::Value* in = r.Find(L"in_period");
+            if (r.StrAt(L"id") == SessionSearchHandleOf(kIdTags))
+            {
+                sawActive = in && in->type == json::Value::Type::Obj && in->I64At(L"messages") == 3 && in->I64At(L"prompts") == 1;
+            }
+            else
+            {
+                sawSpan = in && in->type == json::Value::Type::Str && in->str.rfind(L"none", 0) == 0;
+            }
+        }
+        CHECK(sawActive && sawSpan, "in_period: the messages and prompts inside the period, or 'none' for a session that only spans it");
+        CHECK(J(FormatSessionSearchResult(spans, p, o, kNow)).Find(L"sessions")->arr[0].Find(L"in_period") == nullptr, "in_period: a row that was not checked says nothing (never a wrong 'none')");
+    }
+
+    // ---- a path match's first prompt (SessionSearchRow::firstPrompt; the 2026-10-18 eval, q1) ----
+    {
+        SessionCatalog withFirst = TestCatalog();
+        withFirst.entries[1].stats.firstUserPrompt = L"make the tab drag smooth again"; // the twin: a PATH match on TabDragMath.h
+        const auto pDrag = params(LR"({"query":"drag"})");
+        const auto o = RunSessionSearch(withFirst, pDrag, kNow, content);
+        CHECK(o.rows.size() == 4 && o.rows[2].tier == SessionMatchTier::Path && o.rows[2].firstPromptHolds && o.rows[2].firstPrompt == L"make the tab drag smooth again",
+              "a touched-path match carries the session's first prompt; it holds the word");
+        const json::Value j = J(FormatSessionSearchResult(withFirst, pDrag, o, kNow));
+        const auto* rows = j.Find(L"sessions");
+        CHECK(rows && rows->arr.size() == 4 && rows->arr[2].StrAt(L"first_prompt") == L"make the tab drag smooth again" && rows->arr[2].StrAt(L"path").find(L"TabDragMath.h") != std::wstring::npos,
+              "result row: the path that matched, and the first prompt");
+        CHECK(rows && rows->arr.size() == 4 && rows->arr[0].Find(L"first_prompt") == nullptr && rows->arr[3].Find(L"first_prompt") == nullptr, "result row: a title or prompt match has no first_prompt (its own evidence says more)");
+        SessionCatalog other = TestCatalog();
+        other.entries[1].stats.firstUserPrompt = L"polish the sessions page";
+        const auto o2 = RunSessionSearch(other, pDrag, kNow, content);
+        CHECK(o2.rows.size() == 4 && !o2.rows[2].firstPromptHolds && o2.rows[2].firstPrompt == L"polish the sessions page", "a first prompt without the word is its head, not evidence");
+        other.entries[1].stats.firstUserPrompt = std::wstring(300, L'x') + L" then drag it";
+        const auto o3 = RunSessionSearch(other, pDrag, kNow, content);
+        CHECK(o3.rows.size() == 4 && o3.rows[2].firstPromptHolds && o3.rows[2].firstPrompt.find(L"then drag it") != std::wstring::npos && o3.rows[2].firstPrompt.front() == L'\x2026',
+              "a word late in a long first prompt: the prompt is cut around it, so the model sees it");
+
+        // The auto-why of such a session shown without a why: the user's own first prompt (rank 0), not the path.
+        auto sharedFirst = std::make_shared<const SessionCatalog>(withFirst);
+        std::vector<std::wstring> lastWhys;
+        SessionSearchToolset::Callbacks cb;
+        cb.catalog = [&sharedFirst](int64_t, const std::function<bool()>&) { return sharedFirst; };
+        cb.onShow = [&lastWhys](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>& why) { lastWhys = why; };
+        cb.content = content;
+        cb.now = [] { return kNow; };
+        SessionSearchToolset tools{ cb };
+        const auto servers = tools.Servers();
+        CHECK(!servers[0].tools[0].handler(J(LR"({"query":"drag"})")).isError, "the first-prompt toolset searches");
+        const HarnessToolResult shownTwin = servers[1].tools[0].handler(J(L"{\"ids\":[\"" + std::wstring{ kIdDragTwin } + L"\"]}"));
+        CHECK(!shownTwin.isError && lastWhys.size() == 1 && lastWhys[0] == L"You asked: \x201Cmake the tab drag smooth again\x201D", "auto-why: a path match whose first prompt holds the word is shown with the user's own words");
+    }
+
+    // ---- never a part of the sessions: a search or grep over an index still being read searches nothing ----
+    {
+        auto partial = std::make_shared<SessionCatalog>(TestCatalog());
+        partial->coveredSinceUnixMs = kNow - 10 * kDay; // the keeper has read the last 10 days only
+        std::shared_ptr<const SessionCatalog> given = partial;
+        SessionSearchToolset::Callbacks cb;
+        cb.catalog = [&given](int64_t, const std::function<bool()>&) { return given; };
+        cb.onShow = [](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>&) {};
+        cb.content = content;
+        cb.now = [] { return kNow; };
+        SessionSearchToolset tools{ cb };
+        const auto servers = tools.Servers();
+        const HarnessToolResult everySession = servers[0].tools[0].handler(J(LR"({"query":"drag"})"));
+        CHECK(everySession.isError && everySession.text.find(L"Nothing was searched") != std::wstring::npos && everySession.text.find(L"call search again with the same arguments") != std::wstring::npos,
+              "search over a partial index: an error that says nothing was searched and to call again (the call waits)");
+        CHECK(tools.ResolveHandle(L"aaaa1111").empty(), "... and it records no short id");
+        CHECK(!servers[0].tools[0].handler(J(LR"({"query":"drag","days":3})")).isError, "a search whose own period the partial index covers runs");
+        const HarnessToolResult grepped = servers[0].tools[1].handler(J(LR"({"pattern":"drag"})"));
+        CHECK(grepped.isError && grepped.text.find(L"Nothing was read") != std::wstring::npos, "grep over a partial index: an error too, nothing read");
     }
 
     // ---- the two tool servers ----
@@ -805,7 +920,7 @@ void TestSessionSearchTools()
             }
         }
         CHECK(schemasParse, "toolset: every input schema is JSON, and no description speaks of a screen (Telegram shows the same calls)");
-        CHECK(servers[0].tools[0].inputSchemaJson.find(L"Default " + std::to_wstring(kSessionSearchDefaultDays)) != std::wstring::npos, "toolset: the schema states the real default period");
+        CHECK(servers[0].tools[0].inputSchemaJson.find(L"Default: every session") != std::wstring::npos && servers[0].tools[1].inputSchemaJson.find(L"Default: every session") != std::wstring::npos, "toolset: the schemas state the real default period (every session)");
         CHECK(servers[0].tools.size() == 3 && servers[0].tools[2].inputSchemaJson.find(L"1 to 8 ids") != std::wstring::npos && servers[0].tools[2].inputSchemaJson.find(L"Default 6000") != std::wstring::npos &&
                   servers[1].tools[0].inputSchemaJson.find(L"\"why\"") != std::wstring::npos,
               "toolset: read's schema states its real limits, and show takes a why");
@@ -821,16 +936,24 @@ void TestSessionSearchTools()
         // The structure the user asked for on 2026-10-17 (SESSIONS.md 9.14) is pinned in full by tests_tabtools.cpp (the
         // headings, the counts, every tool name). Here: what carried over from the rules of 2026-10-13 / 2026-10-17 - the
         // plan comes BEFORE the first tool call, in the SAME message (no extra model request), chosen from everything the
-        // tools can do; every candidate is read before it is shown; a why each, the user's own words first; never a screen.
+        // tools can do; the evidence of each shown session, the user's own words first; never a screen - and the rules of
+        // the 2026-10-18 eval (SESSIONS.md 9.15): completeness is the first duty, every list is made whole before it is
+        // judged, no candidate is left out on a guess, and a session shown without a why gets the evidence its results had.
         const size_t behaviorsAt = prompt.find(L"# Instructional Behaviors");
         const size_t toolsAt = prompt.find(L"## Tools");
         const std::wstring behaviors = (behaviorsAt != std::wstring::npos && toolsAt != std::wstring::npos && behaviorsAt < toolsAt) ? prompt.substr(behaviorsAt, toolsAt - behaviorsAt) : std::wstring{};
         CHECK(behaviors.find(L"Open every request with a short plan, before your first tool call and in the same message") != std::wstring::npos &&
                   behaviors.find(L"Choose the plan from everything your tools can do") != std::wstring::npos,
               "toolset: behavior 1 is the plan - before the first tool call, in the same message (no extra model request), chosen from everything the tools can do");
-        CHECK(prompt.find(L"Read a session before you show it") != std::wstring::npos && prompt.find(L"read the best candidates (one read call, up to 8 ids)") != std::wstring::npos,
-              "toolset: every candidate is read before it is shown");
-        CHECK(prompt.find(L"a why for each") != std::wstring::npos && prompt.find(L"You asked:") != std::wstring::npos, "toolset: one line of evidence per shown session, the user's own words first");
+        CHECK(prompt.find(L"Your first duty is COMPLETENESS") != std::wstring::npos && behaviors.find(L"Make every list complete before you judge it") != std::wstring::npos &&
+                  behaviors.find(L"never leave a candidate out on a guess") != std::wstring::npos && behaviors.find(L"Your candidates are the union of EVERY list you got") != std::wstring::npos,
+              "toolset: completeness first - every list made whole before it is judged, the union of every list, no candidate left out on a guess");
+        CHECK(prompt.find(L"read the best ones (one read call, up to 8 ids)") != std::wstring::npos && behaviors.find(L"Read (one read call takes up to 8 sessions") != std::wstring::npos,
+              "toolset: the candidates whose evidence is not conclusive are read, up to 8 per call");
+        CHECK(prompt.find(L"a why where you have one") != std::wstring::npos && prompt.find(L"You asked:") != std::wstring::npos && prompt.find(L"A session you give no why gets the evidence your results showed for it") != std::wstring::npos,
+              "toolset: one line of evidence per shown session, the user's own words first; a session without a why gets its results' evidence");
+        CHECK(prompt.find(L"first_prompt") != std::wstring::npos && prompt.find(L"(id, title, folder, how many messages match)") != std::wstring::npos,
+              "toolset: the prompt teaches a path match's first_prompt and the folder on grep rows");
         CHECK(prompt.find(L"on the screen") == std::wstring::npos && prompt.find(L"exactly ONE short sentence") == std::wstring::npos,
               "toolset: never a screen (the Telegram topic has none), and no longer the one-sentence reply the user called hasty");
         const std::wstring dbPrompt = SessionSearchToolset::DatabaseSystemPrompt();
@@ -859,7 +982,11 @@ void TestSessionSearchTools()
         const HarnessToolResult shownOk = show(J(LR"({"ids":["bbbb2222","aaaa1111","bbbb2222","nope1234"],"note":"  the drag\nsessions "})"));
         CHECK(!shownOk.isError && shown.size() == 1 && shown[0].size() == 2 && shown[0][0] == kIdTags && shown[0][1] == kIdDrag, "show: full ids, the model's order, each session once");
         CHECK(notes.back() == L"the drag sessions" && shownOk.text.find(L"Shown 2 sessions") != std::wstring::npos && shownOk.text.find(L"nope1234") != std::wstring::npos, "show: a one-line caption, and the unknown id is reported back");
-        CHECK(whys.back().size() == 2 && whys.back()[0].empty() && whys.back()[1].empty(), "show without a why: one empty why per shown session (aligned)");
+        // A shown session the model wrote no why for gets the evidence the search showed for it (SESSIONS.md 9.15): the
+        // Tags session's typed prompt, the drag session's title.
+        CHECK(whys.back().size() == 2 && whys.back()[0].rfind(L"You asked: \x201C", 0) == 0 && whys.back()[0].find(L"drag gesture broke again") != std::wstring::npos &&
+                  whys.back()[1] == L"Its title: \x201C" L"Fix tab drag crash\x201D" && shownOk.text.find(L"2 of them got the evidence your results showed as their why") != std::wstring::npos,
+              "show without a why: each shown session gets the evidence its search row had (the user's prompt; the title), aligned");
         // The evidence (SESSIONS.md 9.12): keyed by the ids as the model wrote them (any case), one line, aligned with
         // what is shown; a why for an id that is not shown, or that names no session, is dropped.
         const HarnessToolResult withWhy = show(J(LR"({"ids":["aaaa1111","bbbb2222"],"why":{"BBBB2222":"  Mentions tags\nonly in passing  ","aaaa1111":"You asked: \"fix the drag crash\"","nope1234":"ignored","bbbb2222":"second why for the same session"}})"));
@@ -1052,8 +1179,25 @@ void TestSessionSearchTools()
         // The arguments.
         std::wstring err;
         CHECK(!ParseSessionGrepParams(J(L"{}"), err) && err.find(L"pattern") != std::wstring::npos, "grep arguments: the pattern is required");
-        const auto gp = ParseSessionGrepParams(J(LR"({"pattern":"  v0.7.9  ","in":"user","context":5,"limit":99,"ids":["aaaa1111"," ",7]})"), err);
-        CHECK(gp && gp->pattern == L"v0.7.9" && gp->user && !gp->agent && gp->context == 40 && gp->limit == 20 && gp->ids.size() == 1, "grep arguments: plain text trimmed; in, context and limit clamped; blank and non-text ids dropped");
+        const auto gp = ParseSessionGrepParams(J(LR"({"pattern":"  v0.7.9  ","in":"user","context":5,"limit":999,"ids":["aaaa1111"," ",7]})"), err);
+        CHECK(gp && gp->pattern == L"v0.7.9" && gp->user && !gp->agent && gp->context == 40 && gp->limit == kSessionGrepMaxLimit && kSessionGrepMaxLimit == 100 && gp->ids.size() == 1, "grep arguments: plain text trimmed; in, context and limit clamped (the most is 100); blank and non-text ids dropped");
+        const auto ge = ParseSessionGrepParams(J(LR"({"pattern":"TabDragMath.h","in":"edits"})"), err);
+        CHECK(ge && ge->editsOnly && ge->limit == kSessionGrepDefaultLimit && ge->days == 0, "grep arguments: in:edits; the default limit; every session by default");
+
+        // The any-of prefilter keys (GrepRequiredLiterals) and the plain pattern's unescaped spelling.
+        const auto keys = [](std::wstring_view pattern, bool regex) {
+            std::vector<std::wstring> k = GrepRequiredLiterals(pattern, regex);
+            std::sort(k.begin(), k.end());
+            return k;
+        };
+        // (Each comparison in parentheses: the commas of a braced list would split CHECK's macro arguments.)
+        CHECK((keys(L"tab drag", false) == std::vector<std::wstring>{ L"tab drag" }), "keys: plain text is its own key");
+        CHECK((keys(L"TabDragMath\\.h", false) == std::vector<std::wstring>{ L"TabDragMath", L"TabDragMath.h" }), "keys: plain text with a regex escape - its verbatim piece, and its unescaped spelling");
+        CHECK((keys(L"0xC0000374|heap.?corrupt", true) == std::vector<std::wstring>{ L"0xC0000374", L"corrupt" }), "keys: one key per alternative of a top-level alternation, each the alternative's longest piece");
+        CHECK((keys(L"qm (create|start)", true) == std::vector<std::wstring>{ L"qm create", L"qm start" }), "keys: a required group of plain alternatives multiplies the segment");
+        CHECK((keys(L"drag(ged|ging)?", true) == std::vector<std::wstring>{ L"drag" }) && keys(L"\\d+|foo", true).empty(), "keys: an optional group ends the segment; an alternative with no piece gives no key at all");
+        CHECK(GrepUnescapePlainPattern(L"TabDragMath\\.h") == L"TabDragMath.h" && GrepUnescapePlainPattern(L"foo\\(\\)") == L"foo()" && GrepUnescapePlainPattern(L"K:\\source\\x") == L"K:\\source\\x",
+              "unescape: a regex escape in plain text is undone, a path's backslashes stay");
         const auto gr = ParseSessionGrepParams(J(LR"({"pattern":" a b ","regex":true,"in":"claude","context":900,"days":7})"), err);
         CHECK(gr && gr->pattern == L" a b " && gr->regex && !gr->user && gr->agent && gr->context == 400 && gr->days == 7, "grep arguments: a regex is kept as written; the period is the search's");
         CHECK(!ParseSessionGrepParams(J(LR"({"pattern":"x","ids":"aaaa1111"})"), err) && err.find(L"ids") != std::wstring::npos, "grep arguments: ids must be an array");
@@ -1191,6 +1335,7 @@ void TestSessionSearchTools()
               "grep: the matches in file order, each with who wrote it and when");
         CHECK(g1j.I64At(L"searched") == 3 && g1j.I64At(L"matched") == 1 && g1j.Find(L"stopped") == nullptr && g1rows.size() == 1 && g1rows[0].StrAt(L"title").find(L"cut v0.7.9") == 0,
               "grep: what it searched and found, complete, and the row's title");
+        CHECK(g1rows.size() == 1 && g1rows[0].StrAt(L"dir") == L"K:\\proj" && g1j.Find(L"folders") == nullptr, "grep: the row says its folder; fewer than 10 matches have no per-folder count");
         CHECK(!activity.empty() && activity.back().find(L"grep") == 0 && activity.back().find(L"v0.7.9") != std::wstring::npos, "grep: the page is told what is grepped");
 
         // in: user / claude, case-insensitive.
@@ -1231,6 +1376,71 @@ void TestSessionSearchTools()
         CHECK(!cancelledGrep.complete && cancelledGrep.scanned == 0 && cancelledGrep.sessions.empty(), "grep: a cancelled grep reads nothing more and is not complete");
         const GrepOutcome directGrep = GrepTranscripts({ ref }, direct, {});
         CHECK(directGrep.complete && directGrep.scanned == 1 && directGrep.sessions.size() == 1 && directGrep.sessions[0].hits == 3, "grep: GrepTranscripts reads the file to its end");
+
+        // in:edits - the sessions that CHANGED a file, not the ones that only read it (the 2026-10-18 eval's "which
+        // sessions edited TabDragMath.h?"); and a word that is only in a session's cwd field never makes a match, while a
+        // message that says it still does (the byte prefilter skips cwd-only lines, LineHoldsNeedleOutsideCwd).
+        {
+            const auto toolLine = [&](const std::wstring& id, const std::string& tool, const std::string& path, const std::string& cwd, const std::string& uuid, int ago) {
+                return "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tu9\",\"name\":\"" + tool +
+                       "\",\"input\":{\"file_path\":\"" + esc(path) + "\"}}],\"stop_reason\":\"tool_use\"},\"timestamp\":\"" + iso(ago) + "\",\"cwd\":\"" + esc(cwd) + "\",\"sessionId\":\"" +
+                       HarnessToUtf8(id) + "\",\"uuid\":\"" + uuid + "\",\"parentUuid\":null}\n";
+            };
+            const auto plainUserLine = [&](const std::wstring& id, const std::string& text, const std::string& cwd, const std::string& uuid, int ago) {
+                return "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" + esc(text) + "\"},\"timestamp\":\"" + iso(ago) + "\",\"cwd\":\"" + esc(cwd) + "\",\"sessionId\":\"" +
+                       HarnessToUtf8(id) + "\",\"uuid\":\"" + uuid + "\",\"parentUuid\":null}\n";
+            };
+            const std::wstring idEdit = L"e7e7e7e7-1111-4222-8333-444444444444";
+            const std::wstring idRead = L"e8e8e8e8-1111-4222-8333-444444444444";
+            const std::wstring idCwdOnly = L"e9e9e9e9-1111-4222-8333-444444444444";
+            const std::wstring idSaysIt = L"eaeaeaea-1111-4222-8333-444444444444";
+            const bool wroteMore = WriteFileWithMtime(projects / (idEdit + L".jsonl"), plainUserLine(idEdit, "fix the drag math", "K:\\proj", "x1", 50) + toolLine(idEdit, "Edit", "K:\\proj\\TabDragMath.h", "K:\\proj", "x2", 49), wallNow - 49 * 60000) &&
+                                   WriteFileWithMtime(projects / (idRead + L".jsonl"), plainUserLine(idRead, "look at the drag math", "K:\\proj", "y1", 48) + toolLine(idRead, "Read", "K:\\proj\\TabDragMath.h", "K:\\proj", "y2", 47), wallNow - 47 * 60000) &&
+                                   WriteFileWithMtime(projects / (idCwdOnly + L".jsonl"), plainUserLine(idCwdOnly, "list the disks", "K:\\needlefolder", "z1", 46), wallNow - 46 * 60000) &&
+                                   WriteFileWithMtime(projects / (idSaysIt + L".jsonl"), plainUserLine(idSaysIt, "clean the needlefolder backups", "K:\\needlefolder", "w1", 45), wallNow - 45 * 60000);
+            CHECK(wroteMore, "grep: the edit / read / cwd scratch transcripts were written");
+            const json::Value gEdits = J(grep(J(LR"({"pattern":"TabDragMath\\.h","in":"edits"})")).text);
+            const auto editRows = rowsOf(gEdits);
+            const auto* editMatches = editRows.empty() ? nullptr : editRows[0].Find(L"matches");
+            CHECK(editRows.size() == 1 && editRows[0].StrAt(L"id") == L"e7e7e7e7" && gEdits.StrAt(L"in") == L"edits" && editMatches && !editMatches->arr.empty() &&
+                      editMatches->arr[0].StrAt(L"text") == L"Edit K:\\proj\\TabDragMath.h",
+                  "grep in:edits: only the session that edited the file (not the one that read it), the excerpt naming the tool and the path");
+            CHECK(rowsOf(J(grep(J(LR"({"pattern":"TabDragMath.h","in":"edits"})")).text)).size() == 1, "grep in:edits: the plain file name finds it too (a dot as written)");
+            const json::Value gCwd = J(grep(J(LR"({"pattern":"needlefolder"})")).text);
+            const auto cwdRows = rowsOf(gCwd);
+            CHECK(cwdRows.size() == 1 && cwdRows[0].StrAt(L"id") == L"eaeaeaea", "grep: a word only in a session's cwd field matches nothing; a message that says it still matches");
+        }
+
+        // Ten more sessions in another folder, each with the word "fleetword", and the drag session saying it too: a grep
+        // with 10 or more matches counts them per folder (`folders`, every match, not only the rows), and past its limit
+        // the others are listed in `also`, one line each with its folder.
+        {
+            const std::filesystem::path others = root / L"projects" / L"K--other";
+            std::filesystem::create_directories(others, ec);
+            bool wroteOthers = true;
+            for (int i = 0; i < 10; ++i)
+            {
+                const std::wstring id = L"f" + std::to_wstring(i) + L"f0f0f0-1111-4222-8333-444444444444";
+                const std::string line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"check the fleetword gauge " + std::to_string(i) + "\"},\"timestamp\":\"" + iso(30 + i) +
+                                         "\",\"cwd\":\"K:\\\\other\",\"sessionId\":\"" + HarnessToUtf8(id) + "\",\"uuid\":\"g" + std::to_string(i) + "\",\"parentUuid\":null}\n";
+                wroteOthers = wroteOthers && WriteFileWithMtime(others / (id + L".jsonl"), line, wallNow - (30 + i) * 60000);
+            }
+            wroteOthers = wroteOthers && WriteFileWithMtime(projects / (idDrag + L".jsonl"), drag + userLine(idDrag, "and check the fleetword too", "d3", "d2", 58), wallNow - 58 * 60000);
+            CHECK(wroteOthers, "grep: ten more scratch transcripts were written");
+            const json::Value gFleet = J(grep(J(LR"({"pattern":"fleetword","limit":2})")).text);
+            const auto* folders = gFleet.Find(L"folders");
+            CHECK(gFleet.I64At(L"matched") == 11 && folders && folders->arr.size() == 2 && folders->arr[0].str == L"K:\\other: 10" && folders->arr[1].str == L"K:\\proj: 1",
+                  "grep: 10 or more matches are counted per folder - every match, most first");
+            const auto* also = gFleet.Find(L"also");
+            bool alsoFolders = also && also->arr.size() == 9;
+            for (size_t k = 0; alsoFolders && k < also->arr.size(); ++k)
+            {
+                alsoFolders = also->arr[k].str.find(L" \x00B7 K:\\") != std::wstring::npos;
+            }
+            CHECK(alsoFolders && gFleet.StrAt(L"more").find(L"(id, title, folder, matching messages)") != std::wstring::npos, "grep: past the limit, each other match is one line with its folder");
+            const auto fleetRows = rowsOf(gFleet);
+            CHECK(fleetRows.size() == 2 && fleetRows[0].StrAt(L"dir") == L"K:\\other", "grep: each row says its folder");
+        }
 
         // read: the compact transcript of each session, under the short ids the results printed.
         const HarnessToolResult r1 = read(J(LR"({"ids":["a1a1a1a1","b2b2b2b2"]})"));

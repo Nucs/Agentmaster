@@ -655,6 +655,11 @@ look around freely. The show tool is the one place where the result changes.
 
 ### 9.4 The session index, and why a search never waits for it
 
+> ⚠ **Superseded 2026-10-18 (§9.15, NOT BUILT yet):** a search now WAITS — up to 90 s — for an index that holds
+> every session, is fresh and carries the session store, and over an index still being read it searches NOTHING
+> and tells the model to call again; the index is one per process and never freed. The never-wait design below,
+> its 2 s wait and its `indexing` answers are what made the "still being indexed" answers of §9.13.
+
 A search runs over a **catalog**: one immutable snapshot of the sessions' index entries (the same
 sidecar files the page itself reads, section 6), with the stored titles, tags, favorites and the
 open sessions.
@@ -993,10 +998,12 @@ Not measured live yet.
 session's why and checks the four tools; the timing of a request with a read is unmeasured. The
 Sessions page's rows were not looked at on screen.
 
-### 9.13 Empty "still being indexed" answers (seen 2026-10-17, NOT FIXED)
+### 9.13 Empty "still being indexed" answers (seen 2026-10-17, FIXED 2026-10-18 in §9.15, NOT BUILT yet)
 
-> Status: found 2026-10-17 in the dev bot's 🔎 Search topic (session d1d47b98). Nothing is changed
-> yet; the fix at the end is a proposal.
+> Status: found 2026-10-17 in the dev bot's 🔎 Search topic (session d1d47b98). **Fixed 2026-10-18** (§9.15):
+> fix 1 and fix 2 below were built as proposed (one `SessionCatalogKeeper` per process, never freed; a 90 s wait;
+> an error instead of a partial list), the default period became every session, and rule 9 became behavior 10
+> ("call the same tool again at once"). Fix 3 (a one-file cold start) is still open. Not in any build yet.
 
 **What the user sees.** A request made after a pause comes back with no session and a sentence like
 "I found no sessions ending in an API error, but indexing is still running, so try again shortly."
@@ -1252,6 +1259,152 @@ over. Not run yet: the page's XAML, the windows' half (`_RunAgentWindowTool`), a
 outcome), `[nav] ai-tool resume|fork <sid8> slot=N/M [bg|focus]` and `[nav] ai-tool deactivate <sid8>`
 (the window), `[ai-search] <conversation>: the session database mode is On, but its service is not
 installed ...`.
+
+### 9.15 Searches that never miss: the prompt eval, the engine fixes, the Search Procedure (2026-10-18, NOT BUILT yet)
+
+> **The user's request of 2026-10-18** (after "find proxmox related sess" in the Telegram Search topic answered one
+> session "so far", indexing incomplete, and "are you sure?" then found ~140): "Search is not stable, it does not yield
+> full results. You are to fix [it]. ... Produce an eval of 5 searches, distinctly different, running on Sonnet 5.5
+> medium. Optimize the system prompt to search the best way. Each eval round read the [tool calls], ask yourself
+> could the agent have done that better. Optimize a steps guideline. ... Searches must never miss. Use prompt
+> engineering techniques to word the system prompt." Written and run against the real model; the m5 suite and the
+> live harness are built; the app is NOT built, so neither dev nor production has any of it.
+
+**The eval.** Five queries of five kinds, and four held-out ones the prompt was never tuned on:
+
+| | Query | Kind | Sessions that must be shown |
+|---|---|---|---|
+| q1 | find proxmox related sessions | a subject that is also a folder | 104 |
+| q2 | find the session where I said the home icon used to turn into a return icon | words the user remembers | 1 |
+| q3 | which sessions investigated a heap corruption crash (0xC0000374) of Agentmaster? | an error code, one project | 5 |
+| q4 | which sessions edited TabDragMath.h? | a file CHANGED | 3 |
+| q5 | what did I work on in TraderLab-options between September 26 and September 30? | a period and a folder | 17 |
+| h1 | which sessions changed SessionScanner.cpp? | (held out) a file changed | 39 |
+| h2 | what did I do on October 12? | (held out) a day | 26 |
+| h3 | find sessions where a build failed with LNK2019 | (held out) an error | 20 |
+| h4 | the session where I asked to remove netdata | (held out) the user's words | 3 |
+
+- **The answer keys** were built from the transcripts on disk, not from any tool's answer (an "optional" list beside
+  each "must" list holds the borderline sessions: showing one is no error, missing one is no miss). They name real
+  sessions, so they live outside the repository, with the scorer.
+- **A round** = `harness_live.exe --eval <queries.json> --eval-out <results.json> --agent-thinking medium
+  [--agent-prompt-file <prompt.txt>]`: every query in a FRESH conversation (`Reset`), Sonnet 5.5 at thinking medium,
+  the shared session index warm, every tool call recorded with its whole result. The scorer reports recall over the
+  must list, precision over must + optional, and for every miss whether a tool had NAMED the session (the model saw it
+  and dropped it) or not (the tools never found it).
+- **Each round**, every tool call was read and asked "could the agent have done better?"; a miss the tools caused was
+  fixed in the engine, a miss the model caused in the prompt.
+
+**Results** (mean recall over the five; held-out over the four):
+
+| Round | What changed | Main | Held-out |
+|---|---|---|---|
+| r0 | the app as it was (9.14's prompt, 90 days, a partial index allowed) | 55.3% | |
+| r1 | the engine fixes 1-4 below, the old prompt | 72.6% | |
+| r2-r5 | the Search Procedure, four rewrites | 96% -> 100% | 100% |
+| r6-r7 | the prompt composed from the shared pieces | 95.4% (twice) | 100% |
+| r8 | a touched-path row's first prompt; grep rows' folder | 100% / 96% | 100% |
+| r9 | "repeat the SAME call to narrow"; `folders`; the read budget | 100% / 100% | 91.7% |
+| r10 | the user's words in any form; the deep search, 11x faster; the store wait | 100% / 100% | 100% |
+| r11 | the BUILT-IN prompt, no prompt file (the app's own path, 26,869 characters) | 100% | 100% |
+
+Precision was 100% in every query of r10 and r11 but one run of q2 and one of q3, where the model added a session it
+labeled "weaker match". A request took 8 to 56 s and cost $0.02 to $0.25. The 56 s were r11's q1: its grep was the first
+after a rebuild, with the file cache cold, and it read all 346 candidates in 38 s (before the read-budget fix, the same
+call answered "stopped" having read none); warm it takes about 3 s.
+
+**The kit** for the next change is in the repository: [`tools/ai-search-eval/`](../../tools/ai-search-eval/README.md)
+— the queries, the scorer, `pieces.txt` (the prompt's SOURCE: the `AM_PROMPT_*` macros are generated from it),
+`gen_prompt.py` and `splice_prompt.py`, and the loop (edit the pieces, render a candidate, run main twice and held-out
+once, splice the winner, run once with the built-in prompt). The answer keys name this machine's sessions and stay out
+of the repository.
+
+**What the engine got wrong, and the fixes** (`SessionSearchAgent`, `SessionSearchTools`, `SessionSearch`):
+
+1. **The index** (9.13): ONE `SessionCatalogKeeper` per process (`SharedSessionCatalogKeeper`), read by both
+   conversations, built for every session at the bot's start, never freed by a park or a page hide. A tool call waits
+   up to 90 s (`kCatalogSearchWaitMs`) for an index that reaches back as far as it asks, is fresh, and carries the
+   session store's titles, tags and favorites (the first step of a process is published before the store was read: a
+   search on it matched no tab name the user gave a session). Over an index still being read the tool searches
+   NOTHING and answers an error that tells the model to call again (that call waits again) - never a part.
+2. **The period.** The default is every session (`kSessionSearchDefaultDays` 0, search and grep): 19 of q1's 104
+   sessions were older than the old 90 days, and the model never thought of a longer period. A period now OVERLAPS a
+   session's activity (last active at or after its start, begun at or before its end): a session begun before the
+   period and resumed after it is in. Each row of a dated search says `in_period` - its own messages and prompts
+   inside the period, or "none: it only spans the period" (`ReadPeriodActivity`, a byte scan; a fork's copied lines
+   are skipped).
+3. **The limits.** search 30 rows by default, 200 at most, and `more` when the limit cut them; grep 20 / 100, the rest
+   in `also` (up to 150 one-line rows: id, title, folder, how many messages match), and `folders` - the matches per
+   folder - when 10 or more matched; show takes 300 ids. The Telegram answer lists the rows past its cards as plain
+   lines, packed into messages of 3,500 characters (MESSAGING.md §21.20).
+4. **grep.** Every alternative of an alternation keeps its own prefilter key (`GrepRequiredLiterals`:
+   `0xC0000374|heap.?corrupt` reads only the lines holding "0xC0000374" or "corrupt"; `qm (create|start)` gives "qm
+   create" and "qm start"); plain text with a regex escape (`TabDragMath\.h`) also matches unescaped; ONE ripgrep over
+   the whole projects folder (0.7 s warm for 12 GB) instead of one per 64 files; several reader threads; a line whose
+   only copy of the word is its `cwd` field is never parsed (every line of a session launched in `K:\source\proxmox`
+   holds "proxmox"); `in:edits` matches only the paths of the files Claude edited or wrote (q4: "edited", not
+   "touched"). The 20 s read budget starts AFTER that ripgrep: cold, it took the whole budget, and a grep for
+   "proxmox" answered `stopped` having read 0 of its 346 candidates (3 s warm).
+5. **The evidence the model needs.** A shown session the model gave no `why` gets the evidence its results showed
+   (`KnownSession::evidence`, ranked: the user's own words, an edit of the file, the folder with the first prompt, a
+   touched path, Claude's words, the title, a listing's first prompt). Grep rows carry their folder (`dir`): to judge
+   "of Agentmaster", the model twice re-grepped inside `dir:agentmaster` with a shorter pattern and lost a session.
+   A search row that matched only a TOUCHED path carries the session's `first_prompt`, cut around the word: three
+   forks of a proxmox conversation matched on a path alone (the history-prompt search knows no fork's copied prompts),
+   and the model filed them as "a path in a listing".
+6. **The deep search** (`deep:true`, and the Sessions page's slow content phase, `SearchTranscriptsSlow`): a line is
+   parsed only when its raw bytes hold every plain term (the grep's prefilter), the files are read by several
+   threads (the hits still in the refs' order), and each term's ripgrep round runs once over the projects folder.
+   "home icon return" over every session: 79 s -> 7 s, the same 127 matches.
+
+**The Search Procedure** (`## The Search Procedure`, seven steps, between the behaviors and `## Tools`; the
+introduction now states the duties: completeness first, evidence second, speed third). Its rules, and the eval
+failure each one answers:
+
+1. **Read the facets** - subject, remembered words, error, file, folder, period, mark. A word that names a project or
+   folder (proxmox) is both a subject and a folder.
+2. **Cast a wide net in the FIRST step**, every call at once: the subject's stem over every session, the folder's own
+   listing, other words for it, a grep for remembered words (`in:user`) or an error, `in:edits` for a changed file,
+   a dated listing for a period. (r0: one search of 15 rows for "proxmox".)
+3. **Make every list complete before judging it:** raise a cut search's limit, read `also`, rerun a `stopped` grep
+   narrower, call an unready index again. A long list is no reason to narrow - its rows say their folders. To narrow a
+   cut list, REPEAT THE SAME CALL with dir, a period or ids added: "grep 0xC0000374|heap.?corrupt again with
+   dir:agentmaster, never 0xC0000374 alone" (r6-r8: the model narrowed to the bare code twice and lost a session that
+   said "heap-corruption fail-fast"). The candidates are the union of every list.
+4. **Sort by evidence:** strong (the asked folder, a title or first prompt naming it, a prompt the user typed, an edit
+   of the file, activity in the period) is kept; "to check" (only Claude's text, a tool's output or a touched path) is
+   checked - grep the subject in those ids, or read them; never left out on a guess.
+5. **Check before showing:** an unasked period, a list still cut, other words not searched, every strong candidate
+   kept (small ones too), every fork and continuation kept, nothing shown that is a passing mention.
+6. **Show every one, in ONE call, best first** - never a sample or one representative of similar sessions (r6: three
+   forks dropped as "representatives"); for one particular thing (the words said, the file edited, the error hit)
+   only exact evidence, near misses named in the reply; the user's words count in any form - a line of a pasted
+   table is their words (h9: "Remove entirely Netdata" inside a pasted table was filed as "you did not ask for it").
+7. **Reply** with how many fit, how they group, what was left out and why, and the next step.
+
+Behavior 10 replaces 9.3's rule 9: a result that says the index is still being read searched nothing - call again,
+never answer from it. Workflow 4 (a period) reads the sessions before summarizing them (level minimal, 2,500
+characters, up to 24 sessions in three parallel calls) and leaves out the ones whose `in_period` is none.
+
+**How the prompt is made:** it is composed at compile time from the shared pieces (`AM_PROMPT_*`), the page and the
+database modes from one text; the eval ran the page mode's prompt from a file (`--agent-prompt-file`), and the pieces
+are generated from the winning file, so the built-in prompt is byte for byte the one that scored. The database mode
+shares the procedure's steps 1 and 4-7 and has its own step 2-3 (its tools); it was not run against the eval.
+
+**Tools for the next round:** `harness_live.exe --eval` (above); `harness_live.exe --tool <search|grep|read>
+'<arguments JSON>' [--tool-out <file>]`, one tool call over this machine's sessions with no model, timed (a grep is
+then timed per candidate file too); `--index` with no days now times every session.
+
+**Tests** (m5): the every-session default and the clamps; the tier order with an old session; a period's overlap and
+`in_period` (a span, a session inside it, an unchecked row says nothing); a touched-path row's `first_prompt` and its
+auto-why; a search or grep over a partial index searches nothing; the auto-why of `show`; grep's `in:edits`, the
+cwd-only word, `folders`, the `also` folders, a row's `dir`; `GrepRequiredLiterals` and `GrepUnescapePlainPattern`;
+the deep search over 70 transcripts (order, case, a Hebrew term, two terms, a cancel); the prompt's procedure and the
+schemas (`tests_tabtools.cpp`).
+
+**Still open:** a near miss is still shown now and then with an honest "weaker match"; the deep search remains the
+slowest finder (7 s warm over every session); a cold start still reads one sidecar file per session (9.13's fix 3);
+the database mode's procedure was never evaluated; nothing here has met the app's XAML or a Telegram chat.
 
 ---
 

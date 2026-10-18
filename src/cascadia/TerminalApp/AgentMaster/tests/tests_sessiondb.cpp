@@ -373,7 +373,11 @@ namespace
         const std::wstring prompt = SessionSearchToolset::DatabaseSystemPrompt();
         CHECK(prompt.find(L"# Instructional Behaviors") != std::wstring::npos && prompt.find(L"## Tools") != std::wstring::npos && prompt.find(L"## Workflow Guidelines") != std::wstring::npos,
               "the database prompt has the behaviors, the tools and the workflows");
-        CHECK(prompt.find(L"mcp__agentmaster__read") != std::wstring::npos && prompt.find(L"Read a session before you show it") != std::wstring::npos, "the database prompt confirms candidates with its read");
+        // The Search Procedure of 2026-10-18 (SESSIONS.md 9.15) replaced "Read a session before you show it": the candidates
+        // whose evidence is not conclusive, and the ones the reply describes, are read.
+        CHECK(prompt.find(L"mcp__agentmaster__read") != std::wstring::npos && prompt.find(L"## The Search Procedure") != std::wstring::npos &&
+                  prompt.find(L"Read (one read call takes up to 8 sessions") != std::wstring::npos,
+              "the database prompt checks its unsure candidates with its read (the Search Procedure)");
         bool allNamed = true;
         for (const auto& t : SessionDbToolDefs::kTools)
         {

@@ -44,9 +44,102 @@
 
 namespace Agentmaster
 {
+    struct SessionIndexStatus;
+
+    /// <summary>
+    /// The AI search's SESSION INDEX: the catalog (SessionCatalog) that every search and grep of a conversation reads, kept
+    /// up to date by a background task (the index keeper) that reads the sessions' sidecar index files in steps, newest
+    /// first, and publishes what it has after each step. ONE per process in the app (SharedSessionCatalogKeeper), read by
+    /// BOTH search conversations — the Sessions page's and the Telegram Search topic's — and never freed: the user's rule
+    /// of 2026-10-18, "searches must never miss" (SESSIONS.md §9.13 / §9.15).
+    /// </summary>
+    /// <remarks>
+    /// Why it is shared and kept (the 2026-10-17 diagnosis, SESSIONS.md §9.13): each conversation used to build its own
+    /// index, free it when it parked or its page closed, and search whatever a rebuild had reached after ~2 s — a list of
+    /// 1 to 34 sessions after a pause, which the model then reported as "nothing found, still being indexed". A shared,
+    /// kept index costs its memory once (about 40-60 MB for 4,500 sessions) and a rebuild never. A test makes its own keeper
+    /// (or lets the agent make a private one), so no test touches the app's.
+    /// Thread-safe: every method may be called from any thread. Ensure returns at once; WaitFor blocks its caller (a tool
+    /// call) for at most the time it is given.
+    /// </remarks>
+    class SessionCatalogKeeper
+    {
+    public:
+        /// <summary>Make a keeper. Reads nothing until Ensure or WaitFor asks for a period.</summary>
+        /// <param name="sources">The open sessions (live titles, the `open` filter) and, in a test, the scratch folders.</param>
+        /// <exception cref="std::bad_alloc">If the keeper cannot be allocated.</exception>
+        explicit SessionCatalogKeeper(SessionCatalogSources sources = {});
+
+        /// <summary>Stops the background task (Shutdown). Blocks until it returned.</summary>
+        ~SessionCatalogKeeper();
+
+        SessionCatalogKeeper(const SessionCatalogKeeper&) = delete;
+        SessionCatalogKeeper& operator=(const SessionCatalogKeeper&) = delete;
+
+        /// <summary>
+        /// Make sure a fresh index from `sinceUnixMs` on exists or is on its way: start the background task when none runs
+        /// and the index there is too short or older than half of kSessionCatalogMaxAgeMs. Returns at once (a UI thread
+        /// calls it, through Prewarm and Ask).
+        /// </summary>
+        /// <param name="sinceUnixMs">The earliest instant a search may ask for; 0 = every session. The keeper reads the
+        /// widest period ever asked, so a shorter one never throws a longer index away.</param>
+        /// <remarks>Never throws: without a thread for the task, a search uses the index there is.</remarks>
+        void Ensure(int64_t sinceUnixMs) noexcept;
+
+        /// <summary>
+        /// The index for a search from `sinceUnixMs` on: waits until the newest index covers that period, is fresh and
+        /// carries the session store's titles, tags and favorites (SessionCatalog::storeOverlay - a process's first step
+        /// is published before the store was read), the background task ended (nothing better is coming), `cancelled`
+        /// answers true, or `maxWaitMs` passed.
+        /// </summary>
+        /// <param name="sinceUnixMs">The search's lower time bound (0 = every session).</param>
+        /// <param name="cancelled">Empty = never; else asked every 100 ms: true ends the wait (the search is not wanted).</param>
+        /// <param name="maxWaitMs">The longest wait.</param>
+        /// <returns>The newest index — complete for the period when the task got there in time, else a shorter or older one
+        /// (the caller checks SessionCatalog::coveredSinceUnixMs and must not present it as complete); null when no index
+        /// was ever published.</returns>
+        /// <remarks>Never throws (a failure is logged and answers null).</remarks>
+        std::shared_ptr<const SessionCatalog> WaitFor(int64_t sinceUnixMs, const std::function<bool()>& cancelled, int64_t maxWaitMs) noexcept;
+
+        /// <summary>The newest published index, or null. Reads nothing, waits for nothing. Never throws.</summary>
+        std::shared_ptr<const SessionCatalog> Current() const noexcept;
+
+        /// <summary>Where the index stands (SessionIndexStatus). Never throws.</summary>
+        SessionIndexStatus Status() const noexcept;
+
+        /// <summary>
+        /// Free the index and stop a running build (its sidecar files stay, so the next build continues). For a PRIVATE
+        /// keeper (a test, an agent made without a shared one); the app's shared keeper is never released.
+        /// </summary>
+        void Release() noexcept;
+
+        /// <summary>Stop the background task for good and wait for it. Never throws.</summary>
+        void Shutdown() noexcept;
+
+    private:
+        struct Impl;
+        std::shared_ptr<Impl> _impl;
+    };
+
+    /// <summary>
+    /// The process's ONE session index (SessionCatalogKeeper), made on the first call and never destroyed (the engine's
+    /// rule: the app ends with TerminateProcess). Its open sessions come from the shared engine's registry.
+    /// </summary>
+    /// <returns>The keeper; the same pointer every time.</returns>
+    /// <exception cref="std::bad_alloc">On the first call only, if it cannot be made (a later call tries again).</exception>
+    /// <remarks>⚠ App-only, like SharedSessionSearchAgent: the first call touches SharedEngine(). Tests make their own keeper.</remarks>
+    std::shared_ptr<SessionCatalogKeeper> SharedSessionCatalogKeeper();
+
     // What the agent needs from its host. Every member is optional for a test.
     struct SessionSearchAgentOptions
     {
+        /// <summary>
+        /// The session index this conversation searches. The app passes SharedSessionCatalogKeeper() to BOTH search
+        /// conversations; null (a test) = the agent makes a private one from `openSessions`.
+        /// </summary>
+        /// <remarks>With a shared keeper, ReleaseCatalog() frees nothing (the index is the process's).</remarks>
+        std::shared_ptr<SessionCatalogKeeper> catalogKeeper;
+
         // The sessions that have a tab open now, as (id, tab title): the `open` filter and the
         // live titles of a search. Called on the search thread; must be thread-safe.
         std::function<std::vector<std::pair<std::wstring, std::wstring>>()> openSessions;
@@ -90,6 +183,40 @@ namespace Agentmaster
         /// the SDK's reader thread and must be thread-safe.
         /// </remarks>
         SessionSearchToolset::Callbacks::TabTools tabTools;
+
+        /// <summary>
+        /// A system prompt to use INSTEAD of the built-in one (SessionSearchToolset::SystemPrompt / DatabaseSystemPrompt);
+        /// empty = the built-in. Only the prompt eval sets it (harness_live --eval --agent-prompt-file, SESSIONS.md
+        /// §9.15): a prompt is tried on the real model without a build, and the winner is then compiled in.
+        /// </summary>
+        /// <remarks>⚠ The app never sets it: the built-in text is the one the m5 suite pins to the tools' behavior.</remarks>
+        std::wstring systemPrompt;
+
+        /// <summary>
+        /// Called after EVERY tool call of the conversation with the tool's full name ("mcp__sessions__search"), the
+        /// arguments the model sent (JSON text) and the WHOLE result the model read. The conversation's record keeps
+        /// only a 2,000-character preview of a result (kHarnessMaxToolResultChars), and the eval must know every id a
+        /// result named, to tell a session the tools never found from one the model saw and left out (SESSIONS.md
+        /// §9.15). Empty = none (the app).
+        /// </summary>
+        /// <remarks>Called on the SDK's reader thread, possibly from two read-only calls of one model step at the same
+        /// time: it must be thread-safe, and must not throw (a throw is logged and swallowed).</remarks>
+        std::function<void(const std::wstring& tool, const std::wstring& argumentsJson, const std::wstring& result, bool isError)> toolResultTap;
+    };
+
+    /// <summary>
+    /// Where the session index of an agent stands (SessionSearchAgent::IndexStatus): what a search made now would cover.
+    /// A diagnostic for the eval and the live test; the tools themselves report an index that is not complete in their
+    /// results (FormatSessionSearchResult's `indexing`).
+    /// </summary>
+    struct SessionIndexStatus
+    {
+        size_t sessions{ 0 }; // sessions in the newest published index (0 = none yet)
+        bool complete{ false }; // it holds every session of the period it was asked for
+        int64_t sinceUnixMs{ 0 }; // the period it was asked for starts here (0 = all time)
+        int64_t coveredSinceUnixMs{ 0 }; // it is complete from here on (later than sinceUnixMs while it is not complete)
+        int64_t gatheredUnixMs{ 0 }; // when it was published
+        bool building{ false }; // the index keeper is reading more right now
     };
 
     // What an event reports.
@@ -234,10 +361,13 @@ namespace Agentmaster
         // is started when one was up. Listeners get a Reset event with the new epoch.
         void Reset();
 
-        // Free the in-memory session index (tens of megabytes for a busy month) and stop a
-        // background build of it. Call it when no page shows the AI search any more; the next
-        // Prewarm / Ask reads it again. A build that was stopped continues from where it was:
-        // what it indexed is on disk.
+        // Free the in-memory session index and stop a background build of it — but ONLY for a
+        // private index (an agent made without SessionSearchAgentOptions::catalogKeeper: a test).
+        // With the app's shared index it does nothing: that index is the process's, kept for the
+        // next search of either conversation (SESSIONS.md §9.13, "searches must never miss": a
+        // rebuild after a pause was what made searches answer from a part of the sessions). The
+        // callers (a page that stops showing the AI search, the Telegram topic's park) still call
+        // it; a build that was stopped continues from where it was: what it indexed is on disk.
         void ReleaseCatalog();
 
         // End the idle claude.exe `delayMs` from now unless a Prewarm, an Ask or a Reset comes
@@ -279,6 +409,11 @@ namespace Agentmaster
         // (HarnessConversation::DescribeCommandLine). Starts nothing.
         //   throws — std::bad_alloc.
         std::vector<std::wstring> DescribeCommandLine() const;
+
+        /// <summary>Where the agent's session index stands now (SessionIndexStatus). Reads no file, starts nothing.</summary>
+        /// <returns>The status; all zero when no index was ever published (or the database mode, which has none).</returns>
+        /// <remarks>Never throws.</remarks>
+        SessionIndexStatus IndexStatus() const noexcept;
 
     private:
         struct Impl;
