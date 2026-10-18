@@ -12,7 +12,8 @@
 > **Where each part runs** (checked 2026-10-18 against git and a string probe of each installed `TerminalApp.dll`):
 > PRODUCTION 0.6.8.21 (the Release build of 46e3aad42) holds §21.1–§21.12; DEV 0.0.1.29 (the Debug build of ac4167e63)
 > holds everything through §21.18 except §21.17.4's pager row (a7bb5a577); that row, §21.19, §21.20 and §21.22 (the state
-> as the topic's icon) are in neither (NOT BUILT). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> as the topic's icon) are in neither (NOT BUILT), and nor are §21.23 – §21.25 (§21.25 = a new thread's WIZARD: create a
+> missing folder, a model, a window; an aborted creation deletes the thread). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -2849,6 +2850,11 @@ updated 5 minutes ago
 
 #### 21.17.4 A thread the user opens starts a new session
 
+> **Since §21.25 (NOT BUILT yet)** the folder picker below is the FIRST step of a wizard: a typed folder that does not exist is
+> offered for creation, an optional model and a window follow, ✖ Cancel and a day of nothing chosen delete the thread, and the
+> wizards and launches survive a restart. What this section says about the picker, the bind and the hand-over still holds;
+> §21.25 says what changed.
+
 - **The flow.** The user opens a thread in the bot's chat. Telegram sends `forum_topic_created` from the user (before §21.17
   the bot answered "Topics are made from Agentmaster's tabs"), then the user's message.
   - A thread the user NAMED (`is_name_implicit` false): the name becomes the session's title, and the picker goes up at once.
@@ -2891,7 +2897,8 @@ updated 5 minutes ago
     the last page, which is why "it only shows one page" on the dev bot; production's 1,724 sessions give 37 folders (4 pages).
     Every Claude Code session on the machine (4,519 transcripts under `~/.claude/projects`) was launched in 76 existing folders
     outside the temp roots (8 pages), but the picker reads only the sessions the registry holds.
-- **A pick** (`_startNewThreadSession`): the folder is checked again; a session id is minted (`NewSessionId`) and recorded with
+- **A pick** (`_startNewThreadSession`; since §21.25 the wizard's last step, `_launchNewThread`, which also carries the chosen
+  model, window and anchor tab): the folder is checked again; a session id is minted (`NewSessionId`) and recorded with
   the thread, the title and the held messages in `_threadBinds` BEFORE the launch, because the launch is asynchronous; then a
   `RemoteLaunchRequest` NewSession with `newSessionId` goes to the most recently active window, which opens a background tab
   with THAT id (`_RemoteLaunch` → `_SpawnClaudeSession` → `_LaunchClaudeSession`'s `presetSessionId` → `BuildClaudeSpawn`'s
@@ -3245,7 +3252,10 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
   3-minute bind timeout tells the thread and frees it, and a restart forgets the pickers and binds (they live in memory
   only); each leaves the thread in the chat. *(§21.23, NOT BUILT yet: a launch the PC REFUSES is no abort any more — the
   thread goes back to a new folder picker at once, with its messages and the reason; every path above still leaves the
-  thread.)*
+  thread.)* *(Fixed by §21.25, NOT BUILT yet: ✖ Cancel at any step of the wizard and a wizard nobody touched for a day
+  DELETE the thread — what it held is copied into the main view first; a new thread whose only message was a /search command
+  is deleted once the command left it; the wizards and launches are persisted in `state.json`, so a restart resumes them;
+  the 3-minute timeout puts the thread back into its wizard.)*
 - **A remote fork or new session settles on its SOURCE** (seen on dev: a topic's `/forksession` on 2026-10-16 23:41 —
   `launch Forking c1ce0dbe`, then `revive done c1ce0dbe` 1.3 s later and `c1ce0dbe idle -> waiting`, while the fork
   `de0d4a0a`'s new topic read "leaves the list in 10 min"; and `… launch Opening a new session 91d8d3d1 …` → `revive done
@@ -3268,7 +3278,10 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
   take whatever follows as the model. `BuildClaudeCommandline` quotes it only when it holds a space and never escapes it, and
   `BuildPwshHostedCommandline` puts that line into the PowerShell script that starts claude as it is (`& <line>`), so a `;`
   or a `$(…)` in it would run. The session's launch snapshot (`launchArgs`) keeps the model for its life: a Reactivate, a
-  Restart, a resume and a fork start claude with it again.
+  Restart, a resume and a fork start claude with it again. *(§21.25: the new-thread wizard's typed model id is checked before
+  it can reach a launch — letters, digits and `- _ . : / [ ]`, one word, a letter or digit first (`ParseNewThreadModelId`);
+  the topic's `/newsession` / `/forksession` and Search's `/newsession` still take any text, and a held command still
+  replays.)*
 - **A launch the window cannot make is never reported.** `RequestLaunchInWindow` (Engine.cpp) answers true as soon as a
   window has a launch sink, and the sink answers nothing. A Resume, a Fork or a new session asked from Telegram that never
   comes up is dropped after 3 minutes WITHOUT a word (`_sweepRevives`); a new thread's bind tells its thread after 3 minutes
@@ -3281,7 +3294,8 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
 - **A new thread renamed before its folder is picked loses the rename.** The picker says "rename this thread to change it",
   but `_handleMessage` reads a `forum_topic_edited` only for a thread that has a session. The bind names the session from the
   thread's FIRST name (`topicName`; the folder's name when Telegram made the thread's name up) and renames the thread to it.
-  A rename after the bind renames the session (§21.17.4).
+  A rename after the bind renames the session (§21.17.4). *(Fixed by §21.25, NOT BUILT yet: a rename during the wizard is
+  the coming session's title (`_onNewThreadRenamed`), and a rename while the launch runs renames the session at the bind.)*
 - **A send that gets no answer is lost** (seen in production: 52 `transport failure` lines in `messaging.log`, all between
   18:56 and 18:59 on 2026-10-17, WinHTTP 12002 and 12007 — a DNS outage). The send loop retries only a 429 (§21.14.3); any
   other failure goes once to the item's callback. A final reply (`_postFinal`), a remark (`_postRemark`) and every other
@@ -3594,6 +3608,200 @@ emoji, wide CJK, blocks, rules joined). NOT BUILT; nothing tried live.
 4. 🔄 Restart Session at rest: the toast, and the session resumes in its tab; while a turn runs: the question with
    [Restart now] [Cancel].
 5. A session in Error (a cut-off turn): the card's first row is [🔧 Resume Session] and its line names it; the tap resumes it.
+
+### 21.25 A new thread's WIZARD: create a missing folder, pick a model, pick a window — and an aborted creation deletes the thread (2026-10-18; NOT BUILT yet)
+
+> The user's request (2026-10-18), after the QA of a new session's creation: "If path picker was set manual path and it does
+> not exist (checking case-insensitively as we on win) then we will ask user to confirm creation or back to pick again. After
+> path choosing, add model chooser which shows basically same options like right-click menu context Fork/Resume Session->.
+> This is an optional pick and skip == default. User can specify model manually like "claude-opus-5-5[1m]". After model
+> picking, Allow window picking by number, each window has stats like number of tabs, last tab created, last 10 tab titles.
+> Defaults to finding all tabs with same (inferred) working directory and picking the tab with newest tab with that
+> (inferred) working directory. Make sure the lifecycle is complete and qa through tests." — and, from the QA before it: "If
+> the creation process aborts in any way, the new topic needs to be deleted."
+
+A thread the user opens no longer launches at its folder pick (§21.17.4). Its ONE picker message becomes a WIZARD that is
+edited in place, one step at a time; the session starts when every step is answered. The pure half is
+`AgentMaster/MessagingNewThreadWizard.h` (the steps, the decisions, the folder resolution over an injected file system, the
+model and window choices, the views, the persisted records); the service half is the §21.17 section of
+`Messaging.Inbound.cpp`.
+
+#### 21.25.1 The steps
+
+| Step | What it shows | What it takes |
+|---|---|---|
+| **Folder** | the §21.17 picker, now saying "Then a model (optional) and a window. ✖ Cancel deletes this thread." | a folder button, a pager, or a TYPED path |
+| **Create folder** (a typed folder that does not exist) | "📁 *X* does not exist yet: `K:\a\b\X`" — what exists, what a Create makes ("2 new folders") | [📁 Create the folder] · [◀ Back to the folders] · [✖ Cancel] |
+| **Model** (optional) | the chosen folder; "Default is the settings model, `opus`" (or Claude Code's own default); how to type an id | [✅ Default] [✏ Specify…] first (the PC menus' order), then the model last typed in a "Specify a model" prompt (↺) when the menu lacks it, the menu's models (🧠) and presets (🔌), then [◀ Back] [✖ Cancel]; or "/model &lt;id&gt;" typed |
+| **Model id** (after ✏ Specify…) | "Send the model id as your next message — like `claude-opus-5-5[1m]`" | one word typed; [✅ Use Default] · [◀ Back to the list] · [✖ Cancel] |
+| **Window** | per window: its number, tab count, "used last", how many tabs work in the folder, its newest tab ("newest: “beta” · opened 2h ago"), its ten newest titles; "⭐ Default: window 1 — next to “beta”, the newest tab in proj" | [⭐ Default — window N], one [🪟 N] per window, [🔄 Refresh], [◀ Back], [✖ Cancel]; or the window's number typed (2, #2, w2, window 2) |
+
+Then the launch: "🚀 Opening a new session in **proj** · Opus · window 2, next to “beta”…" (a line in the thread, quoting the
+message when the last choice was typed), the picker is deleted, and the bind of §21.17.4 makes the thread the session's
+topic when the session is live.
+
+- **A typed choice re-posts the picker BELOW the user's message** (the user looks at the bottom of the thread); a button edits
+  it in place. A typed folder path is a folder choice at EVERY step (the user changed their mind); "/model x" at the model
+  step, one word at the model-id step, a window number at the window step; anything else is the user's message, HELD for the
+  session as before (👀).
+- **A button of an earlier step** (tapped before the edit reached the phone) answers "That button belongs to an earlier step"
+  and changes nothing (`NewThreadStepTakes`). The buttons' data names a list and an index, never a path or a model id
+  (`nt:cf`, `nt:bf`, `nt:md`, `nt:mo:<i>`, `nt:ms`, `nt:bm`, `nt:w:<i>`, `nt:wd`, `nt:wr`, beside §21.17's), and maps to the
+  choices AS THE STEP SHOWED THEM (kept in the record), not to a menu that changed since.
+- **A notice** (a folder that is gone, a refused creation, a launch that did not go through) heads the step until the user's
+  next choice clears it — a render alone never clears it, since the picker's edits share one outbox key.
+
+#### 21.25.2 The folder: checked case-insensitively, and created on request
+
+- **A TYPED path** goes through `ResolveNewThreadFolder` — a walk down the path: each part looked up with `FindFirstFileExW`
+  (a Windows lookup ignores case and reports the disk's spelling), and when a lookup misses, the parent LISTED and searched
+  case-insensitively, because a folder WSL marked case-sensitive answers only its exact spelling. So `k:\SOURCE\agentmaster`
+  IS `K:\source\Agentmaster` (and the session opens in that spelling), never a second folder that differs only in case; in a
+  case-sensitive folder the exact spelling wins over a case variant. Every part is checked BEFORE any lookup
+  (`NewThreadFolderNameIllegal`: `< > : " | ? *`, control characters, device names — `< > "` are wildcards to the lookup, which
+  could find another entry), a ".." part is refused, a missing drive or share says so.
+- **The first part that is not there and everything under it** is what a Create makes — each name checked for what Windows
+  cannot make as written (a trailing dot or space, `NewThreadFolderNameProblem`), the whole path at most 240 characters (the
+  tools a session runs are not all long-path aware).
+- **The walk and the creation BLOCK on a slow folder** (an offline share holds a lookup for the network's timeout): each runs on
+  a thread of its own, waited for with a bound (2 s for the walk, 5 s for the creation; `RunNewThreadFsWork`, at most 4 at once)
+  — §21.17.4's rule for the poll thread, for work FolderProbe.h's yes / no cannot carry. A creation that outlives its wait goes
+  on; a second Create finds what it made (an existing level counts as made).
+- **A LIST pick** keeps §21.17.4's bounded probe. A list folder that is gone is never offered for creation: the lists are read
+  again ("That folder is gone").
+
+#### 21.25.3 The model: the right-click menu's list, or a typed id
+
+- The choices are `LaunchMenuEntries(launchModels)` — the configured launch models, then every visible preset as `@id`, the
+  list of the PC's "Fork session ▸" / "Open New Session Here ▸" — plus the model last committed in a "Specify a model" prompt
+  (`LoadLastSpecifiedModel`, the PC prompt's pre-fill) first when the menu lacks it. The presets live in app-only code, so the
+  app layer hands the service a source (`MessagingService::SetLaunchMenuSource`, set with the Search factory in
+  `TerminalPage::_InitAgentmasterEngine`); the settings' `launchModels` and `model` reach the service with every `Apply`.
+- **Skip = Default** ([✅ Default], or ✏ Specify… → [✅ Use Default]): no `--model`, as the PC's Default.
+- **A typed id** is checked before it can reach a launch (`ParseNewThreadModelId`): letters, digits and `- _ . : / [ ]`, one
+  word, a letter or a digit first, at most 120 characters — `claude-opus-5-5[1m]`, `sonnet[1m]`, `anthropic/claude-sonnet-5.5`,
+  `qwen3:32b` pass; a space, a quote, `;`, `$`, a backtick, a leading `-` do not (the id goes into the PowerShell line that
+  starts claude, §21.21). A listed model typed by its id is that choice (its name); `@id` names a listed preset. A typed id
+  joins the "Specify a model" droplist and becomes its pre-fill (`RememberSpecifiedModel`), as on the PC.
+- **No preset at all**: the step says where to add one ("Settings ⚙ → Presets → TEMPLATES"), as the PC menus offer "Add
+  presets…".
+
+#### 21.25.4 The window: by number, with each window's stats, defaulting next to the newest tab of the folder
+
+- **The list** is the AI search's census (`CollectWindowCensus`, the windows in creation order — the numbers the AI search uses
+  too), asked on a WORKER thread of its own (it waits up to 4 s for every window's UI thread; `ServiceHooks::windowCensus`),
+  with the registry's facts per tab (`SnapshotLiveForCards`): where each session works and how new it is. "Looking at the open
+  windows…" shows meanwhile; an answer of an older ask is dropped by its serial.
+- **Newness** is the session's CREATION stamp, `SessionInfo::createdUnixMs` — NEW, persisted, set once at the launch seam of a new
+  session or fork (Claude and Codex) and never moved — then the transcript's age (`convCreatedUnixMs`, for a session from before
+  the stamp), then the MOST RECENT key, then the strip place.
+- **A window's stats**: its tab count (shells included), its newest tab — the user's "last tab created" — with "opened … ago" when
+  stamped, its ten newest titles (cut at 40 characters, on one line), how many of its tabs work in the folder, "used last".
+  Twenty windows at most (the rest counted); the text shrinks each window's titles (10 → 6 → 3 → none) until the message fits.
+- **The default** is the window holding the NEWEST tab working in the chosen folder over every window — a tab counts by its
+  launch folder OR its inferred one — and the new tab opens RIGHT AFTER that tab. With no such tab: the window used last, else
+  the first. `BuildNewThreadWindowPlan`.
+- **One window**: the step is skipped (that window, after its folder tab). **None answered**: skipped too — the engine's choice.
+- **The launch targets the window** (`RemoteLaunchRequest::windowId`): the engine offers it to THAT window only
+  (`RequestLaunchInWindowIn`); a window that closed since the census takes nothing, and the wizard asks again — the tab never
+  lands in a window the user did not pick. `RemoteLaunchRequest::afterSessionId`: `_RemoteLaunch` opens the tab at the anchor's
+  strip index + 1 when that window hosts it, else at the end.
+
+#### 21.25.5 The lifecycle
+
+| Event | What happens |
+|---|---|
+| ✖ Cancel at any step | the thread is DELETED (`deleteForumTopic`, its queued items dropped first); what it held is copied into the main view in a silent line with an expandable quote (`BuildNewThreadAbortHtml`) — the messages go with the thread |
+| Nothing chosen for a day (`kNewThreadPickerIdleMs`, every message or tap counts) | the same, from the tick (`_newThreadsTick`): "🗑 “X” was deleted — nothing was chosen in it for 24 hours." |
+| A new thread whose only message is `/search` / `/search_tab` | deleted once the command left it for the Search topic (`_abortUntouchedNewThread`) — the creation never started |
+| The window REFUSES the launch (§21.23) | not an abort: the thread goes back into its wizard at the step that can fix it (`NewThreadStepAfterRefusal`: a refused preset → the model step, its choices read again; a failed tab or a closed window → the window step; the model step when the window step had been skipped), with its held messages and the reason |
+| No window takes the launch (the chosen one closed, or none is open) | back to the window step ("That window is not open any more — pick another one"), or the model step when none was named |
+| The session does not come up within 3 min | back into the wizard the same way, the picker posted again below the line |
+| After a launch that did not go through | the window step SHOWS its list even with one window (or "No window answered — Refresh"): a refusal is never retried without a tap (`askWindow`); a new model choice is a fresh pass |
+| The bot or the app restarts | every wizard and launch comes back from `state.json` (`MessagingState::newThreads`, written with the topics in one atomic save): a wizard where it stood, its picker's buttons still working; a launch waits for its session (its clock starts at the restore, and no launch times out while the windows still restore their tabs); a window step that waited for its census asks again once the start-up hold is over |
+| A different bot (the token replaced) | the wizards and launches are cleared with the topics (the identity gate) |
+| The user deletes the thread | Telegram tells a bot nothing; the next edit or post answers "thread not found" and the wizard is dropped (the day's abort finds it gone too) |
+| The user deletes the picker | the next edit answers "message not found": a new picker is posted |
+| The user renames the thread | during the wizard: the coming session's title (the folder step shows it); while the launch runs: the session is renamed to it at the bind (§21.21's rename bug) |
+
+#### 21.25.6 The code
+
+- `AgentMaster/MessagingNewThreadWizard.h` (NEW, pure): the steps (`NewThreadStep`), `ResolveNewThreadFolder` over `FolderFs` (+
+  `SplitFolderPath`, `NewThreadFolderNameIllegal` / `NewThreadFolderNameProblem`), `BuildNewThreadModelChoices`,
+  `ParseNewThreadModelId`, `NewThreadModelCommandArg`, `BuildNewThreadWindowPlan`, `ParseNewThreadWindowNumber`, the records
+  `NewThreadWizard` / `NewThreadRecord` / `NewThreadBind` (moved out of MessagingService), the reducers
+  (`ApplyNewThreadButton`, `ApplyNewThreadText`, `ApplyNewThreadFolderResolved`, `ApplyNewThreadFolderCreated`,
+  `EnterNewThreadModelStep`, `ApplyNewThreadWindows`, `NewThreadStepAfterRefusal`, `ReturnNewThreadToStep`), `BuildNewThreadLaunchPlan`,
+  `BuildNewThreadView`, `BuildNewThreadAbortHtml`, `NewThreadsToJson` / `NewThreadsFromJson`.
+- `MessagingNewThread.h`: the wizard's button kinds and their data; the picker's line about the steps and Cancel.
+- `Messaging.Inbound.cpp`: `_holdForNewThread` (the wizard reads a message first), `_showNewThreadPicker` (any step; a repost;
+  "message / thread not found"), `_onNewThreadAction` → `_applyNewThreadOutcome` (the one dispatcher), `_checkNewThreadFolder`,
+  `_createNewThreadFolder`, `_enterNewThreadModelStep`, `_collectNewThreadWindows` / `_applyNewThreadWindows`, `_launchNewThread`
+  (it replaces `_startNewThreadSession`), `_abortNewThread` / `_abortUntouchedNewThread`, `_onNewThreadRenamed`;
+  `_settleLaunchAnswers` puts a refused thread back into its wizard; `_jumpToSearchTopic` / `_relaySearchRequest` say whether the
+  command left its thread.
+- `Messaging.cpp`: the restore at `_start`, the save in `_saveStateIfDirty`, the bot change's reset, `SetLaunchMenuSource`,
+  `Apply` (the launch models), `_adoptBoundThreads` (the start-up hold, the wizard on a timeout, the rename at the bind),
+  `_newThreadsTick`. `MessagingModels.h`: `MessagingState::newThreads` (opaque). `Messaging.h`: `LaunchMenuInfo` /
+  `LaunchMenuSource`, `ServiceHooks::windowCensus`.
+- `RemoteLaunch.h`: `windowId`, `afterSessionId`. `Engine.cpp`: the named window's routing; the census hook. `SessionModels.h` /
+  `Persistence.cpp`: `createdUnixMs`. `TerminalPage.AgentSessions.cpp`: the stamp (Claude and Codex).
+  `TerminalPage.AgentMessaging.cpp`: the insert after the anchor. `TerminalPage.AgentEngine.cpp`: the launch-menu source.
+- **Logs**: `[msg] new thread N: typed|picked folder X → exists|missing|…`, `created the folder X`, `K window(s) answered,
+  default window D`, `opening session S in X model M in window W after A`, `no window took the launch …`, `aborted (why): the
+  thread is deleted`, `the thread is gone …`, `renamed by the user`; `[nav] remote telegram new-thread N …` (typed a choice /
+  button at the S step / created-folder / -> launch / cancelled / abandoned); `[remote-launch] window W was asked for by name
+  and is not open`; `[nav] remote launch after S -> slot N`.
+
+#### 21.25.7 Tests, and what was checked
+
+**Tests.** `tests_messaging_newthread.cpp` → `TestMessagingNewThreadWizard` (run at the end of `TestMessagingNewThread`): the
+buttons' data and their parse (valueless and valued kinds, malformed data); folder names (illegal characters, device names,
+the length, trailing dots for a creation only) and paths (the split, a share, ".."); the case-insensitive resolution over a
+fake file system — an existing folder in another case resolves to the disk's spelling, a missing one names what exists and
+what a Create makes, a file in the way, a case-sensitive folder found through the listing, the exact spelling over a case
+variant, no drive, no share, wildcards, device names, a name Windows cannot make, the path cap; the model choices (the order,
+twins, the last typed model, the cap), typed ids and `/model`; the window plan (stats, newness, the folder by launch or
+inferred folder, the default and its tie-breaks, no folder tab, twenty windows, cut titles) and typed numbers; whole lifecycles
+through the reducers — a list pick, a preset and the default window to the launch plan; a refusal coming back and never
+retried by itself; "create it?" with a refused and a made creation, Back, a list pick that is gone, a folder that did not
+answer, a notice kept by a page label and cleared by the next choice; typed choices (ids, `/model`, presets, a window number,
+a folder at a later step, words held); Cancel at every step and the stale guard; the window step's text within its budget;
+the persisted records (a full round trip, a bind's token and clock, malformed entries, through the state file, no key without
+wizards); the abort line; `createdUnixMs` in `sessions.json`. `tests_tabtools.cpp` → `TestRemoteLaunchAnswers`: a request that
+NAMES its window goes to that window only (with its anchor session), a named window that is not open answers false with no
+other window asked, no name keeps the old order.
+
+**Checked** (2026-10-18, HEAD bcc546a30 + this change only, in a scratch folder): the m5 suite 8,411 checks, the three
+known `TestTaskbarBadge` failures only (133 more than §21.24's 8,278: the wizard's and the named window's); one run also
+failed a scheduler timing check ("…sends once the queue window ran out", the load flake §21.24 records), which passed on the
+rerun.
+`cl /Zs` with the app's own command lines (`zs.py`): `TerminalPage.AgentEngine.cpp` and `TerminalPage.AgentSessions.cpp` pass;
+`TerminalPage.AgentMessaging.cpp` passes with §21.24's `control.ReadScreenSnapshot()` stubbed — the build tree's generated
+projection predates §21.24's `.idl` change, which the next build regenerates. NOT BUILT; nothing tried live.
+⚠ `SessionModels.h` changed (`createdUnixMs`) and the messaging service gained members: the next build must PURGE (the
+build-install skill's §5.8).
+
+**Check after the build** (dev, with the bot):
+1. Open a new thread and send `k:\SOURCE\<an existing folder in another case>`: the picker re-posts below at the model step,
+   naming the folder in its real spelling (no "create it?").
+2. Send a path that does not exist: "📁 … does not exist yet" with what exists and what Create makes; [◀ Back to the folders]
+   returns to the lists; send it again and [📁 Create the folder]: the folder is on disk and the model step shows "(created)".
+3. The model step lists the right-click menu's models and presets after [✅ Default] [✏ Specify…]; ✏ Specify… then
+   `claude-opus-5-5[1m]`: the window step follows; the session's claude command line carries `--model claude-opus-5-5[1m]`.
+   A bad id (`a;b`) is answered and nothing launches.
+4. With two windows open: each window's tab count, newest tab and titles; the default names the window of the newest tab in
+   the folder; [⭐ Default] opens the tab right after that tab, in that window, in the background; typing `2` picks window 2.
+5. ✖ Cancel at the model step: the thread is gone, and the main view has the silent line with what was written there.
+6. Restart the app mid-wizard (at the window step): the picker's buttons still work after the restart, and the window step asks
+   the windows again once they have restored.
+7. Rename the thread at the folder step: the folder step shows the new title, and the session takes it.
+
+**Not changed, still open.** The topic's `/newsession` / `/forksession` and Search's `/newsession <folder>` keep their own
+paths (no wizard, the model unchecked, §21.21); a held command still replays as a topic command at the bind; a never-prompted
+session restores under a NEW id (restore-fresh), so a launch restored from the state file can time out and send its thread back
+into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
+or post.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

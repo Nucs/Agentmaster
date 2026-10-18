@@ -202,10 +202,28 @@ namespace winrt::TerminalApp::implementation
             switch (request.kind)
             {
             case Kind::NewSession:
+            {
+                // MESSAGING.md §21.25: right after the anchor tab (the newest tab working in the same folder, the wizard's
+                // default) when THIS window hosts it — _claudeTabs is the window's own binding map, so a session another window
+                // hosts, or one that closed since the census, leaves the tab at the strip's end (-1, the NewTabPosition default).
+                uint32_t insertAt = static_cast<uint32_t>(-1);
+                if (!request.afterSessionId.empty())
+                {
+                    const auto it = _claudeTabs.find(request.afterSessionId);
+                    const auto anchor = it != _claudeTabs.end() ? it->second.get() : nullptr;
+                    uint32_t anchorIndex = 0;
+                    if (anchor && _tabs.IndexOf(anchor, anchorIndex))
+                    {
+                        insertAt = anchorIndex + 1;
+                    }
+                    ::Agentmaster::LogNav(L"remote launch after " + ::Agentmaster::ShortId(request.afterSessionId) +
+                                          (insertAt == static_cast<uint32_t>(-1) ? std::wstring{ L" -> not in this window: at the end" } : L" -> slot " + std::to_wstring(insertAt)));
+                }
                 // MESSAGING.md §21.17: the id the requester chose, when it chose one (the bot's new-thread picker binds the user's
                 // thread to it), else a minted one.
-                openedId = _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, static_cast<uint32_t>(-1), winrt::hstring{ request.model }, request.newSessionId);
+                openedId = _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, insertAt, winrt::hstring{ request.model }, request.newSessionId);
                 break;
+            }
             case Kind::Resume:
             {
                 const auto before = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(request.sessionId) : std::nullopt;

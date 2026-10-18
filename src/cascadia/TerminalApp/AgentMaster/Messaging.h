@@ -56,7 +56,9 @@
 #include "MessagingStartNote.h" // the start note's facts, kind, sound and text (§21.18)
 #include "MessagingModels.h"
 #include "MessagingNewThread.h" // §21.17: the new-thread folder picker (lists, text, buttons, callback data)
+#include "MessagingNewThreadWizard.h" // §21.25: the new-thread wizard (create a folder, a model, a window; records + persistence)
 #include "RemoteLaunch.h"
+#include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
 #include "SessionModels.h" // AppSettings, SessionInfo
 #include "TelegramApi.h" // TelegramApi + TgResult (the outbox's completion callbacks name TgResult)
 
@@ -125,6 +127,28 @@ namespace Agentmaster::Msg
     // destroyed). thinkingWord = "off" … "max" (AppSettings::messagingSearchThinking), applied to the conversation.
     using SearchBridgeFactory = std::function<std::unique_ptr<SearchBridge>(std::function<void(const SearchBridgeEvent&)> sink, std::wstring thinkingWord)>;
 
+    // ===== the launch-model menu, behind a seam (§21.25) =====================================
+
+    /// <summary>
+    /// What the new-thread wizard's MODEL step shows (§21.25): the right-click menu's own list — the configured launch models,
+    /// then every visible preset as an "@id" target (LaunchPresetsOs.h LaunchMenuEntries) — and whether the user has no preset
+    /// at all, in which case the step says where to add one, as the PC's menus offer "Add presets…".
+    /// </summary>
+    struct LaunchMenuInfo
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> entries; // {display name, launch target}, the menu's order
+        bool offerAddPresets{ false }; // ShouldOfferAddPresets(): the preset list is empty
+    };
+
+    /// <summary>
+    /// Reads the launch-model menu for a launch-models spec (AppSettings::launchModels). The presets live in app-only code (the
+    /// presets file, Windows Credential Manager — LaunchPresetsOs.h, which the m5 harness does not build), so the app layer sets
+    /// it (TerminalPage::_InitAgentmasterEngine); with none set the model step offers Default and a typed id only. Called on the
+    /// service's poll thread; it must be thread-safe (the presets loader is stamp-cached under its own lock) and may throw
+    /// (std::bad_alloc), which the caller contains.
+    /// </summary>
+    using LaunchMenuSource = std::function<LaunchMenuInfo(const std::wstring& launchModelsSpec)>;
+
     // ===== what the service needs from the app ================================================
 
     // Each member may be empty (the test harness): the service then answers "not available".
@@ -156,6 +180,11 @@ namespace Agentmaster::Msg
         // While it is above 0, a session that reads live=false may only be waiting for its tab to be re-homed,
         // so the service holds its "closed" topic deletes (the START-UP HOLD, §21.4). Empty = 0.
         std::function<size_t()> windowsRestoring;
+        // §21.25: every window's tab strip (Engine.h CollectWindowCensus), waiting at most `timeoutMs` for the slowest window —
+        // the new-thread wizard's window step (each window's tab count, newest tab and titles). It BLOCKS until every window
+        // answered or the time is up, and must never run on a window's UI thread: the service calls it on a worker thread of
+        // its own. Empty = no window step (the launch goes to the engine's choice of window).
+        std::function<std::vector<WindowCensus>(uint32_t timeoutMs)> windowCensus;
     };
 
     // ===== the service ========================================================================
@@ -223,6 +252,14 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="factory">The factory; an empty one removes the current factory.</param>
         void SetSearchFactory(SearchBridgeFactory factory) noexcept;
+
+        /// <summary>
+        /// §21.25: sets the source of the launch-model menu the new-thread wizard's model step lists (LaunchMenuSource). Called once
+        /// at engine init by the app layer (the harness never sets one: the step then offers Default and a typed model id only).
+        /// Any thread. Never throws: a failed store is logged, and the step goes on without the menu.
+        /// </summary>
+        /// <param name="source">The source; an empty one removes the current source.</param>
+        void SetLaunchMenuSource(LaunchMenuSource source) noexcept;
 
         // ----- the bot token (Windows Credential Manager; never in a profile file — M4) -----
 
@@ -1019,9 +1056,12 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="fromThreadId">The thread the command was typed in (0 = the chat's main view, "All").</param>
         /// <param name="messageId">The command message's id (0 = unknown: nothing to delete).</param>
+        /// <returns>True when the command LEFT the thread it was typed in (its delete was queued and the line went to the Search
+        /// topic); false when it was answered where it was typed (no Search topic yet). §21.25: a new thread whose only message
+        /// was the command is then empty, and _handleMessage deletes it (_abortUntouchedNewThread).</returns>
         /// <exception cref="std::bad_alloc">If memory runs out (it passes through _handleMessage to _handleUpdate, whose guard
         /// logs it; the command then stays where it was typed and nothing moves).</exception>
-        void _jumpToSearchTopic(int64_t fromThreadId, int64_t messageId);
+        bool _jumpToSearchTopic(int64_t fromThreadId, int64_t messageId);
         /// <summary>
         /// /search &lt;words&gt; typed in any thread but the Search topic (§21.19, kSearchCommand): SENDS the search there. The
         /// command message is deleted where it was typed (_deleteCommandMessage, for the reason _jumpToSearchTopic gives), the
@@ -1035,9 +1075,12 @@ namespace Agentmaster::Msg
         /// <param name="fromThreadId">The thread the command was typed in (0 = the chat's main view, "All").</param>
         /// <param name="msg">The command message (its id, its date).</param>
         /// <param name="words">The search words (SearchCommandWords; not empty).</param>
+        /// <returns>True when the command LEFT the thread it was typed in (deleted there, the request posted in the Search topic);
+        /// false when it was answered where it was typed (no Search topic yet, or a backlog message). §21.25: as for
+        /// _jumpToSearchTopic, a new thread left empty by it is deleted.</returns>
         /// <exception cref="std::bad_alloc">If memory runs out (it passes through _handleMessage to _handleUpdate, whose guard
         /// logs it; the search is then not sent, and the command stays where it was typed).</exception>
-        void _relaySearchRequest(int64_t fromThreadId, const json::Value& msg, const std::wstring& words);
+        bool _relaySearchRequest(int64_t fromThreadId, const json::Value& msg, const std::wstring& words);
         /// <summary>
         /// §21.19: queues the delete of a command message the user typed (a bot may delete the user's messages in its private
         /// chat): /search-tab and /search are moves to the Search topic, not content, and left where they were typed they would
@@ -1146,21 +1189,24 @@ namespace Agentmaster::Msg
         /// <param name="prio">The send priority.</param>
         void _sendPhoto(int64_t threadId, std::wstring fileName, std::string bytes, std::wstring caption, SendPriority prio);
 
-        // ----- §21.17: a thread the user opens starts a new session (Messaging.Inbound.cpp) -----
+        // ----- §21.17: a thread the user opens starts a new session; §21.25: through the wizard (Messaging.Inbound.cpp) -----
         /// <summary>
         /// The owner created a thread (forum_topic_created) that no session owns. A name the user gave it (is_name_implicit
         /// false) is kept — it becomes the session's title — and the picker is posted at once, before any message. A thread
         /// Telegram named (the user only typed a message, which arrives right after) gets its picker with that message
-        /// (_holdForNewThread): one post, not a post and an edit. Poll thread.
+        /// (_holdForNewThread): one post, not a post and an edit. §21.25: the record is persisted with the state file from
+        /// here on (a restart resumes the wizard). Poll thread.
         /// </summary>
         /// <param name="threadId">The new thread.</param>
         /// <param name="msg">The service message (its forum_topic_created carries the name and is_name_implicit).</param>
         void _onUserThreadCreated(int64_t threadId, const json::Value& msg);
         /// <summary>
-        /// A message in a thread no session owns (and not the Search topic): HELD for the new session the thread's picker starts —
-        /// a lone folder path starts it in that folder at once; anything else waits (at most kNewThreadHeldMax messages) and goes
-        /// to the session in order once it is up. The picker is posted with the first held message when the thread has none yet
-        /// (after a restart, or a thread made before §21.17). An edit replaces the held message's text. A thread whose pick is
+        /// A message in a thread no session owns (and not the Search topic): read by the thread's WIZARD (§21.25,
+        /// ApplyNewThreadText) — a lone folder path is a folder choice at every step, a model id at the model steps ("/model
+        /// &lt;id&gt;", or one word after ✏ Specify…), a window number at the window step; a choice re-posts the picker below the
+        /// message (the user looks at the bottom of the thread). Anything else is HELD for the new session (at most
+        /// kNewThreadHeldMax messages) and goes to it in order once it is up. The picker is posted with the first held message
+        /// when the thread has none yet (a thread made before §21.17). An edit replaces the held message's text. A thread whose pick is
         /// already launching holds the message for the launch, and so does a thread whose bind is handing its messages over to
         /// the new topic (_handleMessage sends such a thread's message here). A thread whose bind has become its topic since the
         /// caller looked gets the message as that topic's (_handleTopicMessage) — the binds and the topics are read in one lock
@@ -1172,40 +1218,145 @@ namespace Agentmaster::Msg
         /// <param name="edited">True for an edited_message update.</param>
         void _holdForNewThread(int64_t threadId, const json::Value& msg, bool edited);
         /// <summary>
-        /// Posts the thread's picker, or edits it in place when it is up (a page change, one more held message). The lists are
-        /// built on first use (BuildNewThreadLists over the registry's PlaceSamples, the machine's temp roots left out, every
-        /// listed folder probed once). Takes `_mtx` for the state and releases it before the send. Poll thread.
+        /// Shows the thread's wizard at its current step (§21.25, BuildNewThreadView): posts the picker, or edits it in place when
+        /// it is up (a page change, one more held message, a step reached by a button). The folder lists are built on first use
+        /// at the folder step (BuildNewThreadLists over the registry's PlaceSamples, the machine's temp roots left out, every
+        /// listed folder probed with a bound). A window step whose census is not running (a restored record, a lost answer)
+        /// starts one (_collectNewThreadWindows). An edit Telegram answers "message not found" (the user deleted the picker)
+        /// posts a new one; "thread not found" (the user deleted the thread) drops the record. Takes `_mtx` for the state and
+        /// releases it before the send. Poll thread, or a census worker.
         /// </summary>
         /// <param name="threadId">The thread.</param>
-        void _showNewThreadPicker(int64_t threadId);
+        /// <param name="repost">True: delete the picker and post it again at the BOTTOM of the thread — after a choice the user
+        /// TYPED (a folder, a model id, a window number), which sits below the picker. False: edit in place.</param>
+        void _showNewThreadPicker(int64_t threadId, bool repost = false);
         /// <summary>
-        /// A tap on a picker button (ParseNewThreadCallbackData): a pager arrow edits the picker to its page; a pager's page label
-        /// changes nothing and answers which page it is (NewThreadPageToast); a folder starts the session (_startNewThreadSession);
-        /// Cancel deletes the picker and drops what it held. A button of a picker this run no longer holds (a restart, a pick)
-        /// answers that a new message in the thread brings a new picker. Takes `_mtx` for the picker's state. Poll thread.
+        /// A tap on a picker button (ParseNewThreadCallbackData), read by the thread's wizard (§21.25, ApplyNewThreadButton) and
+        /// carried out (_applyNewThreadOutcome): a pager arrow edits the folder step to its page; a pager's page label changes
+        /// nothing and answers which page it is; a folder is checked (_checkNewThreadFolder) and leads to the model step; Create
+        /// makes a typed folder (_createNewThreadFolder); a model leads to the window step (_collectNewThreadWindows); a window
+        /// launches (_launchNewThread); ✖ Cancel deletes the thread (_abortNewThread). A button of an earlier step answers so and
+        /// changes nothing; a button of a picker this service holds no record of (already launched, cancelled) answers that a
+        /// message in the thread brings a new picker. Takes `_mtx` for the record. Poll thread.
         /// </summary>
         /// <param name="action">The button's action.</param>
         /// <param name="threadId">The thread the picker sits in (the callback's message).</param>
         /// <returns>The button's toast, plain text ("" = none).</returns>
         std::wstring _onNewThreadAction(const NewThreadAction& action, int64_t threadId);
         /// <summary>
-        /// Starts the thread's NEW SESSION in `folder` (§21.17): a fresh Claude tab in the background of the most recently active
-        /// window, under a session id minted here, recorded in `_threadBinds` BEFORE the launch so the tick can bind the thread to
-        /// the session the moment it is live (_adoptBoundThreads); the picker is deleted. A folder that does not exist, or no
-        /// window to open the tab, leaves the picker where it is and says why. §21.23: the window ANSWERS the launch — a refusal
-        /// (no claude.exe on the PC, the tab could not be made, the window closed) sends the thread back to a new picker at once,
-        /// with the messages it held and the reason (_settleLaunchAnswers), instead of the 3-minute timeout's "no window opened
-        /// it".
+        /// §21.25: carries out what the wizard decided (NewThreadOutcome) for the thread — render, check a folder, create one, enter
+        /// the model step, collect the windows, launch, abort, or answer. The one dispatcher for a button (its toast is the return
+        /// value) and a typed message (`replyTo` set: a reply quotes it, a render re-posts the picker below it). A Hold is the
+        /// caller's (it owns the message). Poll thread, or a census worker (a window step skipped by its census launches here).
         /// </summary>
         /// <param name="threadId">The thread.</param>
-        /// <param name="folder">The working folder (a picker entry, or a path the user typed).</param>
-        /// <param name="replyTo">The user's message that typed the folder (0 = a picker button). §21.23: for a typed folder this
-        /// function posts the replies itself, quoting that message, and posts "Opening …" BEFORE the launch — so the window's
-        /// answer, which the tick may post a moment later from another thread, can never land above it.</param>
-        /// <returns>The outcome, plain text, for the caller to show: a button's toast; for a typed folder, a refusal made before
-        /// the launch (the caller replies with it) or "" when this function replied itself.</returns>
+        /// <param name="out">What the wizard decided.</param>
+        /// <param name="replyTo">The user's message that made the choice (0 = a button, or a census answer).</param>
+        /// <returns>The toast for a button (plain text, "" = none); ignored for a typed message.</returns>
+        /// <exception cref="std::bad_alloc">If a reply or an outbox item cannot be allocated.</exception>
+        std::wstring _applyNewThreadOutcome(int64_t threadId, const NewThreadOutcome& out, int64_t replyTo);
+        /// <summary>
+        /// §21.25: checks a chosen folder with a BOUND on the wait (the poll thread must never hang on a slow folder,
+        /// §21.17.4): a list pick through SharedFolderProber (exists, gone, no answer); a TYPED path through the full
+        /// case-insensitive resolution (ResolveNewThreadFolder over the real file system, on a worker thread of its own) — an
+        /// existing folder in its disk spelling, a missing one that can be made (the CreateFolder step), or why not. Then
+        /// ApplyNewThreadFolderResolved, the model step's choices when the folder is chosen, and a render.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="path">The folder (a list entry, or the path the user typed).</param>
+        /// <param name="typed">True when the user typed it (a missing folder may then be created).</param>
+        /// <param name="replyTo">The typed message (0 = a button): the picker is re-posted below it.</param>
+        /// <returns>The toast for a button: "" when the step moved on, the reason when it did not.</returns>
+        /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+        std::wstring _checkNewThreadFolder(int64_t threadId, const std::wstring& path, bool typed, int64_t replyTo);
+        /// <summary>
+        /// §21.25, the CreateFolder step's ✓: makes the folder the user typed — every missing level, outermost first
+        /// (CreateDirectoryW on a worker thread, waited for at most kNewThreadCreateWaitMs) — and goes on to the model step in
+        /// it; a refusal stays at the step with Windows' reason. A level made by someone else meanwhile counts as made.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="path">The folder to make (NewThreadWizard::createPath).</param>
+        /// <returns>The toast: "Created …", or why not.</returns>
+        /// <exception cref="std::bad_alloc">If a string cannot be allocated.</exception>
+        std::wstring _createNewThreadFolder(int64_t threadId, const std::wstring& path);
+        /// <summary>
+        /// §21.25: enters the thread's MODEL step with the choices the right-click menu shows now (the launch-menu source over
+        /// the settings' launch models, BuildNewThreadModelChoices) and the model last typed in a "Specify a model" prompt
+        /// (LoadLastSpecifiedModel). No render: the caller renders. Takes `_mtx` for the record only; the menu and the model
+        /// list are read outside it.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        void _enterNewThreadModelStep(int64_t threadId);
+        /// <summary>
+        /// §21.25: the window step's list. Marks the step "looking at the windows" with a new census serial, renders it, and
+        /// asks every window for its strip on a WORKER thread (ServiceHooks::windowCensus blocks up to kNewThreadCensusTimeoutMs;
+        /// the poll thread never waits for a window). The answer, with the registry's facts per tab, becomes the step's list
+        /// (_applyNewThreadWindows). With no census hook the step is skipped at once (the engine's choice of window).
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="replyTo">The typed message that chose the model (0 = a button): the picker is re-posted below it.</param>
+        void _collectNewThreadWindows(int64_t threadId, int64_t replyTo);
+        /// <summary>
+        /// §21.25: a census answer reaches the thread's window step: stale (another census was asked since, the step moved on,
+        /// the record is gone) — dropped; else ApplyNewThreadWindows decides: render the list, or launch at once (one window, or
+        /// none answered). Any thread (the census worker).
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="serial">The census's serial (NewThreadWizard::windowsSerial when it was asked).</param>
+        /// <param name="plan">The windows and their default (BuildNewThreadWindowPlan).</param>
+        void _applyNewThreadWindows(int64_t threadId, uint64_t serial, NewThreadWindowPlan plan);
+        /// <summary>
+        /// Starts the thread's NEW SESSION with every choice of its wizard (§21.17, §21.25, BuildNewThreadLaunchPlan): a fresh Claude
+        /// tab in the background of the CHOSEN window (or the engine's choice), right after the anchor tab, with the chosen model,
+        /// under a session id minted here and recorded in `_threadBinds` BEFORE the launch so the tick can bind the thread to the
+        /// session the moment it is live (_adoptBoundThreads). A line in the thread says what is opening; the picker is deleted.
+        /// No window to take it (the chosen one closed since the census) puts the wizard back at the step that can fix it. §21.23:
+        /// the window ANSWERS the launch — a refusal sends the thread back to the wizard at once, with the messages it held and the
+        /// reason (_settleLaunchAnswers).
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="replyTo">The user's message that made the last choice by typing (0 = a button or a census answer): the
+        /// "Opening …" line quotes it. §21.23: that line goes out BEFORE the launch, so the window's answer, which the tick may
+        /// post a moment later from another thread, can never land above it.</param>
+        /// <returns>The toast for a button (plain text; the opening line, or why nothing opened).</returns>
         /// <exception cref="std::bad_alloc">If the bind or a reply cannot be allocated.</exception>
-        std::wstring _startNewThreadSession(int64_t threadId, const std::wstring& folder, int64_t replyTo = 0);
+        std::wstring _launchNewThread(int64_t threadId, int64_t replyTo);
+        /// <summary>
+        /// §21.25, the user's rule — "If the creation process aborts in any way, the new topic needs to be deleted": removes the
+        /// thread's wizard and DELETES the thread (deleteForumTopic, queued; every queued item for it dropped first). When the
+        /// thread held messages, a silent line in the chat's main view keeps what the user wrote there (they go with the thread).
+        /// A delete Telegram refuses is logged, and the picker message is deleted instead. Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="why">Why, for the log and the main-view line ("cancelled", "nothing was chosen for a day", …).</param>
+        /// <param name="cancelled">True for the user's ✖ Cancel (the main-view line says "cancelled"); false for an abandoned one.</param>
+        /// <returns>True when a record was there (and the delete is queued); false when the thread had none.</returns>
+        /// <exception cref="std::bad_alloc">If the outbox items or the line cannot be allocated.</exception>
+        bool _abortNewThread(int64_t threadId, const std::wstring& why, bool cancelled);
+        /// <summary>
+        /// §21.25: deletes a new thread that holds NOTHING the user wrote — no held message and no picker yet (an implicit-named
+        /// thread whose first and only message was a /search command, which went to the Search topic): the creation never
+        /// started, and the empty thread is its leftover. A thread with a picker or held messages is left as it is. Any thread.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="why">Why, for the log.</param>
+        void _abortUntouchedNewThread(int64_t threadId, const std::wstring& why);
+        /// <summary>
+        /// §21.25, tick thread, every tick (cheap: a scan under `_mtx`): a wizard nobody used for kNewThreadPickerIdleMs is aborted
+        /// (_abortNewThread: its thread is deleted); and once after a start, when the windows have finished restoring (the
+        /// start-up hold ended), a restored wizard that was waiting for its windows asks them again.
+        /// </summary>
+        void _newThreadsTick();
+        /// <summary>
+        /// §21.25: the owner renamed a thread that is still a wizard (no session yet) or whose launch is under way: the name is the
+        /// coming session's title (the picker shows it), and a launch under way takes it at its bind (_adoptBoundThreads renames
+        /// the session to it). The name without the service's decoration (StripTopicNameDecoration); an empty one changes nothing.
+        /// Poll thread.
+        /// </summary>
+        /// <param name="threadId">The thread.</param>
+        /// <param name="name">The new name as Telegram reports it.</param>
+        /// <returns>True when the thread was a wizard's or a launch's (handled); false otherwise.</returns>
+        bool _onNewThreadRenamed(int64_t threadId, const std::wstring& name);
         /// <summary>
         /// Binds each picked thread to its session once the session is LIVE (§21.17, tick thread, before the sync's plan so the
         /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
@@ -1221,11 +1372,16 @@ namespace Agentmaster::Msg
         /// kNewThreadBindTimeoutMs is dropped, and the thread is told. §21.23: a launch the window REFUSED never waits that long
         /// (_settleLaunchAnswers sends the thread back to its picker at once), so the timeout says what is left — the PC never
         /// answered, or the tab opened and the session never came up (ThreadBind::answered) — and the messages the bind held
-        /// wait in the thread's picker record for the next pick instead of being dropped.
+        /// wait in the thread's picker record for the next pick instead of being dropped. §21.25: the timeout puts the thread
+        /// back into its WIZARD (NewThreadStepAfterRefusal: the window step, or the model step when that was skipped) and shows
+        /// it; a launch restored from the state file waits while the windows restore (its session may only be waiting to be
+        /// re-homed); and a name the user gave the thread while the launch ran is the session's title (renamed at the bind).
         /// </summary>
         /// <param name="byId">The sync's live sessions (SnapshotLiveForCards), by id.</param>
         /// <param name="colorMode">The tab color mode of the sync.</param>
-        void _adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode);
+        /// <param name="inStartupHold">§21.25: the sync's start-up hold (windows still restoring their tabs): no bind times out
+        /// meanwhile — its deadline starts over when the hold ends.</param>
+        void _adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode, bool inStartupHold);
         /// <summary>
         /// The owner renamed a session's topic in Telegram (forum_topic_edited): the session takes the name as its title, without
         /// the state glyph and color square the service shows before it (StripTopicNameDecoration) — like /rename, so the tab,
@@ -1683,42 +1839,38 @@ namespace Agentmaster::Msg
         std::unordered_map<std::wstring, int64_t> _screenImageTapMs;
 
         /// <summary>
-        /// §21.17, under `_mtx`: a thread the user opened that no session owns yet, and its PICKER. In memory only: after a restart
-        /// the next message in the thread posts a new picker (the old one's buttons answer that they are from before the restart).
+        /// §21.17, under `_mtx`: a thread the user opened that no session owns yet, and its PICKER — since §21.25 its WIZARD
+        /// (MessagingNewThreadWizard.h NewThreadRecord: the step, the answers, the folder lists and the model / window choices it
+        /// showed, the held messages). PERSISTED with the state file (MessagingState::newThreads, written by _saveStateIfDirty,
+        /// read at _start), so a restart resumes the wizard and its picker's buttons still map to what they showed. Every change
+        /// to a record sets `_stateDirty`. Before §21.25 it was in memory only and a restart forgot it.
         /// </summary>
-        struct NewThread
-        {
-            std::wstring topicName; // the name the user gave the thread ("" = Telegram named it, or it is not known)
-            NewThreadLists lists; // built on first show (listsBuilt)
-            bool listsBuilt{ false };
-            size_t recentPage{ 0 };
-            size_t usedPage{ 0 };
-            int64_t pickerMessageId{ 0 }; // the picker (0 = not posted, or its post was refused; -1 = the post is in flight)
-            bool pickerStale{ false }; // a page change or a held message came while the post flew: its answer renders it again
-            std::vector<json::Value> held; // the user's messages in the thread, oldest first (each a copy of the Message object)
-            int64_t lastUseMs{ 0 }; // the last message or tap (WallMs): a picker idle past kNewThreadPickerIdleMs is forgotten
-        };
-        std::map<int64_t, NewThread> _newThreads; // thread id -> its picker
+        using NewThread = NewThreadRecord;
+        std::map<int64_t, NewThread> _newThreads; // thread id -> its wizard
         /// <summary>
-        /// §21.17, under `_mtx`: a picked folder's launch, waiting for its session to be live — the session id the launch was
-        /// given (RemoteLaunchRequest::newSessionId), the thread it becomes the topic of, the title it was given ("" = the
-        /// folder-derived default) and the user's messages to hand over. The tick binds it (_adoptBoundThreads) and keeps it
-        /// here, as the thread's hand-over queue, until the topic is recorded and every held message has been handed over: a
-        /// thread that has a topic and a bind is being bound right now, and its new messages join `held`.
+        /// §21.17, under `_mtx`: a wizard's launch, waiting for its session to be live (MessagingNewThreadWizard.h NewThreadBind)
+        /// — the session id the launch was given (RemoteLaunchRequest::newSessionId), the thread it becomes the topic of, the title
+        /// it was given ("" = the folder-derived default), the user's messages to hand over, and (§21.25) the wizard it launched
+        /// with, which a refused or timed-out launch goes back to. The tick binds it (_adoptBoundThreads) and keeps it here, as
+        /// the thread's hand-over queue, until the topic is recorded and every held message has been handed over: a thread that
+        /// has a topic and a bind is being bound right now, and its new messages join `held`. PERSISTED like `_newThreads` (its
+        /// launch token and answer are not: no answer survives a restart, so a restored bind waits for its session, or times out).
         /// </summary>
-        struct ThreadBind
-        {
-            uint64_t launchToken{ 0 }; // §21.23: the key the launch's answer comes back with (_askLaunch)
-            bool answered{ false }; // §21.23: the window opened the tab — a timeout then says the session never came up, not that the PC never answered
-            int64_t replyTo{ 0 }; // §21.23: the user's message that typed the folder (0 = a picker button): a refusal's reply quotes it
-            std::wstring sessionId;
-            int64_t threadId{ 0 };
-            std::wstring dir;
-            std::wstring title;
-            std::vector<json::Value> held;
-            int64_t requestedMs{ 0 }; // WallMs of the launch: kNewThreadBindTimeoutMs counts from it
-        };
+        using ThreadBind = NewThreadBind;
         std::vector<ThreadBind> _threadBinds;
+        /// <summary>§21.25, under `_mtx`: the last census serial handed out (NewThreadWizard::windowsSerial; 0 is never one).</summary>
+        uint64_t _censusSerial{ 0 };
+        /// <summary>
+        /// §21.25, tick thread only: a start restored wizards from the state file, and the ones waiting for their windows (a census
+        /// lost to the stop) ask again once the start-up hold has ended (_newThreadsTick).
+        /// </summary>
+        bool _newThreadsResumePending{ false };
+        /// <summary>§21.25, under `_mtx`: the launch-model menu's source (SetLaunchMenuSource); empty = Default and a typed id only.</summary>
+        LaunchMenuSource _launchMenuSource;
+        /// <summary>§21.25, under `_mtx`: AppSettings::launchModels as the last Apply had it — the spec the model step's menu reads.</summary>
+        std::wstring _launchModelsSpec;
+        /// <summary>§21.25, under `_mtx`: AppSettings::model as the last Apply had it — what the model step's Default stands for.</summary>
+        std::wstring _settingsModel;
         uint64_t _launchTokenSeq{ 0 }; // §21.23, under `_mtx`: the last launch token handed out (0 is never one)
         /// <summary>
         /// §21.23: one window's answer to a launch of this service, waiting for the tick (_settleLaunchAnswers).

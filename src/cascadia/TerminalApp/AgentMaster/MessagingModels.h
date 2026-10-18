@@ -1963,6 +1963,16 @@ namespace Agentmaster::Msg
         uint32_t directoryHash{ 0 };
         bool directoryRich{ false };
         bool directoryPinned{ false };
+        /// <summary>
+        /// §21.25: the NEW-THREAD WIZARDS and their launches — every thread the user opened that has no session yet (its
+        /// wizard's step and answers, the folder lists and model / window choices it showed, the messages it holds) and every
+        /// launch waiting for its session to come up, as MessagingNewThreadWizard.h NewThreadsToJson writes them. Kept OPAQUE
+        /// here (this header does not know the wizard's types): the service converts it at its start (NewThreadsFromJson) and
+        /// writes it back at every save, and a file without the key (written before §21.25) reads as no wizard. Per bot like
+        /// everything here: the identity gate's reset clears it with the topics (thread ids name threads of one bot's chat).
+        /// A Null value = none (not written to the file).
+        /// </summary>
+        json::Value newThreads;
     };
 
     /// <summary>
@@ -2063,6 +2073,11 @@ namespace Agentmaster::Msg
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
+        if (s.newThreads.type == json::Value::Type::Obj)
+        {
+            // §21.25: the wizards and their launches, as the service wrote them (opaque here; omitted when there are none).
+            o.Set(L"newThreads", s.newThreads);
+        }
         return o;
     }
 
@@ -2164,6 +2179,11 @@ namespace Agentmaster::Msg
                 t.promptInterrupted = to.BoolAt(L"promptInterrupted", false);
                 s.topics[t.sessionId] = std::move(t);
             }
+        }
+        if (const auto* newThreads = v.Find(L"newThreads"); newThreads && newThreads->type == json::Value::Type::Obj)
+        {
+            // §21.25 (absent in an older file: no wizard to resume). Copied as it is: the service reads it at its start.
+            s.newThreads = *newThreads;
         }
         return s;
     }

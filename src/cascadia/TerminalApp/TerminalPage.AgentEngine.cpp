@@ -48,6 +48,7 @@
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the Telegram bot: the cog Save re-applies its settings; its Search factory + version word are set here
 #include "MessagingSearchBridge.h" // MESSAGING.md §5.4 — the Search topic's agent (a SessionSearchAgent of its own)
+#include "AgentMaster/LaunchPresetsOs.h" // MESSAGING.md §21.25 — LaunchMenuEntries / ShouldOfferAddPresets: the bot wizard's model step
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
 #include "AgentMaster/Scheduler.h" // SetGlobalPause / GlobalPaused + the global-pause observer (the Manager's Pause button, DELIVERY.md §17)
@@ -1270,6 +1271,16 @@ namespace winrt::TerminalApp::implementation
                     {
                         engine.messaging->SetSearchFactory([](std::function<void(const ::Agentmaster::Msg::SearchBridgeEvent&)> sink, std::wstring thinkingWord) {
                             return ::Agentmaster::Msg::MakeTelegramSearchBridge(std::move(sink), std::move(thinkingWord));
+                        });
+                        // MESSAGING.md §21.25: the new-thread wizard's MODEL step lists the right-click menu's own models and
+                        // presets. Those live in LaunchPresetsOs.h (the presets file, Credential Manager), which only this
+                        // layer links; LaunchMenuEntries and ShouldOfferAddPresets read a stamp-cached config under its own
+                        // lock, so the service may call this from its poll thread.
+                        engine.messaging->SetLaunchMenuSource([](const std::wstring& launchModelsSpec) {
+                            ::Agentmaster::Msg::LaunchMenuInfo info;
+                            info.entries = ::Agentmaster::LaunchMenuEntries(launchModelsSpec);
+                            info.offerAddPresets = ::Agentmaster::ShouldOfferAddPresets();
+                            return info;
                         });
                     }
                 }

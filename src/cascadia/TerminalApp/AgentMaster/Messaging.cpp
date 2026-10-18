@@ -694,6 +694,20 @@ namespace Agentmaster::Msg
         }
     }
 
+    void MessagingService::SetLaunchMenuSource(LaunchMenuSource source) noexcept
+    {
+        try
+        {
+            std::lock_guard lk{ _mtx };
+            _launchMenuSource = std::move(source);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the model step lists Default and a typed id only (the menu's models and presets are missing).
+            LogSwallowedException(L"MessagingService::SetLaunchMenuSource");
+        }
+    }
+
     void MessagingService::Apply(const AppSettings& settings) noexcept
     {
         try
@@ -713,6 +727,10 @@ namespace Agentmaster::Msg
             {
                 std::lock_guard lk{ _mtx };
                 _ownerId = owner;
+                // §21.25: the new-thread wizard's model step lists the launch models of THESE settings (a cog Save reaches the
+                // next wizard that enters the step), and its Default names the settings model.
+                _launchModelsSpec = settings.launchModels;
+                _settingsModel = settings.model;
                 _searchThinkingWord = settings.messagingSearchThinking.empty() ? L"high" : settings.messagingSearchThinking;
                 // The Search conversation is the process's (§21.7): made once, it is never made again with a new
                 // level, so a Save must reach it live. Under `_mtx`, which also orders it after the poll thread's
@@ -917,11 +935,41 @@ namespace Agentmaster::Msg
                 _frontHeld.clear();
                 _frontRequests.clear();
                 _frontTapMs.clear();
-                // §21.17: the new threads' pickers and launch binds name threads of the chat the last start polled — this token
-                // may be another bot's. A picker's thread gets a new picker with its next message; a bind whose launch is still
-                // under way leaves its session as an ordinary new tab (the sync gives it a topic of its own).
+                // §21.25: the new threads' wizards and launch binds come back from the state file (MessagingState::newThreads), so a
+                // restart — of the bot or of the app — resumes each wizard where it stood, its picker's buttons still mapping to
+                // what they showed, and a launch still binds its thread when its session comes up. The file is this token's bot's
+                // as far as the start knows: the identity gate's reset (a different bot at the first getMe) clears them with the
+                // topics before any update or tick can use them. A restored bind's clock starts now (NewThreadsFromJson), and the
+                // window steps that waited for a census ask again once the windows have restored (_newThreadsTick). Before §21.25
+                // both were cleared here: a picker's thread got a new picker with its next message, and a bind's session became an
+                // ordinary new tab with a topic of its own.
                 _newThreads.clear();
                 _threadBinds.clear();
+                try
+                {
+                    NewThreadsFromJson(_state.newThreads, _newThreads, _threadBinds, WallMs());
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: no wizard is restored (their threads get new pickers with their next messages; a bind's
+                    // session becomes an ordinary new tab) — the old behavior.
+                    LogSwallowedException(L"MessagingService::_start (restore the new-thread wizards)");
+                    _newThreads.clear();
+                    _threadBinds.clear();
+                }
+                for (auto& [threadId, nt] : _newThreads)
+                {
+                    nt.pickerStale = false; // no post is in flight at a start
+                    nt.wizard.windowsSerial = 0; // no census is in flight either: _newThreadsTick asks again
+                }
+                _newThreadsResumePending = !_newThreads.empty();
+                if (!_newThreads.empty() || !_threadBinds.empty())
+                {
+                    // A log line under `_mtx` is avoided elsewhere (a file write); here none of the service's threads runs yet
+                    // (they start below), so nothing waits on the lock meanwhile.
+                    _log(L"[msg] new threads: " + std::to_wstring(_newThreads.size()) + L" wizard(s) and " + std::to_wstring(_threadBinds.size()) +
+                         L" launch(es) restored from the state file");
+                }
                 _recreateStartedMs = 0;
                 // The DIRECTORY (§21.16): the outbox was cleared above, so no send of the last run is in flight; a new serial makes
                 // any answer still on its way stale. What the message shows stays in the state file (no edit for an unchanged
@@ -1251,6 +1299,10 @@ namespace Agentmaster::Msg
             {
                 return;
             }
+            // §21.25: the new-thread wizards and launches go into the file with the topics (one atomic write: a crash leaves
+            // either the old file or the new one, never a topic map from one moment and the wizards from another). An empty set
+            // writes no key (NewThreadsToJson's object is dropped), so a state file without wizards reads as before §21.25.
+            _state.newThreads = (_newThreads.empty() && _threadBinds.empty()) ? json::Value{} : NewThreadsToJson(_newThreads, _threadBinds);
             doc = StateToJson(_state);
             _stateDirty = false;
             _lastStateSaveMs = now;
@@ -1801,6 +1853,11 @@ namespace Agentmaster::Msg
                                     _frontRequests.clear();
                                     _frontTapMs.clear();
                                     _backfill = BackfillBatch{}; // its topics are the old bot's
+                                    // §21.25: the new-thread wizards and their launches name threads of the OLD bot's chat.
+                                    _newThreads.clear();
+                                    _threadBinds.clear();
+                                    _state.newThreads = json::Value{};
+                                    _newThreadsResumePending = false;
                                     // §21.16: the directory message is a message of the OLD bot's chat; the new bot posts its own.
                                     _state.directoryMessageId = 0;
                                     _state.directoryHash = 0;
@@ -2043,6 +2100,9 @@ namespace Agentmaster::Msg
                     }
                     _expireRevives();
                 }
+                // §21.25: abandoned new-thread wizards are aborted (their threads deleted), and after a start the restored ones
+                // that waited for their windows ask again once the start-up hold is over (the sync above updated it).
+                _newThreadsTick();
                 _sweepTokens();
                 // Park an idle Search agent.
                 {
@@ -3505,8 +3565,9 @@ namespace Agentmaster::Msg
             }
         }
         // §21.17: a session started from a thread the user opened becomes THAT thread's topic — bound before the plan, so the plan
-        // finds its record and makes no topic of its own for it.
-        _adoptBoundThreads(byId, colorMode);
+        // finds its record and makes no topic of its own for it. §21.25: inside the start-up hold no launch times out (a restored
+        // one's session may only be waiting for its window to re-home it).
+        _adoptBoundThreads(byId, colorMode, inStartupHold);
         std::vector<TopicSyncOp> ops;
         {
             std::lock_guard lk{ _mtx };
@@ -3863,7 +3924,7 @@ namespace Agentmaster::Msg
         _refreshCard(sessionId, true);
     }
 
-    void MessagingService::_adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode)
+    void MessagingService::_adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode, bool inStartupHold)
     {
         // The binds whose session is live now, and the ones that waited too long; the work (Telegram calls, registry writes) runs
         // after the lock. A READY bind is only COPIED here (who and where, not its messages): it stays in _threadBinds until its
@@ -3891,15 +3952,23 @@ namespace Agentmaster::Msg
                     copy.sessionId = it->sessionId;
                     copy.threadId = it->threadId;
                     copy.dir = it->dir;
-                    copy.title = it->title;
+                    copy.title = it->title; // §21.25: a name the user gave the thread while the launch ran is in here too
                     copy.requestedMs = it->requestedMs;
                     ready.push_back(std::move(copy));
+                    ++it;
+                }
+                else if (inStartupHold)
+                {
+                    // §21.25: while the windows restore their tabs, a launch's session may only be waiting to be re-homed (a launch
+                    // restored from the state file, whose tab the window record kept): its deadline starts over when the hold ends.
+                    it->requestedMs = now;
                     ++it;
                 }
                 else if (now - it->requestedMs > kNewThreadBindTimeoutMs)
                 {
                     expired.push_back(std::move(*it));
                     it = _threadBinds.erase(it);
+                    _stateDirty = true; // §21.25: the binds are persisted
                 }
                 else
                 {
@@ -3915,9 +3984,27 @@ namespace Agentmaster::Msg
             // held wait in the thread's picker record — the next message posts the picker, and the pick hands them over — where
             // they were dropped before §21.23 (they stayed in the chat, unsent).
             size_t kept = 0;
+            NewThreadStep backTo = NewThreadStep::Window;
             {
                 std::lock_guard lk{ _mtx };
-                auto& nt = _newThreads[b.threadId];
+                // §21.25: the thread goes back into its WIZARD, with the choices the launch was made with (a record that exists
+                // already — none should while a bind holds the thread — keeps its own, newer state; only the messages merge).
+                const auto [rec, inserted] = _newThreads.try_emplace(b.threadId);
+                auto& nt = rec->second;
+                if (inserted)
+                {
+                    nt.wizard = b.wizard;
+                    nt.topicName = b.title;
+                    nt.pickerMessageId = 0; // the launch deleted the picker: the render posts a new one
+                    // The window step when the user saw it (its list read again, shown even with one window), else the model
+                    // step: a tap is the retry, never a launch by itself (NewThreadStepAfterRefusal).
+                    backTo = NewThreadStepAfterRefusal(nt.wizard, RemoteLaunchResult::WindowClosed);
+                    ReturnNewThreadToStep(nt.wizard, backTo, L"");
+                }
+                else
+                {
+                    backTo = nt.wizard.step;
+                }
                 nt.held.insert(nt.held.begin(), b.held.begin(), b.held.end());
                 if (nt.held.size() > kNewThreadHeldMax)
                 {
@@ -3929,15 +4016,18 @@ namespace Agentmaster::Msg
                     nt.topicName = b.title;
                 }
                 nt.lastUseMs = WallMs();
+                _stateDirty = true;
             }
             const std::wstring minutes = std::to_wstring(kNewThreadBindTimeoutMs / 60000);
             _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": the session " + ShortId(b.sessionId) + L" in " + b.dir + L" did not come up within " + minutes + L" min (" +
-                 (b.answered ? L"the window opened its tab" : L"no window answered the launch") + L"); the thread is free again, " + std::to_wstring(kept) + L" held message(s) kept");
+                 (b.answered ? L"the window opened its tab" : L"no window answered the launch") + L"); back to its wizard's " + NewThreadStepName(backTo) + L" step, " +
+                 std::to_wstring(kept) + L" held message(s) kept");
             _reply(b.threadId,
                    (b.answered ? L"The tab opened on the PC, but the new session did not come up within " + minutes + L" minutes." :
                                  L"The new session did not start: the PC did not answer within " + minutes + L" minutes (its window may be busy).") +
-                       L" Send a message here to pick a folder again" + (kept > 0 ? L"; what you wrote here is kept for it." : L"."),
+                       L" Choose again below, or cancel" + (kept > 0 ? L"; what you wrote here is kept for it." : L"."),
                    false);
+            _showNewThreadPicker(b.threadId); // the wizard again, below the line (the launch deleted the old picker)
         }
         for (auto& b : ready)
         {
@@ -3965,6 +4055,7 @@ namespace Agentmaster::Msg
                     {
                         dropped = it->held.size();
                         _threadBinds.erase(it);
+                        _stateDirty = true; // §21.25: the binds are persisted
                     }
                 }
             }
@@ -3989,9 +4080,39 @@ namespace Agentmaster::Msg
                 });
                 state = SessionState::WaitingForInput;
             }
+            // §21.25: a name the user gave the thread while the launch ran (forum_topic_edited reached the bind,
+            // _onNewThreadRenamed) is the session's title — the launch was asked with the name the thread had then. Renamed
+            // through the hosting window (the tab, the registry, Rule #11) and used for the topic's name right away, so the
+            // rename below does not put the old title back. A bind's title the session already shows changes nothing.
+            std::wstring bindTitle = b.title;
+            if (!bindTitle.empty() && bindTitle != s.title && bindTitle != TgOneLineTitle(s.title))
+            {
+                try
+                {
+                    if (_hooks.sessionAction)
+                    {
+                        _hooks.sessionAction(s.id, L"rename", bindTitle, nullptr);
+                    }
+                    else
+                    {
+                        _registry->Update(s.id, [&bindTitle](SessionInfo& ss) { ss.title = bindTitle; });
+                    }
+                    _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": " + ShortId(s.id) + L" takes the thread's name \x201C" + bindTitle + L"\x201D (renamed while it launched)");
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the session keeps the title it launched with, and the topic is named after it.
+                    LogSwallowedException(L"MessagingService::_adoptBoundThreads (rename to the thread's name)");
+                    bindTitle.clear();
+                }
+            }
+            else
+            {
+                bindTitle.clear();
+            }
             // The record, as _createTopic makes one — but for the user's thread, and with no name recorded yet: the rename below
             // records it when Telegram takes it, and a refused rename leaves the name due for the state-name tick (nameState -1).
-            const std::wstring bare = s.title.empty() ? ShortId(s.id) : s.title;
+            const std::wstring bare = !bindTitle.empty() ? bindTitle : (s.title.empty() ? ShortId(s.id) : s.title);
             TopicRecord t;
             t.sessionId = s.id;
             t.threadId = b.threadId;
@@ -4140,6 +4261,7 @@ namespace Agentmaster::Msg
                 if (it->held.empty())
                 {
                     _threadBinds.erase(it); // in the scope that saw it empty: no message can slip in between
+                    _stateDirty = true; // §21.25: the binds are persisted
                     break;
                 }
                 held.swap(it->held); // the next batch; the lock ends with this pass of the loop, before the hand-over
@@ -4150,6 +4272,56 @@ namespace Agentmaster::Msg
                 _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": " + std::to_wstring(later) +
                      L" more message(s), sent while it was being bound, handed over after the held ones");
             }
+        }
+    }
+
+    void MessagingService::_newThreadsTick()
+    {
+        try
+        {
+            const int64_t now = WallMs();
+            std::vector<int64_t> idle; // wizards nobody used for kNewThreadPickerIdleMs: aborted (their threads deleted)
+            std::vector<int64_t> resume; // restored window steps whose census died with the last run: asked again
+            {
+                std::lock_guard lk{ _mtx };
+                for (const auto& [threadId, nt] : _newThreads)
+                {
+                    if (nt.lastUseMs > 0 && now - nt.lastUseMs > kNewThreadPickerIdleMs)
+                    {
+                        idle.push_back(threadId);
+                    }
+                }
+                // Once per start, after the start-up hold (every window has registered and re-homed its tabs, so the census sees
+                // the whole set): a window step that waits for a census nobody runs any more. `_startupHoldOpen` is this
+                // thread's own (the sync above set it this tick).
+                if (_newThreadsResumePending && !_startupHoldOpen)
+                {
+                    _newThreadsResumePending = false;
+                    for (const auto& [threadId, nt] : _newThreads)
+                    {
+                        if (nt.wizard.step == NewThreadStep::Window && !nt.wizard.windowsCollected && nt.wizard.windowsSerial == 0)
+                        {
+                            resume.push_back(threadId);
+                        }
+                    }
+                }
+            }
+            for (const int64_t threadId : idle)
+            {
+                // The user's rule: an aborted creation deletes its new topic — and a wizard left alone for a day is aborted.
+                _abortNewThread(threadId, L"nothing was chosen in it for " + std::to_wstring(kNewThreadPickerIdleMs / 3600000) + L" hours", false);
+            }
+            for (const int64_t threadId : resume)
+            {
+                _log(L"[msg] new thread " + std::to_wstring(threadId) + L": its window step was waiting when the bot stopped; the windows are asked again");
+                _collectNewThreadWindows(threadId, 0);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the next tick sweeps again (an idle wizard stays one more tick; a lost resume leaves its window
+            // step at "looking at the windows…" until the user taps ◀ Back or sends a message).
+            LogSwallowedException(L"MessagingService::_newThreadsTick");
         }
     }
 

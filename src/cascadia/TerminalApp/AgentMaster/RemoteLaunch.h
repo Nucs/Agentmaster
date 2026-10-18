@@ -35,6 +35,15 @@ namespace Agentmaster
         // NewSessionId — the Telegram bot binds the user's thread to it BEFORE the tab exists, so the thread becomes the
         // session's topic as soon as the session is live (no topic of its own is made). "" = the launch mints one.
         std::wstring newSessionId;
+        // MESSAGING.md §21.25 (the new-thread wizard's window step): the window the tab opens in — WindowCensus::windowId, the
+        // window the user picked by its number. When set, Engine.h RequestLaunchInWindow asks THAT window only: a window that
+        // closed since the census answers nothing (the request returns false), and the wizard asks again, rather than the tab
+        // landing in a window the user did not pick. "" = the engine's choice (the window activated last, then the others).
+        std::wstring windowId;
+        // MESSAGING.md §21.25 (NewSession only): the new tab opens RIGHT AFTER this session's tab when the window that takes the
+        // request hosts it — the wizard's default places a new session beside the newest tab working in the same folder. A
+        // session the window does not host (it moved or closed since the census) leaves the tab at the strip's end, as "" does.
+        std::wstring afterSessionId;
     };
 
     /// <summary>
