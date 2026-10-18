@@ -1085,12 +1085,12 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D6** | "Silent while I'm at the PC" (the final message too) | Offered, **off** (the rule as specified) | On by default |
 | **D9** | Answering questions and plans from a topic | Yes, by verified key plans (§7.4) | Leave them to the terminal |
 | **D10–D12** | Teams: route, tenant, endpoint | Teams Lite first; the tenant is the user's call; Cloudflare Tunnel on the PC for the bot | Bot first; dev tunnel / ngrok |
-| **D13** | Bots per install | One for release, one for dev | One install only |
+| **D13** | Bots per install | One for release, one for dev — **the user's decision, 2026-10-17** (the move of §21.12.4: dev polls `@ClaudeSessionsDebugGateBot`, the release install `@ClaudeSessionsGateBot`) | One install only |
 | **D15** | The external contract | JSON-RPC over stdio, a child process | In-process plugins |
 | **D16** | The route into a session | **The session link** (MOD_LINK.md) wherever a session has it; the typed path otherwise; Claude Code channels not used | Channels, with the development flag |
 | **D17** | The Remote Control presence file | Yes | No |
 | **D18** | The UI name | Messaging | Remote; Phone |
-| **D20** | A topic started in Telegram | Starts a new session (asks for the folder) | Ignored; `/newsession` in 🔎 Search only |
+| **D20** | A topic started in Telegram | Starts a new session (asks for the folder) — **the user's decision, 2026-10-18** ("When creating a new thread in telegram … ask user to pick workdir", §21.17.4; on dev only) | Ignored; `/newsession` in 🔎 Search only |
 | **D25** | The idle grace before a topic is deleted | 10 minutes, with [📌 Pin] and [Wake] on the Idle card | 0 (at once); 1 hour |
 | **D26** | Backfill of a new topic for a session with history | The whole transcript as a file + the last 10 turns as messages | Every turn as messages, paced — **the user's decision, 2026-10-16** (packed; §21.9) |
 | **D27** | Where a revived closed session opens | The most recently active window, without focus, dormant until its first message | A fixed window; the window it last lived in |
