@@ -1307,6 +1307,7 @@ installed ...`.
 | r9 | "repeat the SAME call to narrow"; `folders`; the read budget | 100% / 100% | 91.7% |
 | r10 | the user's words in any form; the deep search, 11x faster; the store wait | 100% / 100% | 100% |
 | r11 | the BUILT-IN prompt, no prompt file (the app's own path, 26,869 characters) | 100% | 100% |
+| r12 | q6 added (the six below), fixes 7-8 below, the built-in prompt | 100% (q1-q6) | 100% |
 
 Precision was 100% in every query of r10 and r11 but one run of q2 and one of q3, where the model added a session it
 labeled "weaker match". A request took 8 to 56 s and cost $0.02 to $0.25. The 56 s were r11's q1: its grep was the first
@@ -1398,13 +1399,66 @@ then timed per candidate file too); `--index` with no days now times every sessi
 **Tests** (m5): the every-session default and the clamps; the tier order with an old session; a period's overlap and
 `in_period` (a span, a session inside it, an unchecked row says nothing); a touched-path row's `first_prompt` and its
 auto-why; a search or grep over a partial index searches nothing; the auto-why of `show`; grep's `in:edits`, the
-cwd-only word, `folders`, the `also` folders, a row's `dir`; `GrepRequiredLiterals` and `GrepUnescapePlainPattern`;
+cwd-only word, `folders`, the `also` folders, a row's `dir`; `GrepRequiredLiterals` (the optional spellings of fix 8:
+`tab[ _-]?drag`, `colou?r`, the 16 of `better[ _-]?clip[ _-]?board`, a case-only class, a range, a repeated class) and
+`GrepUnescapePlainPattern`; a grep of optional spellings over scratch transcripts (two spellings found; a copy in the
+cwd field and the words apart not);
 the deep search over 70 transcripts (order, case, a Hebrew term, two terms, a cancel); the prompt's procedure and the
 schemas (`tests_tabtools.cpp`).
 
+**q6, the dev bot's empty first answer** (2026-10-18, after the commit of the work above; NOT BUILT yet either).
+
+> **The user's report** (the dev bot's Search topic, 12:36): "find betterclipboard session" answered that nothing
+> was found and that older sessions were still being indexed; "Check again, case insensitive" then found many
+> BetterClipboard sessions, showed 8 "though there are more", and said 5 of its reads timed out. "Kindly eval this
+> as-well, we failed on first try to get any result."
+
+What the dev bot ran (DEV 0.0.1.29, which predates all of 9.15; its record `harness\telegram-search.json`): the first
+request's three searches (`betterclipboard`, `better clipboard`, `dir:betterclipboard`, 365 days) each ran over an
+index of ONE session (`"searched":1`, the keeper's first step after a rebuild) and found nothing: fix 1 above. The
+second request searched an index that reached back to 2026-08-21 (40 matched), its grep `better[ _-]?clip[ _-]?board`
+read 4 of 1,166 sessions in its 20 s, and its read of 8 sessions at level minimal left 5 "Not read: rendering it took
+longer than 20 s".
+
+**q6 in the eval** (`tools/ai-search-eval/queries.json`): the 35 sessions launched in `K:\source\BetterClipboard` must
+be shown; the 328 others whose text names it in any spelling (a request to add it to another project, tool output
+listing the folder, an injected catalog listing) are optional. 100% recall in 7 of 7 runs - 3 on the engine above, 3
+after fix 7, and r12 after fixes 7-8 - with precision 100%, 13-22 s ($0.08-0.13) a run but one of 44 s (the run whose
+grep fix 7 answers): three searches (the name, the name with a space, `dir`) and one show of all 35, plus 4 to 6
+sessions elsewhere that worked on the project.
+
+7. **A cold file cache killed the folder-wide ripgrep** (q6's third run): it ran into its 30 s timeout
+   (`kRgTimeoutMs`), was killed, and the grep answered `stopped` having read 0 of 3,696 sessions. Measured with the
+   new log line: 37.5 s and 51.7 s with the transcripts out of the cache, 0.4 s warm (8.9 GB of transcripts here,
+   about 7 GB of RAM free; a build evicts them). The run has its own bound now, 120 s (`kRgTreeTimeoutMs`); the read
+   budget restarts when it ends, whether it filtered or failed (a failed run leaves the batches the whole budget); a
+   run of 5 s or more, or a failed one, writes `[grep] ripgrep over the projects folder: N file(s) in M ms (slow: the
+   transcripts were not in the file cache)` to hooks.log. A first grep after the cache was emptied now takes about a
+   minute and reads every candidate.
+8. **Optional spellings are keys.** `better[ _-]?clip[ _-]?board` was keyed on "better", which 1,889 of the 3,696
+   transcripts hold. `GrepRequiredLiterals` now multiplies a segment by an optional character (`colou?r`: color,
+   colour), by a class of up to 8 plain characters taken once or optionally (`[ _-]?`), and by an optional group of
+   plain alternatives, up to 32 spellings; a key that holds another key is dropped (`drag(ged|ging)?` is keyed on
+   drag alone, `TabDragMath\.h` on TabDragMath); and the line reader searches each line once for the text all the
+   keys share (`GrepRun::anchor`, here "better"), then checks the spellings at each hit. The grep now has 363
+   candidates instead of 1,881 and finds the same 138 matching sessions; warm it takes the same 4.5 s (the time goes
+   to the few huge transcripts that hold the name either way), and cold it reads 1,518 files fewer.
+
+**The read time-outs, and the dev bot's grep, are the Debug build.** The dev install is a Debug build; production and
+the eval's harness are optimized. Measured with a Debug build of the harness (`/Od /Ob1 /MDd /RTC1`, the Debug
+configuration's flags): the dev bot's read of 8 sessions takes 20 s and leaves 2 unread (0.57 s optimized, all 8 read;
+alone, the 43 MB session renders in 6.4 s and the 35 MB one in 9.5 s); a grep in one 10 MB transcript takes 1.3-1.5 s
+(0.1 s optimized); the whole BetterClipboard grep read 1 of its 363 candidates in its 20 s, and took 1,188 s with no
+budget (4.5 s optimized). Per file Debug is about 14 times slower, and its reader and render threads gain nothing
+from running in parallel: the debug heap serializes their allocations. Nothing was changed for it: a search's
+quality measured on the dev bot is lower than production's.
+
 **Still open:** a near miss is still shown now and then with an honest "weaker match"; the deep search remains the
 slowest finder (7 s warm over every session); a cold start still reads one sidecar file per session (9.13's fix 3);
-the database mode's procedure was never evaluated; nothing here has met the app's XAML or a Telegram chat.
+a first grep after the transcripts left the file cache waits about a minute for the folder-wide ripgrep (it reads all
+of them; the session database of SESSIONS_DB.md is the way past it); the Debug build's grep and read rarely finish
+over large sessions; the database mode's procedure was never evaluated; nothing here has met the app's XAML or a
+Telegram chat.
 
 ---
 
