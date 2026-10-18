@@ -3117,6 +3117,11 @@ below, one line each.)", then the lines, silent, every number once; "resume 37" 
 
 Each was read in the code at a7bb5a577; the ones marked "seen" also show in a log or a file. None is fixed yet.
 
+- **An aborted creation leaves its new thread**, against the user's rule of 2026-10-18 ("QA the entire creation of a new
+  session process … If the creation process aborts in any way, the new topic needs to be deleted"). No abort path deletes
+  the thread today (§21.17.4): ✖ Cancel deletes only the picker, a picker nobody uses is forgotten after a day, the
+  3-minute bind timeout tells the thread and frees it, and a restart forgets the pickers and binds (they live in memory
+  only); each leaves the thread in the chat.
 - **A remote fork or new session settles on its SOURCE** (seen on dev: a topic's `/forksession` on 2026-10-16 23:41 —
   `launch Forking c1ce0dbe`, then `revive done c1ce0dbe` 1.3 s later and `c1ce0dbe idle -> waiting`, while the fork
   `de0d4a0a`'s new topic read "leaves the list in 10 min"; and `… launch Opening a new session 91d8d3d1 …` → `revive done
