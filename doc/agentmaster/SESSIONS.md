@@ -517,14 +517,14 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 > against the real `claude.exe`. The engine under it is the agent harness:
 > [`SDK_HARNESS.md`](./SDK_HARNESS.md).
 >
-> **2026-10-17 (the user's choices; NOT BUILT yet, no live run): confirming every match** (9.12).
+> **2026-10-17 (the user's choices; in dev since 0.0.1.20 and production since 0.6.8.21): confirming every match** (9.12).
 > The model READS every session before it shows it (a new `read` tool: the compact transcript), can
 > GREP the conversations' full text (a new `grep` tool: each match in context, who wrote it, when),
 > gives every shown session a `why` (one line of evidence), and answers with a VERDICT sentence that
 > never names a screen. The table shows each `why` as a quote line under the row's title; the
 > Telegram Search topic shows one card per session with it (`MESSAGING.md` §21.10).
 >
-> **2026-10-17, later (the user's request; NOT BUILT yet): windows and tabs, and a new prompt**
+> **2026-10-17, later (the user's request; in dev since 0.0.1.28, not in production): windows and tabs, and a new prompt**
 > (9.14). A third tool server, `tabs`: `list` (the windows and their tabs), `resume` and `fork` (a
 > session as a tab, after a chosen tab; refused with several windows open until the user names one)
 > and `deactivate` (one tab, on the user's request). The system prompt now has `# Instructional
@@ -543,7 +543,7 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   model's one-sentence answer. Its right end reads **"thinking off  ctx 15k / 200k"**: the
   thinking toggle, then the size of the conversation (of the most it can hold before Claude Code
   compacts it: the model's own window or 500K, whichever is smaller).
-- **The thinking toggle** (the user's request of 2026-10-14, NOT BUILT yet) sets how much the
+- **The thinking toggle** (the user's request of 2026-10-14; in dev and production) sets how much the
   model thinks before it searches. A click moves to the next level: **off → low → medium → high →
   xhigh → max → off**.
   - **Off** (the default) is the fastest: no thinking before the answer, at effort low — the
@@ -564,7 +564,7 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
   - Off reads dim like the context size; a level that thinks reads brighter.
 - The **table shows exactly the sessions that the model picked**, best match first. The first
   row is selected, so its detail pane is there without a click.
-- **Each row carries the model's evidence** (9.12, 2026-10-17, NOT BUILT yet): a thin-barred
+- **Each row carries the model's evidence** (9.12, 2026-10-17; in dev and production): a thin-barred
   quote line under its title — the user's own words the model found in the session ("You asked:
   …"), or Claude's, or what the session shows — and the detail pane shows that line in full under
   the title. The strip's answer is a verdict: how many sessions were found and what they are
@@ -900,7 +900,9 @@ above.
 
 ### 9.12 Confirming a match: read, grep and the evidence (2026-10-17)
 
-> Status: written 2026-10-17 (session cb14b056), NOT BUILT, no live run. The m5 suite covers the
+> Status: written 2026-10-17 (session cb14b056). Built into dev 0.0.1.20 (2026-10-17 01:09) and production 0.6.8.21
+> (2026-10-17 12:01) — a string probe of both installed DLLs, 2026-10-18; the dev bot's 🔎 Search topic answered live
+> requests with this agent on 2026-10-18 (`MESSAGING.md` §21.10). The m5 suite covers the
 > tools, the cut, the literal reader and both surfaces' text (9.8 lists the tests).
 
 **What the user asked.** "Does the search agent read the compact transcript of every session it
@@ -1464,8 +1466,9 @@ Telegram chat.
 
 ## 10. The folder filter
 
-> Written 2026-10-12, **NOT BUILT** (checked with `cl /Zs` against the last Debug build and the m5
-> harness; never run on screen). The user's request: "add a folder filter dropdown which pops up a
+> Written 2026-10-12; built into dev 0.0.1.6 (2026-10-13) and production 0.6.8.20 (2026-10-17), and in both installs
+> today — a string probe of both DLLs, 2026-10-18 (before that it was checked with `cl /Zs` against the last Debug build and
+> the m5 harness); no on-screen check is recorded. The user's request: "add a folder filter dropdown which pops up a
 > dropdown menu in the sessions search as a filter with OR between each path. The paths are a list
 > split to two 50%/50%, first is the recent sessions workdir/inferred workdir and second is the most
 > commonly used from all sessions. We need the user to be able to add a folder/s that sessions were

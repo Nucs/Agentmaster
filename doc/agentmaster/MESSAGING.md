@@ -2,12 +2,17 @@
 
 > **Status: Telegram v1 IMPLEMENTED on 2026-10-16 (§21 says exactly what was built, where it differs from the
 > design below, and what is still open; §21.6 = the topics per TAB, Claude Code's own recap, the card that
-> rings — dev 0.0.1.16, not production; §21.11 = Claude's Markdown as Telegram RICH messages (tables render), a
-> VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
-> optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21, 2026-10-17; §21.12 = the
+> rings — dev 0.0.1.16 first, production since 0.6.8.21; §21.11 = Claude's Markdown as Telegram RICH messages (tables
+> render), a VERBOSE or conversation-only mode per topic with a default for all, the state glyph in every topic name, and an
+> optional second SECRETARY bot that posts the user's turns as the user — dev 0.0.1.21 first (2026-10-17), production since
+> 0.6.8.21; §21.12 = the
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
-> folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.** One bot per install since 2026-10-17: the DEV
+> folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
+> **Where each part runs** (checked 2026-10-18 against git and a string probe of each installed `TerminalApp.dll`):
+> PRODUCTION 0.6.8.21 (the Release build of 46e3aad42) holds §21.1–§21.12; DEV 0.0.1.29 (the Debug build of ac4167e63)
+> holds everything through §21.18 except §21.17.4's pager row (a7bb5a577); that row, §21.19 and §21.20 are in neither
+> (NOT BUILT). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -337,11 +342,14 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
     DIFFERENT bot resets `searchThreadId` (that bot's chat is another chat). Production's Search topic is
     thread 22371 (made 2026-10-16 18:50, when @ClaudeSessionsGateBot was still the dev bot), dev's is 25027
     (made 2026-10-17 11:24 under @ClaudeSessionsDebugGateBot).
-  - ⚠ **A Search topic the user deletes does not come back** (read from the code, not tried): nothing reads
-    a refused send's "message thread not found" (`TgResult::ThreadNotFound` is read only by the rich-fallback
-    rule and the two topic-delete paths), and `_ensureSearchTopic` makes the topic only while
-    `searchThreadId` is 0. Its sends then keep failing. The way back today: stop the app, set
-    `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
+  - ⚠ **A Search topic the user deletes comes back only at the bot's next start, and only on dev** (read from the
+    code, not tried; corrected 2026-10-18). Since §21.18 (dev 0.0.1.29) the START NOTE reads its own refused send:
+    "message thread not found" sets `searchThreadId` to 0 (`_onStartNoteSent`), the next tick makes a new Search topic
+    (`_ensureSearchTopic` makes one while `searchThreadId` is 0), and the note goes there. No other send to Search reads
+    that answer (`TgResult::ThreadNotFound` is read otherwise only by the rich-fallback rule and the two topic-delete
+    paths), so the Search topic's answers keep failing until the bot starts again: the next app launch, or the bot
+    switched off and on in the cog's Messaging tab. Production (0.6.8.21, no §21.18) has only the way back by hand: stop
+    the app, set `searchThreadId` to 0 in `<profile>\messaging\telegram\state.json`, start it.
   - **A link that opens Search: the right number exists, and only Telegram Desktop's code opens it** (asked
     2026-10-17, "preferably in the 'all' area"; read from the docs and the three clients' sources, nothing
     built, nothing tried on a device). ⚠ This bullet first said (commit 01ea104cf) that the bot's number for
@@ -417,7 +425,7 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
 | Forked, or a new session in the same folder | A new tab → a new topic when it leaves Idle (at once when started from Telegram) |
 | Closed (archived) | The topic is deleted at once |
 | Agentmaster closed and reopened | Topics stay in Telegram; at start the sync keeps the topics of the tabs that still qualify (restored Waiting / Needs approval / cut-off Error sessions) and deletes the rest |
-| The user deletes a topic in Telegram | Nothing happens to the session; the next message for it fails, and the topic is created again (topics = tabs) |
+| The user deletes a topic in Telegram | Nothing happens to the session; the next message for it fails, and the topic is created again (topics = tabs) *(As built, 2026-10-18: NOT made again — a known bug, §21.21: the record stays and every post into the thread fails until the session goes idle or closes. The Search topic: §5.1.)* |
 
 **Reading on the phone counts.** Any action in a topic (a message, a button, a command) marks the session
 read on the PC — its flash ring and unread count clear — so the 60-minute Waiting → Idle decay works for a
@@ -436,7 +444,8 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
 
 ### 5.4 🔎 Search: find, wake, revive (D24)
 
-- **2026-10-17, later (NOT BUILT yet; `SESSIONS.md` §9.14):** the agent also gets the **tabs** server —
+- **2026-10-17, later (in DEV since 0.0.1.28, 2026-10-18 00:06 — the build of 2404f7838; not in production;
+  `SESSIONS.md` §9.14):** the agent also gets the **tabs** server —
   `list` (every window and its tabs), `resume` / `fork` (a session as a tab after a chosen tab; with more
   than one window open the call refuses until the user names a window, which from a phone the agent must
   always ask) and `deactivate` (ONE tab, only on the user's explicit request) — and the three-part system
@@ -917,11 +926,12 @@ queued message's status; `disable_notification` on everything but a turn's final
 
 | Symptom | Handling |
 |---|---|
-| 401 (token revoked) | stop, alert in the cog and with a Windows toast |
-| 403 (the user blocked the bot) | stop; status "blocked by the user" |
+| 401 (token revoked) | stop, alert in the cog and with a Windows toast *(as built: the poll loop stops and the cog's status line says so; no toast)* |
+| 403 (the user blocked the bot) | stop; status "blocked by the user" *(as built: not handled — each send fails on its own, nothing stops, and the cog's status does not say so)* |
 | 409 | §10.2 |
-| 429 | wait `retry_after`; the pacing lowers its rate |
-| "message thread not found" (a deleted topic) | the topic is created again |
+| 429 | wait `retry_after`; the pacing lowers its rate *(as built: a wait of up to 60 s is slept through and the call made once more; a longer one parks only the refused method, §21.14.3; the history replay pauses 5 min, §21.9)* |
+| "message thread not found" (a deleted topic) | the topic is created again *(as built: only the 🔎 Search topic, at the bot's next start — §5.1, §21.18, dev only; a session's topic is never made again — a known bug, §21.21)* |
+| No answer at all (DNS, network: WinHTTP 12002 / 12007) | *(as built: the send loop does not retry it; a message whose caller does not send it again — a final reply, a prompt line, a remark — is lost: a known bug, §21.21)* |
 | The topic map lost | the old topics are orphans the bot cannot find; new ones are created; the previous copy of `state.json` is tried first |
 
 ## 11. Microsoft Teams
@@ -1158,22 +1168,28 @@ transport's failures and slow calls.
   is dropped after reading only the sender). Levels and the drive PIN (§9.3) are not built: a paired owner
   can do everything the commands offer.
 - **No backfill (§6.7).** A topic mirrors the session from the moment it is created; its first message says
-  so and points at `/transcript` (the whole session as a `.md` file) and `/summary`.
+  so and points at `/transcript` (the whole session as a `.md` file) and `/summary`. *(Replaced on 2026-10-16 night by
+  §21.9: a new topic first replays its session's whole history, then mirrors it live.)*
 - **One fixed mirror level, close to the Default preset (§6.3).** Prompts (⌨ typed at the PC, ⚙ sent by the
   runner; a prompt sent from the topic is the user's own message and is not mirrored), the work log with
   every tool call on one line (and a remark's first line, a failed result, a compaction), the final reply as
-  Markdown; verbose items, files, thinking, hooks, the `/show` and `/level` grid are not built.
+  Markdown; verbose items, files, thinking, hooks, the `/show` and `/level` grid are not built. *(Since §21.5 a remark
+  is a message of its own; since §21.11 each topic is VERBOSE (this layout) or the CONVERSATION ONLY, the default; since
+  §21.12 the ⌨ / ⚙ lines are "👤 You" lines. The per-type grid, `/show` and `/level` are still not built.)*
 - **The activity draft (§6.2) is not built**; the card's state line (edited on every state change, at most
-  every 20 s otherwise) and the work-log edits (every 15 s) show what the session does.
+  every 20 s otherwise) and the work-log edits (every 15 s) show what the session does. *(Since §21.4 the card shows
+  clock times and is edited only when a fact changes, and the work-log gap grows with the open turns, 15 s at least;
+  a conversation-only topic, the default since §21.11, has no work log.)*
 - **Questions and plans are shown, not answered (§7.4).** A question arrives with its options as a numbered
   list, a plan with its text, both as the turn's final message; answering is at the PC (the key plans of
-  P0-1 are unmeasured). A permission prompt shows as the state edge's "Needs your approval at the PC".
+  P0-1 are unmeasured). A permission prompt shows as the state edge's "Needs your approval at the PC". *(Since §21.6
+  there is no such line: the card is re-sent at the bottom of the topic with sound.)*
 - **`/interrupt` is one Esc through the registry's injector** (with a confirmation while running), not the
   link's abort (the session link is not built).
 - **`/takedraft` queues a COPY** of the unsent draft (the box at the PC keeps it); the mail button's verified
   clear is a UI-thread action a later build routes through the hosting window.
 - **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
-  is the `/commands`.
+  is the `/commands`. *(§21.5 added ▶ Reactivate, the first row while the session is parked, in Error or exited.)*
 - **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
   it; the user pins it). Its answers carry one pick button per listed session and ⊘ Clear; a pick opens the
   session's action menu — [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel], no fork-and-pin (§5.4, §21.7); a
@@ -1181,7 +1197,8 @@ transport's failures and slow calls.
   `/newsession <folder> [model]` in Search opens a new session in a folder on this PC. The design's
   [→ Topic] and [Details] buttons are not built (a listed session's menu says it has its topic).
 - **A topic the user starts in Telegram (D20) is not a new session**: the bot answers with the `/newsession`
-  hint, and the topic can be deleted.
+  hint, and the topic can be deleted. *(Replaced on 2026-10-18 by §21.17.4, on dev only (0.0.1.29): such a thread gets a
+  folder picker and becomes the new session's topic.)*
 - **The pin has no PC-side menu item or tab glyph yet (D32)**; `/pin` and the buttons set it.
 - **The run marker's crash note**: the tick loop rewrites `messaging\run.marker` every minute and `Stop`
   deletes it; the FIRST marker write of a run copies a marker still on disk to `run.marker.last`, which the
@@ -1520,7 +1537,12 @@ picking and then a second menu asks if to Resume, Fork (no fork and pin)"* (D24 
   TestTaskbarBadge failures only; `cl /Zs` with the app's recorded lines (warnings as errors) of
   `MessagingSearchBridge.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`, `Engine.cpp`,
   `TerminalPage.AgentEngine.cpp` and `AgentManagerContent.Settings.cpp`, each plain unit with a negative control.
-  NOT BUILT into the app.
+  Not built into the app when written; built since into dev 0.0.1.17 (2026-10-16 22:46, from HEAD 4edb9f377, which holds
+  this work) and production 0.6.8.21 (2026-10-17 12:01) — a string probe of both installed DLLs, 2026-10-18.
+- **Seen live on dev** (its hooks.log by 2026-10-18): 19 requests; `/clear` 4 times, each with its `[ai-search] reset` within
+  3 ms; one pick (`[nav] remote telegram search pick 3 c731238b (closed)`, 2026-10-16 22:59, on
+  0.0.1.17), whose ▶ Resume opened the closed session as a background tab 10 s later (`launch Resuming c731238b`) and its
+  topic 2 s after that; no ⑂ Fork or ✕ Cancel from a menu yet. Production's Search topic has had no request.
 - **Live checks owed:** two searches, then a dev restart, then a follow-up → it continues the conversation;
   `/clear` (and ⊘ Clear) → the cleared line, and the next request starts fresh (`[ai-search] reset` in
   hooks.log); `/wake` in Search → the refusal; tap a number → the menu replies to the answer, tap it again → a
@@ -1718,7 +1740,10 @@ the whole session as messages, not a file plus the last 10 turns.
 
 ### 21.10 The Search answer as evidence cards, and an agent that reads before it shows (2026-10-17)
 
-> Status: written 2026-10-17 (session cb14b056), NOT BUILT, no live run. The agent's half is `SESSIONS.md` §9.12.
+> Status: written 2026-10-17 (session cb14b056). Built into dev 0.0.1.20 (2026-10-17 01:09, the build of d9464b038, which
+> holds this work) and production 0.6.8.21 (2026-10-17 12:01) — a string probe of both installed DLLs, 2026-10-18. Used live
+> on dev (the requests of 2026-10-18 08:26 and 12:36 behind §21.20); production's Search topic has had no request. The
+> agent's half is `SESSIONS.md` §9.12.
 
 **The user's choices** (after "Kindly work on the answering format better, show me 3 variations to choose from" and
 "Does the search agent read the compact transcript of every session it matches against?"): the format **"C · Evidence
@@ -1749,12 +1774,13 @@ matched by title or path without reading it.
 - **Tests** (`TestMessagingSearch` §5): the day words (today, yesterday across a month and a year, this year, an
   older year, unknown), the menu spans, the whole answer of two cards (a quote, a session known only by its id, the
   count not listed), "Nothing found.", the escaping of a title and a quote, distinct glyphs, and both menus.
-- **Not done:** no live run; the answer's look on a phone (the blockquotes' spacing) is unverified.
+- **Not done:** the answer's look on a phone (the blockquotes' spacing) is unverified.
 
 ### 21.11 Rich messages, verbose or conversation-only topics, a state glyph in every topic name, a secretary bot (2026-10-17)
 
 > Status: written 2026-10-17 (session 0b1f8635); LIVE on dev 0.0.1.21 (`Q:\agentmaster-layouts\Debug-B`, a purged full
-> rebuild, 03:08), not in production. Checked live: the glyph renames and their notice deletes; the rich Markdown as
+> rebuild, 03:08), and in production since 0.6.8.21 (2026-10-17 12:01, the Release build of 46e3aad42, §21.12.5). Checked
+> live: the glyph renames and their notice deletes; the rich Markdown as
 > Telegram parses it. Still open: §21.11.5.
 
 **The user's four requests** (2026-10-17, after the §21.9 replay): "Can the threads name be edited to have an emoji
@@ -3085,7 +3111,52 @@ the color square, a short id for an untitled session, 120 sessions packed under 
 message for no rows.
 
 **Check after the build:** "find proxmox related sessions" in the Search topic: the answer with 10 cards and "(N more
-below, one line each.)", then the lines, silent, every number once; "resume 37" opens the 37th. — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
+below, one line each.)", then the lines, silent, every number once; "resume 37" opens the 37th.
+
+### 21.21 Known bugs, not fixed (found 2026-10-18)
+
+Each was read in the code at a7bb5a577; the ones marked "seen" also show in a log or a file. None is fixed yet.
+
+- **A remote fork or new session settles on its SOURCE** (seen on dev: a topic's `/forksession` on 2026-10-16 23:41 —
+  `launch Forking c1ce0dbe`, then `revive done c1ce0dbe` 1.3 s later and `c1ce0dbe idle -> waiting`, while the fork
+  `de0d4a0a`'s new topic read "leaves the list in 10 min"; and `… launch Opening a new session 91d8d3d1 …` → `revive done
+  91d8d3d1` 0.1 s later, 2026-10-18 12:45). `_sweepRevives` counts a revive that names a session as done once THAT session
+  is live, and for a fork also "the source itself when the fork degraded to a resume". A topic's `/forksession` and
+  `/newsession` name the topic's own session (`req.sessionId`), which is live, and 🔎 Search's ⑂ Fork names the picked
+  session, live when it is an idle tab or has a topic: the revive then settles on the source at the next tick. The source
+  is held in Waiting for you and marked unread when it was Idle or Done, the reply "Opened …" names the source, and the new
+  tab gets no hold — it keeps a topic only through the idle grace unless it is used. A fork of a CLOSED session settles
+  right (by the fork's `forkParentId`).
+- **A new thread's held messages replay as topic COMMANDS, and a command's model is any text** (seen on dev, 2026-10-18: new
+  thread 32197 held one 37-character message at 12:37:57; the folder pick handed it to session 91d8d3d1 at 12:45:45.3,
+  where it ran as `/newsession` at 12:45:45.9 — the request above — and `[spawn] 41db7b17 "BetterClipboard"
+  cwd=K:\source\BetterClipboard model=K:/source/BetterClipboard` followed at 12:45:46.9; that session's launch snapshot
+  keeps the model). The
+  bind sends the held messages through `_handleTopicMessage(…, held = true)` (§21.17.4), so a `/newsession <folder>` typed
+  before the folder pick runs as the new topic's own `/newsession`: a SECOND session, in the picked folder, with the typed
+  folder as its MODEL. The topic's `/newsession [model]` / `/forksession [model]` and Search's `/newsession <folder> [model]`
+  take whatever follows as the model. `BuildClaudeCommandline` quotes it only when it holds a space and never escapes it, and
+  `BuildPwshHostedCommandline` puts that line into the PowerShell script that starts claude as it is (`& <line>`), so a `;`
+  or a `$(…)` in it would run. The session's launch snapshot (`launchArgs`) keeps the model for its life: a Reactivate, a
+  Restart, a resume and a fork start claude with it again.
+- **A launch the window cannot make is never reported.** `RequestLaunchInWindow` (Engine.cpp) answers true as soon as a
+  window has a launch sink, and the sink answers nothing. A Resume, a Fork or a new session asked from Telegram that never
+  comes up is dropped after 3 minutes WITHOUT a word (`_sweepRevives`); a new thread's bind tells its thread after 3 minutes
+  (§21.17.4).
+- **A session's topic the user deletes is never made again** (against §5.2 and §10.5). No send reads Telegram's "message
+  thread not found" for a session's topic: the record stays, every post into the thread fails, and the card is posted again
+  every 60 s (`kCardRepostAfterFailureMs`) until the session goes idle past its grace or closes and the sync deletes the
+  record. (The 🔎 Search topic: §5.1.)
+- **A new thread renamed before its folder is picked loses the rename.** The picker says "rename this thread to change it",
+  but `_handleMessage` reads a `forum_topic_edited` only for a thread that has a session. The bind names the session from the
+  thread's FIRST name (`topicName`; the folder's name when Telegram made the thread's name up) and renames the thread to it.
+  A rename after the bind renames the session (§21.17.4).
+- **A send that gets no answer is lost** (seen in production: 52 `transport failure` lines in `messaging.log`, all between
+  18:56 and 18:59 on 2026-10-17, WinHTTP 12002 and 12007 — a DNS outage). The send loop retries only a 429 (§21.14.3); any
+  other failure goes once to the item's callback. A final reply (`_postFinal`), a remark (`_postRemark`) and every other
+  message sent without a callback are then gone; the card is posted again 60 s later and the start note is retried (§21.18).
+
+## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
 > optional? meaning we retain the view and access of all topics and optionally can open the groups view? Can two groups
