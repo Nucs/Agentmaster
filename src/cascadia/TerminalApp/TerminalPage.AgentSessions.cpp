@@ -1322,9 +1322,15 @@ namespace winrt::TerminalApp::implementation
         }
 
         // [refork] = a restore that re-materialized a never-messaged fork from its source into the same
-        // id (forkIntoId set); [fork] = a genuine new fork; else resume/restore-fresh/spawn. The suffix
-        // names the source for both fork kinds (effectiveForkFrom).
-        const std::wstring tag = !forkIntoId.empty() ? L"[refork] " : (!forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ")));
+        // id (a source AND a target: effectiveForkFrom and forkIntoId); [fork] = a genuine new fork; else
+        // resume/restore-fresh/spawn. The suffix names the source for both fork kinds (effectiveForkFrom).
+        // A FRESH launch whose caller chose the id (presetSessionId — MESSAGING.md §21.17's new thread) has
+        // a target but no source: it is a [spawn], with the chosen id noted at the end of the line. Until
+        // 2026-10-18 the tag keyed on the target alone and logged it as a [refork], which reads as a restore
+        // of a fork that never happened.
+        const bool reforked = !forkIntoId.empty() && !effectiveForkFrom.empty();
+        const bool idChosenByCaller = !forkIntoId.empty() && effectiveForkFrom.empty();
+        const std::wstring tag = reforked ? L"[refork] " : (!forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ")));
         // PRESETS: name what the session runs on (never the key) — a preset id, or a plain model pick.
         std::wstring launchNote;
         if (compiledLaunch)
@@ -1332,7 +1338,8 @@ namespace winrt::TerminalApp::implementation
             launchNote = compiledLaunch->presetId.empty() ? (L" model=" + compiledLaunch->model) : (L" preset=" + compiledLaunch->presetId + (compiledLaunch->model.empty() ? std::wstring{} : (L" model=" + compiledLaunch->model)));
         }
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + launchNote + L"\n");
+                                      tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + launchNote +
+                                          (idChosenByCaller ? L" (under the id its caller chose)" : L"") + L"\n");
         return tab;
     }
 

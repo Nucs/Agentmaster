@@ -868,6 +868,21 @@ namespace Agentmaster::Msg
 
         // ----- inbound (Messaging.Inbound.cpp) -----
         void _handleUpdate(const json::Value& update) noexcept;
+        /// <summary>
+        /// One message (or one edit) of the owner's private chat with the bot, routed by where it was written: the bot's own
+        /// service messages (a rename notice and the directory's pin note are deleted), a sender other than the paired owner
+        /// (dropped), what the bot itself sent as the user (secretary mode — never a new prompt), a thread the user created (its
+        /// §21.17 picker), a rename of a session's topic, a text-less message, /search-tab and /search from any thread (§21.19),
+        /// the 🔎 Search topic, a session's topic (an edit replaces a still-queued prompt), the main view (the help line), a
+        /// recreation's old topic, and any other thread (held for a new session, _holdForNewThread). A thread that is a
+        /// session's topic but still has its new-thread bind is being bound by the tick right now: its message joins the bind
+        /// behind the messages it holds (an edit replaces one there), so the session gets them in the order the user wrote them.
+        /// Poll thread; called through _handleUpdate, which catches what it throws.
+        /// </summary>
+        /// <param name="msg">The Telegram Message object.</param>
+        /// <param name="edited">True for an edited_message update.</param>
+        /// <exception cref="std::bad_alloc">If memory runs out (the registry, the held lists and the outbox copy what they
+        /// keep); a handler it routes to may throw the same.</exception>
         void _handleMessage(const json::Value& msg, bool edited);
         void _handleCallback(const json::Value& cq);
         /// <summary>
@@ -1007,7 +1022,11 @@ namespace Agentmaster::Msg
         /// a lone folder path starts it in that folder at once; anything else waits (at most kNewThreadHeldMax messages) and goes
         /// to the session in order once it is up. The picker is posted with the first held message when the thread has none yet
         /// (after a restart, or a thread made before §21.17). An edit replaces the held message's text. A thread whose pick is
-        /// already launching holds the message for the launch. Poll thread.
+        /// already launching holds the message for the launch, and so does a thread whose bind is handing its messages over to
+        /// the new topic (_handleMessage sends such a thread's message here). A thread whose bind has become its topic since the
+        /// caller looked gets the message as that topic's (_handleTopicMessage) — the binds and the topics are read in one lock
+        /// scope, and a bind leaves its list only after its topic is recorded, so a just-bound topic never gets a picker. Poll
+        /// thread.
         /// </summary>
         /// <param name="threadId">The thread.</param>
         /// <param name="msg">The Telegram message.</param>
@@ -1043,11 +1062,16 @@ namespace Agentmaster::Msg
         /// <summary>
         /// Binds each picked thread to its session once the session is LIVE (§21.17, tick thread, before the sync's plan so the
         /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
-        /// user's thread id, seeded like a created topic), is renamed like every topic (state glyph, color square, title), gets
-        /// its card, and receives the held messages as if they had been sent in the topic (the first one is the session's first
-        /// prompt). A session at rest is held in "Waiting for you" (like a revive) so its topic outlasts the idle grace, and a
-        /// tab that has not started yet is started. A bind whose session never came up within kNewThreadBindTimeoutMs is
-        /// dropped, and the thread is told.
+        /// user's thread id, seeded like a created topic), is renamed like every topic (_renameTopic: the state, the color
+        /// square, the title), gets its card, and receives the held messages as if they had been sent in the topic (the first
+        /// one is the session's first prompt). The bind stays in `_threadBinds` until the topic is recorded and every message it
+        /// holds is handed over: what the user writes meanwhile joins it and reaches the session after the earlier messages, in
+        /// order (the record and the bind's messages change hands in one lock scope, and the bind leaves only in a scope that
+        /// finds it empty). The first name's color is resolved fresh from the session's record, as a created topic's is, and
+        /// becomes the sync's settled fact, so a folder color the tab's first paint persisted after the sync's dir-colors
+        /// snapshot causes no second rename. A session at rest is held in "Waiting for you" (like a revive) so its topic
+        /// outlasts the idle grace, and a tab that has not started yet is started. A bind whose session never came up within
+        /// kNewThreadBindTimeoutMs is dropped, and the thread is told.
         /// </summary>
         /// <param name="byId">The sync's live sessions (SnapshotLiveForCards), by id.</param>
         /// <param name="colorMode">The tab color mode of the sync.</param>
@@ -1511,7 +1535,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// §21.17, under `_mtx`: a picked folder's launch, waiting for its session to be live — the session id the launch was
         /// given (RemoteLaunchRequest::newSessionId), the thread it becomes the topic of, the title it was given ("" = the
-        /// folder-derived default) and the user's messages to hand over. The tick binds it (_adoptBoundThreads).
+        /// folder-derived default) and the user's messages to hand over. The tick binds it (_adoptBoundThreads) and keeps it
+        /// here, as the thread's hand-over queue, until the topic is recorded and every held message has been handed over: a
+        /// thread that has a topic and a bind is being bound right now, and its new messages join `held`.
         /// </summary>
         struct ThreadBind
         {

@@ -3832,8 +3832,13 @@ namespace Agentmaster::Msg
 
     void MessagingService::_adoptBoundThreads(const std::unordered_map<std::wstring, SessionInfo>& byId, TabColorMode colorMode)
     {
-        // The binds whose session is live now, and the ones that waited too long; both leave the list under the lock, and the work
-        // (Telegram calls, registry writes) runs after it.
+        // The binds whose session is live now, and the ones that waited too long; the work (Telegram calls, registry writes) runs
+        // after the lock. A READY bind is only COPIED here (who and where, not its messages): it stays in _threadBinds until its
+        // thread is the session's topic AND everything it holds has been handed over (the drain at the end of the loop below),
+        // so at every moment the poll thread finds the thread's bind, its topic, or both. A message the user sends meanwhile is
+        // held by the bind and handed over after the ones before it. Until 2026-10-18 the bind left the list here and the topic
+        // was recorded only after the registry write and the transcript seed: a message in between found neither, and got a
+        // stray folder picker inside the new topic. An EXPIRED bind leaves the list here (its messages stay in the chat).
         std::vector<ThreadBind> ready;
         std::vector<ThreadBind> expired;
         {
@@ -3847,8 +3852,16 @@ namespace Agentmaster::Msg
             {
                 if (const auto s = byId.find(it->sessionId); s != byId.end() && s->second.live)
                 {
-                    ready.push_back(std::move(*it));
-                    it = _threadBinds.erase(it);
+                    // The copy's `held` stays empty: the messages are taken in the lock scope that records the topic, so none the
+                    // poll thread adds before that is missed, and none is handed over twice.
+                    ThreadBind copy;
+                    copy.sessionId = it->sessionId;
+                    copy.threadId = it->threadId;
+                    copy.dir = it->dir;
+                    copy.title = it->title;
+                    copy.requestedMs = it->requestedMs;
+                    ready.push_back(std::move(copy));
+                    ++it;
                 }
                 else if (now - it->requestedMs > kNewThreadBindTimeoutMs)
                 {
@@ -3874,9 +3887,16 @@ namespace Agentmaster::Msg
         for (auto& b : ready)
         {
             const SessionInfo& s = byId.at(b.sessionId);
+            // This bind's entry in _threadBinds (a bind is one thread-and-session pair; it stays there until the hand-over below
+            // ends). Call it under `_mtx` only: the poll thread adds to the entry's `held` under that lock.
+            const auto bindOf = [this, &b]() {
+                return std::find_if(_threadBinds.begin(), _threadBinds.end(), [&b](const ThreadBind& x) { return x.threadId == b.threadId && x.sessionId == b.sessionId; });
+            };
             // The thread must still be free and the session must have no topic: nothing else makes either while the bind waits
             // (the plan runs after this, and a user thread is in no record), so a hit here is a bug worth the line, not a crash.
+            // A taken bind leaves the list here, in the scope that saw it taken, with what it holds.
             bool taken = false;
+            size_t dropped = 0;
             {
                 std::lock_guard lk{ _mtx };
                 taken = _state.topics.count(b.sessionId) > 0;
@@ -3884,10 +3904,19 @@ namespace Agentmaster::Msg
                 {
                     taken = taken || t.threadId == b.threadId;
                 }
+                if (taken)
+                {
+                    if (const auto it = bindOf(); it != _threadBinds.end())
+                    {
+                        dropped = it->held.size();
+                        _threadBinds.erase(it);
+                    }
+                }
             }
             if (taken)
             {
-                _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L" not bound to " + ShortId(b.sessionId) + L": the thread or the session has a topic already");
+                _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L" not bound to " + ShortId(b.sessionId) + L": the thread or the session has a topic already (" +
+                     std::to_wstring(dropped) + L" held message(s) dropped)");
                 continue;
             }
             // At rest it waits for the user (like a revive): an Idle session's topic would leave the list after the idle grace,
@@ -3918,30 +3947,73 @@ namespace Agentmaster::Msg
             t.nameColorMode = -1;
             t.tabToken = s.tabToken;
             _seedFromTranscript(t, s); // a fresh session: no transcript yet, so no history to replay, mirrored from its first line
+            // The thread BECOMES the topic: the record goes in and the bind's messages come out in ONE lock scope. The bind stays,
+            // empty, as the thread's hand-over queue: the poll thread adds to it what the user writes now (_handleMessage sends
+            // a message of a thread that has a topic and a bind to _holdForNewThread), until the drain below finds it empty.
+            std::vector<json::Value> held;
             {
                 std::lock_guard lk{ _mtx };
                 _state.topics[s.id] = t;
                 _mirrors.erase(s.id);
                 _cards.erase(s.id);
                 _stateDirty = true;
+                if (const auto it = bindOf(); it != _threadBinds.end())
+                {
+                    held.swap(it->held); // leaves the bind's own vector empty for the poll thread's next message
+                }
             }
+            // §21.13: the color of the topic's FIRST name — resolved fresh from the session's record as it is now (as _createTopic
+            // resolves a new topic's color) and made the sync's fact for this session, settled, before the rename reads it
+            // (ChooseNameColor reads _lastFact). The sync's facts come from ONE dir-colors.json snapshot taken before its
+            // registry copy, and a session launched from the phone is often in that copy before its tab's first paint has given
+            // its folder a color (_LaunchClaudeSession records the session, then paints the tab, which persists the color — or,
+            // in the Individual mode, the session's own color): the fact then held the folder's PREVIEW color (AutoDirColorHex).
+            // The first name took that square, and the next pass saw the persisted color as a change, so the name tick
+            // re-squared the topic (2026-10-18 on dev: a green square, then a purple one 49 s later). The color clock entry keeps
+            // the next pass from reading the fresh color as a change.
             std::wstring color;
+            bool colorResolved = false;
             try
             {
-                color = ResolveSessionColorHex(colorMode, s);
+                const auto current = _registry->GetWithoutQueue(s.id); // the color reads no queue
+                color = ResolveSessionColorHex(colorMode, current ? *current : s);
+                colorResolved = true;
             }
             catch (...)
             {
-                // Rule #18. Recovery: no square in the log line; the rename resolves the color itself.
+                // Rule #18. Recovery: no square in the log line, and the rename takes the sync's fact as it is.
                 LogSwallowedException(L"MessagingService::_adoptBoundThreads (color)");
             }
+            if (colorResolved)
+            {
+                for (auto& f : _lastFacts)
+                {
+                    if (f.sessionId == s.id)
+                    {
+                        f.colorHex = color;
+                        f.colorSinceMs = 0; // settled: a new topic's name takes the color the tab has now, as a created one does
+                        break;
+                    }
+                }
+                _colorSince[s.id] = { color, int64_t{ 0 } };
+            }
             _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L" is now the topic of " + ShortId(s.id) + L" \x201C" + bare + L"\x201D in " + b.dir +
-                 (color.empty() ? std::wstring{} : L" " + std::wstring{ TgTitleColorSquare(color) }) + L" (" + std::to_wstring(b.held.size()) + L" held message(s) handed over)");
+                 (color.empty() ? std::wstring{} : L" " + std::wstring{ TgTitleColorSquare(color) }) + L" (" + std::to_wstring(held.size()) + L" held message(s) handed over)");
             LogNav(L"remote telegram new-thread bound " + ShortId(s.id) + L" thread=" + std::to_wstring(b.threadId));
             // The thread's name like every topic's (state glyph, color square, title); the card follows the rename. A refused rename
             // (a flood pause) leaves both to the next ticks: the name is due (nameState -1) and the card is posted below anyway.
-            _renameTopic(s.id, bare, state);
-            _refreshCard(s.id, true);
+            // Guarded: whatever fails here, the messages below must still reach the session, and the bind must leave the list.
+            try
+            {
+                _renameTopic(s.id, bare, state);
+                _refreshCard(s.id, true);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the name stays due for the state-name tick (nameState -1 until a rename is recorded), and
+                // the hand-over below goes on.
+                LogSwallowedException(L"MessagingService::_adoptBoundThreads (name and card)");
+            }
             // The tab opened in the background and has not started: start its claude now, so the first prompt does not wait for a
             // visit at the PC (_queueRemotePrompt would start it too, but held commands alone would not).
             if (!s.started && !s.external && _hooks.sessionAction)
@@ -3956,18 +4028,44 @@ namespace Agentmaster::Msg
                 }
             }
             // What the user wrote in the thread, oldest first, as if it had been written in the topic (it was read live: no
-            // backlog question).
-            for (const auto& msg : b.held)
+            // backlog question) — then what the bind took while this ran, batch by batch, until a look under the lock finds it
+            // empty and removes it. From then on the poll thread sends the thread's messages straight to the topic, and every
+            // earlier one was handed over before that look: the session gets them in the order the user wrote them (straight
+            // to the topic, a message sent during the rename would be queued ahead of the held ones).
+            size_t later = 0; // the messages the bind took after the topic was recorded
+            for (;;)
             {
-                try
+                for (const auto& msg : held)
                 {
-                    _handleTopicMessage(s.id, msg, b.threadId, true);
+                    try
+                    {
+                        _handleTopicMessage(s.id, msg, b.threadId, true);
+                    }
+                    catch (...)
+                    {
+                        // Rule #18. Recovery: the next held message still goes; this one stays in the chat for the user to send again.
+                        LogSwallowedException(L"MessagingService::_adoptBoundThreads (a held message)");
+                    }
                 }
-                catch (...)
+                held.clear();
+                std::lock_guard lk{ _mtx };
+                const auto it = bindOf();
+                if (it == _threadBinds.end())
                 {
-                    // Rule #18. Recovery: the next held message still goes; this one stays in the chat for the user to send again.
-                    LogSwallowedException(L"MessagingService::_adoptBoundThreads (a held message)");
+                    break; // nothing else removes a bind whose topic is recorded: there is nothing left to hand over
                 }
+                if (it->held.empty())
+                {
+                    _threadBinds.erase(it); // in the scope that saw it empty: no message can slip in between
+                    break;
+                }
+                held.swap(it->held); // the next batch; the lock ends with this pass of the loop, before the hand-over
+                later += held.size();
+            }
+            if (later > 0)
+            {
+                _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": " + std::to_wstring(later) +
+                     L" more message(s), sent while it was being bound, handed over after the held ones");
             }
         }
     }

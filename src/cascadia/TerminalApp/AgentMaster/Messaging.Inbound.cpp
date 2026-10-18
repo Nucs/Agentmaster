@@ -652,6 +652,10 @@ namespace Agentmaster::Msg
         const int64_t threadId = msg.I64At(L"message_thread_id", 0);
         int64_t searchThread = 0;
         std::wstring sessionId;
+        // §21.17: the thread is a session's topic AND still has its new-thread bind — the tick is binding it right now and hands
+        // the bind's messages over (_adoptBoundThreads). A message then joins the bind behind the ones it holds, so the session
+        // gets them in the order the user wrote them; sent straight to the topic, it would be queued ahead of them.
+        bool bindHandingOver = false;
         {
             std::lock_guard lk{ _mtx };
             searchThread = _state.searchThreadId;
@@ -662,6 +666,10 @@ namespace Agentmaster::Msg
                     sessionId = sid;
                     break;
                 }
+            }
+            if (!sessionId.empty())
+            {
+                bindHandingOver = std::any_of(_threadBinds.begin(), _threadBinds.end(), [threadId](const ThreadBind& b) { return b.threadId == threadId; });
             }
         }
         // Service messages (a topic created by the user, a pinned-message note) carry no text.
@@ -747,6 +755,34 @@ namespace Agentmaster::Msg
             {
                 // An edit of a message that is still a QUEUED prompt replaces its text; a sent one cannot change.
                 const int64_t msgId = msg.I64At(L"message_id", 0);
+                if (bindHandingOver)
+                {
+                    // §21.17: the message may still sit in the binding thread's bind, not handed over yet — the edit replaces it
+                    // there, as in a thread whose pick is launching (_holdForNewThread). Else it is a queued prompt, below.
+                    bool replacedHeld = false;
+                    {
+                        std::lock_guard lk{ _mtx };
+                        for (auto& b : _threadBinds)
+                        {
+                            if (b.threadId != threadId)
+                            {
+                                continue;
+                            }
+                            for (auto& h : b.held)
+                            {
+                                if (h.I64At(L"message_id", 0) == msgId)
+                                {
+                                    h = msg;
+                                    replacedHeld = true;
+                                }
+                            }
+                        }
+                    }
+                    if (replacedHeld)
+                    {
+                        return;
+                    }
+                }
                 const std::wstring source = L"telegram:" + std::to_wstring(msgId);
                 bool replaced = false;
                 _registry->Update(sessionId, [&](SessionInfo& s) {
@@ -764,6 +800,13 @@ namespace Agentmaster::Msg
                 {
                     _reply(threadId, L"Already sent \x2014 send the change as a new message.", false, json::Value{}, msgId);
                 }
+                return;
+            }
+            if (bindHandingOver)
+            {
+                // §21.17: into the bind, behind what it holds; the tick hands it over after them. A bind that is gone by now
+                // (its hand-over ended since the look above) leaves _holdForNewThread to send it to the topic itself.
+                _holdForNewThread(threadId, msg, false);
                 return;
             }
             _handleTopicMessage(sessionId, msg, threadId);
@@ -2555,10 +2598,15 @@ namespace Agentmaster::Msg
             }
             return;
         }
-        // A thread whose pick is launching: the message waits for that session too.
+        // A thread whose pick is launching, or whose bind is handing its messages over: the message waits for that session too.
         {
             bool bound = false;
             bool full = false;
+            // §21.17: the session that owns the thread now — its bind became the thread's topic, and its hand-over ended, after
+            // the caller looked for a topic (_handleMessage). Read in the SAME lock scope as the binds: a bind leaves the list
+            // only after its topic is recorded (_adoptBoundThreads), so this scope sees the bind or the topic, never neither —
+            // which is what posted a stray folder picker in a just-bound topic before 2026-10-18.
+            std::wstring topicSession;
             {
                 std::lock_guard lk{ _mtx };
                 for (auto& b : _threadBinds)
@@ -2574,6 +2622,17 @@ namespace Agentmaster::Msg
                         break;
                     }
                 }
+                if (!bound && threadId != 0)
+                {
+                    for (const auto& [sid, t] : _state.topics)
+                    {
+                        if (t.threadId == threadId)
+                        {
+                            topicSession = sid;
+                            break;
+                        }
+                    }
+                }
             }
             if (bound)
             {
@@ -2585,6 +2644,11 @@ namespace Agentmaster::Msg
                 {
                     _react(msgId, L"\U0001F440"); // seen: it goes to the session once the session is up
                 }
+                return;
+            }
+            if (!topicSession.empty())
+            {
+                _handleTopicMessage(topicSession, msg, threadId); // the thread's topic now: as if the caller had found it
                 return;
             }
         }
