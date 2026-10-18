@@ -2771,16 +2771,30 @@ updated 5 minutes ago
   - 🏆 **Most used** · 1–10 of 34: `<b>1</b> K:\source\Agentmaster · 412 sessions` — the folder more sessions worked in, first
     (`SortFoldersByUse`).
   - Buttons two to a row, `🕘 1 · Agentmaster` (a folder's name; its parent too when another shown folder has the same name,
-    `NewThreadFolderLabel`), `◀ Recent` / `Recent ▶` and `◀ Most used` / `Most used ▶` only where they lead somewhere, and
-    `✖ Cancel`. The buttons' data names the list and an index or a page (`nt:r:12`, `nt:mp:1`, `nt:x` —
-    `NewThreadCallbackData` / `ParseNewThreadCallbackData`), never a path (a path can pass the 64-byte limit); the lists live in
-    the picker's state. A page change edits the picker in place.
+    `NewThreadFolderLabel`), each list's PAGER row, and `✖ Cancel`. The buttons' data names the list and an index or a page
+    (`nt:r:12`, `nt:mp:1`, `nt:x` — `NewThreadCallbackData` / `ParseNewThreadCallbackData`), never a path (a path can pass the
+    64-byte limit); the lists live in the picker's state. A page change edits the picker in place.
+  - **The PAGER row** (2026-10-18, NOT BUILT yet; the user's "We start with one button to the right and after moving one page
+    there are 2 buttons and one label in middle for the page number. reaching end shows only to the left", after "When I click
+    Recent / Most Used, it only shows one page"; `BuildNewThreadPagingRow`): the page label `2 / 4` (`NewThreadPageLabel`), with
+    `◀ Recent` on its left from the second page on and `Recent ▶` on its right until the last page — the first page
+    `[1 / 4] [Recent ▶]`, a middle page `[◀ Recent] [2 / 4] [Recent ▶]`, the last `[◀ Recent] [4 / 4]`; the same for Most used.
+    The label is there on every page: it puts a lone arrow on its side (Telegram stretches a lone button over the whole row) and
+    says from the first page how far the list goes. A list that fits on one page has no pager. A tap on the label changes
+    nothing: its data (`nt:rl:1` / `nt:ml:1`) only answers a toast, "Recent: page 2 of 4 (folders 11–20 of 34)"
+    (`NewThreadPageToast`). Before, the row held only the arrows that led somewhere, so the first page showed one row-wide
+    `Recent ▶` and the last page one `◀ Recent`, with no page number.
 - **The lists** (`BuildNewThreadLists`) are the Sessions page's folder universe (`CollectSessionFolders`, §10 of SESSIONS.md:
   a session counts for its launch folder and, when it differs, its inferred one) over EVERY session the registry holds, the
   archived ones too ("top 10 used overall") — read through a new lean read, `SessionRegistry::PlaceSamples` (two folder
   strings and a stamp per record, never the queues). The machine's temp roots are left out (`CollectMachineTempRoots`), and
   every listed folder is probed once (`GetFileAttributesW`: a deleted folder is not offered; a UNC path is kept unprobed, an
   offline share would hold the poll thread). At most 100 folders a list.
+  - **How many pages that is** (counted 2026-10-18 from each profile's `sessions.json`, the registry's own store): DEV's 217
+    sessions worked in 20 folders that still exist, so each of its lists has exactly TWO pages — one tap of `Recent ▶` reached
+    the last page, which is why "it only shows one page" on the dev bot; production's 1,724 sessions give 37 folders (4 pages).
+    Every Claude Code session on the machine (4,519 transcripts under `~/.claude/projects`) was launched in 76 existing folders
+    outside the temp roots (8 pages), but the picker reads only the sessions the registry holds.
 - **A pick** (`_startNewThreadSession`): the folder is checked again; a session id is minted (`NewSessionId`) and recorded with
   the thread, the title and the held messages in `_threadBinds` BEFORE the launch, because the launch is asynchronous; then a
   `RemoteLaunchRequest` NewSession with `newSessionId` goes to the most recently active window, which opens a background tab
@@ -2835,6 +2849,13 @@ updated 5 minutes ago
   units, SessionRegistry.cpp, ClaudeSpawn.cpp) pass; on the live tree all 104 TerminalAppLib units and the CLI's 17 at /W4 /WX
   pass; three negative controls (`static_assert`s on `kNewThreadPageSize`, `TopicRecord::historyPromptMessageId`,
   `RemoteLaunchRequest::newSessionId`) fail with exactly C2338.
+  - **The pager row** (2026-10-18, NOT BUILT yet): the label's data and its malformed forms, the label text, the toast (a middle
+    page, a page past the end, an empty and a one-page list), `BuildNewThreadPagingRow` on the first, a middle and the last page,
+    past the end, a two-page list and a one-page list, and the keyboard's pager rows on a middle page and on both last pages. The
+    isolated m5 run (HEAD 954d177a1 + this change): 8,071 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the
+    last Debug build's recorded lines: Messaging.Inbound.cpp, Messaging.cpp, Engine.cpp, MessagingSearchBridge.cpp,
+    TerminalPage.AgentEngine.cpp and AgentManagerContent.Settings.cpp pass; a probe that calls `BuildNewThreadPagingRow` with
+    one argument too few fails with exactly C2660.
 - **The build** (2026-10-18 02:14–02:26): Debug, HEAD ac4167e63 (it also carries another session's §21.18 start note,
   f2fb06549), into `Q:\agentmaster-layouts\Debug-B` while dev ran from `Debug`, from a session inside production
   (`devbuild.ps1`); the tree was clean (both sessions' work committed). PURGED: `SessionRegistry.*` changed since the last Debug

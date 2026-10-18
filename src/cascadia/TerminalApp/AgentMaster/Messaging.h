@@ -1007,8 +1007,10 @@ namespace Agentmaster::Msg
         /// <param name="threadId">The thread.</param>
         void _showNewThreadPicker(int64_t threadId);
         /// <summary>
-        /// A tap on a picker button (ParseNewThreadCallbackData): a page change edits the picker; a folder starts the session
-        /// (_startNewThreadSession); Cancel deletes the picker and drops what it held. Poll thread.
+        /// A tap on a picker button (ParseNewThreadCallbackData): a pager arrow edits the picker to its page; a pager's page label
+        /// changes nothing and answers which page it is (NewThreadPageToast); a folder starts the session (_startNewThreadSession);
+        /// Cancel deletes the picker and drops what it held. A button of a picker this run no longer holds (a restart, a pick)
+        /// answers that a new message in the thread brings a new picker. Takes `_mtx` for the picker's state. Poll thread.
         /// </summary>
         /// <param name="action">The button's action.</param>
         /// <param name="threadId">The thread the picker sits in (the callback's message).</param>
