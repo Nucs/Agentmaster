@@ -8,10 +8,13 @@
 
 #include "m5_tests.h"
 
+#include <algorithm> // std::all_of (§21.22: the state icons' ids are digits)
 #include <cstdint> // SIZE_MAX (the rename-budget model's low-water mark)
 #include <deque> // the rename-budget model's call window
+#include <set> // §21.22: the state icons are distinct
 
 #include "../MessagingModels.h"
+#include "../MessagingNewThread.h" // §21.22: StripTopicNameDecoration reads an icon-form name (the user's rename of a thread)
 #include "../MessagingStartNote.h" // §21.18: the start note's marker, version word, kind, sound and text
 #include "../TelegramFormat.h"
 
@@ -1570,6 +1573,106 @@ void TestMessaging()
             ex.colorSquare = blue;
             CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false, &ex)).rfind(L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>\n", 0) == 0, "the card: the pin, the square, the title");
             CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)).rfind(L"\U0001F4CC <b>agent manager tab</b>\n", 0) == 0, "no square: the card as before");
+        }
+
+        // §21.22 — the STATE ICON: a session's state is its topic's ICON (one of Telegram's topic icons), and the name keeps only
+        // the color square and the title. Telegram draws a topic with no icon of its own as its name's first character in a
+        // colored bubble, so a name that started with the state glyph showed the state twice — the user's "two color circles".
+        {
+            const std::wstring blue = L"\U0001F7E6";
+            const SessionState states[] = { SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval,
+                                            SessionState::Error, SessionState::Done, SessionState::Idle };
+            std::set<std::wstring> ids;
+            std::set<std::wstring> shown;
+            bool allDigits = true;
+            for (const SessionState st : states)
+            {
+                const TopicStateIcon icon = StateTopicIcon(st);
+                const std::wstring id{ icon.customEmojiId };
+                ids.insert(id);
+                shown.insert(icon.emoji);
+                allDigits = allDigits && id.size() >= 15 && std::all_of(id.begin(), id.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; });
+            }
+            CHECK(ids.size() == 6 && shown.size() == 6 && allDigits, "six states, six distinct icons, each a custom emoji id of digits");
+            CHECK(std::wstring{ StateTopicIcon(SessionState::Running).customEmojiId } == L"5312016608254762256" &&
+                      std::wstring{ StateTopicIcon(SessionState::WaitingForInput).customEmojiId } == L"5417915203100613993" &&
+                      std::wstring{ StateTopicIcon(SessionState::NeedsApproval).customEmojiId } == L"5377316857231450742" &&
+                      std::wstring{ StateTopicIcon(SessionState::Error).customEmojiId } == L"5377498341074542641" &&
+                      std::wstring{ StateTopicIcon(SessionState::Done).customEmojiId } == L"5408906741125490282" &&
+                      std::wstring{ StateTopicIcon(SessionState::Idle).customEmojiId } == L"5350392020785437399",
+                  "the ids getForumTopicIconStickers listed (2026-10-18): running, waiting, needs approval, error, done, idle");
+            CHECK(std::wstring{ StateTopicIcon(SessionState::Done).emoji } != L"\x2705" && std::wstring{ StateTopicIcon(SessionState::Done).emoji } != L"\x23F9",
+                  "done is none of the prompt line's marks (answered, ended)");
+
+            // The name: the color square and the title, no glyph; the glyph form is the §21.13 name exactly.
+            CHECK(TopicDisplayName(SessionState::WaitingForInput, blue, L"agent manager tab", true) == L"\U0001F7E6 agent manager tab",
+                  "the icon form: the color square, then the title");
+            CHECK(TopicDisplayName(SessionState::Idle, L"", L"x", true) == L"x" && TopicDisplayName(SessionState::Idle, L"\x2B1B", L"x", true) == L"\x2B1B x",
+                  "no square: the title alone; the one-unit idle glyph is dropped as cleanly as a pair");
+            CHECK(TopicDisplayName(SessionState::Error, blue, L"x", false) == TopicDisplayName(SessionState::Error, blue, L"x"), "the glyph form is the §21.13 name");
+            const std::wstring longName = TopicDisplayName(SessionState::Running, blue, std::wstring(200, L'a'), true);
+            CHECK(longName.size() <= 128 && longName.back() == L'\x2026' && longName.rfind(blue + L" a", 0) == 0, "a long title is cut, the square kept first");
+            CHECK(StripTopicNameDecoration(TopicDisplayName(SessionState::Running, blue, L"my title", true)) == L"my title",
+                  "a thread the user renames from the icon form reads its bare title");
+
+            // Telegram's refusals: the icon's own, and nothing else.
+            CHECK(TopicIconRefused(400, L"Bad Request: invalid custom emoji identifier specified") && TopicIconRefused(400, L"Bad Request: TOPIC_ICON_INVALID") &&
+                      TopicIconRefused(400, L"Bad Request: DOCUMENT_INVALID"),
+                  "an icon refusal: the emoji, the icon, the document behind it (any case)");
+            CHECK(!TopicIconRefused(429, L"Too Many Requests: retry after 5 (icon)") && !TopicIconRefused(400, L"Bad Request: message thread not found") &&
+                      !TopicIconRefused(400, L"Bad Request: TOPIC_NOT_MODIFIED") && !TopicIconRefused(400, L""),
+                  "not an icon refusal: a flood wait, a deleted topic, an unchanged topic, no words");
+
+            // Which topic changes next: a glyph-form name is a quiet re-form once its state has held; a state change still goes
+            // first; with the glyph form wanted (a refused icon) the topics that show an icon go back.
+            const int64_t now = 3000000;
+            const auto fact = [](const wchar_t* id, SessionState st, int64_t stateSince) {
+                TabFact f;
+                f.sessionId = id;
+                f.state = st;
+                f.live = true;
+                f.inTab = true;
+                f.claude = true;
+                f.colorHex = L"#61AFEF";
+                f.stateSinceMs = stateSince;
+                return f;
+            };
+            const auto topic = [&blue](const wchar_t* id, int64_t thread, SessionState st, bool stateIcon) {
+                TopicRecord t;
+                t.sessionId = id;
+                t.threadId = thread;
+                t.nameState = static_cast<int>(st);
+                t.nameColor = blue;
+                t.nameColorMode = static_cast<int>(TabColorMode::WorkingDirectory);
+                t.stateIcon = stateIcon;
+                return t;
+            };
+            std::map<std::wstring, TopicRecord> topics;
+            topics[L"g"] = topic(L"g", 1, SessionState::Running, false); // named in the glyph form (before §21.22)
+            topics[L"i"] = topic(L"i", 2, SessionState::Running, true); // its icon shows its state
+            std::vector<TabFact> facts{ fact(L"g", SessionState::Running, 0), fact(L"i", SessionState::Running, 0) };
+            auto pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true);
+            CHECK(pick.sessionId == L"g" && pick.form && !pick.state && !pick.color, "a glyph-form name goes to the icon form (a quiet re-form)");
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory);
+            CHECK(pick.sessionId == L"i" && pick.form, "the glyph form wanted (a refused icon): the topic that shows an icon goes back");
+            facts[0].stateSinceMs = now - 2000;
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true).sessionId.empty(), "a re-form waits for a settled state (the call carries the state)");
+            facts[0].stateSinceMs = 0;
+            facts.push_back(fact(L"n", SessionState::NeedsApproval, 0));
+            topics[L"n"] = topic(L"n", 3, SessionState::Running, true);
+            pick = PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true);
+            CHECK(pick.sessionId == L"n" && pick.state && !pick.form, "a state change (needs approval) goes before a quiet re-form");
+            topics[L"g"].stateIcon = true;
+            topics[L"n"].nameState = static_cast<int>(SessionState::NeedsApproval);
+            CHECK(PickNameRename(facts, topics, now, TabColorMode::WorkingDirectory, true).sessionId.empty(), "every topic in the icon form, its state shown: nothing is due");
+
+            // The record keeps the form; an older file reads as the glyph form (re-formed once, quietly).
+            MessagingState st;
+            st.topics[L"i"] = topics[L"i"];
+            const auto back = StateFromJson(StateToJson(st));
+            CHECK(back && back->topics.count(L"i") && back->topics.at(L"i").stateIcon, "the form round-trips");
+            const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(old && old->topics.count(L"o") && !old->topics.at(L"o").stateIcon, "an older file: the glyph form");
         }
 
         // §21.15 — the title CHIP: in a rich message a title is an in-text copy_text button in the Telegram look nearest the

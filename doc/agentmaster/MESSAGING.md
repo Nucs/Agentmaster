@@ -11,8 +11,8 @@
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
 > **Where each part runs** (checked 2026-10-18 against git and a string probe of each installed `TerminalApp.dll`):
 > PRODUCTION 0.6.8.21 (the Release build of 46e3aad42) holds §21.1–§21.12; DEV 0.0.1.29 (the Debug build of ac4167e63)
-> holds everything through §21.18 except §21.17.4's pager row (a7bb5a577); that row, §21.19 and §21.20 are in neither
-> (NOT BUILT). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> holds everything through §21.18 except §21.17.4's pager row (a7bb5a577); that row, §21.19, §21.20 and §21.22 (the state
+> as the topic's icon) are in neither (NOT BUILT). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -1861,6 +1861,10 @@ showing beyond unformatted ascii".
 
 #### 21.11.3 The state glyph in every topic name
 
+- **Since §21.22 (2026-10-18, NOT BUILT yet) the state is the topic's ICON**, and the name keeps the color square and the
+  title (`🟦 title`): Telegram draws a topic that has no icon of its own with the name's first character inside, so the
+  glyph showed twice. The glyph below is now the FALLBACK form, used for a run in which Telegram refuses an icon; the
+  rename rules below apply to both forms.
 - **The glyph** (`StateGlyph`): the tab strip's status dot as an emoji — Running 🔵, Waiting for you 🟡, Needs approval
   🟠, Error 🔴, Done (claude exited) 🟢, Idle ⚪ (the tab's dot is gray; Telegram has no gray circle). The name is
   `TopicDisplayName(state, title)`: the glyph, a space, the title (≤ 120 units, "…", never cut inside a pair).
@@ -3160,6 +3164,69 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
   18:56 and 18:59 on 2026-10-17, WinHTTP 12002 and 12007 — a DNS outage). The send loop retries only a 429 (§21.14.3); any
   other failure goes once to the item's callback. A final reply (`_postFinal`), a remark (`_postRemark`) and every other
   message sent without a callback are then gone; the card is posted again 60 s later and the start note is retried (§21.18).
+
+### 21.22 The state is the topic's ICON; the name keeps the color square and the title (2026-10-18; NOT BUILT yet)
+
+> The user's request (2026-10-18): "We have two color circles, the title has a status circle in icon, a status circle in
+> topic title and a color square. remove the status circle in the title when we have status circle in topic icon."
+
+**Why the state showed twice.** Every topic so far was made with an `icon_color` and no icon of its own, and the Telegram
+apps draw such a topic as a bubble in that color with the NAME'S FIRST CHARACTER inside (Telegram Android's current source:
+`ForumUtilities.createTopicDrawable`, a `LetterDrawable` of the name's first character). Every name started with the state
+glyph (§21.11, `🟡 🟦 title`), so the state stood in the icon and again at the start of the name — the user saw both.
+Telegram cannot keep a character in the icon but out of the name: the default icon is made FROM the name. The icon has
+to be set apart from the name.
+
+**What changed.**
+- **The state is the topic's icon**: `createForumTopic` and `editForumTopic` carry `icon_custom_emoji_id` (allowed in a
+  private chat's topics; `editForumTopic` changes it at any time, unlike `icon_color`, which is fixed at creation).
+  `StateTopicIcon` (MessagingModels.h, pure): Running ⚡️, Waiting for you 💬, Needs approval ❓, Error ‼️, Done (claude
+  exited) 🏁, Idle ☕️.
+- **No circles, measured.** `getForumTopicIconStickers` lists the icons a bot may set: 112 custom emoji, read 2026-10-18
+  with both bots (the same list and the same ids). None is a colored circle; the circles are custom emoji only a Premium
+  owner's bot may send (§21.15.1). The six were picked for distinct shapes, and none is a mark of the prompt line's status
+  (✅ answered, ⏹ ended, §21.12.3), so Done never reads as "answered". The ids are in the code; a refused one falls back
+  (below).
+- **The name** is the color square and the title — `🟦 agent manager tab` (`TopicDisplayName(state, square, title, true)`);
+  with no square (the "Remove colors" mode) the title alone. The creation color stays the tab's (Telegram shows it only
+  if the icon is removed). The card, the directory and every title mention are unchanged.
+- **A state change is an icon change**: the same one `editForumTopic`, under the same rules as before (§21.11.3: a state
+  held 8 s, a topic at most every 30 s, within the call budget, before the history replay — §21.14.2). Telegram's "icon
+  changed" notice is a `forum_topic_edited` service message like the rename's, and the bot deletes it the same way: two
+  calls per change, as before. A title change still renames through the sync's plan, with the icon.
+- **The form is recorded**: `TopicRecord::stateIcon` (persisted `stateIcon`; absent = false). A topic made before this build
+  shows the glyph form and is renamed ONCE into the icon form, quietly (`PickNameRename(…, stateIcons)` → `form`: the rank of
+  a quiet re-square, once the topic's state has held). A rename costs two calls and the budget is 18 calls a minute, so at
+  most ~9 topics a minute: dev's 48 in about 6 minutes, production's ~413 in about 45, longer while live traffic runs; the
+  history replay waits behind them, as behind every due rename.
+- **If Telegram refuses an icon** (`TopicIconRefused`: a 400 whose description names the icon, the emoji or the document),
+  the state icons go off for the rest of the run (`_stateIconRefused`; hooks.log `[msg] Telegram refused a topic icon
+  (<Telegram's words>): the topic names show the state glyph again until the bot starts again`). Every name gets its glyph
+  back (the form rule, the other way), a state icon a topic shows is removed (`icon_custom_emoji_id` ""), and a create is
+  made again in the glyph form. The next start tries the icons again: one refused call per run while Telegram refuses.
+- **The user's own edits.** A thread the user renames still reads its bare title (`StripTopicNameDecoration` strips an
+  optional glyph and an optional square). An icon the user sets by hand is replaced at the session's next state change.
+- **Logs**: `[msg] topic created <sid8> ⚡️ “🟦 title” (thread …)` and `[msg] topic renamed <sid8> → 💬 “🟦 title”` (the
+  icon first, as Telegram shows it; nothing before the quote in the glyph form).
+
+**Tests** (`TestMessaging`, the §21.22 block): six distinct icons with digit ids, and the ids read from Telegram; Done is no
+mark of the prompt line; the icon form's name (square and title; the title alone without a square; the one-unit Idle glyph
+dropped as cleanly as a pair; a long title cut within 128 with the square first; the glyph form equal to the §21.13 name);
+`StripTopicNameDecoration` of an icon-form name; the refusal reader (the emoji, the icon, the document — not a 429, a
+deleted thread, "not modified" or no words); the picker (a glyph-form topic is a quiet re-form, the glyph form wanted brings
+icon topics back, an unsettled state waits, a state change goes first, nothing is due when every topic shows its state in
+its icon); `stateIcon`'s round trip and an older file. The isolated m5 run (HEAD a7bb5a577 + this work; the two commits
+since change only documents): 8,089 checks, only the 3 known TestTaskbarBadge failures. `cl /Zs` with the last Debug
+build's recorded flags of Messaging.cpp, Messaging.Inbound.cpp, Engine.cpp, MessagingSearchBridge.cpp,
+AgentManagerContent.Settings.cpp and TerminalPage.AgentEngine.cpp: clean; a negative control (a false `static_assert` on
+`TopicStateIcon` appended to a copy of Messaging.cpp) failed with C2338, as it must.
+
+**Check after the build** (each install, on the phone and in the desktop app):
+1. After the start-up hold the existing topics change one by one (hooks.log `[msg] topic renamed <sid8> → 💬 “🟦 …”`): each
+   topic's icon shows its state, its name no longer starts with a circle, and no "changed the title" line appears.
+2. A session that starts a turn: its topic's icon turns ⚡️ about 8 s later, and 💬 after the turn; the name stays.
+3. A new tab: its topic is created with its state icon and a name without a glyph.
+4. hooks.log holds no `Telegram refused a topic icon` line; if it does, every name has its glyph back and the line says why.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

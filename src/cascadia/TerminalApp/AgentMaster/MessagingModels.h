@@ -1848,6 +1848,16 @@ namespace Agentmaster::Msg
         std::wstring nameColor;
         int nameColorMode{ -1 };
         /// <summary>
+        /// Whether the topic's ICON shows its session's state (§21.22, the user's "remove the status circle in the title when we
+        /// have status circle in topic icon"): true = the icon is StateTopicIcon(nameState) and the NAME carries no state glyph
+        /// (TopicDisplayName's stateIcon form, `🟦 title`); false = the name starts with the glyph (§21.11, `🟡 🟦 title`) and the
+        /// icon is Telegram's default, which draws the name's first character — the state a second time. Recorded with every
+        /// rename and create (what the call asked for); persisted as `stateIcon`. Absent in an older file = false: the topic is
+        /// renamed once into the icon form, quietly (PickNameRename's form rule). After Telegram refused an icon in a run
+        /// (TopicIconRefused), the topics that show one go back to the glyph form for the rest of that run.
+        /// </summary>
+        bool stateIcon{ false };
+        /// <summary>
         /// The LAST PROMPT the user sent in this topic's session (§21.12) — the one whose line carries the turn's status and
         /// whose message the turn's final reply answers. `promptMessageId`: the bot's prompt line, or the user's own message
         /// (a prompt from the phone, or one sent as the user by the secretary bot); 0 = not known yet (the send has not
@@ -2036,6 +2046,8 @@ namespace Agentmaster::Msg
             // §21.13: the name's color square and the mode it was resolved under (-1 = the name predates the square).
             to.Set(L"nameColor", json::Value::MkStr(t.nameColor));
             to.Set(L"nameColorMode", json::Value::MkNum(static_cast<double>(t.nameColorMode)));
+            // §21.22: the state is the topic's icon, and the name carries no glyph.
+            to.Set(L"stateIcon", json::Value::MkBool(t.stateIcon));
             if (t.promptMessageId != 0 || !t.promptText.empty())
             {
                 // §21.12: the last prompt's line (omitted when the live mirror has seen none).
@@ -2139,6 +2151,8 @@ namespace Agentmaster::Msg
                 // §21.13 (absent in an older file: a name with no square yet and an unknown mode — re-squared once, quietly).
                 t.nameColor = to.StrAt(L"nameColor");
                 t.nameColorMode = std::clamp(static_cast<int>(to.I64At(L"nameColorMode", -1)), -1, static_cast<int>(TabColorMode::NoColor));
+                // §21.22 (absent in an older file: the glyph form — renamed once into the icon form, quietly).
+                t.stateIcon = to.BoolAt(L"stateIcon", false);
                 // §21.12 (absent in an older file: no prompt tracked yet — the next live prompt starts it).
                 t.promptMessageId = to.I64At(L"promptMessageId", 0);
                 t.promptBotLine = to.BoolAt(L"promptBotLine", false);
@@ -2514,6 +2528,92 @@ namespace Agentmaster::Msg
         }
     }
 
+    /// <summary>
+    /// A state's topic ICON (§21.22): one of Telegram's forum-topic icons — the 112 custom emoji that getForumTopicIconStickers
+    /// lists and any bot may set without Premium (read 2026-10-18; both bots got the same ids). Why the state moved into the
+    /// icon: Telegram draws a topic that has no icon of its own as a bubble in its creation color with the NAME'S FIRST
+    /// CHARACTER inside (Telegram iOS and Web take the first grapheme), so a name that starts with the state glyph showed the
+    /// state twice, in the icon and in the name — the user's "two color circles" (2026-10-18). The icon is set apart from the
+    /// name, and editForumTopic can change it at any time (a topic's `icon_color` is fixed at creation), so the state goes
+    /// there and the name keeps the color square and the title (TopicDisplayName's stateIcon form). None of the 112 icons is a
+    /// colored circle (the circles are custom emoji only a Premium owner's bot may use), so the states read as shapes:
+    /// Running ⚡️, Waiting for you 💬, Needs approval ❓, Error ‼️, Done (claude exited) 🏁, Idle ☕️ — six distinct icons, and
+    /// none of the marks of the prompt line's status (§21.12.3: ✅ answered, ⏹ ended), so "done" never reads as "answered".
+    /// </summary>
+    struct TopicStateIcon
+    {
+        const wchar_t* emoji; // what the icon shows (the logs, the docs)
+        const wchar_t* customEmojiId; // Telegram's custom_emoji_id, for createForumTopic / editForumTopic `icon_custom_emoji_id`
+    };
+
+    /// <summary>The topic icon that shows a session's state (§21.22).</summary>
+    /// <param name="s">The state.</param>
+    /// <returns>The icon (static strings).</returns>
+    inline TopicStateIcon StateTopicIcon(SessionState s) noexcept
+    {
+        switch (s)
+        {
+        case SessionState::Running:
+            return { L"\x26A1\xFE0F", L"5312016608254762256" };
+        case SessionState::WaitingForInput:
+            return { L"\U0001F4AC", L"5417915203100613993" };
+        case SessionState::NeedsApproval:
+            return { L"\x2753", L"5377316857231450742" };
+        case SessionState::Error:
+            return { L"\x203C\xFE0F", L"5377498341074542641" };
+        case SessionState::Done:
+            return { L"\U0001F3C1", L"5408906741125490282" };
+        case SessionState::Idle:
+        default:
+            return { L"\x2615\xFE0F", L"5350392020785437399" };
+        }
+    }
+
+    /// <summary>
+    /// Whether Telegram refused a topic call because of its ICON (§21.22): a 400 whose description names the icon, the custom
+    /// emoji, or the document behind it ("icon", "emoji", "document_invalid", any case). The service then puts the state glyph
+    /// back into the topic names for the rest of the run, so a topic never loses its state. Every other answer — a 429, "message
+    /// thread not found", "topic not modified" — is not an icon refusal. No allocation: a refusal is read on the tick thread.
+    /// </summary>
+    /// <param name="httpStatus">The call's HTTP status.</param>
+    /// <param name="description">Telegram's description of the refusal.</param>
+    /// <returns>True for an icon refusal.</returns>
+    inline bool TopicIconRefused(int httpStatus, std::wstring_view description) noexcept
+    {
+        if (httpStatus != 400)
+        {
+            return false;
+        }
+        const auto containsCi = [description](std::wstring_view needle) {
+            if (needle.size() > description.size())
+            {
+                return false;
+            }
+            for (size_t at = 0; at + needle.size() <= description.size(); ++at)
+            {
+                size_t i = 0;
+                for (; i < needle.size(); ++i)
+                {
+                    wchar_t c = description[at + i];
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a'); // ASCII folding: Telegram's descriptions are ASCII
+                    }
+                    if (c != needle[i])
+                    {
+                        break;
+                    }
+                }
+                if (i == needle.size())
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return containsCi(L"icon") || containsCi(L"emoji") || containsCi(L"document_invalid");
+    }
+
     // The most UTF-16 units of a title in a topic's name (Telegram allows 128 characters; the glyph and a space go first).
     inline constexpr size_t kTopicTitleMaxChars = 120;
 
@@ -2563,6 +2663,29 @@ namespace Agentmaster::Msg
             // glyph is one or two UTF-16 units, StateGlyph's table).
             const size_t at = std::wstring_view{ StateGlyph(s) }.size() + 1;
             name.insert(at, std::wstring{ colorSquare } + L" ");
+        }
+        return name;
+    }
+
+    /// <summary>
+    /// A topic's name in either FORM (§21.22): with `stateIcon` the topic's ICON shows the state (StateTopicIcon), so the name
+    /// is the color square, a space, the title — `🟦 agent manager tab` (no square: the title alone); without it, the
+    /// 3-argument name exactly (`🟡 🟦 agent manager tab`, the glyph form a topic falls back to when Telegram refuses an icon).
+    /// The title is cut like the 3-argument name, so the icon form never runs past Telegram's 128 characters either.
+    /// </summary>
+    /// <param name="s">The session's state (the glyph form's first character; the icon form leaves it to the icon).</param>
+    /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = no square).</param>
+    /// <param name="title">The tab title ("" = the caller's fallback, e.g. the short session id).</param>
+    /// <param name="stateIcon">True when the topic's icon shows the state (the name then carries no glyph).</param>
+    /// <returns>The name for createForumTopic / editForumTopic.</returns>
+    /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+    inline std::wstring TopicDisplayName(SessionState s, std::wstring_view colorSquare, std::wstring_view title, bool stateIcon)
+    {
+        std::wstring name = TopicDisplayName(s, colorSquare, title);
+        if (stateIcon)
+        {
+            // The 3-argument name starts "<glyph> " (StateGlyph's one or two UTF-16 units and a space): drop exactly that.
+            name.erase(0, std::wstring_view{ StateGlyph(s) }.size() + 1);
         }
         return name;
     }
@@ -2855,8 +2978,9 @@ namespace Agentmaster::Msg
     struct NameRenamePick
     {
         std::wstring sessionId; // "" = no rename is due
-        bool state{ false }; // the name's glyph shows another state than the session's
+        bool state{ false }; // the topic shows another state than the session's (its icon, or its name's glyph)
         bool color{ false }; // the name's square differs from the tab's color square (§21.13)
+        bool form{ false }; // the topic shows its state the other way than wanted: the glyph in the name vs the icon (§21.22)
     };
 
     /// <summary>
@@ -2868,14 +2992,21 @@ namespace Agentmaster::Msg
     /// of a tab (the topic's square was resolved under `colorMode`: its topic gets a line about it), then the quiet re-squares
     /// (a topic named before §21.13 or under another mode), each the change that has held the longest first. A title change is
     /// not this function's: PlanTopicSync's Rename sets the title, the glyph and the square at once.
+    /// Since §21.22 the state may be the topic's ICON instead of the name's glyph (TopicRecord::stateIcon): a topic that shows
+    /// its state the other way than `stateIcons` asks — a glyph-form name made before §21.22, or an icon after Telegram refused
+    /// one in this run — is due too, as a QUIET change of the same rank as a quiet re-square, once its state has held
+    /// kNameStateSettleMs (so the call carries a settled state). The same call fixes a state, a square and the form at once.
     /// </summary>
     /// <param name="facts">The live sessions (the sync's facts, with stateSinceMs, colorHex and colorSinceMs).</param>
     /// <param name="topics">The topic map.</param>
     /// <param name="nowMs">The clock (Unix ms).</param>
     /// <param name="colorMode">The tab-color mode the facts' colors were resolved under.</param>
+    /// <param name="stateIcons">True when the topics' icons should show the states (the service's state icons, §21.22: on until
+    /// Telegram refuses an icon in a run); false = the glyph form, the rule before §21.22 (the default, which the m5 suite's
+    /// §21.11–§21.13 checks pin).</param>
     /// <returns>The topic to rename and why; an empty session id when none is due.</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
-    inline NameRenamePick PickNameRename(const std::vector<TabFact>& facts, const std::map<std::wstring, TopicRecord>& topics, int64_t nowMs, TabColorMode colorMode)
+    inline NameRenamePick PickNameRename(const std::vector<TabFact>& facts, const std::map<std::wstring, TopicRecord>& topics, int64_t nowMs, TabColorMode colorMode, bool stateIcons = false)
     {
         // 0-3: a state the name must show (PickStateRename's urgency); 4: the tab's color changed; 5: a quiet re-square.
         const auto urgency = [](SessionState s) {
@@ -2910,19 +3041,24 @@ namespace Agentmaster::Msg
             {
                 continue; // renamed lately
             }
-            const bool stateDue = t.nameState != static_cast<int>(f.state) && (f.stateSinceMs <= 0 || nowMs - f.stateSinceMs >= kNameStateSettleMs);
+            const bool stateSettled = f.stateSinceMs <= 0 || nowMs - f.stateSinceMs >= kNameStateSettleMs;
+            const bool stateDue = t.nameState != static_cast<int>(f.state) && stateSettled;
             const bool colorDue = t.nameColor != TgTitleColorSquare(f.colorHex) && (f.colorSinceMs <= 0 || nowMs - f.colorSinceMs >= kNameStateSettleMs);
-            if (!stateDue && !colorDue)
+            // §21.22: the state shown the other way than wanted (glyph vs icon) — quiet, and only with a settled state.
+            const bool formDue = t.stateIcon != stateIcons && stateSettled;
+            if (!stateDue && !colorDue && !formDue)
             {
                 continue; // up to date, or a change that has not held yet
             }
-            const int rank = stateDue ? urgency(f.state) : (t.nameColorMode == static_cast<int>(colorMode) ? 4 : 5);
-            const int64_t since = stateDue ? f.stateSinceMs : f.colorSinceMs;
+            // A form change alone ranks with the quiet re-squares (5): every state and every real color change goes first.
+            const int rank = stateDue ? urgency(f.state) : (colorDue && t.nameColorMode == static_cast<int>(colorMode) ? 4 : 5);
+            const int64_t since = stateDue ? f.stateSinceMs : (colorDue ? f.colorSinceMs : f.stateSinceMs);
             if (pick.sessionId.empty() || rank < bestRank || (rank == bestRank && since < bestSince))
             {
                 pick.sessionId = f.sessionId;
                 pick.state = stateDue;
                 pick.color = colorDue;
+                pick.form = formDue;
                 bestRank = rank;
                 bestSince = since;
             }
