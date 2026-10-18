@@ -546,7 +546,7 @@ namespace Agentmaster::Msg
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
         /// <summary>
-        /// The card's buttons on one page (§21.24 - Main: ⚙ Session · ⑂ Fork · 🆕 New Session · 🔄 Restart Session; Session: the
+        /// The card's buttons on one page (§21.24 - Main: ⚙ Session · 🔄 Restart Session; Session: ⑂ Fork · 🆕 New Session, the
         /// card's buttons of before, 🖼 Screen Image and ◀ Back), each page led by the state's own action (🔧 Resume Session for a
         /// session in Error, ▶ Reactivate for a parked tab or a claude that exited). BuildCardButtonRows lays them out.
         /// </summary>

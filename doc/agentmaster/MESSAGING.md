@@ -532,10 +532,10 @@ As built (§21.18): the runner line is left out while it is the common default �
 queued, no global pause; a Paused runner, the global pause or a queued prompt brings it back as above.
 
 As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, every card's default: the state's own action
-first ([🔧 Resume Session] in Error, [▶ Reactivate] for a parked tab or a claude that exited), then [⚙️ Session] [⑂ Fork] ·
-[🆕 New Session] [🔄 Restart Session]. **⚙️ Session** turns the keyboard into the Session page: the same first row,
-[⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] ·
-[◀ Back]. **More ▸** stays the `/commands` (§21.2).
+first ([🔧 Resume Session] in Error, [▶ Reactivate] for a parked tab or a claude that exited), then [⚙️ Session]
+[🔄 Restart Session]. **⚙️ Session** turns the keyboard into the Session page: the same first row, [⑂ Fork]
+[🆕 New Session] · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
+[🖼 Screen Image] · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
 
 ### 6.2 What it is doing, or whether it is idle
 
@@ -1198,7 +1198,7 @@ transport's failures and slow calls.
   clear is a UI-thread action a later build routes through the hosting window.
 - **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
   is the `/commands`. *(§21.5 added ▶ Reactivate, the first row while the session is parked, in Error or exited.)*
-  *(§21.24 put them on two pages — Main: ⚙️ Session, ⑂ Fork, 🆕 New Session, 🔄 Restart Session; Session: the five,
+  *(§21.24 put them on two pages — Main: ⚙️ Session, 🔄 Restart Session; Session: ⑂ Fork, 🆕 New Session, the five,
   🖼 Screen Image and ◀ Back — and names the first row 🔧 Resume Session for a session in Error.)*
 - **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
   it; the user pins it). Its answers carry one pick button per listed session and ⊘ Clear; a pick opens the
@@ -3483,8 +3483,12 @@ service's `_cardMarkupFor`). Two buttons a row at most, so a phone shows every l
 
 | Page | Rows |
 |---|---|
-| **Main** (every card's default) | [🔧 Resume Session] for a session in Error, else [▶ Reactivate] for a parked tab or a claude that exited (no first row for a running or waiting session) · [⚙️ Session] [⑂ Fork] · [🆕 New Session] [🔄 Restart Session] |
-| **Session** (after ⚙️ Session) | the same first row · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] · [◀ Back] |
+| **Main** (every card's default) | [🔧 Resume Session] for a session in Error, else [▶ Reactivate] for a parked tab or a claude that exited (no first row for a running or waiting session) · [⚙️ Session] [🔄 Restart Session] |
+| **Session** (after ⚙️ Session) | the same first row · [⑂ Fork] [🆕 New Session] · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] · [◀ Back] |
+
+> The user's follow-up (2026-10-18), on the first layout, which had [⑂ Fork] [🆕 New Session] on Main: "[⑂ Fork] · [🆕 New
+> Session] should be after ⚙️ Session" — read as: on the page ⚙️ Session opens, so they moved there, as its first row.
+> 🔄 Restart Session stays on Main beside ⚙️ Session.
 
 A button's data stays `c:<verb>:<session id>`, with no token: the verb acts on the session's state when it is tapped (M5 is
 about answers and queue items). New verbs: `panel` (⚙️ Session), `main` (◀ Back), `fork`, `newsession`, `restart`, `resume`,
@@ -3498,10 +3502,10 @@ The old verbs stay understood, so a card posted before this build keeps working 
   starts to RING (the session exited, errs or needs approval — a state change, so once per episode) goes back to Main, where
   the state's own action is; a page opened after that is kept. On a copy of the card (a `/status` reply) only that message's
   buttons change (`editMessageReplyMarkup`). After a restart every card shows Main.
-- **⑂ Fork / 🆕 New Session** are the topic's `/forksession` and `/newsession` with no model, through the very same code
-  (`_launchFromCard` → `_runSessionCommand`): the thread gets the commands' own lines ("Forking into a tab…", then "Opened
-  <the fork's title> — its topic is coming up.", §21.23), and the toast only says it was asked ("⑂ Forking it into a new
-  tab…", "🆕 Opening a new session in its folder…").
+- **⑂ Fork / 🆕 New Session** (the Session page's first row) are the topic's `/forksession` and `/newsession` with no
+  model, through the very same code (`_launchFromCard` → `_runSessionCommand`): the thread gets the commands' own lines
+  ("Forking into a tab…", then "Opened <the fork's title> — its topic is coming up.", §21.23), and the toast only says it
+  was asked ("⑂ Forking it into a new tab…", "🆕 Opening a new session in its folder…").
 - **🔄 Restart Session** is `/restartsession` (`_restartFromCard`): a session at rest is restarted at once — the same
   conversation resumes in its tab, toast "🔄 Restarting it — the same conversation resumes in its tab." While a turn RUNS, the
   command's question with its [Restart now] [Cancel] goes into the thread (the turn would be cut off) and the toast points at
@@ -3580,8 +3584,9 @@ emoji, wide CJK, blocks, rules joined). NOT BUILT; nothing tried live.
 (the build-install skill's §5.8).
 
 **Check after the build** (dev, with the bot):
-1. A topic's card shows [⚙️ Session] [⑂ Fork] · [🆕 New Session] [🔄 Restart Session]; ⚙️ Session flips it at once to the
-   Session page and ◀ Back flips it back; a new message in the topic (the card re-posted below it) keeps the page.
+1. A topic's card shows [⚙️ Session] [🔄 Restart Session]; ⚙️ Session flips it at once to the Session page, whose first row
+   is [⑂ Fork] [🆕 New Session], and ◀ Back flips it back; a new message in the topic (the card re-posted below it) keeps the
+   page.
 2. 🖼 Screen Image on a live session: "🖼 Drawing the screen…", then a photo of the screen in its colors (hooks.log `[msg]
    screen picture of …`); on a parked tab: "The screen could not be read …". `/screenimage` typed: the same.
 3. ⑂ Fork: "Forking into a tab…", then "Opened <the fork's title> — its topic is coming up."; 🆕 New Session likewise, in the
