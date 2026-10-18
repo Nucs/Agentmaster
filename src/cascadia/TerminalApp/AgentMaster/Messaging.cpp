@@ -856,6 +856,7 @@ namespace Agentmaster::Msg
             }
             _lastGetMeMs = 0;
             _startNotePosted = false;
+            _stateIconRefused.store(false); // §21.22: every start tries the state icons again (one refused call when Telegram still refuses)
             _startedMs = WallMs(); // the start-up hold on "closed" deletes counts from here
             _startupHoldLogged = false;
             // §21.18: count this start (only the first one of the process, at its launch, rings — ClassifyStartNote), re-arm
@@ -3708,31 +3709,60 @@ namespace Agentmaster::Msg
 
     void MessagingService::_createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose)
     {
-        // The name carries the state glyph first (§21.11), then the tab color's square (§21.13); the record keeps the bare
-        // title, which the sync compares with the tab's (a long title is cut in the name only), and the square.
+        // §21.22: the state is the topic's ICON, and the name is the tab color's square and the title (§21.13) — a name that
+        // started with the state glyph (§21.11) showed the state twice, since Telegram draws a topic with no icon of its own as
+        // its name's first character in a colored bubble. While Telegram refuses icons in this run, the glyph form. The record
+        // keeps the bare title, which the sync compares with the tab's (a long title is cut in the name only), the square and
+        // the form.
         const std::wstring bare = title.empty() ? ShortId(sessionId) : title;
         const std::wstring square = TgTitleColorSquare(colorHex);
-        const std::wstring name = TopicDisplayName(state, square, bare);
-        auto p = json::Value::MkObj();
-        p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
-        p.Set(L"name", json::Value::MkStr(name));
-        p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(TgTopicIconColor(colorHex))));
+        const TopicStateIcon icon = StateTopicIcon(state);
+        bool stateIcon = _stateIconsWanted();
+        std::wstring name = TopicDisplayName(state, square, bare, stateIcon);
+        // One attempt's parameters: the name, the creation color (the tab's — what Telegram shows if the icon is ever removed,
+        // and the only color it lets a topic have) and the state icon, as far as the attempt keeps them.
+        const auto params = [&](bool withColor, bool withIcon) {
+            auto p = json::Value::MkObj();
+            p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            p.Set(L"name", json::Value::MkStr(name));
+            if (withColor)
+            {
+                p.Set(L"icon_color", json::Value::MkNum(static_cast<double>(TgTopicIconColor(colorHex))));
+            }
+            if (withIcon)
+            {
+                p.Set(L"icon_custom_emoji_id", json::Value::MkStr(icon.customEmojiId));
+            }
+            return p;
+        };
         if (!_awaitCallSlot(L"createForumTopic"))
         {
             return; // stopping, or a long 429 parks topic creation: the sync plans the topic again on a later tick
         }
-        TgResult r = _api->Call(L"createForumTopic", p, 20000);
-        if (!r.ok && r.httpStatus == 400 && r.description.find(L"icon") != std::wstring::npos)
+        TgResult r = _api->Call(L"createForumTopic", params(true, stateIcon), 20000);
+        std::wstring iconRefusal; // §21.22: Telegram's words, when it refused the create that carried the state icon
+        if (!r.ok && stateIcon && TopicIconRefused(r.httpStatus, r.description))
         {
-            // A color Telegram did not take: create without one.
-            auto p2 = json::Value::MkObj();
-            p2.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
-            p2.Set(L"name", json::Value::MkStr(name));
+            // Telegram did not take the icon (or the color — the next answer tells): the glyph form, with the color.
+            iconRefusal = r.description;
+            stateIcon = false;
+            name = TopicDisplayName(state, square, bare);
             if (!_awaitCallSlot(L"createForumTopic"))
             {
                 return;
             }
-            r = _api->Call(L"createForumTopic", p2, 20000);
+            r = _api->Call(L"createForumTopic", params(true, false), 20000);
+        }
+        bool colorDropped = false;
+        if (!r.ok && r.httpStatus == 400 && r.description.find(L"icon") != std::wstring::npos)
+        {
+            // A color Telegram did not take: create without one.
+            colorDropped = true;
+            if (!_awaitCallSlot(L"createForumTopic"))
+            {
+                return;
+            }
+            r = _api->Call(L"createForumTopic", params(false, false), 20000);
         }
         if (!r.ok)
         {
@@ -3741,6 +3771,13 @@ namespace Agentmaster::Msg
             _handleTickFlood(L"createForumTopic", r);
             _log(L"[msg] topic create failed for " + ShortId(sessionId) + L": " + r.description);
             return;
+        }
+        if (!iconRefusal.empty() && !colorDropped && !_stateIconRefused.exchange(true))
+        {
+            // Leaving the icon out is what made the create go through: Telegram refuses the state icons, so every topic shows the
+            // glyph again for this run (PickNameRename's form rule). A create that also had to drop its color proves nothing
+            // about the icon: that topic is made in the glyph form, and the name tick's next try of the icon finds out.
+            _log(L"[msg] Telegram refused a topic icon (" + iconRefusal + L"): the topic names show the state glyph again until the bot starts again");
         }
         const int64_t thread = r.result.I64At(L"message_thread_id", 0);
         if (thread == 0)
@@ -3760,6 +3797,7 @@ namespace Agentmaster::Msg
         t.nameSetMs = t.createdMs;
         t.nameColor = square; // §21.13: the square the name shows, and the mode it was resolved under
         t.nameColorMode = static_cast<int>(_currentColorMode());
+        t.stateIcon = stateIcon; // §21.22: the icon shows the state (the name has no glyph), or the glyph form after a refusal
         t.verbose = verbose; // §21.11: -1 follows the default; a topic recreated in a mode keeps that mode
         if (s)
         {
@@ -3779,7 +3817,7 @@ namespace Agentmaster::Msg
         {
             rank = L", most recent " + TgClockText(ok->second.first, WallMs());
         }
-        _log(L"[msg] topic created " + ShortId(sessionId) + L" \x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L", " +
+        _log(L"[msg] topic created " + ShortId(sessionId) + L" " + (stateIcon ? std::wstring{ icon.emoji } + L" " : std::wstring{}) + L"\x201C" + name + L"\x201D (thread " + std::to_wstring(thread) + L", " +
              (t.transcriptPath.empty() ? std::wstring{ L"no transcript yet: mirrored from its first line" } : L"mirrored from byte " + std::to_wstring(t.cursor)) + rank + L")");
         if (!s)
         {
@@ -4810,45 +4848,91 @@ namespace Agentmaster::Msg
             thread = it->second.threadId;
             before = it->second;
         }
-        // The state glyph first (§21.11), then the tab color's square once that color has held (§21.13: a rename for the
-        // state or the title never carries a color that is still changing; ChooseNameColor keeps the old square then).
+        // §21.22: the state is the topic's ICON while Telegram takes the icons, and the name is the tab color's square (once
+        // that color has held — §21.13: a rename for the state or the title never carries a color that is still changing;
+        // ChooseNameColor keeps the old square then) and the title; a state change then changes only the icon. After a refused
+        // icon in this run, the glyph form (§21.11), and a state icon the topic still shows is removed ("" removes it).
         const int64_t now = WallMs();
         const NameColorChoice color = ChooseNameColor(_lastFact(sessionId), before, now, _currentColorMode());
-        const std::wstring name = TopicDisplayName(state, color.square, title);
-        auto p = json::Value::MkObj();
-        p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
-        p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
-        p.Set(L"name", json::Value::MkStr(name));
+        const bool wantIcon = _stateIconsWanted();
+        const TopicStateIcon icon = StateTopicIcon(state);
+        const std::wstring name = TopicDisplayName(state, color.square, title, wantIcon);
+        const auto params = [&](bool touchIcon) {
+            auto p = json::Value::MkObj();
+            p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+            p.Set(L"message_thread_id", json::Value::MkNum(static_cast<double>(thread)));
+            p.Set(L"name", json::Value::MkStr(name));
+            if (touchIcon)
+            {
+                p.Set(L"icon_custom_emoji_id", json::Value::MkStr(wantIcon ? std::wstring{ icon.customEmojiId } : std::wstring{}));
+            }
+            return p;
+        };
         if (!_awaitCallSlot(L"editForumTopic"))
         {
             return; // stopping, or a long 429 parks renames: the name stays due, and a later tick (or run) renames it
         }
-        const TgResult r = _api->Call(L"editForumTopic", p, 20000);
-        if (_handleTickFlood(L"editForumTopic", r))
-        {
+        // The icon is touched when it should show the state, or when it shows one that must go (the glyph form after a refusal).
+        TgResult r = _api->Call(L"editForumTopic", params(wantIcon || before.stateIcon), 20000);
+        const auto floodRefused = [&]() {
+            if (!_handleTickFlood(L"editForumTopic", r))
+            {
+                return false;
+            }
             // Telegram's flood control refused it: NOT recorded, so the name stays due and is made after the pause (the
             // record used to take the new state "either way", and a topic refused this way kept its old glyph until the
             // session's next change).
             _log(L"[msg] topic rename of " + ShortId(sessionId) + L" refused by Telegram's flood control (429); it is made again after the pause");
+            return true;
+        };
+        if (floodRefused())
+        {
             return;
+        }
+        if (!r.ok && (wantIcon || before.stateIcon) && TopicIconRefused(r.httpStatus, r.description))
+        {
+            // §21.22: Telegram refused the topic ICON. The glyph form for the rest of the run: every topic that shows a state
+            // icon becomes due for it (PickNameRename's form rule), and the next try of the icons is the bot's next start.
+            if (!_stateIconRefused.exchange(true))
+            {
+                _log(L"[msg] Telegram refused a topic icon (" + r.description + L"): the topic names show the state glyph again until the bot starts again");
+            }
+            if (wantIcon)
+            {
+                // Nothing changed on Telegram's side: NOT recorded, so the topic stays due and the next name tick renames it
+                // in the glyph form.
+                return;
+            }
+            // The REMOVAL of a state icon was refused: the glyph-form name without touching the icon (its old state icon stays
+            // beside the glyph), recorded as the glyph form so it is not tried again every tick.
+            if (!_awaitCallSlot(L"editForumTopic"))
+            {
+                return;
+            }
+            r = _api->Call(L"editForumTopic", params(false), 20000);
+            if (floodRefused())
+            {
+                return;
+            }
         }
         {
             std::lock_guard lk{ _mtx };
             if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
             {
-                // Remember the title and the glyph's state either way (a refusal other than the flood control's — a name
+                // Remember the title and the state either way (a refusal other than the flood control's or an icon's — a name
                 // Telegram will not take — must not be retried every tick).
                 it->second.title = title;
                 it->second.nameState = static_cast<int>(state);
                 it->second.nameSetMs = WallMs();
                 it->second.nameColor = color.square; // §21.13: and the square, with the mode it stands for
                 it->second.nameColorMode = color.mode;
+                it->second.stateIcon = wantIcon; // §21.22: the icon shows the state, or the glyph form (after a refused icon)
                 _stateDirty = true;
             }
         }
         if (r.ok)
         {
-            _log(L"[msg] topic renamed " + ShortId(sessionId) + L" \x2192 \x201C" + name + L"\x201D");
+            _log(L"[msg] topic renamed " + ShortId(sessionId) + L" \x2192 " + (wantIcon ? std::wstring{ icon.emoji } + L" " : std::wstring{}) + L"\x201C" + name + L"\x201D");
             // §21.13, the CHANGE LINE (the user's "a message like whatsapp does for group chat name changed"): a new title, or
             // the tab's color changed from one square to another under a settled mode. Silent, and it does not move the sticky
             // card (one call, not three: the next real post moves the card below it). Telegram's own "topic renamed" notice is
@@ -4900,8 +4984,10 @@ namespace Agentmaster::Msg
                     return;
                 }
                 // §21.13: the state glyph AND the color square (PickNameRename: PickStateRename's rule, then the tabs whose
-                // color changed, then the quiet re-squares of topics named before the square or under another mode).
-                sid = PickNameRename(_lastFacts, _state.topics, WallMs(), _currentColorMode()).sessionId;
+                // color changed, then the quiet re-squares of topics named before the square or under another mode). §21.22:
+                // the state is the topic's ICON while Telegram takes the icons, and a topic that still shows its state the other
+                // way (a glyph-form name made before §21.22, or an icon after a refusal in this run) is a quiet re-form.
+                sid = PickNameRename(_lastFacts, _state.topics, WallMs(), _currentColorMode(), _stateIconsWanted()).sessionId;
                 if (sid.empty())
                 {
                     _renameWaitingSinceMs = 0;
@@ -5409,6 +5495,11 @@ namespace Agentmaster::Msg
             LogSwallowedException(L"MessagingService::_currentColorMode");
             return TabColorMode::WorkingDirectory;
         }
+    }
+
+    bool MessagingService::_stateIconsWanted() const noexcept
+    {
+        return !_stateIconRefused.load();
     }
 
     std::wstring MessagingService::_titleSquare(const SessionInfo* s, const std::wstring& dirFallback) const noexcept

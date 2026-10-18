@@ -552,36 +552,50 @@ namespace Agentmaster::Msg
         void _onStartNoteSent(int64_t threadId, const TgResult& r);
         void _syncTopics();
         /// <summary>
-        /// Makes a session's topic: named TopicDisplayName(state, square, title) (the state glyph, then the tab color's square:
-        /// §21.11, §21.13), its icon colored like the tab, seeded from the transcript (its history replayed first, §21.9), its
-        /// card posted. The record keeps the square and the tab-color mode it stands for (TopicRecord::nameColor /
-        /// nameColorMode). `verbose` is the new topic's TopicRecord::verbose (-1 = the default for all; a topic recreated in a
-        /// mode passes 0 or 1). Tick thread.
+        /// Makes a session's topic: its ICON the state's (StateTopicIcon, §21.22) and its name TopicDisplayName(state, square,
+        /// title, true) — the tab color's square and the title, no glyph (§21.13) — while state icons are wanted
+        /// (_stateIconsWanted); else the glyph form (§21.11). The creation color (`icon_color`) is still the tab's: it is what
+        /// Telegram shows if the icon is ever removed. A create Telegram refuses for its icon is made again in the glyph form
+        /// (and the state icons go off for the run); one refused for its color, without it. Seeded from the transcript (its
+        /// history replayed first, §21.9), its card posted. The record keeps the square, the tab-color mode it stands for and
+        /// the form (TopicRecord::nameColor / nameColorMode / stateIcon). `verbose` is the new topic's TopicRecord::verbose
+        /// (-1 = the default for all; a topic recreated in a mode passes 0 or 1). Tick thread.
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <param name="title">Its tab title ("" = the short id).</param>
         /// <param name="colorHex">Its tab color (ResolveSessionColorHex; "" = none: no icon color, no square).</param>
-        /// <param name="state">Its state (the name's glyph).</param>
+        /// <param name="state">Its state (the icon, or the name's glyph in the glyph form).</param>
         /// <param name="verbose">The topic's own verbose mode.</param>
         void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose = -1);
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
         /// <summary>
-        /// Renames a session's topic to TopicDisplayName(state, square, title) and records all three (a refused rename is
-        /// recorded too, so it is not retried every tick). The square is ChooseNameColor's: the tab's color once it has held,
-        /// else the one the name shows. When the TITLE changed, or the tab's COLOR changed from one square to another under a
-        /// settled mode, a silent line in the topic says so (BuildTopicChangeNoticeHtml — the user's "a message like whatsapp
-        /// does for group chat name changed", §21.13); a state-only rename, a quiet re-square and a topic whose history is
-        /// still being replayed get none. The card is refreshed after a rename Telegram took. Tick thread (a direct call,
-        /// paced by _awaitCallSlot).
+        /// Updates a session's topic in ONE editForumTopic: its ICON to the state's (StateTopicIcon) and its name to
+        /// TopicDisplayName(state, square, title, true) while state icons are wanted (§21.22) — a state change then changes only
+        /// the icon —, else the glyph form with any state icon the topic shows removed. Records the title, the state, the square
+        /// and the form (a refused rename is recorded too, so it is not retried every tick — except a refusal of Telegram's flood
+        /// control, and a refused ICON, which turns the state icons off for the run and leaves the topic due in the glyph form).
+        /// The square is ChooseNameColor's: the tab's color once it has held, else the one the name shows. When the TITLE
+        /// changed, or the tab's COLOR changed from one square to another under a settled mode, a silent line in the topic says
+        /// so (BuildTopicChangeNoticeHtml — the user's "a message like whatsapp does for group chat name changed", §21.13); a
+        /// state-only change, a quiet re-square or re-form and a topic whose history is still being replayed get none. The card
+        /// is refreshed after a rename Telegram took. Tick thread (a direct call, paced by _awaitCallSlot).
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <param name="title">The title the name shows from now on.</param>
-        /// <param name="state">The state its glyph shows.</param>
+        /// <param name="state">The state the topic shows (its icon, or its name's glyph in the glyph form).</param>
         void _renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state);
         /// <summary>
-        /// The topic NAMES' state glyphs and color squares (§21.11, §21.13), once per tick after the sync: at most one rename
-        /// (PickNameRename over the sync's facts: the states that need the user, then a tab's color change, then the quiet
-        /// re-squares) and only while the last minute's calls leave room for its two calls (NameRenameFits), no 429 pause runs
+        /// Whether the topics show their sessions' states as their ICONS (§21.22, TopicRecord::stateIcon) — true until Telegram
+        /// refuses a topic icon in this run (TopicIconRefused; then the glyph form, §21.11, until the bot starts again). Any
+        /// thread.
+        /// </summary>
+        /// <returns>True when the state icons are wanted.</returns>
+        bool _stateIconsWanted() const noexcept;
+        /// <summary>
+        /// The topics' states (their icons, §21.22 — or their names' glyphs in the glyph form, §21.11) and color squares
+        /// (§21.13), once per tick after the sync: at most one rename (PickNameRename over the sync's facts with
+        /// _stateIconsWanted: the states that need the user, then a tab's color change, then the quiet re-squares and
+        /// re-forms) and only while the last minute's calls leave room for its two calls (NameRenameFits), no 429 pause runs
         /// and no long 429 parks editForumTopic, the start-up hold is over and no recreation is under way. A due rename that
         /// finds no room stamps _renameWaitingSinceMs, and the history replay holds until it went (HistoryYieldsToRename):
         /// renames come after the live traffic and BEFORE the replay. Tick thread; never throws (Rule #18 inside).
@@ -1147,6 +1161,12 @@ namespace Agentmaster::Msg
         /// </summary>
         std::vector<TabFact> _lastFacts;
         std::atomic<int> _renameNoticeFailures{ 0 };
+        /// <summary>
+        /// §21.22: Telegram refused a topic ICON in this run (TopicIconRefused, read by _createTopic and _renameTopic), so the
+        /// topics show their states as name glyphs again (_stateIconsWanted is false) until the bot starts again — _start clears
+        /// it, and the next run tries the icons once more (one refused call per run when Telegram keeps refusing). Any thread.
+        /// </summary>
+        std::atomic<bool> _stateIconRefused{ false };
         /// <summary>
         /// §21.13, the tab colors the topic names follow. Tick thread: `_colorSince` is each live session's color as the last
         /// sync resolved it and since when it holds (0 = since its first sight in this run, which reads as settled) — the
