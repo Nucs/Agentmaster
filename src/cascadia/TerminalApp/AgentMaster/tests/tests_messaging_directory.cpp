@@ -282,6 +282,11 @@ void TestMessagingDirectory()
         CHECK(DirectoryFrontAnswer(L"  ", false) == L"\x2191 This thread goes first in the thread list", "no title: \"This thread\"");
         const std::wstring longTitle(500, L'x');
         CHECK(DirectoryFrontAnswer(longTitle, true).size() < 200, "a long title is cut, so the toast stays under Telegram's 200 characters");
+        // A two-line tab title (its line break a lone CR, as the tab's rename box writes it) is one line, like every title the bot
+        // prints (TgOneLineTitle, 2026-10-18): a CR LF pair is ONE space now, where the label's own loop made it two.
+        CHECK(DirectoryFrontAnswer(L"BetterClipboard\ron-launch", false) == L"\x2191 \x201C" L"BetterClipboard on-launch\x201D goes first in the thread list" &&
+                  DirectoryFrontAnswer(L"a\r\nb", false) == L"\x2191 \x201C" L"a b\x201D goes first in the thread list",
+              "a multi-line title is one line in the directory's toast (and in its chips: the same label)");
     }
     // The footer: the relative date-time entity, apps keep it current; the PC's clock time is its text.
     {

@@ -1580,6 +1580,91 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// A title on ONE line, the way the bot prints it (the user's rule of 2026-10-18, after a topic was told
+    /// "“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard”"). A tab title can have several lines: the tab's rename
+    /// box takes a line break and stores it as a lone CR (so do all 187 multi-line titles of the production fleet and the 12 of
+    /// dev's, counted that day; none had an LF). A topic name, a chip and a line of a message are one line, so every line
+    /// break becomes ONE space: a CR LF pair, an LF and a lone CR alike. The spaces and tabs right around a break, and a run of
+    /// breaks (an empty line), go into that one space, and a break at the start or the end of the title leaves nothing:
+    /// `BetterClipboard\ron-launch` prints as `BetterClipboard on-launch`, `produce chinese models \rparameters` as
+    /// `produce chinese models parameters`.
+    /// Only line breaks change: a one-line title comes back byte for byte (its own spaces and tabs included), so a place that
+    /// prints a one-line title prints it as before, and a second application changes nothing. The tab, the registry and the
+    /// topic record keep the title as typed (the sync compares those): this is the PRINTED form only.
+    /// </summary>
+    /// <param name="title">The title as the tab has it (any line breaks).</param>
+    /// <returns>The title with each run of line breaks, and the blanks around it, as one space, and none at its ends.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgOneLineTitle(std::wstring_view title)
+    {
+        if (title.find_first_of(L"\r\n") == std::wstring_view::npos)
+        {
+            return std::wstring{ title }; // the usual title: one line already
+        }
+        std::wstring out;
+        out.reserve(title.size());
+        // A run of breaks (and the blanks around it) is held here and written as ONE space only once a character of the next
+        // part arrives: so a run at the end writes nothing, and one at the start (nothing written yet) writes nothing either.
+        bool breakPending = false;
+        for (const wchar_t c : title)
+        {
+            if (c == L'\r' || c == L'\n')
+            {
+                // The blanks just before the break belong to it: without this, "models \rparameters" would print two spaces.
+                while (!out.empty() && (out.back() == L' ' || out.back() == L'\t'))
+                {
+                    out.pop_back();
+                }
+                breakPending = true;
+                continue;
+            }
+            if (breakPending)
+            {
+                if (c == L' ' || c == L'\t')
+                {
+                    continue; // the blanks just after a break belong to it too (an indented second line)
+                }
+                if (!out.empty())
+                {
+                    out += L' ';
+                }
+                breakPending = false;
+            }
+            out += c;
+        }
+        return out;
+    }
+
+    /// <summary>
+    /// A title for a place that shows at most `maxChars` of it (a "👤 You" line's title row, the change line, a Search card,
+    /// a new thread's picker): TgOneLineTitle, trimmed of spaces and tabs, and cut with an ellipsis. It replaces TgFirstLine for
+    /// TITLES: the first line of a two-line title is not the title — the change line compared the whole titles but showed
+    /// only their first lines, so a second line typed into a tab title was announced as "“🟪 BetterClipboard” changed the
+    /// title to “🟪 BetterClipboard”" (2026-10-18). For a one-line title the result is TgFirstLine's, except that a cut never
+    /// splits a surrogate pair (a lone high surrogate makes the text invalid UTF-16, which Telegram refuses).
+    /// </summary>
+    /// <param name="title">The title as the tab has it (any line breaks).</param>
+    /// <param name="maxChars">The cap in UTF-16 units, the ellipsis included (0 = no cap, as for TgFirstLine).</param>
+    /// <returns>The title on one line, trimmed and capped; "" for a blank title.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::wstring TgTitleLine(std::wstring_view title, size_t maxChars)
+    {
+        const std::wstring line = TgOneLineTitle(title);
+        const size_t a = line.find_first_not_of(L" \t");
+        if (a == std::wstring::npos)
+        {
+            return {};
+        }
+        const std::wstring_view trimmed = std::wstring_view{ line }.substr(a, line.find_last_not_of(L" \t") - a + 1);
+        if (maxChars > 0 && trimmed.size() > maxChars)
+        {
+            // One unit short of the cap (fewer when the cut would split a pair) so the ellipsis keeps the result within it.
+            return std::wstring{ detail::TgPrefixUnits(trimmed, maxChars - 1) } + L"\x2026";
+        }
+        return std::wstring{ trimmed };
+    }
+
+    /// <summary>
     /// A title TOKEN (§21.15): what a builder writes where a message names a session, instead of the title. The send layer
     /// renders it, classic (TgRenderTitleTokensClassic: the §21.13 square and title, in the given form) or as a chip
     /// (TgRichHtmlFromClassic). To every HTML helper in between (chunking, the plain-text fallback) a token is ordinary text:
@@ -1588,19 +1673,24 @@ namespace Agentmaster::Msg
     /// §21.17: a token that names the session's TOPIC (`threadId` &gt; 0) is a link to that topic wherever the send layer knows
     /// the bot's username — a URL chip in a rich message, an &lt;a&gt; around the title in a classic one; without a thread it
     /// stays a copy chip (rich) or the plain mention (classic), as before.
+    /// A title with line breaks is printed on ONE line (TgOneLineTitle, 2026-10-18): every message that names a session goes
+    /// through here, so its classic render and its chip now read the same — the classic mention carried the breaks into the
+    /// message, and only the chip flattened them.
     /// </summary>
     /// <param name="form">How the classic render reads (TgTitleForm).</param>
     /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
-    /// <param name="title">The title as is (escaped here); the caller cuts it where its place wants it cut.</param>
+    /// <param name="title">The title as is: put on one line and escaped here; the caller cuts it where its place wants it cut
+    /// (TgTitleLine, which puts it on one line first, so the cut counts what is shown).</param>
     /// <param name="threadId">The session's topic (its message_thread_id); 0 (the default) = no link — a session with no topic
     /// yet, or a place that names no topic.</param>
     /// <returns>The token.</returns>
     /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
     inline std::wstring TgTitleToken(TgTitleForm form, std::wstring_view colorSquare, std::wstring_view title, int64_t threadId = 0)
     {
+        const std::wstring oneLine = TgOneLineTitle(title);
         std::wstring clean;
-        clean.reserve(title.size());
-        for (const wchar_t c : title)
+        clean.reserve(oneLine.size());
+        for (const wchar_t c : oneLine)
         {
             if (!detail::TgIsTitleTokenMarker(c))
             {
@@ -1727,8 +1817,10 @@ namespace Agentmaster::Msg
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
     inline std::wstring TgTitleChipHtml(std::wstring_view colorSquare, std::wstring_view escapedTitle, std::wstring_view url = {})
     {
-        // One line, trimmed: a line break or a tab would split the label of a button that sits inside a line of text.
-        std::wstring line = detail::TgUnescapeOwnHtml(escapedTitle);
+        // One line, trimmed: a line break or a tab would split the label of a button that sits inside a line of text. The
+        // breaks follow TgOneLineTitle's rule (a token's title is on one line already, since TgTitleToken applies it, so this
+        // is a belt), and a tab becomes a space.
+        std::wstring line = TgOneLineTitle(detail::TgUnescapeOwnHtml(escapedTitle));
         for (auto& c : line)
         {
             if (c == L'\r' || c == L'\n' || c == L'\t')

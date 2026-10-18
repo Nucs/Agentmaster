@@ -2157,7 +2157,8 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
 
 - **`BuildTopicChangeNoticeHtml`** (pure), italic, in the user's words: `“🟦 old” changed the title to “🟩 new”` (a color that
   changed at the same time shows in the two squares) · `“🟦 tab” changed the color to 🟩` · `The title is now “🟦 new”` (no old
-  title known). The titles are escaped and cut like the Search answer's (200 units).
+  title known). The titles are printed on ONE line, escaped and cut like the Search pick menu's (200 units), and the line
+  tells a title change only when the two printed titles differ (§21.13.6, 2026-10-18).
 - **Sent** by `_renameTopic` after a rename Telegram took: silent, at the New priority, and it does NOT move the sticky card
   (one call, not three: the next real post moves the card below it). Telegram's own `forum_topic_edited` notice is still
   deleted when it arrives (§21.11.3).
@@ -2205,6 +2206,60 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
 - **Open** (live, the user's): the squares on the phone and the desktop app; a tab's recolor (the line `… changed the color
   to 🟩` about 8 s later); a rename at the PC and with `/rename` in the topic (the line at once); a mode switch in the cog
   (quiet, `[msg] tab color mode changed`); the Search answers' squares.
+
+#### 21.13.6 A title is printed on ONE line, wherever the bot prints it (2026-10-18; NOT BUILT yet)
+
+- **The report** (the user, 2026-10-18, the dev bot): the topic of `91d8d3d1` was told "🟪 BetterClipboard changed the title to
+  🟪 BetterClipboard". At 19:47:23 the tab had been renamed to a TWO-LINE title. The tab's rename box takes a line break and
+  stores it as a lone CR, so the title became `BetterClipboard\ron-launch` (dev's `sessions.json` and the topic record). The
+  sync renamed the topic, whose name then carried the raw CR (`topic renamed 91d8d3d1 → “🔵 🟪 BetterClipboard\ron-launch”`
+  in hooks.log). The change line compared the whole titles, which differed, but printed only their FIRST lines
+  (`TgFirstLine(title, 200)`): "BetterClipboard" both times.
+- **How common**: every multi-line title on this machine has a lone CR as its line break: 187 of production's 1,731
+  sessions and 12 of dev's 217, counted 2026-10-18. None had an LF or a CR LF pair.
+- **The rule** (the user's words: "\n should normalize to a ' ', '\r' if no \n present should be removed. otherwise replaced
+  into ' ' like '\n'"; `TgOneLineTitle`, TelegramFormat.h): every line break of a printed title becomes ONE space — an LF, a
+  CR LF pair (its CR dropped) and a lone CR alike. The spaces and tabs right around a break, and a run of breaks (an empty
+  line), go into that one space; a break at the start or the end leaves nothing. A one-line title is untouched, byte for
+  byte. The tab, the registry and the topic record keep the title as typed: the sync compares those.
+  - ⚠ **Where the code differs from the words**: the words remove a CR that has no LF. The lone CR is the line break of
+    every multi-line title here, so removing it would glue the two lines together (`BetterClipboardon-launch`,
+    `chairflowpass auth`). The code makes a lone CR a space, like an LF. A decision for the user: confirm it, or make a lone
+    CR vanish (one branch of `TgOneLineTitle`).
+- **Where it applies** (every place the bot prints a title):
+  - the topic NAME: `TopicDisplayName` (its other forms build on the 2-argument one);
+  - every message that names a session: `TgTitleToken` and `TitleMentionHtml`. Before, the chip flattened the breaks by
+    itself (a CR LF pair into two spaces) while the classic mention sent them to Telegram;
+  - the places that CUT a title: `TgTitleLine` (TgOneLineTitle, trimmed, cut with an ellipsis that never splits a surrogate
+    pair) replaces `TgFirstLine` for titles in the "👤 You" line's title row (`UserLineTitleRow`, 120 units), the change line
+    (200), the Search answer's cards (100), its rest lines (80), its pick menu (200) and the new thread's picker (120);
+  - the directory's chips and its dot toast: `DirectoryLabel` (a CR LF pair was two spaces there).
+  - ⚠ **A new place that prints a title** goes through `TgTitleToken`, `TopicDisplayName` or `TgTitleLine` — never
+    `TgFirstLine`, which prints only the first line of a two-line title (and `TgEscapeHtml(title)` alone keeps the raw CR).
+- **The change line** (`BuildTopicChangeNoticeHtml`) decides by the titles it PRINTS (`TopicChangeShowsTitle`). The report
+  now reads "“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard on-launch”". A change the line cannot show sends no
+  title line: a space retyped as a line break, a blank at an end, a difference past the 200-unit cut. A color change at the
+  same time still gets its own line. `_renameTopic`'s log (`told: its title|color changed`) uses the same answer.
+- **A user's rename of a thread** (`_onUserTopicRenamed`, §21.17) ignores a name that is the session's title as printed
+  (`TgOneLineTitle(title)`): a topic name saved back unchanged in Telegram would otherwise flatten the tab's two-line title.
+- **What a build changes by itself**: no topic is renamed for this alone (the sync compares the titles as typed). A topic
+  whose name still carries a raw CR gets its one-line name at its next rename (a state, color or title change). A card whose
+  title has a line break is edited once (its text hash moves).
+- **Tests**: `TestMessaging` (the block after `TgFirstLine`'s checks) — the rule (a lone CR, an LF, a CR LF pair, the blanks
+  around a break, a run of breaks, the ends, a one-line title byte for byte, a second application, a surrogate pair);
+  `TgTitleLine` (both lines, trimmed, blank, the cut, the same result as `TgFirstLine` for one-line titles, no split pair);
+  the token's classic render and chip; the mention; the topic name in its three forms and what `StripTopicNameDecoration`
+  reads back; the change line (the report itself, the same printed title tells nothing, a color change at the same time is
+  still told, a difference past the cut, a blank old title) and `TopicChangeShowsTitle`; the title row; a Search card, rest
+  line and pick menu; the new thread's picker. `TestMessagingDirectory`: the dot toast of a two-line title and of a CR LF
+  pair. `TestMessagingNewThread`: the title row of a two-line title (it expected the first line only). The isolated m5 run
+  (HEAD f3093efa0 + this work, ONE compiler under a commit guard: the machine had 2–4 GB of free commit): 8,124 checks, the 3
+  known TestTaskbarBadge failures only. A before/after program on the exact titles printed, with HEAD's headers,
+  `“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard”` and the name `🔵 🟪 BetterClipboard<CR>on-launch`; with this
+  work, `… changed the title to “🟪 BetterClipboard on-launch”` and `🔵 🟪 BetterClipboard on-launch`.
+- **Check after the build**: rename a tab to two lines (the rename box's line break): the topic's name shows both lines with
+  a space, and the topic gets "“🟦 old” changed the title to “🟦 line one line two”"; rename it back with a space instead of the
+  break: the name stays and no line comes; the card, a "👤 You" line and a Search answer show the title on one line.
 
 ### 21.14 A topic's name follows its session during the history replay; a long 429 holds one method, not the bot (2026-10-17)
 
@@ -3099,7 +3154,7 @@ where it was asked, the topic it came from, the words escaped, no "/search" in i
 buttons. The shown sessions past them used to end in "(94 more not listed: ask to narrow it down)", so a broad request
 reached the phone as ten sessions. Now the answer says "(94 more below, one line each.)" and the rest follows as silent
 messages (`BuildSearchMoreLinesHtml`, `_postSearchResults`): one line per session — its number, the pick-state glyph,
-the tab's color square, the title (first line, 80 characters), the folder's leaf and the day — packed into as few
+the tab's color square, the title (on one line, 80 characters; §21.13.6), the folder's leaf and the day — packed into as few
 messages as fit 3,500 characters each (`kSearchMoreLinesPackChars`; Telegram's limit is 4,096). The lines are plain HTML
 with no title token and no button (a rich message of a hundred chips would be refused): the user names a number in a
 reply ("resume 37"), which the conversation knows. Only the answer itself rings (D5).

@@ -1104,11 +1104,12 @@ namespace Agentmaster::Msg
     /// <param name="sessionId">The session id (the fallback name).</param>
     /// <param name="colorSquare">The square the topic's name shows (TopicRecord::nameColor; "" = none).</param>
     /// <param name="threadId">The topic's thread (0 = no link: the row names the session without one).</param>
-    /// <returns>The token (TgTitleForm::Plain, the title cut to its first line and 120 characters).</returns>
+    /// <returns>The token (TgTitleForm::Plain, the title on one line — TgTitleLine: a two-line tab title shows both lines,
+    /// joined by a space — and cut to 120 characters).</returns>
     /// <exception cref="std::bad_alloc">If the token cannot be allocated.</exception>
     inline std::wstring UserLineTitleRow(std::wstring_view title, std::wstring_view sessionId, std::wstring_view colorSquare, int64_t threadId)
     {
-        const std::wstring name = title.empty() ? std::wstring{ sessionId.substr(0, 8) } : TgFirstLine(title, 120);
+        const std::wstring name = title.empty() ? std::wstring{ sessionId.substr(0, 8) } : TgTitleLine(title, 120);
         return TgTitleToken(TgTitleForm::Plain, colorSquare, name, threadId);
     }
 
@@ -2619,15 +2620,17 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// A topic's name (§21.11): the state glyph, a space, the title — a title past kTopicTitleMaxChars ends in "…" (never cut
-    /// between the halves of a surrogate pair).
+    /// between the halves of a surrogate pair). A title with line breaks is put on ONE line first (TgOneLineTitle, 2026-10-18):
+    /// a topic name is one line, and the name sent before carried the tab's raw CR (`🔵 🟪 BetterClipboard\ron-launch`). Every
+    /// overload builds on this one, so every topic name follows the rule.
     /// </summary>
     /// <param name="s">The session's state.</param>
-    /// <param name="title">The tab title ("" = the caller's fallback, e.g. the short session id).</param>
+    /// <param name="title">The tab title, as typed ("" = the caller's fallback, e.g. the short session id).</param>
     /// <returns>The name for createForumTopic / editForumTopic.</returns>
     /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
     inline std::wstring TopicDisplayName(SessionState s, std::wstring_view title)
     {
-        std::wstring t{ title };
+        std::wstring t = TgOneLineTitle(title);
         if (t.size() > kTopicTitleMaxChars)
         {
             size_t cut = kTopicTitleMaxChars - 1;
@@ -2697,12 +2700,35 @@ namespace Agentmaster::Msg
     /// exactly this text in a classic message and to a CHIP in a rich one (TgRenderTitleTokensClassic / TgRichHtmlFromClassic).
     /// </summary>
     /// <param name="colorSquare">TgTitleColorSquare of the tab color ("" = none).</param>
-    /// <param name="title">The title as is (escaped here).</param>
+    /// <param name="title">The title as is: put on one line (TgOneLineTitle, as a token's title is) and escaped here.</param>
     /// <returns>Telegram HTML (no tags: the caller wraps it in &lt;b&gt; where it wants).</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring TitleMentionHtml(std::wstring_view colorSquare, std::wstring_view title)
     {
-        return colorSquare.empty() ? TgEscapeHtml(title) : std::wstring{ colorSquare } + L" " + TgEscapeHtml(title);
+        const std::wstring escaped = TgEscapeHtml(TgOneLineTitle(title));
+        return colorSquare.empty() ? escaped : std::wstring{ colorSquare } + L" " + escaped;
+    }
+
+    // The most UTF-16 units of a title the change line names (BuildTopicChangeNoticeHtml), the ellipsis included: the Search
+    // answer's pick menu shows a title the same way (BuildSearchPickMenuHtml).
+    inline constexpr size_t kTopicChangeTitleMaxChars = 200;
+
+    /// <summary>
+    /// Whether a topic's change line has a TITLE change to tell (2026-10-18): the two titles as the line PRINTS them — on one
+    /// line and cut (TgTitleLine) — differ, and the new one is not blank. The line used to compare the titles as typed while it
+    /// printed only their first lines, so a second line typed into a tab title was told as "“🟪 BetterClipboard” changed the
+    /// title to “🟪 BetterClipboard”". Now a change the line cannot show tells nothing — a space retyped as a line break, a
+    /// blank at an end, a difference past the cut — while the topic's NAME still follows the tab and a color change still gets
+    /// its own line. The service logs by the same answer, so "told: its title changed" means a title line went out.
+    /// </summary>
+    /// <param name="oldTitle">The title the topic's name showed, as typed ("" = unknown).</param>
+    /// <param name="newTitle">The title the topic's name shows now, as typed.</param>
+    /// <returns>True when the line names a new title.</returns>
+    /// <exception cref="std::bad_alloc">If a printed title cannot be allocated.</exception>
+    inline bool TopicChangeShowsTitle(std::wstring_view oldTitle, std::wstring_view newTitle)
+    {
+        const std::wstring shownNew = TgTitleLine(newTitle, kTopicChangeTitleMaxChars);
+        return !shownNew.empty() && TgTitleLine(oldTitle, kTopicChangeTitleMaxChars) != shownNew;
     }
 
     /// <summary>
@@ -2715,38 +2741,46 @@ namespace Agentmaster::Msg
     /// The titles are title TOKENS (§21.15): the classic render is the text above, byte for byte; a rich message shows each
     /// title as a CHIP in its color (the quotes give way to the button), and the color line shows the new color as a chip too
     /// — `[🟦 tab] changed the color to [🟩 tab]` — where the classic line has the bare square.
+    /// A title is PRINTED on one line and cut (TgTitleLine, kTopicChangeTitleMaxChars), and the line tells a title change only
+    /// when those printed titles differ (TopicChangeShowsTitle, 2026-10-18): a tab title that got a second line reads
+    /// `“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard on-launch”`, and never again "… to “🟪 BetterClipboard”".
     /// </summary>
-    /// <param name="oldTitle">The title the topic's name showed ("" = unknown: the line names the new title only).</param>
+    /// <param name="oldTitle">The title the topic's name showed, as typed ("" or blank = unknown: the line names the new title
+    /// only).</param>
     /// <param name="oldSquare">The color square the name showed ("" = none).</param>
-    /// <param name="newTitle">The title the topic's name shows now.</param>
+    /// <param name="newTitle">The title the topic's name shows now, as typed.</param>
     /// <param name="newSquare">The color square the name shows now ("" = none).</param>
     /// <param name="threadId">§21.17: the topic the line is posted in — every title of the line links to it (0, the default = no
     /// links).</param>
-    /// <returns>Telegram HTML with title tokens; "" when no title changed and the color did not change from one square to another
-    /// (a square that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a change worth a
-    /// line).</returns>
+    /// <returns>Telegram HTML with title tokens; "" when the printed title did not change and the color did not change from one
+    /// square to another (a square that only appears or goes — a topic named before §21.13, the "Remove colors" mode — is not a
+    /// change worth a line).</returns>
     /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
     inline std::wstring BuildTopicChangeNoticeHtml(std::wstring_view oldTitle, std::wstring_view oldSquare, std::wstring_view newTitle, std::wstring_view newSquare, int64_t threadId = 0)
     {
-        // A mention is cut like the Search answer's titles (TgFirstLine: the first line, an ellipsis past 200 units); classic, it
-        // reads “🟦 title” (TgTitleForm::Quoted).
-        const auto mention = [threadId](std::wstring_view square, std::wstring_view title) {
-            return TgTitleToken(TgTitleForm::Quoted, square, TgFirstLine(title, 200), threadId);
+        // A mention names a title as the line prints it: on one line, cut like the Search pick menu's titles (an ellipsis past
+        // 200 units). Classic, it reads “🟦 title” (TgTitleForm::Quoted).
+        const std::wstring shownOld = TgTitleLine(oldTitle, kTopicChangeTitleMaxChars);
+        const std::wstring shownNew = TgTitleLine(newTitle, kTopicChangeTitleMaxChars);
+        const auto mention = [threadId](std::wstring_view square, std::wstring_view shown) {
+            return TgTitleToken(TgTitleForm::Quoted, square, shown, threadId);
         };
-        if (!newTitle.empty() && oldTitle != newTitle)
+        // The decision is taken over the PRINTED titles (one rule with the service's log line): titles that differ only where
+        // the line cannot show it would otherwise be told as "“X” changed the title to “X”".
+        if (TopicChangeShowsTitle(oldTitle, newTitle))
         {
-            if (oldTitle.empty())
+            if (shownOld.empty())
             {
-                return L"<i>The title is now " + mention(newSquare, newTitle) + L"</i>";
+                return L"<i>The title is now " + mention(newSquare, shownNew) + L"</i>";
             }
-            return L"<i>" + mention(oldSquare, oldTitle) + L" changed the title to " + mention(newSquare, newTitle) + L"</i>";
+            return L"<i>" + mention(oldSquare, shownOld) + L" changed the title to " + mention(newSquare, shownNew) + L"</i>";
         }
         if (!oldSquare.empty() && !newSquare.empty() && oldSquare != newSquare)
         {
             // The new color: the bare square in a classic line, the title as a chip of the new color in a rich one
             // (TgTitleForm::Square).
-            const std::wstring_view title = newTitle.empty() ? oldTitle : newTitle;
-            return L"<i>" + mention(oldSquare, title) + L" changed the color to " + TgTitleToken(TgTitleForm::Square, newSquare, TgFirstLine(title, 200), threadId) + L"</i>";
+            const std::wstring& shown = shownNew.empty() ? shownOld : shownNew;
+            return L"<i>" + mention(oldSquare, shown) + L" changed the color to " + TgTitleToken(TgTitleForm::Square, newSquare, shown, threadId) + L"</i>";
         }
         return {};
     }
@@ -3825,7 +3859,8 @@ namespace Agentmaster::Msg
             {
                 html += L"\n\n";
             }
-            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 100);
+            // The title on one line (TgTitleLine: a two-line tab title shows both lines, joined by a space), 100 units at most.
+            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgTitleLine(card.title, 100);
             // The glyph for where it stands, then the tab's color square (§21.13: "State, then color", like the topic names);
             // §21.15: the square and the title as a title token — "🟦 <b>title</b>" classic, a chip in a rich answer.
             html += L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" " + TgTitleToken(TgTitleForm::Bold, card.colorSquare, title, card.threadId);
@@ -3884,7 +3919,8 @@ namespace Agentmaster::Msg
         std::wstring current;
         for (const auto& card : cards)
         {
-            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 80);
+            // The title on one line (TgTitleLine), 80 units at most: a line break would split the session's line in two.
+            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgTitleLine(card.title, 80);
             std::wstring line = L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" ";
             if (!card.colorSquare.empty())
             {
@@ -3927,7 +3963,8 @@ namespace Agentmaster::Msg
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
     inline std::wstring BuildSearchPickMenuHtml(const SearchCard& card, int64_t nowMs)
     {
-        const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 200);
+        // The title on one line (TgTitleLine), 200 units at most.
+        const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgTitleLine(card.title, 200);
         // §21.13: the color square first; §21.15: square and title as a title token (TitleMentionHtml's text when classic).
         std::wstring html = L"<b>" + std::to_wstring(card.number) + L" \x00B7 " + TgTitleToken(TgTitleForm::Plain, card.colorSquare, title, card.threadId) + L"</b>";
         std::wstring place = card.dir;

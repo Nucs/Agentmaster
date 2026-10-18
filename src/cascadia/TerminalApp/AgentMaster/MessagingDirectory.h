@@ -296,15 +296,18 @@ namespace Agentmaster::Msg
         }
 
         /// <summary>
-        /// A label for a chip: one line (line breaks and tabs become spaces), trimmed, cut at kTgTitleChipLabelMaxChars with an
-        /// ellipsis (never between the halves of a surrogate pair).
+        /// A label for a chip: one line, trimmed, cut at kTgTitleChipLabelMaxChars with an ellipsis (never between the halves of
+        /// a surrogate pair). The line breaks follow the title rule of every other place the bot prints a title (TgOneLineTitle,
+        /// 2026-10-18: a run of breaks and the blanks around it become ONE space — a CR LF pair used to become two), and a tab
+        /// becomes a space.
         /// </summary>
-        /// <param name="text">The raw text.</param>
+        /// <param name="text">The raw text (a tab title, a tag name, a dedicated topic's label).</param>
         /// <returns>The label, raw (the caller escapes it); "" for a blank text.</returns>
         /// <exception cref="std::bad_alloc">If the label cannot be allocated.</exception>
         inline std::wstring DirectoryLabel(std::wstring_view text)
         {
-            std::wstring line{ text };
+            // The breaks first, by the title rule; the loop below then meets only tabs (its CR / LF arms stay as a belt).
+            std::wstring line = TgOneLineTitle(text);
             for (auto& c : line)
             {
                 if (c == L'\r' || c == L'\n' || c == L'\t')

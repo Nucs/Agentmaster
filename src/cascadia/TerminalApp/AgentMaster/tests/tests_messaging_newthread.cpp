@@ -146,7 +146,10 @@ void TestMessagingNewThread()
         const std::wstring row = UserLineTitleRow(L"my tab", L"12345678-aaaa-bbbb-cccc-dddddddddddd", blue, 42);
         CHECK(row == TgTitleToken(TgTitleForm::Plain, blue, L"my tab", 42), "UserLineTitleRow: the title as a Plain token naming the topic");
         CHECK(UserLineTitleRow(L"", L"12345678-aaaa", L"", 0) == TgTitleToken(TgTitleForm::Plain, L"", L"12345678", 0), "no title: the short id, no link");
-        CHECK(UserLineTitleRow(L"line one\nline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one", 1), "a title's first line only");
+        // 2026-10-18: a title is printed on ONE line (TgTitleLine), no longer cut to its first line.
+        CHECK(UserLineTitleRow(L"line one\nline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1) &&
+                  UserLineTitleRow(L"line one\rline two", L"x", L"", 1) == TgTitleToken(TgTitleForm::Plain, L"", L"line one line two", 1),
+              "a two-line title: both lines, joined by a space (an LF, or the lone CR the tab's rename box writes)");
         const std::wstring without = BuildPromptLineHtml(0, PromptSource::Pc, L"hello", PromptTurnStatus::Running, false);
         const std::wstring with = BuildPromptLineHtml(0, PromptSource::Pc, L"hello", PromptTurnStatus::Running, false, row);
         const size_t nl = without.find(L'\n');
