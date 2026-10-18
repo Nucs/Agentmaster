@@ -2763,6 +2763,21 @@ namespace Agentmaster::Msg
     std::wstring MessagingService::_onNewThreadAction(const NewThreadAction& action, int64_t threadId)
     {
         static constexpr const wchar_t* kGone = L"This folder picker is from before a restart (or was used): send a message in this thread for a new one.";
+        if (action.kind == NewThreadAction::Kind::PageLabelRecent || action.kind == NewThreadAction::Kind::PageLabelUsed)
+        {
+            // The pager's page LABEL (2026-10-18): nothing changes and nothing is sent — the toast says which page of which list
+            // the label shows, counted on the picker's own lists (a label of a picker from before a restart, or one already used,
+            // answers like every stale picker button). The tap counts as a use of the picker, like a page change.
+            std::lock_guard lk{ _mtx };
+            const auto it = _newThreads.find(threadId);
+            if (it == _newThreads.end() || it->second.pickerMessageId <= 0)
+            {
+                return kGone;
+            }
+            it->second.lastUseMs = WallMs();
+            const bool recent = action.kind == NewThreadAction::Kind::PageLabelRecent;
+            return NewThreadPageToast(recent ? L"Recent" : L"Most used", action.value, recent ? it->second.lists.recent.size() : it->second.lists.mostUsed.size());
+        }
         if (action.kind == NewThreadAction::Kind::PageRecent || action.kind == NewThreadAction::Kind::PageUsed)
         {
             {

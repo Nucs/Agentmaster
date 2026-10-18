@@ -259,6 +259,44 @@ void TestMessagingNewThread()
                   ParseNewThreadCallbackData(L"c:r:1").kind == NewThreadAction::Kind::None && ParseNewThreadCallbackData(L"nt:").kind == NewThreadAction::Kind::None,
               "parse: malformed data is no action");
         CHECK(ParseNewThreadCallbackData(L"d:front:5").kind == NewThreadAction::Kind::None, "a directory dot is not a picker button");
+        // The pager's page label (2026-10-18): its own data, so a tap only answers which page it is.
+        CHECK(NewThreadCallbackData(NewThreadAction::Kind::PageLabelRecent, 1) == L"nt:rl:1" && NewThreadCallbackData(NewThreadAction::Kind::PageLabelUsed, 0) == L"nt:ml:0",
+              "the pager labels' callback data");
+        CHECK(NewThreadCallbackData(NewThreadAction::Kind::PageLabelUsed, static_cast<size_t>(-1)).size() <= 26, "the longest data: 26 characters at most");
+        const auto label = ParseNewThreadCallbackData(L"nt:ml:3");
+        CHECK(label.kind == NewThreadAction::Kind::PageLabelUsed && label.value == 3 && ParseNewThreadCallbackData(L"nt:rl:0").kind == NewThreadAction::Kind::PageLabelRecent,
+              "parse: a pager label");
+        CHECK(ParseNewThreadCallbackData(L"nt:rl:").kind == NewThreadAction::Kind::None && ParseNewThreadCallbackData(L"nt:ml:2x").kind == NewThreadAction::Kind::None &&
+                  ParseNewThreadCallbackData(L"nt:l:1").kind == NewThreadAction::Kind::None && ParseNewThreadCallbackData(L"nt:rlx:1").kind == NewThreadAction::Kind::None,
+              "parse: a malformed label is no action");
+        CHECK(NewThreadPageLabel(0, 4) == L"1 / 4" && NewThreadPageLabel(3, 4) == L"4 / 4" && NewThreadPageLabel(1, 2) == L"2 / 2", "the page label: the 1-based page / the pages");
+        CHECK(NewThreadPageToast(L"Recent", 1, 34) == L"Recent: page 2 of 4 (folders 11\x2013" L"20 of 34)", "the label's toast: the page, the pages, the folders shown");
+        CHECK(NewThreadPageToast(L"Most used", 9, 34) == L"Most used: page 4 of 4 (folders 31\x2013" L"34 of 34)", "a label past the end tells the last page");
+        CHECK(NewThreadPageToast(L"Recent", 0, 0) == L"Recent: no folders known yet." && NewThreadPageToast(L"Recent", 0, 7) == L"Recent: page 1 of 1 (folders 1\x2013" L"7 of 7)",
+              "an empty list says so; a short list is one page");
+    }
+
+    // ===== 2. the pager rows (2026-10-18) ======================================================================================
+    // The user's layout: "We start with one button to the right and after moving one page there are 2 buttons and one label in
+    // middle for the page number. reaching end shows only to the left".
+    {
+        using K = NewThreadAction::Kind;
+        CHECK(BuildNewThreadPagingRow(L"Recent", 0, 0, K::PageRecent, K::PageLabelRecent).empty() && BuildNewThreadPagingRow(L"Recent", 10, 0, K::PageRecent, K::PageLabelRecent).empty(),
+              "one page, or none: no pager");
+        const auto firstPage = BuildNewThreadPagingRow(L"Recent", 34, 0, K::PageRecent, K::PageLabelRecent);
+        CHECK(firstPage.size() == 2 && firstPage[0].text == L"1 / 4" && firstPage[0].data == L"nt:rl:0" && firstPage[1].text == L"Recent \x25B6" && firstPage[1].data == L"nt:rp:1",
+              "the first page: the label, then the one arrow, on the right");
+        const auto middlePage = BuildNewThreadPagingRow(L"Recent", 34, 1, K::PageRecent, K::PageLabelRecent);
+        CHECK(middlePage.size() == 3 && middlePage[0].text == L"\x25C0 Recent" && middlePage[0].data == L"nt:rp:0" && middlePage[1].text == L"2 / 4" &&
+                  middlePage[1].data == L"nt:rl:1" && middlePage[2].text == L"Recent \x25B6" && middlePage[2].data == L"nt:rp:2",
+              "a middle page: the two arrows with the label between them");
+        const auto lastPage = BuildNewThreadPagingRow(L"Most used", 34, 3, K::PageUsed, K::PageLabelUsed);
+        CHECK(lastPage.size() == 2 && lastPage[0].text == L"\x25C0 Most used" && lastPage[0].data == L"nt:mp:2" && lastPage[1].text == L"4 / 4" && lastPage[1].data == L"nt:ml:3",
+              "the last page: the one arrow, on the left, then the label");
+        const auto pastEnd = BuildNewThreadPagingRow(L"Recent", 34, 99, K::PageRecent, K::PageLabelRecent);
+        CHECK(pastEnd.size() == 2 && pastEnd[0].data == L"nt:rp:2" && pastEnd[1].text == L"4 / 4" && pastEnd[1].data == L"nt:rl:3", "a page past the end: the last page's pager");
+        const auto twoPages = BuildNewThreadPagingRow(L"Recent", 20, 1, K::PageRecent, K::PageLabelRecent);
+        CHECK(twoPages.size() == 2 && twoPages[0].data == L"nt:rp:0" && twoPages[1].text == L"2 / 2", "two pages (dev's 20 folders): the second page is the last");
     }
 
     // ===== 2. the labels ======================================================================================================
@@ -293,15 +331,26 @@ void TestMessagingNewThread()
     // ===== 2. the keyboard ====================================================================================================
     {
         const auto rows = BuildNewThreadPickerKeyboard(lists, 1, 0);
-        CHECK(rows.size() == 13, "5 + paging + 5 + paging + cancel rows");
+        CHECK(rows.size() == 13, "5 + pager + 5 + pager + cancel rows");
         if (rows.size() == 13)
         {
             CHECK(rows[0].size() == 2 && rows[0][0].text == L"\U0001F558 11 \x00B7 f10" && rows[0][0].data == L"nt:r:10" && rows[0][1].data == L"nt:r:11", "Recent's folders two to a row, by global index");
-            CHECK(rows[5].size() == 2 && rows[5][0].data == L"nt:rp:0" && rows[5][1].data == L"nt:rp:2" && rows[5][0].text == L"\x25C0 Recent" && rows[5][1].text == L"Recent \x25B6",
-                  "Recent's page 2 of 3 leads both ways");
+            CHECK(rows[5].size() == 3 && rows[5][0].data == L"nt:rp:0" && rows[5][0].text == L"\x25C0 Recent" && rows[5][1].text == L"2 / 3" && rows[5][1].data == L"nt:rl:1" &&
+                      rows[5][2].data == L"nt:rp:2" && rows[5][2].text == L"Recent \x25B6",
+                  "Recent's page 2 of 3: both arrows around its page label");
             CHECK(rows[6][0].text == L"\U0001F3C6 1 \x00B7 f05" && rows[6][0].data == L"nt:m:0", "Most used's first folder");
-            CHECK(rows[11].size() == 1 && rows[11][0].data == L"nt:mp:1" && rows[11][0].text == L"Most used \x25B6", "Most used's first page leads forward only");
+            CHECK(rows[11].size() == 2 && rows[11][0].text == L"1 / 3" && rows[11][0].data == L"nt:ml:0" && rows[11][1].data == L"nt:mp:1" && rows[11][1].text == L"Most used \x25B6",
+                  "Most used's first page: its label, then the arrow forward");
             CHECK(rows[12].size() == 1 && rows[12][0].data == L"nt:x", "Cancel last");
+        }
+        const auto lastRows = BuildNewThreadPickerKeyboard(lists, 2, 2);
+        CHECK(lastRows.size() == 7, "both last pages (folders 21-24): 2 + pager + 2 + pager + cancel rows");
+        if (lastRows.size() == 7)
+        {
+            CHECK(lastRows[2].size() == 2 && lastRows[2][0].text == L"\x25C0 Recent" && lastRows[2][0].data == L"nt:rp:1" && lastRows[2][1].text == L"3 / 3" && lastRows[2][1].data == L"nt:rl:2",
+                  "Recent's last page: the arrow back, then its label");
+            CHECK(lastRows[5].size() == 2 && lastRows[5][0].text == L"\x25C0 Most used" && lastRows[5][1].text == L"3 / 3" && lastRows[5][1].data == L"nt:ml:2",
+                  "Most used's last page: the arrow back, then its label");
         }
         const NewThreadLists few = BuildNewThreadLists({ NtFacts(L"K:\\a\\one", L"", now), NtFacts(L"K:\\b\\one", L"", now - 1), NtFacts(L"K:\\c\\two", L"", now - 2) }, {}, nullptr);
         const auto fewRows = BuildNewThreadPickerKeyboard(few, 0, 0); // (never "small": a <windows.h> macro)

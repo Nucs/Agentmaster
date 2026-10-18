@@ -9,7 +9,8 @@
 // The flow (the service half is MessagingService's _onUserThreadCreated / _holdForNewThread / _onNewThreadAction / _adoptBoundThreads):
 //   1. The user creates a thread (Telegram sends forum_topic_created) or writes in a thread no session owns: the bot posts a
 //      PICKER there — two lists of folders, RECENT (the folder whose newest session was active last, first) and MOST USED (the
-//      folder more sessions worked in, first), ten a page, each with its own paging — and holds what the user writes there.
+//      folder more sessions worked in, first), ten a page, each with its own PAGER row (the page number between a ◀ and a ▶, each
+//      arrow only where it leads somewhere) — and holds what the user writes there.
 //   2. A tap on a folder (or a folder path the user sends) deletes the picker and opens a new Claude tab there, with a session id
 //      the service chose, in the background of the most recently active window.
 //   3. When the session is live, the service ADOPTS the user's thread as the session's topic (no new topic is made), renames it like
@@ -165,6 +166,42 @@ namespace Agentmaster::Msg
         return page < pages ? page : pages - 1;
     }
 
+    /// <summary>
+    /// The text of a pager's page LABEL ("2 / 4"): the page shown and how many there are, so the user sees at once how far a list
+    /// goes. Only a list of two pages or more has a pager (BuildNewThreadPagingRow).
+    /// </summary>
+    /// <param name="page">The 0-based page shown.</param>
+    /// <param name="pages">The list's page count (NewThreadPageCount).</param>
+    /// <returns>The 1-based page, " / ", the count.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring NewThreadPageLabel(size_t page, size_t pages)
+    {
+        return std::to_wstring(page + 1) + L" / " + std::to_wstring(pages);
+    }
+
+    /// <summary>
+    /// The TOAST a tap on a pager's page label answers with (the label is not a button that does anything: Telegram still shows a
+    /// spinner on it until the tap is answered, so the answer says where the user is): "Recent: page 2 of 4 (folders 11–20 of 34)".
+    /// Plain text, well under answerCallbackQuery's 200 characters.
+    /// </summary>
+    /// <param name="listName">The list's name ("Recent", "Most used").</param>
+    /// <param name="page">The 0-based page the label shows (clamped here: the list can be shorter than when the label was drawn).</param>
+    /// <param name="items">The list's size.</param>
+    /// <returns>The toast; for an empty list, that it has no folders.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring NewThreadPageToast(std::wstring_view listName, size_t page, size_t items)
+    {
+        if (items == 0)
+        {
+            return std::wstring{ listName } + L": no folders known yet.";
+        }
+        page = ClampNewThreadPage(page, items);
+        const size_t first = page * kNewThreadPageSize;
+        const size_t last = (std::min)(items, first + kNewThreadPageSize); // (std::min): the <windows.h> macro
+        return std::wstring{ listName } + L": page " + std::to_wstring(page + 1) + L" of " + std::to_wstring(NewThreadPageCount(items)) + L" (folders " +
+               std::to_wstring(first + 1) + L"\x2013" + std::to_wstring(last) + L" of " + std::to_wstring(items) + L")";
+    }
+
     // ===== the buttons' callback data ================================================================================
 
     /// <summary>What a picker button asks for (§21.17). The data names the list and a GLOBAL index (or a page), never a path: a
@@ -178,16 +215,19 @@ namespace Agentmaster::Msg
             PickUsed, // value = the folder's 0-based index in the Most used list
             PageRecent, // value = the Recent list's 0-based page to show
             PageUsed, // value = the Most used list's 0-based page to show
+            PageLabelRecent, // the Recent pager's page label: nothing changes, the toast says the page; value = the 0-based page it shows
+            PageLabelUsed, // the Most used pager's page label (as PageLabelRecent)
             Cancel, // the picker goes; the held messages are dropped
         };
         Kind kind{ Kind::None };
         size_t value{ 0 };
     };
 
-    /// <summary>The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:x".</summary>
+    /// <summary>The callback data of a picker button: "nt:r:3", "nt:m:0", "nt:rp:1", "nt:mp:2", "nt:rl:1", "nt:ml:0", "nt:x".</summary>
     /// <param name="kind">The action (None gives "").</param>
     /// <param name="value">The index or page (ignored for Cancel).</param>
-    /// <returns>The data, at most 25 characters.</returns>
+    /// <returns>The data, at most 26 characters ("nt:", a three-character tag, a 64-bit value's 20 digits): far under the Bot API's
+    /// 64 bytes. Only a value of at most 9 digits parses back (ParseNewThreadCallbackData), which every real index and page is.</returns>
     /// <exception cref="std::bad_alloc">If the data cannot be allocated.</exception>
     inline std::wstring NewThreadCallbackData(NewThreadAction::Kind kind, size_t value)
     {
@@ -202,6 +242,10 @@ namespace Agentmaster::Msg
             return prefix + L"rp:" + std::to_wstring(value);
         case NewThreadAction::Kind::PageUsed:
             return prefix + L"mp:" + std::to_wstring(value);
+        case NewThreadAction::Kind::PageLabelRecent:
+            return prefix + L"rl:" + std::to_wstring(value);
+        case NewThreadAction::Kind::PageLabelUsed:
+            return prefix + L"ml:" + std::to_wstring(value);
         case NewThreadAction::Kind::Cancel:
             return prefix + L"x";
         case NewThreadAction::Kind::None:
@@ -262,6 +306,14 @@ namespace Agentmaster::Msg
         else if (what == L"mp")
         {
             a.kind = NewThreadAction::Kind::PageUsed;
+        }
+        else if (what == L"rl")
+        {
+            a.kind = NewThreadAction::Kind::PageLabelRecent;
+        }
+        else if (what == L"ml")
+        {
+            a.kind = NewThreadAction::Kind::PageLabelUsed;
         }
         else
         {
@@ -429,8 +481,45 @@ namespace Agentmaster::Msg
     };
 
     /// <summary>
-    /// The picker's KEYBOARD (§21.17): the Recent page's folders two to a row ("🕘 1 · Agentmaster"), its paging row (◀ / ▶, only
-    /// the ones that lead somewhere), the Most used page's folders ("🏆 1 · Agentmaster") and paging row, and Cancel.
+    /// One list's PAGER row (§21.17; the user's layout of 2026-10-18: "We start with one button to the right and after moving one
+    /// page there are 2 buttons and one label in middle for the page number. reaching end shows only to the left"): the page label
+    /// ("2 / 4", NewThreadPageLabel) with "◀ Recent" on its left from the second page on and "Recent ▶" on its right until the last
+    /// page — the first page [1 / 4] [Recent ▶], a middle page [◀ Recent] [2 / 4] [Recent ▶], the last [◀ Recent] [4 / 4]. The label
+    /// is there on every page: it places a lone arrow on its side (a lone button would fill the whole row) and says from the first
+    /// page how far the list goes. A list of one page, or none, has no pager.
+    /// </summary>
+    /// <param name="listName">The list's name the arrows carry ("Recent", "Most used"): the picker shows two pagers.</param>
+    /// <param name="items">The list's size.</param>
+    /// <param name="page">The page shown (clamped here).</param>
+    /// <param name="turn">An arrow's action (PageRecent / PageUsed); its value is the page the arrow turns to.</param>
+    /// <param name="label">The label's action (PageLabelRecent / PageLabelUsed); its value is the page the label shows.</param>
+    /// <returns>The row's buttons, left to right; empty when the list fits on one page.</returns>
+    /// <exception cref="std::bad_alloc">If the row cannot be allocated.</exception>
+    inline std::vector<NewThreadButton> BuildNewThreadPagingRow(std::wstring_view listName, size_t items, size_t page, NewThreadAction::Kind turn, NewThreadAction::Kind label)
+    {
+        std::vector<NewThreadButton> row;
+        const size_t pages = NewThreadPageCount(items);
+        if (pages < 2)
+        {
+            return row; // nothing to turn to
+        }
+        page = ClampNewThreadPage(page, items);
+        if (page > 0)
+        {
+            row.push_back(NewThreadButton{ L"\x25C0 " + std::wstring{ listName }, NewThreadCallbackData(turn, page - 1) });
+        }
+        row.push_back(NewThreadButton{ NewThreadPageLabel(page, pages), NewThreadCallbackData(label, page) });
+        if (page + 1 < pages)
+        {
+            row.push_back(NewThreadButton{ std::wstring{ listName } + L" \x25B6", NewThreadCallbackData(turn, page + 1) });
+        }
+        return row;
+    }
+
+    /// <summary>
+    /// The picker's KEYBOARD (§21.17): the Recent page's folders two to a row ("🕘 1 · Agentmaster"), its pager row
+    /// (BuildNewThreadPagingRow: the page label between the arrows that lead somewhere), the Most used page's folders
+    /// ("🏆 1 · Agentmaster") and pager row, and Cancel.
     /// </summary>
     /// <param name="lists">The picker's lists.</param>
     /// <param name="recentPage">The Recent page shown (clamped here).</param>
@@ -474,25 +563,17 @@ namespace Agentmaster::Msg
                 rows.push_back(std::move(row));
             }
         };
-        const auto pagingRow = [&](const wchar_t* name, size_t items, size_t page, NewThreadAction::Kind kind) {
-            std::vector<NewThreadButton> row;
-            if (page > 0)
-            {
-                row.push_back(NewThreadButton{ L"\x25C0 " + std::wstring{ name }, NewThreadCallbackData(kind, page - 1) });
-            }
-            if (page + 1 < NewThreadPageCount(items))
-            {
-                row.push_back(NewThreadButton{ std::wstring{ name } + L" \x25B6", NewThreadCallbackData(kind, page + 1) });
-            }
+        const auto pagingRow = [&](const wchar_t* name, size_t items, size_t page, NewThreadAction::Kind turn, NewThreadAction::Kind label) {
+            std::vector<NewThreadButton> row = BuildNewThreadPagingRow(name, items, page, turn, label);
             if (!row.empty())
             {
                 rows.push_back(std::move(row));
             }
         };
         folderRows(L"\U0001F558", lists.recent, rFirst, rLast, NewThreadAction::Kind::PickRecent);
-        pagingRow(L"Recent", lists.recent.size(), recentPage, NewThreadAction::Kind::PageRecent);
+        pagingRow(L"Recent", lists.recent.size(), recentPage, NewThreadAction::Kind::PageRecent, NewThreadAction::Kind::PageLabelRecent);
         folderRows(L"\U0001F3C6", lists.mostUsed, mFirst, mLast, NewThreadAction::Kind::PickUsed);
-        pagingRow(L"Most used", lists.mostUsed.size(), usedPage, NewThreadAction::Kind::PageUsed);
+        pagingRow(L"Most used", lists.mostUsed.size(), usedPage, NewThreadAction::Kind::PageUsed, NewThreadAction::Kind::PageLabelUsed);
         rows.push_back({ NewThreadButton{ L"\x2716 Cancel", NewThreadCallbackData(NewThreadAction::Kind::Cancel, 0) } });
         return rows;
     }
