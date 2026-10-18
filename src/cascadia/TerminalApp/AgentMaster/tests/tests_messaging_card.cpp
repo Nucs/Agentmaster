@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster M5 — MESSAGING.md §21.24: the sticky card's buttons, refactored on the user's request of 2026-10-18 —
-//   1. two PAGES (MessagingModels.h BuildCardButtonRows / CardButtonFactsFor): Main holds ⚙ Session, ⑂ Fork, 🆕 New Session and
-//      🔄 Restart Session; ⚙ Session turns the keyboard into the Session page — every button the card had before (the runner, the
-//      queue, the pin, the transcript, the screen as text) plus 🖼 Screen Image and ◀ Back; both pages start with the state's own
-//      action (🔧 Resume Session in Error, ▶ Reactivate for a parked tab or a claude that exited), and the card's text names it;
+//   1. two PAGES (MessagingModels.h BuildCardButtonRows / CardButtonFactsFor): Main holds ⚙ Session and 🔄 Restart Session;
+//      ⚙ Session turns the keyboard into the Session page — ⑂ Fork and 🆕 New Session first (the user's placement), then every
+//      button the card had before (the runner, the queue, the pin, the transcript, the screen as text), 🖼 Screen Image and
+//      ◀ Back; both pages start with the state's own action (🔧 Resume Session in Error, ▶ Reactivate for a parked tab or a
+//      claude that exited), and the card's text names it;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -201,25 +202,27 @@ void TestMessagingCard()
         CHECK(!f.error && !f.reactivatable && f.runnerAuto && !f.pinned, "facts of a waiting session: no state action, the runner Auto, unpinned");
 
         const Rows main = BuildCardButtonRows(kCardSid, f, CardPage::Main);
-        CHECK(main.size() == 2, "Main: two rows (no state action for a waiting session)");
-        CHECK(main.size() == 2 && main[0].size() == 2 && main[1].size() == 2, "Main: two buttons a row");
+        CHECK(main.size() == 1, "Main: one row (no state action for a waiting session)");
+        CHECK(main.size() == 1 && main[0].size() == 2, "Main: the cog and Restart Session side by side");
         CHECK(HasData(main, L"c:panel:" + kCardSid) && HasLabel(main, L"Session"), "Main: the cog Session button opens the Session page");
-        CHECK(HasData(main, L"c:fork:" + kCardSid) && HasLabel(main, L"Fork"), "Main: Fork");
-        CHECK(HasData(main, L"c:newsession:" + kCardSid) && HasLabel(main, L"New Session"), "Main: New Session");
         CHECK(HasData(main, L"c:restart:" + kCardSid) && HasLabel(main, L"Restart Session"), "Main: Restart Session");
-        CHECK(main.size() == 2 && main[0][0].first.rfind(L"\x2699\xFE0F", 0) == 0, "Main: the first button is the cog (with VS16, drawn as the emoji)");
+        CHECK(main.size() == 1 && main[0][0].first.rfind(L"\x2699\xFE0F", 0) == 0, "Main: the first button is the cog (with VS16, drawn as the emoji)");
+        CHECK(!HasData(main, L"c:fork:" + kCardSid) && !HasData(main, L"c:newsession:" + kCardSid), "Main: Fork and New Session are on the Session page (the user's placement)");
         CHECK(!HasData(main, L"c:queue:" + kCardSid) && !HasData(main, L"c:screen:" + kCardSid), "Main: the session's own buttons are on the other page");
 
         const Rows page = BuildCardButtonRows(kCardSid, f, CardPage::Session);
-        CHECK(page.size() == 4, "Session: four rows");
+        CHECK(page.size() == 5, "Session: five rows");
+        CHECK(page.size() == 5 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
+                  page[0][1].second == L"c:newsession:" + kCardSid && page[0][1].first.find(L"New Session") != std::wstring::npos,
+              "Session: Fork and New Session first, side by side (right after the cog's tap)");
         CHECK(HasData(page, L"c:runner:" + kCardSid) && HasLabel(page, L"Pause runner"), "Session: the runner button (Auto -> Pause runner)");
         CHECK(HasData(page, L"c:queue:" + kCardSid), "Session: Queue");
         CHECK(HasData(page, L"c:pin:" + kCardSid) && HasLabel(page, L"\U0001F4CC Pin"), "Session: Pin (unpinned)");
         CHECK(HasData(page, L"c:transcript:" + kCardSid), "Session: Transcript");
         CHECK(HasData(page, L"c:screen:" + kCardSid) && HasLabel(page, L"Screen Text"), "Session: Screen Text (the old Screen's verb)");
         CHECK(HasData(page, L"c:screenimg:" + kCardSid) && HasLabel(page, L"Screen Image"), "Session: Screen Image");
-        CHECK(page.size() == 4 && page[3].size() == 1 && page[3][0].second == L"c:main:" + kCardSid && page[3][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
-        CHECK(!HasData(page, L"c:fork:" + kCardSid) && !HasData(page, L"c:panel:" + kCardSid), "Session: no Main buttons");
+        CHECK(page.size() == 5 && page[4].size() == 1 && page[4][0].second == L"c:main:" + kCardSid && page[4][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
+        CHECK(!HasData(page, L"c:restart:" + kCardSid) && !HasData(page, L"c:panel:" + kCardSid), "Session: no Main buttons");
 
         SessionInfo paused = waiting;
         paused.autorunner.mode = AutorunnerMode::Off;
@@ -254,7 +257,7 @@ void TestMessagingCard()
         SessionInfo closed = CardSession(SessionState::Error);
         closed.live = false;
         const Rows cl = BuildCardButtonRows(kCardSid, CardButtonFactsFor(closed), CardPage::Main);
-        CHECK(cl.size() == 2, "a closed session has no state action (nothing to resume in a tab)");
+        CHECK(cl.size() == 1, "a closed session has no state action (nothing to resume in a tab)");
 
         // Telegram's limits: callback data within 64 bytes, ASCII; every button with a label.
         bool fits = true;
@@ -278,7 +281,9 @@ void TestMessagingCard()
         CHECK(fits, "every card button's data is ASCII and within Telegram's 64 bytes (a 36-character id)");
         CHECK(labeled, "every card button has a label");
         CHECK(twoARow, "at most two buttons a row (a phone keeps the labels whole)");
-        CHECK(CardCallbackData(kCardVerbScreenImage, kCardSid).size() == 48, "the longest data, c:screenimg:<id>, is 48 bytes");
+        CHECK(CardCallbackData(kCardVerbNewSession, kCardSid).size() == 49 && CardCallbackData(L"reactivate", kCardSid).size() == 49 &&
+                  CardCallbackData(L"transcript", kCardSid).size() == 49,
+              "the longest data (c:newsession:, c:reactivate:, c:transcript: + a 36-character id) is 49 bytes");
     }
 
     // ===== 2. the card's line for the state's action =====

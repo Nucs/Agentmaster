@@ -4138,10 +4138,10 @@ namespace Agentmaster::Msg
     // ===== the card's buttons: two pages (§21.24) ==============================================
 
     /// <summary>
-    /// The two pages of buttons a sticky card can show (MESSAGING.md §21.24). MAIN is what every card shows by default: the
-    /// lifecycle actions a phone needs at once - ⑂ Fork, 🆕 New Session in the folder, 🔄 Restart Session - and ⚙ Session,
-    /// which turns the card's keyboard into the SESSION page: every button the card had before (the runner, the queue, the
-    /// pin, the transcript, the screen as text) plus the screen as a picture, and ◀ Back.
+    /// The two pages of buttons a sticky card can show (MESSAGING.md §21.24). MAIN is what every card shows by default: ⚙ Session
+    /// and 🔄 Restart Session. ⚙ Session turns the card's keyboard into the SESSION page: ⑂ Fork and 🆕 New Session in the folder
+    /// first (the user's placement of 2026-10-18: "after ⚙ Session"), then every button the card had before (the runner, the
+    /// queue, the pin, the transcript, the screen as text), the screen as a picture, and ◀ Back.
     /// </summary>
     /// <remarks>
     /// The page belongs to the card the button sits on: the service remembers the sticky card's page per topic in memory
@@ -4151,8 +4151,8 @@ namespace Agentmaster::Msg
     /// </remarks>
     enum class CardPage
     {
-        Main, // ⚙ Session · ⑂ Fork · 🆕 New Session · 🔄 Restart Session
-        Session, // the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
+        Main, // ⚙ Session · 🔄 Restart Session
+        Session, // ⑂ Fork · 🆕 New Session · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
     };
 
     /// <summary>What the card's buttons depend on, read from the session at render time (CardButtonFactsFor).</summary>
@@ -4215,7 +4215,7 @@ namespace Agentmaster::Msg
     /// The sticky card's buttons on one page, as rows of (label, callback data) - the service turns them into Telegram's
     /// inline keyboard. Both pages START with the state's own action when it has one, because that is what a card in that
     /// state is for: 🔧 Resume Session for a session in Error, else ▶ Reactivate for a parked tab or a claude that exited.
-    /// Main then holds ⚙ Session · ⑂ Fork and 🆕 New Session · 🔄 Restart Session; Session holds the runner · 📋 Queue,
+    /// Main then holds ⚙ Session · 🔄 Restart Session; Session holds ⑂ Fork · 🆕 New Session, the runner · 📋 Queue,
     /// 📌 Pin · 📄 Transcript, 🖥 Screen Text · 🖼 Screen Image, and ◀ Back.
     /// </summary>
     /// <param name="sessionId">The card's session (it goes into every button's data).</param>
@@ -4238,11 +4238,12 @@ namespace Agentmaster::Msg
         {
             // The cog carries U+FE0F so every app draws it as the emoji (U+2699 alone may be drawn as a text glyph).
             rows.push_back({ { L"\x2699\xFE0F Session", CardCallbackData(kCardVerbSessionPage, sessionId) },
-                             { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) } });
-            rows.push_back({ { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) },
                              { L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) } });
             return rows;
         }
+        // The user's placement (2026-10-18): ⑂ Fork and 🆕 New Session come right after ⚙ Session is tapped, at the top of its page.
+        rows.push_back({ { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) },
+                         { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) } });
         rows.push_back({ { facts.runnerAuto ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", CardCallbackData(L"runner", sessionId) },
                          { L"\U0001F4CB Queue", CardCallbackData(L"queue", sessionId) } });
         rows.push_back({ { facts.pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", CardCallbackData(L"pin", sessionId) },
