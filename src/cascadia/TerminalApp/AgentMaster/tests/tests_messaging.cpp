@@ -52,6 +52,75 @@ void TestMessaging()
     CHECK(TgFirstLine(L"abcdefghij", 5).size() == 5, "first line capped at maxChars incl. the ellipsis");
     CHECK(TgFirstLine(L"   \n  ", 10).empty(), "a blank text has no first line");
 
+    // ---- TelegramFormat: a title on ONE line, wherever the bot prints it (2026-10-18: a tab title that got a second line was
+    //      told as "“🟪 BetterClipboard” changed the title to “🟪 BetterClipboard”") ----
+    {
+        const std::wstring purple = L"\U0001F7EA";
+        const std::wstring green = L"\U0001F7E9";
+        // The rule: every line break is ONE space — a lone CR (what the tab's rename box writes), an LF, a CR LF pair.
+        CHECK(TgOneLineTitle(L"BetterClipboard\ron-launch") == L"BetterClipboard on-launch", "one line: a lone CR (the tab's line break) is a space");
+        CHECK(TgOneLineTitle(L"a\nb") == L"a b" && TgOneLineTitle(L"a\r\nb") == L"a b", "one line: an LF is a space, and a CR LF pair is ONE space");
+        CHECK(TgOneLineTitle(L"produce chinese models \rparameters") == L"produce chinese models parameters" && TgOneLineTitle(L"a \t\r\n\t b") == L"a b",
+              "one line: the blanks around a break go into its one space");
+        CHECK(TgOneLineTitle(L"a\r\n\r\nb") == L"a b" && TgOneLineTitle(L"a\n\n\nb") == L"a b", "one line: a run of breaks (an empty line) is one space");
+        CHECK(TgOneLineTitle(L"\r\n  x\n") == L"x" && TgOneLineTitle(L"\r").empty(), "one line: a break at an end leaves nothing");
+        CHECK(TgOneLineTitle(L"  a  b\t") == L"  a  b\t" && TgOneLineTitle(L"").empty(), "one line: a one-line title comes back byte for byte, its own blanks too");
+        CHECK(TgOneLineTitle(L"x\r y\n\nz") == L"x y z" && TgOneLineTitle(TgOneLineTitle(L"x\r y\n\nz")) == L"x y z", "one line: a second application changes nothing");
+        CHECK(TgOneLineTitle(L"\U0001F7EA x\ry") == L"\U0001F7EA x y", "one line: a surrogate pair is untouched");
+        // The cut a place uses for a title: TgTitleLine replaces TgFirstLine for titles.
+        CHECK(TgTitleLine(L"BetterClipboard\ron-launch", 200) == L"BetterClipboard on-launch", "title line: both lines of a two-line title");
+        CHECK(TgTitleLine(L"  x \r ", 10) == L"x" && TgTitleLine(L" \r\n\t ", 10).empty(), "title line: trimmed, and a blank title is empty");
+        CHECK(TgTitleLine(L"abcdefghij", 5) == L"abcd\x2026" && TgTitleLine(L"abcdefghij", 0) == L"abcdefghij", "title line: cut within the cap with an ellipsis; 0 = no cap");
+        for (const wchar_t* one : { L"hello world", L"  padded  ", L"abcdefghijklmnop", L"x" })
+        {
+            CHECK(TgTitleLine(one, 8) == TgFirstLine(one, 8), "title line: a one-line title is cut exactly like TgFirstLine");
+        }
+        CHECK(TgTitleLine(L"ab\U0001F7EAcd", 4) == L"ab\x2026", "title line: a cut never splits a surrogate pair");
+        // The title token (every message that names a session): its classic render, its chip, and the classic mention.
+        CHECK(TgRenderTitleTokensClassic(TgTitleToken(TgTitleForm::Plain, purple, L"BetterClipboard\ron-launch")) == purple + L" BetterClipboard on-launch",
+              "a token's title is one line (its classic render carried the CR before)");
+        CHECK(TgRichHtmlFromClassic(TgTitleToken(TgTitleForm::Plain, purple, L"a\r\nb")).find(L">" + purple + L" a b</tg-button>") != std::wstring::npos,
+              "the chip reads the same one line (a CR LF pair is one space)");
+        CHECK(TitleMentionHtml(purple, L"a <b>\rc") == purple + L" a &lt;b&gt; c", "the classic mention: one line, escaped");
+        // A topic's NAME, in every form, and what a user's rename of the thread reads back from it.
+        CHECK(TopicDisplayName(SessionState::Running, L"BetterClipboard\ron-launch") == L"\U0001F535 BetterClipboard on-launch", "a topic name is one line (the glyph form)");
+        CHECK(TopicDisplayName(SessionState::Running, purple, L"BetterClipboard\ron-launch") == L"\U0001F535 " + purple + L" BetterClipboard on-launch",
+              "a topic name is one line (with the color square)");
+        CHECK(TopicDisplayName(SessionState::Running, purple, L"BetterClipboard\ron-launch", true) == purple + L" BetterClipboard on-launch",
+              "a topic name is one line (the state-icon form, 21.22)");
+        CHECK(StripTopicNameDecoration(TopicDisplayName(SessionState::Running, purple, L"a\rb", true)) == L"a b", "a re-saved name reads back as the one-line title");
+        // The change line: the report itself, and the rule behind it.
+        CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"BetterClipboard", purple, L"BetterClipboard\ron-launch", purple)) ==
+                  L"<i>\x201C" + purple + L" BetterClipboard\x201D changed the title to \x201C" + purple + L" BetterClipboard on-launch\x201D</i>",
+              "the change line names the whole new title on one line (it read \"... changed the title to BetterClipboard\")");
+        CHECK(BuildTopicChangeNoticeHtml(L"BetterClipboard on-launch", purple, L"BetterClipboard\ron-launch", purple).empty() &&
+                  !TopicChangeShowsTitle(L"BetterClipboard on-launch", L"BetterClipboard\ron-launch"),
+              "a title that prints the same (a space retyped as a line break) tells nothing: never \"X changed the title to X\"");
+        CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"a b", purple, L"a\rb", green)) == L"<i>\x201C" + purple + L" a b\x201D changed the color to " + green + L"</i>",
+              "...while a color change at the same time still gets its line");
+        CHECK(BuildTopicChangeNoticeHtml(std::wstring(230, L'x') + L"A", purple, std::wstring(230, L'x') + L"B", purple).empty(), "a difference past the cut (200) tells nothing either");
+        CHECK(TgRenderTitleTokensClassic(BuildTopicChangeNoticeHtml(L"\r\n", L"", L"x", L"")) == L"<i>The title is now \x201Cx\x201D</i>", "a blank old title is an unknown one");
+        CHECK(TopicChangeShowsTitle(L"BetterClipboard", L"BetterClipboard\ron-launch") && TopicChangeShowsTitle(L"", L"x") && !TopicChangeShowsTitle(L"old", L" \r "),
+              "TopicChangeShowsTitle: the printed titles differ and the new one is not blank");
+        // The "You" line's title row, the Search answer (its cards, its rest lines, the pick menu), the new thread's picker.
+        CHECK(TgRenderTitleTokensClassic(UserLineTitleRow(L"BetterClipboard\ron-launch", L"91d8d3d1", purple, 0)) == purple + L" BetterClipboard on-launch",
+              "the You line's title row is one line");
+        SearchCard card;
+        card.number = 1;
+        card.sessionId = L"91d8d3d1-7bca-4228-bd4f-26a0209fb458";
+        card.title = L"BetterClipboard\ron-launch";
+        card.colorSquare = purple;
+        card.state = SearchPickState::Listed;
+        const auto printedOnOneLine = [](const std::wstring& html) {
+            return html.find(L"BetterClipboard on-launch") != std::wstring::npos && html.find(L'\r') == std::wstring::npos;
+        };
+        CHECK(printedOnOneLine(TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"one", { card }, 0, 1'800'000'000'000))), "a Search card's title is one line");
+        const std::vector<std::wstring> rest = BuildSearchMoreLinesHtml({ card }, 1'800'000'000'000);
+        CHECK(rest.size() == 1 && printedOnOneLine(rest[0]) && rest[0].find(L'\n') == std::wstring::npos, "a Search rest line stays ONE line");
+        CHECK(printedOnOneLine(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(card, 1'800'000'000'000))), "the pick menu's title is one line");
+        CHECK(BuildNewThreadPickerHtml(NewThreadLists{}, 0, 0, 0, L"a\rb", 1'800'000'000'000).find(L"<b>a b</b>") != std::wstring::npos, "the new thread's picker names its title on one line");
+    }
+
     // ---- TelegramFormat: Markdown -> HTML ----
     {
         const std::wstring html = TgMarkdownToHtml(L"# Title\nSome **bold** and `code <x>` here\n- item one\n* item two\n> quoted\n```cpp\nint a<b;\n```\ntail [link](https://x.y/z?a=1&b=2) end");

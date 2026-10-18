@@ -4941,14 +4941,18 @@ namespace Agentmaster::Msg
             const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs), title, color.square, before.threadId);
             if (!notice.empty())
             {
+                // Which change the line tells, by the line's own rule (the titles as it PRINTS them, 2026-10-18): titles that
+                // differ only in a line break or past the cut tell their color, if anything, so the log never says "title" for
+                // a line that names none.
+                const wchar_t* const what = TopicChangeShowsTitle(before.title, title) ? L"title" : L"color";
                 if (TopicBackfillPending(before))
                 {
-                    _log(L"[msg] topic " + ShortId(sessionId) + L" changed (" + (before.title != title ? L"title" : L"color") + L"): no line while its history is being added");
+                    _log(L"[msg] topic " + ShortId(sessionId) + L" changed (" + what + L"): no line while its history is being added");
                 }
                 else
                 {
                     _sendText(thread, notice, true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
-                    _log(L"[msg] topic " + ShortId(sessionId) + L" told: its " + (before.title != title ? L"title" : L"color") + L" changed");
+                    _log(L"[msg] topic " + ShortId(sessionId) + L" told: its " + what + L" changed");
                 }
             }
             _refreshCard(sessionId, true);

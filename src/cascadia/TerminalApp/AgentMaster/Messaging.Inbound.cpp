@@ -2927,7 +2927,9 @@ namespace Agentmaster::Msg
             return; // nothing but the decoration: no title to take
         }
         const auto s = _registry->GetWithoutQueue(sessionId);
-        if (!s || s->title == title)
+        // A name that is the session's title as the service PRINTS it — on one line (TgOneLineTitle, 2026-10-18) — is the
+        // service's own name saved back unchanged: taking it would flatten a tab title that has line breaks ("a\rb" -> "a b").
+        if (!s || s->title == title || TgOneLineTitle(s->title) == title)
         {
             return; // the name the service gave it, or one only re-decorated: the session's title stands
         }

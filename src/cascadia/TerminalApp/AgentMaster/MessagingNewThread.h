@@ -434,7 +434,7 @@ namespace Agentmaster::Msg
             html += L"\n<i>Your " + std::to_wstring(heldCount) + L" messages wait here and go to the session in order.</i>";
         }
         html += topicName.empty() ? std::wstring{ L"\n<i>Its title: the folder's name \x2014 rename this thread to change it.</i>" }
-                                  : L"\n<i>Its title: <b>" + TgEscapeHtml(TgFirstLine(topicName, 120)) + L"</b> \x2014 rename this thread to change it.</i>";
+                                  : L"\n<i>Its title: <b>" + TgEscapeHtml(TgTitleLine(topicName, 120)) + L"</b> \x2014 rename this thread to change it.</i>"; // a title: on one line (TgTitleLine), like every title the bot prints
         html += L"\n<i>Or send a folder's full path.</i>";
         const auto section = [&](const wchar_t* glyph, const wchar_t* name, const std::vector<NewThreadFolder>& list, size_t page, bool recency) {
             html += L"\n\n";
