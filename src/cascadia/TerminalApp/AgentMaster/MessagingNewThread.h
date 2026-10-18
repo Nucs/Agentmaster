@@ -15,7 +15,8 @@
 //      the service chose, in the background of the most recently active window.
 //   3. When the session is live, the service ADOPTS the user's thread as the session's topic (no new topic is made), renames it like
 //      every topic (state glyph, color square, title), and hands it the held messages as if they had been sent in the topic: the
-//      first becomes the session's first prompt.
+//      first becomes the session's first prompt. A held message the user deleted meanwhile is left out (HeldMessageGone), and
+//      each one's 👀 "seen" mark comes off as it is handed over.
 //   4. The title: the thread's name when the user named it (forum_topic_created's is_name_implicit false), else the folder-derived
 //      default; renaming the thread later renames the session (forum_topic_edited), like /rename.
 //
@@ -58,6 +59,17 @@ namespace Agentmaster::Msg
     inline constexpr int64_t kNewThreadPickerIdleMs = 24 * 60 * 60 * 1000;
     // The most messages one picker holds; a message past it is answered and not held (the picker is a doorway, not a queue).
     inline constexpr size_t kNewThreadHeldMax = 20;
+    // The folder checks run on the POLL thread, the one that reads Telegram, so each waits a bounded time (FolderProbe.h): an
+    // offline network share answers only after the network's timeout, tens of seconds, and the whole bot froze meanwhile.
+    //   A PICK (a picker button, a typed path, the Search topic's /newsession <folder>) asks the folder again and waits this long;
+    //   past it the user is told the folder did not answer, and the probe goes on in the background.
+    inline constexpr uint32_t kNewThreadPickProbeWaitMs = 2000;
+    //   A picker's LISTS wait at most this long per folder…
+    inline constexpr uint32_t kNewThreadListProbeEachMs = 250;
+    //   …and at most this long for all the folders together; past it the rest are listed unchecked (the pick checks them).
+    inline constexpr uint32_t kNewThreadListProbeBudgetMs = 1500;
+    //   A list takes an answer up to this old (a minute: a folder deleted that recently is caught by the pick's own check).
+    inline constexpr uint32_t kNewThreadListProbeMaxAgeMs = 60 * 1000;
     // The most characters of a folder's name on its button (an ellipsis past it).
     inline constexpr size_t kNewThreadLabelMaxChars = 24;
     // The prefix of every picker button's callback data. "nt:" collides with no other prefix the service reads ("c:" card verbs,
@@ -599,6 +611,22 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// What a pick says when the folder's check did not answer within kNewThreadPickProbeWaitMs (§21.17.4, FolderProbe.h) — an
+    /// offline network share, a disk spinning up. The folder comes LAST: a picker button's toast is cut at 190 characters, so a
+    /// long path must not push the reason out of it.
+    /// </summary>
+    /// <param name="folderShown">The folder as the reply shows it: plain for a toast or an escaped reply, or already marked up
+    /// (`&lt;code&gt;…&lt;/code&gt;`, escaped) for an HTML reply. The rest of the text holds no HTML special character, so it is
+    /// safe either way.</param>
+    /// <returns>The sentence, naming the wait in whole seconds.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring NewThreadFolderNoAnswerText(std::wstring_view folderShown)
+    {
+        return L"The folder did not answer within " + std::to_wstring(kNewThreadPickProbeWaitMs / 1000) +
+               L" s (an offline network share?) \x2014 try again once it is reachable: " + std::wstring{ folderShown };
+    }
+
+    /// <summary>
     /// A topic NAME without the decoration the service puts before the title (§21.11, §21.13): one leading state glyph
     /// (StateGlyph's six) and one leading color square (TgTitleColorSquare's nine), each with the space after it — so a thread the
     /// user renamed to "🟡 🟦 my title" (the decoration kept, the title changed) or to "my title" reads "my title" either way.
@@ -643,5 +671,35 @@ namespace Agentmaster::Msg
             }
         }
         return std::wstring{ name };
+    }
+
+    // ===== the held messages =========================================================================================
+
+    /// <summary>
+    /// Whether Telegram's answer to a reaction on a HELD message (§21.17.4) says the message is GONE — the user deleted it
+    /// before the new session took it. Telegram sends a bot no update when a user deletes a message, so the hand-over asks with
+    /// the reaction call that takes the message's 👀 off anyway (the hold's "seen" mark): a message the Bot API no longer has
+    /// is answered 400 "message to react not found" (the server's "&lt;what&gt; not found" wording; "message to edit not found"
+    /// is its edit twin), or MESSAGE_ID_INVALID. Every other answer is NOT proof — a success, a flood refusal, a lost connection,
+    /// a missing topic or chat, a refused reaction — and the message is handed over: a lost prompt costs more than a stray one.
+    /// </summary>
+    /// <param name="ok">Telegram's `ok`.</param>
+    /// <param name="httpStatus">The HTTP status (0 when no response came back).</param>
+    /// <param name="description">Telegram's `description`.</param>
+    /// <returns>True only for an answer that says the message itself does not exist.</returns>
+    inline bool HeldMessageGone(bool ok, int httpStatus, std::wstring_view description) noexcept
+    {
+        if (ok || httpStatus != 400)
+        {
+            return false;
+        }
+        if (description.find(L"MESSAGE_ID_INVALID") != std::wstring_view::npos)
+        {
+            return true;
+        }
+        // "message … not found", but not the TOPIC ("message thread not found") nor the chat ("chat not found"): those say
+        // nothing about one message, and the topic's own handling reads them.
+        return description.find(L"message") != std::wstring_view::npos && description.find(L"not found") != std::wstring_view::npos &&
+               description.find(L"thread") == std::wstring_view::npos && description.find(L"chat not found") == std::wstring_view::npos;
     }
 }
