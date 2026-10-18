@@ -136,42 +136,115 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TerminalPage::_RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request)
+    ::Agentmaster::RemoteLaunchOutcome TerminalPage::_RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request) noexcept
     {
+        using Kind = ::Agentmaster::RemoteLaunchRequest::Kind;
+        using Result = ::Agentmaster::RemoteLaunchResult;
+        // Failed until the seams say otherwise: an answer this function could not finish never passes for a success.
+        ::Agentmaster::RemoteLaunchOutcome outcome;
         try
         {
-            using Kind = ::Agentmaster::RemoteLaunchRequest::Kind;
+            outcome.windowId = _windowId;
             const wchar_t* what = request.kind == Kind::Fork ? L"fork" : (request.kind == Kind::Resume ? L"resume" : L"new");
             ::Agentmaster::LogNav(std::wstring{ L"remote launch " } + what + L" " + ::Agentmaster::ShortId(request.sessionId) + L" dir=" + request.dir + (request.model.empty() ? std::wstring{} : L" model=" + request.model) +
                                   (request.newSessionId.empty() ? std::wstring{} : L" id=" + ::Agentmaster::ShortId(request.newSessionId)));
             if (request.kind != Kind::NewSession && request.dir.empty())
             {
-                ::Agentmaster::LogNav(L"remote launch dropped: no folder for the session");
-                return;
+                outcome.result = Result::NoFolder;
+                ::Agentmaster::LogNav(L"remote launch done no-folder (dropped: no folder for the session)");
+                return outcome;
             }
-            // The phone's launches never take focus: the Sessions page's bulk-open latch keeps the new tab in
-            // the background and skips the page hide / activation.
-            const bool previous = _openClaudeTabInBackground;
+            // The phone's launches never take focus: the Sessions page's bulk-open latch keeps the new tab in the background and
+            // skips the page hide / activation. MESSAGING.md §21.23: and they never show a dialog on the PC — the seams record a
+            // refusal they would have shown (_NoteRemoteLaunchRefusal), and it becomes this launch's answer. Both latches cover
+            // exactly this one synchronous launch; the guard restores them on every path out, a throw included.
+            const bool previousBackground = _openClaudeTabInBackground;
+            const bool previousInFlight = _remoteLaunchInFlight;
             _openClaudeTabInBackground = true;
-            auto restore = wil::scope_exit([this, previous] { _openClaudeTabInBackground = previous; });
+            _remoteLaunchInFlight = true;
+            _remoteLaunchRefusal.reset();
+            auto restore = wil::scope_exit([this, previousBackground, previousInFlight] {
+                _openClaudeTabInBackground = previousBackground;
+                _remoteLaunchInFlight = previousInFlight;
+                _remoteLaunchRefusal.reset(); // a refusal belongs to the launch that recorded it, never to the next one
+            });
+            std::wstring openedId;
+            bool wasOpen = false; // a resume of a session that is live already: its tab stands, nothing new opens
+            bool fresh = false; // a new conversation opens in place of the one asked for
             switch (request.kind)
             {
             case Kind::NewSession:
                 // MESSAGING.md §21.17: the id the requester chose, when it chose one (the bot's new-thread picker binds the user's
                 // thread to it), else a minted one.
-                _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, static_cast<uint32_t>(-1), winrt::hstring{ request.model }, request.newSessionId);
+                openedId = _SpawnClaudeSession(winrt::hstring{ request.dir }, winrt::hstring{ request.title }, static_cast<uint32_t>(-1), winrt::hstring{ request.model }, request.newSessionId);
                 break;
             case Kind::Resume:
-                _ResumeSessionFromDisk(request.sessionId, request.dir, request.title);
-                break;
-            case Kind::Fork:
-                _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model);
+            {
+                const auto before = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(request.sessionId) : std::nullopt;
+                wasOpen = before && before->live;
+                openedId = _ResumeSessionFromDisk(request.sessionId, request.dir, request.title);
+                // A resume whose transcript was gone opens a FRESH session in the same folder (Rule #6) under a new id.
+                fresh = !wasOpen && !openedId.empty() && openedId != request.sessionId;
                 break;
             }
+            case Kind::Fork:
+                // A source with no transcript forks into a FRESH session (_ForkSessionFromDisk's own gate, read the same way
+                // before the call, since the fork's new id is always new and cannot tell it).
+                fresh = !::Agentmaster::ClaudeConversationExists(request.sessionId);
+                openedId = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model);
+                break;
+            }
+            if (!openedId.empty())
+            {
+                // The id first, the result last: a throw in between leaves the answer Failed, never a success without its id.
+                outcome.sessionId = openedId;
+                outcome.fresh = fresh;
+                outcome.result = wasOpen ? Result::AlreadyOpen : Result::Opened;
+            }
+            else if (_remoteLaunchRefusal)
+            {
+                outcome.detail = _remoteLaunchRefusal->detail;
+                outcome.result = _remoteLaunchRefusal->result;
+            }
+            // else: Failed with no detail — nothing opened and no seam said why (its own log line in hooks.log does).
+            ::Agentmaster::LogNav(L"remote launch done " + std::wstring{ ::Agentmaster::RemoteLaunchResultName(outcome.result) } +
+                                  (openedId.empty() ? std::wstring{} : L" new=" + ::Agentmaster::ShortId(openedId)) + (outcome.fresh ? L" (fresh: no transcript to continue)" : L"") +
+                                  (outcome.detail.empty() ? std::wstring{} : L": " + outcome.detail));
         }
         catch (...)
         {
+            // Rule #18. Recovery: the answer stands as far as it got — Failed (the default) unless the seams had opened the tab
+            // already, whose id and result were set last and in that order. The bot is told; nothing else is retried.
             ::Agentmaster::AgentLogCaughtException(L"_RemoteLaunch");
         }
+        return outcome; // a move (no allocation): safe in a noexcept function
+    }
+
+    bool TerminalPage::_NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult result, const std::wstring& detail) noexcept
+    {
+        if (!_remoteLaunchInFlight)
+        {
+            return false; // a launch the user started at the PC: the caller shows its dialog, as before MESSAGING.md §21.23
+        }
+        try
+        {
+            if (!_remoteLaunchRefusal)
+            {
+                ::Agentmaster::RemoteLaunchOutcome refusal;
+                refusal.result = result;
+                refusal.detail = detail;
+                refusal.windowId = _windowId;
+                _remoteLaunchRefusal = std::move(refusal);
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[remote-launch] refused (" + std::wstring{ ::Agentmaster::RemoteLaunchResultName(result) } + L")" + (detail.empty() ? std::wstring{} : L": " + detail) +
+                                                            L" \x2014 no dialog on the PC; the reason goes back to the phone\n");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the dialog stays suppressed (nobody may be at the PC) and the answer falls back to Failed with
+            // no detail; the refusal's own [launch-blocked] / [launch-fail] line in hooks.log still names it.
+            ::Agentmaster::AgentLogCaughtException(L"_NoteRemoteLaunchRefusal");
+        }
+        return true;
     }
 }

@@ -595,6 +595,13 @@ namespace Agentmaster::Msg
     {
         _stateFile = _profile + L"\\messaging\\telegram\\state.json";
         _status = L"Off.";
+        // §21.23: a host that gives only the ANSWERED launch still gets a plain one, for the code that only asks whether launching
+        // is available (`!_hooks.launch`) and for any caller that needs no answer. Its answers are dropped: the service's own
+        // launches go through _askLaunch, which takes launchAnswered itself and routes the answer to the tick.
+        if (!_hooks.launch && _hooks.launchAnswered)
+        {
+            _hooks.launch = [answered = _hooks.launchAnswered](const RemoteLaunchRequest& req) { return answered(req, RemoteLaunchReply{}); };
+        }
     }
 
     MessagingService::~MessagingService()
@@ -1667,13 +1674,18 @@ namespace Agentmaster::Msg
             {
                 {
                     std::unique_lock lk{ _mtx };
-                    _tickCv.wait_for(lk, std::chrono::milliseconds(kTickMs), [this] { return _stop.load() || _tickRequested; });
+                    // §21.23: a launch answer wakes the tick too (_onLaunchAnswered sets the flag without `_mtx`, so the phone hears
+                    // a refusal at once instead of after the tick's period).
+                    _tickCv.wait_for(lk, std::chrono::milliseconds(kTickMs), [this] { return _stop.load() || _tickRequested || _launchAnswersPending.load(); });
                     _tickRequested = false;
                 }
                 if (_stop.load())
                 {
                     break;
                 }
+                // §21.23: the windows' answers to this service's launches first, every tick — before the sync, so a bind or a
+                // revive the answer settles is seen settled by everything this tick does.
+                _settleLaunchAnswers();
                 const int64_t now = WallMs();
                 // The run marker (§4.3, §21.18): rewritten every minute with the time and the version word — the previous
                 // run's last copy is when that run was last seen alive and which version it was (the start note). Held for
@@ -2004,16 +2016,19 @@ namespace Agentmaster::Msg
                 // live posts of this tick are queued first (they go first anyway: the replay has the lowest priority).
                 _pumpBackfill();
                 _resortTick();
-                // Revives for sessions that have no topic yet (a resumed session that is still Idle).
+                // Revives for sessions that have no topic yet (a resumed session that is still Idle). §21.23: a revive settles on
+                // the session its window's ANSWER named (Revive::openedId) — a new session or a fork has no id of its own until the
+                // answer, and the request's own id is the fork's SOURCE (or the topic a /newsession was typed in), which a live
+                // match used to settle on. A revive with no answer yet waits; the ones that waited too long are told so.
                 {
                     std::vector<std::wstring> reviveIds;
                     {
                         std::lock_guard lk{ _mtx };
                         for (const auto& rv : _revives)
                         {
-                            if (!rv.req.sessionId.empty())
+                            if (rv.answered && !rv.openedId.empty())
                             {
-                                reviveIds.push_back(rv.req.sessionId);
+                                reviveIds.push_back(rv.openedId);
                             }
                         }
                     }
@@ -2024,22 +2039,7 @@ namespace Agentmaster::Msg
                             _sweepRevives(*s);
                         }
                     }
-                    // A New-session revive has no id: match any live session in its folder.
-                    bool anyNew = false;
-                    {
-                        std::lock_guard lk{ _mtx };
-                        for (const auto& rv : _revives)
-                        {
-                            anyNew = anyNew || rv.req.sessionId.empty();
-                        }
-                    }
-                    if (anyNew)
-                    {
-                        for (const auto& s : _registry->SnapshotLiveForCards())
-                        {
-                            _sweepRevives(s);
-                        }
-                    }
+                    _expireRevives();
                 }
                 _sweepTokens();
                 // Park an idle Search agent.
@@ -3876,12 +3876,34 @@ namespace Agentmaster::Msg
         }
         for (const auto& b : expired)
         {
-            // The launch never registered a live session (no window took it, claude.exe missing, a preset refused): the user's
-            // messages stay where they are in the chat, and the next message in the thread asks for a folder again.
-            _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": the session " + ShortId(b.sessionId) + L" in " + b.dir + L" did not come up within " +
-                 std::to_wstring(kNewThreadBindTimeoutMs / 60000) + L" min; the thread is free again");
-            _reply(b.threadId, L"The new session did not start (no window opened it within " + std::to_wstring(kNewThreadBindTimeoutMs / 60000) +
-                                   L" minutes). Send a message here to pick a folder again.",
+            // §21.23: a launch the window REFUSED (no claude.exe, a failed tab, a window that closed) never gets here — its answer
+            // sent the thread back to a picker at once (_settleLaunchAnswers). What is left: the PC never answered within the
+            // timeout (its window's UI thread was busy), or it opened the tab and the session never came up. The messages the bind
+            // held wait in the thread's picker record — the next message posts the picker, and the pick hands them over — where
+            // they were dropped before §21.23 (they stayed in the chat, unsent).
+            size_t kept = 0;
+            {
+                std::lock_guard lk{ _mtx };
+                auto& nt = _newThreads[b.threadId];
+                nt.held.insert(nt.held.begin(), b.held.begin(), b.held.end());
+                if (nt.held.size() > kNewThreadHeldMax)
+                {
+                    nt.held.resize(kNewThreadHeldMax); // the oldest ones: the bind's, then any the record already had
+                }
+                kept = nt.held.size();
+                if (nt.topicName.empty())
+                {
+                    nt.topicName = b.title;
+                }
+                nt.lastUseMs = WallMs();
+            }
+            const std::wstring minutes = std::to_wstring(kNewThreadBindTimeoutMs / 60000);
+            _log(L"[msg] new thread " + std::to_wstring(b.threadId) + L": the session " + ShortId(b.sessionId) + L" in " + b.dir + L" did not come up within " + minutes + L" min (" +
+                 (b.answered ? L"the window opened its tab" : L"no window answered the launch") + L"); the thread is free again, " + std::to_wstring(kept) + L" held message(s) kept");
+            _reply(b.threadId,
+                   (b.answered ? L"The tab opened on the PC, but the new session did not come up within " + minutes + L" minutes." :
+                                 L"The new session did not start: the PC did not answer within " + minutes + L" minutes (its window may be busy).") +
+                       L" Send a message here to pick a folder again" + (kept > 0 ? L"; what you wrote here is kept for it." : L"."),
                    false);
         }
         for (auto& b : ready)

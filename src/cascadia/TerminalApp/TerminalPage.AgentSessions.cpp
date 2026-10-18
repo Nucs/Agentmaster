@@ -137,6 +137,13 @@ namespace winrt::TerminalApp::implementation
     // appearing and the action proceeds.
     winrt::fire_and_forget TerminalPage::_PromptClaudeMissing()
     {
+        // MESSAGING.md §21.23: a launch the Telegram bot asked for has nobody at the PC to read this — record the refusal for
+        // its answer (_RemoteLaunch) and show nothing. Runs synchronously inside the launch (before any co_await), which is the
+        // only time the latch is set.
+        if (_NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::ClaudeMissing, {}))
+        {
+            co_return;
+        }
         if (_claudeMissingPromptShowing)
         {
             co_return; // a prompt is already up (or queued this tick) — never stack duplicates
@@ -215,6 +222,12 @@ namespace winrt::TerminalApp::implementation
     // happened at the launch seam; this only explains it.
     winrt::fire_and_forget TerminalPage::_PromptPresetLaunchError(std::wstring message)
     {
+        // MESSAGING.md §21.23: a launch the Telegram bot asked for — the preset's refusal goes back to the phone in the launch's
+        // answer (_RemoteLaunch), with the preset's own words, and no dialog waits on the PC for someone who may not be there.
+        if (_NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::PresetRefused, message))
+        {
+            co_return;
+        }
         if (_presetLaunchErrorShowing)
         {
             co_return; // one notice at a time: a window restore of N keyless preset sessions shows ONE
@@ -359,7 +372,10 @@ namespace winrt::TerminalApp::implementation
     // presetSessionId (MESSAGING.md §21.17): the id the session takes when the caller chose one — the
     // Telegram bot's new-thread picker mints it so the user's thread is bound to the session before the
     // tab exists; "" mints one here, as every other launch does.
-    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition, winrt::hstring model, const std::wstring& presetSessionId)
+    // Returns the new session's id, or "" when no tab opened (the claude.exe gate, a refused preset, a
+    // failed pane): the Telegram bot's launch answers with it (MESSAGING.md §21.23, _RemoteLaunch); the
+    // other callers ignore it.
+    std::wstring TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition, winrt::hstring model, const std::wstring& presetSessionId)
     {
         // Nav audit: the user asked for a FRESH session here (Manager "Launch Claude", a tree/board/
         // Sessions-page "Open New Session Here", or a tab-menu spawn). The resulting minted id lands
@@ -373,14 +389,15 @@ namespace winrt::TerminalApp::implementation
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
             ::Agentmaster::LogNav(L"open-new claude done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
-            _PromptClaudeMissing();
-            return;
+            _PromptClaudeMissing(); // a remote launch records the refusal instead of the dialog (MESSAGING.md §21.23)
+            return {};
         }
         const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition, std::wstring{ model }, {}, {}, presetSessionId);
         // Nav audit END (pairs with the open-new BEGIN above): the minted id of the fresh session. An
         // open-new with no matching done = the launch crashed/no-op'd before the tab was created.
         const std::wstring spawnedId = spawnedTab ? _ClaudeSessionForTab(spawnedTab) : std::wstring{};
         ::Agentmaster::LogNav(L"open-new claude done " + (spawnedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(spawnedId))));
+        return spawnedId;
     }
 
     // Agentmaster (COMMANDS.md — the /handover family): a CommandWatch markdown await resolved —
@@ -914,6 +931,9 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
+            // MESSAGING.md §21.23: a remote launch says why (each refusal below does the same: its words go back to the phone
+            // in the launch's answer; a launch started at the PC is unaffected — _NoteRemoteLaunchRefusal is a no-op then).
+            _NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::Failed, L"The window is still starting.");
             return nullptr;
         }
 
@@ -926,6 +946,7 @@ namespace winrt::TerminalApp::implementation
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-blocked] no native claude.exe; refusing to spawn \"" + std::wstring{ title } + L"\"\n");
+            _NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::ClaudeMissing, {});
             return nullptr;
         }
 
@@ -964,6 +985,7 @@ namespace winrt::TerminalApp::implementation
         if (!resumeTargetId.empty() && _claudeTabs.find(resumeTargetId) != _claudeTabs.end())
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore-dedup] " + resumeTargetId + L" already hosted in this window — skipping duplicate resume (a tab can't be two sessions)\n");
+            _NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::Failed, L"A tab of this session is open in the window already, but the session is not running there; open that tab at the PC.");
             return nullptr;
         }
         // Resume ONLY if Claude actually has a saved conversation for the (tail) id. A session that was
@@ -1027,7 +1049,7 @@ namespace winrt::TerminalApp::implementation
         if (!_ResolveLaunchForSpawn(modelOverride, launchInheritFrom, dir, appSettings, launchArgs, compiledLaunch, launchError))
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-blocked] " + (modelOverride.empty() ? (L"inherited from " + ::Agentmaster::ShortId(launchInheritFrom)) : (L"target " + modelOverride)) + L": " + launchError + L" (\"" + ttl + L"\" cwd=" + dir + L")\n");
-            _PromptPresetLaunchError(launchError);
+            _PromptPresetLaunchError(launchError); // a remote launch records the refusal instead of the dialog (MESSAGING.md §21.23)
             return nullptr;
         }
         // Seed workspace trust HERE, at the launch seam — the spec builders are pure and never
@@ -1076,6 +1098,7 @@ namespace winrt::TerminalApp::implementation
             // that "did nothing". Record it so a vanished spawn is diagnosable (the registry upsert + the
             // [spawn]/[fork]/[resume] success line below never ran).
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-fail] " + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L" (pane build returned null \x2014 no tab created)\n");
+            _NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult::Failed, L"The PC could not create the terminal tab.");
             return nullptr;
         }
 

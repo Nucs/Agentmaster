@@ -1043,6 +1043,14 @@ namespace winrt::TerminalApp::implementation
         // dialog closes, and in its catch, or the notice could never show again for the window's life.
         bool _presetLaunchErrorShowing{ false };
         bool _addPresetsHelpShowing{ false }; // Agentmaster (PRESETS): the "Add presets" dialog is up — a second click while it shows opens nothing (_PromptAddPresets)
+        // Agentmaster (MESSAGING.md §21.23): true while _RemoteLaunch runs the launch seams for a request from the phone. A
+        // refusal those seams would show as a MODAL on the PC — no native claude.exe (_PromptClaudeMissing), a preset that
+        // cannot start (_PromptPresetLaunchError) — and the silent refusals of _LaunchClaudeSession are recorded in
+        // _remoteLaunchRefusal instead (_NoteRemoteLaunchRefusal): the user is at the phone, nobody may be at the PC to read a
+        // dialog, and the reason goes back to the phone in the launch's answer. Set and cleared on the UI thread around ONE
+        // synchronous launch (the _openClaudeTabInBackground idiom), so no other launch ever sees it.
+        bool _remoteLaunchInFlight{ false };
+        std::optional<::Agentmaster::RemoteLaunchOutcome> _remoteLaunchRefusal; // the FIRST refusal a seam recorded while _remoteLaunchInFlight was set
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -1385,7 +1393,7 @@ namespace winrt::TerminalApp::implementation
         // _OnTabSelectionChanged, which leaves the page itself. Returns true when it switched. UI thread.
         bool _LeaveManagerPageOntoSelectedTab(const TerminalApp::Tab& tab);
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
-        void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}, const std::wstring& presetSessionId = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model. presetSessionId: MESSAGING.md §21.17 — the id the new session takes, minted by the caller (the Telegram bot's new-thread picker binds the user's thread to it before the tab exists); "" = mint one)
+        std::wstring _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1, winrt::hstring model = {}, const std::wstring& presetSessionId = {}); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab. model: the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu; "" = Default, the settings model. presetSessionId: MESSAGING.md §21.17 — the id the new session takes, minted by the caller (the Telegram bot's new-thread picker binds the user's thread to it before the tab exists); "" = mint one. Returns the new session's id, or "" when no tab opened — the claude.exe gate, a refused preset, a failed pane — which _RemoteLaunch turns into its answer, MESSAGING.md §21.23; every other caller ignores it)
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, const std::wstring& initialPrompt = {}, const std::wstring& inheritLaunchFromId = {}, const std::wstring& presetSessionId = {}); // Agentmaster (MESSAGING.md §21.17): presetSessionId = the id a FRESH launch takes (no `restored`, no fork) instead of a minted one — ignored by a resume, a restore and a fork. // Agentmaster (PRESETS): modelOverride is now a LAUNCH TARGET — "" (inherit / Default), a model id, or "@<presetId>" — resolved by _ResolveLaunchForSpawn; an empty target reuses the snapshot of the resumed session, else the fork source, else inheritLaunchFromId (the /handover origin), and the result is stored under the new session id (launchArgs) so every later relaunch keeps it // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end; modelOverride: launch-model picker — non-empty adds ` --model <id>` to THIS launch's commandline; initialPrompt: COMMANDS.md — non-empty rides the commandline as the positional prompt claude submits as the session's FIRST turn, the /handover successor's kickoff)
         void _HandleCommandHandover(const std::wstring& sessionId, const std::wstring& mdPayload, const std::wstring& commandArgs = {}, bool inPlace = false, bool standby = false); // Agentmaster (COMMANDS.md): a /handover-family await resolved — if THIS window hosts the origin session's tab, FAN OUT one successor PER collected markdown (mdPayload = the '|'-joined path set, SplitWatchPaths): each HANDOVER-*.md starts its OWN "<title> (handover N)" successor whose first user message is THAT file's content, via the per-file delivery tiers (commandline under the escaped budget; full-document bracketed-paste injection above it; NEVER truncated), tabs in write order right of the origin. commandArgs = the typed command's <command-args> verbatim — its LEADING words may name a §6b per-message successor-model hint ("/handover [fable] do x…", PickModelFromArgsHint), overriding the per-command Successor-model combo for THIS handover only. inPlace=false (/handover) spawns every successor as a new tab; inPlace=true (/handover-here) puts the FIRST file's successor INTO the origin tab via _RestartTabIntoFreshSession (additional files beside it), degrading to the new-tab spawn if the in-place swap is unavailable. standby=true (/handover-standby, §5b — mutually exclusive with inPlace) spawns new tabs like /handover but delivers NOTHING at launch: every file (content AND pointer alike) rides the pump's STANDBY lane, which TYPES it into the successor's input box without submitting (BuildPromptFill — one Enter away; the commandline tier is structurally excluded because a positional prompt auto-submits)
         std::wstring _RestartTabIntoFreshSession(const TerminalApp::Tab& originTab, const ::Agentmaster::SessionInfo& origin, const std::wstring& dir, const std::wstring& title, const std::wstring& initialPrompt, const std::wstring& modelOverride = {}); // Agentmaster (COMMANDS.md — /handover-here): REPLACE the origin session's live pane in place with a brand-new FRESH conversation — "Open New Session Here -> Default" spawn semantics (new minted id, the settings model unless the §6b per-command successor modelOverride is set, same dir) delivered through the Restart-session swap (_RestartManagedSession's recipe: HardResetWithoutErase + Connection swap + Start, scrollback kept); _BindClaudeSessionToTab's re-home block then archives the origin (live=false, injector cleared, resumable from Sessions) and re-keys the tab onto the successor. Returns the successor's session id ("" == refused/failed — the caller falls back to the new-tab spawn so the handover is never lost). UI thread only
@@ -1940,11 +1948,35 @@ namespace winrt::TerminalApp::implementation
         // "refresh-favorite" = repaint after a remote store edit). Returns false, calling nothing, when this window
         // does not host the session (the fan-out's other windows). UI thread; never throws (Rule #18 inside).
         bool _RemoteSessionAction(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, const std::function<void(std::wstring)>& reply);
-        // Agentmaster (MESSAGING.md §5.4 / D27): open a session the Telegram bot asked for — resume / fork / a new one —
-        // as a BACKGROUND tab of this window (no focus change: the user is at the phone, and the Sessions page's
-        // bulk-open latch _openClaudeTabInBackground is set around the call). Resume and Fork need the folder; a
-        // request without one is logged and dropped. UI thread; never throws.
-        void _RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request);
+        /// <summary>
+        /// Agentmaster (MESSAGING.md §5.4 / D27 / §21.23): open a session the Telegram bot asked for — resume / fork / a new
+        /// one — as a BACKGROUND tab of this window (no focus change: the user is at the phone, and the Sessions page's
+        /// bulk-open latch _openClaudeTabInBackground is set around the call), and say what came of it. The seams run with
+        /// _remoteLaunchInFlight set, so a refusal they would show as a dialog on the PC (no claude.exe, a refused preset) is
+        /// recorded instead and becomes the answer.
+        /// </summary>
+        /// <param name="request">What the bot asked for (the engine routed it to this window).</param>
+        /// <returns>The answer the bot is told (RemoteLaunch.h): Opened / AlreadyOpen with the session the tab hosts (and
+        /// `fresh` when a new conversation opened in place of the asked one), else the refusal — NoFolder for a resume or a
+        /// fork without its folder, ClaudeMissing, PresetRefused with the preset's words, Failed with what the PC knows.</returns>
+        /// <remarks>
+        /// UI thread. Never throws: a caught exception becomes a Failed answer (Rule #18 inside), because the sink hands
+        /// this value to the bot, which waits for it. Pairs `[nav] remote launch …` with `[nav] remote launch done …`.
+        /// </remarks>
+        ::Agentmaster::RemoteLaunchOutcome _RemoteLaunch(const ::Agentmaster::RemoteLaunchRequest& request) noexcept;
+        /// <summary>
+        /// Agentmaster (MESSAGING.md §21.23): record why the remote launch in flight opened nothing, so _RemoteLaunch can
+        /// answer with it — called by the launch seams at each refusal (the two prompts, and _LaunchClaudeSession's silent
+        /// refusals). Only the FIRST refusal of a launch is kept: it is the cause, and what follows is its consequence.
+        /// </summary>
+        /// <param name="result">What refused (a RemoteLaunchResult other than Opened / AlreadyOpen).</param>
+        /// <param name="detail">The PC's own words for it (plain text; "" when the result says it all).</param>
+        /// <returns>True when a remote launch is in flight — the refusal was recorded, and the caller must NOT show its dialog
+        /// (nobody may be at the PC); false otherwise (a launch the user started at the PC: the caller shows the dialog as
+        /// before).</returns>
+        /// <remarks>UI thread (the latch is UI-thread state). Never throws: a failed allocation keeps the dialog suppressed and
+        /// the answer generic (Rule #18: logged).</remarks>
+        bool _NoteRemoteLaunchRefusal(::Agentmaster::RemoteLaunchResult result, const std::wstring& detail) noexcept;
         /// <summary>
         /// Agentmaster (SESSIONS.md §9.14 — TerminalPage.AgentSessionsAi.cpp): the receiving half of the AI search's window
         /// and tab tools. Census: this window's strip (title, session, selected tab per tab). Resume / Fork: open the

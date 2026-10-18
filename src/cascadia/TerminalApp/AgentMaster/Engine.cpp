@@ -551,7 +551,9 @@ namespace Agentmaster
                 hooks.sessionAction = [](const std::wstring& sid, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply) {
                     RequestSessionActionInWindows(sid, action, arg, std::move(reply));
                 };
-                hooks.launch = [](const RemoteLaunchRequest& req) { return RequestLaunchInWindow(req); };
+                // §21.23: ANSWERED — the window says which session it opened, or why nothing opened. The service builds its plain
+                // `launch` on top of it (MessagingService's constructor).
+                hooks.launchAnswered = [](const RemoteLaunchRequest& req, RemoteLaunchReply reply) { return RequestLaunchInWindow(req, std::move(reply)); };
                 hooks.restartSession = [](const std::wstring& sid) { RestartSessionInOtherWindows(sid, L""); };
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
                 hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
@@ -1916,14 +1918,99 @@ namespace Agentmaster
         }
     }
 
-    // Agentmaster (MESSAGING.md §5.4 / §8.2 / D27): see Engine.h. The launch sinks + the last-active window.
-    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<void(const RemoteLaunchRequest&)> handler)
+    // Agentmaster (MESSAGING.md §5.4 / §8.2 / D27 / §21.23): see Engine.h. The launch sinks, the last-active window, and
+    // the launch's ANSWER.
+    namespace
+    {
+        /// <summary>
+        /// MESSAGING.md §21.23: the ONE answer of one remote launch a window took. Every copy of the reply the engine hands a
+        /// window's sink shares one of these, so the first outcome is delivered and every later one ignored (a sink that
+        /// answers twice; the window's answer racing the engine's own). When the LAST copy dies unanswered — the window's
+        /// dispatcher dropped the work item without running it, which is what a closing window does with its queue — the
+        /// destructor answers WindowClosed, so the requester is never left to wait out its timeout for a window that is gone.
+        /// Disarm() settles it without an answer, for an attempt the sink refused: the engine asks the next window instead, and
+        /// a refusal must never also answer.
+        /// </summary>
+        /// <remarks>
+        /// The answer runs on whichever thread delivers it (the window's UI thread, or the thread that drops the last copy) and
+        /// is contained here (Rule #18): a throwing requester costs its own answer, never the window's dispatcher item or a
+        /// destructor's noexcept.
+        /// </remarks>
+        class LaunchAnswer
+        {
+        public:
+            /// <summary>Holds the requester's reply until the one answer settles it.</summary>
+            /// <param name="reply">The requester's receiver (may be empty: the answer is then dropped).</param>
+            /// <exception cref="std::bad_alloc">If the reply's copy cannot be allocated.</exception>
+            explicit LaunchAnswer(RemoteLaunchReply reply) :
+                _reply{ std::move(reply) }
+            {
+            }
+
+            LaunchAnswer(const LaunchAnswer&) = delete;
+            LaunchAnswer& operator=(const LaunchAnswer&) = delete;
+
+            /// <summary>The last copy of the reply died: answers WindowClosed unless an answer or Disarm came first. Never throws.</summary>
+            ~LaunchAnswer() noexcept
+            {
+                if (!_settled.exchange(true))
+                {
+                    RemoteLaunchOutcome dropped; // the strings stay empty: no allocation, nothing to throw
+                    dropped.result = RemoteLaunchResult::WindowClosed;
+                    _Deliver(dropped);
+                }
+            }
+
+            /// <summary>Delivers `outcome` unless the answer was settled already (then it is ignored). Never throws.</summary>
+            /// <param name="outcome">The window's answer.</param>
+            void Send(const RemoteLaunchOutcome& outcome) noexcept
+            {
+                if (!_settled.exchange(true))
+                {
+                    _Deliver(outcome);
+                }
+            }
+
+            /// <summary>Settles the answer without delivering anything: the attempt was refused. Never throws.</summary>
+            void Disarm() noexcept
+            {
+                _settled.store(true);
+            }
+
+        private:
+            /// <summary>Calls the requester's reply, containing a throw (Rule #18: logged, the answer lost). Never throws.</summary>
+            /// <param name="outcome">What to hand over.</param>
+            void _Deliver(const RemoteLaunchOutcome& outcome) noexcept
+            {
+                try
+                {
+                    if (_reply)
+                    {
+                        _reply(outcome);
+                    }
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"RequestLaunchInWindow: the requester's reply");
+                }
+            }
+
+            RemoteLaunchReply _reply;
+            std::atomic<bool> _settled{ false }; // an answer was delivered, or the attempt was disarmed: nothing more goes out
+        };
+    }
+
+    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)> handler)
+    {
+        return RegisterWindowLaunchHandlerIn(SharedEngine(), windowId, std::move(handler));
+    }
+
+    uint64_t RegisterWindowLaunchHandlerIn(Engine& e, const std::wstring& windowId, std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)> handler)
     {
         if (!handler)
         {
             return 0;
         }
-        auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.launchMutex);
         const auto token = e.nextLaunchToken++;
         e.launchSinks.push_back({ token, windowId, std::move(handler) });
@@ -1932,11 +2019,15 @@ namespace Agentmaster
 
     void UnregisterWindowLaunchHandler(uint64_t token)
     {
+        UnregisterWindowLaunchHandlerIn(SharedEngine(), token);
+    }
+
+    void UnregisterWindowLaunchHandlerIn(Engine& e, uint64_t token)
+    {
         if (token == 0)
         {
             return;
         }
-        auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.launchMutex);
         for (auto it = e.launchSinks.begin(); it != e.launchSinks.end(); ++it)
         {
@@ -1948,40 +2039,68 @@ namespace Agentmaster
         }
     }
 
-    bool RequestLaunchInWindow(const RemoteLaunchRequest& request)
+    bool RequestLaunchInWindow(const RemoteLaunchRequest& request, RemoteLaunchReply reply)
     {
-        auto& e = SharedEngine();
-        std::function<void(const RemoteLaunchRequest&)> fn;
+        return RequestLaunchInWindowIn(SharedEngine(), request, std::move(reply));
+    }
+
+    bool RequestLaunchInWindowIn(Engine& e, const RemoteLaunchRequest& request, RemoteLaunchReply reply)
+    {
+        // The candidates in preference order, copied under the lock and asked outside it (each sink hops into its own
+        // window's dispatcher and returns at once): the most recently activated window first; then, because that window
+        // may be closing (its dispatcher refuses the item) or may have closed since (it is then no longer in the list), the
+        // others in registration order — the oldest window first, as the single fallback was before §21.23.
+        std::vector<std::pair<std::wstring, std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)>>> sinks;
         {
             std::lock_guard<std::mutex> lk(e.launchMutex);
-            // The most recently activated window first; a window that closed since is no longer in the list, so
-            // the fallback is the first registered (the oldest window).
+            sinks.reserve(e.launchSinks.size());
             for (const auto& s : e.launchSinks)
             {
                 if (s.fn && !e.lastActiveWindowId.empty() && s.windowId == e.lastActiveWindowId)
                 {
-                    fn = s.fn;
-                    break;
+                    sinks.emplace_back(s.windowId, s.fn);
                 }
             }
-            if (!fn)
+            for (const auto& s : e.launchSinks)
             {
-                for (const auto& s : e.launchSinks)
+                if (s.fn && (e.lastActiveWindowId.empty() || s.windowId != e.lastActiveWindowId))
                 {
-                    if (s.fn)
-                    {
-                        fn = s.fn;
-                        break;
-                    }
+                    sinks.emplace_back(s.windowId, s.fn);
                 }
             }
         }
-        if (!fn)
+        size_t refused = 0;
+        for (const auto& [windowId, fn] : sinks)
         {
-            return false;
+            // One answer per ATTEMPT. The engine keeps its own copy of the reply (`sinkReply`) until the attempt is decided:
+            // a sink that refuses and drops every copy it made must not let the answer's destructor deliver WindowClosed
+            // before the Disarm below — the requester is about to be told `false` (or the next window is asked), and a
+            // refused attempt must never also answer.
+            auto answer = std::make_shared<LaunchAnswer>(reply); // a copy: a refused attempt leaves the reply to the next window
+            RemoteLaunchReply sinkReply = [answer](const RemoteLaunchOutcome& outcome) { answer->Send(outcome); };
+            bool taken = false;
+            try
+            {
+                taken = fn(request, sinkReply);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: this window counts as refusing (a dead dispatcher), and the next one is asked.
+                LogSwallowedException(L"RequestLaunchInWindow: a window's launch sink");
+            }
+            if (taken)
+            {
+                if (refused > 0)
+                {
+                    AppendStateLog(L"hooks.log", L"[remote-launch] window " + windowId + L" took the launch after " + std::to_wstring(refused) + L" window(s) could not\n");
+                }
+                return true; // the window holds the reply's copies now; the answer comes from it (or from the last copy's death)
+            }
+            answer->Disarm();
+            ++refused;
+            AppendStateLog(L"hooks.log", L"[remote-launch] window " + windowId + L" could not take the launch (its sink refused it)\n");
         }
-        fn(request);
-        return true;
+        return false; // no window, or none could take it: nothing opened and no answer follows
     }
 
     void NoteWindowActivated(const std::wstring& windowId) noexcept
