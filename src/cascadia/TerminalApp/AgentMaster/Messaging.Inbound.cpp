@@ -433,6 +433,118 @@ namespace Agentmaster::Msg
         return answerText;
     }
 
+    void MessagingService::_jumpToSearchTopic(int64_t fromThreadId, int64_t messageId)
+    {
+        int64_t search = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            search = _state.searchThreadId;
+        }
+        if (search == 0)
+        {
+            // No Search topic to go to: the first connect is still making it, or it is being made again after the user deleted
+            // it (§21.18). The answer stays where the command was typed, and so does the command (the answer replies to it).
+            _reply(fromThreadId, L"The \U0001F50E Search topic is not there yet \x2014 it is being made. Send /search_tab again in a moment.", false, json::Value{}, messageId);
+            _log(L"[msg] /search-tab (thread " + std::to_wstring(fromThreadId) + L"): no Search topic yet");
+            LogNav(L"remote telegram search-tab -> no search topic yet");
+            return;
+        }
+        // 1. The command goes first: it is a move, not content (_deleteCommandMessage says why it must not stay).
+        _deleteCommandMessage(messageId, L"/search-tab");
+        // 2. One SILENT line in the Search topic, queued after the delete (the same priority goes in order): it is now the chat's
+        //    newest message, so Telegram lists the Search topic FIRST on every app (§21.16.7's rule: a bot chat's topics go by
+        //    their last message), and Android's "All" view puts "Continue last thread ›" under it. Silent: the user is at the
+        //    phone and asked for it. The quiet re-sort never moves it down: it orders the session topics only (_resortTick).
+        _sendText(search,
+                  L"\U0001F50E <b>Search</b> \x2014 first in the thread list now (/search_tab). Ask for a session in plain words here, or with /search &lt;words&gt; from any topic; /help lists the rest.",
+                  true, SendPriority::Final, L"", json::Value{}, nullptr);
+        _log(L"[msg] /search-tab (thread " + std::to_wstring(fromThreadId) + L"): the Search topic (thread " + std::to_wstring(search) + L") is put first in the thread list");
+        LogNav(L"remote telegram search-tab from thread " + std::to_wstring(fromThreadId));
+    }
+
+    void MessagingService::_relaySearchRequest(int64_t fromThreadId, const json::Value& msg, const std::wstring& words)
+    {
+        const int64_t messageId = msg.I64At(L"message_id", 0);
+        const int64_t dateMs = msg.I64At(L"date", 0) * 1000;
+        int64_t search = 0;
+        std::wstring fromSessionId; // the session whose topic the command was typed in ("" = the main view, a thread no session owns)
+        std::wstring fromSquare; // that topic's color square, as its name shows it (§21.13)
+        {
+            std::lock_guard lk{ _mtx };
+            search = _state.searchThreadId;
+            if (fromThreadId != 0)
+            {
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    if (t.threadId == fromThreadId)
+                    {
+                        fromSessionId = sid;
+                        fromSquare = t.nameColor;
+                        break;
+                    }
+                }
+            }
+        }
+        if (search == 0)
+        {
+            // No Search topic to send it to (the first connect is still making it, or it is being made again, §21.18): the
+            // answer stays where the command was typed, and so does the command — the user still has the words.
+            _reply(fromThreadId, L"The \U0001F50E Search topic is not there yet \x2014 it is being made. Send the /search again in a moment.", false, json::Value{}, messageId);
+            _log(L"[msg] /search (thread " + std::to_wstring(fromThreadId) + L"): no Search topic yet");
+            LogNav(L"remote telegram search-relay -> no search topic yet");
+            return;
+        }
+        if (IsBacklogUpdate(dateMs, WallMs()))
+        {
+            // D2, the Search topic's own rule for a request: a search sent while Agentmaster was closed is answered, never run
+            // unasked. The command stays, so the user sees what the answer is about.
+            _reply(fromThreadId, L"(sent " + TgShortSpan(WallMs() - dateMs) + L" ago, while Agentmaster was closed \x2014 send the /search again if you still want it)", false,
+                   json::Value{}, messageId);
+            LogNav(L"remote telegram search-relay -> backlog");
+            return;
+        }
+        // 1. The command leaves the thread it was typed in (_deleteCommandMessage), so a session's topic is not put back on top.
+        _deleteCommandMessage(messageId, L"/search");
+        // 2. The request in the Search topic as the user's line, naming the session's topic it came from (a link back to it):
+        //    the Search topic then reads like a request typed there, and the answer below it makes sense. Silent, like the
+        //    "Searching…" after it; the answer rings (D5). The words are the user's: escaped, never markup (UserLineBody).
+        std::wstring fromRow;
+        if (!fromSessionId.empty())
+        {
+            const auto s = _session(fromSessionId);
+            fromRow = UserLineTitleRow(s ? s->title : std::wstring{}, fromSessionId, fromSquare, fromThreadId);
+        }
+        _sendText(search, BuildRelayedSearchLineHtml(dateMs, words, fromRow, fromThreadId == 0), true, SendPriority::Final, L"", json::Value{}, nullptr);
+        _log(L"[msg] /search (thread " + std::to_wstring(fromThreadId) + L"): " + std::to_wstring(words.size()) + L" chars sent to the Search topic (thread " +
+             std::to_wstring(search) + L")");
+        LogNav(L"remote telegram search-relay from thread " + std::to_wstring(fromThreadId) + L" chars=" + std::to_wstring(words.size()));
+        // 3. Asked of the Search agent IN the Search topic: its "Searching…" and its answer go there (_postSearchResults).
+        _askSearch(words, search);
+    }
+
+    void MessagingService::_deleteCommandMessage(int64_t messageId, const wchar_t* what)
+    {
+        if (messageId <= 0)
+        {
+            return; // no id to delete (a caller that had none)
+        }
+        OutItem del;
+        del.prio = SendPriority::Final;
+        del.method = L"deleteMessage";
+        del.params = json::Value::MkObj();
+        del.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        del.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(messageId)));
+        auto self = weak_from_this();
+        const std::wstring name{ what ? what : L"a command" };
+        del.onDone = [self, messageId, name](const TgResult& r) {
+            if (auto me = self.lock(); me && !r.ok)
+            {
+                me->_log(L"[msg] " + name + L": the command message " + std::to_wstring(messageId) + L" could not be deleted (" + r.description + L"); it stays where it was typed");
+            }
+        };
+        _enqueue(std::move(del));
+    }
+
     void MessagingService::_handleMessage(const json::Value& msg, bool edited)
     {
         // H3: the sender first, nothing else read before it.
@@ -591,6 +703,36 @@ namespace Agentmaster::Msg
             _log(L"[msg] secretary: our own send as the user came back as a message (thread " + std::to_wstring(threadId) + L"); ignored");
             return;
         }
+        // §21.19: /search-tab (and /search_tab, the "/" menu's spelling) jumps to the 🔎 Search topic from ANY thread — the main
+        // view, a session's topic, a thread no session owns yet (the §21.17 folder picker never holds it), and Search itself.
+        // Read HERE, before a session topic's own handling, which would note the command as the topic's newest post and
+        // re-post the topic's sticky card a few seconds later — putting that topic back on top of the list the jump reorders.
+        // An EDIT that turns a message into the command does nothing: an edit makes no message the newest.
+        if (!edited && IsSearchTabCommand(text))
+        {
+            _jumpToSearchTopic(threadId, msg.I64At(L"message_id", 0));
+            return;
+        }
+        // §21.19: /search <words> SENDS a search to the Search topic from any other thread — the request is posted there and its
+        // answer comes there (_relaySearchRequest) — read here for the same reason as /search-tab. A bare /search has nothing
+        // to ask: it is the jump. In the Search topic itself the words are a request like plain words
+        // (ClassifySearchTopicMessage), so that one case falls through to the Search topic's own reading below.
+        if (!edited)
+        {
+            if (const std::optional<std::wstring> words = SearchCommandWords(text))
+            {
+                if (words->empty())
+                {
+                    _jumpToSearchTopic(threadId, msg.I64At(L"message_id", 0));
+                    return;
+                }
+                if (searchThread == 0 || threadId != searchThread)
+                {
+                    _relaySearchRequest(threadId, msg, *words);
+                    return;
+                }
+            }
+        }
         if (threadId != 0 && threadId == searchThread)
         {
             if (!edited)
@@ -636,7 +778,7 @@ namespace Agentmaster::Msg
                 _sendHelp(0, true);
                 return;
             }
-            _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones; a new thread starts a new session (you pick its folder). Send /help for the commands.", false); // §21.17: the new thread
+            _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones (/search &lt;words&gt; asks it from anywhere, /search_tab puts it first in the list); a new thread starts a new session (you pick its folder). Send /help for the commands.", false); // §21.17: the new thread; §21.19: /search, /search_tab
             return;
         }
         // §21.17: a thread no session owns — one the user opened, or one whose session closed while the thread stayed — starts a
@@ -1290,6 +1432,27 @@ namespace Agentmaster::Msg
             done(L"asked");
             return;
         }
+        if (detail::InList(name, std::begin(kSearchTabCommands), std::end(kSearchTabCommands)))
+        {
+            // §21.19: _handleMessage takes /search-tab before a topic's own handling; this is the belt for a path that reaches a
+            // session command without it (every name of kAgentmasterCommands has its branch here).
+            _jumpToSearchTopic(threadId, msgId);
+            done(L"search-tab");
+            return;
+        }
+        if (name == kSearchCommand)
+        {
+            // §21.19: the same belt for /search (_handleMessage reads it first): words go to the Search topic, a bare one jumps.
+            if (cmd.args.empty())
+            {
+                _jumpToSearchTopic(threadId, msgId);
+                done(L"search-tab");
+                return;
+            }
+            _relaySearchRequest(threadId, msg, cmd.args);
+            done(L"search-relay");
+            return;
+        }
         if (name == L"idle" || name == L"board" || name == L"pauseall" || name == L"resumeall" || name == L"cc")
         {
             _runSearchCommand(cmd, msg, threadId); // the fleet commands work in any topic
@@ -1342,11 +1505,31 @@ namespace Agentmaster::Msg
         _askSearch(m.cmd.text, threadId);
     }
 
-    void MessagingService::_runSearchCommand(const RemoteCommand& cmd, const json::Value& /*msg*/, int64_t threadId)
+    void MessagingService::_runSearchCommand(const RemoteCommand& cmd, const json::Value& msg, int64_t threadId)
     {
-        // (The message itself is not read here yet: every Search command acts on its arguments alone. The
-        // parameter stays for the backlog question a later build asks on a command with side effects.)
+        // (The message itself is read only for /search-tab, whose command message is deleted: every other Search command acts
+        // on its arguments alone. The parameter stays for the backlog question a later build asks on a command with side effects.)
         const std::wstring& name = cmd.name;
+        if (detail::InList(name, std::begin(kSearchTabCommands), std::end(kSearchTabCommands)))
+        {
+            // §21.19: _handleMessage takes /search-tab first; this belt keeps the Search topic's own reading complete.
+            _jumpToSearchTopic(threadId, msg.I64At(L"message_id", 0));
+            return;
+        }
+        if (name == kSearchCommand)
+        {
+            // §21.19: a bare /search is the jump; ClassifySearchTopicMessage makes "/search <words>" a REQUEST, so words reach
+            // here only through a path that bypassed it — they are asked, as a request typed here would be.
+            if (cmd.args.empty())
+            {
+                _jumpToSearchTopic(threadId, msg.I64At(L"message_id", 0));
+            }
+            else
+            {
+                _askSearch(cmd.args, threadId);
+            }
+            return;
+        }
         if (name == L"help" || name == L"start")
         {
             _sendHelp(threadId, true);
@@ -2846,13 +3029,21 @@ namespace Agentmaster::Msg
         {
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)";
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
+                   // §21.19: the hyphenated spelling only inside <code>: a client makes a command LINK of "/search-tab" only up
+                   // to the hyphen, so the word would show half linked, and its tap would send a bare "/search" (the jump too,
+                   // but not what the line says). The menu's "/search_tab" is a link as a whole.
+                   L"/search_tab \x2014 from any topic: put this topic first in the thread list (typed, <code>/search-tab</code> works too)\n"
+                   L"/search &lt;words&gt; \x2014 from any topic: a search asked here, its answer here (in this topic the words alone do the same)";
         }
         else
         {
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
                    L"/queue \x00B7 /sendnow \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
-                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not";
+                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
+                   L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
+                   L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";
         }
         _reply(threadId, html, false);
     }

@@ -2998,6 +2998,10 @@ namespace Agentmaster::Msg
                     { L"summary", L"the session's summary" },
                     { L"screen", L"the terminal's visible text" },
                     { L"status", L"the session's card / the fleet" },
+                    { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19
+                    // §21.19: a menu command's name holds only a-z, 0-9 and "_" (Telegram refuses the WHOLE list otherwise), so
+                    // the user's /search-tab is listed in the form a tap sends; typed, /search-tab works the same.
+                    { L"search_tab", L"jump to the \U0001F50E Search topic (from any topic)" },
                     { L"rename", L"rename the tab and the topic" },
                     { L"restartsession", L"restart the session (asks while running)" },
                     { L"deactivate", L"park the tab (asks while running)" },
