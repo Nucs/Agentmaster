@@ -106,11 +106,34 @@ namespace Agentmaster
     // worked in a minute ago; long enough that the few searches of one request share one gather.
     inline constexpr int64_t kSessionCatalogMaxAgeMs = 20000;
 
-    // The period a search covers when the model names none: the last 90 days. Longer than the
-    // Sessions page's own "1 month", because a request like "the session where I fixed X" names
-    // no period, and a second search with a longer one costs a model round trip (about a second).
-    // The search tool's schema text and whoever reads the index ahead of a search use it.
-    inline constexpr int kSessionSearchDefaultDays = 90;
+    // The period a search covers when the model names none, in days; 0 = EVERY session on this
+    // computer (no lower bound). It was 90 until 2026-10-18, when the user's rule "searches must
+    // never miss" met a corpus that reaches back ten months: "find proxmox related sessions" lost
+    // 19 of its 104 sessions to the 90-day default, and the model did not think of a longer period
+    // (SESSIONS.md §9.15). An in-memory search over every session costs milliseconds; the index of
+    // every session is read once per run (SessionCatalogKeeper). The search and grep schemas, the
+    // system prompt and the index read at a bot's start state it.
+    inline constexpr int kSessionSearchDefaultDays = 0;
+
+    // How many rows one search returns when the model names no limit, and the most it may ask for.
+    // A request about a broad topic matches a hundred sessions or more ("proxmox": 145), and every
+    // one that fits must reach the user: 50 was the old cap, 15 the old default (SESSIONS.md §9.15).
+    inline constexpr int kSessionSearchDefaultLimit = 30;
+    inline constexpr int kSessionSearchMaxLimit = 200;
+
+    // How many sessions one grep returns when the model names no limit, and the most it may ask for.
+    inline constexpr int kSessionGrepDefaultLimit = 20;
+    inline constexpr int kSessionGrepMaxLimit = 100;
+
+    // A grep result counts its matching sessions per working folder (`folders`, every match, not only the rows) when
+    // this many or more matched - a shorter result's rows say it at a glance - listing the kSessionGrepFoldersMax
+    // folders with the most and summing the rest in one line. The model then judges "the sessions of project X" from
+    // the result it has (the 2026-10-18 eval: a second, narrower grep lost a session the first had found).
+    inline constexpr size_t kSessionGrepFoldersMinMatches = 10;
+    inline constexpr size_t kSessionGrepFoldersMax = 8;
+
+    // The most sessions one `show` call lists (it was 100): every session of a broad topic, in one list.
+    inline constexpr size_t kSessionShowMaxIds = 300;
 
     // The name a session is shown by: the stored / live tab title when there is one, else the
     // transcript's own (custom title > AI title > legacy summary > first prompt), else a
@@ -182,9 +205,12 @@ namespace Agentmaster
     struct SessionSearchParams
     {
         std::wstring query; // words (all must match), "quoted phrases", or a session id; empty = no text filter
-        int days{ kSessionSearchDefaultDays }; // sessions active in the last N days; ignored when afterUnixMs is set
-        int64_t afterUnixMs{}; // 0 = use `days`; else sessions active at or after this instant
-        int64_t beforeUnixMs{}; // 0 = until now; else sessions active at or before this instant
+        int days{ kSessionSearchDefaultDays }; // sessions active in the last N days; 0 = every session; ignored when afterUnixMs is set
+        // A PERIOD (2026-10-18): a session is in it when its activity OVERLAPS it — it was last active at or after
+        // afterUnixMs, and it started (SessionSearchCreatedMs) at or before beforeUnixMs. Before, a session had to END
+        // inside the period, so a session that began on Sep 28 and went on to Oct 3 was not "between Sep 26 and Sep 30".
+        int64_t afterUnixMs{}; // 0 = use `days`; else sessions last active at or after this instant
+        int64_t beforeUnixMs{}; // 0 = until now; else sessions that started at or before this instant
         std::wstring dir; // part of the working directory's path ('/' and '\' are the same)
         std::wstring branch; // part of the git branch name
         std::wstring tag; // a bookmark tag (case-insensitive, the whole name)
@@ -192,7 +218,7 @@ namespace Agentmaster
         bool openOnly{};
         bool deep{}; // also read the conversations' full text: slow, and broad
         std::wstring sort{ L"relevance" }; // "relevance" | "active" | "created"
-        int limit{ 15 }; // rows to return, 1..50
+        int limit{ kSessionSearchDefaultLimit }; // rows to return, 1..kSessionSearchMaxLimit
     };
 
     // Read the tool's arguments.
@@ -202,11 +228,12 @@ namespace Agentmaster
     //               THE MODEL (it becomes the tool's error result), so it says how to fix the call.
     //   returns   — the parameters, or nullopt with `error` set.
     //   throws    — std::bad_alloc.
-    // Out-of-range numbers are clamped, not refused: a search that runs with limit 50 instead of
-    // 500 is more useful to the model than an error.
+    // Out-of-range numbers are clamped, not refused: a search that runs with limit 200 instead of
+    // 500 is more useful to the model than an error. `days` 0 means every session.
     std::optional<SessionSearchParams> ParseSessionSearchParams(const json::Value& arguments, int64_t nowUnixMs, std::wstring& error);
 
-    // The instant `params` searches from (the lower time bound): afterUnixMs, else now - days.
+    // The instant `params` searches from (the lower time bound): afterUnixMs, else now - days, else
+    // (days 0) 0 — every session.
     int64_t SessionSearchSinceMs(const SessionSearchParams& params, int64_t nowUnixMs) noexcept;
 
     // Why a row matched, best reason first. The order is the relevance ranking.
@@ -226,6 +253,26 @@ namespace Agentmaster
         SessionMatchTier tier{ SessionMatchTier::Listed };
         int hits{}; // matched messages (content tiers); 0 for a name / path match
         std::vector<std::wstring> snippets; // up to 2 pieces of matching text
+        // A Path row's evidence (filled for the RETURNED rows only): the working folder when a query word matches it,
+        // else the first touched path a query word matches — what the result's `path` says, and the auto-why of a shown
+        // session the model gave no why (SessionSearchToolset::Show). Empty for the other tiers.
+        std::wstring evidencePath;
+        bool evidenceIsFolder{}; // evidencePath is the session's working folder (not a file it touched)
+        // A Path row whose evidence is a TOUCHED path (not the working folder) and that carries no prompt or text snippet
+        // (filled for the RETURNED rows only): the session's first prompt, cut around the first query word it holds,
+        // else its head — what the session was FOR, which a touched path does not say. Empty when the session has no
+        // first prompt. Why (the 2026-10-18 eval, q1): three forks whose first prompt was about proxmox matched only on
+        // a touched K:\source\proxmox path, the history-prompt search knows no fork's copied prompts, and the model read
+        // "a path in a file listing" and left all three out.
+        std::wstring firstPrompt;
+        // firstPrompt holds a query word: the user's own words name the subject (the procedure's "strong" evidence, and
+        // the auto-why's rank 0).
+        bool firstPromptHolds{};
+        // A dated search's check (CheckSessionSearchPeriodActivity, run by the search tool, not by the pure
+        // RunSessionSearch): how many of the session's own lines fall INSIDE the period. A row whose activity only spans
+        // the period (begun before it, resumed after it, silent in it) reads 0 messages. periodChecked false = not checked.
+        PeriodActivity period;
+        bool periodChecked{};
     };
 
     // A search's answer.
@@ -268,6 +315,21 @@ namespace Agentmaster
     //   throws    — std::bad_alloc; whatever `content` throws.
     SessionSearchOutcome RunSessionSearch(const SessionCatalog& catalog, const SessionSearchParams& params, int64_t nowUnixMs, const SessionContentSearch& content, const std::function<bool()>& cancelled = {});
 
+    // The most rows a dated search checks for activity inside its period (CheckSessionSearchPeriodActivity): a
+    // period's own listing is rarely longer, and each check reads one transcript.
+    inline constexpr size_t kSessionPeriodCheckMaxRows = 300;
+
+    // For a search with an explicit period (after and/or before), count each returned row's own lines inside the
+    // period (ReadPeriodActivity over the rows' transcripts, several at once) and set the rows' `period` /
+    // `periodChecked`. Does nothing for a search without a period, or with more than kSessionPeriodCheckMaxRows rows.
+    //   catalog   — the catalog the outcome's rows index.
+    //   params    — the search's parameters (the period).
+    //   nowUnixMs — the current time (the period's end when `before` is not given).
+    //   outcome   — the search's outcome; its rows get the counts.
+    //   cancelled — empty = never; else asked between files.
+    //   throws    — std::bad_alloc.
+    void CheckSessionSearchPeriodActivity(const SessionCatalog& catalog, const SessionSearchParams& params, int64_t nowUnixMs, SessionSearchOutcome& outcome, const std::function<bool()>& cancelled = {});
+
     // The SHORT id the model sees for a session: the first 8 characters of its id. Short on
     // purpose — the model must write every id it wants shown, and output tokens are what a
     // search waits for (a full id costs about five times as many).
@@ -297,14 +359,17 @@ namespace Agentmaster
         std::wstring pattern; // the text to find (required); a regex when `regex`
         bool regex{};
         std::vector<std::wstring> ids; // the ids as the model wrote them (short or whole); empty = every session of the period
-        int days{ kSessionSearchDefaultDays }; // the period when no ids are given (like search)
+        int days{ kSessionSearchDefaultDays }; // the period when no ids are given (like search; 0 = every session)
         int64_t afterUnixMs{}; // 0 = use `days`
         int64_t beforeUnixMs{}; // 0 = until now
         std::wstring dir; // part of the working folder's path ('/' and '\' are the same)
         bool user{ true }; // read the user's typed prompts ("in": "all" or "user")
         bool agent{ true }; // read Claude's side ("in": "all" or "claude")
+        // "in": "edits" — match only the paths of the files Claude edited or wrote (GrepOptions::editsOnly): "which
+        // sessions changed TabDragMath.h". `user` / `agent` do not apply then.
+        bool editsOnly{};
         int context{ 120 }; // characters on each side of a match, 40..400
-        int limit{ 10 }; // sessions to return, 1..20
+        int limit{ kSessionGrepDefaultLimit }; // sessions to return, 1..kSessionGrepMaxLimit
     };
 
     // Read the grep tool's arguments.
@@ -459,6 +524,12 @@ namespace Agentmaster
             std::function<void(const std::vector<std::wstring>& sessionIds, const std::wstring& note, const std::vector<std::wstring>& whys)> onShow;
             SessionContentSearch content; // empty members = DefaultSessionContentSearch()
             std::function<int64_t()> now; // empty = the system clock
+            // Every tool call's outcome, after its handler returned: the tool's full name
+            // ("mcp__sessions__search"), the model's arguments and the WHOLE result (the conversation's
+            // record keeps only a preview). Optional: the prompt eval's evidence of which sessions the
+            // tools named (SessionSearchAgentOptions::toolResultTap, SESSIONS.md §9.15). Called on the
+            // tool-call thread, maybe by two read-only calls at once; a throw is logged and swallowed.
+            std::function<void(const std::wstring& tool, const json::Value& arguments, const HarnessToolResult& result)> onToolResult;
             // Where a session's transcript is, by its whole id, for a `read` or a `grep` with ids
             // of a session no search of this conversation returned (in the database mode, every
             // session). "" = not found. Called on the tool-call thread. Optional: empty =
@@ -618,7 +689,24 @@ namespace Agentmaster
             std::wstring title; // SessionSearchTitleOf, cut for a header line
             int64_t activeMs{}; // SessionSearchLastActivityMs
             int64_t sizeBytes{}; // the transcript's size when it was listed (a grep batch's weight)
+            // SessionSearchDirOf: the working folder, printed on a grep row so the model can judge "the sessions of
+            // project X" from the rows it has instead of grepping again inside `dir` with other words (the 2026-10-18
+            // eval, q3: a re-grep narrowed to dir:agentmaster with a shorter pattern lost a session that the first grep
+            // had found). Empty when no result of this conversation listed the session.
+            std::wstring dir;
+            // The best evidence a result of this conversation showed for the session, as one why line ("You wrote:
+            // "..."", "Launched in K:\source\proxmox; you asked: "..."", "Claude: "...""), and how strong it is (lower =
+            // stronger: 0 the user's own words, 1 an edit of a file, 2 its folder, 3 a touched path, 4 Claude's words,
+            // 5 its title, 6 the first prompt of a session a filter-only listing named).
+            // Show gives it to a shown session the model wrote no why for, so a list of a hundred sessions still
+            // carries one line of evidence each (SESSIONS.md §9.15). A weaker line never replaces a stronger one.
+            std::wstring evidence;
+            int evidenceRank{ 99 };
         };
+
+        // Record `line` as the evidence of `sessionId` when it is stronger than what is there (KnownSession::evidence).
+        // The caller holds _mutex. Never throws beyond std::bad_alloc.
+        void NoteEvidenceLocked(const std::wstring& sessionId, std::wstring line, int rank);
 
         HarnessToolResult Search(const json::Value& arguments);
         // The grep tool: GrepTranscripts over the sessions the ids name, or over the catalog of

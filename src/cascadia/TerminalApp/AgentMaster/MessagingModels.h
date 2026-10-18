@@ -3676,7 +3676,7 @@ namespace Agentmaster::Msg
     /// </summary>
     /// <param name="verdict">The model's one sentence, plain text (escaped here); empty = none.</param>
     /// <param name="cards">The listed sessions, in order (the caller cuts them to kSearchAnswerMaxRows).</param>
-    /// <param name="notListed">Shown sessions past the cut.</param>
+    /// <param name="notListed">Shown sessions past the cut (they follow as lines, BuildSearchMoreLinesHtml).</param>
     /// <param name="nowMs">The clock (a parameter, so the days a test reads are its own).</param>
     /// <returns>Telegram HTML with title tokens, balanced; "Nothing found." when there is nothing at all.</returns>
     /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
@@ -3716,13 +3716,67 @@ namespace Agentmaster::Msg
         }
         if (notListed > 0)
         {
-            html += (html.empty() ? L"" : L"\n\n") + std::wstring{ L"<i>(" } + std::to_wstring(notListed) + L" more not listed: ask to narrow it down.)</i>";
+            // The rest follows in the next message(s), one line each (BuildSearchMoreLinesHtml): every shown session reaches
+            // the phone (2026-10-18; it used to say "N more not listed: ask to narrow it down").
+            html += (html.empty() ? L"" : L"\n\n") + std::wstring{ L"<i>(" } + std::to_wstring(notListed) + L" more below, one line each.)</i>";
         }
         if (html.empty())
         {
             html = L"Nothing found.";
         }
         return html;
+    }
+
+    // The most characters of Telegram HTML one message of an answer's rest carries (Telegram's limit is 4096 after the tags).
+    inline constexpr size_t kSearchMoreLinesPackChars = 3500;
+
+    /// <summary>
+    /// The REST of a Search answer (§21.10, the user's rule of 2026-10-18 "searches must never miss"): the shown sessions past
+    /// the cards (kSearchAnswerMaxRows), one line each — "<b>11</b> 📦 🟦 title · folder · day" — packed into as few messages
+    /// as fit kSearchMoreLinesPackChars each. An answer of 104 sessions used to end in "94 more not listed"; now the phone
+    /// gets every session the agent showed, in its order. The lines carry no pick button (the answer's keyboard holds the
+    /// first rows): the user names a number in a reply ("resume 37"), which the conversation knows.
+    /// </summary>
+    /// <param name="cards">The sessions past the cards, in order, with their row numbers (their `why` is not shown).</param>
+    /// <param name="nowMs">The clock (the day words a test reads are its own).</param>
+    /// <returns>The messages' HTML, in order; empty for no cards. Plain HTML (no title token): a line is short and a rich
+    /// message of a hundred chips would be refused.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::vector<std::wstring> BuildSearchMoreLinesHtml(const std::vector<SearchCard>& cards, int64_t nowMs)
+    {
+        std::vector<std::wstring> messages;
+        std::wstring current;
+        for (const auto& card : cards)
+        {
+            const std::wstring title = card.title.empty() ? card.sessionId.substr(0, (std::min)(card.sessionId.size(), size_t{ 8 })) : TgFirstLine(card.title, 80);
+            std::wstring line = L"<b>" + std::to_wstring(card.number) + L"</b> " + SearchPickStateGlyph(card.state) + L" ";
+            if (!card.colorSquare.empty())
+            {
+                line += card.colorSquare + L" ";
+            }
+            line += TgEscapeHtml(title);
+            std::wstring meta;
+            const auto add = [&meta](const std::wstring& part) {
+                if (!part.empty())
+                {
+                    meta += L" \x00B7 " + part;
+                }
+            };
+            add(detail::FolderLeaf(card.dir));
+            add(SearchDayText(card.lastActivityMs, nowMs));
+            line += TgEscapeHtml(meta);
+            if (!current.empty() && current.size() + 1 + line.size() > kSearchMoreLinesPackChars)
+            {
+                messages.push_back(std::move(current));
+                current.clear();
+            }
+            current += (current.empty() ? L"" : L"\n") + line;
+        }
+        if (!current.empty())
+        {
+            messages.push_back(std::move(current));
+        }
+        return messages;
     }
 
     /// <summary>

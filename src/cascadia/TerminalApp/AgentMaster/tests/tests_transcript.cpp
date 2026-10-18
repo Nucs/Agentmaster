@@ -4572,6 +4572,48 @@ void TestSessionSearch()
         hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
         CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: both terms in ONE assistant message hit");
 
+        // slow phase over MANY refs (2026-10-18, SESSIONS.md §9.15): the reader threads return the hits in the refs'
+        // order, the byte prefilter folds ASCII case and never drops the line of a term with no ASCII piece, and more
+        // than 64 refs in one projects folder take the folder-wide ripgrep round - the hits are the same either way.
+        {
+            const std::wstring manyDir = root + L"\\projects\\K--many";
+            std::filesystem::create_directories(std::filesystem::path{ manyDir }, ec);
+            std::vector<TranscriptRef> many;
+            for (int i = 0; i < 70; ++i)
+            {
+                wchar_t sid[40]{};
+                swprintf_s(sid, L"%08x-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 0x10000000 + i);
+                // Every third one says it, in capitals, with a Hebrew word (shalom, as UTF-8 bytes) beside it.
+                const std::string text = i % 3 == 0 ? "the QUUX gauge " + std::to_string(i) + " \xD7\xA9\xD7\x9C\xD7\x95\xD7\x9D" : "nothing here " + std::to_string(i);
+                MakeJsonl(manyDir + L"\\" + sid + L".jsonl", "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"message\":{\"content\":\"" + text + "\"}}\n", 3000 + i, 3000 + i);
+                TranscriptRef r;
+                r.sessionId = sid;
+                r.path = manyDir + L"\\" + sid + L".jsonl";
+                r.mtimeMs = 3000 + i;
+                r.birthMs = 3000 + i;
+                many.push_back(std::move(r));
+            }
+            SessionQuery mq;
+            mq.scopeUser = true;
+            mq.text = L"quux";
+            const auto manyHits = SearchTranscriptsSlow(many, mq, 2, nullptr);
+            bool ordered = manyHits.size() == 24;
+            for (size_t k = 0; ordered && k < manyHits.size(); ++k)
+            {
+                ordered = manyHits[k].sessionId == many[k * 3].sessionId && manyHits[k].hitCount == 1;
+            }
+            CHECK(ordered, "slow, many refs: every hit, in the refs' order (several reader threads), the prefilter case-insensitive");
+            mq.text = L"\x05E9\x05DC\x05D5\x05DD"; // the Hebrew word: no ASCII piece, so the prefilter drops no line
+            CHECK(SearchTranscriptsSlow(many, mq, 2, nullptr).size() == 24, "slow, many refs: a term with no ASCII piece finds its lines too");
+            mq.text = L"quux gauge";
+            CHECK(SearchTranscriptsSlow(many, mq, 2, nullptr).size() == 24, "slow, many refs: two terms, both in each line");
+            mq.text = L"quux nothing";
+            CHECK(SearchTranscriptsSlow(many, mq, 2, nullptr).empty(), "slow, many refs: two terms that never meet in one message");
+            const auto stopAtOnce = []() { return true; };
+            mq.text = L"quux";
+            CHECK(SearchTranscriptsSlow(many, mq, 2, stopAtOnce).empty(), "slow, many refs: a cancel stops every reader");
+        }
+
         // index sidecar: refresh -> hit -> incremental refresh.
         const std::wstring idxDir = root + L"\\sessions-index";
         std::filesystem::create_directories(std::filesystem::path{ idxDir }, ec);

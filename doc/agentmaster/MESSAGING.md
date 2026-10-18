@@ -3037,7 +3037,34 @@ where it was asked, the topic it came from, the words escaped, no "/search" in i
    a topic", the topic's title (a link back), the words, "Searching…" and the answer with sound.
 4. In Search, `/search the tab drag crash`: the message stays, "Searching…", the answer — like plain words.
 
-## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
+### 21.20 Every shown session reaches the phone, and the Search topic's index is the app's (2026-10-18; NOT BUILT yet)
+
+> The user's rule of 2026-10-18, after "find proxmox related sess" answered one session "so far" and "are you sure?" then
+> found about 140: "Search is not stable, it does not yield full results ... Searches must never miss." The search itself
+> (the shared index, every session by default, the Search Procedure, the prompt eval) is SESSIONS.md §9.15; this section
+> is what changed in the topic.
+
+**The answer's rest, one line each.** The answer still carries at most `kSearchAnswerMaxRows` (10) cards with their pick
+buttons. The shown sessions past them used to end in "(94 more not listed: ask to narrow it down)", so a broad request
+reached the phone as ten sessions. Now the answer says "(94 more below, one line each.)" and the rest follows as silent
+messages (`BuildSearchMoreLinesHtml`, `_postSearchResults`): one line per session — its number, the pick-state glyph,
+the tab's color square, the title (first line, 80 characters), the folder's leaf and the day — packed into as few
+messages as fit 3,500 characters each (`kSearchMoreLinesPackChars`; Telegram's limit is 4,096). The lines are plain HTML
+with no title token and no button (a rich message of a hundred chips would be refused): the user names a number in a
+reply ("resume 37"), which the conversation knows. Only the answer itself rings (D5).
+
+**The index.** The topic's conversation (`telegram-search`) and the Sessions page's read ONE session index
+(`SharedSessionCatalogKeeper`), built for every session when the bot starts (`Bridge`'s constructor) and never freed:
+`Park` ends only the idle `claude.exe`. A tool call waits up to 90 s for an index that is complete, fresh and carries
+the session store; over an index still being read it searches nothing and the model calls again — so "still being
+indexed, try again shortly" answers (SESSIONS.md §9.13) cannot happen any more.
+
+**Tests** (`TestMessagingSearch`): the answer's "N more below, one line each" (and nothing for none); the lines' escaping,
+the color square, a short id for an untitled session, 120 sessions packed under the limit with every number once, and no
+message for no rows.
+
+**Check after the build:** "find proxmox related sessions" in the Search topic: the answer with 10 cards and "(N more
+below, one line each.)", then the lines, silent, every number once; "resume 37" opens the 37th. — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
 > optional? meaning we retain the view and access of all topics and optionally can open the groups view? Can two groups

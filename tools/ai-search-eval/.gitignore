@@ -1,0 +1,7 @@
+# The answer keys name real sessions of one machine (ids, titles, first prompts): never in the repository.
+*keys*.json
+# A round's output and the generator's output belong outside the tree too (gen_prompt.py takes an out dir).
+*results*.json
+macros.cpp.txt
+rendered_*.txt
+prompt_v*.txt

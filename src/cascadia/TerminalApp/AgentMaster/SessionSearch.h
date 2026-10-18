@@ -177,7 +177,12 @@ namespace Agentmaster
     // ClassifyTranscriptLine (👤 = REAL prompt text, 🤖 = assistant text/thinking + tool
     // inputs/results + system content). Without rg, every ref is scanned. Requires at least
     // one message scope ON (title/dir/file matching is phase 1's job). `cancelled` is polled
-    // between files — the UI cancels a stale search on re-type.
+    // between files and every megabyte inside one — the UI cancels a stale search on re-type.
+    // Since 2026-10-18 (SESSIONS.md §9.15) a line is decoded and parsed only when its raw bytes
+    // hold every plain term's JSON-verbatim ASCII piece (the grep's prefilter; a fuzzy, guid or
+    // all-non-ASCII term requires nothing), and the files are read by several threads at once,
+    // the hits returned in the refs' order: the AI search's deep:true over every session took
+    // 79 s for three common words, sequential and parsing every line.
     std::vector<SessionHit> SearchTranscriptsSlow(const std::vector<TranscriptRef>& refs, const SessionQuery& q, size_t maxSnippetsPerSession, const std::function<bool()>& cancelled);
 
     // ===== grep: WHERE a pattern occurs (the AI search's evidence, SESSIONS.md §9.12) =========
@@ -200,9 +205,16 @@ namespace Agentmaster
     // `^` and `$` are the start and the end of one message's text.
     //
     // Speed: ripgrep first drops the files that cannot match, and the reader then parses only the
-    // lines that hold a REQUIRED LITERAL of the pattern (GrepRequiredLiteral). A pattern with no
-    // such literal (a regex like `\d+`) skips both, so every candidate is parsed line by line —
-    // the deep search's cost. A time budget bounds a call; the outcome says when it ran out.
+    // lines that hold a REQUIRED LITERAL of the pattern (GrepRequiredLiterals: one piece every
+    // match contains, or — for an alternation such as `0xC0000374|heap corruption` — one piece per
+    // alternative, of which every match contains at least one). A pattern with no such literal (a
+    // regex like `\d+`) skips both, so every candidate is parsed line by line — the deep search's
+    // cost. A line whose only copies of the literal sit in its `cwd` field (every line of a session
+    // launched in a folder of that name) is not parsed either. Since 2026-10-18 the candidates are
+    // read by several threads at once, and a grep over many sessions of one projects folder asks
+    // ripgrep ONCE for the whole folder instead of once per 64 files (SESSIONS.md §9.15: one run
+    // over 9.3 GB took 1.3 s warm, the batches about 20 s and more). A time budget bounds a call;
+    // the outcome says when it ran out.
 
     // How much of one message's text a grep reads, in UTF-16 units: the head of a long tool result
     // or file read. 16K was measured cheap for std::wregex on MSVC (a 64K-character message took
@@ -224,8 +236,19 @@ namespace Agentmaster
         size_t contextChars{ 120 }; // characters kept on each side of a match in an excerpt
         size_t maxExcerpts{ 3 }; // excerpts kept per session (every match still counts)
         // 0 = no time limit. Else stop reading files this many milliseconds after the call
-        // started: the outcome then has complete == false and the sessions read so far.
+        // started — or, when the one tree-wide ripgrep prefilter ran, after IT ended (it has its own
+        // timeout, and cold it can take as long as the whole budget): the outcome then has
+        // complete == false and the sessions read so far.
         int64_t budgetMs{};
+        // true: match the pattern only against the PATHS of the files Claude changed — the
+        // file_path / notebook_path of every Edit, Write, MultiEdit and NotebookEdit call — so a
+        // match means "this session edited or wrote that file" (the question a search by a file's
+        // name cannot answer: it matches every session that only read the file). `user` and
+        // `agent` are ignored then. Each match's excerpt is "<tool> <path>".
+        bool editsOnly{};
+        // The reader threads (0 = a default: half the processors, 2 to 8). Each candidate file is
+        // read by one thread; the outcome keeps the candidates' order.
+        size_t threads{ 0 };
     };
 
     // One match, as the model reads it.
@@ -272,6 +295,28 @@ namespace Agentmaster
     //   throws  — std::bad_alloc.
     std::wstring GrepRequiredLiteral(std::wstring_view pattern, bool regex);
 
+    // The prefilter keys of `pattern`: pieces of text of which EVERY match contains AT LEAST ONE,
+    // each held verbatim by a transcript's raw JSON line (GrepRequiredLiteral's rule). A regex is
+    // walked atom by atom: plain characters make a SEGMENT that every match holds in one piece, a
+    // required group of plain alternatives multiplies it ("qm (create|start)" gives "qm create"
+    // and "qm start", not the common words alone), and anything that varies ends it; the segment
+    // set whose shortest member is longest wins. A top-level alternation (`0xC0000374|heap
+    // corruption`) is the union of its alternatives' sets (nested up to 3 levels). Plain text
+    // gives itself, and — when it holds a regex escape such as `\.` or `\(` (the model escaped a
+    // dot in plain text: "TabDragMath\.h") — its unescaped form too, so both spellings are found.
+    // Empty when some alternative has no piece: the grep then reads every candidate.
+    //   pattern — the grep's pattern.
+    //   regex   — true: an ECMAScript regex.
+    //   returns — the pieces (original case, each once), or none.
+    //   throws  — std::bad_alloc.
+    std::vector<std::wstring> GrepRequiredLiterals(std::wstring_view pattern, bool regex);
+
+    // A plain-text pattern with its regex escapes undone: `\` before one of `.()[]{}?*+|^$-` is
+    // dropped ("TabDragMath\.h" -> "TabDragMath.h"); every other backslash stays (a Windows path
+    // keeps "\source\"). Returns the text unchanged when there is no such escape. Pure.
+    //   throws — std::bad_alloc.
+    std::wstring GrepUnescapePlainPattern(std::wstring_view pattern);
+
     // One excerpt: `contextChars` of `text` on each side of the match at [matchPos, matchPos +
     // matchLen), whitespace collapsed to single spaces, "…" where `text` goes on; a match longer
     // than kGrepMaxQuotedMatchChars is quoted up to that length. Never splits a surrogate pair.
@@ -281,6 +326,35 @@ namespace Agentmaster
     //   matchLen  — its length.
     //   throws    — std::bad_alloc.
     std::wstring MakeGrepExcerpt(std::wstring_view text, size_t matchPos, size_t matchLen, size_t contextChars);
+
+    // ===== period activity: did a session say anything INSIDE a period? (SESSIONS.md §9.15) ====
+    //
+    // A period search keeps every session whose activity OVERLAPS the period (it started before the
+    // period's end and was last active after its start) — also one that only SPANS it: begun on
+    // Oct 11, resumed on Oct 13, silent on the 12th. The index knows a session's first and last
+    // times only, so the search tool reads the candidates' own lines to tell the two apart, and
+    // says so per row; the model shows the sessions that worked in the period (the 2026-10-18 eval:
+    // "what did I do on October 12?" left out three sessions it could not confirm).
+
+    // What one session did inside a period.
+    struct PeriodActivity
+    {
+        int messages{}; // its own user and assistant lines timestamped inside the period
+        int prompts{}; // of those, user lines that carry no tool result (an approximation of typed prompts)
+        bool read{}; // false: the transcript could not be opened (the counts mean nothing)
+    };
+
+    // Count a session's own lines inside [fromUnixMs, toUnixMs]. "Own": a line older than
+    // `ownSinceUnixMs` is a fork's copy of its parent's history (it keeps the parent's times) and is
+    // skipped. A byte scan: each line's "timestamp" and "type" are found without a JSON parse.
+    //   path           — the transcript.
+    //   fromUnixMs     — the period's start (inclusive).
+    //   toUnixMs       — its end (inclusive).
+    //   ownSinceUnixMs — the file's birth minus a minute (0 = take every line).
+    //   cancelled      — empty = never; else asked every megabyte: true ends the scan (counts so far).
+    //   returns        — the counts; read == false when the file cannot be opened.
+    //   throws         — std::bad_alloc.
+    PeriodActivity ReadPeriodActivity(const std::wstring& path, int64_t fromUnixMs, int64_t toUnixMs, int64_t ownSinceUnixMs, const std::function<bool()>& cancelled = {});
 
     // Grep the transcripts of `refs`, in their order (a caller that wants the newest sessions
     // first when the budget runs out passes them newest first).

@@ -37,12 +37,22 @@
 //      system prompt on both requests: the model's first step mentions which kinds of tool calls
 //      it can use and how, and the page's answer stays the final sentence alone.
 //
+//   E. (with --eval) THE PROMPT EVAL (SESSIONS.md §9.15): a file of queries, each answered by the search
+//      agent in a fresh conversation, everything recorded into one JSON file for a scorer outside the
+//      repository (the answer keys name real sessions). Nothing else runs with it.
+//
 // Usage: harness_live.exe [--claude <path to claude.exe>] [--model <id>] [--agent "<request>"]
 //                         [--only-agent] [--only-permissions] [--only-thinking]
 //                         [--agent-thinking off|low|medium|high|xhigh|max] [--verbose]
-//        harness_live.exe --index [days]     measure the session index alone (no model call)
+//        harness_live.exe --index [days]     measure the session index alone (no model call; no days = every session)
+//        harness_live.exe --tool <search|grep|read> '<arguments JSON>' [--tool-out <file>]
+//                         one finding tool's call over this machine's sessions, timed, with no model (a grep
+//                         is then timed per candidate file too); --tool-out writes the whole result
+//        harness_live.exe --eval <queries.json> --eval-out <results.json> [--eval-only q1,q3]
+//                         [--agent-prompt-file <prompt.txt>] [--agent-thinking medium]
+//                         [--eval-timeout <seconds per query>] [--eval-index-wait <seconds>]
 //   --verbose prints each tool result in full (as far as the record keeps it).
-// Exit code: the number of failed checks.
+// Exit code: the number of failed checks (with --eval: the number of queries that got no answer).
 
 #include "../AgentHarness.h"
 #include "../ClaudeSpawn.h"
@@ -57,9 +67,14 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Agentmaster;
@@ -910,17 +925,15 @@ namespace
     // slow ones. No model call. It reads through the same two functions the gather uses
     // (EnumerateTranscripts + LoadOrRefreshSessionIndex), one session at a time, so each read
     // can be timed. It writes sidecar files into the test profile, like any gather does.
-    //   days — the period to read (the search tool's default when 0).
+    //   days — the period to read; 0 = every session (the search tool's default since 2026-10-18, when
+    //          kSessionSearchDefaultDays became 0 — "the last 0 days" would list nothing).
     void RunIndexTiming(int days)
     {
-        if (days <= 0)
-        {
-            days = kSessionSearchDefaultDays;
-        }
-        Say(L"=== index timing: the last " + std::to_wstring(days) + L" day(s) ===");
+        Say(days > 0 ? L"=== index timing: the last " + std::to_wstring(days) + L" day(s) ===" : std::wstring{ L"=== index timing: every session ===" });
         const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const int64_t since = days > 0 ? now - static_cast<int64_t>(days) * 86400000LL : 0;
         const double t0 = Seconds();
-        const auto refs = EnumerateTranscripts(now - static_cast<int64_t>(days) * 86400000LL);
+        const auto refs = EnumerateTranscripts(since);
         const double listed = Seconds() - t0;
         int64_t bytes = 0;
         for (const auto& ref : refs)
@@ -969,14 +982,125 @@ namespace
         Say(L"  the same reads again (every sidecar current): " + std::to_wstring(static_cast<int>((Seconds() - t2) * 1000)) + L" ms");
         // And the whole gather, as the keeper's first step would run it with no budget.
         const double t3 = Seconds();
-        const auto catalog = GatherSessionCatalog(now - static_cast<int64_t>(days) * 86400000LL, SessionCatalogSources{});
+        const auto catalog = GatherSessionCatalog(since, SessionCatalogSources{});
         const double gathered = Seconds() - t3;
         Say(L"  a whole gather (listing + sidecars + the session store): " + std::to_wstring(static_cast<int>(gathered * 1000)) + L" ms, " + std::to_wstring(catalog->entries.size()) + L" session(s)");
         SessionCatalogGatherOptions again;
         again.previous = catalog;
         const double t4 = Seconds();
-        const auto refreshed = GatherSessionCatalog(now - static_cast<int64_t>(days) * 86400000LL, SessionCatalogSources{}, again);
+        const auto refreshed = GatherSessionCatalog(since, SessionCatalogSources{}, again);
         Say(L"  a refresh of it (unchanged sessions copied): " + std::to_wstring(static_cast<int>((Seconds() - t4) * 1000)) + L" ms, " + std::to_wstring(refreshed->entries.size()) + L" session(s)");
+    }
+
+    // --tool <search|grep|read> <arguments JSON>: ONE call of a finding tool over this machine's real sessions, with no
+    // model, timed - what a tool costs and returns, so a slow or empty result can be taken apart without a model run
+    // (the 2026-10-18 eval: a grep for "proxmox" over every session read no file in its 20 s budget). For grep it then
+    // times the same pattern per candidate file, newest first (the readers' order), with no budget, and names the
+    // slowest files. It refreshes sidecar files in the test profile, like any gather does.
+    //   tool          - the tool's name: search, grep or read.
+    //   argumentsJson - the call's arguments, as the model would send them.
+    //   outPath       - empty, or a file that receives the WHOLE result text as UTF-8 (the console shows its first
+    //                   3,000 characters): two runs can then be compared row by row.
+    void RunToolTiming(const std::wstring& tool, const std::wstring& argumentsJson, const std::wstring& outPath)
+    {
+        Say(L"=== one tool call: " + tool + L" " + argumentsJson + L" ===");
+        const auto arguments = json::Parse(argumentsJson);
+        if (!arguments)
+        {
+            Say(L"  the arguments are not JSON");
+            return;
+        }
+        const auto keeper = SharedSessionCatalogKeeper();
+        const double t0 = Seconds();
+        const auto first = keeper->WaitFor(0, {}, 900000); // every session, as the tools ask by default
+        Say(L"  session index: " + (first ? std::to_wstring(first->entries.size()) + L" session(s)" : std::wstring{ L"none" }) + L" after " + std::to_wstring(static_cast<int>((Seconds() - t0) * 1000)) + L" ms");
+        SessionSearchToolset::Callbacks cb;
+        cb.catalog = [keeper](int64_t since, const std::function<bool()>& cancelled) { return keeper->WaitFor(since, cancelled, 90000); };
+        cb.onShow = [](const std::vector<std::wstring>&, const std::wstring&, const std::vector<std::wstring>&) {};
+        SessionSearchToolset toolset{ cb };
+        std::function<HarnessToolResult(const json::Value&)> handler;
+        for (const auto& server : toolset.Servers())
+        {
+            for (const auto& t : server.tools)
+            {
+                if (t.name == tool)
+                {
+                    handler = t.handler;
+                }
+            }
+        }
+        if (!handler)
+        {
+            Say(L"  no tool named " + tool + L" (search, grep, read)");
+            return;
+        }
+        const double t1 = Seconds();
+        const HarnessToolResult result = handler(*arguments);
+        Say(L"  the call took " + std::to_wstring(static_cast<int>((Seconds() - t1) * 1000)) + L" ms" + (result.isError ? L" (an error result)" : L"") + L"; " + std::to_wstring(result.text.size()) + L" characters:");
+        Say(L"  " + result.text.substr(0, 3000));
+        if (!outPath.empty())
+        {
+            std::ofstream out(std::filesystem::path{ outPath }, std::ios::binary | std::ios::trunc);
+            const std::string bytes = HarnessToUtf8(result.text);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            Say(out ? L"  the whole result: " + outPath : L"  could not write " + outPath);
+        }
+        if (tool != L"grep" || !first)
+        {
+            return;
+        }
+        // The grep once more, file by file: the readers' order (the period's sessions, newest first), the same prefilter
+        // (ripgrep over the whole folder), then each candidate alone with no budget.
+        std::wstring error;
+        const auto params = ParseSessionGrepParams(*arguments, error);
+        if (!params || !params->ids.empty())
+        {
+            return; // the per-file timing is for a grep over a period
+        }
+        GrepOptions options;
+        options.pattern = params->pattern;
+        options.regex = params->regex;
+        options.user = params->user;
+        options.agent = params->agent;
+        options.editsOnly = params->editsOnly;
+        options.contextChars = static_cast<size_t>(params->context);
+        std::vector<TranscriptRef> refs;
+        for (const auto& e : first->entries)
+        {
+            TranscriptRef ref;
+            ref.sessionId = e.sessionId;
+            ref.path = e.path;
+            ref.sizeBytes = e.sizeBytes;
+            ref.mtimeMs = e.mtimeMs;
+            ref.birthMs = e.birthMs;
+            refs.push_back(std::move(ref));
+        }
+        const double t2 = Seconds();
+        const GrepOutcome whole = GrepTranscripts(refs, options, {});
+        Say(L"  with no budget: " + std::to_wstring(static_cast<int>((Seconds() - t2) * 1000)) + L" ms, " + std::to_wstring(whole.candidates) + L" candidate(s), " + std::to_wstring(whole.scanned) + L" read, " + std::to_wstring(whole.sessions.size()) + L" matching");
+        // Each candidate alone, newest first: one thread, so a file's time is its own.
+        std::vector<std::pair<double, size_t>> perFile;
+        GrepOptions single = options;
+        single.threads = 1;
+        size_t done = 0;
+        for (size_t i = 0; i < refs.size() && done < 40; ++i)
+        {
+            const double a = Seconds();
+            const GrepOutcome one = GrepTranscripts({ refs[i] }, single, {});
+            if (one.candidates == 0)
+            {
+                continue; // ripgrep dropped it: not a candidate
+            }
+            perFile.emplace_back((Seconds() - a) * 1000.0, i);
+            ++done;
+        }
+        std::sort(perFile.begin(), perFile.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+        Say(L"  the slowest of the first " + std::to_wstring(done) + L" candidate(s), alone (ripgrep included):");
+        for (size_t k = 0; k < perFile.size() && k < 10; ++k)
+        {
+            const TranscriptRef& r = refs[perFile[k].second];
+            Say(L"      " + std::to_wstring(static_cast<int>(perFile[k].first)) + L" ms  #" + std::to_wstring(perFile[k].second) + L"  " + r.sessionId.substr(0, 8) + L"  " + std::to_wstring(r.sizeBytes / 1024) + L" KB");
+        }
     }
 
     // Print one turn of a conversation record as a TIMELINE: what the user asked, every tool call
@@ -1337,6 +1461,345 @@ namespace
         agent.RemoveListener(token);
         agent.Shutdown();
     }
+
+    // ===== --eval: the prompt eval (SESSIONS.md §9.15) =========================================================
+    //
+    // The user's request of 2026-10-18: an eval of five distinctly different searches on Sonnet 5.5 at medium
+    // thinking, run round after round while the system prompt is improved, with every round's tool calls read to ask
+    // "could the agent have done that better?" — and "searches must never miss". This program only RUNS and RECORDS:
+    // each query in a fresh conversation of one agent (Reset between queries, so no query learns from another), on
+    // this machine's real sessions, and one JSON file with everything a review needs (what was shown, with its whys
+    // and caption; the reply and the plan; every tool call with its arguments and its WHOLE result; times; tokens).
+    // The answer keys and the scoring stay outside the repository: they name real sessions and their titles.
+
+    // A UTF-8 file as text; nullopt when it cannot be read.
+    std::optional<std::wstring> ReadUtf8File(const std::wstring& path)
+    {
+        std::ifstream in{ std::filesystem::path{ path }, std::ios::binary };
+        if (!in)
+        {
+            return std::nullopt;
+        }
+        std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
+        if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF)
+        {
+            bytes.erase(0, 3); // a BOM an editor added
+        }
+        return HarnessFromUtf8(bytes);
+    }
+
+    // Write `text` as UTF-8 (whole file, replaced). false when the file cannot be written.
+    bool WriteUtf8File(const std::wstring& path, const std::wstring& text)
+    {
+        std::ofstream out{ std::filesystem::path{ path }, std::ios::binary | std::ios::trunc };
+        if (!out)
+        {
+            return false;
+        }
+        const std::string bytes = HarnessToUtf8(text);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return static_cast<bool>(out);
+    }
+
+    // One tool call as the tap saw it (SessionSearchAgentOptions::toolResultTap).
+    struct EvalCall
+    {
+        int64_t atMs{}; // since the query was asked
+        std::wstring tool;
+        std::wstring argumentsJson;
+        std::wstring result; // whole
+        bool isError{};
+    };
+
+    // What --eval needs from the command line.
+    struct EvalOptions
+    {
+        std::wstring queriesPath; // {"queries": {"<id>": {"text": "..."}, ...}} (other members are ignored)
+        std::wstring outPath; // the result file; rewritten after every query, so a run that dies keeps what it did
+        std::wstring promptPath; // a system prompt to try instead of the built-in one ("" = the built-in)
+        std::vector<std::wstring> only; // the ids to run ("" = every query, in the file's order)
+        int timeoutSeconds{ 600 }; // per query
+        int indexWaitSeconds{ 600 }; // how long to wait for the session index before the first query
+    };
+
+    // The record items of one turn as JSON: the order things happened, with their times since the request.
+    json::Value TurnTraceJson(const HarnessRecord& record, uint64_t turn)
+    {
+        using json::Value;
+        Value items = Value::MkArr();
+        int64_t t0 = 0;
+        for (const auto& item : record.items)
+        {
+            if (item.turn != turn)
+            {
+                continue;
+            }
+            if (t0 == 0)
+            {
+                t0 = item.atUnixMs;
+            }
+            Value o = Value::MkObj();
+            const wchar_t* kind = L"notice";
+            switch (item.kind)
+            {
+            case HarnessItemKind::User:
+                kind = L"user";
+                break;
+            case HarnessItemKind::Assistant:
+                kind = L"assistant";
+                break;
+            case HarnessItemKind::ToolCall:
+                kind = L"tool_call";
+                break;
+            case HarnessItemKind::ToolResult:
+                kind = L"tool_result";
+                break;
+            case HarnessItemKind::Notice:
+            default:
+                break;
+            }
+            o.Set(L"kind", Value::MkStr(kind));
+            o.Set(L"at_ms", Value::MkNum(static_cast<double>(item.atUnixMs - t0)));
+            if (!item.toolName.empty())
+            {
+                o.Set(L"tool", Value::MkStr(item.toolName));
+            }
+            if (!item.argumentsJson.empty())
+            {
+                o.Set(L"arguments", Value::MkStr(item.argumentsJson));
+            }
+            if (!item.text.empty())
+            {
+                o.Set(L"text", Value::MkStr(item.text));
+            }
+            if (item.isError)
+            {
+                o.Set(L"error", Value::MkBool(true));
+            }
+            items.Push(std::move(o));
+        }
+        return items;
+    }
+
+    // Run the eval (see the comment block above). Returns the number of queries that failed to answer.
+    int RunAgentEval(const std::wstring& claudeExe, const EvalOptions& eval)
+    {
+        using json::Value;
+        Say(L"=== the prompt eval: " + eval.queriesPath + L" ===");
+        const auto queriesText = ReadUtf8File(eval.queriesPath);
+        const auto parsed = queriesText ? json::Parse(*queriesText) : std::nullopt;
+        const Value* queries = parsed ? parsed->Find(L"queries") : nullptr;
+        if (!queries || queries->type != Value::Type::Obj || queries->members.empty())
+        {
+            Say(L"FAIL  the queries file is missing or has no \"queries\" object: " + eval.queriesPath);
+            return 1;
+        }
+        std::wstring prompt;
+        if (!eval.promptPath.empty())
+        {
+            const auto text = ReadUtf8File(eval.promptPath);
+            if (!text || text->empty())
+            {
+                Say(L"FAIL  the prompt file is missing or empty: " + eval.promptPath);
+                return 1;
+            }
+            prompt = *text;
+            Say(L"  system prompt: " + eval.promptPath + L" (" + std::to_wstring(prompt.size()) + L" characters)");
+        }
+        else
+        {
+            Say(L"  system prompt: the built-in one (" + std::to_wstring(std::wcslen(SessionSearchToolset::SystemPrompt())) + L" characters)");
+        }
+
+        // The tap's calls, for the query that runs now (the tap runs on the SDK's reader thread).
+        std::mutex tapMutex;
+        std::vector<EvalCall> calls;
+        int64_t askedAtMs = 0;
+        const auto nowMs = [] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); };
+
+        SessionSearchAgentOptions options;
+        options.claudeExe = [claudeExe] { return claudeExe; };
+        options.persist = false; // an eval must not leave a conversation in the profile
+        options.thinkingLevel = g_agentThinking;
+        options.systemPrompt = prompt;
+        options.toolResultTap = [&](const std::wstring& tool, const std::wstring& argumentsJson, const std::wstring& result, bool isError) {
+            std::lock_guard lock{ tapMutex };
+            calls.push_back(EvalCall{ nowMs() - askedAtMs, tool, argumentsJson, result, isError });
+        };
+        Say(std::wstring{ L"  thinking level: " } + HarnessThinkingLevelWord(g_agentThinking) + L" (--agent-thinking)");
+        SessionSearchAgent agent{ options };
+
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::vector<SessionSearchEvent> seen;
+        const uint64_t token = agent.AddListener([&](const SessionSearchEvent& e) {
+            {
+                std::lock_guard lock{ mutex };
+                seen.push_back(e);
+            }
+            changed.notify_all();
+        });
+
+        // The index first: a query must measure the search, not how far a cold index got (that is measured apart).
+        {
+            const double t0 = Seconds();
+            agent.Prewarm(true);
+            SessionIndexStatus status;
+            for (;;)
+            {
+                status = agent.IndexStatus();
+                if ((status.complete && !status.building) || Seconds() - t0 > eval.indexWaitSeconds)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{ 250 });
+            }
+            Say(L"  session index: " + std::to_wstring(status.sessions) + L" session(s), " + (status.complete ? L"complete" : L"NOT complete") + L" after " + std::to_wstring(static_cast<int>((Seconds() - t0) * 1000)) + L" ms");
+        }
+
+        Value results = Value::MkArr();
+        int failedQueries = 0;
+        bool first = true;
+        for (const auto& [id, query] : queries->members)
+        {
+            if (!eval.only.empty() && std::find(eval.only.begin(), eval.only.end(), id) == eval.only.end())
+            {
+                continue;
+            }
+            const std::wstring text = query.StrAt(L"text");
+            if (text.empty())
+            {
+                continue;
+            }
+            if (!first)
+            {
+                agent.Reset(); // a fresh conversation: no query may build on another's results
+            }
+            first = false;
+            {
+                std::lock_guard lock{ mutex };
+                seen.clear();
+            }
+            {
+                std::lock_guard lock{ tapMutex };
+                calls.clear();
+                askedAtMs = nowMs();
+            }
+            Say(L"--- " + id + L": " + text);
+            const double t0 = Seconds();
+            const uint64_t turn = agent.Ask(text);
+            bool answered = false;
+            bool failed = false;
+            double shownAt = 0;
+            std::vector<std::wstring> shownIds;
+            std::vector<std::wstring> shownWhys;
+            std::wstring note;
+            size_t showCalls = 0;
+            {
+                std::unique_lock lock{ mutex };
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{ eval.timeoutSeconds };
+                size_t next = 0;
+                while (!answered && !failed)
+                {
+                    for (; next < seen.size(); ++next)
+                    {
+                        const auto& e = seen[next];
+                        if (e.turn != 0 && e.turn != turn)
+                        {
+                            continue; // an event of an older request
+                        }
+                        if (e.kind == SessionSearchEventKind::Shown)
+                        {
+                            ++showCalls;
+                            shownAt = Seconds() - t0;
+                            shownIds = e.sessionIds; // the LAST show of the request is what the user sees
+                            shownWhys = e.reasons;
+                            note = e.text;
+                        }
+                        answered = answered || e.kind == SessionSearchEventKind::Answer;
+                        failed = failed || e.kind == SessionSearchEventKind::Failed;
+                    }
+                    if (answered || failed)
+                    {
+                        break;
+                    }
+                    if (changed.wait_until(lock, deadline) == std::cv_status::timeout)
+                    {
+                        break;
+                    }
+                }
+            }
+            const double elapsed = Seconds() - t0;
+            if (!answered || failed)
+            {
+                ++failedQueries;
+            }
+            const SessionSearchSnapshot snapshot = agent.Snapshot();
+            Say(L"  " + std::wstring{ answered ? L"answered" : (failed ? L"FAILED" : L"TIMED OUT") } + L" after " + std::to_wstring(static_cast<int>(elapsed * 1000)) + L" ms; shown " + std::to_wstring(shownIds.size()) + L" (" + std::to_wstring(showCalls) + L" show call(s)); " + std::to_wstring(calls.size()) + L" tool call(s)");
+
+            Value r = Value::MkObj();
+            r.Set(L"id", Value::MkStr(id));
+            r.Set(L"text", Value::MkStr(text));
+            r.Set(L"answered", Value::MkBool(answered && !failed));
+            r.Set(L"elapsed_ms", Value::MkNum(elapsed * 1000.0));
+            r.Set(L"shown_at_ms", Value::MkNum(shownAt * 1000.0));
+            r.Set(L"show_calls", Value::MkNum(static_cast<double>(showCalls)));
+            Value shown = Value::MkArr();
+            for (size_t i = 0; i < shownIds.size(); ++i)
+            {
+                Value s = Value::MkObj();
+                s.Set(L"id", Value::MkStr(shownIds[i]));
+                s.Set(L"why", Value::MkStr(i < shownWhys.size() ? shownWhys[i] : std::wstring{}));
+                shown.Push(std::move(s));
+            }
+            r.Set(L"shown", std::move(shown));
+            r.Set(L"note", Value::MkStr(note));
+            r.Set(L"answer", Value::MkStr(snapshot.answer));
+            r.Set(L"narration", Value::MkStr(snapshot.narration));
+            Value usage = Value::MkObj();
+            usage.Set(L"input", Value::MkNum(static_cast<double>(snapshot.usage.inputTokens)));
+            usage.Set(L"output", Value::MkNum(static_cast<double>(snapshot.usage.outputTokens)));
+            usage.Set(L"cache_read", Value::MkNum(static_cast<double>(snapshot.usage.cacheReadTokens)));
+            usage.Set(L"cache_write", Value::MkNum(static_cast<double>(snapshot.usage.cacheCreationTokens)));
+            usage.Set(L"context", Value::MkNum(static_cast<double>(snapshot.usage.contextTokens)));
+            usage.Set(L"cost_usd", Value::MkNum(snapshot.usage.costUsd));
+            r.Set(L"usage", std::move(usage));
+            Value callList = Value::MkArr();
+            {
+                std::lock_guard lock{ tapMutex };
+                for (const auto& c : calls)
+                {
+                    Value o = Value::MkObj();
+                    o.Set(L"at_ms", Value::MkNum(static_cast<double>(c.atMs)));
+                    o.Set(L"tool", Value::MkStr(c.tool));
+                    o.Set(L"arguments", Value::MkStr(c.argumentsJson));
+                    o.Set(L"result", Value::MkStr(c.result));
+                    if (c.isError)
+                    {
+                        o.Set(L"error", Value::MkBool(true));
+                    }
+                    callList.Push(std::move(o));
+                }
+            }
+            r.Set(L"calls", std::move(callList));
+            r.Set(L"trace", TurnTraceJson(agent.Record(), turn));
+            results.Push(std::move(r));
+
+            // After every query: a run that dies (a timeout, a crash, ^C) keeps what it did.
+            Value out = Value::MkObj();
+            out.Set(L"prompt", Value::MkStr(eval.promptPath.empty() ? std::wstring{ L"(built-in)" } : eval.promptPath));
+            out.Set(L"thinking", Value::MkStr(HarnessThinkingLevelWord(g_agentThinking)));
+            out.Set(L"results", results);
+            if (!WriteUtf8File(eval.outPath, json::Dump(out)))
+            {
+                Say(L"FAIL  could not write " + eval.outPath);
+            }
+        }
+        Say(L"  results: " + eval.outPath);
+        agent.RemoveListener(token);
+        agent.Shutdown();
+        return failedQueries;
+    }
 #endif // AM_LIVE_NO_AGENT
 }
 
@@ -1373,9 +1836,74 @@ int wmain(int argc, wchar_t** argv)
     bool onlyPermissions = false; // --only-permissions: the permission scenarios alone (two short turns)
     bool onlyThinking = false; // --only-thinking: scenario T alone (three short turns)
     int indexDays = -1; // --index [days]: -1 = not asked, 0 = the default period
+#ifndef AM_LIVE_NO_AGENT
+    EvalOptions eval; // --eval ...: the prompt eval (queriesPath empty = not asked)
+    std::wstring toolName; // --tool <name> <arguments JSON>: one timed tool call (empty = not asked)
+    std::wstring toolArguments;
+    std::wstring toolOut; // --tool-out <file>: the call's whole result (RunToolTiming)
+#endif
     for (int i = 1; i < argc; ++i)
     {
         const std::wstring a = argv[i];
+#ifndef AM_LIVE_NO_AGENT
+        if (a == L"--tool" && i + 2 < argc)
+        {
+            toolName = argv[++i];
+            toolArguments = argv[++i];
+            continue;
+        }
+        if (a == L"--tool-out" && i + 1 < argc)
+        {
+            toolOut = argv[++i];
+            continue;
+        }
+        if (a == L"--eval" && i + 1 < argc)
+        {
+            eval.queriesPath = argv[++i];
+            continue;
+        }
+        if (a == L"--eval-out" && i + 1 < argc)
+        {
+            eval.outPath = argv[++i];
+            continue;
+        }
+        if (a == L"--agent-prompt-file" && i + 1 < argc)
+        {
+            eval.promptPath = argv[++i];
+            continue;
+        }
+        if (a == L"--eval-only" && i + 1 < argc)
+        {
+            // "q1,q3": the ids to run, in the file's order.
+            const std::wstring list = argv[++i];
+            size_t start = 0;
+            while (start <= list.size())
+            {
+                const size_t comma = list.find(L',', start);
+                const std::wstring idText = list.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+                if (!idText.empty())
+                {
+                    eval.only.push_back(idText);
+                }
+                if (comma == std::wstring::npos)
+                {
+                    break;
+                }
+                start = comma + 1;
+            }
+            continue;
+        }
+        if (a == L"--eval-timeout" && i + 1 < argc)
+        {
+            eval.timeoutSeconds = (std::max)(30, _wtoi(argv[++i]));
+            continue;
+        }
+        if (a == L"--eval-index-wait" && i + 1 < argc)
+        {
+            eval.indexWaitSeconds = (std::max)(0, _wtoi(argv[++i]));
+            continue;
+        }
+#endif
         if (a == L"--index")
         {
             indexDays = 0;
@@ -1446,6 +1974,24 @@ int wmain(int argc, wchar_t** argv)
         RunIndexTiming(indexDays);
         std::filesystem::remove_all(dir, ec);
         return 0;
+    }
+    if (!toolName.empty())
+    {
+        // A measurement too: one tool call, no model.
+        RunToolTiming(toolName, toolArguments, toolOut);
+        std::filesystem::remove_all(dir, ec);
+        return 0;
+    }
+    if (!eval.queriesPath.empty())
+    {
+        // The prompt eval, alone too: its exit code is the number of queries that got no answer.
+        if (eval.outPath.empty())
+        {
+            eval.outPath = eval.queriesPath + L".results.json";
+        }
+        const int unanswered = RunAgentEval(claudeExe, eval);
+        std::filesystem::remove_all(dir, ec);
+        return unanswered;
     }
 #endif
     if (onlyThinking)

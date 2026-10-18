@@ -1,0 +1,16 @@
+{
+ "queries": {
+  "h1": {
+   "text": "which sessions changed SessionScanner.cpp?"
+  },
+  "h2": {
+   "text": "what did I do on October 12?"
+  },
+  "h3": {
+   "text": "find sessions where a build failed with LNK2019"
+  },
+  "h4": {
+   "text": "the session where I asked to remove netdata"
+  }
+ }
+}

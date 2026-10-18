@@ -37,8 +37,12 @@ namespace
     }
 
     // The period a catalog is gathered for before any search asked for one: the search tool's
-    // own default, so the first search of a request finds its catalog ready.
-    constexpr int64_t kDefaultCatalogMs = static_cast<int64_t>(kSessionSearchDefaultDays) * 86400000LL;
+    // own default (since 2026-10-18 every session: kSessionSearchDefaultDays is 0), so the first
+    // search of a request finds its catalog ready.
+    int64_t DefaultCatalogSinceMs()
+    {
+        return SessionSearchSinceMs(SessionSearchParams{}, NowUnixMs());
+    }
 
     // One step of the index keeper reads sidecar files for this long, then publishes what it
     // has. Short enough that a search which waits for "a bit more index" gets it soon; long
@@ -53,16 +57,16 @@ namespace
     // the first step has the newest 20 to 40 sessions cold, and all of them warm.
     constexpr int64_t kCatalogFirstStepBudgetMs = 400;
 
-    // How long a search waits for an index that covers its period and is fresh, when an older
-    // or shorter one is there. After that it searches what there is, and the result says that
-    // older sessions are still being indexed. The model, and behind it the user, waits here:
-    // only the first search of a request waits (CatalogFor).
-    constexpr int64_t kCatalogSearchWaitMs = 2000;
-
-    // How long a search waits for the FIRST index of a run (there is nothing to search before
-    // it). The first step, plus room for one very large transcript that a step cannot split
-    // (a transcript with no sidecar is parsed whole: seconds for hundreds of megabytes).
-    constexpr int64_t kCatalogFirstWaitMs = 15000;
+    // How long ONE search or grep call waits for an index that covers its period and is fresh
+    // (SessionCatalogKeeper::WaitFor). Since 2026-10-18 a call never searches a part of the
+    // sessions (the user's rule, "searches must never miss"): when the wait ends first, the tool
+    // answers that the index is not ready and asks the model to call it again, which waits once
+    // more (SessionSearchToolset::Search). It was 2 s once per request (15 s with no index at
+    // all) — after a pause that searched the keeper's first step, 1 to 34 sessions (SESSIONS.md
+    // §9.13). A first build of every session reads one sidecar file per session (3,671 files:
+    // 11-13 s cold in a Release build) plus a parse of each transcript that has none; with the
+    // shared index kept for the process, a wait this long happens once per app run at most.
+    constexpr int64_t kCatalogSearchWaitMs = 90000;
 
     // ===== the session database mode (SESSIONS_DB.md §8.2) =====
 
@@ -443,6 +447,407 @@ namespace
 
 namespace Agentmaster
 {
+    // ===== the session index (SessionCatalogKeeper) =====================================================
+
+    struct SessionCatalogKeeper::Impl
+    {
+        SessionCatalogSources sources;
+
+        // `mutex` guards everything from here to `task`.
+        mutable std::mutex mutex;
+        std::shared_ptr<const SessionCatalog> catalog; // the newest published index, or null
+        // Somebody asked for an index (Ensure / WaitFor) since it was made or last released, and the
+        // earliest instant asked. The period only moves back: the task reads the widest period ever
+        // asked, so a search for a shorter one never throws a longer index away. (A flag beside the
+        // instant, because 0 is a real period now: every session.)
+        bool wanted{ false };
+        int64_t wantSince{ 0 };
+        bool running{ false }; // a task is gathering (at most one at a time)
+        bool shuttingDown{ false };
+        std::future<void> task; // that task, kept so that Shutdown can wait for it
+
+        // Raised when a new index was published or the task ended. Waited on with `mutex`.
+        std::condition_variable changed;
+        // Bumped to stop the running step (Release, Shutdown). Atomic: the gather reads it between
+        // two sidecar files, without the mutex.
+        std::atomic<uint64_t> epoch{ 0 };
+
+        // The task: the ONE place that reads the session index for the AI search. It runs while
+        // there is something to read, and reads in STEPS: each step takes everything the step before
+        // had (no file read) and reads new sidecar files for kCatalogStepBudgetMs, newest sessions
+        // first, then publishes the result. So:
+        //   - a search never reads the disk itself; it takes the newest published index;
+        //   - an index that needs minutes the first time (every transcript whose sidecar is missing
+        //     or out of date is parsed once) is searchable after the first step, the newest sessions
+        //     first, and reaches further back with every step;
+        //   - a refresh of a complete index is one short step (the listing, plus the sessions that
+        //     changed).
+        // It ends when the index is complete for the widest period asked, when the index was
+        // released and nobody asked since, when a gather failed, or at the shutdown.
+        // Never throws: a task that threw would end silently with `running` left true, and no index
+        // would ever be read again.
+        void Run() noexcept
+        {
+            try
+            {
+                const auto started = std::chrono::steady_clock::now();
+                int steps = 0;
+                bool announced = false; // the "being built" line was written for this run
+                bool storeWarmTried = false; // the session store's first read was tried in this run (once is enough: a failure must not loop)
+                for (;;)
+                {
+                    std::shared_ptr<const SessionCatalog> previous;
+                    int64_t since = 0;
+                    uint64_t stepEpoch = 0;
+                    {
+                        std::lock_guard lock{ mutex };
+                        if (shuttingDown || !wanted)
+                        {
+                            running = false;
+                            break;
+                        }
+                        previous = catalog;
+                        since = wantSince;
+                        // Read under the lock, like Release bumps it: the step belongs to exactly the
+                        // state it copied.
+                        stepEpoch = epoch.load();
+                    }
+                    std::shared_ptr<const SessionCatalog> step;
+                    try
+                    {
+                        SessionCatalogGatherOptions gather;
+                        // No index yet: publish the newest sessions fast, then take normal steps.
+                        gather.budgetMs = previous ? kCatalogStepBudgetMs : kCatalogFirstStepBudgetMs;
+                        gather.previous = std::move(previous);
+                        gather.cancelled = [this, stepEpoch] { return epoch.load() != stepEpoch; };
+                        step = GatherSessionCatalog(since, sources, gather);
+                        ++steps;
+                    }
+                    catch (...)
+                    {
+                        LogSwallowedException(L"SessionCatalogKeeper: the session index gather");
+                    }
+                    if (step && epoch.load() == stepEpoch) // not a step that a release cut short
+                    {
+                        // The log lines come BEFORE the last locked section: after it this task must
+                        // return at once (Ensure may replace its future, which waits for the task,
+                        // while it holds the mutex).
+                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+                        if (!step->Complete() && !announced)
+                        {
+                            announced = true;
+                            const int64_t periodDays = step->sinceUnixMs > 0 ? (step->gatheredUnixMs - step->sinceUnixMs) / 86400000LL : -1;
+                            LogAgent(L"the session index is being built in the background: " + std::to_wstring(step->entries.size()) + L" session(s) so far, the last " +
+                                     std::to_wstring((step->gatheredUnixMs - step->coveredSinceUnixMs) / 86400000LL) + L" of " +
+                                     (periodDays >= 0 ? std::to_wstring(periodDays) + L" day(s)" : std::wstring{ L"all the days" }) + L" are searchable");
+                        }
+                        else if (step->Complete() && (announced || ms > 1500))
+                        {
+                            // Worth a line: time a search may have waited, or the end of a build.
+                            LogAgent(L"the session index is complete: " + std::to_wstring(step->entries.size()) + L" session(s), " + std::to_wstring(steps) + L" step(s), " + std::to_wstring(ms) + L" ms");
+                            announced = false;
+                        }
+                    }
+                    // The step left the stored titles, tags and favorites out (the session store was
+                    // not read yet in this process): it is published as it is, and the store is read
+                    // AFTER the publish, here on this background thread, so the step after it has
+                    // them. In the app the engine reads the store at start-up, so this runs only for
+                    // a request made in the first seconds of a run.
+                    const bool needStore = step && !step->storeOverlay && !storeWarmTried;
+                    bool more = false;
+                    {
+                        std::lock_guard lock{ mutex };
+                        // Released (or shut down) while the step ran: its result must not bring back
+                        // the memory that Release freed.
+                        const bool released = epoch.load() != stepEpoch;
+                        if (step && !released)
+                        {
+                            catalog = step;
+                        }
+                        if (shuttingDown)
+                        {
+                            more = false;
+                        }
+                        else if (released)
+                        {
+                            more = wanted; // somebody asked again after the release: read it again
+                        }
+                        else if (!step)
+                        {
+                            more = false; // the gather failed: the next Ensure starts a new task
+                        }
+                        else
+                        {
+                            // Not everything is read yet, the store is still to be read, or a search
+                            // asked for a longer period while this step ran.
+                            more = !step->Complete() || needStore || wantSince < step->sinceUnixMs;
+                        }
+                        if (!more)
+                        {
+                            running = false;
+                        }
+                    }
+                    changed.notify_all();
+                    if (!more)
+                    {
+                        break;
+                    }
+                    if (needStore)
+                    {
+                        storeWarmTried = true;
+                        try
+                        {
+                            const auto t0 = std::chrono::steady_clock::now();
+                            const size_t records = WarmSessionStore();
+                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+                            if (ms > 1500)
+                            {
+                                LogAgent(L"the session store was read for the index: " + std::to_wstring(records) + L" record(s), " + std::to_wstring(ms) + L" ms");
+                            }
+                        }
+                        catch (...)
+                        {
+                            // The next steps then stay without the stored titles, tags and favorites;
+                            // the next run of the task tries again.
+                            LogSwallowedException(L"SessionCatalogKeeper: read the session store");
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                LogSwallowedException(L"SessionCatalogKeeper::Run");
+                try
+                {
+                    std::lock_guard lock{ mutex };
+                    running = false;
+                }
+                catch (...)
+                {
+                    LogSwallowedException(L"SessionCatalogKeeper::Run: clear the running flag");
+                }
+                changed.notify_all();
+            }
+        }
+    };
+
+    SessionCatalogKeeper::SessionCatalogKeeper(SessionCatalogSources sources) :
+        _impl{ std::make_shared<Impl>() }
+    {
+        _impl->sources = std::move(sources);
+    }
+
+    SessionCatalogKeeper::~SessionCatalogKeeper()
+    {
+        Shutdown();
+    }
+
+    void SessionCatalogKeeper::Ensure(int64_t sinceUnixMs) noexcept
+    {
+        try
+        {
+            Impl* const impl = _impl.get();
+            std::lock_guard lock{ impl->mutex };
+            if (impl->shuttingDown)
+            {
+                return;
+            }
+            if (!impl->wanted || sinceUnixMs < impl->wantSince)
+            {
+                impl->wanted = true;
+                impl->wantSince = (std::max)(int64_t{ 0 }, sinceUnixMs);
+            }
+            if (impl->running)
+            {
+                return; // it reads wantSince before every step
+            }
+            // Half the maximum age: an index read now must still be good when the model's first request has come back
+            // (about a second later).
+            if (impl->catalog && impl->catalog->coveredSinceUnixMs <= impl->wantSince && NowUnixMs() - impl->catalog->gatheredUnixMs <= kSessionCatalogMaxAgeMs / 2)
+            {
+                return;
+            }
+            // Replacing `task` waits for the task before this one. That task has cleared `running` as its last act under
+            // this mutex, so it is returning: the wait is a few instructions long, not a gather.
+            impl->running = true;
+            try
+            {
+                impl->task = std::async(std::launch::async, [impl] { impl->Run(); });
+            }
+            catch (...)
+            {
+                impl->running = false;
+                throw;
+            }
+        }
+        catch (...)
+        {
+            // No thread for the task. A search then uses the index there is, or reports that there is none; the next
+            // request tries again.
+            LogSwallowedException(L"SessionCatalogKeeper::Ensure");
+        }
+    }
+
+    std::shared_ptr<const SessionCatalog> SessionCatalogKeeper::WaitFor(int64_t sinceUnixMs, const std::function<bool()>& cancelled, int64_t maxWaitMs) noexcept
+    {
+        try
+        {
+            Ensure(sinceUnixMs);
+            Impl* const impl = _impl.get();
+            const auto started = std::chrono::steady_clock::now();
+            std::unique_lock lock{ impl->mutex };
+            for (;;)
+            {
+                const auto& catalog = impl->catalog;
+                // Ready = it reaches back far enough, it is fresh, and it carries the session store's titles, tags and
+                // favorites - or the task is done, so no step with them is coming (the store could not be read). The
+                // first step of a process publishes WITHOUT the store when it was not read yet (Run reads it after that
+                // publish): a search on it matched no tab name the user gave a session, and a tag or favorite filter
+                // matched nothing (seen 2026-10-18: a fresh process's rows all carried the transcripts' titles).
+                const bool good = catalog && catalog->coveredSinceUnixMs <= (std::max)(int64_t{ 0 }, sinceUnixMs) && NowUnixMs() - catalog->gatheredUnixMs <= kSessionCatalogMaxAgeMs &&
+                                  (catalog->storeOverlay || !impl->running);
+                if (good || impl->shuttingDown || !impl->running)
+                {
+                    break; // it is there, or nothing better is coming
+                }
+                if (cancelled && cancelled())
+                {
+                    break;
+                }
+                const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+                if (waited >= maxWaitMs)
+                {
+                    break;
+                }
+                // Short slices: `cancelled` has no notification of its own.
+                impl->changed.wait_for(lock, std::chrono::milliseconds{ 100 });
+            }
+            return impl->catalog;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"SessionCatalogKeeper::WaitFor");
+            return nullptr;
+        }
+    }
+
+    std::shared_ptr<const SessionCatalog> SessionCatalogKeeper::Current() const noexcept
+    {
+        try
+        {
+            std::lock_guard lock{ _impl->mutex };
+            return _impl->catalog;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"SessionCatalogKeeper::Current");
+            return nullptr;
+        }
+    }
+
+    SessionIndexStatus SessionCatalogKeeper::Status() const noexcept
+    {
+        SessionIndexStatus status;
+        try
+        {
+            std::lock_guard lock{ _impl->mutex };
+            status.building = _impl->running;
+            if (const auto& catalog = _impl->catalog)
+            {
+                status.sessions = catalog->entries.size();
+                status.complete = catalog->Complete();
+                status.sinceUnixMs = catalog->sinceUnixMs;
+                status.coveredSinceUnixMs = catalog->coveredSinceUnixMs;
+                status.gatheredUnixMs = catalog->gatheredUnixMs;
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: an all-zero status ("no index yet"); a diagnostic must not throw.
+            LogSwallowedException(L"SessionCatalogKeeper::Status");
+        }
+        return status;
+    }
+
+    void SessionCatalogKeeper::Release() noexcept
+    {
+        try
+        {
+            std::shared_ptr<const SessionCatalog> old;
+            {
+                std::lock_guard lock{ _impl->mutex };
+                old = std::move(_impl->catalog);
+                _impl->catalog.reset();
+                // Nobody wants an index now: the running step stops at its next sidecar file and publishes nothing. The
+                // sidecar files it wrote stay, so the next build continues where this one stopped.
+                _impl->wanted = false;
+                ++_impl->epoch;
+            }
+            _impl->changed.notify_all();
+            // `old` is released here, outside the lock: freeing a large catalog takes a moment.
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"SessionCatalogKeeper::Release");
+        }
+    }
+
+    void SessionCatalogKeeper::Shutdown() noexcept
+    {
+        try
+        {
+            std::future<void> pending;
+            {
+                std::lock_guard lock{ _impl->mutex };
+                _impl->shuttingDown = true;
+                ++_impl->epoch; // the running step stops at its next sidecar file
+                pending = std::move(_impl->task);
+            }
+            _impl->changed.notify_all(); // a search that waits for an index returns
+            if (pending.valid())
+            {
+                pending.wait(); // the task uses the Impl: it must be gone before the Impl is
+            }
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"SessionCatalogKeeper::Shutdown");
+        }
+    }
+
+    std::shared_ptr<SessionCatalogKeeper> SharedSessionCatalogKeeper()
+    {
+        // Leaked on purpose (the engine's rule): a function-local static, created once, thread-safe. Both search
+        // conversations of the app hold it, so the index is read once per run and never thrown away (SESSIONS.md §9.13).
+        static const std::shared_ptr<SessionCatalogKeeper>* const keeper = [] {
+            SessionCatalogSources sources;
+            sources.openSessions = [] {
+                std::vector<std::pair<std::wstring, std::wstring>> open;
+                const auto registry = SharedEngine().registry;
+                if (!registry)
+                {
+                    return open;
+                }
+                // The two lean registry reads: the live ids, then their titles — never a snapshot of whole records
+                // (UI_THREAD.md §10a).
+                std::vector<std::wstring> ids;
+                for (const auto& binding : registry->LiveTabBindings())
+                {
+                    ids.push_back(binding.id);
+                }
+                for (auto& headline : registry->HeadlinesOf(ids))
+                {
+                    open.emplace_back(std::move(headline.id), std::move(headline.title));
+                }
+                return open;
+            };
+            return new std::shared_ptr<SessionCatalogKeeper>{ std::make_shared<SessionCatalogKeeper>(std::move(sources)) };
+        }();
+        return *keeper;
+    }
+
+    // ===== the agent ==============================================================================
+
     struct SessionSearchAgent::Impl
     {
         SessionSearchAgentOptions options;
@@ -468,24 +873,12 @@ namespace Agentmaster
         // snapshot.narration (they were written before acting: the plan); the turn's end drops them (they are the
         // answer, which TurnCompleted carries).
         std::wstring pendingAssistantText;
-        // ---- the index keeper (see KeeperRun) ----
-        std::shared_ptr<const SessionCatalog> catalog; // the newest session index, or null
-        // The earliest instant a search of this run asked for; 0 = nobody asked since the index
-        // was released. It only moves back: the keeper reads the widest period ever asked, so
-        // a search for a shorter one never throws a long index away.
-        int64_t wantSince{ 0 };
-        bool keeperRunning{ false }; // a keeper task is gathering (at most one at a time)
-        // The request (a requestGeneration value) whose search already waited the whole
-        // kCatalogSearchWaitMs for a longer index and did not get it. Its further searches do
-        // not wait again: three searches of one request must not wait three times.
-        uint64_t waitedGeneration{ ~uint64_t{ 0 } };
-        std::future<void> keeper; // that task, kept so that Shutdown can wait for it
-
-        // Raised when a new index was published or the keeper ended. Waited on with `mutex`.
-        std::condition_variable catalogChanged;
-        // Bumped to stop the keeper's running step (ReleaseCatalog, Shutdown). Atomic: the
-        // gather reads it between two sidecar files, without the mutex.
-        std::atomic<uint64_t> keeperEpoch{ 0 };
+        // ---- the session index (SessionCatalogKeeper) ----
+        // The app's shared index (SessionSearchAgentOptions::catalogKeeper), or one made for this
+        // agent alone (a test); null in the database mode, which reads no index. Set once, by the
+        // constructor, and never replaced: read without `mutex`.
+        std::shared_ptr<SessionCatalogKeeper> keeper;
+        bool privateKeeper{ false }; // made by this agent: ReleaseCatalog and Shutdown act on it
         // Bumped whenever the running request is not wanted any more (a newer request, an
         // interrupt, a reset, the shutdown). A search reads it when it starts and stops when it
         // changed (SessionSearchToolset::Callbacks::generation).
@@ -496,11 +889,6 @@ namespace Agentmaster
         std::unique_ptr<HarnessConversation> conversation;
 
         // -------------------------------------------------------------------------------
-
-        SessionCatalogSources Sources() const
-        {
-            return SessionCatalogSources{ options.openSessions };
-        }
 
         /// <summary>
         /// Append one text block to snapshot.narration, within kSessionSearchMaxNarrationChars: the START is what
@@ -598,268 +986,31 @@ namespace Agentmaster
             }
         }
 
-        // The index keeper: the ONE place that reads the session index for the AI search. It
-        // runs as a background task while there is something to read, and reads in STEPS: each
-        // step takes everything the step before had (no file read) and reads new sidecar files
-        // for kCatalogStepBudgetMs, newest sessions first, then publishes the result. So:
-        //   - a search never reads the disk itself; it takes the newest published index;
-        //   - an index that needs minutes the first time (every transcript whose sidecar is
-        //     missing or out of date is parsed once) is searchable after the first step, the
-        //     newest sessions first, and reaches further back with every step;
-        //   - a refresh of a complete index is one short step (the listing, plus the sessions
-        //     that changed).
-        // It ends when the index is complete for the widest period asked, when the index was
-        // released and nobody asked since, when a gather failed, or at the shutdown.
-        // Never throws: a task that threw would end silently with keeperRunning left true, and
-        // no index would ever be read again.
-        void KeeperRun() noexcept
-        {
-            try
-            {
-                const auto started = std::chrono::steady_clock::now();
-                int steps = 0;
-                bool announced = false; // the "being built" line was written for this run
-                bool storeWarmTried = false; // the session store's first read was tried in this run (once is enough: a failure must not loop)
-                for (;;)
-                {
-                    std::shared_ptr<const SessionCatalog> previous;
-                    int64_t since = 0;
-                    uint64_t epoch = 0;
-                    {
-                        std::lock_guard lock{ mutex };
-                        if (shuttingDown || wantSince == 0)
-                        {
-                            keeperRunning = false;
-                            break;
-                        }
-                        previous = catalog;
-                        since = wantSince;
-                        // Read under the lock, like ReleaseCatalog bumps it: the step belongs
-                        // to exactly the state it copied.
-                        epoch = keeperEpoch.load();
-                    }
-                    std::shared_ptr<const SessionCatalog> step;
-                    try
-                    {
-                        SessionCatalogGatherOptions gather;
-                        // No index yet: publish the newest sessions fast, then take normal steps.
-                        gather.budgetMs = previous ? kCatalogStepBudgetMs : kCatalogFirstStepBudgetMs;
-                        gather.previous = std::move(previous);
-                        gather.cancelled = [this, epoch] { return keeperEpoch.load() != epoch; };
-                        step = GatherSessionCatalog(since, Sources(), gather);
-                        ++steps;
-                    }
-                    catch (...)
-                    {
-                        LogSwallowedException(L"SessionSearchAgent: the session index gather");
-                    }
-                    if (step && keeperEpoch.load() == epoch) // not a step that a release cut short
-                    {
-                        // The log lines come BEFORE the last locked section: after it this task
-                        // must return at once (EnsureCatalog may replace its future, which
-                        // waits for the task, while it holds the mutex).
-                        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-                        if (!step->Complete() && !announced)
-                        {
-                            announced = true;
-                            LogAgent(L"the session index is being built in the background: " + std::to_wstring(step->entries.size()) + L" session(s) so far, the last " +
-                                     std::to_wstring((step->gatheredUnixMs - step->coveredSinceUnixMs) / 86400000LL) + L" of " +
-                                     std::to_wstring((step->gatheredUnixMs - step->sinceUnixMs) / 86400000LL) + L" day(s) are searchable");
-                        }
-                        else if (step->Complete() && (announced || ms > 1500))
-                        {
-                            // Worth a line: time a search may have waited, or the end of a build.
-                            LogAgent(L"the session index is complete: " + std::to_wstring(step->entries.size()) + L" session(s), " + std::to_wstring(steps) + L" step(s), " + std::to_wstring(ms) + L" ms");
-                            announced = false;
-                        }
-                    }
-                    // The step left the stored titles, tags and favorites out (the session store
-                    // was not read yet in this process): it is published as it is, and the store
-                    // is read AFTER the publish, here on this background thread, so the step
-                    // after it has them. In the app the engine reads the store at start-up, so
-                    // this runs only for a request made in the first seconds of a run.
-                    const bool needStore = step && !step->storeOverlay && !storeWarmTried;
-                    bool more = false;
-                    {
-                        std::lock_guard lock{ mutex };
-                        // Released (or shut down) while the step ran: its result must not bring
-                        // back the memory that ReleaseCatalog freed.
-                        const bool released = keeperEpoch.load() != epoch;
-                        if (step && !released)
-                        {
-                            catalog = step;
-                        }
-                        if (shuttingDown)
-                        {
-                            more = false;
-                        }
-                        else if (released)
-                        {
-                            more = wantSince != 0; // somebody asked again after the release: read it again
-                        }
-                        else if (!step)
-                        {
-                            more = false; // the gather failed: the next request starts a new keeper
-                        }
-                        else
-                        {
-                            // Not everything is read yet, the store is still to be read, or a
-                            // search asked for a longer period while this step ran.
-                            more = !step->Complete() || needStore || wantSince < step->sinceUnixMs;
-                        }
-                        if (!more)
-                        {
-                            keeperRunning = false;
-                        }
-                    }
-                    catalogChanged.notify_all();
-                    if (!more)
-                    {
-                        break;
-                    }
-                    if (needStore)
-                    {
-                        storeWarmTried = true;
-                        try
-                        {
-                            const auto t0 = std::chrono::steady_clock::now();
-                            const size_t records = WarmSessionStore();
-                            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-                            if (ms > 1500)
-                            {
-                                LogAgent(L"the session store was read for the index: " + std::to_wstring(records) + L" record(s), " + std::to_wstring(ms) + L" ms");
-                            }
-                        }
-                        catch (...)
-                        {
-                            // The next steps then stay without the stored titles, tags and
-                            // favorites; the next run of the keeper tries again.
-                            LogSwallowedException(L"SessionSearchAgent: read the session store");
-                        }
-                    }
-                }
-            }
-            catch (...)
-            {
-                LogSwallowedException(L"SessionSearchAgent::KeeperRun");
-                try
-                {
-                    std::lock_guard lock{ mutex };
-                    keeperRunning = false;
-                }
-                catch (...)
-                {
-                    LogSwallowedException(L"SessionSearchAgent::KeeperRun: clear the running flag");
-                }
-                catalogChanged.notify_all();
-            }
-        }
+        // The index for a search from `sinceUnixMs` on is the KEEPER's (SessionCatalogKeeper): the app's shared one, or
+        // this agent's private one (a test). These two are what the toolset's catalog callback and Prewarm / Ask use.
 
-        // Make sure that a fresh index from `sinceUnixMs` on exists or is on its way: start the
-        // keeper when none runs and the current index is too old or too short. Returns at once
-        // (it is called from a UI thread, through Prewarm and Ask). Never throws.
+        // Make sure an index from `sinceUnixMs` on exists or is on its way. Returns at once. Never throws.
         void EnsureCatalog(int64_t sinceUnixMs) noexcept
         {
-            try
+            // The database mode searches the session database: no index is read here (SESSIONS_DB.md §8.2).
+            if (keeper && options.sessionDbProfile.empty())
             {
-                std::lock_guard lock{ mutex };
-                // The database mode searches the session database: no index is read here (SESSIONS_DB.md §8.2).
-                if (shuttingDown || !options.sessionDbProfile.empty())
-                {
-                    return;
-                }
-                if (wantSince == 0 || sinceUnixMs < wantSince)
-                {
-                    wantSince = sinceUnixMs;
-                }
-                if (keeperRunning)
-                {
-                    return; // it reads wantSince before every step
-                }
-                // Half the maximum age: an index read now must still be good when the model's
-                // first request has come back (about a second later).
-                if (catalog && catalog->coveredSinceUnixMs <= wantSince && NowUnixMs() - catalog->gatheredUnixMs <= kSessionCatalogMaxAgeMs / 2)
-                {
-                    return;
-                }
-                // Replacing `keeper` waits for the task before this one. That task has cleared
-                // keeperRunning as its last act under this mutex, so it is returning: the wait
-                // is a few instructions long, not a gather.
-                keeperRunning = true;
-                try
-                {
-                    keeper = std::async(std::launch::async, [this] { KeeperRun(); });
-                }
-                catch (...)
-                {
-                    keeperRunning = false;
-                    throw;
-                }
-            }
-            catch (...)
-            {
-                // No thread for the task. A search then uses the index there is, or reports
-                // that there is none; the next request tries again.
-                LogSwallowedException(L"SessionSearchAgent::EnsureCatalog");
+                keeper->Ensure(sinceUnixMs);
             }
         }
 
-        // The index for a search from `sinceUnixMs` on. Called on the tool-call thread, with
-        // the model waiting. It reads no file: it asks the keeper for the index and waits a
-        // bounded time for one that covers the period and is fresh.
-        //   cancelled — empty = never; else true ends the wait (the search is not wanted).
-        //   returns   — the newest index: complete for the period when the keeper got there in
-        //               time, else a shorter or older one (the search result says what it
-        //               lacks); null when there is none at all.
+        // The index for a search from `sinceUnixMs` on, waited for up to kCatalogSearchWaitMs (the search then checks
+        // whether it is complete for its period, and answers "not ready, call again" when it is not). Called on the
+        // tool-call thread, with the model waiting. Null when there is no index at all. Never throws.
         std::shared_ptr<const SessionCatalog> CatalogFor(int64_t sinceUnixMs, const std::function<bool()>& cancelled) noexcept
         {
-            try
-            {
-                EnsureCatalog(sinceUnixMs);
-                const auto started = std::chrono::steady_clock::now();
-                const uint64_t generation = requestGeneration.load();
-                std::unique_lock lock{ mutex };
-                for (;;)
-                {
-                    const bool good = catalog && catalog->coveredSinceUnixMs <= sinceUnixMs && NowUnixMs() - catalog->gatheredUnixMs <= kSessionCatalogMaxAgeMs;
-                    if (good || shuttingDown || !keeperRunning)
-                    {
-                        break; // it is there, or nothing better is coming
-                    }
-                    if (cancelled && cancelled())
-                    {
-                        break;
-                    }
-                    if (catalog && waitedGeneration == generation)
-                    {
-                        break; // this request waited once already: search what there is
-                    }
-                    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-                    if (waited >= (catalog ? kCatalogSearchWaitMs : kCatalogFirstWaitMs))
-                    {
-                        waitedGeneration = generation;
-                        break;
-                    }
-                    // Short slices: `cancelled` has no notification of its own.
-                    catalogChanged.wait_for(lock, std::chrono::milliseconds{ 100 });
-                }
-                return catalog;
-            }
-            catch (...)
-            {
-                LogSwallowedException(L"SessionSearchAgent::CatalogFor");
-                return nullptr;
-            }
+            return keeper ? keeper->WaitFor(sinceUnixMs, cancelled, kCatalogSearchWaitMs) : nullptr;
         }
 
         // The index entries of `ids`, in order, without their touched-path lists.
         std::vector<SessionIndexEntry> EntriesFor(const std::vector<std::wstring>& ids) const
         {
-            std::shared_ptr<const SessionCatalog> current;
-            {
-                std::lock_guard lock{ mutex };
-                current = catalog;
-            }
+            const std::shared_ptr<const SessionCatalog> current = keeper ? keeper->Current() : nullptr;
             std::vector<SessionIndexEntry> out;
             if (ids.empty())
             {
@@ -1105,6 +1256,20 @@ namespace Agentmaster
             throw std::invalid_argument("SessionSearchAgentOptions::name must be 1 to 48 characters of a-z, 0-9 and '-'.");
         }
 
+        // The session index: the host's (the app passes SharedSessionCatalogKeeper() to both search conversations), else one
+        // of this agent's own (a test) — none in the database mode, which reads no index (SESSIONS_DB.md §8.2).
+        if (impl->options.sessionDbProfile.empty())
+        {
+            impl->keeper = impl->options.catalogKeeper;
+            if (!impl->keeper)
+            {
+                SessionCatalogSources sources;
+                sources.openSessions = impl->options.openSessions;
+                impl->keeper = std::make_shared<SessionCatalogKeeper>(std::move(sources));
+                impl->privateKeeper = true;
+            }
+        }
+
         SessionSearchToolset::Callbacks callbacks;
         callbacks.catalog = [impl](int64_t since, const std::function<bool()>& cancelled) { return impl->CatalogFor(since, cancelled); };
         callbacks.generation = [impl] { return impl->requestGeneration.load(); };
@@ -1131,6 +1296,13 @@ namespace Agentmaster
             callbacks.database.resolve = [profile](const std::vector<std::wstring>& handles) { return ResolveDatabaseIds(profile, handles); };
             LogAgent(L"the AI search uses the session database (profile " + profile + L")");
         }
+        // The prompt eval's copy of every tool result (SessionSearchAgentOptions::toolResultTap; empty in the app).
+        if (impl->options.toolResultTap)
+        {
+            callbacks.onToolResult = [tap = impl->options.toolResultTap](const std::wstring& tool, const json::Value& arguments, const HarnessToolResult& result) {
+                tap(tool, json::Dump(arguments), result.text, result.isError);
+            };
+        }
         impl->toolset = std::make_unique<SessionSearchToolset>(std::move(callbacks));
 
         HarnessOptions h;
@@ -1144,7 +1316,8 @@ namespace Agentmaster
         // before a tool call, at effort low: the fastest answer.
         h.thinking = HarnessThinkingLevelThinks(impl->options.thinkingLevel) ? HarnessThinking::Adaptive : HarnessThinking::Disabled;
         h.effort = HarnessThinkingLevelEffort(impl->options.thinkingLevel);
-        h.systemPrompt = database ? SessionSearchToolset::DatabaseSystemPrompt() : SessionSearchToolset::SystemPrompt();
+        // The eval's prompt when it gives one (SessionSearchAgentOptions::systemPrompt), else the built-in one.
+        h.systemPrompt = !impl->options.systemPrompt.empty() ? impl->options.systemPrompt : std::wstring{ database ? SessionSearchToolset::DatabaseSystemPrompt() : SessionSearchToolset::SystemPrompt() };
         h.toolServers = impl->toolset->Servers();
         h.autoCompactTokens = impl->options.autoCompactTokens;
         h.persistRecord = impl->options.persist;
@@ -1227,7 +1400,7 @@ namespace Agentmaster
     {
         if (readIndex)
         {
-            _impl->EnsureCatalog(NowUnixMs() - kDefaultCatalogMs);
+            _impl->EnsureCatalog(DefaultCatalogSinceMs());
         }
         _impl->conversation->Prewarm();
     }
@@ -1256,7 +1429,7 @@ namespace Agentmaster
         }
         // The index is read while the model reads the request: by the time it calls the search
         // tool (about a second later) the catalog is there.
-        _impl->EnsureCatalog(NowUnixMs() - kDefaultCatalogMs);
+        _impl->EnsureCatalog(DefaultCatalogSinceMs());
         // BEFORE the send: a search of the request that this one replaces must see the change
         // and return, or the interrupt that Send makes waits behind it.
         ++_impl->requestGeneration;
@@ -1349,19 +1522,12 @@ namespace Agentmaster
 
     void SessionSearchAgent::ReleaseCatalog()
     {
-        std::shared_ptr<const SessionCatalog> old;
+        // Only an index of this agent's own (a test): the app's is shared by both search conversations and kept for the
+        // process (SESSIONS.md §9.13 — a rebuild after a pause is what made searches answer from a part of the sessions).
+        if (_impl->keeper && _impl->privateKeeper)
         {
-            std::lock_guard lock{ _impl->mutex };
-            old = std::move(_impl->catalog);
-            _impl->catalog.reset();
-            // Nobody wants an index now: the keeper stops at its next sidecar file and
-            // publishes nothing. The sidecar files it wrote stay, so the next build continues
-            // where this one stopped.
-            _impl->wantSince = 0;
-            ++_impl->keeperEpoch;
+            _impl->keeper->Release();
         }
-        _impl->catalogChanged.notify_all();
-        // `old` is released here, outside the lock: freeing a large catalog takes a moment.
     }
 
     void SessionSearchAgent::ParkProcessAfter(int64_t delayMs)
@@ -1373,22 +1539,20 @@ namespace Agentmaster
     {
         try
         {
-            std::future<void> pending;
             {
                 std::lock_guard lock{ _impl->mutex };
                 _impl->shuttingDown = true;
-                ++_impl->keeperEpoch; // the keeper's running step stops at its next sidecar file
-                pending = std::move(_impl->keeper);
             }
-            ++_impl->requestGeneration; // a running search returns at once
-            _impl->catalogChanged.notify_all(); // ... and so does one that waits for an index
+            // A running search returns at once — also one that waits for the index (its cancel check reads this).
+            ++_impl->requestGeneration;
             if (_impl->conversation)
             {
                 _impl->conversation->Shutdown(); // no event and no tool call after this returns
             }
-            if (pending.valid())
+            if (_impl->keeper && _impl->privateKeeper)
             {
-                pending.wait(); // the keeper uses this object: it must be gone before the object is
+                // An index of this agent's own ends with it; the app's shared one outlives every conversation.
+                _impl->keeper->Shutdown();
             }
         }
         catch (...)
@@ -1426,6 +1590,12 @@ namespace Agentmaster
         return _impl->conversation->DescribeCommandLine();
     }
 
+    SessionIndexStatus SessionSearchAgent::IndexStatus() const noexcept
+    {
+        // The keeper's (Status never throws); all zero in the database mode, which has no index.
+        return _impl->keeper ? _impl->keeper->Status() : SessionIndexStatus{};
+    }
+
     SessionSearchAgent& SharedSessionSearchAgent()
     {
         // Leaked on purpose (see the header). A function-local static: created once, thread-safe.
@@ -1454,6 +1624,9 @@ namespace Agentmaster
             }
             // SESSIONS.md §9.14: the window and tab tools over the app's windows (list, resume, fork, deactivate).
             options.tabTools = MakeEngineTabTools();
+            // SESSIONS.md §9.13: the process's ONE session index, shared with the Telegram Search topic's conversation
+            // and kept for the run (never rebuilt after a pause).
+            options.catalogKeeper = SharedSessionCatalogKeeper();
             options.openSessions = [] {
                 std::vector<std::pair<std::wstring, std::wstring>> open;
                 const auto registry = SharedEngine().registry;

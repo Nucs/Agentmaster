@@ -1,0 +1,19 @@
+{
+ "queries": {
+  "q1": {
+   "text": "find proxmox related sessions"
+  },
+  "q2": {
+   "text": "find the session where I said the home icon used to turn into a return icon"
+  },
+  "q3": {
+   "text": "which sessions investigated a heap corruption crash (0xC0000374) of Agentmaster?"
+  },
+  "q4": {
+   "text": "which sessions edited TabDragMath.h?"
+  },
+  "q5": {
+   "text": "what did I work on in TraderLab-options between September 26 and September 30?"
+  }
+ }
+}

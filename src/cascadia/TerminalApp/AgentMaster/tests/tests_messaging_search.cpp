@@ -168,8 +168,40 @@ void TestMessagingSearch()
         CHECK(answer == L"Two sessions are about &lt;releasing&gt; Agentmaster.\n\n"
                         L"<b>1</b> \U0001F4E6 <b>Release v0.7.9</b>\nAgentmaster \x00B7 11 Oct \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n\n"
                         L"<b>2</b> \U0001F4A4 <b>b2b2b2b2</b>\n1 prompt\n\n"
-                        L"<i>(3 more not listed: ask to narrow it down.)</i>",
-              "answer: the verdict escaped, a card per session with its one quote, the short id for a session with no title, and the count not listed");
+                        L"<i>(3 more below, one line each.)</i>",
+              "answer: the verdict escaped, a card per session with its one quote, the short id for a session with no title, and how many follow as lines");
+        // The rest of an answer (2026-10-18, "searches must never miss"): every shown session past the cards, one line each —
+        // number, glyph, color square, title; folder · day — packed into messages of at most kSearchMoreLinesPackChars.
+        {
+            SearchCard line11 = release;
+            line11.number = 11;
+            line11.colorSquare = L"\U0001F7E6";
+            line11.title = L"a <b>bold</b> & title";
+            SearchCard line12 = bare;
+            line12.number = 12;
+            const std::vector<std::wstring> rest = BuildSearchMoreLinesHtml({ line11, line12 }, now);
+            CHECK(rest.size() == 1 && rest[0] == L"<b>11</b> \U0001F4E6 \U0001F7E6 a &lt;b&gt;bold&lt;/b&gt; &amp; title \x00B7 Agentmaster \x00B7 11 Oct\n<b>12</b> \U0001F4A4 b2b2b2b2",
+                  "answer's rest: one escaped line per session, the square and the folder and day when known, the short id for no title");
+            std::vector<SearchCard> many;
+            for (size_t i = 0; i < 120; ++i)
+            {
+                SearchCard c = release;
+                c.number = 11 + i;
+                c.title = L"Session " + std::to_wstring(i) + L" about the proxmox homelab and its backups";
+                many.push_back(c);
+            }
+            const std::vector<std::wstring> packed = BuildSearchMoreLinesHtml(many, now);
+            size_t lines = 0;
+            bool fits = packed.size() > 1;
+            for (const auto& m : packed)
+            {
+                fits = fits && m.size() <= kSearchMoreLinesPackChars;
+                lines += static_cast<size_t>(std::count(m.begin(), m.end(), L'\n')) + 1;
+            }
+            CHECK(fits && lines == 120 && packed.front().rfind(L"<b>11</b> ", 0) == 0 && packed.back().find(L"<b>130</b> ") != std::wstring::npos,
+                  "answer's rest: 120 sessions in several messages, each under the pack size, every one listed, in order");
+            CHECK(BuildSearchMoreLinesHtml({}, now).empty(), "answer's rest: nothing past the cards, no message");
+        }
         CHECK(BuildSearchAnswerHtml(L"", {}, 0, now) == L"Nothing found." && BuildSearchAnswerHtml(L"No session is about that.", {}, 0, now) == L"No session is about that.", "answer: nothing at all says so; a verdict alone is the answer");
         SearchCard escaped = release;
         escaped.title = L"a <b>bold</b> & title";
