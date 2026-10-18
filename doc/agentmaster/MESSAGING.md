@@ -494,7 +494,9 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
   expire (M5).
 - **Fleet commands in 🔎 Search:** `/idle` (the idle tabs, each with [Wake]), `/board` (counts per
   state), `/newsession <folder> [model] [-- first prompt]` (a new tab + topic), `/pauseall`,
-  `/resumeall`, `/status`, `/clear`, `/help`.
+  `/resumeall`, `/status`, `/clear`, `/help`. As built (§21.19), from ANY topic: `/search <words>` sends a search
+  here (the request and its answer land in this topic), and `/search-tab` (the "/" menu lists it as `/search_tab`)
+  puts this topic first in the thread list.
 - **App notes** land here: started, the previous run ended unexpectedly, updated, closed (§4.3). As built: the
   START NOTE of every launch, with sound (the version, how the last run ended, how long the bot was gone —
   §21.18), and the recreation and history-replay notes (§21.8, §21.9).
@@ -734,7 +736,8 @@ queued prompt now), `/unqueue <n>`, `/runner auto|paused`, `/takedraft` (queue t
 PC — the overlay's mail button), `/screen` (the visible terminal text, redacted), `/show`, `/level`
 (§6.3), `/interrupt` (stops a running turn, with a confirmation — D29: the link's `abort` →
 `$.turn.abort` in a linked session, one Esc through the hosting window otherwise), `/help`. Telegram's "/"
-menu (`setMyCommands`, one list for the whole chat) lists these.
+menu (`setMyCommands`, one list for the whole chat) lists these. As built (§21.19), in every topic: `/search
+<words>` (a search sent to 🔎 Search) and `/search-tab` / `/search_tab` (Search goes first in the thread list).
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -2855,7 +2858,7 @@ updated 5 minutes ago
   anything better with the URL chip than with the directory's (it should not, §21.16.3). Not in production (needs the user's
   word).
 
-### 21.18 The start note at every launch, and the card's default runner line (2026-10-18; NOT BUILT yet)
+### 21.18 The start note at every launch, and the card's default runner line (2026-10-18; LIVE on dev 0.0.1.29 since 02:27)
 
 > The user's two requests (2026-10-18, session 0e4c554e): "When agentmaster launches, it should send a message on
 > telegram to Search topic mentioning that. This will help us notice restarts or regain accessability", and
@@ -2954,6 +2957,85 @@ kinds, at the first start ever, and with an escaped version.
 3. A hot swap: the note says "did not close normally" and "(was <the old version>)".
 4. A card of a session in the default (Auto, nothing queued) shows no runner line; Paused, a queued prompt or the
    global pause shows it.
+
+**Live on dev 0.0.1.29** (built by another session from ac4167e63, which holds this work; swapped in at 2026-10-18
+02:27): dev hooks.log `02:27:36.771 [msg] start note: the app's launch, version dev 0.0.1.29, the previous run did
+not close (last seen alive 02:26), 48 topic(s) kept` → `… queued for the Search topic (thread 25027, with sound)` →
+`02:27:38.304 [msg] start note posted in the Search topic (message 931)`. Check 1 passed in the log; "did not close"
+is right for a hot swap, and no "(was …)" yet because the previous run's marker came from a build before §21.18 (a bare
+number). Still owed: the note as the phone shows it, checks 2–4, and the next swap's "(was dev 0.0.1.29)". Not in
+production.
+
+### 21.19 `/search-tab` and `/search`: the 🔎 Search topic from any topic (2026-10-18; NOT BUILT yet)
+
+> The user's two requests (2026-10-18, session 0e4c554e): "Add /search-tab command which jumps to the search tab", and
+> while it was being written, "also add /search which sends a search command to search tab".
+
+**What a bot can do.** Telegram gives a bot no way to switch the app's open view, and no link opens a topic of a bot
+chat on Android (§21.16.3). So "jump" is done the directory dot's way (§21.16.7): the Search topic is made the chat's
+NEWEST message. Telegram lists a bot chat's topics by their last message, so Search is then FIRST in the thread list on
+every app (one tap opens it), and Android's "All" view puts "Continue last thread ›" under it. A search sent from
+another topic does the same by itself: its request and answer are the newest messages.
+
+**`/search-tab`** (`IsSearchTabCommand`, `kSearchTabCommands`; also `/search_tab` and a bare `/search`), typed in any
+thread — the main view, a session's topic, a thread no session owns yet, Search itself:
+1. The command message is DELETED where it was typed (`_deleteCommandMessage`; a bot may delete the user's messages
+   in its private chat). It is a move, not content: left in a session's topic it would be that topic's newest message,
+   and the sticky card would be re-posted below it a few seconds later (§21.5), putting THAT topic back on top.
+2. One silent line in Search: "🔎 Search — first in the thread list now (/search_tab). Ask for a session in plain words
+   here, or with /search <words> from any topic; /help lists the rest."
+
+**`/search <words>`** (`SearchCommandWords`, `kSearchCommand`), typed in any thread but Search (`_relaySearchRequest`):
+1. The command message is deleted where it was typed, for the same reason.
+2. The words are posted in Search as the user's line (`BuildRelayedSearchLineHtml`): "👤 You · 02:41 · 🔎 search, from a
+   topic", then the session's topic it came from as a title that links back to it (§21.17; none from the main view),
+   then the words — so Search reads like a request typed there.
+3. They are asked of the Search agent IN Search (`_askSearch`): "Searching…" and then the answer, with sound (D5), as
+   for words typed there.
+
+In Search itself `/search <words>` is simply a request of the words (`ClassifySearchTopicMessage`); a bare `/search` is
+the jump. Not done, with the reason answered where the command was typed and nothing deleted: with no Search topic yet
+(the first connect is still making it, or it is being made again, §21.18), and for a `/search` older than the backlog
+limit (D2, the Search topic's own rule: a search sent while Agentmaster was closed is answered, never run unasked).
+An EDIT that turns a message into either command does nothing (an edit makes no message the newest). `/cc /search …`
+still forces the command through to Claude Code.
+
+**Why three spellings, and the menu.** A command in Telegram's "/" menu may hold only a–z, 0–9 and "_" (`setMyCommands`
+refuses the whole list otherwise), so the menu lists `/search_tab` and `/search`; typed, `/search-tab` works the same. A
+client makes a command LINK of `/search-tab` only up to the hyphen, so a tap on a printed `/search-tab` sends `/search`
+— which is why a bare `/search` is the jump too, and why the bot's own texts print `/search_tab` (and `/search-tab` only
+inside `<code>`, which is never a link). The relayed request's line writes "search", never "/search", for the same reason.
+
+**Where they are read.** `_handleMessage` reads both FIRST, for a message in any thread, before a session topic's own
+handling — which would note the command as the topic's newest post (`_noteTopicPosted`) and re-post its card. Both
+names are also in `kAgentmasterCommands` (a session's topic never queues them for Claude Code) and
+`kSearchTopicFleetCommands`; `_runSessionCommand` and `_runSearchCommand` carry the same branches as belts.
+
+**Logs:** `[msg] /search-tab (thread N): the Search topic (thread M) is put first in the thread list`, `[msg] /search
+(thread N): K chars sent to the Search topic (thread M)`, `… no Search topic yet`, `[msg] /search…: the command message N
+could not be deleted (…)`; `[nav] remote telegram search-tab from thread N`, `[nav] remote telegram search-relay from
+thread N chars=K` (`-> backlog`, `-> no search topic yet`), then the Search topic's own `[nav] remote telegram search
+turn=…`.
+
+**The code:** MessagingModels.h (`kSearchTabCommands`, `IsSearchTabCommand`, `kSearchCommand`, `SearchCommandWords`,
+`BuildRelayedSearchLineHtml`, the two command tables, `ClassifySearchTopicMessage`'s `/search <words>` request);
+Messaging.Inbound.cpp (`_handleMessage`, `_jumpToSearchTopic`, `_relaySearchRequest`, `_deleteCommandMessage`, the belts,
+both help texts, the main view's answer); Messaging.cpp (the "/" menu); Messaging.h (the declarations).
+
+**Tests** (`TestMessagingSearch`, `tests_messaging_search.cpp`): both spellings of the jump in any case, with a bot
+suffix and words after it, and what is NOT the jump (`/search`, a third spelling, plain words, `/cc`); a session's topic
+reading all three as Agentmaster's; `/search`'s words (every line, trimmed, "" bare) and what is not `/search` (the
+jump, a longer word, plain words, `/cc`); every name in both command tables; the Search topic's own reading (the jump
+and a bare `/search` are fleet commands, `/search <words>` a request of the words); the relayed line (You, the clock,
+where it was asked, the topic it came from, the words escaped, no "/search" in it; the main-view form).
+
+**Check after the build:**
+1. In a session's topic, `/search-tab`: the message disappears, a line appears in Search, and Search is first in the
+   thread list (Android: also "Continue last thread ›" in the "All" view); the topic's card is not re-posted.
+2. `/search_tab` from the "/" menu, and `/search-tab` typed in the main view and in Search: the same.
+3. In a session's topic, `/search the tab drag crash`: the message disappears; Search shows "👤 You · … · 🔎 search, from
+   a topic", the topic's title (a link back), the words, "Searching…" and the answer with sound.
+4. In Search, `/search the tab drag crash`: the message stays, "Searching…", the answer — like plain words.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

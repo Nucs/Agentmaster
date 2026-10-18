@@ -202,4 +202,53 @@ void TestMessagingSearch()
         CHECK(TgRichHtmlFromClassic(BuildSearchPickMenuHtml(colored, now)).rfind(L"<p><b>1 \x00B7 </b><tg-button type=\"copy_text\" style=\"primary\" text=\"Release v0.7.9\">\U0001F7E6 Release v0.7.9</tg-button><br>", 0) == 0,
               "pick menu, rich: the number in bold, then the chip");
     }
+
+    // ---- §21.19: /search-tab jumps to the Search topic and /search sends a search there, from any topic ----
+    {
+        // /search-tab: the user's spelling and the "/" menu's (search_tab), in any case, with a bot suffix, with words after it.
+        CHECK(IsSearchTabCommand(L"/search-tab") && IsSearchTabCommand(L"/search_tab"), "/search-tab and /search_tab are the jump");
+        CHECK(IsSearchTabCommand(L"  /SEARCH-TAB@ClaudeSessionsGateBot  ") && IsSearchTabCommand(L"/search_tab now please"), "the jump in any case, with a bot suffix, with words after it");
+        CHECK(!IsSearchTabCommand(L"/search") && !IsSearchTabCommand(L"/search the crash") && !IsSearchTabCommand(L"/searchtab") && !IsSearchTabCommand(L"search-tab") &&
+                  !IsSearchTabCommand(L""),
+              "not the jump: /search (its own command), a third spelling, plain words, nothing");
+        CHECK(!IsSearchTabCommand(L"/cc /search-tab"), "/cc forces /search-tab through to Claude Code (the user's choice)");
+        // A session's topic reads all three as Agentmaster's own, never as Claude Code commands to queue.
+        CHECK(ParseRemoteCommand(L"/search-tab").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/search_tab").kind == RemoteKind::AgentmasterCommand &&
+                  ParseRemoteCommand(L"/search the crash").kind == RemoteKind::AgentmasterCommand,
+              "a session's topic reads /search-tab, /search_tab and /search as Agentmaster's commands");
+
+        // /search <words>: its words (the rest of the line and every further line, trimmed); "" for a bare /search.
+        CHECK(SearchCommandWords(L"/search the session where I fixed the tab drag crash") == std::optional<std::wstring>{ L"the session where I fixed the tab drag crash" },
+              "/search: its words");
+        CHECK(SearchCommandWords(L"/Search@ClaudeSessionsGateBot   drag crash  \n  in the strip ") == std::optional<std::wstring>{ L"drag crash  \n  in the strip" },
+              "/search in any case, with a bot suffix: every line, trimmed");
+        CHECK(SearchCommandWords(L"/search") == std::optional<std::wstring>{ L"" }, "a bare /search has no words (it is the jump)");
+        CHECK(!SearchCommandWords(L"/search-tab") && !SearchCommandWords(L"/searching x") && !SearchCommandWords(L"search x") && !SearchCommandWords(L"/cc /search x"),
+              "not /search: the jump, a longer word, plain words, a forced /cc");
+
+        // The tables: every name of both commands is Agentmaster's in a session's topic and a fleet command in the Search topic.
+        std::vector<std::wstring_view> names{ std::begin(kSearchTabCommands), std::end(kSearchTabCommands) };
+        names.push_back(kSearchCommand);
+        for (const std::wstring_view name : names)
+        {
+            CHECK(::Agentmaster::Msg::detail::InList(name, std::begin(kAgentmasterCommands), std::end(kAgentmasterCommands)), "each name is Agentmaster's in a session's topic (never queued for Claude Code)");
+            CHECK(::Agentmaster::Msg::detail::InList(name, std::begin(kSearchTopicFleetCommands), std::end(kSearchTopicFleetCommands)), "each name is a fleet command in the Search topic");
+        }
+
+        // In the Search topic: the jump (and a bare /search) is a fleet command; "/search <words>" is a request of the words alone.
+        CHECK(ClassifySearchTopicMessage(L"/search-tab").verb == SearchTopicVerb::FleetCommand && ClassifySearchTopicMessage(L"/search_tab").verb == SearchTopicVerb::FleetCommand &&
+                  ClassifySearchTopicMessage(L"/search").verb == SearchTopicVerb::FleetCommand,
+              "in the Search topic the jump and a bare /search are fleet commands");
+        const auto here = ClassifySearchTopicMessage(L"/search the tab drag crash");
+        CHECK(here.verb == SearchTopicVerb::Request && here.cmd.text == L"the tab drag crash", "/search <words> in the Search topic is a request: the agent is asked the words, not the command");
+
+        // The relayed request as the bot posts it in the Search topic: You, the clock, where it was asked; the topic it came
+        // from (a title token); the words, escaped — and never a "/search" a tap would send.
+        const std::wstring row = UserLineTitleRow(L"Agentmaster/feature", L"sid-1", L"\U0001F7E6", 26785);
+        const std::wstring line = TgRenderTitleTokensClassic(BuildRelayedSearchLineHtml(1792273200000, L"the <drag> crash", row, false));
+        CHECK(line.rfind(L"<b>\U0001F464 You</b> \x00B7 ", 0) == 0 && line.find(L" \x00B7 \U0001F50E search, from a topic\n") != std::wstring::npos, "relayed: You, the clock, where it was asked");
+        CHECK(line.find(L"Agentmaster/feature") != std::wstring::npos && line.find(L"\nthe &lt;drag&gt; crash") != std::wstring::npos, "relayed: the topic it came from, then the words, escaped");
+        CHECK(line.find(L"/search") == std::wstring::npos, "relayed: no /search a tap would send again");
+        CHECK(BuildRelayedSearchLineHtml(0, L"x", L"", true) == L"<b>\U0001F464 You</b> \x00B7 \U0001F50E search, from the main view\nx", "relayed from the main view: no clock when unknown, no row");
+    }
 }

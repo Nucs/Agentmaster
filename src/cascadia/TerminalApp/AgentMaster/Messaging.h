@@ -904,6 +904,53 @@ namespace Agentmaster::Msg
         /// logs it; the tap then gets no toast and nothing moves).</exception>
         std::wstring _bringTopicToFront(int64_t threadId);
         /// <summary>
+        /// /search-tab (§21.19; also /search_tab, the "/" menu's spelling — kSearchTabCommands — and a bare /search, which has
+        /// nothing to ask): takes the user to the 🔎 Search topic from
+        /// any thread. Telegram gives a bot no way to switch the app's open view, so it does what the directory's dot does for
+        /// a tab (§21.16.7): it makes the Search topic the chat's NEWEST message — Telegram lists a bot chat's topics by their
+        /// last message, so Search is then FIRST in the thread list on every app (one tap opens it), and Telegram Android's
+        /// "All" view puts "Continue last thread ›" under it. Two calls, in this order:
+        ///   1. the command message itself is DELETED (a bot may delete the user's messages in its private chat): it is a
+        ///      move, not content, and left where it was typed it would be that thread's newest message — in a session's
+        ///      topic its sticky card would then be re-posted below it a few seconds later, which puts THAT topic back on
+        ///      top. A delete Telegram refuses (too old, already gone) is logged and changes nothing else;
+        ///   2. one SILENT line is posted in the Search topic — the user is at the phone and asked for it.
+        /// With no Search topic yet (the first connect is still making it, or it is being made again after the user
+        /// deleted it, §21.18), it answers in the thread the command was typed in and deletes nothing. Poll thread.
+        /// </summary>
+        /// <param name="fromThreadId">The thread the command was typed in (0 = the chat's main view, "All").</param>
+        /// <param name="messageId">The command message's id (0 = unknown: nothing to delete).</param>
+        /// <exception cref="std::bad_alloc">If memory runs out (it passes through _handleMessage to _handleUpdate, whose guard
+        /// logs it; the command then stays where it was typed and nothing moves).</exception>
+        void _jumpToSearchTopic(int64_t fromThreadId, int64_t messageId);
+        /// <summary>
+        /// /search &lt;words&gt; typed in any thread but the Search topic (§21.19, kSearchCommand): SENDS the search there. The
+        /// command message is deleted where it was typed (_deleteCommandMessage, for the reason _jumpToSearchTopic gives), the
+        /// words are posted in the Search topic as the user's line, naming the session's topic they came from
+        /// (BuildRelayedSearchLineHtml), and asked of the Search agent there (_askSearch: "Searching…", then the answer with
+        /// sound, D5) — so the Search topic is also the chat's newest thread, first in the list. Not done, with the reason
+        /// answered where the command was typed and nothing deleted: with no Search topic yet, and for a message older than
+        /// the backlog limit (D2: a search sent while Agentmaster was closed is answered, never run unasked — the Search
+        /// topic's own rule for a request). Poll thread.
+        /// </summary>
+        /// <param name="fromThreadId">The thread the command was typed in (0 = the chat's main view, "All").</param>
+        /// <param name="msg">The command message (its id, its date).</param>
+        /// <param name="words">The search words (SearchCommandWords; not empty).</param>
+        /// <exception cref="std::bad_alloc">If memory runs out (it passes through _handleMessage to _handleUpdate, whose guard
+        /// logs it; the search is then not sent, and the command stays where it was typed).</exception>
+        void _relaySearchRequest(int64_t fromThreadId, const json::Value& msg, const std::wstring& words);
+        /// <summary>
+        /// §21.19: queues the delete of a command message the user typed (a bot may delete the user's messages in its private
+        /// chat): /search-tab and /search are moves to the Search topic, not content, and left where they were typed they would
+        /// be that thread's newest message — in a session's topic its sticky card would then be re-posted below them, putting
+        /// that topic back on top of the thread list. Final, so it never waits behind the fleet's other traffic. A refusal (a
+        /// message too old, already gone) is only logged. Any thread.
+        /// </summary>
+        /// <param name="messageId">The message to delete (0 or less = nothing to do).</param>
+        /// <param name="what">The command's name for the log ("/search-tab", "/search").</param>
+        /// <exception cref="std::bad_alloc">If the outbox item cannot be allocated.</exception>
+        void _deleteCommandMessage(int64_t messageId, const wchar_t* what);
+        /// <summary>
         /// A `business_connection` update: the user connected, edited or removed a bot under Telegram → Settings → Chat
         /// Automation (H3: the connecting user must be the paired owner). `viaSecretary`: it came to the SECRETARY bot
         /// (§21.11), whose client then sends as the user; else to the topics bot. A disconnect of the bot that does NOT

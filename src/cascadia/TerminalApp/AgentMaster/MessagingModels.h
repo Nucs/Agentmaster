@@ -3020,7 +3020,9 @@ namespace Agentmaster::Msg
         L"moveidle", L"wake", L"favorite", L"unfavorite", L"tags", L"tag", L"untag", L"sessionid", L"path", L"gitbranch",
         L"draft", L"summary", L"transcript", L"screen", L"restartsession", L"deactivate", L"activate", L"forksession",
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
-        L"reactivate", L"recreate", L"verbose"
+        L"reactivate", L"recreate", L"verbose",
+        L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
+        L"search" // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
     };
 
     // Claude Code commands that leave NO record in the session (§7.2, provisional until P0-19): run at
@@ -3142,6 +3144,88 @@ namespace Agentmaster::Msg
         return r;
     }
 
+    /// <summary>
+    /// §21.19, the words of the command that JUMPS to the 🔎 Search topic from any topic (the user's request of 2026-10-18:
+    /// "Add /search-tab command which jumps to the search tab"). Two spellings of one command:
+    ///   "search-tab" — the user's name for it, typed as it is;
+    ///   "search_tab" — the one Telegram's "/" menu can list (setMyCommands takes only a-z, 0-9 and "_"), and the one the
+    ///                  help texts print: a client makes a command LINK of "/search-tab" only up to the hyphen, so a tap on
+    ///                  a printed "/search-tab" would send "/search".
+    /// "/search" itself is the second command (kSearchCommand, the user's follow-up of the same night: "also add /search
+    /// which sends a search command to search tab"): "/search <words>" asks the Search topic's agent from any topic, and a
+    /// BARE "/search" — that link's tap, too — is this jump. It is not in this list, because its words are a request.
+    /// Every name is also in kAgentmasterCommands (a session's topic never sends it to Claude Code) and in
+    /// kSearchTopicFleetCommands (the Search topic runs it); the m5 suite checks both lists against this one.
+    /// </summary>
+    inline constexpr std::wstring_view kSearchTabCommands[] = { L"search-tab", L"search_tab" };
+
+    /// <summary>
+    /// Whether a message is the /search-tab command (kSearchTabCommands), read the way every command is read
+    /// (ParseRemoteCommand: any case, a "@bot" suffix dropped, words after the command ignored). `/cc /search-tab` is NOT:
+    /// "/cc" forces its command through to Claude Code, and that choice is the user's. The service checks it FIRST for a
+    /// message in any thread — before a session topic's own handling, which would note the message as the topic's newest
+    /// post and re-post its sticky card a few seconds later, putting THAT topic back on top of the list the jump just
+    /// reordered (MessagingService::_jumpToSearchTopic).
+    /// </summary>
+    /// <param name="text">The message text.</param>
+    /// <returns>True for /search-tab and /search_tab.</returns>
+    /// <exception cref="std::bad_alloc">If ParseRemoteCommand cannot allocate its reading.</exception>
+    inline bool IsSearchTabCommand(std::wstring_view text)
+    {
+        const RemoteCommand cmd = ParseRemoteCommand(text);
+        return cmd.kind == RemoteKind::AgentmasterCommand && detail::InList(cmd.name, std::begin(kSearchTabCommands), std::end(kSearchTabCommands));
+    }
+
+    /// <summary>
+    /// §21.19, the command that SENDS a search to the 🔎 Search topic from any topic (the user's request of 2026-10-18: "also
+    /// add /search which sends a search command to search tab"): "/search the session where I fixed the tab drag crash". Its
+    /// words are posted in the Search topic as the user's line and asked of the Search agent there, and the answer comes in
+    /// the Search topic, as for words typed there (MessagingService::_relaySearchRequest). A bare "/search" has nothing to
+    /// ask, and is the /search-tab jump instead. In the Search topic itself "/search <words>" is simply a request
+    /// (ClassifySearchTopicMessage).
+    /// </summary>
+    inline constexpr std::wstring_view kSearchCommand = L"search";
+
+    /// <summary>
+    /// Reads a /search message (kSearchCommand) the way every command is read (ParseRemoteCommand: any case, a "@bot" suffix
+    /// dropped): the words after the command — the rest of its line and every further line, trimmed — or "" for a bare
+    /// "/search". `/cc /search x` is not one: "/cc" forces its command through to Claude Code, the user's choice. A longer word
+    /// that starts with it ("/searching", "/search-tab") is not one either: the command word is read up to whitespace.
+    /// </summary>
+    /// <param name="text">The message text.</param>
+    /// <returns>The words (possibly ""), or nullopt when the message is not /search.</returns>
+    /// <exception cref="std::bad_alloc">If ParseRemoteCommand cannot allocate its reading.</exception>
+    inline std::optional<std::wstring> SearchCommandWords(std::wstring_view text)
+    {
+        RemoteCommand cmd = ParseRemoteCommand(text);
+        if (cmd.kind != RemoteKind::AgentmasterCommand || cmd.name != kSearchCommand)
+        {
+            return std::nullopt;
+        }
+        return std::move(cmd.args);
+    }
+
+    /// <summary>
+    /// §21.19: a /search typed in ANOTHER thread, as the bot posts it in the 🔎 Search topic right before the agent's
+    /// "Searching…" and answer, so the Search topic reads like a request typed there: the "👤 You" header (§21.12) with the
+    /// clock and where it was asked, a second row naming the session's topic it came from — a title token that links back to
+    /// that topic (§21.17), "" for the chat's main view or a thread no session owns — then the words (UserLineBody: plain when
+    /// short, an expandable quote past it, cut at kUserLineMaxChars).
+    /// "&lt;b&gt;👤 You&lt;/b&gt; · 14:02 · 🔎 search, from a topic\n🟦 Agentmaster\nthe tab drag crash". The header writes
+    /// "search", never "/search": a command in a bot's message is a tappable link, and a tap would send a bare /search.
+    /// </summary>
+    /// <param name="tsMs">The command message's time (unix ms; 0 = no clock).</param>
+    /// <param name="words">The search words (SearchCommandWords).</param>
+    /// <param name="fromRow">The title token of the session's topic it came from (UserLineTitleRow); "" = none.</param>
+    /// <param name="fromMainView">It was typed in the chat's main view ("All"), not in a topic.</param>
+    /// <returns>Telegram HTML, with the row as a title token (the send layer renders it).</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    inline std::wstring BuildRelayedSearchLineHtml(int64_t tsMs, std::wstring_view words, std::wstring_view fromRow, bool fromMainView)
+    {
+        const std::wstring_view what = fromMainView ? std::wstring_view{ L"\U0001F50E search, from the main view" } : std::wstring_view{ L"\U0001F50E search, from a topic" };
+        return detail::UserLineHead(tsMs, what, fromRow) + L"\n" + detail::UserLineBody(words);
+    }
+
     // ===== the Search topic (§5.4; the user's rules of 2026-10-16 night, §21.7) ==============
 
     // The Search topic's conversation is NOT a session (the user's rule, §21.7): it has no transcript, so it is never a
@@ -3162,7 +3246,9 @@ namespace Agentmaster::Msg
     // a session's topic still forwards /idle, /board, /pauseall and /resumeall here (they work in any topic).
     inline constexpr std::wstring_view kSearchTopicFleetCommands[] = {
         L"start", L"help", L"status", L"idle", L"board", L"newsession", L"pauseall", L"resumeall",
-        L"recreate" // §21.8: make the session topics again in MOST RECENT order (asks first)
+        L"recreate", // §21.8: make the session topics again in MOST RECENT order (asks first)
+        L"search-tab", L"search_tab", // §21.19: in the Search topic itself it only puts the topic first again
+        L"search" // §21.19: a bare /search is that jump too; "/search <words>" here is a REQUEST (ClassifySearchTopicMessage)
     };
 
     // A message of the Search topic, classified.
@@ -3214,6 +3300,15 @@ namespace Agentmaster::Msg
             // a search request or a refusal that names the wrong command.
             m.verb = SearchTopicVerb::SessionCommand;
             m.cmd.name = L"cc";
+            return m;
+        }
+        // §21.19: "/search <words>" is the command that sends a search to this topic from any other one; typed HERE, its words
+        // are a request like plain words (what the agent is asked is the words, not the command). A bare "/search" stays a
+        // fleet command: the jump that puts this topic first (MessagingService::_runSearchCommand).
+        if (m.cmd.kind == RemoteKind::AgentmasterCommand && m.cmd.name == kSearchCommand && !m.cmd.args.empty())
+        {
+            m.verb = SearchTopicVerb::Request;
+            m.cmd.text = m.cmd.args;
             return m;
         }
         switch (m.cmd.kind)
