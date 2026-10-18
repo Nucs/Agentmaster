@@ -28,7 +28,16 @@
 //     place, the page's query never matching the branch) against MatchesQueryText / SearchIndexFast; each regex example
 //     of "Patterns for grep" against GrepRequiredLiteral (the fixed piece the prompt promises is the one the grep
 //     narrows by, and the bad examples really have none); the per-mode costs, the workflows that use the patterns,
-//     and the tabs advice; and the page tools' schemas that repeat it.
+//     and the tabs advice; and the page tools' schemas that repeat it;
+//   * MESSAGING.md §21.23, the REMOTE LAUNCH's answer (a sibling of the answered fan-out above, on the same local Engine
+//     seam): RemoteLaunch.h's outcome rules (a default answer is a failure; which results count as opened; one stable log
+//     word per result; the phone's reason for each refusal, the PC's own words trimmed and ended with a period, the preset
+//     rule's tail) and RemoteLaunchSubject (a one-line title, the short id, a folder's last name); and the engine's ANSWERED
+//     launch routing (RequestLaunchInWindowIn): no window -> false and no answer; an inline answer; a late answer from
+//     another thread, given twice, delivered once; a window that drops the request unanswered -> WindowClosed from the
+//     engine; the last-activated window first, a refusing or throwing sink skipped for the next; every sink refusing ->
+//     false, and no answer even when a refusing sink's copy of the reply dies later; a throwing requester contained; an
+//     empty reply.
 
 #include "m5_tests.h"
 
@@ -39,10 +48,14 @@
 #include "../WindowTabTools.h"
 
 #include <algorithm>
+#include <atomic> // MESSAGING.md §21.23: the remote launch tests count answers delivered on other threads
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace
@@ -643,6 +656,275 @@ namespace
                   "description: search covers every session by default; grep's in:edits and its `also` list");
         }
     }
+
+    /// <summary>
+    /// What the remote launch tests saw: every answer a reply delivered, in order, and how many there were. Shared by the reply
+    /// closures through a shared_ptr, because an answer may come from a thread that outlives the test's frame.
+    /// </summary>
+    struct LaunchAnswersSeen
+    {
+        std::mutex mutex;
+        std::vector<RemoteLaunchOutcome> answers;
+        std::atomic<int> count{ 0 };
+    };
+
+    /// <summary>A reply that records every answer it is given into `seen` (it never throws).</summary>
+    RemoteLaunchReply RecordingReply(const std::shared_ptr<LaunchAnswersSeen>& seen)
+    {
+        return [seen](const RemoteLaunchOutcome& outcome) {
+            std::lock_guard<std::mutex> lk(seen->mutex);
+            seen->answers.push_back(outcome);
+            seen->count.fetch_add(1);
+        };
+    }
+
+    /// <summary>Waits up to `timeoutMs` for `seen` to hold at least `atLeast` answers; true when it does.</summary>
+    bool WaitForAnswers(const std::shared_ptr<LaunchAnswersSeen>& seen, int atLeast, int timeoutMs)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{ timeoutMs };
+        while (seen->count.load() < atLeast && std::chrono::steady_clock::now() < deadline)
+        {
+            ::Sleep(5);
+        }
+        return seen->count.load() >= atLeast;
+    }
+
+    /// <summary>The answer `seen` recorded at `index`, copied under its lock (a default answer when there is none).</summary>
+    RemoteLaunchOutcome AnswerAt(const std::shared_ptr<LaunchAnswersSeen>& seen, size_t index)
+    {
+        std::lock_guard<std::mutex> lk(seen->mutex);
+        return index < seen->answers.size() ? seen->answers[index] : RemoteLaunchOutcome{};
+    }
+
+    /// <summary>
+    /// MESSAGING.md §21.23: the remote launch's ANSWER — RemoteLaunch.h's outcome rules and subject, and the engine's answered
+    /// launch routing on a local Engine (RequestLaunchInWindowIn), every window a fake sink.
+    /// </summary>
+    void TestRemoteLaunchAnswers()
+    {
+        std::wprintf(L"Remote launch answers (MESSAGING.md 21.23 - the outcome rules, the phone's reasons, the subject, the engine's answered routing):\n");
+        using R = RemoteLaunchResult;
+
+        // ----- the outcome rules (RemoteLaunch.h, pure) -----
+        RemoteLaunchOutcome o;
+        CHECK(o.result == R::Failed && !RemoteLaunchOpened(o), "outcome: a default answer is a failure, never a success");
+        o.result = R::Opened;
+        CHECK(RemoteLaunchOpened(o) && RemoteLaunchRefusalText(o).empty(), "outcome: Opened is a success and needs no reason");
+        o.result = R::AlreadyOpen;
+        CHECK(RemoteLaunchOpened(o) && RemoteLaunchRefusalText(o).empty(), "outcome: AlreadyOpen is a success and needs no reason");
+        {
+            const R all[] = { R::Opened, R::AlreadyOpen, R::WindowClosed, R::ClaudeMissing, R::PresetRefused, R::NoFolder, R::Failed };
+            std::vector<std::wstring> names;
+            bool refusalsClosed = true;
+            for (const R r : all)
+            {
+                names.push_back(RemoteLaunchResultName(r));
+                if (r != R::Opened && r != R::AlreadyOpen)
+                {
+                    RemoteLaunchOutcome x;
+                    x.result = r;
+                    refusalsClosed = refusalsClosed && !RemoteLaunchOpened(x);
+                }
+            }
+            std::vector<std::wstring> sorted = names;
+            std::sort(sorted.begin(), sorted.end());
+            CHECK(std::unique(sorted.begin(), sorted.end()) == sorted.end() && names[0] == L"opened" && names[1] == L"already-open" && names[3] == L"claude-missing" && names[6] == L"failed",
+                  "outcome: one distinct, stable log word per result");
+            CHECK(refusalsClosed, "outcome: every result but Opened and AlreadyOpen means nothing opened");
+        }
+        o = RemoteLaunchOutcome{};
+        o.result = R::ClaudeMissing;
+        std::wstring why = RemoteLaunchRefusalText(o);
+        CHECK(why.find(L"claude.exe") != std::wstring::npos && why.find(L"Settings") != std::wstring::npos && why.back() == L'.',
+              "reason: no claude.exe names the binary and the two fixes, as a whole sentence");
+        o.result = R::PresetRefused;
+        o.detail = L"  The preset \x201CKimi K3\x201D has no API key  \r\n";
+        why = RemoteLaunchRefusalText(o);
+        CHECK(why.rfind(L"The preset \x201CKimi K3\x201D has no API key. Nothing was started", 0) == 0 && why.find(L"never falls back to your Claude login.") != std::wstring::npos,
+              "reason: a refused preset gives the preset's own words (trimmed, ended with a period) and the PC dialog's rule");
+        o.detail.clear();
+        CHECK(RemoteLaunchRefusalText(o).rfind(L"Its launch preset cannot start. Nothing was started", 0) == 0, "reason: a refused preset without words still says what refused");
+        o.result = R::Failed;
+        CHECK(RemoteLaunchRefusalText(o).find(L"hooks.log") != std::wstring::npos, "reason: a failure without words points at the PC's hooks.log");
+        o.detail = L"The PC could not create the terminal tab.";
+        CHECK(RemoteLaunchRefusalText(o) == L"The PC could not create the terminal tab.", "reason: a failure with words is those words, as they are");
+        o.detail = L"Is it there?";
+        CHECK(RemoteLaunchRefusalText(o) == L"Is it there?", "reason: words that end a sentence get no extra period");
+        o.detail = L"half a sentence";
+        CHECK(RemoteLaunchRefusalText(o) == L"half a sentence.", "reason: words without an end get a period");
+        o = RemoteLaunchOutcome{};
+        o.result = R::WindowClosed;
+        CHECK(RemoteLaunchRefusalText(o).find(L"closed") != std::wstring::npos, "reason: a window that closed says so");
+        o.result = R::NoFolder;
+        CHECK(RemoteLaunchRefusalText(o).find(L"folder") != std::wstring::npos, "reason: no folder says so");
+
+        // ----- the subject (RemoteLaunchSubject) -----
+        RemoteLaunchRequest q;
+        q.kind = RemoteLaunchRequest::Kind::Resume;
+        q.sessionId = kS1;
+        q.title = L"BetterClipboard\ron-launch"; // the lone CR of the tab's rename box
+        CHECK(RemoteLaunchSubject(q, true) == L"The resume of \x201C" L"BetterClipboard on-launch\x201D", "subject: a resume, its title on one line (a lone CR is a space)");
+        q.kind = RemoteLaunchRequest::Kind::Fork;
+        q.title = L"\r\na \t\r\n\r\n  b\n";
+        CHECK(RemoteLaunchSubject(q, false) == L"the fork of \x201C" L"a b\x201D", "subject: a fork mid-sentence; a run of breaks with its blanks is one space, a break at an end is nothing");
+        q.title.clear();
+        CHECK(RemoteLaunchSubject(q, true) == L"The fork of \x201C" L"11111111\x201D", "subject: no title -> the session's short id");
+        q.kind = RemoteLaunchRequest::Kind::NewSession;
+        q.dir = L"K:\\source\\BetterClipboard\\";
+        CHECK(RemoteLaunchSubject(q, true) == L"The new session in BetterClipboard", "subject: a new session names its folder's last name (a trailing separator dropped)");
+        q.dir = L"/home/eli/proj";
+        CHECK(RemoteLaunchSubject(q, false) == L"the new session in proj", "subject: forward slashes too");
+        q.dir = L"C:\\";
+        CHECK(RemoteLaunchSubject(q, true) == L"The new session in C:\\", "subject: a drive root keeps its path");
+        q.dir.clear();
+        CHECK(RemoteLaunchSubject(q, true) == L"The new session in its folder", "subject: no folder at all");
+
+        // ----- the engine's answered routing (RequestLaunchInWindowIn on a local Engine) -----
+        Engine e;
+        RemoteLaunchRequest req;
+        req.kind = RemoteLaunchRequest::Kind::NewSession;
+        req.dir = L"K:\\source\\BetterClipboard";
+        req.newSessionId = kS7;
+
+        // No window at all: false, and no answer ever.
+        auto seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(!RequestLaunchInWindowIn(e, req, RecordingReply(seen)) && seen->count.load() == 0, "routing: no window -> false, and no answer");
+
+        // An inline answer (the window answers before the call returns).
+        const auto answerWith = [](R result, const std::wstring& sessionId, const std::wstring& windowId) {
+            return [result, sessionId, windowId](const RemoteLaunchRequest&, RemoteLaunchReply reply) -> bool {
+                RemoteLaunchOutcome out;
+                out.result = result;
+                out.sessionId = sessionId;
+                out.windowId = windowId;
+                reply(out);
+                return true;
+            };
+        };
+        const uint64_t tokInline = RegisterWindowLaunchHandlerIn(e, kWinA, answerWith(R::Opened, kS7, kWinA));
+        CHECK(tokInline != 0 && RegisterWindowLaunchHandlerIn(e, kWinB, {}) == 0, "routing: a sink registers with a token; an empty handler registers nothing");
+        seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(RequestLaunchInWindowIn(e, req, RecordingReply(seen)) && seen->count.load() == 1 && AnswerAt(seen, 0).result == R::Opened && AnswerAt(seen, 0).sessionId == kS7,
+              "routing: an inline answer is delivered once, before the call returns");
+        UnregisterWindowLaunchHandlerIn(e, tokInline);
+        UnregisterWindowLaunchHandlerIn(e, tokInline); // a second detach is a no-op
+
+        // A late answer from another thread, given twice: only the first is delivered.
+        const uint64_t tokLate = RegisterWindowLaunchHandlerIn(e, kWinA, [](const RemoteLaunchRequest&, RemoteLaunchReply reply) -> bool {
+            std::thread([reply] {
+                ::Sleep(30);
+                RemoteLaunchOutcome first;
+                first.result = R::Opened;
+                first.sessionId = kS7;
+                reply(first);
+                RemoteLaunchOutcome second;
+                second.result = R::Failed;
+                reply(second); // ignored: the answer is settled
+            }).detach();
+            return true;
+        });
+        seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(RequestLaunchInWindowIn(e, req, RecordingReply(seen)), "routing: a window that answers later takes the request");
+        CHECK(WaitForAnswers(seen, 1, 3000) && AnswerAt(seen, 0).result == R::Opened, "routing: the late answer arrives from the window's thread");
+        ::Sleep(80);
+        CHECK(seen->count.load() == 1, "routing: a second answer to the same request is ignored");
+        UnregisterWindowLaunchHandlerIn(e, tokLate);
+
+        // A window that drops the request without running it (a closing window's queue): the engine answers WindowClosed when the
+        // last copy of the reply dies.
+        const uint64_t tokDrop = RegisterWindowLaunchHandlerIn(e, kWinA, [](const RemoteLaunchRequest&, RemoteLaunchReply reply) -> bool {
+            auto kept = std::make_shared<RemoteLaunchReply>(std::move(reply)); // the "work item"
+            std::thread([kept]() mutable {
+                ::Sleep(30);
+                kept.reset(); // dropped unrun: the last copy dies here
+            }).detach();
+            return true;
+        });
+        seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(RequestLaunchInWindowIn(e, req, RecordingReply(seen)), "routing: a window that will drop the request still took it");
+        CHECK(WaitForAnswers(seen, 1, 3000) && AnswerAt(seen, 0).result == R::WindowClosed && seen->count.load() == 1,
+              "routing: a request dropped unanswered is answered WindowClosed by the engine, once");
+        UnregisterWindowLaunchHandlerIn(e, tokDrop);
+
+        // The last-activated window first; a sink that refuses, and one that throws, are skipped for the next window.
+        auto asked = std::make_shared<std::vector<std::wstring>>();
+        auto askedMutex = std::make_shared<std::mutex>();
+        const auto noteAsked = [asked, askedMutex](const std::wstring& who) {
+            std::lock_guard<std::mutex> lk(*askedMutex);
+            asked->push_back(who);
+        };
+        const uint64_t tokA = RegisterWindowLaunchHandlerIn(e, kWinA, [noteAsked](const RemoteLaunchRequest&, RemoteLaunchReply reply) -> bool {
+            noteAsked(L"A");
+            RemoteLaunchOutcome out;
+            out.result = R::Opened;
+            out.sessionId = kS7;
+            out.windowId = kWinA;
+            reply(out);
+            return true;
+        });
+        const uint64_t tokThrow = RegisterWindowLaunchHandlerIn(e, L"{THROW}", [noteAsked](const RemoteLaunchRequest&, RemoteLaunchReply) -> bool {
+            noteAsked(L"throw");
+            throw std::runtime_error("dead dispatcher");
+        });
+        const uint64_t tokRefuse = RegisterWindowLaunchHandlerIn(e, kWinB, [noteAsked](const RemoteLaunchRequest&, RemoteLaunchReply reply) -> bool {
+            noteAsked(L"B");
+            // A refusing sink that keeps a copy of the reply and drops it later: the attempt is disarmed, so it never answers.
+            auto kept = std::make_shared<RemoteLaunchReply>(std::move(reply));
+            std::thread([kept]() mutable {
+                ::Sleep(20);
+                kept.reset();
+            }).detach();
+            return false;
+        });
+        {
+            std::lock_guard<std::mutex> lk(e.launchMutex);
+            e.lastActiveWindowId = kWinB; // the refusing window was used last: it is asked first
+        }
+        seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(RequestLaunchInWindowIn(e, req, RecordingReply(seen)), "routing: the request is taken by a window after the last-active one refused");
+        ::Sleep(80); // the refusing sink's copy dies meanwhile: it must not answer
+        {
+            std::lock_guard<std::mutex> lk(*askedMutex);
+            CHECK(asked->size() == 2 && (*asked)[0] == L"B" && (*asked)[1] == L"A", "routing: the last-activated window first, then the others in registration order");
+        }
+        CHECK(seen->count.load() == 1 && AnswerAt(seen, 0).windowId == kWinA, "routing: exactly one answer, from the window that took it; the refusal never answers");
+
+        // Every sink refusing or throwing: false, and no answer even after the refusing sink's copy of the reply died.
+        UnregisterWindowLaunchHandlerIn(e, tokA);
+        {
+            std::lock_guard<std::mutex> lk(*askedMutex);
+            asked->clear();
+        }
+        seen = std::make_shared<LaunchAnswersSeen>();
+        CHECK(!RequestLaunchInWindowIn(e, req, RecordingReply(seen)), "routing: every window refusing or throwing -> false");
+        ::Sleep(80);
+        {
+            std::lock_guard<std::mutex> lk(*askedMutex);
+            CHECK(asked->size() == 2 && (*asked)[0] == L"B" && (*asked)[1] == L"throw", "routing: every window is asked before false");
+        }
+        CHECK(seen->count.load() == 0, "routing: a launch no window took is never answered");
+        UnregisterWindowLaunchHandlerIn(e, tokThrow);
+        UnregisterWindowLaunchHandlerIn(e, tokRefuse);
+
+        // A requester whose reply throws is contained (Rule #18: logged into the scratch profile's hooks.log), and an empty reply
+        // is allowed (the launch runs, its answer goes nowhere).
+        const uint64_t tokOk = RegisterWindowLaunchHandlerIn(e, kWinA, answerWith(R::ClaudeMissing, L"", kWinA));
+        bool threw = false;
+        try
+        {
+            CHECK(RequestLaunchInWindowIn(e, req, [](const RemoteLaunchOutcome&) { throw std::runtime_error("a requester that throws"); }),
+                  "routing: a throwing requester still gets its request taken");
+            CHECK(RequestLaunchInWindowIn(e, req, RemoteLaunchReply{}), "routing: an empty reply is allowed");
+        }
+        catch (...)
+        {
+            threw = true;
+        }
+        CHECK(!threw, "routing: nothing a requester's reply throws reaches the caller");
+        UnregisterWindowLaunchHandlerIn(e, tokOk);
+        CHECK(!RequestLaunchInWindowIn(e, req, RecordingReply(std::make_shared<LaunchAnswersSeen>())), "routing: no window left -> false");
+        ::Sleep(60); // let the detached sink threads finish before the Engine goes away (they hold only their own copies)
+    }
 }
 
 void TestTabTools()
@@ -654,4 +936,5 @@ void TestTabTools()
     TestEngineFanOut();
     TestPrompts();
     TestToolsTeaching();
+    TestRemoteLaunchAnswers(); // MESSAGING.md §21.23: the remote launch's answer (it prints its own header)
 }

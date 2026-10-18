@@ -404,14 +404,20 @@ namespace Agentmaster
 
         // Agentmaster (MESSAGING.md §5.4 / §8.2 — open a session into a tab from a REMOTE surface): per-window
         // LAUNCH sinks. Unlike the session-action fan-out, a launch has no host: the request goes to ONE window —
-        // the most recently ACTIVATED one (lastActiveWindowId, stamped by NoteWindowActivated), else the first
-        // registered — which opens the session as a background tab (no focus change). Same lifetime as the other
-        // sinks. Placed LAST.
+        // the most recently ACTIVATED one (lastActiveWindowId, stamped by NoteWindowActivated), else the others in
+        // registration order — which opens the session as a background tab (no focus change). Every request a sink
+        // TAKES is ANSWERED (MESSAGING.md §21.23): the sink marshals to its UI thread, acts, and calls the reply with a
+        // RemoteLaunchOutcome — the session the tab hosts, or why nothing opened — because the phone that asked must hear
+        // what happened (before §21.23 the sink answered nothing, and a refused launch reached the phone only as a
+        // 3-minute timeout, or never). Same lifetime as the other sinks. Placed LAST.
         struct WindowLaunchSink
         {
             uint64_t token{ 0 };
             std::wstring windowId;
-            std::function<void(const RemoteLaunchRequest& request)> fn;
+            // Called from ANY thread with (request, reply). Returns true when it handed the request to its window — the
+            // reply is then called exactly once, later — and false (or throws) when it could not: the reply is then never
+            // called, and RequestLaunchInWindow asks the next window.
+            std::function<bool(const RemoteLaunchRequest& request, RemoteLaunchReply reply)> fn;
         };
         std::mutex launchMutex; // guards launchSinks, nextLaunchToken and lastActiveWindowId
         std::vector<WindowLaunchSink> launchSinks;
@@ -757,32 +763,73 @@ namespace Agentmaster
     void RequestSessionActionInWindows(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply);
 
     /// <summary>
-    /// Agentmaster (MESSAGING.md §5.4 / §8.2): register THIS window's launch sink — "open this session (resume /
-    /// fork / new) as a background tab in my strip". The registry-token pattern (UnregisterWindowLaunchHandler at
-    /// teardown, Rule #10).
+    /// Agentmaster (MESSAGING.md §5.4 / §8.2 / §21.23): register THIS window's launch sink — "open this session (resume /
+    /// fork / new) as a background tab in my strip, and say what came of it". The registry-token pattern
+    /// (UnregisterWindowLaunchHandler at teardown, Rule #10).
     /// </summary>
     /// <param name="windowId">The registering window's id.</param>
-    /// <param name="handler">Called from ANY thread with the request; it must marshal to its own UI thread and must not throw.</param>
+    /// <param name="handler">Called from ANY thread with (request, reply). It must hand the request to its own UI thread and
+    /// return true — the reply is then due exactly once, with the launch's RemoteLaunchOutcome — or return false (or throw)
+    /// when it cannot (a dispatcher that refuses the work item): the reply is then never called and the engine asks the next
+    /// window. It must not block.</param>
     /// <returns>A non-zero token, or 0 when `handler` is empty.</returns>
     /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
     /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
-    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<void(const RemoteLaunchRequest& request)> handler);
+    uint64_t RegisterWindowLaunchHandler(const std::wstring& windowId, std::function<bool(const RemoteLaunchRequest& request, RemoteLaunchReply reply)> handler);
+
+    /// <summary>
+    /// Agentmaster (MESSAGING.md §21.23): RegisterWindowLaunchHandler on a given Engine — the seam the m5 suite drives with a
+    /// local Engine (no window, no shared engine). The app calls the SharedEngine() form above.
+    /// </summary>
+    /// <param name="e">The engine whose launch sinks to extend.</param>
+    /// <param name="windowId">The registering window's id.</param>
+    /// <param name="handler">As RegisterWindowLaunchHandler's.</param>
+    /// <returns>A non-zero token, or 0 when `handler` is empty.</returns>
+    /// <exception cref="std::bad_alloc">If the sink list cannot grow.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    uint64_t RegisterWindowLaunchHandlerIn(Engine& e, const std::wstring& windowId, std::function<bool(const RemoteLaunchRequest& request, RemoteLaunchReply reply)> handler);
 
     /// <summary>Agentmaster (MESSAGING.md §8.2): detach a launch sink; 0 and a removed token are no-ops.</summary>
     /// <param name="token">The token RegisterWindowLaunchHandler returned.</param>
     /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
     void UnregisterWindowLaunchHandler(uint64_t token);
 
+    /// <summary>Agentmaster (MESSAGING.md §21.23): UnregisterWindowLaunchHandler on a given Engine (the m5 suite's seam).</summary>
+    /// <param name="e">The engine whose launch sinks to shrink.</param>
+    /// <param name="token">The token RegisterWindowLaunchHandlerIn returned; 0 and a removed token are no-ops.</param>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    void UnregisterWindowLaunchHandlerIn(Engine& e, uint64_t token);
+
     /// <summary>
-    /// Agentmaster (MESSAGING.md D27): open a session into ONE window — the most recently activated one
-    /// (NoteWindowActivated), else the first registered. Fire-and-forget: the window opens it as a background tab
-    /// and the registry's live set shows the result.
+    /// Agentmaster (MESSAGING.md D27 / §21.23): open a session into ONE window — the most recently activated one
+    /// (NoteWindowActivated), else the other windows in registration order (a window whose sink cannot take the request is
+    /// skipped) — and hand the launch's ANSWER to `reply`: the session the new tab hosts, or why nothing opened.
     /// </summary>
     /// <param name="request">What to open.</param>
-    /// <returns>True when a window took the request; false when no window is registered (nothing opened).</returns>
-    /// <exception cref="std::bad_alloc">If the sink copy cannot be allocated.</exception>
+    /// <param name="reply">The answer's receiver (may be empty: the launch still runs, its answer is dropped). Called EXACTLY
+    /// ONCE when this returns true: by the window when it acted, or by the engine with WindowClosed when the window dropped
+    /// the request without running it (the last copy of the reply died unanswered). From ANY thread, possibly before this
+    /// returns — see RemoteLaunchReply. Never called when this returns false.</param>
+    /// <returns>True when a window took the request; false when no window could (none registered, or every sink refused or
+    /// threw): nothing opened, and no answer follows.</returns>
+    /// <exception cref="std::bad_alloc">If the sink copy or the answer's state cannot be allocated.</exception>
     /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
-    bool RequestLaunchInWindow(const RemoteLaunchRequest& request);
+    /// <remarks>
+    /// Before §21.23 this was fire-and-forget: it answered true as soon as a window had a sink, the sink answered nothing,
+    /// and a launch the window refused (no claude.exe, a refused preset — each shown as a dialog on the PC, where nobody may
+    /// be) reached the phone only as a 3-minute timeout, or never. A sink that throws is logged (Rule #18) and counts as a
+    /// refusal, so the next window is tried.
+    /// </remarks>
+    bool RequestLaunchInWindow(const RemoteLaunchRequest& request, RemoteLaunchReply reply);
+
+    /// <summary>Agentmaster (MESSAGING.md §21.23): RequestLaunchInWindow on a given Engine (the m5 suite's seam).</summary>
+    /// <param name="e">The engine whose launch sinks to use.</param>
+    /// <param name="request">What to open.</param>
+    /// <param name="reply">As RequestLaunchInWindow's.</param>
+    /// <returns>As RequestLaunchInWindow's.</returns>
+    /// <exception cref="std::bad_alloc">If the sink copy or the answer's state cannot be allocated.</exception>
+    /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+    bool RequestLaunchInWindowIn(Engine& e, const RemoteLaunchRequest& request, RemoteLaunchReply reply);
 
     /// <summary>
     /// Agentmaster (MESSAGING.md D27): record that `windowId` was just activated (brought to the foreground) — the

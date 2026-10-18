@@ -136,8 +136,15 @@ namespace Agentmaster::Msg
         // hosting window with the action's text answer (may be empty); a window that does not host the
         // session calls nothing.
         std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> sessionAction;
-        // Open a session into a tab in the most recently active window (RemoteLaunch.h).
+        // Open a session into a tab in the most recently active window (RemoteLaunch.h): true when a window took the request.
+        // §21.23: a host that sets launchAnswered (below) may leave this empty — the service's constructor then builds it on top
+        // of launchAnswered (answers dropped), for the code that only asks whether launching is available. The service's own
+        // launches go through _askLaunch, which uses launchAnswered whenever it is set, so their answers reach the service.
         std::function<bool(const RemoteLaunchRequest&)> launch;
+        // §21.23: the ANSWERED launch (Engine.h RequestLaunchInWindow): true when a window took the request — the reply then
+        // comes exactly once, from any thread, possibly before this returns, with the session the tab hosts or why nothing
+        // opened; false when no window could take it (no reply follows).
+        std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)> launchAnswered;
         // The existing cross-window seams: restart a session's connection in place; park its tab.
         std::function<void(const std::wstring& sessionId)> restartSession;
         std::function<void(const std::wstring& sessionId)> deactivateSession;
@@ -291,6 +298,42 @@ namespace Agentmaster::Msg
         void _secretaryPollLoop() noexcept;
         void _sendLoop() noexcept;
         void _tickLoop() noexcept;
+        /// <summary>
+        /// §21.23: hands `req` to a window (the host's launchAnswered, else its unanswered launch) under `token`, the key its
+        /// ANSWER comes back with (_onLaunchAnswered → _settleLaunchAnswers): the caller records its revive or bind with that
+        /// token BEFORE it asks, because the answer may come back from another thread before this returns. Takes no lock, and
+        /// the answer takes only the answer queue's own; the caller must not hold `_mtx` (no caller does).
+        /// </summary>
+        /// <param name="req">What to open.</param>
+        /// <param name="token">The key the caller recorded its revive or bind under (from _launchTokenSeq).</param>
+        /// <returns>True when a window took the request (an answer follows when the host answers); false when none could, or
+        /// the host has no launch at all.</returns>
+        /// <exception cref="std::bad_alloc">If the request or the reply cannot be copied.</exception>
+        bool _askLaunch(const RemoteLaunchRequest& req, uint64_t token);
+        /// <summary>
+        /// §21.23: a window's answer to the launch recorded under `token` — queued for the tick (_launchAnswers, behind its own
+        /// leaf lock) and the tick woken, nothing more: this runs on whichever thread the answer comes from (the window's UI
+        /// thread, or the engine's when the window dropped the request), possibly inside _askLaunch's own call. Never throws
+        /// (Rule #18 inside: a lost answer leaves the revive or bind to its timeout).
+        /// </summary>
+        /// <param name="token">The launch's key.</param>
+        /// <param name="outcome">The window's answer (RemoteLaunch.h).</param>
+        void _onLaunchAnswered(uint64_t token, const RemoteLaunchOutcome& outcome) noexcept;
+        /// <summary>
+        /// §21.23, tick thread, at the top of every tick: applies the queued launch answers. A new thread's bind that the window
+        /// opened is marked answered (the tick binds it once its session is live, _adoptBoundThreads); a refused one leaves at
+        /// once — its thread goes back to its folder picker with the messages it held, and the thread is told why. A revive is
+        /// told the session the window opened (_sweepRevives settles on exactly that one); a refused revive leaves, and its
+        /// thread is told why — after _requestLaunch's own "… into a tab…" line (Revive::announced), so the two never swap
+        /// places. Never throws (Rule #18 inside).
+        /// </summary>
+        void _settleLaunchAnswers() noexcept;
+        /// <summary>
+        /// §21.23, tick thread, once per tick: the revives that waited longer than kRemoteLaunchTimeoutMs leave, each with a line
+        /// in its thread — the PC never answered, or the session it opened never came up. Before §21.23 _sweepRevives dropped
+        /// them without a word. Never throws (Rule #18 inside).
+        /// </summary>
+        void _expireRevives() noexcept;
         void _onRegistryNotify(const SessionInfo& s) noexcept;
         void _setStatus(std::wstring text);
         void _log(const std::wstring& line) const noexcept;
@@ -1004,7 +1047,27 @@ namespace Agentmaster::Msg
         void _probeSecretary();
         void _wake(const std::wstring& sessionId, bool pin);
         void _setPinned(const std::wstring& sessionId, bool pinned);
+        /// <summary>
+        /// Opens a session into a tab of the most recently active window (resume / fork / a new session) and tells the thread how
+        /// it goes: "… into a tab…" once a window took the request, then (§21.23) the window's ANSWER — "Opened …" when the
+        /// session it opened is live (_sweepRevives), or why nothing opened (_settleLaunchAnswers), or, after
+        /// kRemoteLaunchTimeoutMs without either, that the PC never answered (_expireRevives). The revive is recorded under the
+        /// launch's token BEFORE the request goes out (the answer may come back from another thread at once). Poll thread.
+        /// </summary>
+        /// <param name="req">The request (a Resume or Fork without a folder gets the registry's, else the transcript's).</param>
+        /// <param name="threadId">The thread to reply in (a session's topic, or the 🔎 Search topic).</param>
+        /// <exception cref="std::bad_alloc">If the request, the revive or a reply cannot be allocated.</exception>
         void _requestLaunch(RemoteLaunchRequest req, int64_t threadId);
+        /// <summary>
+        /// Settles every revive whose launch the window ANSWERED with `s` (§21.23: Revive::openedId — the fork's new session, a
+        /// fresh resume's new id, the resumed session itself) once `s` is live: pins it when asked, holds it in Waiting for you so
+        /// its topic appears, says "Opened …" in the revive's thread, and forgets the revive. A revive with no answer yet waits
+        /// (_expireRevives tells its thread when the wait runs out). Before §21.23 a revive matched the request's own id or
+        /// folder, and a /forksession or /newsession in a live session's topic, or 🔎 Search's Fork of a live session, settled on
+        /// the SOURCE (§21.21). Tick thread.
+        /// </summary>
+        /// <param name="s">A session the tick looked at (a topic's, or the one an answer named).</param>
+        /// <exception cref="std::bad_alloc">If the matched copies or the reply cannot be allocated.</exception>
         void _sweepRevives(const SessionInfo& s);
 
         // ----- §21.17: a thread the user opens starts a new session (Messaging.Inbound.cpp) -----
@@ -1053,12 +1116,20 @@ namespace Agentmaster::Msg
         /// Starts the thread's NEW SESSION in `folder` (§21.17): a fresh Claude tab in the background of the most recently active
         /// window, under a session id minted here, recorded in `_threadBinds` BEFORE the launch so the tick can bind the thread to
         /// the session the moment it is live (_adoptBoundThreads); the picker is deleted. A folder that does not exist, or no
-        /// window to open the tab, leaves the picker where it is and says why.
+        /// window to open the tab, leaves the picker where it is and says why. §21.23: the window ANSWERS the launch — a refusal
+        /// (no claude.exe on the PC, the tab could not be made, the window closed) sends the thread back to a new picker at once,
+        /// with the messages it held and the reason (_settleLaunchAnswers), instead of the 3-minute timeout's "no window opened
+        /// it".
         /// </summary>
         /// <param name="threadId">The thread.</param>
         /// <param name="folder">The working folder (a picker entry, or a path the user typed).</param>
-        /// <returns>The outcome, plain text (a toast, or the reply to a typed path).</returns>
-        std::wstring _startNewThreadSession(int64_t threadId, const std::wstring& folder);
+        /// <param name="replyTo">The user's message that typed the folder (0 = a picker button). §21.23: for a typed folder this
+        /// function posts the replies itself, quoting that message, and posts "Opening …" BEFORE the launch — so the window's
+        /// answer, which the tick may post a moment later from another thread, can never land above it.</param>
+        /// <returns>The outcome, plain text, for the caller to show: a button's toast; for a typed folder, a refusal made before
+        /// the launch (the caller replies with it) or "" when this function replied itself.</returns>
+        /// <exception cref="std::bad_alloc">If the bind or a reply cannot be allocated.</exception>
+        std::wstring _startNewThreadSession(int64_t threadId, const std::wstring& folder, int64_t replyTo = 0);
         /// <summary>
         /// Binds each picked thread to its session once the session is LIVE (§21.17, tick thread, before the sync's plan so the
         /// plan never makes the session a topic of its own): the thread becomes the session's topic (a TopicRecord with the
@@ -1071,7 +1142,10 @@ namespace Agentmaster::Msg
         /// becomes the sync's settled fact, so a folder color the tab's first paint persisted after the sync's dir-colors
         /// snapshot causes no second rename. A session at rest is held in "Waiting for you" (like a revive) so its topic
         /// outlasts the idle grace, and a tab that has not started yet is started. A bind whose session never came up within
-        /// kNewThreadBindTimeoutMs is dropped, and the thread is told.
+        /// kNewThreadBindTimeoutMs is dropped, and the thread is told. §21.23: a launch the window REFUSED never waits that long
+        /// (_settleLaunchAnswers sends the thread back to its picker at once), so the timeout says what is left — the PC never
+        /// answered, or the tab opened and the session never came up (ThreadBind::answered) — and the messages the bind held
+        /// wait in the thread's picker record for the next pick instead of being dropped.
         /// </summary>
         /// <param name="byId">The sync's live sessions (SnapshotLiveForCards), by id.</param>
         /// <param name="colorMode">The tab color mode of the sync.</param>
@@ -1507,8 +1581,19 @@ namespace Agentmaster::Msg
         std::unordered_map<std::wstring, Token> _tokens;
         uint64_t _tokenSeq{ 0 };
 
+        /// <summary>
+        /// Under `_mtx`: a launch _requestLaunch asked for, until the session it opened is live (_sweepRevives), the window refused
+        /// it (_settleLaunchAnswers) or kRemoteLaunchTimeoutMs ran out (_expireRevives). §21.23: recorded BEFORE the request goes
+        /// out, under the launch's token; the window's answer fills in what it opened.
+        /// </summary>
         struct Revive
         {
+            uint64_t launchToken{ 0 }; // §21.23: the key the launch's answer comes back with (_askLaunch)
+            bool announced{ false }; // §21.23: _requestLaunch posted its "… into a tab…" line — a refusal may now be posted after it
+            bool answered{ false }; // §21.23: the window answered that a tab hosts the session (openedId)
+            std::wstring openedId; // §21.23: the session the window opened: the one the revive settles on, and no other
+            bool alreadyOpen{ false }; // §21.23: a resume of a session that was open already (nothing new opened)
+            bool fresh{ false }; // §21.23: a NEW conversation opened in place of the asked one (no transcript to continue)
             RemoteLaunchRequest req;
             int64_t requestedMs{ 0 };
             int64_t threadId{ 0 }; // where to report
@@ -1541,6 +1626,9 @@ namespace Agentmaster::Msg
         /// </summary>
         struct ThreadBind
         {
+            uint64_t launchToken{ 0 }; // §21.23: the key the launch's answer comes back with (_askLaunch)
+            bool answered{ false }; // §21.23: the window opened the tab — a timeout then says the session never came up, not that the PC never answered
+            int64_t replyTo{ 0 }; // §21.23: the user's message that typed the folder (0 = a picker button): a refusal's reply quotes it
             std::wstring sessionId;
             int64_t threadId{ 0 };
             std::wstring dir;
@@ -1549,6 +1637,22 @@ namespace Agentmaster::Msg
             int64_t requestedMs{ 0 }; // WallMs of the launch: kNewThreadBindTimeoutMs counts from it
         };
         std::vector<ThreadBind> _threadBinds;
+        uint64_t _launchTokenSeq{ 0 }; // §21.23, under `_mtx`: the last launch token handed out (0 is never one)
+        /// <summary>
+        /// §21.23: one window's answer to a launch of this service, waiting for the tick (_settleLaunchAnswers).
+        /// </summary>
+        struct LaunchAnswerItem
+        {
+            uint64_t token{ 0 }; // the launch's key (Revive::launchToken / ThreadBind::launchToken)
+            RemoteLaunchOutcome outcome; // the window's answer
+            int64_t atMs{ 0 }; // WallMs when it came: a refusal whose revive never says it announced itself goes out after 5 s anyway
+        };
+        // §21.23: the launch answers not applied yet, behind their OWN leaf lock — an answer comes from any thread (a window's
+        // UI thread, the engine's), possibly inside _askLaunch's call, so it must not need `_mtx`. `_launchAnswersPending` wakes
+        // the tick (its wait reads it with `_tickRequested`): a wake-up lost to the race between the two costs one tick, 1.5 s.
+        std::mutex _launchAnswerMtx;
+        std::vector<LaunchAnswerItem> _launchAnswers;
+        std::atomic<bool> _launchAnswersPending{ false };
 
         SearchBridgeFactory _searchFactory;
         std::unique_ptr<SearchBridge> _search;

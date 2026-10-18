@@ -2449,10 +2449,27 @@ namespace Agentmaster::Msg
             _reply(threadId, L"The session's folder is not known; resume it from the Sessions page at the PC.", false);
             return;
         }
+        // §21.23: the revive goes in BEFORE the request goes out, under the launch's token: the window answers on its own thread,
+        // possibly before _askLaunch returns, and its answer must find the revive (_settleLaunchAnswers).
+        uint64_t token = 0;
+        {
+            std::lock_guard lk{ _mtx };
+            token = ++_launchTokenSeq;
+            Revive rv;
+            rv.launchToken = token;
+            rv.req = req;
+            rv.requestedMs = WallMs();
+            rv.threadId = threadId;
+            _revives.push_back(std::move(rv));
+        }
+        const auto dropRevive = [this, token]() {
+            std::lock_guard lk{ _mtx };
+            _revives.erase(std::remove_if(_revives.begin(), _revives.end(), [token](const Revive& r) { return r.launchToken == token; }), _revives.end());
+        };
         bool ok = false;
         try
         {
-            ok = _hooks.launch(req);
+            ok = _askLaunch(req, token);
         }
         catch (...)
         {
@@ -2460,51 +2477,43 @@ namespace Agentmaster::Msg
         }
         if (!ok)
         {
+            dropRevive(); // no window took it: no answer follows, and nothing will open
             _reply(threadId, L"No window could open it right now.", false);
             return;
         }
-        {
-            std::lock_guard lk{ _mtx };
-            Revive rv;
-            rv.req = req;
-            rv.requestedMs = WallMs();
-            rv.threadId = threadId;
-            _revives.push_back(std::move(rv));
-        }
         const wchar_t* what = req.kind == RemoteLaunchRequest::Kind::Fork ? L"Forking" : (req.kind == RemoteLaunchRequest::Kind::Resume ? L"Resuming" : L"Opening a new session");
         _reply(threadId, std::wstring{ what } + L" into a tab\x2026 its topic appears once it is up.", false);
-        LogNav(L"remote telegram launch " + std::wstring{ what } + L" " + ShortId(req.sessionId) + L" dir=" + req.dir + (req.pin ? L" (pin)" : L""));
+        {
+            // §21.23: the line above is queued; a refusal the window answered with may go out now, after it, never above it.
+            std::lock_guard lk{ _mtx };
+            for (auto& rv : _revives)
+            {
+                if (rv.launchToken == token)
+                {
+                    rv.announced = true;
+                    break;
+                }
+            }
+        }
+        LogNav(L"remote telegram launch " + std::wstring{ what } + L" " + ShortId(req.sessionId) + L" dir=" + req.dir + (req.pin ? L" (pin)" : L"") + L" token=" + std::to_wstring(token));
     }
 
     void MessagingService::_sweepRevives(const SessionInfo& s)
     {
         // A revive is "done" when its session is LIVE: pin it when asked, hold it in Waiting for you so its
-        // topic appears, and forget the revive. A New-session revive matches a live session created in its
-        // folder after the request. Revives older than 3 minutes are dropped.
+        // topic appears, and forget the revive. §21.23: "its session" is the one the window ANSWERED it opened
+        // (Revive::openedId) — exactly that one. Until the answer comes the revive waits (the answer normally comes
+        // within a second; _expireRevives tells the thread when it never does). Before §21.23 a revive matched the
+        // request's own id or a live session in its folder, which for a fork of a live session — or a /newsession
+        // typed in a live session's topic — was the SOURCE, live at once, settled at the next tick (§21.21).
         std::vector<Revive> matched;
         {
             std::lock_guard lk{ _mtx };
-            const int64_t now = WallMs();
             for (auto it = _revives.begin(); it != _revives.end();)
             {
-                bool match = false;
-                if (!it->req.sessionId.empty())
-                {
-                    // Resume: the same id. Fork: a live session whose forkParentId is the source (or the
-                    // source itself when the fork degraded to a resume).
-                    match = s.live && (s.id == it->req.sessionId || (it->req.kind == RemoteLaunchRequest::Kind::Fork && s.forkParentId == it->req.sessionId));
-                }
-                else
-                {
-                    match = s.live && s.stateChangedAtUnixMs >= it->requestedMs - 2000 && NormDirKey(s.workingDir) == NormDirKey(it->req.dir) && s.kind == AgentKind::Claude;
-                }
-                if (match)
+                if (it->answered && s.live && !it->openedId.empty() && s.id == it->openedId)
                 {
                     matched.push_back(*it);
-                    it = _revives.erase(it);
-                }
-                else if (now - it->requestedMs > 3 * 60 * 1000)
-                {
                     it = _revives.erase(it);
                 }
                 else
@@ -2527,8 +2536,280 @@ namespace Agentmaster::Msg
                     ss.readUnixMs = 0;
                 }
             });
-            _reply(rv.threadId, L"Opened <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), s.title.empty() ? ShortId(s.id) : s.title) + L"</b> \x2014 its topic is coming up." + (rv.req.pin ? L" \U0001F4CC" : L""), false); // §21.15: a chip when rich
-            _log(L"[msg] revive done " + ShortId(s.id));
+            // §21.15: the title is a chip when rich. §21.23: the answer says HOW it opened — a resume of a session that was open
+            // already (its topic may stand: then it is linked, and nothing is "coming up"), or a NEW conversation in place of the one
+            // asked for (a resume or a fork with no transcript to continue).
+            const std::wstring title = s.title.empty() ? ShortId(s.id) : s.title;
+            const int64_t ownThread = _threadOf(s.id);
+            std::wstring line;
+            if (rv.alreadyOpen)
+            {
+                line = L"<b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), title, ownThread) + L"</b> is open already" +
+                       (ownThread != 0 ? std::wstring{ L", with its own topic." } : std::wstring{ L" \x2014 its topic is coming up." });
+            }
+            else if (rv.fresh)
+            {
+                line = L"Opened <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), title) + L"</b> as a NEW session in the folder (there was no transcript to continue) \x2014 its topic is coming up.";
+            }
+            else
+            {
+                line = L"Opened <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), title) + L"</b> \x2014 its topic is coming up.";
+            }
+            _reply(rv.threadId, line + (rv.req.pin ? L" \U0001F4CC" : L""), false);
+            _log(L"[msg] revive done " + ShortId(s.id) + (rv.alreadyOpen ? L" (open already)" : (rv.fresh ? L" (a fresh session: no transcript to continue)" : L"")) + L" token=" + std::to_wstring(rv.launchToken));
+        }
+    }
+
+    bool MessagingService::_askLaunch(const RemoteLaunchRequest& req, uint64_t token)
+    {
+        if (_hooks.launchAnswered)
+        {
+            // The answer may outlive the service (a window answers whenever its UI thread runs the request): a weak reference, and
+            // the queue behind its own lock (_onLaunchAnswered), so the window's thread never waits on the service's.
+            auto self = weak_from_this();
+            return _hooks.launchAnswered(req, [self, token](const RemoteLaunchOutcome& outcome) {
+                if (const auto me = self.lock())
+                {
+                    me->_onLaunchAnswered(token, outcome);
+                }
+            });
+        }
+        // A host without the answered launch (before §21.23): the launch goes, and the revive or bind waits for its timeout.
+        return _hooks.launch && _hooks.launch(req);
+    }
+
+    void MessagingService::_onLaunchAnswered(uint64_t token, const RemoteLaunchOutcome& outcome) noexcept
+    {
+        try
+        {
+            {
+                std::lock_guard lk{ _launchAnswerMtx };
+                LaunchAnswerItem item;
+                item.token = token;
+                item.outcome = outcome;
+                item.atMs = WallMs();
+                _launchAnswers.push_back(std::move(item));
+            }
+            // Without `_mtx` (the leaf lock above is the only one this thread takes): the tick's wait reads the flag, and a wake-up
+            // lost to the race between its check and this store costs one tick period.
+            _launchAnswersPending.store(true);
+            _tickCv.notify_one();
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the answer is lost — the revive or the bind waits for its timeout, which tells the thread.
+            LogSwallowedException(L"MessagingService::_onLaunchAnswered");
+        }
+    }
+
+    void MessagingService::_settleLaunchAnswers() noexcept
+    {
+        try
+        {
+            _launchAnswersPending.store(false); // before the take: an answer queued after it wakes the next tick
+            std::vector<LaunchAnswerItem> answers;
+            {
+                std::lock_guard lk{ _launchAnswerMtx };
+                answers.swap(_launchAnswers);
+            }
+            if (answers.empty())
+            {
+                return;
+            }
+            // How long a refusal waits for _requestLaunch to say it has queued its own "… into a tab…" line (Revive::announced)
+            // before it is posted anyway: that line goes out right after the launch call returns, on the poll thread, so the wait
+            // is a belt for a request that threw in between.
+            constexpr int64_t kAnnounceWaitMs = 5000;
+            const int64_t now = WallMs();
+            std::vector<LaunchAnswerItem> later; // refusals whose revive has not announced itself yet: the next tick looks again
+            struct Notice
+            {
+                int64_t threadId{ 0 };
+                std::wstring html;
+                int64_t replyTo{ 0 };
+                bool picker{ false }; // a new thread back at its picker: post the picker after the line
+            };
+            std::vector<Notice> notices;
+            std::vector<std::wstring> logs; // written after the lock: a log line is a file write, never made with `_mtx` held
+            // The sessions of the binds a refusal names, and whether each is live: a throw in the window AFTER its tab opened
+            // answers "failed" with the session running, and such a bind is bound like an opened one. Read with no lock held (the
+            // registry has its own), between a look at the binds and the pass that changes them — both on this thread, the only
+            // one that removes a bind.
+            std::unordered_set<std::wstring> liveBindSessions;
+            {
+                std::vector<std::wstring> refusedBindSessions;
+                {
+                    std::lock_guard lk{ _mtx };
+                    for (const auto& a : answers)
+                    {
+                        if (RemoteLaunchOpened(a.outcome))
+                        {
+                            continue;
+                        }
+                        for (const auto& b : _threadBinds)
+                        {
+                            if (b.launchToken == a.token)
+                            {
+                                refusedBindSessions.push_back(b.sessionId);
+                                break;
+                            }
+                        }
+                    }
+                }
+                for (const auto& sid : refusedBindSessions)
+                {
+                    if (const auto s = _registry->GetWithoutQueue(sid); s && s->live)
+                    {
+                        liveBindSessions.insert(sid);
+                    }
+                }
+            }
+            {
+                std::lock_guard lk{ _mtx };
+                for (auto& a : answers)
+                {
+                    const bool opened = RemoteLaunchOpened(a.outcome);
+                    const std::wstring reason = RemoteLaunchRefusalText(a.outcome);
+                    // A new thread's bind (§21.17).
+                    const auto bind = std::find_if(_threadBinds.begin(), _threadBinds.end(), [&a](const ThreadBind& b) { return b.launchToken == a.token; });
+                    if (bind != _threadBinds.end())
+                    {
+                        // The bind's own session is live already: whatever the answer says, the tab is up and the tick binds it.
+                        if (opened || liveBindSessions.count(bind->sessionId) > 0)
+                        {
+                            bind->answered = true; // the tick binds the thread once the session is live (_adoptBoundThreads)
+                            logs.push_back(L"[msg] new thread " + std::to_wstring(bind->threadId) + L": the window opened session " + ShortId(bind->sessionId) +
+                                 (opened ? std::wstring{} : L" (it answered " + std::wstring{ RemoteLaunchResultName(a.outcome.result) } + L", but the session is live)"));
+                            continue;
+                        }
+                        // Refused: the creation is not over — the thread goes back to a picker of its own, with every message the bind
+                        // held (the ones written before the pick, and since), and the reason; a new pick starts it again.
+                        ThreadBind b = std::move(*bind);
+                        _threadBinds.erase(bind);
+                        auto& nt = _newThreads[b.threadId];
+                        nt.held.insert(nt.held.begin(), b.held.begin(), b.held.end());
+                        if (nt.held.size() > kNewThreadHeldMax)
+                        {
+                            nt.held.resize(kNewThreadHeldMax); // the oldest ones (the bind's own come first)
+                        }
+                        if (nt.topicName.empty())
+                        {
+                            nt.topicName = b.title;
+                        }
+                        nt.lastUseMs = now;
+                        logs.push_back(L"[msg] new thread " + std::to_wstring(b.threadId) + L": the window refused session " + ShortId(b.sessionId) + L" in " + b.dir + L" (" +
+                             RemoteLaunchResultName(a.outcome.result) + (a.outcome.detail.empty() ? std::wstring{} : L": " + a.outcome.detail) + L"); back to its folder picker with " +
+                             std::to_wstring(nt.held.size()) + L" held message(s)");
+                        Notice n;
+                        n.threadId = b.threadId;
+                        n.html = L"\x26A0 The new session did not start. " + TgEscapeHtml(reason) + L"\nPick a folder below to try again, or cancel.";
+                        n.replyTo = b.replyTo;
+                        n.picker = true;
+                        notices.push_back(std::move(n));
+                        continue;
+                    }
+                    // A revive (_requestLaunch).
+                    const auto rv = std::find_if(_revives.begin(), _revives.end(), [&a](const Revive& r) { return r.launchToken == a.token; });
+                    if (rv != _revives.end())
+                    {
+                        if (opened)
+                        {
+                            // What the window opened is what the revive settles on (_sweepRevives, this tick's revive pass).
+                            rv->answered = true;
+                            rv->openedId = a.outcome.sessionId;
+                            rv->alreadyOpen = a.outcome.result == RemoteLaunchResult::AlreadyOpen;
+                            rv->fresh = a.outcome.fresh;
+                            logs.push_back(L"[msg] launch token=" + std::to_wstring(a.token) + L": the window " + (rv->alreadyOpen ? L"had " : L"opened ") + ShortId(a.outcome.sessionId) +
+                                 (rv->fresh ? L" (a fresh session: no transcript to continue)" : L"") + L" for the request of " + ShortId(rv->req.sessionId));
+                            continue;
+                        }
+                        if (!rv->announced && now - a.atMs < kAnnounceWaitMs)
+                        {
+                            later.push_back(std::move(a)); // _requestLaunch has not queued its own line yet: this goes after it
+                            continue;
+                        }
+                        const std::wstring subject = RemoteLaunchSubject(rv->req, true);
+                        logs.push_back(L"[msg] launch token=" + std::to_wstring(a.token) + L": the window refused " + subject + L" (" + RemoteLaunchResultName(a.outcome.result) +
+                             (a.outcome.detail.empty() ? std::wstring{} : L": " + a.outcome.detail) + L")");
+                        Notice n;
+                        n.threadId = rv->threadId;
+                        n.html = L"\x26A0 " + TgEscapeHtml(subject) + L" did not open. " + TgEscapeHtml(reason);
+                        notices.push_back(std::move(n));
+                        _revives.erase(rv);
+                        continue;
+                    }
+                    // Nothing waits for it: the revive or bind gave up on its timeout before the window answered, or the bot was
+                    // stopped and started since. The window did what it said; only the line in the chat is missing.
+                    logs.push_back(L"[msg] launch token=" + std::to_wstring(a.token) + L" answered " + RemoteLaunchResultName(a.outcome.result) +
+                         (a.outcome.sessionId.empty() ? std::wstring{} : L" " + ShortId(a.outcome.sessionId)) + L" after its request was given up: no line in the chat");
+                }
+            }
+            if (!later.empty())
+            {
+                std::lock_guard lk{ _launchAnswerMtx };
+                _launchAnswers.insert(_launchAnswers.begin(), std::make_move_iterator(later.begin()), std::make_move_iterator(later.end()));
+            }
+            for (const auto& line : logs)
+            {
+                _log(line);
+            }
+            for (const auto& n : notices)
+            {
+                _reply(n.threadId, n.html, false, json::Value{}, n.replyTo);
+                if (n.picker)
+                {
+                    _showNewThreadPicker(n.threadId); // a NEW picker under the line (the old one went at the pick)
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the answers taken in this pass are lost; their revives and binds wait for their timeouts, which
+            // tell the thread.
+            LogSwallowedException(L"MessagingService::_settleLaunchAnswers");
+        }
+    }
+
+    void MessagingService::_expireRevives() noexcept
+    {
+        try
+        {
+            std::vector<Revive> expired;
+            {
+                std::lock_guard lk{ _mtx };
+                const int64_t now = WallMs();
+                for (auto it = _revives.begin(); it != _revives.end();)
+                {
+                    if (now - it->requestedMs > kRemoteLaunchTimeoutMs)
+                    {
+                        expired.push_back(std::move(*it));
+                        it = _revives.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
+            const std::wstring minutes = std::to_wstring(kRemoteLaunchTimeoutMs / 60000);
+            for (const auto& rv : expired)
+            {
+                // The window opened what it said and the session never went live, or the window never answered at all (its UI thread
+                // busy all along) — the second may still open later, and its topic then appears on its own.
+                const std::wstring subject = RemoteLaunchSubject(rv.req, true);
+                _log(L"[msg] launch token=" + std::to_wstring(rv.launchToken) + L" given up after " + minutes + L" min: " + subject +
+                     (rv.answered ? L" (the window opened " + ShortId(rv.openedId) + L"; it never went live)" : std::wstring{ L" (no window answered)" }));
+                _reply(rv.threadId,
+                       rv.answered ? TgEscapeHtml(subject) + L" opened on the PC, but its session did not come up within " + minutes + L" minutes." :
+                                     L"The PC did not answer within " + minutes + L" minutes: " + TgEscapeHtml(RemoteLaunchSubject(rv.req, false)) +
+                                         L" may still open \x2014 its topic appears if it does.",
+                       false);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: those revives are gone without their line; nothing else depends on them.
+            LogSwallowedException(L"MessagingService::_expireRevives");
         }
     }
 
@@ -2659,7 +2940,7 @@ namespace Agentmaster::Msg
                 std::lock_guard lk{ _mtx };
                 _newThreads[threadId].lastUseMs = now; // a thread the bot never saw (after a restart) gets its entry here
             }
-            const std::wstring outcome = _startNewThreadSession(threadId, *folder);
+            const std::wstring outcome = _startNewThreadSession(threadId, *folder, msgId); // §21.23: it answers a launch it starts itself, quoting msgId
             if (!outcome.empty())
             {
                 _reply(threadId, TgEscapeHtml(outcome), false, json::Value{}, msgId);
@@ -2911,34 +3192,46 @@ namespace Agentmaster::Msg
         return _startNewThreadSession(threadId, folder);
     }
 
-    std::wstring MessagingService::_startNewThreadSession(int64_t threadId, const std::wstring& folder)
+    std::wstring MessagingService::_startNewThreadSession(int64_t threadId, const std::wstring& folder, int64_t replyTo)
     {
         const DWORD attrs = ::GetFileAttributesW(folder.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
         {
             return L"Not a folder on this PC: " + folder;
         }
-        if (!_hooks.launch)
+        if (!_hooks.launch && !_hooks.launchAnswered)
         {
             return L"Opening sessions is not available in this build.";
         }
         // The bind goes in BEFORE the launch: the launch is asynchronous (the window's UI thread opens the tab), and the tick may
-        // see the session live at any moment after it. The thread's messages are COPIED into it, so a refused launch leaves the
-        // picker as it was.
+        // see the session live at any moment after it. §21.23: so does the window's ANSWER, which finds the bind by its token.
+        // The picker's RECORD leaves the map in the same lock scope: a refusal the window answers with puts a NEW record in its
+        // place (_settleLaunchAnswers, on the tick thread), and an erase after the launch returned could remove that one. A launch
+        // no window takes puts the record back as it was.
         ThreadBind bind;
         bind.sessionId = NewSessionId();
         bind.threadId = threadId;
         bind.dir = folder;
         bind.requestedMs = WallMs();
+        bind.replyTo = replyTo;
         int64_t pickerId = 0;
+        std::optional<NewThread> picker; // the thread's picker record, out of the map while the launch is asked for
         {
             std::lock_guard lk{ _mtx };
+            // One launch per thread at a time: a second pick while one is starting would start a second session for the thread.
+            if (std::any_of(_threadBinds.begin(), _threadBinds.end(), [threadId](const ThreadBind& b) { return b.threadId == threadId; }))
+            {
+                return L"A new session is already starting in this thread\x2026";
+            }
             if (const auto it = _newThreads.find(threadId); it != _newThreads.end())
             {
                 bind.title = it->second.topicName;
                 bind.held = it->second.held;
                 pickerId = it->second.pickerMessageId;
+                picker = std::move(it->second);
+                _newThreads.erase(it); // the bind holds the messages now
             }
+            bind.launchToken = ++_launchTokenSeq;
             _threadBinds.push_back(bind);
         }
         RemoteLaunchRequest req;
@@ -2946,10 +3239,18 @@ namespace Agentmaster::Msg
         req.dir = folder;
         req.title = bind.title; // "" = the folder-derived default title
         req.newSessionId = bind.sessionId;
+        // §21.23: a typed folder's "Opening …" goes out BEFORE the launch, so the window's answer — a refusal the tick may post a
+        // moment later, from another thread — can never land above it. A button's is its toast (the return value), which no line
+        // in the thread can overtake.
+        const std::wstring opening = L"Opening a new session in " + NewThreadFolderLabel(folder, {}) + L"\x2026";
+        if (replyTo != 0)
+        {
+            _reply(threadId, TgEscapeHtml(opening), false, json::Value{}, replyTo);
+        }
         bool ok = false;
         try
         {
-            ok = _hooks.launch(req);
+            ok = _askLaunch(req, bind.launchToken);
         }
         catch (...)
         {
@@ -2957,14 +3258,29 @@ namespace Agentmaster::Msg
         }
         if (!ok)
         {
-            std::lock_guard lk{ _mtx };
-            _threadBinds.erase(std::remove_if(_threadBinds.begin(), _threadBinds.end(), [&](const ThreadBind& b) { return b.sessionId == bind.sessionId; }),
-                               _threadBinds.end());
-            return L"No window could open it right now; try again in a moment.";
-        }
-        {
-            std::lock_guard lk{ _mtx };
-            _newThreads.erase(threadId); // the bind holds the messages now
+            {
+                std::lock_guard lk{ _mtx };
+                const auto it = std::find_if(_threadBinds.begin(), _threadBinds.end(), [&bind](const ThreadBind& b) { return b.launchToken == bind.launchToken; });
+                if (it != _threadBinds.end())
+                {
+                    if (picker)
+                    {
+                        picker->held = std::move(it->held); // what the bind held: the picker's own, and any message written meanwhile
+                    }
+                    _threadBinds.erase(it);
+                }
+                if (picker && _newThreads.find(threadId) == _newThreads.end())
+                {
+                    _newThreads.emplace(threadId, std::move(*picker)); // the picker stands as it was, its buttons still answer
+                }
+            }
+            const std::wstring noWindow = L"No window could open it right now; try again in a moment.";
+            if (replyTo != 0)
+            {
+                _reply(threadId, TgEscapeHtml(noWindow), false, json::Value{}, replyTo);
+                return {};
+            }
+            return noWindow;
         }
         if (pickerId > 0)
         {
@@ -2979,8 +3295,8 @@ namespace Agentmaster::Msg
         }
         _log(L"[msg] new thread " + std::to_wstring(threadId) + L": opening session " + ShortId(bind.sessionId) + L" in " + folder +
              (bind.title.empty() ? std::wstring{} : L" titled \x201C" + bind.title + L"\x201D") + L" (" + std::to_wstring(bind.held.size()) + L" held message(s))");
-        LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" -> launch " + ShortId(bind.sessionId) + L" dir=" + folder);
-        return L"Opening a new session in " + NewThreadFolderLabel(folder, {}) + L"\x2026";
+        LogNav(L"remote telegram new-thread " + std::to_wstring(threadId) + L" -> launch " + ShortId(bind.sessionId) + L" dir=" + folder + L" token=" + std::to_wstring(bind.launchToken));
+        return replyTo != 0 ? std::wstring{} : opening; // a typed folder was answered above, before the launch
     }
 
     void MessagingService::_onUserTopicRenamed(const std::wstring& sessionId, int64_t threadId, const std::wstring& name)

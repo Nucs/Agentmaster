@@ -2897,6 +2897,9 @@ updated 5 minutes ago
   `_handleTopicMessage(…, held = true)` — as if sent in the topic (the first is the session's first prompt; a `/rename` among
   them renames), never asked about as backlog however long the pick took. A message sent while the launch runs is held for it
   too. A bind whose session is not live after 3 minutes (`kNewThreadBindTimeoutMs`) is dropped and the thread is told.
+  *(Since §21.23, NOT BUILT yet: the window ANSWERS the launch — a refusal sends the thread back to a new picker at once, with
+  the reason and the messages it held; the timeout is left for a PC that never answers, and keeps the messages for the next
+  pick.)*
 - **While a thread is being bound** (2026-10-18, NOT BUILT yet). The bind stays in `_threadBinds` until its topic is recorded
   AND every message it holds has been handed over: the record goes in and the held messages come out in ONE lock scope, and
   the bind leaves the list only in a scope that finds it empty. A message the user sends in the meantime (the rename and the
@@ -3202,7 +3205,9 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
   session process … If the creation process aborts in any way, the new topic needs to be deleted"). No abort path deletes
   the thread today (§21.17.4): ✖ Cancel deletes only the picker, a picker nobody uses is forgotten after a day, the
   3-minute bind timeout tells the thread and frees it, and a restart forgets the pickers and binds (they live in memory
-  only); each leaves the thread in the chat.
+  only); each leaves the thread in the chat. *(§21.23, NOT BUILT yet: a launch the PC REFUSES is no abort any more — the
+  thread goes back to a new folder picker at once, with its messages and the reason; every path above still leaves the
+  thread.)*
 - **A remote fork or new session settles on its SOURCE** (seen on dev: a topic's `/forksession` on 2026-10-16 23:41 —
   `launch Forking c1ce0dbe`, then `revive done c1ce0dbe` 1.3 s later and `c1ce0dbe idle -> waiting`, while the fork
   `de0d4a0a`'s new topic read "leaves the list in 10 min"; and `… launch Opening a new session 91d8d3d1 …` → `revive done
@@ -3212,7 +3217,8 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
   session, live when it is an idle tab or has a topic: the revive then settles on the source at the next tick. The source
   is held in Waiting for you and marked unread when it was Idle or Done, the reply "Opened …" names the source, and the new
   tab gets no hold — it keeps a topic only through the idle grace unless it is used. A fork of a CLOSED session settles
-  right (by the fork's `forkParentId`).
+  right (by the fork's `forkParentId`). *(Fixed by §21.23, NOT BUILT yet: the window answers which session it opened, and
+  the revive settles on exactly that one.)*
 - **A new thread's held messages replay as topic COMMANDS, and a command's model is any text** (seen on dev, 2026-10-18: new
   thread 32197 held one 37-character message at 12:37:57; the folder pick handed it to session 91d8d3d1 at 12:45:45.3,
   where it ran as `/newsession` at 12:45:45.9 — the request above — and `[spawn] 41db7b17 "BetterClipboard"
@@ -3228,7 +3234,8 @@ Each was read in the code at a7bb5a577; the ones marked "seen" also show in a lo
 - **A launch the window cannot make is never reported.** `RequestLaunchInWindow` (Engine.cpp) answers true as soon as a
   window has a launch sink, and the sink answers nothing. A Resume, a Fork or a new session asked from Telegram that never
   comes up is dropped after 3 minutes WITHOUT a word (`_sweepRevives`); a new thread's bind tells its thread after 3 minutes
-  (§21.17.4).
+  (§21.17.4). *(Fixed by §21.23, NOT BUILT yet: the launch is ANSWERED — a refusal is told at once with its reason and shows
+  no dialog on the PC, and a timeout is never silent.)*
 - **A session's topic the user deletes is never made again** (against §5.2 and §10.5). No send reads Telegram's "message
   thread not found" for a session's topic: the record stays, every post into the thread fails, and the card is posted again
   every 60 s (`kCardRepostAfterFailureMs`) until the session goes idle past its grace or closes and the sync deletes the
@@ -3304,6 +3311,126 @@ AgentManagerContent.Settings.cpp and TerminalPage.AgentEngine.cpp: clean; a nega
 2. A session that starts a turn: its topic's icon turns ⚡️ about 8 s later, and 💬 after the turn; the name stays.
 3. A new tab: its topic is created with its state icon and a name without a glyph.
 4. hooks.log holds no `Telegram refused a topic icon` line; if it does, every name has its glyph back and the line says why.
+
+### 21.23 A launch from the phone is ANSWERED: the bot hears what opened, or why nothing did (2026-10-18; NOT BUILT yet)
+
+> The user's request (2026-10-18), the first finding of the QA of a new session's creation: "The bot never learns whether the
+> launch worked. RequestLaunchInWindow returns "ok" as soon as a window exists (Engine.cpp:1983). If claude is missing or a
+> preset is refused, a dialog pops up on the PC (TerminalPage.AgentSessions.cpp:138, :216), where nobody may be watching. On
+> the phone, a new thread waits 3 minutes and then gives the wrong reason ("no window opened it"). The other paths hear
+> nothing at all: their pending launch is dropped silently (Messaging.Inbound.cpp:2463)."
+
+**What was wrong.** Every launch the bot asks for (a new thread's folder pick, §21.17.4; a topic's `/forksession` and
+`/newsession`; 🔎 Search's `/newsession <folder>`, ▶ Resume and ⑂ Fork) went through `RequestLaunchInWindow`, which handed
+the request to a window and answered true at once. The window's sink answered nothing. So:
+- a refusal on the PC was shown as a DIALOG there — no native claude.exe (`_PromptClaudeMissing`), a preset that cannot start
+  (`_PromptPresetLaunchError`) — and the phone heard nothing about it;
+- a new thread waited for its 3-minute bind timeout and then said "no window opened it", whatever the cause;
+- every other path waited for its revive's 3-minute timeout, which dropped the revive without a word.
+
+**The answer** (`AgentMaster/RemoteLaunch.h`). A `RemoteLaunchOutcome`: the `result`, the `sessionId` the tab hosts, `fresh`
+(a NEW conversation opened in place of the one asked for: a resume or a fork with no transcript to continue), the PC's own
+words for a refusal (`detail`) and the answering `windowId`.
+
+| Result | When | What the phone is told (`RemoteLaunchRefusalText`) |
+|---|---|---|
+| `Opened` | a new background tab hosts the session | (the usual "Opened …" line, below) |
+| `AlreadyOpen` | a resume of a session that was open already | "… is open already" |
+| `WindowClosed` | the window closed, or dropped the request unrun, before it acted | "The window that took the request closed before it opened the tab." |
+| `ClaudeMissing` | no native claude.exe | "Claude Code (the native claude.exe) was not found on the PC. Install it there, or set its path in Settings → Claude binary." |
+| `PresetRefused` | the launch's preset cannot start | the preset's own words + "Nothing was started: a preset session never falls back to your Claude login." |
+| `NoFolder` | a resume or a fork whose folder is not known | "The session's working folder is not known." |
+| `Failed` | the tab could not be made, an error | the PC's words ("The PC could not create the terminal tab.") or "The PC could not open it; its hooks.log says why." |
+
+`RemoteLaunchReply` gets the answer EXACTLY ONCE for a request a window took, from any thread (the window's UI thread, or the
+engine's when the window dropped the request), possibly before `RequestLaunchInWindow` returns.
+
+**The engine** (`Engine.cpp`). `RequestLaunchInWindow(request, reply)` asks the most recently activated window first, then
+the others in registration order. A window's sink returns true when it handed the request to its UI thread, false (or
+throws) when it could not — a closing window's dispatcher refuses the work item — and the next window is asked. One
+`LaunchAnswer` per attempt holds the reply: the first answer is delivered and any later one ignored; when the LAST copy of the
+reply dies unanswered (the dispatcher dropped the work item), it answers `WindowClosed`; a refused attempt is disarmed, so a
+refusal never also answers. A launch no window takes returns false and is never answered. hooks.log: `[remote-launch] window
+<id> could not take the launch (its sink refused it)`. The `…In(Engine&, …)` forms are the test seam (like the window tools'
+answered fan-out, SESSIONS.md §9.14).
+
+**The window** (`TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentMessaging.cpp`, `TerminalPage.AgentSessions.cpp`). The
+sink's work item calls `_RemoteLaunch`, which now RETURNS the answer (`noexcept`), and hands it to the reply; a page gone by
+the time the item runs answers `WindowClosed`. `_RemoteLaunch` sets `_remoteLaunchInFlight` around its one synchronous
+launch (beside the background latch), and while it is set the seams RECORD a refusal instead of showing it
+(`_NoteRemoteLaunchRefusal`, the first refusal kept): the two prompts return before their dialog, and `_LaunchClaudeSession`'s
+silent refusals (the claude.exe backstop, the restore dedup, a null pane, a window still starting) say why. A launch started
+at the PC is unchanged: the latch is not set, the dialogs show. `_SpawnClaudeSession` returns the new session's id.
+hooks.log: `[remote-launch] refused (<result>): <words> — no dialog on the PC; the reason goes back to the phone`, and the nav
+pair `[nav] remote launch …` → `[nav] remote launch done <result> new=<sid8>`.
+
+**The bot** (`Messaging.h`, `Messaging.cpp`, `Messaging.Inbound.cpp`).
+- **The hook**: `ServiceHooks::launchAnswered` (the engine's `RequestLaunchInWindow`); the service builds its plain `launch`
+  on top of it for the code that only asks whether launching is available. Its own launches go through `_askLaunch(req, token)`.
+- **The token**: every launch gets one (`_launchTokenSeq`), and its revive or bind is recorded under it BEFORE the request goes
+  out — the answer may come back from another thread at once. `_onLaunchAnswered` only queues the answer behind its own leaf
+  lock and wakes the tick; `_settleLaunchAnswers`, at the top of every tick, applies the answers.
+- **A new thread** (§21.17.4): the window opened the tab → the bind is marked answered and the tick binds it when the session is
+  live (unchanged). Refused → the bind leaves at once, the thread gets a NEW folder picker with every message the bind held,
+  under "⚠ The new session did not start. <the reason> / Pick a folder below to try again, or cancel." The creation is not
+  over: a new pick starts it again. A typed folder's "Opening a new session in …" is now posted BEFORE the launch, so a refusal
+  can never land above it; one launch per thread at a time. The 3-minute timeout is left only for a PC that never answered
+  ("The new session did not start: the PC did not answer within 3 minutes (its window may be busy).") or a tab whose session
+  never came up ("The tab opened on the PC, but the new session did not come up within 3 minutes."), and it keeps the held
+  messages in the thread's picker record for the next pick (they were dropped before).
+- **A revive** (`_requestLaunch`): the answer names the session the window opened (`Revive::openedId`), and `_sweepRevives`
+  settles on exactly that one — never on a session found by a guess. This also ends §21.21's "a remote fork or new session
+  settles on its SOURCE": a fork's revive and a `/newsession` typed in a live session's topic matched the live source at the
+  next tick. The "Opened …" line says how it opened: "Opened <title> — its topic is coming up." · "<title> is open already,
+  with its own topic." (or "— its topic is coming up.") · "Opened <title> as a NEW session in the folder (there was no
+  transcript to continue) — its topic is coming up." A refusal: "⚠ The fork of “X” did not open. <the reason>" — posted only
+  after `_requestLaunch` has queued its own "Forking into a tab…" line (`Revive::announced`; 5 s at most), so the two never
+  swap places. After 3 minutes (`kRemoteLaunchTimeoutMs`, `_expireRevives`, once per tick) a revive is never dropped
+  silently: "The PC did not answer within 3 minutes: the fork of “X” may still open — its topic appears if it does.", or "The
+  fork of “X” opened on the PC, but its session did not come up within 3 minutes."
+- Logs: `[msg] launch token=<n>: the window opened|had <sid8> …` / `: the window refused …` / `… given up after 3 min …`,
+  `[msg] new thread <id>: the window refused session … back to its folder picker with N held message(s)`, `[nav] remote
+  telegram launch … token=<n>`.
+
+**Not changed, still open.**
+- §21.21's first bug (the user's rule: an aborted creation deletes its new thread): Cancel, a forgotten picker, the timeout
+  and a restart still leave the thread. A REFUSED launch is not an abort here: the thread goes back to its picker, and the user
+  picks again or cancels.
+- The answers, the revives and the binds live in memory: a restart of the bot (or the app) forgets them, and an answer that
+  comes after its revive or bind gave up is only logged (`… after its request was given up: no line in the chat`).
+- The other window-hosted actions are still unanswered: a `sessionAction "start"` (Reactivate, a queued remote prompt that
+  starts a dormant tab) reports no refusal.
+- A host that sets only the old `launch` (none in the app) gets the launches without answers; its revives then settle never
+  and expire with the "did not answer" line.
+
+**Tests.** `tests_tabtools.cpp` → `TestRemoteLaunchAnswers` (39 checks, inside `TestTabTools`): the outcome rules (a default
+answer is a failure; Opened / AlreadyOpen are the successes; one stable log word per result), the phone's reasons (the PC's
+words trimmed and ended with a period, the preset rule's tail, the hooks.log pointer), `RemoteLaunchSubject` (a one-line
+title, the short id, a folder's last name, a drive root), and the engine's answered routing on a local Engine — no window →
+false and no answer; an inline answer; a late answer given twice, delivered once; a request dropped unanswered → WindowClosed
+from the engine; the last-activated window first, a refusing and a throwing sink skipped; every sink refusing → false and no
+answer even when a refusing sink's copy of the reply dies later; a throwing requester contained; an empty reply. The service
+half (`_settleLaunchAnswers`, `_expireRevives`, the new-thread picker's return) has no test, like the rest of the service.
+
+**Checked** (2026-10-18, HEAD 1efab4879 + this change only, in scratch folders; the shared tree held another session's
+unfinished work): the m5 suite 8,163 checks, the three known `TestTaskbarBadge` failures only (a first run also failed the
+scheduler's timing test "woken tab: the queue resumes by itself…", which passed in the next run and in HEAD's own run);
+`cl /Zs` with the app's flags on a shadow tree of this change — `Engine.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`,
+`MessagingSearchBridge.cpp`, `TerminalPage.cpp`, `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentMessaging.cpp`,
+`TerminalPage.AgentSessions.cpp`, `TerminalPage.AgentSidePanel.cpp`, `TerminalPage.AgentSessionsPage.cpp`,
+`TerminalPage.AgentSessionsPageActions.cpp` all pass (a negative control fails as it must). NOT BUILT; nothing tried live.
+⚠ `TerminalPage.h` and the messaging service gained data members: the next dev build must purge (the build-install skill's
+§5.8).
+
+**Check after the build** (dev, with the bot):
+1. Rename `claude.exe` away (or set Settings → Claude binary to a missing file), then open a new thread and pick a folder: the
+   thread says "⚠ The new session did not start. Claude Code (the native claude.exe) was not found on the PC. …" within a
+   couple of seconds, a new picker follows with the messages it held, and NO dialog appears on the PC (hooks.log
+   `[remote-launch] refused (claude-missing)`). Put claude.exe back and pick again: the session starts and binds.
+2. In a live session's topic, `/forksession`: "Forking into a tab…", then "Opened <the FORK's title> — its topic is coming
+   up." — the fork, not the source (hooks.log `[msg] launch token=… the window opened <fork>`, then `revive done <fork>`).
+3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
+4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

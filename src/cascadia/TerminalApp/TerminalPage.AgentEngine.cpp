@@ -1506,9 +1506,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (MESSAGING.md §8.2): the Telegram bot's two window sinks. The SESSION-ACTION sink receives
         // (session, action, arg, reply) from the engine's fan-out on a bot thread, hops to this window's UI thread
         // and acts only when this window hosts the session's tab (_RemoteSessionAction); the LAUNCH sink receives a
-        // resume / fork / new-session request the engine aimed at THIS window (the most recently activated one) and
-        // opens it as a background tab (_RemoteLaunch). Both detach in ~TerminalPage (Rule #10). Each item is
-        // contained (Rule #18): an exception escaping a dispatcher item ends the process.
+        // resume / fork / new-session request the engine aimed at THIS window (the most recently activated one), opens it
+        // as a background tab (_RemoteLaunch) and answers what came of it (MESSAGING.md §21.23). Both detach in
+        // ~TerminalPage (Rule #10). Each item is contained (Rule #18): an exception escaping a dispatcher item ends the
+        // process.
         {
             const auto weakThis = get_weak();
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
@@ -1527,20 +1528,34 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
             });
-            _windowLaunchToken = ::Agentmaster::RegisterWindowLaunchHandler(_windowId, [weakThis, dispatcher](const ::Agentmaster::RemoteLaunchRequest& req) {
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, req]() {
-                    if (auto self = weakThis.get())
-                    {
-                        try
+            // MESSAGING.md §21.23: ANSWERED. The work item carries the engine's reply and calls it with _RemoteLaunch's answer —
+            // or with WindowClosed when the page is gone by the time the item runs. An item the dispatcher drops unrun (a window
+            // closing) takes the reply's copy with it, and the engine answers WindowClosed for it (LaunchAnswer). A dispatcher
+            // that refuses the item answers FALSE here, never through the reply: the engine then asks the next window.
+            _windowLaunchToken = ::Agentmaster::RegisterWindowLaunchHandler(_windowId, [weakThis, dispatcher](const ::Agentmaster::RemoteLaunchRequest& req, ::Agentmaster::RemoteLaunchReply reply) -> bool {
+                try
+                {
+                    dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, req, reply]() {
+                        ::Agentmaster::RemoteLaunchOutcome outcome;
+                        outcome.result = ::Agentmaster::RemoteLaunchResult::WindowClosed; // the window closed between the hand-over and now
+                        if (auto self = weakThis.get())
                         {
-                            self->_RemoteLaunch(req);
+                            outcome = self->_RemoteLaunch(req); // noexcept: every failure comes back as an answer
                         }
-                        catch (...)
+                        if (reply)
                         {
-                            ::Agentmaster::AgentLogCaughtException(L"remote launch sink (_RemoteLaunch)");
+                            reply(outcome); // the engine's LaunchAnswer: delivered once, and it contains a throwing requester itself
                         }
-                    }
-                });
+                    });
+                    return true;
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: a dispatcher that refused the item (a window being torn down) — this window cannot take
+                    // the launch, and says so at once: the engine asks the next window instead of waiting for an answer.
+                    ::Agentmaster::AgentLogCaughtException(L"remote launch sink: RunAsync");
+                    return false;
+                }
             });
         }
 
