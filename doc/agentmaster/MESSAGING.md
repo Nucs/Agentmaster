@@ -115,7 +115,8 @@ configurable, backfill, the activity draft → P4 the Search agent and revive �
 
 - **N1** Codex and any non-Claude agent (D23); sessions that are not in a tab.
 - **N2** Sharing the fleet with other people (one owner per connection).
-- **N3** Mirroring the terminal's pixels; `/screen` sends its text.
+- **N3** Mirroring the terminal's pixels; `/screen` sends its text. *(§21.24: 🖼 Screen Image draws ONE still picture of the
+  screen from its cells, on request — not a mirror.)*
 - **N4** Any always-on helper or cloud service: the bot runs in Agentmaster (D1).
 - **N5** Voice and files from the phone into a session (later, §7.6).
 
@@ -530,6 +531,12 @@ Runner Paused · queue 2 — next: "also update the docs"
 As built (§21.18): the runner line is left out while it is the common default — an Auto runner, nothing
 queued, no global pause; a Paused runner, the global pause or a queued prompt brings it back as above.
 
+As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, every card's default: the state's own action
+first ([🔧 Resume Session] in Error, [▶ Reactivate] for a parked tab or a claude that exited), then [⚙️ Session] [⑂ Fork] ·
+[🆕 New Session] [🔄 Restart Session]. **⚙️ Session** turns the keyboard into the Session page: the same first row,
+[⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] ·
+[◀ Back]. **More ▸** stays the `/commands` (§21.2).
+
 ### 6.2 What it is doing, or whether it is idle
 
 - **The card's state line** — the state, since when, and while Running the current step ("Bash: npm
@@ -747,6 +754,7 @@ PC — the overlay's mail button), `/screen` (the visible terminal text, redacte
 `$.turn.abort` in a linked session, one Esc through the hosting window otherwise), `/help`. Telegram's "/"
 menu (`setMyCommands`, one list for the whole chat) lists these. As built (§21.19), in every topic: `/search
 <words>` (a search sent to 🔎 Search) and `/search-tab` / `/search_tab` (Search goes first in the thread list).
+As built (§21.24): `/screenimage` (the screen as a picture — the card's 🖼 Screen Image).
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -1190,6 +1198,8 @@ transport's failures and slow calls.
   clear is a UI-thread action a later build routes through the hosting window.
 - **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
   is the `/commands`. *(§21.5 added ▶ Reactivate, the first row while the session is parked, in Error or exited.)*
+  *(§21.24 put them on two pages — Main: ⚙️ Session, ⑂ Fork, 🆕 New Session, 🔄 Restart Session; Session: the five,
+  🖼 Screen Image and ◀ Back — and names the first row 🔧 Resume Session for a session in Error.)*
 - **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
   it; the user pins it). Its answers carry one pick button per listed session and ⊘ Clear; a pick opens the
   session's action menu — [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel], no fork-and-pin (§5.4, §21.7); a
@@ -3459,6 +3469,126 @@ scheduler's timing test "woken tab: the queue resumes by itself…", which passe
    up." — the fork, not the source (hooks.log `[msg] launch token=… the window opened <fork>`, then `revive done <fork>`).
 3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
 4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
+
+### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; NOT BUILT yet)
+
+> The user's request (2026-10-18): "The buttons in a topic's bottom pinned status message (with title and status which keeps
+> getting updated), we need to refactor the buttons a bit. — Have a button "<cog>Session" that then changes the buttons of the
+> bottom pinned status message to have all the current buttons. — Add a Screen Text (which is current) and Screen Image which
+> takes renders the text into TUI like AM/WT renders. — Add "<fork>Fork" and "<new>New Session" and "<reload>Restart Session"
+> and in-case of error "<wrench>Resume Session"."
+
+**The two pages** (`MessagingModels.h`: `CardPage`, `CardButtonFacts` / `CardButtonFactsFor`, `BuildCardButtonRows`; the
+service's `_cardMarkupFor`). Two buttons a row at most, so a phone shows every label whole:
+
+| Page | Rows |
+|---|---|
+| **Main** (every card's default) | [🔧 Resume Session] for a session in Error, else [▶ Reactivate] for a parked tab or a claude that exited (no first row for a running or waiting session) · [⚙️ Session] [⑂ Fork] · [🆕 New Session] [🔄 Restart Session] |
+| **Session** (after ⚙️ Session) | the same first row · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] · [◀ Back] |
+
+A button's data stays `c:<verb>:<session id>`, with no token: the verb acts on the session's state when it is tapped (M5 is
+about answers and queue items). New verbs: `panel` (⚙️ Session), `main` (◀ Back), `fork`, `newsession`, `restart`, `resume`,
+`screenimg`; the longest (`c:newsession:`, `c:reactivate:`, `c:transcript:`) with a 36-character id is 49 bytes of the 64.
+The old verbs stay understood, so a card posted before this build keeps working until its next edit gives it the new keyboard.
+
+**What each button does.**
+- **⚙️ Session / ◀ Back** flip the keyboard of the message they sit on; nothing is posted. On the topic's sticky card the page
+  is remembered (`CardState::page`, in memory): the next edit and re-post keep it, and the edit goes at an answer's priority
+  (`SendPriority::Final`, the `tapped` flag of `_refreshCard`), so the keyboard flips at once behind a busy outbox. A card that
+  starts to RING (the session exited, errs or needs approval — a state change, so once per episode) goes back to Main, where
+  the state's own action is; a page opened after that is kept. On a copy of the card (a `/status` reply) only that message's
+  buttons change (`editMessageReplyMarkup`). After a restart every card shows Main.
+- **⑂ Fork / 🆕 New Session** are the topic's `/forksession` and `/newsession` with no model, through the very same code
+  (`_launchFromCard` → `_runSessionCommand`): the thread gets the commands' own lines ("Forking into a tab…", then "Opened
+  <the fork's title> — its topic is coming up.", §21.23), and the toast only says it was asked ("⑂ Forking it into a new
+  tab…", "🆕 Opening a new session in its folder…").
+- **🔄 Restart Session** is `/restartsession` (`_restartFromCard`): a session at rest is restarted at once — the same
+  conversation resumes in its tab, toast "🔄 Restarting it — the same conversation resumes in its tab." While a turn RUNS, the
+  command's question with its [Restart now] [Cancel] goes into the thread (the turn would be cut off) and the toast points at
+  it. A closed session's toast says so.
+- **🔧 Resume Session** is ▶ Reactivate under the user's name for a session in Error (`_reactivate`: a parked tab is started
+  in place, a claude that is up is restarted); its outcome is the toast. The card's line reads "🔧 Resume Session restarts it
+  (the same conversation goes on)", or "… starts it in its tab (a cut-off turn goes on by itself)" for a parked tab in Error:
+  `BuildCardText` reads Error FIRST now, so a tab restored after a crash with its turn cut off names the action it needs, not
+  a bare "not running".
+- **🖥 Screen Text** is the old 🖥 Screen (`/screen`, the visible text) under the user's name.
+- **🖼 Screen Image** (also `/screenimage`, in the "/" menu and the help) sends the terminal's screen as a PICTURE: toast
+  "🖼 Drawing the screen…", then the photo in the topic.
+
+**The screen as a picture.**
+1. **The read** (the hosting window, on its UI thread): `sessionAction "screen-snapshot"` →
+   `TerminalPage::_ReadScreenSnapshotForSession` → `TermControl::ReadScreenSnapshot` → `ControlCore::ReadScreenSnapshot`
+   (new in `ControlCore.idl` and `TermControl.idl`, beside `ReadPendingInputDraft`). Under the terminal's read lock it walks
+   the ACTIVE buffer's mutable viewport — the live screen, main or alternate (Claude Code's fullscreen renderer lives in the
+   alternate one), never a view the user scrolled back to — and takes each cell's glyph, its width (a wide glyph covers two
+   columns), its colors as `RenderSettings::GetAttributeColors` resolves them for the renderer (the color table,
+   bright-for-intense, faint, reverse video, invisible text, a reversed screen), bold by the renderer's IntenseIsBold rule,
+   italic, underline and strikethrough; plus the screen's default colors and the control's font family. A dormant tab, a tab
+   in another window or an uninitialized control answers "" and the thread is told the screen could not be read.
+2. **The format** (`AgentMaster/ScreenSnapshot.h`, pure): a header `AMSS1 <cols> <rows> <fg> <bg> <font>`, a style table,
+   then one line per row of `<style>,<width>,<length>:<text>` cells, trailing blank cells left out. Bounded (1,000 × 500
+   cells, 64 code units a cell, 8 M characters); the reader refuses anything malformed rather than guess.
+3. **The drawing** (`AgentMaster/ScreenImage.{h,cpp}`, on a worker thread of its own, never a UI thread): Direct2D on a WIC
+   bitmap, DirectWrite for the text, a PNG through WIC. The grid is whole pixels: the cell width is the image budget
+   (2,400 px) over the columns, 8–16 px; the font is sized so its advance is exactly one cell; the cell height is the font's
+   line height; 16 px of padding in the screen's background. Each row paints its backgrounds as merged runs, then every
+   glyph at its cell (grayscale antialiasing; color emoji), box-drawing and block characters (U+2500–U+259F) STRETCHED to fill
+   the cell so frames join like the terminal's own glyphs, then underline and strikethrough. The font is the snapshot's family
+   when the system has it, else Cascadia Mono, Cascadia Code, Consolas, Lucida Console, Courier New. Measured (2026-10-18, a
+   scratch benchmark on the owner's PC; optimized and Debug builds alike, the first call of a process the slowest): a 200 × 60
+   screen → 2,232 × 1,352 px, ~0.5 MB of PNG, 88–137 ms; 300 × 80 → 2,432 × 1,312 px, 113–183 ms. The snapshot's text round
+   trip took 0.3–0.6 ms optimized (6–25 ms in a Debug build).
+4. **The send**: `sendPhoto` (multipart, the field `photo`, `image/png`; `TelegramApi::SendPhoto`, which shares `_upload` with
+   `SendDocument`), silent, at the answers' priority, captioned "🖼 <title> · <clock> · <cols>×<rows>", the file
+   `screen-<title>.png`. Telegram refuses a photo past its limits (10 MB; width + height at most 10,000 px; one side at most
+   20 × the other — a very wide terminal can pass them): a 400 that is not a deleted topic sends the same bytes again as a
+   document (`_sendPhoto`'s fallback; a transport failure or a 429 stays the send loop's, so a picture is never sent twice).
+- **Bounds:** at most 2 pictures drawn at once (`kScreenImageMaxRenders`; past it the thread is told to ask again); a second
+  request for one session within 3 s asks nothing new (`kScreenImageTapGapMs`: a double tap must not draw and send two photos
+  on the chat's budget); a session with no tab is refused at once.
+- **Logs:** `[msg] screen picture of <sid8>: <w>x<h> px, <n> KB, <font>, drawn in <t> ms` (or why it failed, or the
+  photo-refused fallback), `[nav] remote telegram /screenimage <sid8> -> ok|repeated|refused:no-tab`, `[nav] remote telegram
+  card-page <sid8> session|main`, `[nav] remote telegram restart (card) <sid8> -> …`.
+
+**Not changed, still open.**
+- Like the text `/screen` sends, the picture is NOT redacted: the §9.6 redactor is not built. When it is, it must run over the
+  snapshot's rows before the drawing — a picture cannot be redacted afterwards.
+- The page lives in memory: after a restart every card shows Main, and a `/status` copy's page is not remembered at all.
+- ⑂ Fork and 🆕 New Session take no model (the typed `/forksession <model>` does).
+- The picture keeps the terminal's colors and font family, not its pixel size, background image or acrylic; a cell holding
+  several code points (a combining mark, an emoji with a modifier) is drawn as one string in its cell.
+
+**Tests.** `tests_messaging_card.cpp` → `TestMessagingCard` (the m5 suite): both pages' rows and labels per state (Error
+first, Reactivate, neither); every callback's data within 64 bytes and every row at two buttons; the card text's Error line
+(parked and started); the snapshot's round trip (wide glyphs, a surrogate pair, a combining mark, separators inside a cell,
+trailing blanks) and its refusals (a bad header, a bad style, a cell past the width, a truncated row, sizes out of range); the
+grid arithmetic and the stretched set; and a REAL drawing decoded back through WIC — its size, the padding and the trailing
+blanks in the background, a red cell's corner, a green blank cell, ink inside a glyph's cell, a blue full block filling its
+cell, a box rule joining across columns; an unknown font falls back; an empty snapshot is refused. `tests_messaging.cpp`'s
+Error-line check follows the new wording.
+
+**Checked** (2026-10-18, HEAD 8bab5e432 + this change only, in scratch folders; the shared tree held another session's
+work, committed meanwhile): the m5 suite 8,278 checks, the three known `TestTaskbarBadge` failures only (on earlier bases
+three first runs each also failed one scheduler timing check, a different one every time, which passed in every rerun);
+`cl /Zs` with the app's flags on a shadow tree of this change — `Messaging.cpp`, `Messaging.Inbound.cpp`,
+`TelegramApi.cpp`, `ScreenImage.cpp` (with `TelegramApi.cpp`'s command line) and the live `ControlCore.cpp` pass;
+`TerminalPage.AgentMessaging.cpp` and `TermControl.cpp` fail only on `ReadScreenSnapshot` missing from the generated
+projection, which the build regenerates from the changed `.idl` files; negative controls fail as they must. The picture was
+looked at: a Claude Code–like screen drawn by the scratch benchmark (colors, bold, italic, underline, strikethrough, color
+emoji, wide CJK, blocks, rules joined). NOT BUILT; nothing tried live.
+⚠ `ControlCore.idl` and `TermControl.idl` changed, and the messaging service gained data members: the next build must purge
+(the build-install skill's §5.8).
+
+**Check after the build** (dev, with the bot):
+1. A topic's card shows [⚙️ Session] [⑂ Fork] · [🆕 New Session] [🔄 Restart Session]; ⚙️ Session flips it at once to the
+   Session page and ◀ Back flips it back; a new message in the topic (the card re-posted below it) keeps the page.
+2. 🖼 Screen Image on a live session: "🖼 Drawing the screen…", then a photo of the screen in its colors (hooks.log `[msg]
+   screen picture of …`); on a parked tab: "The screen could not be read …". `/screenimage` typed: the same.
+3. ⑂ Fork: "Forking into a tab…", then "Opened <the fork's title> — its topic is coming up."; 🆕 New Session likewise, in the
+   session's folder.
+4. 🔄 Restart Session at rest: the toast, and the session resumes in its tab; while a turn runs: the question with
+   [Restart now] [Cancel].
+5. A session in Error (a cut-off turn): the card's first row is [🔧 Resume Session] and its line names it; the tap resumes it.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

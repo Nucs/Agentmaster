@@ -750,7 +750,8 @@ void TestMessaging()
         failed.live = true;
         failed.started = true;
         failed.state = SessionState::Error;
-        CHECK(BuildCardText(failed, 5000, 0, false).find(L"\x25B6 Reactivate restarts it") != std::wstring::npos, "a session in Error: the Reactivate line");
+        // §21.24: the Error line names the card's 🔧 Resume Session (the same action as Reactivate, under the user's name for it).
+        CHECK(BuildCardText(failed, 5000, 0, false).find(L"\U0001F527 Resume Session restarts it") != std::wstring::npos, "a session in Error: the Resume Session line");
         CHECK(TgStripTags(L"<b>a &lt;T&gt;</b> &amp; <code>b</code>") == L"a <T> & b", "TgStripTags drops the tags and unescapes the three entities");
         CHECK(ParseRemoteCommand(L"/reactivate").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/reactivate").name == L"reactivate", "/reactivate is an Agentmaster command");
     }

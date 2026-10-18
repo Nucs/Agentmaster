@@ -1995,6 +1995,11 @@ namespace winrt::TerminalApp::implementation
         // text — what the owner would see on the screen — with trailing blank lines dropped. "" when this window does
         // not host the session, the tab is dormant, or the read threw (logged). UI thread.
         std::wstring _ReadScreenTextForSession(const std::wstring& sessionId, size_t maxLines);
+        // Agentmaster (MESSAGING.md §21.24 — the Telegram card's 🖼 Screen Image): the session's live screen as a STYLED snapshot
+        // (ScreenSnapshot.h: every cell's glyph, width and resolved colors, from TermControl::ReadScreenSnapshot), for the bot to
+        // draw as a picture on a worker thread of its own. "" when this window does not host the session, the tab is dormant, or
+        // the read threw (logged, Rule #18). UI thread; one viewport under the terminal's read lock.
+        std::wstring _ReadScreenSnapshotForSession(const std::wstring& sessionId);
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         safe_void_coroutine _ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (the SINGLE folder-close confirm+close entry — Manager board/tree menu AND the WT tab-strip "Close ▸" submenu): show ONE confirm LISTING the tab titles, then _CloseClaudeSessionsInFolder. `excludeId` non-empty == "Other of Same Folder" (keep the clicked one open)
         void _CloseClaudeSessionsInFolder(winrt::hstring folder, winrt::hstring excludeId); // Agentmaster (board/tree "Close ▸ Of Same Folder" / "Other of Same Folder"): close every live managed session whose effective work dir == `folder`, SKIPPING `excludeId` when non-empty ("Other …" keeps the clicked one open) — local tabs directly (skip-confirm; _ConfirmAndClose… already showed the one confirm), remote ones fanned out via CloseSessionInOtherWindows

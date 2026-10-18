@@ -88,6 +88,20 @@ namespace Agentmaster::Msg
         TgResult SendDocument(const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs = 60000) noexcept;
 
         /// <summary>
+        /// Uploads a picture with `sendPhoto` (multipart/form-data, the field "photo"): the Telegram card's 🖼 Screen Image
+        /// (MESSAGING.md §21.24). The apps show a photo inline and zoomable, where a document is a file to tap open; Telegram
+        /// recompresses a photo, and refuses one past its photo limits (10 MB; width + height at most 10,000 pixels; one side
+        /// at most 20 times the other) with a 400 — the caller then sends the same bytes as a document. Blocks like Call.
+        /// </summary>
+        /// <param name="params">The other parameters (chat_id, message_thread_id, caption, disable_notification), each sent as its
+        /// own form field, as SendDocument.</param>
+        /// <param name="fileName">The file name in the form (UTF-8; keep it ASCII-safe).</param>
+        /// <param name="bytes">The picture's bytes (a PNG here).</param>
+        /// <param name="timeoutMs">The receive timeout.</param>
+        /// <returns>The answer, as Call. Never throws.</returns>
+        TgResult SendPhoto(const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs = 60000) noexcept;
+
+        /// <summary>
         /// Ends the request in flight, if any, from ANOTHER thread: the blocked call returns with a
         /// transport failure. The long poll (getUpdates with a 50 s timeout) is the one call that needs
         /// it: Stop() must not wait a minute. Safe to call with nothing in flight. Never throws.
@@ -102,6 +116,20 @@ namespace Agentmaster::Msg
 
     private:
         TgResult _request(std::wstring_view method, const std::string& body, const std::wstring& contentType, uint32_t timeoutMs) noexcept;
+        /// <summary>
+        /// The one multipart upload behind SendDocument and SendPhoto (§21.24 split it out of SendDocument): every parameter as
+        /// its own text field, then the file as the part named `field` with `fileContentType`, under a boundary no file can hold.
+        /// </summary>
+        /// <param name="method">The Bot API method ("sendDocument", "sendPhoto").</param>
+        /// <param name="field">The file's form field ("document", "photo").</param>
+        /// <param name="fileContentType">The file part's Content-Type ("application/octet-stream", "image/png").</param>
+        /// <param name="params">The other parameters (each a text field).</param>
+        /// <param name="fileName">The file name in the form (quotes, backslashes and line breaks become '_').</param>
+        /// <param name="bytes">The file's bytes.</param>
+        /// <param name="timeoutMs">The receive timeout.</param>
+        /// <returns>The answer, as Call. Never throws: a failure while building the body is logged (Rule #18) and returned as a
+        /// transport failure.</returns>
+        TgResult _upload(std::wstring_view method, std::string_view field, std::string_view fileContentType, const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept;
 
         std::wstring _token;
         std::mutex _mtx; // guards _inflight

@@ -27,6 +27,7 @@
 #include "SessionRegistry.h"
 #include "SessionStore.h" // favorites, tags
 #include "TranscriptTurns.h" // RenderTranscriptTurnsFile
+#include "ScreenImage.h" // §21.24: RenderScreenSnapshotPng + ParseScreenSnapshot (the card's 🖼 Screen Image)
 
 namespace Agentmaster::Msg
 {
@@ -163,6 +164,12 @@ namespace Agentmaster::Msg
         // or just sent, and the topic is first already; another would cost two more calls of the chat's flood budget (~20 a
         // minute) for nothing. Longer than a double tap and the tick's few seconds, short enough that a later tap still works.
         constexpr int64_t kFrontTapGapMs = 10 * 1000;
+        // §21.24: at most this many screen pictures are drawn at once (each one a worker thread and ~90 to ~185 ms of Direct2D
+        // drawing, measured for a 200 x 60 to 300 x 80 screen); a request past it is told to ask again.
+        constexpr int kScreenImageMaxRenders = 2;
+        // §21.24: a second picture of the same session within this window asks nothing new - a double tap must not draw and
+        // send two photos on the chat's ~20-calls-a-minute budget. Short enough that a deliberate "again" a few seconds later works.
+        constexpr int64_t kScreenImageTapGapMs = 3 * 1000;
     }
 
     // ===== updates ===========================================================================
@@ -985,7 +992,7 @@ namespace Agentmaster::Msg
                 }
             }
             json::Value markup;
-            _cardMarkupFor(sessionId, s->pinned, s->autorunner.mode, markup, SessionIsReactivatable(*s));
+            _cardMarkupFor(sessionId, CardButtonFactsFor(*s), CardPage::Main, markup); // §21.24: a copy starts on Main and flips by itself
             CardExtras extras;
             extras.colorSquare = _titleSquare(&*s); // §21.13: the title with the tab's color, as the tab shows it now
             extras.threadId = _threadOf(sessionId); // §21.17: the title links to the session's topic
@@ -1361,6 +1368,44 @@ namespace Agentmaster::Msg
                         }
                         me->_reply(threadId, L"<pre>" + TgEscapeHtml(text) + L"</pre>", false);
                     }
+                }
+            });
+            done(L"ok");
+            return;
+        }
+        if (name == L"screenimage")
+        {
+            // §21.24: the terminal's screen as a PICTURE - the hosting window reads the live screen with its colors (a snapshot),
+            // and _startScreenImage draws it off the UI thread and sends it as a photo.
+            if (!_hooks.sessionAction)
+            {
+                _reply(threadId, L"Not available here.", false);
+                return;
+            }
+            if (!s->live || s->tabToken.empty())
+            {
+                // No window hosts it, so no window would answer: say so now instead of leaving the request unanswered.
+                _reply(threadId, L"This session is not open in a tab, so it has no screen to show.", false);
+                done(L"refused:no-tab");
+                return;
+            }
+            {
+                std::lock_guard lk{ _mtx };
+                const int64_t now = WallMs();
+                auto& last = _screenImageTapMs[sessionId];
+                if (last > 0 && now - last < kScreenImageTapGapMs)
+                {
+                    done(L"repeated"); // the first request's picture is on its way
+                    return;
+                }
+                last = now;
+            }
+            auto self = weak_from_this();
+            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, threadId](std::wstring snapshot) {
+                // The hosting window's UI thread: _startScreenImage only hands the drawing to a worker thread.
+                if (auto me = self.lock())
+                {
+                    me->_startScreenImage(sessionId, threadId, std::move(snapshot));
                 }
             });
             done(L"ok");
@@ -2165,10 +2210,39 @@ namespace Agentmaster::Msg
             {
                 cmd.name = verb;
             }
-            else if (verb == L"reactivate")
+            else if (verb == L"reactivate" || verb == kCardVerbResume)
             {
                 // The outcome as the button's toast: nothing is posted in the thread, which is the conversation (§21.6).
+                // §21.24: 🔧 Resume Session is ▶ Reactivate's name for a session in Error - the same action.
                 answer(_reactivate(sid));
+                return;
+            }
+            else if (verb == kCardVerbSessionPage || verb == kCardVerbMainPage)
+            {
+                // §21.24: ⚙ Session / ◀ Back flip the keyboard of the message the button sits on; nothing is posted.
+                answer(L"");
+                _showCardPage(sid, messageId, verb == kCardVerbSessionPage ? CardPage::Session : CardPage::Main);
+                return;
+            }
+            else if (verb == kCardVerbFork || verb == kCardVerbNewSession)
+            {
+                // §21.24: ⑂ Fork / 🆕 New Session - the outcome as the toast; the new topic appearing is the rest of the answer.
+                answer(_launchFromCard(sid, verb == kCardVerbFork, threadId));
+                return;
+            }
+            else if (verb == kCardVerbRestart)
+            {
+                // §21.24: 🔄 Restart Session - a toast at rest; while a turn runs, a question in the thread (the turn would be cut off).
+                answer(_restartFromCard(sid, threadId));
+                return;
+            }
+            else if (verb == kCardVerbScreenImage)
+            {
+                // §21.24: 🖼 Screen Image - the picture takes a moment to draw, so the toast says it is coming; the photo itself
+                // lands in the topic (or a line saying why it cannot).
+                answer(L"\U0001F5BC Drawing the screen\x2026");
+                cmd.name = L"screenimage";
+                _runSessionCommand(sid, cmd, fake, threadId);
                 return;
             }
             else
@@ -2504,6 +2578,177 @@ namespace Agentmaster::Msg
             }
         }
         LogNav(L"remote telegram launch " + std::wstring{ what } + L" " + ShortId(req.sessionId) + L" dir=" + req.dir + (req.pin ? L" (pin)" : L"") + L" token=" + std::to_wstring(token));
+    }
+
+    std::wstring MessagingService::_launchFromCard(const std::wstring& sessionId, bool fork, int64_t threadId)
+    {
+        // The topic's /forksession and /newsession with no model (a button carries none): the very same request through the
+        // very same path, so the button and the typed command can never behave differently - the thread gets the command's
+        // own replies (how the launch goes, and "Opened …" once the new session is live). The toast only says it was asked.
+        RemoteCommand cmd;
+        cmd.kind = RemoteKind::AgentmasterCommand;
+        cmd.name = fork ? L"forksession" : L"newsession";
+        _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
+        return fork ? L"\x2442 Forking it into a new tab\x2026" : L"\U0001F195 Opening a new session in its folder\x2026";
+    }
+
+    std::wstring MessagingService::_restartFromCard(const std::wstring& sessionId, int64_t threadId)
+    {
+        const auto s = _registry->Get(sessionId);
+        if (!s || !s->live)
+        {
+            LogNav(L"remote telegram restart (card) " + ShortId(sessionId) + L" -> closed");
+            return L"This session is closed. Resume it from the \U0001F50E Search topic.";
+        }
+        if (s->state == SessionState::Running)
+        {
+            // A turn would be cut off: the question /restartsession asks, with its two single-use buttons, goes in the thread.
+            RemoteCommand cmd;
+            cmd.kind = RemoteKind::AgentmasterCommand;
+            cmd.name = L"restartsession";
+            _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
+            return L"A turn is running \x2014 confirm the restart below.";
+        }
+        if (!_hooks.restartSession)
+        {
+            return L"Restarting is not available in this build.";
+        }
+        try
+        {
+            _hooks.restartSession(sessionId);
+        }
+        catch (...)
+        {
+            // Rule #18: logged with its throw site; the toast says it did not go through.
+            LogSwallowedException(L"MessagingService::_restartFromCard");
+            return L"The restart could not be asked for (hooks.log says why).";
+        }
+        LogNav(L"remote telegram restart (card) " + ShortId(sessionId) + L" -> restart");
+        return L"\U0001F504 Restarting it \x2014 the same conversation resumes in its tab.";
+    }
+
+    void MessagingService::_showCardPage(const std::wstring& sessionId, int64_t messageId, CardPage page)
+    {
+        // The topic whose STICKY card the button sits on, found by the message: after a /clear or /resume in the tab the
+        // card belongs to the tab's next session (a Rekey), whatever session the button's data names.
+        std::wstring cardOwner;
+        {
+            std::lock_guard lk{ _mtx };
+            if (messageId > 0)
+            {
+                for (const auto& [sid, t] : _state.topics)
+                {
+                    if (t.cardMessageId == messageId)
+                    {
+                        cardOwner = sid;
+                        _cards[sid].page = page; // remembered: a re-post of the card keeps the page
+                        break;
+                    }
+                }
+            }
+        }
+        LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) + (page == CardPage::Session ? L" session" : L" main") +
+               (cardOwner.empty() ? L" (a copy of the card)" : L""));
+        if (!cardOwner.empty())
+        {
+            // The card's hash covers its buttons, so the new page is an edit (or a re-post, when the card was due for one) -
+            // at an answer's priority, so the keyboard flips at once.
+            _refreshCard(cardOwner, true, false, true);
+            return;
+        }
+        // A copy of the card (a /status reply): only its buttons change, in place. Never the sticky card itself - its recorded
+        // hash would then not match what it shows, and its next refresh would skip an edit it needs.
+        const auto s = _registry->Get(sessionId);
+        if (!s || messageId <= 0)
+        {
+            return;
+        }
+        json::Value markup;
+        _cardMarkupFor(sessionId, CardButtonFactsFor(*s), page, markup);
+        OutItem item;
+        item.prio = SendPriority::Final;
+        item.method = L"editMessageReplyMarkup";
+        item.key = L"kb:" + std::to_wstring(messageId); // a quick second tap replaces a first one that is still queued
+        item.params = json::Value::MkObj();
+        item.params.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
+        item.params.Set(L"message_id", json::Value::MkNum(static_cast<double>(messageId)));
+        item.params.Set(L"reply_markup", std::move(markup));
+        _enqueue(std::move(item));
+    }
+
+    void MessagingService::_startScreenImage(const std::wstring& sessionId, int64_t threadId, std::wstring snapshot)
+    {
+        // The hosting window's UI thread: nothing here may block it. The drawing runs on a worker thread of its own.
+        if (snapshot.empty())
+        {
+            _reply(threadId, L"The screen could not be read (the tab is dormant, or in another window that is not up).", false);
+            LogNav(L"remote telegram screenimage " + ShortId(sessionId) + L" -> unreadable");
+            return;
+        }
+        if (_screenImageRenders.fetch_add(1) >= kScreenImageMaxRenders)
+        {
+            _screenImageRenders.fetch_sub(1);
+            _reply(threadId, L"Other screen pictures are being drawn right now; ask again in a moment.", false);
+            return;
+        }
+        std::wstring title;
+        // The title only (the caption, the file's name), so the lean read: this runs on the hosting window's UI thread.
+        if (const auto s = _registry->GetWithoutQueue(sessionId))
+        {
+            title = s->title;
+        }
+        try
+        {
+            std::thread([self = weak_from_this(), sessionId, threadId, text = std::move(snapshot), title]() noexcept {
+                const auto me = self.lock();
+                if (!me)
+                {
+                    return; // the service is gone (an app quit): nothing to send to
+                }
+                try
+                {
+                    const int64_t startedMs = static_cast<int64_t>(::GetTickCount64());
+                    const auto parsed = ParseScreenSnapshot(text);
+                    if (!parsed)
+                    {
+                        me->_reply(threadId, L"The screen could not be read (its snapshot was not understood).", false);
+                        me->_log(L"[msg] screen picture of " + ShortId(sessionId) + L": the snapshot did not parse (" + std::to_wstring(text.size()) + L" chars)");
+                    }
+                    else
+                    {
+                        const ScreenImage image = RenderScreenSnapshotPng(*parsed);
+                        if (image.png.empty())
+                        {
+                            me->_reply(threadId, L"The screen could not be drawn: " + TgEscapeHtml(image.error), false);
+                            me->_log(L"[msg] screen picture of " + ShortId(sessionId) + L" failed: " + image.error);
+                        }
+                        else
+                        {
+                            const int64_t now = WallMs();
+                            const std::wstring caption = L"\U0001F5BC " + (TgTitleLine(title, 120).empty() ? ShortId(sessionId) : TgTitleLine(title, 120)) + L" \x00B7 " +
+                                                         TgClockText(now, now) + L" \x00B7 " + std::to_wstring(parsed->cols) + L"\x00D7" + std::to_wstring(parsed->rows);
+                            me->_log(L"[msg] screen picture of " + ShortId(sessionId) + L": " + std::to_wstring(image.grid.widthPx) + L"x" + std::to_wstring(image.grid.heightPx) +
+                                     L" px, " + std::to_wstring(image.png.size() / 1024) + L" KB, " + image.fontFamily + L", drawn in " +
+                                     std::to_wstring(static_cast<int64_t>(::GetTickCount64()) - startedMs) + L" ms");
+                            me->_sendPhoto(threadId, L"screen-" + SafeFileStem(title) + L".png", image.png, caption, SendPriority::Final);
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18: an exception escaping a std::thread would end the process.
+                    LogSwallowedException(L"MessagingService::_startScreenImage (worker)");
+                }
+                me->_screenImageRenders.fetch_sub(1);
+            }).detach();
+        }
+        catch (...)
+        {
+            // The thread could not start (std::system_error): nothing is drawing, so the count goes back.
+            _screenImageRenders.fetch_sub(1);
+            LogSwallowedException(L"MessagingService::_startScreenImage");
+            _reply(threadId, L"The picture could not be started (hooks.log says why).", false);
+        }
     }
 
     void MessagingService::_sweepRevives(const SessionInfo& s)
@@ -3488,7 +3733,7 @@ namespace Agentmaster::Msg
         {
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
                    L"/queue \x00B7 /sendnow \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
-                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
                    L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";

@@ -15,6 +15,7 @@
 #include "EventArgs.h"
 #include "../TerminalApp/AgentMaster/PromptAnchor.h" // Agentmaster (SUMMARY_JUMP.md): pure header-only jump resolver
 #include "../TerminalApp/AgentMaster/PendingInput.h" // Agentmaster (PENDING_INPUT.md): pure header-only unsent-draft detector
+#include "../TerminalApp/AgentMaster/ScreenSnapshot.h" // Agentmaster (MESSAGING.md section 21.24): the styled screen snapshot's format
 #include "../../renderer/atlas/AtlasEngine.h"
 #include "../../renderer/base/renderer.hpp"
 #include "../../renderer/uia/UiaRenderer.hpp"
@@ -2833,6 +2834,79 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 conpty.ClearBuffer(true);
             }
         }
+    }
+
+    // Agentmaster (MESSAGING.md section 21.24 - the Telegram card's Screen Image): the live screen as a styled snapshot (see
+    // ControlCore.h). It is the MUTABLE viewport of the ACTIVE buffer - the rows the application draws, main or alternate
+    // (Claude Code's fullscreen renderer lives in the alternate one, PENDING_INPUT.md section 12) - never the scrolled-back view
+    // the user may be reading at the PC: a remote "show me the screen" means the live screen. Colors go through
+    // RenderSettings::GetAttributeColors, the very resolution the renderer paints with, so the picture keeps the terminal's
+    // color scheme, its reverse video and faint text; bold follows the renderer's own IntenseIsBold rule (AtlasEngine).
+    winrt::hstring ControlCore::ReadScreenSnapshot()
+    {
+        // The same guard as ReadPendingInputDraft: a restored-but-never-shown tab has a ControlCore whose TextBuffer is not
+        // created yet (Initialize waits for the first non-zero layout), and reading it would AV. No buffer => no screen.
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return {};
+        }
+        const auto lock = _terminal->LockForReading();
+        const auto state = _terminal->GetBufferAndViewport(); // the active buffer + its mutable viewport (exclusive right/bottom)
+        const auto& buffer = state.buffer;
+        const auto& renderSettings = _terminal->GetRenderSettings();
+        const bool intenseIsBold = renderSettings.GetRenderMode(::Microsoft::Console::Render::RenderSettings::Mode::IntenseIsBold);
+        const auto toRgb = [](COLORREF c) noexcept {
+            return (static_cast<uint32_t>(GetRValue(c)) << 16) | (static_cast<uint32_t>(GetGValue(c)) << 8) | static_cast<uint32_t>(GetBValue(c));
+        };
+
+        ::Agentmaster::ScreenSnapshot snapshot;
+        // Bounded like the format (ScreenSnapshot.h): a real screen is far inside both limits; the clamp only keeps a damaged
+        // size from producing a snapshot the reader would refuse.
+        snapshot.cols = std::clamp(static_cast<int>(state.viewport.width()), 0, ::Agentmaster::kScreenSnapshotMaxCols);
+        snapshot.rows = std::clamp(static_cast<int>(state.viewport.height()), 0, ::Agentmaster::kScreenSnapshotMaxRows);
+        // The screen's own colors through the same resolution as a cell's (a default attribute), so a reversed screen (DECSCNM)
+        // fills the picture with what the terminal fills its background with.
+        const auto [defaultFg, defaultBg] = renderSettings.GetAttributeColors(TextAttribute{});
+        snapshot.defaultFg = toRgb(defaultFg);
+        snapshot.defaultBg = toRgb(defaultBg);
+        snapshot.fontFace = _actualFont.GetFaceName();
+        snapshot.lines.resize(static_cast<size_t>(snapshot.rows));
+        const auto right = std::min<til::CoordType>(state.viewport.left + snapshot.cols, buffer.GetSize().Width());
+        for (til::CoordType y = 0; y < snapshot.rows; ++y)
+        {
+            const auto& row = buffer.GetRowByOffset(state.viewport.top + y);
+            auto& line = snapshot.lines[static_cast<size_t>(y)];
+            line.reserve(static_cast<size_t>(snapshot.cols));
+            for (til::CoordType x = state.viewport.left; x < right;)
+            {
+                const auto dbcs = row.DbcsAttrAt(x);
+                const auto attr = row.GetAttrByColumn(x);
+                const auto [fg, bg] = renderSettings.GetAttributeColors(attr);
+                ::Agentmaster::ScreenCell cell;
+                cell.fg = toRgb(fg);
+                cell.bg = toRgb(bg);
+                cell.flags = static_cast<uint8_t>((attr.IsBold(intenseIsBold) ? ::Agentmaster::kScreenCellBold : 0) |
+                                                  (attr.IsItalic() ? ::Agentmaster::kScreenCellItalic : 0) |
+                                                  (attr.IsUnderlined() ? ::Agentmaster::kScreenCellUnderline : 0) |
+                                                  (attr.IsCrossedOut() ? ::Agentmaster::kScreenCellStrikethrough : 0));
+                if (dbcs == DbcsAttribute::Trailing)
+                {
+                    // The right half of a wide glyph whose left half is off the viewport's left edge: a blank in its colors.
+                    cell.text = L" ";
+                    cell.width = 1;
+                }
+                else
+                {
+                    cell.text = row.GlyphAt(x);
+                    // A wide glyph covers its next column too - unless that column is past the screen's edge (it then draws
+                    // as one column rather than past the picture's right side).
+                    cell.width = (dbcs == DbcsAttribute::Leading && x + 1 < right) ? 2 : 1;
+                }
+                x += cell.width;
+                line.push_back(std::move(cell));
+            }
+        }
+        return winrt::hstring{ ::Agentmaster::SerializeScreenSnapshot(snapshot) };
     }
 
     hstring ControlCore::ReadEntireBuffer() const

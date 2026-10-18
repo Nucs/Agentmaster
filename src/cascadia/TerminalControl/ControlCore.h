@@ -306,6 +306,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of
         // the buffer (read-only). Empty => no pending draft.
         winrt::hstring ReadPendingInputDraft();
+        // Agentmaster (MESSAGING.md section 21.24 - the Telegram card's Screen Image): the LIVE screen as a STYLED snapshot in
+        // ScreenSnapshot.h's text format - the active buffer's mutable viewport (main or alternate; never the scrolled-back view
+        // the user may be reading), each cell's glyph and width, its colors resolved by RenderSettings::GetAttributeColors (the
+        // color table, bright-for-intense, faint, reverse video, invisible), and bold / italic / underline / strikethrough as
+        // flags; the font family is the control's own. "" when the terminal is not initialized (a never-shown restored tab has
+        // no buffer). UI thread; one pass over the viewport's cells under the terminal's read lock (its cost is not measured).
+        winrt::hstring ReadScreenSnapshot();
         // Agentmaster (DELIVERY_PLAN.md R5 — the tri-state box read): the InputBoxState verdict of the
         // SAME cached 120-row scan ReadPendingInputDraft uses (Unknown/NoBox/Empty/Draft/MenuOpen as
         // int32 — "" is ambiguous, the verdict is not). Unknown when the terminal isn't initialized.
