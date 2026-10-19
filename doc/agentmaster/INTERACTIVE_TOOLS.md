@@ -62,6 +62,11 @@
   the user's own answer and the note through a ForceReply prompt, several questions on one card, the previews inline and as
   a picture on demand, "Chat about this" — answering exactly as the PC answers (proven live, §10.4); and S0 (the notes in
   every answer line).
+- **Extended the same evening** (§10.6, NOT BUILT; the user's "This session has multi-tab multi-question, do we support to that
+  degree? we need to and more than that. Scan for other cases …"): several questions are TABS with the PC's review, a
+  multi-select answer keeps the tick order, ✖️ Cancel (the PC's Esc, confirmed first), 💬 a reply instead of answering
+  (Claude Code's `response`), the idle timeout shown as such, long content shortened instead of dropped — checked on every
+  real call of this machine (1,065 calls replayed through the card; 937 real answers rebuilt byte for byte) and live (H5–H7).
 
 ## 1. AskUserQuestion with previews and notes (Claude Code 2.1.291)
 
@@ -177,6 +182,33 @@ So "2, n, the note, Enter" picks option 2 with the note (case 1), and "n, the no
 
   Unanswered questions are allowed.
 - **A one-question call has no review:** a pick sends at once.
+- **The details, read in the bundle (2026-10-19 evening; the code is `QS` / `A5` / `W5` / `K5` and the reducer `hoo`, around
+  byte 237,350,000 of 2.1.291's claude.exe):**
+  - The tab row is `← ☐ header … ✔ Submit →`: each tab wears `checkboxOn` / `checkboxOff` by whether its question has an
+    answer; the shown tab takes the "permission" color; names are cut to share the terminal's width (the shown one gets
+    more). The Submit tab is hidden only for ONE single-select question (`hideSubmitTab = n === 1 && !multiSelect`), so a
+    lone multi-select question has a review too.
+  - The state is one reducer (`hoo`): `next-question` +1, `prev-question` −1 (never below 0), `set-answer` stores the answer
+    under the question TEXT and, with `shouldAdvance`, moves to the NEXT tab — not the next unanswered one — so the review
+    (index n) comes after the last question. ←/→ and Tab move between tabs.
+  - A single-select pick answers with `shouldAdvance`; a multi-select question stores its array (`Tct`-joined) without
+    moving, and its own button reads "Next" — "Submit" on the last question. "Chat about this" is offered on single-select
+    questions only.
+  - The review's [Cancel] calls the same `deny` as Esc: the turn ends ("STOP what you are doing and wait for the user …").
+    [Submit answers] composes `nJ` with whatever is answered.
+  - **The multi-select answer keeps the TICK order**, not the options' order: 19 of the 94 real multi-select answers here
+    list their labels out of the options' order. A user's own text is always last and, like a label, quoted when it holds
+    ", " or a double quote — `Tct`, in the corpus from 2.1.259 on (older versions joined without quoting).
+  - **An AFK timer** (`khe`, `CLAUDE_AFK_TIMEOUT_MS` or a server value) can resolve the dialog with the answers so far
+    (`afkTimeoutMs` in the result; "No response after 60s — the user may be away from keyboard…"). It is off only when the
+    dialog has an "external racer" — Remote Control's bridge or channel callbacks, not a hook. It fired 3 times here (60 s on
+    2.1.199, 86,400 s on 2.1.225).
+  - **Claude Code's remote cards** (claude.ai, `admitCardAnswer`) may also send `response` — "freeform text the user typed
+    instead of selecting a structured option": the model then reads only "The user responded: <text>" — and, in the
+    EXTENDED schema, `followUp` (another round of questions). The extended schema (`kind` "text" / "number", `title`, a
+    question's `description`, `min` / `max` / `unit` …) is a host launch option (`extendedQuestionsEnabled`, set by SDK and
+    remote hosts), not used by a CLI session (0 of 1,616 questions here). The schema also refuses repeated question texts
+    and repeated labels within a question (`P.check`), so answers keyed by text never collide.
 
 ### 1.6 What the PC sends (`nJ`)
 
@@ -827,3 +859,70 @@ The live run of the table above was repeated with the request-first helper (17:1
 - **On every Claude Code upgrade** that touches hooks or `AskUserQuestion`, re-run `run_probe.py` (the seven scenarios)
   and `askprobe.py` (the four of the shipped hook). If `V_r` ever drops the tool, the hook's `allow` is ignored, the dialog
   stays with the PC, and the card ends as "Answered at the PC".
+
+### 10.6 Several questions as tabs, and the rest of the corpus (2026-10-19 evening; NOT BUILT yet)
+
+> The user's request: "This session has multi-tab multi-question, do we support to that degree? we need to and more than
+> that. Scan for other cases based on the tool name on global .claude". The session was NumSharp's `char plan (fork)` in
+> production, sitting on four tabs with 200–300-character descriptions; production has no question card yet, so it could
+> only be answered at the PC. The topic's side is MESSAGING.md §21.30's evening block.
+
+**The census** (`ask_census.py`, every `AskUserQuestion` tool_use under `~/.claude/projects`, subagent files included,
+deduplicated by tool_use id; `--real-only` leaves out the probes' sessions): 1,065 calls of real sessions, Claude Code
+2.0.70 – 2.1.291, 1,616 questions.
+
+| Shape | Count |
+|---|---|
+| calls of 1 / 2 / 3 / 4 questions | 725 / 190 / 73 / 73 |
+| calls of several questions with a multi-select tab / with a preview tab | 45 / 46 |
+| options per question 2 / 3 / 4 / 6 | 396 / 844 / 375 / 1 (the 6: refused by Claude Code's schema) |
+| headers: median / p90 / max characters; over the schema's 12 | 10 / 14 / 21; 289 |
+| question text: median / p90 / max | 108 / 244 / 755 (1 with Markdown and line breaks) |
+| labels: median / p90 / max; over the 40 a button shows; holding ", " or a quote | 22 / 35 / 112; 233; 667 |
+| descriptions: median / p90 / max | 145 / 257 / 704 |
+| single-select answers: a label / the user's OWN words / a note alone / none / an image | 878 / 443 / 41 / 7 / 1 |
+| multi-select answers: labels / labels + own words / own words only / one label / none | 36 / 34 / 15 / 9 / 1 |
+| answered multi-question calls with a question left open | 5 of 304 |
+| results: plain / careful / the old form / Chat about this / Esc / the idle timeout / no result / errors | 563 / 239 / 164 / 39 / 31 / 3 / 15 / 11 |
+| extended questions (`kind`, `title`) / `response` / `followUp` | 0 / 0 / 0 |
+
+**What it changed:**
+- **Tabs and the review** (the PC's §1.5): `AskCardModel::current` reaches `questions.size()`, the review; `AskOnReview`,
+  `AskGoTab` (verb `t`), `detail::AskAdvance(m, from)` (the next question without an answer, then the review), the tab row
+  in `BuildAskCardButtons` (`kAskTabLabelMaxChars` 16, `kAskTabsPerRow` 3), `detail::AskReviewHtml`. The ◀ / ▶ and
+  "Send answers" buttons are gone from the question tabs; their verbs still work for a keyboard of an earlier build.
+- **Tick order**: `AskTapOption` appends a tick and keeps the others' order (before: sorted by option).
+- **✖️ Cancel**: `AskAskCancel` / `AskCancelBack` (`confirmCancel`, verbs `z` / `zy` / `zn`), `BuildAskDeclineLine`
+  (`kAskDeclineMessage` + `interrupt`), phase `Cancelled`.
+- **💬 A reply**: `BuildAskAllowLine(…, response)`, the verb `r` on the "what is this message?" question (`AskWhichHtml` +
+  `AskWhichButtons`), phase `Replied`; `ClassifyTranscriptLine` shows a `response` as the user's message.
+- **The idle timeout**: `TopicItem::afkTimeoutMs`, `QuestionResult::TimedOut`, phase `TimedOut` with the selections made
+  before it.
+- **Typed text on the review**: `AskTextQuestion` (the first question without an answer); with none, a reply to the card is
+  asked about instead of taken.
+- **Long content**: `BuildAskCardHtml` fits a tab in steps (previews → the list → descriptions 400 / 250 / 160 / 100 / 60 →
+  the question 400 / 250 / 160) and says when it shortened; the labels-only fallback is the last step.
+
+**What was checked:**
+- **`askcorpus.exe`** (built by `build_askdrive.py <dir> askcorpus` from the m5 suite's engine sources) replays the export of
+  `ask_census.py --export`: every tab and the review of every call in five states, and every outcome with long answers —
+  20,200 cards of real calls, every one within the card's budget and Telegram's 4,096, tags balanced, no torn surrogate,
+  every button's data ≤ 64 bytes and parsing back; 1,950 fresh tabs in full, 2 with their previews in the picture.
+- **The composer against the user's real answers**: each recorded answer is rebuilt as the card's choices (a label → a
+  pick, a multi-select answer split as Claude Code's `H` splits it, anything else → the user's own words, "(notes only)" +
+  the note) and composed: **937 equal byte for byte**; 14 + 1 are an older Claude Code's unquoted joins, 16 notes of 2.1.49
+  / 2.1.71 on questions without previews (later versions take notes on preview questions only), 1 a pasted image (a hook
+  cannot send one); the 15 tick-order answers that differed before the order fix are equal now.
+- **The m5 suite**: `TestAskTabs`, `TestAskCancelAndReply`, `TestAskLongContent` and the updated steps / card tests —
+  9,022 checks, the 3 known TaskbarBadge failures only. **`cl /Zs`** with the last Debug build's flags: every TU that
+  includes a changed header (Messaging.cpp, .Inbound, .Questions, .Menus, Engine.cpp, HooksBridge.cpp,
+  MessagingSearchBridge.cpp, TerminalPage.AgentEngine.cpp, AgentManagerContent.Settings.cpp) and the CLI's HooksBridge.cpp
+  at /W4 /WX pass; a negative control fails at its line.
+- **Live** (`askprobe.py`, claude.exe 2.1.291, Haiku): H1–H7 pass. H5: a dialog of three questions — a single-select, a
+  multi-select ticked Olives then Cheese plus "extra basil, please", a preview question answered by a note alone — gives
+  `"Which toppings do you want?"="Olives, Cheese, "extra basil, please""` and the rest exactly as the PC's form. H6: the
+  decline leaves the PC's Esc transcript (the rejection, `"User rejected tool use"`, the interrupt marker) and the turn ends.
+  H7: "The user responded: Spring, actually - none of these", and the model answered `GOT=…`.
+
+**Owed after the build:** the phone checks of MESSAGING.md §21.30 (the tab row with four and five tabs on the phone, the
+review, Cancel, a reply), and a dialog the AFK timer resolves while a card is open.

@@ -353,6 +353,37 @@ namespace
         const auto a4 = msg::ClassifyTranscriptLine(ParseOrEmpty(answerLine(LR"({"First?":"a"})", L"{}")));
         CHECK(a4.size() == 1 && a4[0].kind == msg::TopicItemKind::Answer && a4[0].text == L"a" && a4[0].toolUseId == L"toolu_42",
               "ask transcript: no note = the answer as before, with its tool_use id");
+        CHECK(a4.size() == 1 && a4[0].afkTimeoutMs == 0, "ask transcript: a person's answer carries no idle timeout");
+
+        // Claude Code's own IDLE TIMEOUT resolved the dialog (the corpus has three: 60 s on 2.1.199, 86,400 s on 2.1.225): the item
+        // says so, with the selections made before it (an Answer item) or none (a plain result).
+        const std::wstring afkNone = LR"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_43","content":"No response after 60s"}]},)"
+                                     LR"("toolUseResult":{"questions":[{"question":"First?","header":"One"}],"answers":{},"afkTimeoutMs":60000}})";
+        const auto t1 = msg::ClassifyTranscriptLine(ParseOrEmpty(afkNone));
+        CHECK(t1.size() == 1 && t1[0].kind == msg::TopicItemKind::ToolResult && t1[0].afkTimeoutMs == 60000 && !t1[0].isError,
+              "ask transcript: an idle timeout without selections: a plain result carrying afkTimeoutMs");
+        const std::wstring afkSome = LR"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_44","content":"No response after 60s"}]},)"
+                                     LR"("toolUseResult":{"questions":[{"question":"First?","header":"One"}],"answers":{"First?":"a"},"afkTimeoutMs":60000}})";
+        const auto t2 = msg::ClassifyTranscriptLine(ParseOrEmpty(afkSome));
+        CHECK(t2.size() == 1 && t2[0].kind == msg::TopicItemKind::Answer && t2[0].text == L"a" && t2[0].afkTimeoutMs == 60000,
+              "ask transcript: an idle timeout after a selection: the answer item, marked with afkTimeoutMs");
+        // A free-form REPLY instead of the answers (`response`, the phone's 💬 A reply): the user's words, as the model reads them.
+        const std::wstring replied = LR"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_45","content":"The user responded: later"}]},)"
+                                     LR"("toolUseResult":{"questions":[{"question":"First?","header":"One"}],"answers":{"First?":"a"},"response":"Spring, actually"}})";
+        const auto r1 = msg::ClassifyTranscriptLine(ParseOrEmpty(replied));
+        CHECK(r1.size() == 1 && r1[0].kind == msg::TopicItemKind::Answer && r1[0].text == L"\U0001F4AC Spring, actually" && r1[0].toolUseId == L"toolu_45",
+              "ask transcript: a `response` is the user's message (it wins over answers, as in Claude Code's result mapper)");
+        const std::wstring blank = LR"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_46","content":"x"}]},)"
+                                   LR"("toolUseResult":{"questions":[{"question":"First?","header":"One"}],"answers":{"First?":"a"},"response":"  "}})";
+        const auto r2 = msg::ClassifyTranscriptLine(ParseOrEmpty(blank));
+        CHECK(r2.size() == 1 && r2[0].text == L"a", "ask transcript: a blank `response` is ignored (Claude Code trims it), the answer shows");
+        // Another tool's result with a field named `response` (any shape of its own) is no answer: only an AskUserQuestion
+        // result carries `questions` beside an `answers` object.
+        const std::wstring other = LR"({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_47","content":"ok"}]},)"
+                                   LR"("toolUseResult":{"response":"HTTP 200","afkTimeoutMs":5}})";
+        const auto o1 = msg::ClassifyTranscriptLine(ParseOrEmpty(other));
+        CHECK(o1.size() == 1 && o1[0].kind == msg::TopicItemKind::ToolResult && o1[0].afkTimeoutMs == 0,
+              "ask transcript: another tool's `response` / `afkTimeoutMs` stay that tool's: a plain tool result");
     }
 
     // ===== 4. the card =====
@@ -398,7 +429,8 @@ namespace
             const auto bad = msg::AskTapOption(m, 7);
             CHECK(!bad.send && !bad.changed, "ask step: an option that is not there does nothing");
         }
-        // Two questions: a tap moves on to the next UNANSWERED one; never sends by itself.
+        // Two questions: a tap moves on to the next UNANSWERED one, and the last answer opens the REVIEW (the PC's Submit tab);
+        // nothing is ever sent by a tap on a card of several questions.
         {
             const std::wstring input = LR"({"questions":[{"question":"One?","header":"A","options":[{"label":"x"},{"label":"y"}]},)"
                                        LR"({"question":"Two?","header":"B","options":[{"label":"p"},{"label":"q"}]}]})";
@@ -406,22 +438,34 @@ namespace
             const auto s1 = msg::AskTapOption(m, 0);
             CHECK(!s1.send && m.current == 1, "ask step: two questions: the first tap moves on to question 2");
             const auto s2 = msg::AskTapOption(m, 1);
-            CHECK(!s2.send && m.current == 1, "ask step: every question answered: the card stays (📨 Send answers sends)");
+            CHECK(!s2.send && m.current == 2 && msg::AskOnReview(m), "ask step: every question answered: the card moves on to the review (the PC's Submit tab)");
             m.current = 0;
             msg::AskTapOption(m, 1);
-            CHECK(m.choices[0].picks == std::vector<size_t>{ 1 } && m.current == 0, "ask step: a re-pick replaces the answer; every question answered, so the card stays on the re-picked one");
+            CHECK(m.choices[0].picks == std::vector<size_t>{ 1 } && msg::AskOnReview(m), "ask step: a re-pick replaces the answer; every question answered, so the review again");
+            m.choices[1].picks.clear();
+            m.current = 0;
+            msg::AskTapOption(m, 0);
+            CHECK(m.current == 1, "ask step: a re-pick moves on to the question still without an answer");
+            const auto onReview = msg::AskGoTab(m, 2);
+            CHECK(onReview.changed && msg::AskOnReview(m), "ask step: the Submit tab opens the review");
+            const auto optionOnReview = msg::AskTapOption(m, 0);
+            CHECK(!optionOnReview.changed && !optionOnReview.toast.empty(), "ask step: an option tap on the review changes nothing (an older keyboard) and says why");
         }
-        // Multi-select: toggles, never sends.
+        // Multi-select: toggles in TICK order (the PC's answer lists the labels in the order they were ticked), never sends.
         {
             const std::wstring input = LR"({"questions":[{"question":"Which?","header":"M","multiSelect":true,"options":[{"label":"a"},{"label":"b"},{"label":"c"}]}]})";
             auto m = ModelFor(input);
-            msg::AskTapOption(m, 0);
             msg::AskTapOption(m, 2);
-            CHECK(m.choices[0].picks == (std::vector<size_t>{ 0, 2 }), "ask step: multi-select toggles on, kept in order");
-            const auto s = msg::AskTapOption(m, 0);
-            CHECK(!s.send && m.choices[0].picks == std::vector<size_t>{ 2 }, "ask step: a second tap toggles off; nothing is sent");
+            msg::AskTapOption(m, 0);
+            CHECK(m.choices[0].picks == (std::vector<size_t>{ 2, 0 }), "ask step: multi-select keeps the tick order (c before a)");
+            CHECK(msg::AskAnswerFor(m.questions[0], m.choices[0]) == L"c, a", "ask step: the answer lists the labels in tick order, as the PC's does");
+            const auto s = msg::AskTapOption(m, 2);
+            CHECK(!s.send && m.choices[0].picks == std::vector<size_t>{ 0 }, "ask step: a second tap toggles off; nothing is sent");
+            msg::AskTapOption(m, 2);
+            CHECK(m.choices[0].picks == (std::vector<size_t>{ 0, 2 }), "ask step: a re-tick goes to the end");
             const auto t = msg::AskTakeText(m, L"  my own  ", msg::AskTextTarget::Answer);
-            CHECK(!t.send && m.choices[0].otherText == L"my own" && m.choices[0].picks == std::vector<size_t>{ 2 }, "ask step: an own answer JOINS the picks (trimmed)");
+            CHECK(!t.send && m.choices[0].otherText == L"my own" && m.choices[0].picks == (std::vector<size_t>{ 0, 2 }), "ask step: an own answer JOINS the picks (trimmed)");
+            CHECK(msg::AskAnswerFor(m.questions[0], m.choices[0]) == L"a, c, my own", "ask step: the own answer goes LAST");
         }
         // Typed text: the own answer of a single question sends; a note never does.
         {
@@ -486,7 +530,8 @@ namespace
             m.choices[0].otherText = L"<b>&";
             CHECK(msg::BuildAskCardHtml(m, now).find(L"&lt;b&gt;&amp;") != std::wstring::npos, "ask card: the user's text is escaped");
         }
-        // Two questions: the list, "Question 1 of 2", ▶ and 📨 Send answers (0 of 2).
+        // Two questions: the list, "Question 1 of 2", the TAB ROW (▶ the shown tab, then the other, then 📨 Submit); the review
+        // holds 📨 Submit answers (a of n). No ◀ / ▶ or Send buttons any more: the tabs and the review took their place.
         {
             const std::wstring input = LR"({"questions":[{"question":"One?","header":"A","options":[{"label":"x"},{"label":"y"}]},)"
                                        LR"({"question":"Two?","header":"B","options":[{"label":"p"},{"label":"q"}]}]})";
@@ -495,17 +540,33 @@ namespace
             CHECK(html.find(L"2 questions") != std::wstring::npos && html.find(L"Question 1 of 2") != std::wstring::npos && html.find(L"not answered yet") != std::wstring::npos,
                   "ask card: several questions: the list and the position");
             const auto rows = msg::BuildAskCardButtons(m, L"k3");
-            bool next = false;
-            bool send = false;
+            CHECK(!rows.empty() && rows[0].size() == 3 && rows[0][0].first == L"\x25B6 A" && rows[0][0].second == L"q:k3:t:0" && rows[0][1].first == L"B" &&
+                      rows[0][1].second == L"q:k3:t:1" && rows[0][2].first == L"\U0001F4E8 Submit" && rows[0][2].second == L"q:k3:t:2",
+                  "ask card: the tab row: the shown tab marked, the other, Submit (the review)");
+            bool oldNav = false;
             for (const auto& row : rows)
             {
                 for (const auto& [label, data] : row)
                 {
-                    next = next || data == L"q:k3:x";
-                    send = send || (data == L"q:k3:s" && label.find(L"(0 of 2)") != std::wstring::npos);
+                    oldNav = oldNav || data == L"q:k3:x" || data == L"q:k3:p" || data == L"q:k3:s";
                 }
             }
-            CHECK(next && send, "ask card: ▶ the next question and 📨 Send answers (0 of 2)");
+            CHECK(!oldNav, "ask card: a question tab has no prev / next and no Send button (the tabs and the review replace them)");
+            m.choices[1].picks = { 0 };
+            const auto afterOne = msg::BuildAskCardButtons(m, L"k3");
+            CHECK(!afterOne.empty() && afterOne[0][1].first == L"\x2713 B", "ask card: an answered tab wears a check mark");
+            msg::AskGoTab(m, 2);
+            const auto review = msg::BuildAskCardButtons(m, L"k3");
+            CHECK(review.size() == 3 && review[0][2].first == L"\x25B6 Submit" && review[1].size() == 1 && review[1][0].second == L"q:k3:s" &&
+                      review[1][0].first.find(L"(1 of 2)") != std::wstring::npos && review[2].size() == 2 && review[2][0].second == L"q:k3:c" && review[2][1].second == L"q:k3:z",
+                  "ask card: the review: the tabs, Submit answers (1 of 2), Chat about this + Cancel");
+            const std::wstring reviewHtml = msg::BuildAskCardHtml(m, now);
+            CHECK(reviewHtml.find(L"Review your answers") != std::wstring::npos && reviewHtml.find(L"You have not answered all questions") != std::wstring::npos &&
+                      reviewHtml.find(L"\x2192 <i>not answered</i>") != std::wstring::npos && reviewHtml.find(L"\x2192 <b>p</b>") != std::wstring::npos &&
+                      reviewHtml.find(L"Ready to submit your answers?") != std::wstring::npos,
+                  "ask card: the review's text: the PC's title, its warning, every answer (or not answered), and its question");
+            m.choices[0].picks = { 1 };
+            CHECK(msg::BuildAskCardHtml(m, now).find(L"You have not answered all questions") == std::wstring::npos, "ask card: no warning once every question has an answer");
         }
         // Every phase's text; no buttons once it is not open.
         {
@@ -527,6 +588,21 @@ namespace
                   "ask card: answered at the PC, with the PC's answer");
             m.phase = msg::AskCardPhase::Clarify;
             CHECK(msg::BuildAskCardHtml(m, now).find(L"clarify") != std::wstring::npos, "ask card: Chat about this");
+            m.phase = msg::AskCardPhase::Cancelled;
+            CHECK(msg::BuildAskCardHtml(m, now).find(L"Cancelled from Telegram") != std::wstring::npos && msg::BuildAskCardButtons(m, L"k").empty(),
+                  "ask card: Cancelled (the PC's Esc), no buttons");
+            m.phase = msg::AskCardPhase::Replied;
+            m.reply = L"<later>";
+            const std::wstring repliedHtml = msg::BuildAskCardHtml(m, now);
+            CHECK(repliedHtml.find(L"Replied from Telegram") != std::wstring::npos && repliedHtml.find(L"<b>&lt;later&gt;</b>") != std::wstring::npos,
+                  "ask card: Replied, with the reply (escaped)");
+            m.phase = msg::AskCardPhase::TimedOut;
+            m.timeoutMs = 60000;
+            m.atPcAnswer = L"Left";
+            const std::wstring timedOut = msg::BuildAskCardHtml(m, now);
+            CHECK(timedOut.find(L"No answer in time") != std::wstring::npos && timedOut.find(L"after 1 min") != std::wstring::npos &&
+                      timedOut.find(L"Selected before that") != std::wstring::npos && timedOut.find(L"<b>Left</b>") != std::wstring::npos,
+                  "ask card: TimedOut: Claude Code went on by itself after its idle timeout, with what was selected before it");
             m.phase = msg::AskCardPhase::Closed;
             m.closedWhy = L"it was closed at the PC";
             CHECK(msg::BuildAskCardHtml(m, now).find(L"No longer open here") != std::wstring::npos && msg::BuildAskCardHtml(m, now).find(L"closed at the PC") != std::wstring::npos,
@@ -561,9 +637,196 @@ namespace
             big.phase = msg::AskCardPhase::Open;
             CHECK(msg::BuildAskCardHtml(big, now).size() <= msg::kAskCardMaxChars, "ask card: so does the open card");
         }
-        // The "answer or next prompt?" question's words.
-        CHECK(msg::AskWhichHtml(ModelFor(kLayoutInput)).find(L"note") != std::wstring::npos && msg::AskWhichHtml(ModelFor(kColorInput)).find(L"answer") != std::wstring::npos,
-              "ask card: the question asks about the note (preview) or the answer");
+        // The "what is this message?" question's words and buttons: my answer (note), a reply instead of answering, the next prompt.
+        CHECK(msg::AskWhichHtml(ModelFor(kLayoutInput)).find(L"My note") != std::wstring::npos && msg::AskWhichHtml(ModelFor(kColorInput)).find(L"My answer") != std::wstring::npos,
+              "ask card: the question offers the note (preview) or the answer");
+        {
+            const auto rows = msg::AskWhichButtons(ModelFor(kColorInput), L"k9", 4242);
+            CHECK(rows.size() == 2 && rows[0].size() == 2 && rows[0][0].second == L"q:k9:u:4242" && rows[0][1].second == L"q:k9:r:4242" && rows[1].size() == 1 &&
+                      rows[1][0].second == L"q:k9:h:4242",
+                  "ask card: [My answer] [A reply], then [The next prompt], each naming the held message");
+            CHECK(msg::AskWhichHtml(ModelFor(kColorInput)).find(L"A reply") != std::wstring::npos && msg::AskWhichHtml(ModelFor(kColorInput)).find(L"The next prompt") != std::wstring::npos,
+                  "ask card: the words name the reply and the next prompt");
+            // A review with every question answered: no question to take the message — only a reply or the next prompt.
+            const std::wstring input = LR"({"questions":[{"question":"One?","header":"A","options":[{"label":"x"},{"label":"y"}]},)"
+                                       LR"({"question":"Two?","header":"B","options":[{"label":"p"},{"label":"q"}]}]})";
+            auto m = ModelFor(input);
+            m.choices[0].picks = { 0 };
+            m.choices[1].picks = { 1 };
+            m.current = 2;
+            const auto onlyTwo = msg::AskWhichButtons(m, L"k9", 7);
+            CHECK(onlyTwo.size() == 2 && onlyTwo[0].size() == 1 && onlyTwo[0][0].second == L"q:k9:r:7" && msg::AskTextTargetFor(m) == msg::AskTextTarget::None,
+                  "ask card: every question answered, on the review: no answer button (nothing would take it), a reply or the next prompt");
+            m.choices[1].picks.clear();
+            CHECK(msg::AskTextQuestion(m) == 1 && msg::AskTextTargetFor(m) == msg::AskTextTarget::Answer,
+                  "ask card: on the review, typed text goes to the first question without an answer");
+            const auto took = msg::AskTakeText(m, L"r", msg::AskTextTarget::Answer);
+            CHECK(took.changed && !took.send && m.choices[1].otherText == L"r" && msg::AskOnReview(m), "ask card: it answers that question and the review stays (every question answered)");
+        }
+    }
+
+    // The TABS of a card of several questions — the NumSharp session's dialog of 2026-10-19 (four tabs NDArray<T> / NDMatrix /
+    // NDListArray / "s_, flatiter", long descriptions), mixed with the kinds the corpus holds in one call (ask_census.py): a plain
+    // question, a multi-select one, a preview one, one without a header.
+    void TestAskTabs()
+    {
+        constexpr int64_t now = 1760000000000;
+        const std::wstring desc(240, L'd');
+        const std::wstring input =
+            std::wstring{ LR"({"questions":[)" } + LR"({"question":"With one indexer per class, what should NDArray<T> keep?","header":"NDArray<T>","options":[)" +
+            L"{\"label\":\"One typed indexer (Recommended)\",\"description\":\"" + desc + L"\"},{\"label\":\"Inherit NDArray's\",\"description\":\"" + desc +
+            L"\"},{\"label\":\"Keep the scalar indexer\",\"description\":\"" + desc + L"\"}]}," +
+            LR"({"question":"Which views should NDMatrix keep?","header":"NDMatrix","multiSelect":true,"options":[{"label":"Rows"},{"label":"Columns, transposed"},{"label":"Diagonal"}]},)"
+            LR"({"question":"Which layout?","header":"NDListArray","options":[{"label":"Left","preview":"+--+\n|L |\n+--+"},{"label":"Right","preview":"+--+\n| R|\n+--+"}]},)"
+            LR"({"question":"And s_ / flatiter?","options":[{"label":"Keep"},{"label":"Drop"}]}]})";
+        auto m = ModelFor(input);
+        CHECK(m.questions.size() == 4 && m.questions[1].multiSelect && m.questions[2].previewLayout && m.questions[3].header.empty(), "ask tabs: four mixed questions parse");
+
+        // The tab row: three to a row, the header (or Q4) as the name, ▶ the shown tab, 📨 Submit last.
+        const auto rows = msg::BuildAskCardButtons(m, L"k");
+        CHECK(rows.size() >= 2 && rows[0].size() == 3 && rows[1].size() == 2, "ask tabs: four questions and the review make two rows (3 + 2)");
+        CHECK(rows.size() >= 2 && rows[0][0].first == L"\x25B6 NDArray<T>" && rows[0][1].first == L"NDMatrix" && rows[0][2].first == L"NDListArray" && rows[1][0].first == L"Q4" &&
+                  rows[1][1].first == L"\U0001F4E8 Submit",
+              "ask tabs: the names are the headers, Q<n> for a question without one (the PC's own names)");
+        CHECK(rows.size() >= 2 && rows[1][1].second == L"q:k:t:4", "ask tabs: the Submit tab is tab n (the review)");
+        const std::wstring longHeader = msg::detail::AskTabName(ModelFor(LR"({"questions":[{"question":"q","header":"A header of twenty-one","options":[{"label":"a"},{"label":"b"}]}]})"), 0,
+                                                                  msg::kAskTabLabelMaxChars);
+        CHECK(longHeader.size() == msg::kAskTabLabelMaxChars && longHeader.back() == L'\x2026', "ask tabs: a header past 16 characters ends in an ellipsis on its tab");
+
+        // The NumSharp flow: answer tab 1 → tab 2 (multi-select: ticks in order, own words, Done) → tab 3 (a note alone) → tab 4 → the review.
+        msg::AskTapOption(m, 0);
+        CHECK(m.current == 1, "ask tabs: a pick on tab 1 opens tab 2");
+        msg::AskTapOption(m, 2);
+        msg::AskTapOption(m, 1);
+        m.awaiting = msg::AskTextTarget::Answer;
+        msg::AskTakeText(m, L"Strided, too", msg::AskTextTarget::Answer);
+        CHECK(m.current == 1 && m.choices[1].otherText == L"Strided, too", "ask tabs: own words on a multi-select tab stay there (Done moves on)");
+        CHECK(msg::AskAnswerFor(m.questions[1], m.choices[1]) == L"Diagonal, \"Columns, transposed\", \"Strided, too\"", "ask tabs: tick order, Tct's quoting, the own words last");
+        msg::detail::AskAdvance(m, m.current); // ✅ Done (the service's verb): the next question without an answer
+        CHECK(m.current == 2, "ask tabs: Done opens tab 3");
+        m.awaiting = msg::AskTextTarget::Note;
+        msg::AskTakeText(m, L"neither, use a grid", msg::AskTextTarget::Note);
+        CHECK(m.current == 2 && msg::AskQuestionAnswered(m.questions[2], m.choices[2]), "ask tabs: a note alone answers a preview tab (\"(notes only)\"), and the tab stays");
+        msg::AskGoTab(m, 3);
+        msg::AskTapOption(m, 1);
+        CHECK(msg::AskOnReview(m), "ask tabs: the last answer opens the review");
+        const std::wstring review = msg::BuildAskCardHtml(m, now);
+        CHECK(review.find(L"Review your answers") != std::wstring::npos && review.find(L"not answered") == std::wstring::npos && review.find(L"neither, use a grid") != std::wstring::npos &&
+                  review.find(L"<b>4. Q4</b>") != std::wstring::npos,
+              "ask tabs: the review lists every answer, the note too, under each tab's name");
+        CHECK(review.size() <= msg::kAskCardMaxChars, "ask tabs: the review fits one message");
+        Value answers;
+        Value annotations;
+        msg::ComposeAskAnswers(m.questions, m.choices, answers, annotations);
+        CHECK(JsonEquals(answers, LR"J({"With one indexer per class, what should NDArray<T> keep?":"One typed indexer (Recommended)","Which views should NDMatrix keep?":"Diagonal, \"Columns, transposed\", \"Strided, too\"","Which layout?":"(notes only)","And s_ / flatiter?":"Drop"})J"),
+              "ask tabs: the four answers, exactly as the PC would send them");
+        CHECK(JsonEquals(annotations, LR"({"Which layout?":{"notes":"neither, use a grid"}})"), "ask tabs: the note alone in the annotations");
+        // Every tab and the review render within the budget, with every button's data parsing back.
+        bool fits = true;
+        bool parse = true;
+        for (size_t tab = 0; tab <= m.questions.size(); ++tab)
+        {
+            m.current = tab;
+            fits = fits && msg::BuildAskCardHtml(m, now).size() <= msg::kAskCardMaxChars;
+            for (const auto& row : msg::BuildAskCardButtons(m, L"abcdefghij"))
+            {
+                for (const auto& [label, data] : row)
+                {
+                    parse = parse && msg::ParseAskCallbackData(data).has_value() && data.size() <= 64 && !label.empty();
+                }
+            }
+        }
+        CHECK(fits && parse, "ask tabs: every tab and the review fit one message, every button's data parses back");
+
+        // Tab taps: the same tab changes nothing; past the review is refused; a one-question card has no tabs.
+        m.current = 1;
+        CHECK(!msg::AskGoTab(m, 1).changed, "ask tabs: the shown tab again changes nothing");
+        const auto past = msg::AskGoTab(m, 5);
+        CHECK(!past.changed && !past.toast.empty() && m.current == 1, "ask tabs: a tab past the review is refused with a toast");
+        auto one = ModelFor(kColorInput);
+        CHECK(!msg::AskGoTab(one, 1).changed && !msg::AskOnReview(one), "ask tabs: a card of one question has no review tab");
+        m.awaiting = msg::AskTextTarget::Answer;
+        msg::AskGoTab(m, 0);
+        CHECK(m.current == 0 && m.awaiting == msg::AskTextTarget::None, "ask tabs: another tab drops the text the card waited for");
+    }
+
+    // ✖ Cancel (the PC's Esc, its review's Cancel): asked to confirm, then Claude Code's STOP rejection with `interrupt`.
+    void TestAskCancelAndReply()
+    {
+        constexpr int64_t now = 1760000000000;
+        auto m = ModelFor(kColorInput);
+        const auto ask = msg::AskAskCancel(m);
+        CHECK(ask.changed && m.confirmCancel, "ask cancel: a tap asks to confirm");
+        const auto rows = msg::BuildAskCardButtons(m, L"k");
+        CHECK(rows.size() == 1 && rows[0].size() == 2 && rows[0][0].second == L"q:k:zy" && rows[0][1].second == L"q:k:zn",
+              "ask cancel: the confirmation's buttons alone (Yes, cancel / No, go back)");
+        CHECK(msg::BuildAskCardHtml(m, now).find(L"Cancel the question?") != std::wstring::npos, "ask cancel: the card asks, saying the turn ends");
+        const auto back = msg::AskCancelBack(m);
+        CHECK(back.changed && !m.confirmCancel, "ask cancel: No, go back drops the question");
+        msg::AskAskCancel(m);
+        msg::AskTapOption(m, 0);
+        CHECK(!m.confirmCancel, "ask cancel: any answer drops the confirmation too");
+        const std::string decline = msg::BuildAskDeclineLine();
+        const auto dl = ParseLine(decline);
+        const Value* hso = dl ? dl->Find(L"hookSpecificOutput") : nullptr;
+        const Value* d = hso ? hso->Find(L"decision") : nullptr;
+        CHECK(IsAscii(decline) && d && d->StrAt(L"behavior") == L"deny" && d->BoolAt(L"interrupt", false) && d->StrAt(L"message") == msg::kAskDeclineMessage,
+              "ask cancel: the decline line: deny, interrupt, Claude Code's own STOP rejection (the tool result an Esc leaves)");
+        CHECK(std::wstring{ msg::kAskDeclineMessage }.find(L"STOP what you are doing and wait for the user to tell you how to proceed.") != std::wstring::npos,
+              "ask cancel: the text is the PC's Esc text (corpus 2.1.225 – 2.1.291, probe H6)");
+
+        // 💬 A reply: Claude Code's `response` beside empty answers — the model reads "The user responded: …" (probe H7).
+        const std::string reply = msg::BuildAskAllowLine(ParseOrEmpty(kColorInput), Value::MkObj(), Value::MkObj(), L"Spring, actually \x05E9\x05DC\x05D5\x05DD");
+        const auto rl = ParseLine(reply);
+        const Value* rh = rl ? rl->Find(L"hookSpecificOutput") : nullptr;
+        const Value* rd = rh ? rh->Find(L"decision") : nullptr;
+        const Value* upd = rd ? rd->Find(L"updatedInput") : nullptr;
+        CHECK(IsAscii(reply) && rd && rd->StrAt(L"behavior") == L"allow" && upd && upd->StrAt(L"response") == L"Spring, actually \x05E9\x05DC\x05D5\x05DD" &&
+                  upd->Find(L"answers") && upd->Find(L"answers")->members.empty() && CountMembers(*upd, L"response") == 1,
+              "ask reply: the allow line carries the response (ASCII-escaped), empty answers, one response member");
+        const std::string plain = msg::BuildAskAllowLine(ParseOrEmpty(kColorInput), Value::MkObj(), Value::MkObj());
+        const auto pl = ParseLine(plain);
+        const Value* pu = pl && pl->Find(L"hookSpecificOutput") && pl->Find(L"hookSpecificOutput")->Find(L"decision") ? pl->Find(L"hookSpecificOutput")->Find(L"decision")->Find(L"updatedInput") : nullptr;
+        CHECK(pu && !pu->Find(L"response"), "ask reply: an answer without a reply has no response member");
+
+        // The idle timeout's words.
+        CHECK(msg::detail::AskTimeoutText(60000) == L"1 min" && msg::detail::AskTimeoutText(86400000) == L"24 h" && msg::detail::AskTimeoutText(5000) == L"5 s" &&
+                  msg::detail::AskTimeoutText(0).empty(),
+              "ask timeout: 60 s = 1 min, 86,400 s = 24 h, 5 s, none");
+
+        // The new verbs parse back.
+        const auto tab = msg::ParseAskCallbackData(L"q:abc:t:4");
+        const auto zy = msg::ParseAskCallbackData(L"q:abc:zy");
+        const auto r = msg::ParseAskCallbackData(L"q:abc:r:123456789012");
+        CHECK(tab && tab->verb == L"t" && tab->arg == 4 && zy && zy->verb == L"zy" && r && r->verb == L"r" && r->arg == 123456789012ll,
+              "ask data: the tab, cancel and reply verbs parse");
+    }
+
+    // Long content is SHORTENED, never dropped (the corpus maxima: a 755-character question, 704-character descriptions, 112-
+    // character labels): a tab fits one message with every option and a cut of every description, and says it was shortened.
+    void TestAskLongContent()
+    {
+        constexpr int64_t now = 1760000000000;
+        std::wstring input = std::wstring{ LR"({"questions":[{"question":")" } + std::wstring(755, L'Q') + LR"(","header":"Big","options":[)";
+        for (int i = 0; i < 4; ++i)
+        {
+            input += (i ? L"," : L"") + std::wstring{ L"{\"label\":\"" } + std::wstring(112, static_cast<wchar_t>(L'A' + i)) + L"\",\"description\":\"" +
+                     std::wstring(704, static_cast<wchar_t>(L'a' + i)) + L"\"}";
+        }
+        input += L"]},{\"question\":\"Second?\",\"header\":\"Two\",\"options\":[{\"label\":\"x\"},{\"label\":\"y\"}]}]}";
+        auto m = ModelFor(input);
+        const std::wstring html = msg::BuildAskCardHtml(m, now);
+        CHECK(html.size() <= msg::kAskCardMaxChars, "ask long: the tab fits the budget");
+        CHECK(html.find(L"(cut to fit one message)") == std::wstring::npos, "ask long: the last resort (labels only) is not needed");
+        bool everyOption = true;
+        for (int i = 0; i < 4; ++i)
+        {
+            everyOption = everyOption && html.find(std::wstring(60, static_cast<wchar_t>(L'a' + i))) != std::wstring::npos && html.find(std::wstring(40, static_cast<wchar_t>(L'A' + i))) != std::wstring::npos;
+        }
+        CHECK(everyOption, "ask long: every option keeps its label and a part of its description");
+        CHECK(html.find(L"Shortened to fit one message") != std::wstring::npos, "ask long: the card says it was shortened");
+        m.choices[0].otherText = std::wstring(600, L'o');
+        CHECK(msg::BuildAskCardHtml(m, now).size() <= msg::kAskCardMaxChars, "ask long: with the longest own answer too");
     }
 
     void TestAskPreviewSheet()
@@ -880,6 +1143,9 @@ void TestAskQuestion()
     TestAskCallbackAndRouting();
     TestAskSteps();
     TestAskCardText();
+    TestAskTabs();
+    TestAskCancelAndReply();
+    TestAskLongContent();
     TestAskPreviewSheet();
     TestAskChatAboutThis();
     TestAskHookWiring();

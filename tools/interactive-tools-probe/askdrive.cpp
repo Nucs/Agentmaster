@@ -18,6 +18,11 @@
 //     release                        "{}": the dialog stays with the PC (the probe answers it there)
 //     chat                           Chat about this (the PC's rejection with its clarify request)
 //     hold                           no answer: the helper keeps waiting (askmem.py measures it, askparent.py ends its parent)
+//     tabs:<q0>|<q1>|...             a dialog of SEVERAL questions answered tab by tab, one part per question: items joined by
+//                                    ';' — p<i> (pick option i), m<i>.<j>... (multi-select picks), o=<text> (an answer of the
+//                                    user's own), n=<text> (a note) — and an empty part leaves the question unanswered
+//     decline                        ✖ Cancel from the phone: the PC's Esc (AskDeclineMessage, interrupt: the turn ends)
+//     respond:<text>                 a free-form reply instead of the answers (Claude Code's `response`)
 // Every request and decision goes to <dir>\drive.jsonl; the driver exits when every action's request has finished (the hook
 // got its reply, or went away), or after 15 minutes, or when <dir>\stop exists.
 
@@ -180,6 +185,71 @@ int wmain(int argc, wchar_t** argv)
                 {
                     line = BuildAskDenyLine(AskChatAboutThisMessage(m.questions, m.choices), false);
                     kind = L"deny";
+                }
+                else if (action == L"decline")
+                {
+                    line = BuildAskDeclineLine();
+                    kind = L"deny";
+                }
+                else if (action.rfind(L"respond:", 0) == 0)
+                {
+                    json::Value answers;
+                    json::Value annotations;
+                    ComposeAskAnswers(m.questions, m.choices, answers, annotations);
+                    line = BuildAskAllowLine(req->toolInput, answers, annotations, action.substr(8));
+                    kind = L"respond";
+                }
+                else if (action.rfind(L"tabs:", 0) == 0)
+                {
+                    // One part per question, '|' between them; items ';'-joined inside a part (see the usage above).
+                    std::wstring spec = action.substr(5);
+                    size_t qi = 0;
+                    for (;;)
+                    {
+                        const size_t bar = spec.find(L'|');
+                        const std::wstring part = spec.substr(0, bar);
+                        if (qi < m.choices.size())
+                        {
+                            AskChoice& c = m.choices[qi];
+                            std::wstring rest = part;
+                            while (!rest.empty())
+                            {
+                                const size_t semi = rest.find(L';');
+                                const std::wstring item = rest.substr(0, semi);
+                                if (item.rfind(L"o=", 0) == 0)
+                                {
+                                    c.otherText = item.substr(2);
+                                }
+                                else if (item.rfind(L"n=", 0) == 0)
+                                {
+                                    c.note = item.substr(2);
+                                }
+                                else if (!item.empty() && item[0] == L'p')
+                                {
+                                    c.picks = { static_cast<size_t>(std::stoul(item.substr(1))) };
+                                }
+                                else if (!item.empty() && item[0] == L'm')
+                                {
+                                    std::wstring list = item.substr(1);
+                                    // In the order given: the card keeps the tick order, as the PC does.
+                                    while (!list.empty())
+                                    {
+                                        const size_t dot = list.find(L'.');
+                                        c.picks.push_back(static_cast<size_t>(std::stoul(list.substr(0, dot))));
+                                        list = dot == std::wstring::npos ? std::wstring{} : list.substr(dot + 1);
+                                    }
+                                }
+                                rest = semi == std::wstring::npos ? std::wstring{} : rest.substr(semi + 1);
+                            }
+                        }
+                        ++qi;
+                        if (bar == std::wstring::npos)
+                        {
+                            break;
+                        }
+                        spec = spec.substr(bar + 1);
+                    }
+                    kind = L"allow";
                 }
                 else if (action == L"hold")
                 {
