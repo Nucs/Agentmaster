@@ -39,7 +39,7 @@ Our own objects match the open tabs (no closed-tab trees left behind): `Tab` 701
 freed controls), `AgentManagerContent` 3–4 for 4 windows. The leak classes fixed on 2026-10-14 did not come
 back: 570 live `CScrollViewer`s and one overlay per tab (UI_THREAD.md §12).
 
-## 3. The leak: one 144-byte ICU `UText` per URL scan (FIXED in source 2026-10-19, NOT BUILT)
+## 3. The leak: one 144-byte ICU `UText` per URL scan (FIXED in source 2026-10-19; in dev since 0.0.1.31, not in production)
 
 - **Evidence:** between the dumps only one population grew steadily: live 144-byte blocks with the
   signature magic `0x345AD82C` (UTEXT_MAGIC), flags 0, providerProperties 6, sizeOfStruct 0x90, pFuncs NULL,

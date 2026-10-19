@@ -1,6 +1,6 @@
 # Interactive tools — AskUserQuestion with previews and notes, answered from Telegram
 
-> **2026-10-19 · BUILT the same day, NOT BUILT into the app yet** (§10: what was built, where it differs from the design of
+> **2026-10-19 · BUILT the same day; in dev since 0.0.1.31, not in production** (§10: what was built, where it differs from the design of
 > §6–§7, and what was checked — the m5 suite, `cl /Zs` with the build's flags, and a LIVE end-to-end run of the shipped hook
 > against Claude Code 2.1.291). The topic's side is [`MESSAGING.md`](MESSAGING.md) §21.30. Read in the Claude Code 2.1.291
 > bundle and **measured on it**: a live ConPTY probe of seven scenarios (§5) and a survey of every transcript on this
@@ -707,7 +707,7 @@ quoted strings (`tools/interactive-tools-probe/grepbin.py`). Byte offsets in 2.1
 - MESSAGING.md §6.3, §7.4, §7.5, §18 (D9, D16, D30), §19, §21.2, §21.24 (Screen Image); MOD_LINK.md §4.4; HOOKS.md
   (hook invocation, the blocked-on-user belts).
 
-## 10. What was built (2026-10-19; NOT BUILT into the app yet)
+## 10. What was built (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual
 > text input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and

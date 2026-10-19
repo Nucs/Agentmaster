@@ -495,7 +495,7 @@ Manager's own launch row, so a session starts from the side panel without leavin
    (the bar's `textEdited` → `SetLaunchBoxText`), and writes its last, normalized text back when it
    closes. So the two boxes always read the same; a tab switch then pre-aims the Manager's box as
    always (the card closes first, in `_ApplyAgentTabSelection`, before `_SyncManagerSelectionToTab`).
-5. **Focus, and the folder list OPEN with the card (the user's rule, 2026-10-19, NOT BUILT yet):**
+5. **Focus, and the folder list OPEN with the card (the user's rule, 2026-10-19, in dev since 0.0.1.31, not in production):**
    "That path selection menu's path textbox's dropdown menu is supposed to be open by default when +
    the menu is shown." One dispatcher tick after the open, `_SidePanelFinishLaunchCardOpen` runs three
    steps, in this order:
@@ -567,7 +567,7 @@ Manager's own launch row, so a session starts from the side panel without leavin
    `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`), with the page's own "Claude not detected"
    notice (`_PromptClaudeMissing`). Both bars push into ONE recent-folders list
    (`AgentManagerContent::LaunchRecentDirs`).
-   - **ONE click on Launch launches (2026-10-19, NOT BUILT yet) — the user's report:** "Can Launch
+   - **ONE click on Launch launches (2026-10-19, in dev since 0.0.1.31, not in production) — the user's report:** "Can Launch
      Claude work exactly like it does now but on a single-click … instead of double-click". The
      hover menu is a light-dismiss `MenuFlyout`, and XAML EATS the press that dismisses one: the
      press closed the menu and never reached Launch, and the next pointer move over the button

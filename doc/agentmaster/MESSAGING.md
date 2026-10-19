@@ -9,11 +9,12 @@
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
-> **Where each part runs** (checked 2026-10-18 against git and a string probe of each installed `TerminalApp.dll`):
-> PRODUCTION 0.6.8.21 (the Release build of 46e3aad42) holds §21.1–§21.12; DEV 0.0.1.29 (the Debug build of ac4167e63)
-> holds everything through §21.18 except §21.17.4's pager row (a7bb5a577); that row, §21.19, §21.20 and §21.22 (the state
-> as the topic's icon) are in neither (NOT BUILT), and nor are §21.23 – §21.25 (§21.25 = a new thread's WIZARD: create a
-> missing folder, a model, a window; an aborted creation deletes the thread). **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> **Where each part runs** (checked 2026-10-19 17:50 against git and the commit each installed `TerminalApp.dll` bakes):
+> PRODUCTION 0.6.8.22 (the Release build of ec966a2ca, since the morning of 2026-10-19) holds everything through §21.25
+> except §21.16.8 (the directory's Recent activity) and §21.24's Restart / Resume rule (d0fbc4e31); DEV 0.0.1.31 (the
+> Debug build of ac2add394, since 2026-10-19 17:43) holds everything through §21.31; §21.32 is research only, §22
+> design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
+> these two builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -2812,7 +2813,7 @@ updated 5 minutes ago
   thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
   line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
 
-#### 21.16.8 The RECENT ACTIVITY section: the ten newest tabs that are not stationary (2026-10-19; NOT BUILT yet)
+#### 21.16.8 The RECENT ACTIVITY section: the ten newest tabs that are not stationary (2026-10-19; in dev since 0.0.1.31, not in production)
 
 - **The user's request** (2026-10-19): "In the telegram pinned message we specify the tabs we have. At the bottom add the top
   10 tab titles in the order of their recent activity and that are not in stationary status." Once the first version was
@@ -3576,7 +3577,7 @@ scheduler's timing test "woken tab: the queue resumes by itself…", which passe
 3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
 4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
 
-### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 NOT BUILT yet)
+### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-18): "The buttons in a topic's bottom pinned status message (with title and status which keeps
 > getting updated), we need to refactor the buttons a bit. — Have a button "<cog>Session" that then changes the buttons of the
@@ -3918,7 +3919,7 @@ session restores under a NEW id (restore-fresh), so a launch restored from the s
 into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
 or post.
 
-### 21.26 The card leads with its state, the title under it (2026-10-19; NOT BUILT yet)
+### 21.26 The card leads with its state, the title under it (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19), with a card pasted from the dev bot (its first two lines: "📌 🟧 messaging bot answer
 > questions" / "🟡 Waiting for you since 08:21"): "swap the row of status waiting for you and the title when we send this
@@ -3963,7 +3964,7 @@ Production 0.6.8.22 (`Release-B`, its `TerminalApp.dll` built at 06:41) and dev 
 ec966a2ca, which came before 4621cf9d4 (09:27). `Release` (0.6.8.21) and `Debug-B` (0.0.1.29) are older. The proof was a probe
 of each `TerminalApp.dll` for the wide literal `L"\n📌 "`, which only the state-first code has. It was in none of the four.
 
-### 21.27 A shorter place line (2026-10-19; NOT BUILT yet)
+### 21.27 A shorter place line (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19), quoting a card's place line: "…/source/Agentmaster · agentmaster · claude-opus-5-5 · max ·
 > ctx 427K" — "Change to: /source/Agentmaster · agentmaster · opus-5-5 · max · 427K".
@@ -4001,7 +4002,7 @@ build that carries d0fbc4e31, §21.26 and this change costs one edit per card in
 - Every card's place line reads like the one above: no "…", no "claude-", no "ctx", on the phone and on the desktop app.
 - The work log's tool lines still show "Edit: …/TerminalApp/AgentMaster/Messaging.cpp".
 
-### 21.28 A tapped button stays busy until its work is done (2026-10-19; NOT BUILT yet)
+### 21.28 A tapped button stays busy until its work is done (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19): "In telegram, buttons we click on should look 'active' as long as they are waiting for
 > serverside to react."
@@ -4109,7 +4110,7 @@ for example, answers nothing.
 - 🔄 Restart Session on a session in Error: busy until the card shows the next state, or 9 s with the restart's toast.
 - A directory dot: busy until the topic is first in the thread list.
 
-### 21.29 A rename's change line is its only answer (2026-10-19; NOT BUILT yet)
+### 21.29 A rename's change line is its only answer (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19), after a `/rename` posted two messages, "Renamed to 🟧 Small telegram fixes (the topic
 > follows in a moment)." and then "🟧 Agentmaster changed the title to 🟧 Small telegram fixes": "We dont need the first as
@@ -4172,7 +4173,7 @@ The gaps were rare in practice, but once the reply is gone each would leave a re
 - A rename while a topic's history is replayed (a new topic of a long session, or `/recreate`): the name changes at once,
   and the line comes after the last history message.
 
-### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; NOT BUILT yet)
+### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual text
 > input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
@@ -4286,7 +4287,7 @@ the script; the ask pipe end to end (refused, answered, released, a helper that 
   (`Get-Process powershell` — no `agentmaster-ask.ps1` left); Esc at the PC: ⏹ closed at the PC.
 - The bot off: no helper waits (a dialog closes no slower than before); a subagent's question: shown at the PC at once.
 
-### 21.31 The main view says when a session's topic leaves as idle (2026-10-19; NOT BUILT yet)
+### 21.31 The main view says when a session's topic leaves as idle (2026-10-19; in dev since 0.0.1.31, not in production)
 
 > The user's request (2026-10-19): "When session goes idle, I think (confirm) that the topic gets deleted. can we send a
 > message in the all chat that <title> is idle."
