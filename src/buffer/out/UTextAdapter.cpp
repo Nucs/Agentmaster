@@ -129,7 +129,24 @@ static UText* U_CALLCONV utextClone(UText* dest, const UText* src, UBool deep, U
         return dest;
     }
 
+    // Agentmaster (leak fix, 2026-10-19): the whole-struct copy below must not carry the SOURCE's flags /
+    // pExtra / extraSize into dest. utext_setup() just marked dest the way ICU allocated it -
+    // UTEXT_HEAP_ALLOCATED | UTEXT_OPEN for a clone ICU created (RegexMatcher::reset clones every input
+    // through here) - while the source is a stack UText (UTextFromTextBuffer: UTEXT_OPEN only). Copied over,
+    // dest lost UTEXT_HEAP_ALLOCATED, so utext_close() (uregex_close -> ~RegexMatcher) ran our close, NULLed
+    // pFuncs and never freed the struct: 144 bytes leaked per URL scan (Terminal::_getPatterns) and per
+    // TextBuffer::SearchText. Production's dump held 131,622 of them, +27,864 in 53 minutes
+    // (doc/agentmaster/MEMORY_LEAKS.md). ICU's own shallowTextClone keeps these three fields for the same reason;
+    // the adapter keeps its state in p / q / a / b (accessLength / accessBuffer / accessRowRange /
+    // accessCurrentRow), never in them, so nothing of ours is lost. tools/leakhunt/utext_clone_leak_repro.cpp
+    // proves both halves against the system ICU (200,000 scans: +33 MB before, +0 after).
+    const auto destFlags = dest->flags;
+    const auto destExtra = dest->pExtra;
+    const auto destExtraSize = dest->extraSize;
     memcpy(dest, src, sizeof(UText));
+    dest->flags = destFlags;
+    dest->pExtra = destExtra;
+    dest->extraSize = destExtraSize;
     if (const auto buf = accessBuffer(dest))
     {
         buf->AddRef();
