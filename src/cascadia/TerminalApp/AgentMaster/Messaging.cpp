@@ -7064,9 +7064,10 @@ namespace Agentmaster::Msg
                 }
                 break;
             case TopicItemKind::ToolResult:
-                // §21.30: the result of a question card's dialog without answers — an error (Chat about this, Esc at the PC) or none
-                // given — closes the card (a no-op for every other tool's result).
-                _onTranscriptAnswer(sessionId, it.toolUseId, std::wstring{}, it.isError ? QuestionResult::Rejected : QuestionResult::Answered);
+                // §21.30: the result of a question card's dialog without answers — an error (Chat about this, Esc at the PC), none
+                // given, or Claude Code's own idle timeout — closes the card (a no-op for every other tool's result).
+                _onTranscriptAnswer(sessionId, it.toolUseId, std::wstring{},
+                                    it.isError ? QuestionResult::Rejected : (it.afkTimeoutMs > 0 ? QuestionResult::TimedOut : QuestionResult::Answered), it.afkTimeoutMs);
                 if (it.isError && verbose)
                 {
                     std::wstring name;
@@ -7177,7 +7178,7 @@ namespace Agentmaster::Msg
                 m.awaitingAnswer = false;
                 // §21.30: a question card shows its dialog's answer itself ("Answered from Telegram", or "Answered at the PC" with the
                 // answer): no "You ↩ answer" line under it. A show-only question still waiting for its hook is posted first, above it.
-                if (_onTranscriptAnswer(sessionId, it.toolUseId, it.text, QuestionResult::Answered))
+                if (_onTranscriptAnswer(sessionId, it.toolUseId, it.text, it.afkTimeoutMs > 0 ? QuestionResult::TimedOut : QuestionResult::Answered, it.afkTimeoutMs))
                 {
                     _log(L"[msg] " + ShortId(sessionId) + L" a question's answer: shown on its question card");
                     break;

@@ -57,6 +57,14 @@ namespace Agentmaster::Msg
     /// </summary>
     inline constexpr std::wstring_view kAskRejectPrefix{ L"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
                                                          L"the new_string was NOT written to the file). To tell you how to proceed, the user said:\n" };
+    /// <summary>
+    /// The tool result of the PC's Esc (and of the review's Cancel, which calls the same `deny`): Claude Code's STOP rejection,
+    /// verbatim as the corpus records it (2.1.225 – 2.1.291). The phone's ✖ Cancel sends it with `interrupt`, so the turn ends
+    /// and Claude waits for the user, as at the PC — never a softer text the model could read as permission to go on.
+    /// </summary>
+    inline constexpr std::wstring_view kAskDeclineMessage{ L"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+                                                           L"the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how "
+                                                           L"to proceed." };
     /// <summary>What the dialog shows instead of a WITHHELD preview (`Xge`); the card shows the same words.</summary>
     inline constexpr std::wstring_view kAskWithheldPreviewText{ L"(preview cannot be shown in full \x2014 compare the option labels and descriptions instead)" };
     /// <summary>
@@ -76,6 +84,13 @@ namespace Agentmaster::Msg
     inline constexpr size_t kAskCardMaxChars = 3800;
     /// <summary>The longest option label a button shows (Telegram cuts a long button anyway; a cut label stays recognizable).</summary>
     inline constexpr size_t kAskButtonLabelMaxChars = 40;
+    /// <summary>
+    /// The longest question name a TAB button shows (a card of several questions): headers reach 21 characters on this machine
+    /// (ask_census.py, 2026-10-19; the schema asks for 12 but does not enforce it), and a phone's row of three tabs shows ~16.
+    /// </summary>
+    inline constexpr size_t kAskTabLabelMaxChars = 16;
+    /// <summary>Tabs per keyboard row: four questions and the review make two rows (3 + 2) instead of five slivers.</summary>
+    inline constexpr size_t kAskTabsPerRow = 3;
     /// <summary>The widest preview picture, in columns: wider lines are hard-wrapped, as the PC's preview box does at its width.</summary>
     inline constexpr int kAskSheetMaxCols = 160;
 
@@ -343,7 +358,12 @@ namespace Agentmaster::Msg
     /// <summary>What the user chose for ONE question so far.</summary>
     struct AskChoice
     {
-        std::vector<size_t> picks; // option indexes, ascending (single-select: at most one)
+        /// <summary>
+        /// The picked options' indexes IN THE ORDER THEY WERE TICKED (single-select: at most one). The PC keeps a multi-select
+        /// answer in tick order, not option order — 19 of 94 real multi-select answers on this machine list their labels out of
+        /// the options' order (askcorpus.exe, 2026-10-19) — so the card's answer is the PC's byte for byte only in tick order.
+        /// </summary>
+        std::vector<size_t> picks;
         std::wstring otherText; // an answer of the user's own ("Type something." at the PC); a multi-select one joins the picks
         std::wstring note; // a preview question's note (the PC's Notes field)
     };
@@ -591,15 +611,26 @@ namespace Agentmaster::Msg
     /// <param name="toolInput">The call's input as the request carried it.</param>
     /// <param name="answers">ComposeAskAnswers' answers.</param>
     /// <param name="annotations">ComposeAskAnswers' annotations.</param>
+    /// <param name="response">
+    /// A free-form REPLY instead of the answers ("" = none): Claude Code's own `response` field, which its remote cards send
+    /// for "freeform text the user typed instead of selecting a structured option". The tool's result then reads "The user
+    /// responded: &lt;text&gt;" and the answers are not shown to the model (its result mapper, 2.1.291) — so a caller that has
+    /// answers sends them without a response.
+    /// </param>
     /// <returns>The line (ASCII JSON, no line break).</returns>
     /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
-    inline std::string BuildAskAllowLine(const json::Value& toolInput, const json::Value& answers, const json::Value& annotations)
+    inline std::string BuildAskAllowLine(const json::Value& toolInput, const json::Value& answers, const json::Value& annotations, std::wstring_view response = {})
     {
         json::Value updated = toolInput.type == json::Value::Type::Obj ? toolInput : json::Value::MkObj();
         detail::AskRemoveMember(updated, L"answers");
         detail::AskRemoveMember(updated, L"annotations");
+        detail::AskRemoveMember(updated, L"response");
         updated.Set(L"answers", answers);
         updated.Set(L"annotations", annotations);
+        if (!response.empty())
+        {
+            updated.Set(L"response", json::Value::MkStr(std::wstring{ response }));
+        }
         json::Value decision = json::Value::MkObj();
         decision.Set(L"behavior", json::Value::MkStr(L"allow"));
         decision.Set(L"updatedInput", std::move(updated));
@@ -631,6 +662,17 @@ namespace Agentmaster::Msg
         json::Value root = json::Value::MkObj();
         root.Set(L"hookSpecificOutput", std::move(hso));
         return AskJsonToAsciiUtf8(json::Dump(root));
+    }
+
+    /// <summary>
+    /// The phone's ✖ Cancel, the PC's Esc: a `deny` with Claude Code's own STOP rejection (kAskDeclineMessage) and `interrupt`,
+    /// so the tool result reads exactly as an Esc at the PC and the turn ends — Claude waits for the user's next message.
+    /// </summary>
+    /// <returns>The line (ASCII JSON, no line break).</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
+    inline std::string BuildAskDeclineLine()
+    {
+        return BuildAskDenyLine(kAskDeclineMessage, true);
     }
 
     /// <summary>The reply that leaves the dialog to the PC (no decision): the helper prints nothing and exits.</summary>
@@ -687,6 +729,9 @@ namespace Agentmaster::Msg
         Answered, // answered from the phone (confirmed, or unconfirmed after kAskConfirmTimeoutMs)
         AnsweredAtPc, // answered at the PC first
         Clarify, // the phone asked Claude to clarify ("Chat about this")
+        Cancelled, // ✖ Cancel from the phone: the PC's Esc (Claude Code's STOP rejection with `interrupt`) — the turn ended
+        Replied, // a free-form reply from the phone INSTEAD of the answers (Claude Code's own `response` field)
+        TimedOut, // Claude Code's own idle timeout resolved the dialog (`afkTimeoutMs`): it went on without (all of) the answers
         Closed, // gone without an answer from here: cancelled at the PC, the session ended, the app restarted, 24 h passed
     };
 
@@ -703,11 +748,19 @@ namespace Agentmaster::Msg
     {
         std::vector<AskQuestion> questions;
         std::vector<AskChoice> choices; // one per question
-        size_t current{ 0 }; // the question the card shows and its buttons act on
+        /// <summary>
+        /// The TAB the card shows and its buttons act on: a question's index, or — on a card of SEVERAL questions only —
+        /// questions.size(), the REVIEW tab (the PC's "✔ Submit" tab: "Review your answers", Submit / Cancel). A card of one
+        /// question has no review: a pick sends at once, as the PC's Enter does.
+        /// </summary>
+        size_t current{ 0 };
         AskCardPhase phase{ AskCardPhase::Open };
         AskTextTarget awaiting{ AskTextTarget::None };
+        bool confirmCancel{ false }; // ✖ Cancel was tapped: the card asks "cancel the question?" before it ends the turn
         int64_t outcomeAtMs{ 0 }; // when the card left Open (the final edit's clock)
-        std::wstring atPcAnswer; // AnsweredAtPc: the answer as the transcript recorded it
+        std::wstring atPcAnswer; // AnsweredAtPc / TimedOut: the answer (TimedOut: the selections made before the timeout) as the transcript recorded it
+        std::wstring reply; // Replied: the free-form reply the phone sent instead of the answers
+        int64_t timeoutMs{ 0 }; // TimedOut: Claude Code's idle timeout (`afkTimeoutMs`), for the card's "no answer within N s"
         std::wstring closedWhy; // Closed: why ("it was cancelled at the PC, or its session ended")
         bool unconfirmed{ false }; // Answered: the transcript never confirmed it in time
     };
@@ -757,6 +810,16 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kAskVerbUseHeld{ L"u" };
     /// <summary>Queue the held message `arg` as the session's next prompt instead (D30).</summary>
     inline constexpr std::wstring_view kAskVerbQueueHeld{ L"h" };
+    /// <summary>Show tab `arg`: a question (0-based), or the question count for the review tab (several questions).</summary>
+    inline constexpr std::wstring_view kAskVerbTab{ L"t" };
+    /// <summary>✖ Cancel: ask to confirm (a cancel ends the turn, as the PC's Esc does).</summary>
+    inline constexpr std::wstring_view kAskVerbCancel{ L"z" };
+    /// <summary>✖ Yes, cancel: send the PC's Esc (BuildAskDeclineLine).</summary>
+    inline constexpr std::wstring_view kAskVerbCancelYes{ L"zy" };
+    /// <summary>◀ No, back to the question: drop the cancel confirmation.</summary>
+    inline constexpr std::wstring_view kAskVerbCancelNo{ L"zn" };
+    /// <summary>Send the held message `arg` to Claude as a free-form REPLY instead of the answers (Claude Code's `response`).</summary>
+    inline constexpr std::wstring_view kAskVerbReplyHeld{ L"r" };
 
     /// <summary>A card button's callback data.</summary>
     /// <param name="key">The card's key.</param>
@@ -813,8 +876,10 @@ namespace Agentmaster::Msg
         std::wstring_view rest = data.substr(c1 + 1);
         const size_t c2 = rest.find(L':');
         tap.verb = std::wstring{ rest.substr(0, c2) };
-        static constexpr std::wstring_view kVerbs[] = { kAskVerbOption, kAskVerbWrite, kAskVerbNote, kAskVerbNoteRemove, kAskVerbNoteSend, kAskVerbDone, kAskVerbPrev,
-                                                        kAskVerbNext,   kAskVerbSend,  kAskVerbChat, kAskVerbPicture,    kAskVerbCancelWrite, kAskVerbUseHeld, kAskVerbQueueHeld };
+        static constexpr std::wstring_view kVerbs[] = { kAskVerbOption,     kAskVerbWrite,   kAskVerbNote,     kAskVerbNoteRemove, kAskVerbNoteSend, kAskVerbDone,
+                                                        kAskVerbPrev,       kAskVerbNext,    kAskVerbSend,     kAskVerbChat,       kAskVerbPicture,  kAskVerbCancelWrite,
+                                                        kAskVerbUseHeld,    kAskVerbQueueHeld, kAskVerbTab,    kAskVerbCancel,     kAskVerbCancelYes, kAskVerbCancelNo,
+                                                        kAskVerbReplyHeld };
         if (std::find(std::begin(kVerbs), std::end(kVerbs), std::wstring_view{ tap.verb }) == std::end(kVerbs))
         {
             return std::nullopt;
@@ -841,18 +906,68 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// What a typed message means for the CURRENT question: the note of a preview question (the PC's Notes field is its only free
-    /// text), else an answer of the user's own (the PC's "Type something.").
+    /// Is the card on its REVIEW tab (several questions, `current` past the last question)? The review lists every answer and
+    /// takes the submit — the PC's "✔ Submit" tab ("Review your answers", "Ready to submit your answers?").
     /// </summary>
     /// <param name="m">The card.</param>
-    /// <returns>Note or Answer (None when the card has no question).</returns>
-    inline AskTextTarget AskTextTargetFor(const AskCardModel& m) noexcept
+    /// <returns>True on the review tab.</returns>
+    inline bool AskOnReview(const AskCardModel& m) noexcept
     {
-        if (m.current >= m.questions.size())
+        return m.questions.size() > 1 && m.current == m.questions.size();
+    }
+
+    /// <summary>How many of the card's questions have an answer (AskQuestionAnswered).</summary>
+    /// <param name="m">The card.</param>
+    /// <returns>The count.</returns>
+    /// <exception cref="std::bad_alloc">If an answer cannot be computed.</exception>
+    inline size_t AskAnsweredCount(const AskCardModel& m)
+    {
+        size_t answered = 0;
+        for (size_t i = 0; i < m.questions.size() && i < m.choices.size(); ++i)
+        {
+            answered += AskQuestionAnswered(m.questions[i], m.choices[i]) ? 1 : 0;
+        }
+        return answered;
+    }
+
+    /// <summary>
+    /// The question a TYPED message is for: the tab's own question, or — on the review tab — the first question still without an
+    /// answer (the one the review warns about); none when every question has one.
+    /// </summary>
+    /// <param name="m">The card.</param>
+    /// <returns>The question's index, or questions.size() for none.</returns>
+    /// <exception cref="std::bad_alloc">If an answer cannot be computed.</exception>
+    inline size_t AskTextQuestion(const AskCardModel& m)
+    {
+        if (m.current < m.questions.size())
+        {
+            return m.current;
+        }
+        for (size_t i = 0; i < m.questions.size() && i < m.choices.size(); ++i)
+        {
+            if (!AskQuestionAnswered(m.questions[i], m.choices[i]))
+            {
+                return i;
+            }
+        }
+        return m.questions.size();
+    }
+
+    /// <summary>
+    /// What a typed message means for its question (AskTextQuestion): the note of a preview question (the PC's Notes field is its
+    /// only free text), else an answer of the user's own (the PC's "Type something.").
+    /// </summary>
+    /// <param name="m">The card.</param>
+    /// <returns>Note or Answer; None when the card has no question to take text (none at all, or the review with every question answered).</returns>
+    /// <exception cref="std::bad_alloc">If an answer cannot be computed.</exception>
+    inline AskTextTarget AskTextTargetFor(const AskCardModel& m)
+    {
+        const size_t i = AskTextQuestion(m);
+        if (i >= m.questions.size())
         {
             return AskTextTarget::None;
         }
-        return m.questions[m.current].previewLayout ? AskTextTarget::Note : AskTextTarget::Answer;
+        return m.questions[i].previewLayout ? AskTextTarget::Note : AskTextTarget::Answer;
     }
 
     /// <summary>How the service routes a plain text message of the topic while a card is there.</summary>
@@ -905,29 +1020,103 @@ namespace Agentmaster::Msg
     namespace detail
     {
         /// <summary>
-        /// After a question was answered on a card of several questions: the next UNANSWERED question after the current one
-        /// (wrapping around), or the current one when every question is answered (the card then offers 📨 Send).
+        /// After question `from` was answered on a card of several questions: the next UNANSWERED question after it (wrapping
+        /// around), or the REVIEW tab once every question has an answer — the PC moves on to its "✔ Submit" tab after the last
+        /// question the same way (2.1.291 `set-answer` with shouldAdvance), and the review is where the answers are submitted.
+        /// A card of one question never moves (it has no review: its answer is sent).
         /// </summary>
         /// <param name="m">The card.</param>
-        inline void AskAdvance(AskCardModel& m)
+        /// <param name="from">The question just answered.</param>
+        /// <exception cref="std::bad_alloc">If an answer cannot be computed.</exception>
+        inline void AskAdvance(AskCardModel& m, size_t from)
         {
             const size_t n = m.questions.size();
-            for (size_t step = 1; step < n; ++step)
+            if (n < 2)
             {
-                const size_t i = (m.current + step) % n;
+                return;
+            }
+            for (size_t step = 1; step <= n; ++step)
+            {
+                const size_t i = (from + step) % n;
                 if (!AskQuestionAnswered(m.questions[i], m.choices[i]))
                 {
                     m.current = i;
                     return;
                 }
             }
+            m.current = n;
         }
+    }
+
+    /// <summary>
+    /// A tap on a TAB of a card of several questions: show that question (or, at questions.size(), the review). Any text the card
+    /// waited for and a pending cancel confirmation are dropped — the user moved on.
+    /// </summary>
+    /// <param name="m">The card.</param>
+    /// <param name="tab">The tab: a question's index, or questions.size() for the review.</param>
+    /// <returns>What happened (a tap on the tab already shown changes nothing).</returns>
+    inline AskStep AskGoTab(AskCardModel& m, size_t tab) noexcept
+    {
+        AskStep step;
+        if (m.phase != AskCardPhase::Open)
+        {
+            return step; // the caller answers with the phase's own toast
+        }
+        if (m.questions.size() < 2 || tab > m.questions.size())
+        {
+            step.toast = L"That tab is not on this card \x2014 it changed meanwhile.";
+            return step;
+        }
+        if (tab == m.current && !m.confirmCancel && m.awaiting == AskTextTarget::None)
+        {
+            return step;
+        }
+        m.current = tab;
+        m.awaiting = AskTextTarget::None;
+        m.confirmCancel = false;
+        step.changed = true;
+        return step;
+    }
+
+    /// <summary>
+    /// ✖ Cancel was tapped: the card asks to CONFIRM, since a cancel ends the turn like the PC's Esc (a stray tap on a phone must
+    /// not). Any text the card waited for is dropped.
+    /// </summary>
+    /// <param name="m">The card.</param>
+    /// <returns>What happened.</returns>
+    inline AskStep AskAskCancel(AskCardModel& m) noexcept
+    {
+        AskStep step;
+        if (m.phase != AskCardPhase::Open)
+        {
+            return step;
+        }
+        m.confirmCancel = true;
+        m.awaiting = AskTextTarget::None;
+        step.changed = true;
+        return step;
+    }
+
+    /// <summary>◀ No, go back: the cancel confirmation goes, the card shows its tab again.</summary>
+    /// <param name="m">The card.</param>
+    /// <returns>What happened.</returns>
+    inline AskStep AskCancelBack(AskCardModel& m) noexcept
+    {
+        AskStep step;
+        if (m.phase != AskCardPhase::Open || !m.confirmCancel)
+        {
+            return step;
+        }
+        m.confirmCancel = false;
+        step.changed = true;
+        return step;
     }
 
     /// <summary>
     /// A tap on an option. Single-select: the option becomes the answer (an own answer is dropped, a note kept); a one-question
     /// card then SENDS at once (the PC's Enter answers a one-question dialog), a card of several questions moves on to the next
-    /// unanswered one. Multi-select: the option is toggled.
+    /// unanswered question — or to the review when every question has an answer. Multi-select: the option is toggled (a tick
+    /// joins the END of the picks: the answer lists the labels in tick order, as the PC's does).
     /// </summary>
     /// <param name="m">The card.</param>
     /// <param name="option">The option's index.</param>
@@ -936,9 +1125,14 @@ namespace Agentmaster::Msg
     inline AskStep AskTapOption(AskCardModel& m, size_t option)
     {
         AskStep step;
-        if (m.phase != AskCardPhase::Open || m.current >= m.questions.size())
+        if (m.phase != AskCardPhase::Open)
         {
             step.toast = L"This question is not open any more.";
+            return step;
+        }
+        if (m.current >= m.questions.size())
+        {
+            step.toast = L"Open a question's tab to pick its options.";
             return step;
         }
         const AskQuestion& q = m.questions[m.current];
@@ -948,17 +1142,18 @@ namespace Agentmaster::Msg
             return step;
         }
         m.awaiting = AskTextTarget::None;
+        m.confirmCancel = false;
         step.changed = true;
         if (q.multiSelect)
         {
-            const auto it = std::lower_bound(c.picks.begin(), c.picks.end(), option);
-            if (it != c.picks.end() && *it == option)
+            // A tick goes to the END and an untick keeps the others' order: the PC's answer lists the labels in tick order.
+            if (const auto it = std::find(c.picks.begin(), c.picks.end(), option); it != c.picks.end())
             {
                 c.picks.erase(it);
             }
             else
             {
-                c.picks.insert(it, option);
+                c.picks.push_back(option);
             }
             return step;
         }
@@ -969,14 +1164,15 @@ namespace Agentmaster::Msg
             step.send = true;
             return step;
         }
-        detail::AskAdvance(m);
+        detail::AskAdvance(m, m.current);
         return step;
     }
 
     /// <summary>
-    /// A typed text taken by the card. A NOTE: stored on the current question (trimmed), nothing sent. An ANSWER of the user's own:
-    /// single-select — it replaces a pick and a one-question card SENDS at once (the PC's "Type something." + Enter), several
-    /// questions move on; multi-select — it joins the picks and the user taps ✅ Done.
+    /// A typed text taken by the card, for its question (AskTextQuestion: the tab's question, or on the review the first one
+    /// without an answer). A NOTE: stored on that question (trimmed), nothing sent. An ANSWER of the user's own: single-select —
+    /// it replaces a pick and a one-question card SENDS at once (the PC's "Type something." + Enter), several questions move on
+    /// (to the review once every question has an answer); multi-select — it joins the picks and the user taps ✅ Done.
     /// </summary>
     /// <param name="m">The card.</param>
     /// <param name="text">The typed text.</param>
@@ -986,9 +1182,15 @@ namespace Agentmaster::Msg
     inline AskStep AskTakeText(AskCardModel& m, std::wstring_view text, AskTextTarget target)
     {
         AskStep step;
-        if (m.phase != AskCardPhase::Open || m.current >= m.questions.size() || target == AskTextTarget::None)
+        if (m.phase != AskCardPhase::Open || target == AskTextTarget::None)
         {
             step.toast = L"This question is not open any more.";
+            return step;
+        }
+        const size_t index = AskTextQuestion(m);
+        if (index >= m.questions.size())
+        {
+            step.toast = L"Every question has an answer \x2014 \U0001F4E8 Submit them, or open a question's tab to change one.";
             return step;
         }
         std::wstring t = detail::AskJsTrim(text);
@@ -1002,9 +1204,10 @@ namespace Agentmaster::Msg
             step.toast = L"That text is longer than 8,192 characters \x2014 send a shorter one.";
             return step;
         }
-        const AskQuestion& q = m.questions[m.current];
-        AskChoice& c = m.choices[m.current];
+        const AskQuestion& q = m.questions[index];
+        AskChoice& c = m.choices[index];
         m.awaiting = AskTextTarget::None;
+        m.confirmCancel = false;
         step.changed = true;
         if (target == AskTextTarget::Note)
         {
@@ -1015,6 +1218,8 @@ namespace Agentmaster::Msg
         c.otherText = std::move(t);
         if (q.multiSelect)
         {
+            // Shown with the picks on the question's own tab (from the review, the card goes there: Done is on the tab).
+            m.current = index;
             step.toast = L"\x270D\xFE0F Added \x2014 tap \x2705 Done when your picks are complete.";
             return step;
         }
@@ -1024,7 +1229,7 @@ namespace Agentmaster::Msg
             step.send = true;
             return step;
         }
-        detail::AskAdvance(m);
+        detail::AskAdvance(m, index);
         return step;
     }
 
@@ -1077,19 +1282,66 @@ namespace Agentmaster::Msg
     namespace detail
     {
         /// <summary>
-        /// The current question's block of the card: its text, a multi-select hint, and every option (number, label,
-        /// description, the picked mark) with its preview in a monospace block when `withPreviews` (a Withheld preview shows
-        /// Claude Code's own placeholder; an option without one shows nothing).
+        /// A TAB's name: the question's header (the PC's tab chip), else "Q&lt;n&gt;" as the PC names a header-less tab, cut to
+        /// `maxChars` — headers reach 21 characters on this machine (ask_census.py, 2026-10-19), and a phone's row of three tab
+        /// buttons shows about 16. Past the last question: "Submit", the review tab's name.
         /// </summary>
         /// <param name="m">The card.</param>
+        /// <param name="i">The tab: a question's index, or questions.size() for the review.</param>
+        /// <param name="maxChars">The cap (at least 2).</param>
+        /// <returns>The name (plain text, not escaped).</returns>
+        /// <exception cref="std::bad_alloc">If the name cannot be allocated.</exception>
+        inline std::wstring AskTabName(const AskCardModel& m, size_t i, size_t maxChars)
+        {
+            if (i >= m.questions.size())
+            {
+                return L"Submit";
+            }
+            const std::wstring& header = m.questions[i].header;
+            return AskCut(header.empty() ? L"Q" + std::to_wstring(i + 1) : header, maxChars);
+        }
+
+        /// <summary>
+        /// How long Claude Code's idle timeout waited, for the TimedOut card ("60 s", "5 min", "24 h"): the largest whole unit.
+        /// </summary>
+        /// <param name="ms">The timeout (`afkTimeoutMs`).</param>
+        /// <returns>The text; "" for no timeout.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        inline std::wstring AskTimeoutText(int64_t ms)
+        {
+            if (ms <= 0)
+            {
+                return {};
+            }
+            if (ms >= 3600000 && ms % 3600000 == 0)
+            {
+                return std::to_wstring(ms / 3600000) + L" h";
+            }
+            if (ms >= 60000 && ms % 60000 == 0)
+            {
+                return std::to_wstring(ms / 60000) + L" min";
+            }
+            return std::to_wstring((ms + 500) / 1000) + L" s";
+        }
+
+        /// <summary>
+        /// The current question's block of the card: its text, a multi-select hint, and every option (number, label,
+        /// description, the picked mark) with its preview in a monospace block when `withPreviews` (a Withheld preview shows
+        /// Claude Code's own placeholder; an option without one shows nothing). A long question or long descriptions can be
+        /// SHORTENED to fit one message (`questionCut`, `descCut`; 0 = in full) — never dropped: a description is what the PC's
+        /// preview layout hides and the phone shows.
+        /// </summary>
+        /// <param name="m">The card (its `current` must be a question).</param>
         /// <param name="withPreviews">Show the previews inline.</param>
+        /// <param name="questionCut">The longest question text shown (0 = all of it; a cut one is on one line).</param>
+        /// <param name="descCut">The longest description shown (0 = all of it).</param>
         /// <returns>The HTML.</returns>
         /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
-        inline std::wstring AskQuestionBlockHtml(const AskCardModel& m, bool withPreviews)
+        inline std::wstring AskQuestionBlockHtml(const AskCardModel& m, bool withPreviews, size_t questionCut = 0, size_t descCut = 0)
         {
             const AskQuestion& q = m.questions[m.current];
             const AskChoice& c = m.choices[m.current];
-            std::wstring out = L"<b>" + TgEscapeHtml(q.question) + L"</b>";
+            std::wstring out = L"<b>" + TgEscapeHtml(questionCut ? AskCut(q.question, questionCut) : q.question) + L"</b>";
             if (q.multiSelect)
             {
                 out += L"\n<i>Pick one or more.</i>";
@@ -1102,7 +1354,7 @@ namespace Agentmaster::Msg
                 out += L"\n" + std::wstring{ picked ? (q.multiSelect ? L"\x2611 " : L"\x2705 ") : L"" } + L"<b>" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(o.label) + L"</b>";
                 if (!o.description.empty())
                 {
-                    out += L" \x2014 " + TgEscapeHtml(o.description);
+                    out += L" \x2014 " + TgEscapeHtml(descCut ? AskCut(o.description, descCut) : o.description);
                 }
                 if (!withPreviews || q.multiSelect)
                 {
@@ -1119,15 +1371,75 @@ namespace Agentmaster::Msg
             }
             return out;
         }
+
+        /// <summary>
+        /// The REVIEW tab's body, the PC's "Review your answers" (2.1.291 `K5`): the warning "You have not answered all questions"
+        /// while one has no answer, then every question — its number, tab name and text — with its answer ("→ …", or "not
+        /// answered") and, for a preview question, the note (the phone shows notes here too; the PC's review lists answers only).
+        /// </summary>
+        /// <param name="m">The card.</param>
+        /// <param name="questionCut">The longest question text shown.</param>
+        /// <param name="answerCut">The longest answer shown.</param>
+        /// <param name="noteCut">The longest note shown.</param>
+        /// <returns>The HTML.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        inline std::wstring AskReviewHtml(const AskCardModel& m, size_t questionCut, size_t answerCut, size_t noteCut)
+        {
+            const size_t n = m.questions.size();
+            std::wstring out = L"<b>Review your answers</b>";
+            if (AskAnsweredCount(m) < n)
+            {
+                out += L"\n\x26A0\xFE0F <i>You have not answered all questions.</i>";
+            }
+            out += L"\n";
+            for (size_t i = 0; i < n; ++i)
+            {
+                const AskQuestion& q = m.questions[i];
+                const AskChoice c = i < m.choices.size() ? m.choices[i] : AskChoice{};
+                std::wstring answer = AskAnswerFor(q, c);
+                if (answer == kAskNotesOnlyAnswer)
+                {
+                    answer.clear(); // "(notes only)" reads as the note line alone
+                }
+                const std::wstring note = q.previewLayout ? AskJsTrim(c.note) : std::wstring{};
+                out += L"\n<b>" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(AskTabName(m, i, 40)) + L"</b> \x00B7 <i>" + TgEscapeHtml(AskCut(q.question, questionCut)) + L"</i>";
+                if (!answer.empty())
+                {
+                    out += L"\n\x2192 <b>" + TgEscapeHtml(AskCut(answer, answerCut)) + L"</b>";
+                }
+                else if (note.empty())
+                {
+                    out += L"\n\x2192 <i>not answered</i>";
+                }
+                if (!note.empty())
+                {
+                    out += L"\n\U0001F4DD <i>" + TgEscapeHtml(AskCut(note, noteCut)) + L"</i>";
+                }
+            }
+            return out;
+        }
+
+        /// <summary>The hint of an open card that asks to confirm ✖ Cancel (it replaces the card's usual hint).</summary>
+        inline constexpr std::wstring_view kAskCancelConfirmHtml{ L"\x2716\xFE0F <b>Cancel the question?</b> Claude stops this turn and waits for you \x2014 as Esc "
+                                                                  L"does at the PC. Nothing you picked here is sent." };
     }
 
     /// <summary>
-    /// The card's text (Telegram HTML). Open: "❓ Claude is asking" (with the header, or how many questions), a list of every
-    /// question with its answer so far (several questions), the current question with its options and their previews, the note and
-    /// the user's own answer, and a hint — "write your answer as your next message" while ✍️ / 📝 waits. Sending: the answer on its
-    /// way. Answered / AnsweredAtPc / Clarify / Closed: the outcome with its clock time and the answers, the question kept for the
-    /// record. The previews are left out (with a pointer to 🖼) when they would push the text past kAskCardMaxChars.
+    /// The card's text (Telegram HTML). Open, on a QUESTION tab: "❓ Claude is asking" (with the header, or how many questions),
+    /// for several questions a list of every question with its answer so far (✓ answered, ▶ shown) and "Question k of n", the
+    /// question with its options, their descriptions and previews, the note and the user's own answer, and a hint — "write your
+    /// answer as your next message" while ✍️ / 📝 waits, the cancel confirmation while ✖ Cancel waits. Open, on the REVIEW tab
+    /// (several questions): "Review your answers" with every answer and "Ready to submit your answers?", as the PC's Submit tab.
+    /// Sending: the answer on its way. Answered / AnsweredAtPc / Clarify / Cancelled / Replied / TimedOut / Closed: the outcome
+    /// with its clock time and the answers, the questions kept for the record.
     /// </summary>
+    /// <remarks>
+    /// A tab must fit one message (kAskCardMaxChars). It is fitted in steps, each tried only when the one before does not fit:
+    /// the previews go first (a pointer to 🖼 stays), then the list of the other questions (the tab row still shows which have
+    /// an answer), then the descriptions are SHORTENED — never dropped — and finally the question text; a shortened card says
+    /// so. Only a question no step fits falls back to its labels alone. On this machine's 1,627 real questions (askcorpus.exe)
+    /// that last step is never reached.
+    /// </remarks>
     /// <param name="m">The card.</param>
     /// <param name="nowMs">The clock for the outcome's time ("HH:MM" today, else "D Mon HH:MM").</param>
     /// <returns>The HTML.</returns>
@@ -1161,6 +1473,16 @@ namespace Agentmaster::Msg
                        (m.atPcAnswer.empty() ? std::wstring{} : L"\n<b>" + TgEscapeHtml(detail::AskCut(m.atPcAnswer, answerCut * 5)) + L"</b>");
             case AskCardPhase::Clarify:
                 return L"\U0001F4AC <b>You asked Claude to clarify</b>" + when + L"\n" + questionList(questionCut);
+            case AskCardPhase::Cancelled:
+                return L"\x2716\xFE0F <b>Cancelled from Telegram</b>" + when + L"\n<i>Claude stopped this turn and waits for you, as after Esc at the PC.</i>\n" +
+                       questionList(questionCut);
+            case AskCardPhase::Replied:
+                return L"\U0001F4AC <b>Replied from Telegram</b>" + when + L" \x2014 <i>instead of answering</i>\n" + questionList(questionCut) + L"\n<b>" +
+                       TgEscapeHtml(detail::AskCut(m.reply, answerCut * 5)) + L"</b>";
+            case AskCardPhase::TimedOut:
+                return L"\x23F1\xFE0F <b>No answer in time</b>" + when + L" \x2014 <i>Claude Code went on by itself" +
+                       (m.timeoutMs > 0 ? L" after " + detail::AskTimeoutText(m.timeoutMs) : std::wstring{}) + L"</i>\n" + questionList(questionCut) +
+                       (m.atPcAnswer.empty() ? std::wstring{} : L"\n<i>Selected before that:</i>\n<b>" + TgEscapeHtml(detail::AskCut(m.atPcAnswer, answerCut * 5)) + L"</b>");
             case AskCardPhase::Closed:
                 return L"\x23F9\xFE0F <b>No longer open here</b>" + when + (m.closedWhy.empty() ? std::wstring{} : L" \x2014 " + TgEscapeHtml(m.closedWhy)) + L"\n" +
                        questionList(questionCut);
@@ -1184,17 +1506,37 @@ namespace Agentmaster::Msg
             }
             return text;
         }
-        const AskQuestion& q = m.questions[m.current];
-        const AskChoice& c = m.choices[m.current];
         std::wstring head = L"\x2753 <b>Claude is asking</b>";
         if (n > 1)
         {
             head += L" \x00B7 " + std::to_wstring(n) + L" questions";
         }
-        else if (!q.header.empty())
+        else if (!m.questions[0].header.empty())
         {
-            head += L" \x00B7 <i>" + TgEscapeHtml(q.header) + L"</i>";
+            head += L" \x00B7 <i>" + TgEscapeHtml(m.questions[0].header) + L"</i>";
         }
+        if (AskOnReview(m))
+        {
+            const std::wstring hint = m.confirmCancel ? std::wstring{ detail::kAskCancelConfirmHtml }
+                                                      : std::wstring{ L"<i>Ready to submit your answers?</i> Tap \U0001F4E8 Submit answers \x2014 or a tab to change one." };
+            static constexpr size_t kReviewCuts[][3] = { { 200, 300, 600 }, { 100, 160, 300 }, { 60, 80, 120 }, { 40, 40, 60 } };
+            std::wstring text;
+            for (const auto& cut : kReviewCuts)
+            {
+                text = head + L"\n\n" + detail::AskReviewHtml(m, cut[0], cut[1], cut[2]) + L"\n\n" + hint;
+                if (text.size() <= kAskCardMaxChars)
+                {
+                    break;
+                }
+            }
+            return text;
+        }
+        if (m.current >= n)
+        {
+            return head; // a one-question card never shows a review; nothing else is reachable
+        }
+        const AskQuestion& q = m.questions[m.current];
+        const AskChoice& c = m.choices[m.current];
         std::wstring list;
         if (n > 1)
         {
@@ -1207,22 +1549,28 @@ namespace Agentmaster::Msg
                     answer = L"\U0001F4DD note only";
                 }
                 const std::wstring name = qi.header.empty() ? detail::AskCut(qi.question, 40) : qi.header;
-                list += L"\n" + std::wstring{ i == m.current ? L"\x25B6 " : L"   " } + L"<b>" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(detail::AskCut(name, 40)) + L"</b> \x2014 " +
-                        (answer.empty() ? std::wstring{ L"<i>not answered yet</i>" } : TgEscapeHtml(detail::AskCut(answer, 60)));
+                list += L"\n" + std::wstring{ i == m.current ? L"\x25B6 " : (answer.empty() ? L"   " : L"\x2713 ") } + L"<b>" + std::to_wstring(i + 1) + L". " +
+                        TgEscapeHtml(detail::AskCut(name, 40)) + L"</b> \x2014 " + (answer.empty() ? std::wstring{ L"<i>not answered yet</i>" } : TgEscapeHtml(detail::AskCut(answer, 60)));
             }
-            list += L"\n";
         }
-        std::wstring tail;
-        if (!c.otherText.empty())
-        {
-            tail += L"\n\x270D\xFE0F <b>Your own answer:</b> <i>" + TgEscapeHtml(detail::AskCut(c.otherText, 600)) + L"</i>";
-        }
-        if (q.previewLayout && !c.note.empty())
-        {
-            tail += L"\n\U0001F4DD <b>Note:</b> <i>" + TgEscapeHtml(detail::AskCut(c.note, 600)) + L"</i>";
-        }
+        const auto tail = [&](size_t cut) {
+            std::wstring out;
+            if (!c.otherText.empty())
+            {
+                out += L"\n\x270D\xFE0F <b>Your own answer:</b> <i>" + TgEscapeHtml(detail::AskCut(c.otherText, cut)) + L"</i>";
+            }
+            if (q.previewLayout && !c.note.empty())
+            {
+                out += L"\n\U0001F4DD <b>Note:</b> <i>" + TgEscapeHtml(detail::AskCut(c.note, cut)) + L"</i>";
+            }
+            return out;
+        };
         std::wstring hint;
-        if (m.awaiting == AskTextTarget::Answer)
+        if (m.confirmCancel)
+        {
+            hint = detail::kAskCancelConfirmHtml;
+        }
+        else if (m.awaiting == AskTextTarget::Answer)
         {
             hint = L"\x270D\xFE0F <b>Write your answer</b> and send it here \x2014 as your next message, or as a reply to this one.";
         }
@@ -1232,7 +1580,7 @@ namespace Agentmaster::Msg
         }
         else if (q.multiSelect)
         {
-            hint = L"<i>Tap the options you want, then \x2705 Done.</i>";
+            hint = n == 1 ? L"<i>Tap the options you want, then \U0001F4E8 Send.</i>" : L"<i>Tap the options you want, then \x2705 Done.</i>";
         }
         else if (q.previewLayout)
         {
@@ -1243,40 +1591,80 @@ namespace Agentmaster::Msg
         {
             hint = n == 1 ? L"<i>Tap an option to answer \x2014 or \x270D\xFE0F write your own.</i>" : L"<i>Tap an option \x2014 or \x270D\xFE0F write your own.</i>";
         }
-        if (n > 1)
+        if (n > 1 && !m.confirmCancel && m.awaiting == AskTextTarget::None)
         {
-            hint += L"\n<i>When you are done, \U0001F4E8 Send answers.</i>";
-        }
-        const std::wstring prefix = head + L"\n" + list + L"\n" + (n > 1 ? L"<b>Question " + std::to_wstring(m.current + 1) + L" of " + std::to_wstring(n) + L"</b>\n" : L"");
-        std::wstring withPreviews = prefix + detail::AskQuestionBlockHtml(m, true) + L"\n" + tail + L"\n\n" + hint;
-        if (withPreviews.size() <= kAskCardMaxChars)
-        {
-            return withPreviews;
+            hint += L"\n<i>An answer moves on to the next question; \U0001F4E8 Submit shows them all before they are sent.</i>";
         }
         const bool anyFull = std::any_of(q.options.begin(), q.options.end(), [](const AskOption& o) { return o.previewKind == ClaudePreviewKind::Full; });
-        std::wstring without = prefix + detail::AskQuestionBlockHtml(m, false) + L"\n" + tail +
-                               (q.previewLayout && anyFull ? L"\n\U0001F5BC <i>The previews do not fit in one message \x2014 tap \U0001F5BC Previews.</i>" : L"") + L"\n\n" + hint;
-        if (without.size() > kAskCardMaxChars)
+        // The fitting steps (see the remarks): with or without the list of questions and the previews, then shorter
+        // descriptions, question text and own answer / note.
+        struct Fit
         {
-            // Very long questions or descriptions: Telegram cuts an edit at its limit anyway; cut here, before a tag can be split,
-            // by keeping the head and the hint and ending the middle with an ellipsis line.
-            const size_t keep = kAskCardMaxChars > hint.size() + 64 ? kAskCardMaxChars - hint.size() - 64 : kAskCardMaxChars / 2;
-            std::wstring plain = prefix + L"<b>" + TgEscapeHtml(detail::AskCut(q.question, keep / 2)) + L"</b>";
-            for (size_t i = 0; i < q.options.size() && plain.size() < keep; ++i)
+            bool list;
+            bool previews;
+            size_t descCut;
+            size_t questionCut;
+            size_t tailCut;
+        };
+        static constexpr Fit kFits[] = {
+            { true, true, 0, 0, 600 },      { true, false, 0, 0, 600 },     { false, false, 0, 0, 600 },     { false, false, 400, 0, 400 },
+            { false, false, 250, 0, 300 },  { false, false, 160, 400, 200 }, { false, false, 100, 250, 150 }, { false, false, 60, 160, 100 },
+        };
+        for (const Fit& f : kFits)
+        {
+            std::wstring text = head + L"\n";
+            if (n > 1)
             {
-                plain += L"\n<b>" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(detail::AskCut(q.options[i].label, 80)) + L"</b>";
+                if (f.list)
+                {
+                    text += list + L"\n";
+                }
+                text += L"\n<b>Question " + std::to_wstring(m.current + 1) + L" of " + std::to_wstring(n) + L"</b>\n";
             }
-            return plain + L"\n<i>(cut to fit one message)</i>\n\n" + hint;
+            else
+            {
+                text += L"\n";
+            }
+            text += detail::AskQuestionBlockHtml(m, f.previews, f.questionCut, f.descCut) + L"\n" + tail(f.tailCut);
+            if (!f.previews && q.previewLayout && anyFull)
+            {
+                text += L"\n\U0001F5BC <i>The previews do not fit in one message \x2014 tap \U0001F5BC Previews.</i>";
+            }
+            const bool shortened = (f.descCut != 0 && std::any_of(q.options.begin(), q.options.end(), [&](const AskOption& o) { return o.description.size() > f.descCut; })) ||
+                                   (f.questionCut != 0 && q.question.size() > f.questionCut);
+            if (shortened)
+            {
+                text += L"\n<i>(Shortened to fit one message \x2014 the PC shows it in full.)</i>";
+            }
+            text += L"\n\n" + hint;
+            if (text.size() <= kAskCardMaxChars)
+            {
+                return text;
+            }
         }
-        return without;
+        // No step fits (only a question of extreme size): the head, the question cut, the labels, and the hint.
+        const size_t keep = kAskCardMaxChars > hint.size() + 64 ? kAskCardMaxChars - hint.size() - 64 : kAskCardMaxChars / 2;
+        std::wstring plain = head + L"\n\n" + (n > 1 ? L"<b>Question " + std::to_wstring(m.current + 1) + L" of " + std::to_wstring(n) + L"</b>\n" : std::wstring{}) + L"<b>" +
+                             TgEscapeHtml(detail::AskCut(q.question, keep / 2)) + L"</b>";
+        for (size_t i = 0; i < q.options.size() && plain.size() < keep; ++i)
+        {
+            plain += L"\n<b>" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(detail::AskCut(q.options[i].label, 80)) + L"</b>";
+        }
+        return plain + L"\n<i>(cut to fit one message)</i>\n\n" + hint;
     }
 
     /// <summary>
-    /// The card's buttons (an inline keyboard as rows of {label, callback data}); none unless the card is Open. The current
-    /// question's options first (✅ marks a picked one; ☐ / ☑ toggles for multi-select; two to a row when every label is short),
-    /// then ✍️ write my own (or 📝 the note, ✏️ / ✖ change or remove it, 📨 send it alone) and 🖼 the previews, ✅ Done for a
-    /// multi-select question, ◀ / ▶ and 📨 Send answers for several questions, and 💬 Chat about this. While ✍️ / 📝 waits for
-    /// text, a ✖ Cancel row comes first.
+    /// The card's buttons (an inline keyboard as rows of {label, callback data}); none unless the card is Open.
+    /// <list type="bullet">
+    /// <item>While ✖ Cancel waits for its confirmation: [✖️ Yes, cancel] [◀ No, go back] alone.</item>
+    /// <item>While ✍️ / 📝 waits for text: a ✖ Cancel row first.</item>
+    /// <item>Several questions: the TAB ROW — one tab per question (▶ the one shown, ✓ answered) and 📨 Submit, the review — three
+    /// to a row, the PC's tab bar ("☐ header … ✔ Submit").</item>
+    /// <item>A question tab: its options (✅ marks a picked one; ☐ / ☑ toggles for multi-select; two to a row when every label is
+    /// short), then ✍️ write my own (or 📝 the note, ✏️ / ✖ change or remove it, 📨 send it alone), 🖼 the previews, the multi-select
+    /// row (✍️ add my own · 📨 Send / ✅ Done ▶), and [💬 Chat about this] [✖️ Cancel].</item>
+    /// <item>The review tab: [📨 Submit answers (a of n)], then [💬 Chat about this] [✖️ Cancel] — the PC's Submit / Cancel.</item>
+    /// </list>
     /// </summary>
     /// <param name="m">The card.</param>
     /// <param name="key">The card's key (the callback data's second field).</param>
@@ -1285,17 +1673,56 @@ namespace Agentmaster::Msg
     inline std::vector<std::vector<std::pair<std::wstring, std::wstring>>> BuildAskCardButtons(const AskCardModel& m, std::wstring_view key)
     {
         std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
-        if (m.phase != AskCardPhase::Open || m.current >= m.questions.size())
+        const size_t n = m.questions.size();
+        if (m.phase != AskCardPhase::Open || n == 0 || m.current > n || (m.current == n && n < 2))
         {
             return rows;
         }
-        const AskQuestion& q = m.questions[m.current];
-        const AskChoice& c = m.choices[m.current];
-        const size_t n = m.questions.size();
+        if (m.confirmCancel)
+        {
+            rows.push_back({ { L"\x2716\xFE0F Yes, cancel", AskCallbackData(key, kAskVerbCancelYes) }, { L"\x25C0 No, go back", AskCallbackData(key, kAskVerbCancelNo) } });
+            return rows;
+        }
         if (m.awaiting != AskTextTarget::None)
         {
             rows.push_back({ { m.awaiting == AskTextTarget::Note ? L"\x2716 Cancel the note" : L"\x2716 Cancel writing", AskCallbackData(key, kAskVerbCancelWrite) } });
         }
+        if (n > 1)
+        {
+            // The tab row: every question and the review, so the user goes straight to any of them (the PC's ← / → over its tabs).
+            std::vector<std::pair<std::wstring, std::wstring>> tabs;
+            for (size_t i = 0; i <= n; ++i)
+            {
+                std::wstring label;
+                if (i == n)
+                {
+                    label = std::wstring{ m.current == n ? L"\x25B6 " : L"\U0001F4E8 " } + L"Submit";
+                }
+                else
+                {
+                    const bool answered = AskQuestionAnswered(m.questions[i], m.choices[i]);
+                    label = std::wstring{ i == m.current ? L"\x25B6 " : (answered ? L"\x2713 " : L"") } + detail::AskTabName(m, i, kAskTabLabelMaxChars);
+                }
+                tabs.emplace_back(std::move(label), AskCallbackData(key, kAskVerbTab, static_cast<int64_t>(i)));
+                if (tabs.size() == kAskTabsPerRow)
+                {
+                    rows.push_back(std::move(tabs));
+                    tabs.clear();
+                }
+            }
+            if (!tabs.empty())
+            {
+                rows.push_back(std::move(tabs));
+            }
+        }
+        if (AskOnReview(m))
+        {
+            rows.push_back({ { L"\U0001F4E8 Submit answers (" + std::to_wstring(AskAnsweredCount(m)) + L" of " + std::to_wstring(n) + L")", AskCallbackData(key, kAskVerbSend) } });
+            rows.push_back({ { L"\U0001F4AC Chat about this", AskCallbackData(key, kAskVerbChat) }, { L"\x2716\xFE0F Cancel", AskCallbackData(key, kAskVerbCancel) } });
+            return rows;
+        }
+        const AskQuestion& q = m.questions[m.current];
+        const AskChoice& c = m.choices[m.current];
         // The options: two to a row when every label is short (a phone row holds two ~18-character buttons), else one each.
         const bool shortLabels = std::all_of(q.options.begin(), q.options.end(), [](const AskOption& o) { return o.label.size() <= 18; });
         std::vector<std::pair<std::wstring, std::wstring>> row;
@@ -1344,43 +1771,54 @@ namespace Agentmaster::Msg
         {
             rows.push_back({ { L"\U0001F5BC Previews as a picture", AskCallbackData(key, kAskVerbPicture) } });
         }
-        if (n > 1)
-        {
-            std::vector<std::pair<std::wstring, std::wstring>> nav;
-            if (m.current > 0)
-            {
-                nav.emplace_back(L"\x25C0 Question " + std::to_wstring(m.current), AskCallbackData(key, kAskVerbPrev));
-            }
-            if (m.current + 1 < n)
-            {
-                nav.emplace_back(L"Question " + std::to_wstring(m.current + 2) + L" \x25B6", AskCallbackData(key, kAskVerbNext));
-            }
-            if (!nav.empty())
-            {
-                rows.push_back(std::move(nav));
-            }
-            size_t answered = 0;
-            for (size_t i = 0; i < n; ++i)
-            {
-                answered += AskQuestionAnswered(m.questions[i], m.choices[i]) ? 1 : 0;
-            }
-            rows.push_back({ { L"\U0001F4E8 Send answers (" + std::to_wstring(answered) + L" of " + std::to_wstring(n) + L")", AskCallbackData(key, kAskVerbSend) } });
-        }
-        rows.push_back({ { L"\U0001F4AC Chat about this", AskCallbackData(key, kAskVerbChat) } });
+        rows.push_back({ { L"\U0001F4AC Chat about this", AskCallbackData(key, kAskVerbChat) }, { L"\x2716\xFE0F Cancel", AskCallbackData(key, kAskVerbCancel) } });
         return rows;
     }
 
-    /// <summary>The words the bot asks with when a plain message arrives while a card is open (AskTextRoute::AskWhich).</summary>
+    /// <summary>
+    /// The words the bot asks with when a plain message arrives while a card is open (AskTextRoute::AskWhich): what is it — the
+    /// ANSWER (or the NOTE) of the question it would go to (AskTextQuestion; none once every question has an answer), a REPLY to
+    /// Claude instead of answering (Claude Code's `response`: the model reads "The user responded: …"), or the session's NEXT
+    /// PROMPT (kept until the question is answered, D30).
+    /// </summary>
     /// <param name="m">The card.</param>
-    /// <returns>The HTML (one line and a question).</returns>
+    /// <returns>The HTML (the question, then one line per choice).</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring AskWhichHtml(const AskCardModel& m)
     {
-        const bool note = AskTextTargetFor(m) == AskTextTarget::Note;
-        const std::wstring q = m.current < m.questions.size() ? detail::AskCut(m.questions[m.current].question, 120) : std::wstring{};
-        return L"\x2753 Claude's question is still open: <i>" + TgEscapeHtml(q) + L"</i>\n" +
-               (note ? std::wstring{ L"Is this message your <b>note</b> on it, or the session's <b>next prompt</b>?" }
-                     : std::wstring{ L"Is this message your <b>answer</b> to it, or the session's <b>next prompt</b>?" });
+        const size_t i = AskTextQuestion(m);
+        const bool has = i < m.questions.size();
+        const bool note = has && m.questions[i].previewLayout;
+        const std::wstring q = has ? detail::AskCut(m.questions[i].question, 120) : (m.questions.empty() ? std::wstring{} : detail::AskCut(m.questions[0].question, 120));
+        std::wstring out = L"\x2753 Claude's question is still open: <i>" + TgEscapeHtml(q) + L"</i>\nWhat is this message?";
+        if (has)
+        {
+            out += note ? L"\n\U0001F4DD <b>My note</b> \x2014 the note on this question" : L"\n\x270D\xFE0F <b>My answer</b> \x2014 the answer to this question";
+        }
+        out += L"\n\U0001F4AC <b>A reply</b> \x2014 to Claude, instead of answering the question" + std::wstring{ m.questions.size() > 1 ? L"s" : L"" };
+        out += L"\n\U0001F4E8 <b>The next prompt</b> \x2014 kept until the question is answered";
+        return out;
+    }
+
+    /// <summary>The buttons under AskWhichHtml: [✍️ My answer | 📝 My note] [💬 A reply], then [📨 The next prompt].</summary>
+    /// <param name="m">The card.</param>
+    /// <param name="key">The card's key.</param>
+    /// <param name="messageId">The held message the choice is about.</param>
+    /// <returns>The rows.</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<std::pair<std::wstring, std::wstring>>> AskWhichButtons(const AskCardModel& m, std::wstring_view key, int64_t messageId)
+    {
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
+        std::vector<std::pair<std::wstring, std::wstring>> first;
+        const size_t i = AskTextQuestion(m);
+        if (i < m.questions.size())
+        {
+            first.emplace_back(m.questions[i].previewLayout ? L"\U0001F4DD My note" : L"\x270D\xFE0F My answer", AskCallbackData(key, kAskVerbUseHeld, messageId));
+        }
+        first.emplace_back(L"\U0001F4AC A reply", AskCallbackData(key, kAskVerbReplyHeld, messageId));
+        rows.push_back(std::move(first));
+        rows.push_back({ { L"\U0001F4E8 The next prompt", AskCallbackData(key, kAskVerbQueueHeld, messageId) } });
+        return rows;
     }
 
     // ===== the previews as a picture =========================================================================================

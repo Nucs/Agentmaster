@@ -70,6 +70,12 @@ namespace Agentmaster::Msg
         bool multiSelect{ false }; // Question
         std::vector<std::wstring> options; // Question: the option labels (of the FIRST question when several)
         int64_t tsMs{ 0 }; // the line's timestamp, unix ms (0 when absent)
+        /// <summary>
+        /// Answer / ToolResult of an AskUserQuestion: Claude Code's own IDLE TIMEOUT resolved the dialog (`toolUseResult.afkTimeoutMs`,
+        /// "No response after 60s — the user may be away from keyboard…") — nobody answered; an Answer item then holds only what was
+        /// selected before it. 0 for a dialog a person (or the phone) answered.
+        /// </summary>
+        int64_t afkTimeoutMs{ 0 };
     };
 
     // Telegram shows a tool call as "Name: summary" in the work log. Summaries are capped here.
@@ -494,6 +500,26 @@ namespace Agentmaster::Msg
                     // one answer reads as itself, several as "header: answer" lines.
                     const json::Value* tur = line.Find(L"toolUseResult");
                     const json::Value* answers = (tur && tur->type == json::Value::Type::Obj) ? tur->Find(L"answers") : nullptr;
+                    // Only an AskUserQuestion result carries `questions` beside an `answers` object: every other tool's
+                    // toolUseResult is its own shape, and a field of the same name there (a `response` of some tool) is no answer.
+                    const json::Value* askQuestions = (tur && tur->type == json::Value::Type::Obj) ? tur->Find(L"questions") : nullptr;
+                    const bool askResult = askQuestions && askQuestions->type == json::Value::Type::Arr && answers && answers->type == json::Value::Type::Obj;
+                    if (items.size() == 1 && askResult)
+                    {
+                        // §21.30: Claude Code's own idle timeout resolved the dialog (nobody answered): the question card says so.
+                        items[0].afkTimeoutMs = tur->I64At(L"afkTimeoutMs", 0);
+                        // A free-form REPLY instead of the answers (Claude Code's `response`, from the phone's 💬 A reply or a claude.ai
+                        // remote card): the user's words. The model reads only them ("The user responded: …", answers or not — its
+                        // result mapper checks `response.trim()` before the answers), so the mirror shows them in the answers' place.
+                        const std::wstring response = tur->StrAt(L"response");
+                        if (response.find_first_not_of(L" \t\r\n") != std::wstring::npos && items[0].afkTimeoutMs == 0)
+                        {
+                            items[0].kind = TopicItemKind::Answer;
+                            items[0].text = L"\U0001F4AC " + response;
+                            items[0].isError = false;
+                            return items;
+                        }
+                    }
                     if (items.size() == 1 && answers && answers->type == json::Value::Type::Obj && !answers->members.empty())
                     {
                         const json::Value* questions = tur->Find(L"questions");

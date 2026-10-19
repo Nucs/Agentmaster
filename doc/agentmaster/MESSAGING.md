@@ -4218,11 +4218,12 @@ Tap an option to answer. A note goes with the option you tap — or alone, as yo
   reply — or the next message, or any reply to the card itself — is TAKEN (a 👌 on it) and the prompt is deleted. An own
   answer of a one-question card sends at once; a note is stored ([📨 Send the note alone] answers "(notes only)").
 - **A plain message while the card is open** is no longer queued silently (D30): it is HELD and asked about, as a reply to
-  it: "❓ Claude's question is still open: … Is this message your answer to it, or the session's next prompt?"
-  [✍️ It's my answer] / [📝 It's my note] · [📨 Next prompt]. An edit of the held message changes what it holds. A
-  `/command` stays a command.
-- **Several questions** share the card: a list with every answer so far, "Question k of n", [◀ Question k-1] /
-  [Question k+1 ▶] and [📨 Send answers (a of n)] (unanswered ones are allowed, as at the PC).
+  it: "❓ Claude's question is still open: … What is this message?" — [✍️ My answer] / [📝 My note] (for the question it
+  would go to) · [💬 A reply] (to Claude, instead of answering — below) · [📨 The next prompt]. An edit of the held message
+  changes what it holds. A `/command` stays a command. (Before the evening's change: [✍️ It's my answer] / [📝 It's my
+  note] · [📨 Next prompt].)
+- **Several questions** are TABS, as at the PC (the evening's change, below): a tab row of every question and
+  [📨 Submit], the review. (Before: a list, [◀ Question k-1] / [Question k+1 ▶] and [📨 Send answers (a of n)].)
 - **[💬 Chat about this]** sends Claude Code's own rejection with its clarify request, each question's answer so far and
   its note; the turn goes on, and Claude's next message (it asks what to clarify) comes like any reply.
 - **[🖼 Previews as a picture]** draws the current question's previews into ONE picture (`BuildAskPreviewSheet` → the
@@ -4234,12 +4235,106 @@ Tap an option to answer. A note goes with the option you tap — or alone, as yo
 - **The outcome** replaces the text and removes the buttons: ⏳ Sending your answer to Claude… → ✅ Answered from Telegram
   · 14:02 (the questions and the answers, notes included; ⚠ "Claude Code did not confirm this answer" when the transcript
   shows no result within 60 s); ✅ Answered at the PC · 14:03 (the PC's answer, notes included); 💬 You asked Claude to
-  clarify; ⏹ No longer open here — it was closed at the PC / its session ended / its topic is gone.
+  clarify; ✖️ Cancelled from Telegram; 💬 Replied from Telegram — instead of answering (the reply); ⏱ No answer in time —
+  Claude Code went on by itself after 1 min (what was selected before it); ⏹ No longer open here — it was closed at the
+  PC / its session ended / its topic is gone.
 - **The mirror around it:** the transcript's question item posts nothing while a card shows the dialog, and the answer
   item posts no "👤 You ↩ answer" line under a card that shows the answer. A question no hook offers within 8 s (a claude
   that started before the bot was on, or one older than 2.1.139) is posted show-only as before, with the reason and
   "🔄 Restart Session gives it the question hook". §21.30's first step needs no hook at all: every answer line (live and in
   a history replay) now carries the NOTES (`📝 …`), and "(notes only)" reads as the note alone.
+
+**Several questions as TABS, ✖️ Cancel, 💬 a reply, the idle timeout, long content (2026-10-19 evening; NOT BUILT yet).**
+
+> The user's request (2026-10-19): "This session has multi-tab multi-question, do we support to that degree? we need to
+> and more than that. Scan for other cases based on the tool name on global .claude". The session (`char plan (fork)`,
+> NumSharp, in production — which has no question card yet) sat on a four-tab dialog, `NDArray<T> · NDMatrix ·
+> NDListArray · s_, flatiter · ✔ Submit`, each option with a 200–300-character description.
+
+What the PC does (2.1.291's bundle; INTERACTIVE_TOOLS.md §1.5): one TAB per question (its header, else `Q<n>`; ☐ / ☒ by
+answered; the shown one highlighted) and a `✔ Submit` tab for a call of several questions (or of one multi-select one); a
+pick moves to the NEXT tab; past the last, "Review your answers" — "You have not answered all questions" while one is open,
+each answer under its question, "Ready to submit your answers?", [Submit answers] / [Cancel], where Cancel is the Esc
+rejection. Unanswered questions may be submitted. What the card does now:
+```
+❓ Claude is asking · 4 questions
+
+▶ 1. NDArray<T> — not answered yet
+   2. NDMatrix — not answered yet
+   3. NDListArray — not answered yet
+   4. s_, flatiter — not answered yet
+
+Question 1 of 4
+With one indexer per class, what should NDArray<T> keep?
+
+1. One typed indexer (Recommended) — Keep only `NDArray<T> this[params object[] key]`. …
+2. Inherit NDArray's — NDArray<T> declares no indexer. …
+3. Keep the scalar indexer — Keep `T this[params long[]]` …
+
+Tap an option — or ✍️ write your own.
+An answer moves on to the next question; 📨 Submit shows them all before they are sent.
+[ ▶ NDArray<T> ] [ NDMatrix ] [ NDListArray ]
+[ s_, flatiter ] [ 📨 Submit ]
+[ 1 · One typed indexer (Recommended) ]
+[ 2 · Inherit NDArray's ]
+[ 3 · Keep the scalar indexer ]
+[ ✍️ Write my own answer ]
+[ 💬 Chat about this ] [ ✖️ Cancel ]
+```
+- **The TAB ROW** (several questions): one tab per question — its header cut to 16 characters (headers reach 21 here),
+  else `Q<n>` as the PC names it — ▶ on the shown one, ✓ on an answered one, then [📨 Submit]; three to a row (four
+  questions: 3 + 2). A tap shows that question (text the card waited for, and a cancel confirmation, go); ◀ / ▶ of an
+  earlier keyboard move one tab.
+- **An answer moves on** to the next question WITHOUT an answer (wrapping), and once every question has one, to the
+  REVIEW (the PC moves to the next tab, and past the last to its review). On a multi-select tab, [✅ Done ▶] moves on.
+- **The REVIEW** (the 📨 Submit tab): "Review your answers", the PC's warning while a question is open, every question
+  (number, tab name, text) with "→ answer" or "→ not answered" and its note; "Ready to submit your answers?" —
+  [📨 Submit answers (a of n)], then [💬 Chat about this] [✖️ Cancel]. A message typed on the review goes to the first
+  question without an answer.
+- **Multi-select answers keep the TICK ORDER.** The PC lists the labels in the order they were ticked, not the options'
+  order (19 of 94 real multi-select answers here); the card sorted them before, so those answers differed. Now a card
+  answer is the PC's byte for byte (probe H5: `"Olives, Cheese, "extra basil, please""`).
+- **✖️ Cancel** (on every tab and the review: the PC's Esc and its review's Cancel). The card asks first — "Cancel the
+  question? Claude stops this turn and waits for you — as Esc does at the PC" [✖️ Yes, cancel] [◀ No, go back] — then
+  sends Claude Code's own STOP rejection with `interrupt` (`BuildAskDeclineLine`). Measured (probe H6): the transcript then
+  holds exactly what an Esc leaves — the rejection, `toolUseResult: "User rejected tool use"`, `[Request interrupted by
+  user for tool use]` — and the turn ends; the interrupt hold (DELIVERY.md §14) parks the runner as after an Esc.
+- **💬 A reply** (the middle button of the plain-message question): the message goes to Claude INSTEAD of answering —
+  Claude Code's own `response` field, which its claude.ai remote cards send for "freeform text the user typed instead of
+  selecting a structured option". The model reads "The user responded: <text>" and goes on (probe H7: it answered the
+  reply). The answers made so far are not sent (the model would not read them beside a response). The transcript mirror
+  shows a `response` as the user's message (`💬 …`) too.
+- **⏱ Claude Code's idle timeout.** It has an AFK timer that resolves a question nobody answers (3 times here: 60 s on
+  2.1.199, 86,400 s on 2.1.225; only Remote Control turns it off — our hook does not). The card now says "⏱ No answer in
+  time — Claude Code went on by itself after 1 min", with what was selected before it, instead of "Answered at the PC",
+  and releases the hook (`TopicItem::afkTimeoutMs`, `QuestionResult::TimedOut`).
+- **Long content is shortened, never dropped.** A tab is fitted in steps: the previews go to 🖼, then the list of the other
+  questions goes (the tab row still shows ✓), then the descriptions are shortened, then the question; a shortened card
+  says "(Shortened to fit one message — the PC shows it in full.)". Only a question no step fits falls back to its labels
+  (before: any card past the budget fell back to its labels and lost every description). On this machine's 1,616 real
+  questions no fresh tab needs even the shortening (a tab carrying a 600-character own answer and note may).
+
+**Checked against every real call on this machine** (`tools/interactive-tools-probe`: `ask_census.py` counts and exports,
+`askcorpus.exe` replays — 1,065 calls of real sessions, Claude Code 2.0.70 – 2.1.291):
+- **The shapes** (`ask_census.py --real-only`): 1 question in 725 calls, 2 in 190, 3 in 73, 4 in 73 (32% have several);
+  45 of those hold a multi-select tab, 46 a preview tab. 2–4 options (one 6-option call, refused by Claude Code). Headers
+  up to 21 characters (289 over the schema's 12), labels up to 112 (233 over the 40 a button shows), descriptions up to
+  704, questions up to 755. The user typed their OWN words in 443 of 1,370 single-select answers (32%) and in 49 of 95
+  multi-select ones; 5 of 304 answered multi-question calls left a question open; the idle timeout fired 3 times.
+- **The cards** (`askcorpus.exe`): every tab of every call and its review, in five states (fresh, every question
+  answered, waiting for typed text, confirming Cancel, the longest own answer and note), and every outcome with long
+  answers — 20,200 cards, each within the budget and Telegram's 4,096, tags balanced, no torn surrogate pair, every button's
+  data ≤ 64 bytes and parsing back. 1,950 fresh tabs fit in full; 2 move their previews to the picture.
+- **The user's REAL answers**, rebuilt as card choices and composed by the card: 937 equal to what the PC sent, byte for
+  byte. The others are an older Claude Code's formats (14 with an unquoted ", " — the quoting came in 2.1.259 — and one
+  more of 2.1.138; 16 notes on questions without previews, 2.1.49 / 2.1.71 only), 1 pasted image (a hook cannot send
+  images) and 92 calls without a structured answer.
+- **Live** against claude.exe 2.1.291 (`askprobe.py` H1–H7: the shipped hook, the real AskBridge, AskQuestion.h's lines):
+  all seven pass. H5, a three-tab dialog answered tab by tab (a pick; Olives then Cheese plus own words holding ", "; a
+  note alone), equals the PC's form; H6, Cancel, ends the turn as Esc does; H7, a reply, reads "The user responded: …".
+- **Not covered:** Claude Code's EXTENDED questions (`kind` text / number, `title`, `followUp`) are a host launch option
+  (`extendedQuestionsEnabled`, set by SDK and remote hosts) and appear in none of the 1,616 CLI questions here. A question
+  without options would show only ✍️ Write my own answer.
 
 **How it gets there** (INTERACTIVE_TOOLS.md §10.2):
 - The hooks settings file (`hooks-settings.json`, and a preset's launch-settings file) carries a NINTH entry while the bot
@@ -4270,20 +4365,29 @@ from Telegram` or `… question not taken here (the Telegram bot is off, or the 
 `… open -> answered at the PC (the transcript's result)`, `… open -> closed (its session ended)`;
 `[ask] <sid8> request N answered from Telegram (b bytes)` / `released to the PC (2 bytes)` from the pipe's worker; and
 `[nav] remote telegram question <sid8> -> answered (…) | chat about this | own answer chars=N | note chars=N | a held
-message queued as the next prompt`. The words themselves never go to the log.
+message queued as the next prompt`. The evening's change adds `… cancelled from Telegram (the PC's Esc: the turn ends)`,
+`… replied from Telegram instead of answering (N chars)`, `… open -> Claude Code's idle timeout (the transcript's result)`
+and `[nav] … -> cancelled | -> replied instead chars=N`. The words themselves never go to the log.
 
 **Tests** (`tests/tests_ask.cpp`, `TestAskQuestion`): the composer against the probe's goldens (D, E, G), a plain pick,
 Tct, an own answer, the note's trim, the bounds; the allow / deny lines; the preview rules; the request and its signature
 against the mirror's question item; the answer item with its notes; the callback data, the routing, the steps, every
 phase's text and buttons and the budget; the previews' sheet drawn into a real PNG; Chat about this; the settings entry and
-the script; the ask pipe end to end (refused, answered, released, a helper that leaves, Stop).
+the script; the ask pipe end to end (refused, answered, released, a helper that leaves, Stop). The evening's change adds
+`TestAskTabs` (the NumSharp shape: four mixed tabs, their names and rows, the flow to the review, the composed answers, every
+tab within the budget), `TestAskCancelAndReply` (the confirmation, the decline and reply lines, the timeout's words, the
+new verbs), `TestAskLongContent` (the corpus maxima shortened, not dropped), the tick order, the review's text and
+buttons, the three-way "what is this message?" and the transcript's `afkTimeoutMs` / `response` items.
 
 **Check after the build** (each install, with its bot; a test message only with the user's go-ahead):
 - A preview question from a session: the card rings once (not the sticky card too); a tap on an option answers; the PC's
   dialog closes, and the PC prints "Allowed by PermissionRequest hook"; the card reads ✅ Answered from Telegram.
 - 📝 a note, then an option; 📝 a note, then 📨 Send the note alone; ✍️ an own answer on a plain question; a reply to the
-  card; a plain message (the "answer or next prompt?" question, both buttons); 🖼 the picture; 💬 Chat about this.
-- Two questions in one call (◀ / ▶, Send answers 1 of 2); a multi-select question (☐ / ☑, ✍️ Add my own, Send).
+  card; a plain message (the "what is this message?" question: My answer, A reply, The next prompt); 🖼 the picture;
+  💬 Chat about this; ✖️ Cancel (asked first; then the PC's dialog closes and Claude stops).
+- Several questions in one call: the tab row (▶ / ✓, 📨 Submit), a pick moving on, the review (its warning, Submit answers
+  a of n); a multi-select tab (☐ / ☑ in tick order, ✍️ Add my own, ✅ Done ▶); how the tab row looks on the phone with
+  four or five tabs.
 - The PC answers first: the card reads Answered at the PC with the answer, and the helper process is gone within a tick
   (`Get-Process powershell` — no `agentmaster-ask.ps1` left); Esc at the PC: ⏹ closed at the PC.
 - The bot off: no helper waits (a dialog closes no slower than before); a subagent's question: shown at the PC at once.

@@ -99,6 +99,7 @@ namespace Agentmaster::Msg
             bool resultFound{ false };
             bool answered{ false }; // the result carried answers, or no error (else: an error result — Chat about this, Esc)
             std::wstring answerText; // the answer as the mirror shows it (ClassifyTranscriptLine's answer item; "" for none)
+            int64_t timeoutMs{ 0 }; // Claude Code's own idle timeout resolved the dialog (`afkTimeoutMs`): nobody answered
         };
 
         /// <summary>
@@ -202,6 +203,7 @@ namespace Agentmaster::Msg
                         w.resultFound = true;
                         w.answered = it.kind == TopicItemKind::Answer || !it.isError;
                         w.answerText = it.kind == TopicItemKind::Answer ? it.text : std::wstring{};
+                        w.timeoutMs = it.afkTimeoutMs;
                     }
                 }
                 w.toolUseId = toolUseId;
@@ -230,6 +232,12 @@ namespace Agentmaster::Msg
                 return L"\x2705 It was answered at the PC.";
             case AskCardPhase::Clarify:
                 return L"\U0001F4AC You asked Claude to clarify \x2014 its next message asks what.";
+            case AskCardPhase::Cancelled:
+                return L"\x2716\xFE0F You cancelled this question \x2014 Claude stopped and waits for you.";
+            case AskCardPhase::Replied:
+                return L"\U0001F4AC You replied to Claude instead of answering.";
+            case AskCardPhase::TimedOut:
+                return L"\x23F1\xFE0F Claude Code went on by itself \x2014 nobody answered in time.";
             case AskCardPhase::Closed:
             default:
                 return L"\x23F9\xFE0F This question is not open any more.";
@@ -253,6 +261,12 @@ namespace Agentmaster::Msg
                 return L"answered at the PC";
             case AskCardPhase::Clarify:
                 return L"Chat about this";
+            case AskCardPhase::Cancelled:
+                return L"cancelled from Telegram";
+            case AskCardPhase::Replied:
+                return L"replied from Telegram";
+            case AskCardPhase::TimedOut:
+                return L"Claude Code's idle timeout";
             case AskCardPhase::Closed:
             default:
                 return L"closed";
@@ -706,7 +720,8 @@ namespace Agentmaster::Msg
                 }
                 if (w.resultFound && !c->resultSeen)
                 {
-                    _applyQuestionResultLocked(*c, w.answered ? QuestionResult::Answered : QuestionResult::Rejected, w.answerText, now, fx);
+                    _applyQuestionResultLocked(*c, !w.answered ? QuestionResult::Rejected : (w.timeoutMs > 0 ? QuestionResult::TimedOut : QuestionResult::Answered), w.answerText, now,
+                                               fx, w.timeoutMs);
                 }
             }
             // The request's side. GONE while open: the hook ended before an answer from here — Esc at the PC (Claude Code ends
@@ -827,7 +842,7 @@ namespace Agentmaster::Msg
         _applyQuestionEffects(std::move(fx));
     }
 
-    void MessagingService::_applyQuestionResultLocked(QuestionCard& c, QuestionResult result, const std::wstring& answerText, int64_t now, QuestionEffects& fx)
+    void MessagingService::_applyQuestionResultLocked(QuestionCard& c, QuestionResult result, const std::wstring& answerText, int64_t now, QuestionEffects& fx, int64_t timeoutMs)
     {
         if (c.resultSeen)
         {
@@ -836,10 +851,33 @@ namespace Agentmaster::Msg
         c.resultSeen = true;
         AskCardModel& m = c.model;
         const AskCardPhase before = m.phase;
+        const bool timedOut = result == QuestionResult::TimedOut;
         const bool answered = result == QuestionResult::Answered;
+        // Claude Code's own idle timeout (`afkTimeoutMs`) resolved the dialog: nobody answered it, from the PC or from here. The card
+        // says so, with what was selected before it; a hook still waiting is released like after a PC answer.
+        const auto toTimedOut = [&]() {
+            m.phase = AskCardPhase::TimedOut;
+            m.atPcAnswer = answerText;
+            m.timeoutMs = timeoutMs;
+            m.closedWhy.clear();
+            m.outcomeAtMs = now;
+            m.awaiting = AskTextTarget::None;
+            m.confirmCancel = false;
+            if (!c.decided)
+            {
+                c.decided = true;
+                fx.askId = c.askId;
+                fx.releaseWhy = L"Claude Code's idle timeout resolved it";
+            }
+        };
         switch (m.phase)
         {
         case AskCardPhase::Open:
+            if (timedOut)
+            {
+                toTimedOut();
+                break;
+            }
             // The PC was first. Claude Code does NOT end the hook when the PC answers (measured on 2.1.291): released here, it
             // prints nothing and ends — else it would wait until its claude exits.
             m.phase = answered ? AskCardPhase::AnsweredAtPc : AskCardPhase::Closed;
@@ -847,6 +885,7 @@ namespace Agentmaster::Msg
             m.closedWhy = answered ? std::wstring{} : std::wstring{ L"it was dismissed at the PC" };
             m.outcomeAtMs = now;
             m.awaiting = AskTextTarget::None;
+            m.confirmCancel = false;
             if (!c.decided)
             {
                 c.decided = true;
@@ -855,6 +894,11 @@ namespace Agentmaster::Msg
             }
             break;
         case AskCardPhase::Sending:
+            if (timedOut)
+            {
+                toTimedOut(); // the timeout came first: the phone's answer never reached the model
+                break;
+            }
             // The phone's answer, as Claude Code took it — or, an error, refused (a deny rule, the dialog cancelled at that moment).
             m.phase = answered ? AskCardPhase::Answered : AskCardPhase::Closed;
             if (!answered)
@@ -872,8 +916,15 @@ namespace Agentmaster::Msg
             }
             break;
         case AskCardPhase::Closed:
-            // Closed on the request's side first (the hook ended); the transcript says the PC answered it.
-            if (answered)
+            // Closed on the request's side first (the hook ended); the transcript says the PC answered it — or the idle timeout.
+            if (timedOut)
+            {
+                m.phase = AskCardPhase::TimedOut;
+                m.atPcAnswer = answerText;
+                m.timeoutMs = timeoutMs;
+                m.closedWhy.clear();
+            }
+            else if (answered)
             {
                 m.phase = AskCardPhase::AnsweredAtPc;
                 m.atPcAnswer = answerText;
@@ -882,8 +933,11 @@ namespace Agentmaster::Msg
             break;
         case AskCardPhase::AnsweredAtPc:
         case AskCardPhase::Clarify:
+        case AskCardPhase::Cancelled:
+        case AskCardPhase::Replied:
+        case AskCardPhase::TimedOut:
         default:
-            break; // Clarify: the deny's own text is the result — confirmed, nothing changes
+            break; // the phone's own decision (its deny or its reply is the result) or an outcome already shown: confirmed
         }
         if (m.phase != before)
         {
@@ -999,7 +1053,7 @@ namespace Agentmaster::Msg
         return true;
     }
 
-    bool MessagingService::_onTranscriptAnswer(const std::wstring& sessionId, const std::wstring& toolUseId, const std::wstring& answerText, QuestionResult result)
+    bool MessagingService::_onTranscriptAnswer(const std::wstring& sessionId, const std::wstring& toolUseId, const std::wstring& answerText, QuestionResult result, int64_t timeoutMs)
     {
         if (toolUseId.empty())
         {
@@ -1021,7 +1075,7 @@ namespace Agentmaster::Msg
                     continue;
                 }
                 fx.key = c.key;
-                _applyQuestionResultLocked(c, result, answerText, WallMs(), fx);
+                _applyQuestionResultLocked(c, result, answerText, WallMs(), fx, timeoutMs);
                 // A card in the topic (or on its way there) shows the answer; one never posted (refused, its topic gone) does not.
                 shown = c.messageId != 0;
                 break;
@@ -1105,10 +1159,32 @@ namespace Agentmaster::Msg
                     }
                 };
                 const size_t n = m.questions.size();
-                const bool haveQuestion = m.current < n;
+                // The verbs that act on the tab's QUESTION (its options, its own answer, its note, its Done): the review tab has none.
+                const bool questionVerb = verb == kAskVerbOption || verb == kAskVerbWrite || verb == kAskVerbNote || verb == kAskVerbNoteRemove || verb == kAskVerbNoteSend ||
+                                          verb == kAskVerbDone;
+                // A decision of the phone's own (Chat about this, Cancel, a reply) ends the card at once: the deny or the reply IS the
+                // dialog's result, so there is no Sending phase to confirm (a decision that comes too late is said so by the effects).
+                const auto finishWith = [&](AskCardPhase phase, std::string line) {
+                    fx.decisionLine = std::move(line);
+                    fx.askId = c->askId;
+                    decisionPrepared = true;
+                    c->decided = true;
+                    m.phase = phase;
+                    m.awaiting = AskTextTarget::None;
+                    m.confirmCancel = false;
+                    m.outcomeAtMs = now;
+                    c->finishedMs = now;
+                    ++c->version;
+                    fx.edit = true;
+                    if (c->writePromptMessageId > 0)
+                    {
+                        fx.deleteMessages.push_back(c->writePromptMessageId);
+                        c->writePromptMessageId = 0;
+                    }
+                };
                 if (verb == kAskVerbQueueHeld)
                 {
-                    // "📨 Next prompt": whatever the card's phase, the held message becomes the session's next prompt (D30).
+                    // "📨 The next prompt": whatever the card's phase, the held message becomes the session's next prompt (D30).
                     if (const auto h = c->held.find(tap->arg); h == c->held.end())
                     {
                         toast = L"That message was decided already.";
@@ -1119,7 +1195,7 @@ namespace Agentmaster::Msg
                         queueText = h->second;
                         queueMessageId = h->first;
                         c->held.erase(h);
-                        fx.deleteMessages.push_back(messageId); // the "answer or next prompt?" question has its answer
+                        fx.deleteMessages.push_back(messageId); // the "what is this message?" question has its answer
                     }
                 }
                 else if (verb == kAskVerbPicture)
@@ -1129,14 +1205,18 @@ namespace Agentmaster::Msg
                 else if (!open)
                 {
                     toast = ClosedPhaseToast(m.phase);
-                    if (verb == kAskVerbUseHeld && c->held.count(tap->arg) != 0)
+                    if ((verb == kAskVerbUseHeld || verb == kAskVerbReplyHeld) && c->held.count(tap->arg) != 0)
                     {
-                        toast += L" Tap \U0001F4E8 Next prompt to send your message to Claude.";
+                        toast += L" Tap \U0001F4E8 The next prompt to send your message to Claude.";
                     }
                 }
-                else if (!haveQuestion)
+                else if (n == 0)
                 {
                     // A card without a question to act on (its request held none it could read): nothing to do, no toast.
+                }
+                else if (questionVerb && m.current >= n)
+                {
+                    toast = L"Open a question's tab first.";
                 }
                 else if (verb == kAskVerbOption)
                 {
@@ -1155,6 +1235,7 @@ namespace Agentmaster::Msg
                     // answer ("Type something."). The button names the right one; an older keyboard's tap is read the same way.
                     const AskTextTarget target = AskTextTargetFor(m);
                     m.awaiting = target;
+                    m.confirmCancel = false;
                     ++c->version;
                     fx.edit = true;
                     fx.writePrompt = target;
@@ -1185,7 +1266,7 @@ namespace Agentmaster::Msg
                         step.send = n == 1;
                         if (n > 1)
                         {
-                            detail::AskAdvance(m);
+                            detail::AskAdvance(m, m.current);
                         }
                         takeStep(step);
                     }
@@ -1203,35 +1284,33 @@ namespace Agentmaster::Msg
                         step.send = n == 1;
                         if (n > 1)
                         {
-                            const size_t was = m.current;
-                            detail::AskAdvance(m);
-                            step.toast = m.current == was ? L"Every question has an answer \x2014 \U0001F4E8 Send answers." : L"";
+                            detail::AskAdvance(m, m.current); // the next unanswered question, or the review
                         }
                         m.awaiting = AskTextTarget::None;
                         takeStep(step);
                     }
                 }
+                else if (verb == kAskVerbTab)
+                {
+                    if (tap->arg < 0)
+                    {
+                        toast = L"That tab is not on this card \x2014 it changed meanwhile.";
+                    }
+                    else
+                    {
+                        takeStep(AskGoTab(m, static_cast<size_t>(tap->arg)));
+                    }
+                }
                 else if (verb == kAskVerbPrev || verb == kAskVerbNext)
                 {
-                    if (verb == kAskVerbPrev && m.current > 0)
-                    {
-                        --m.current;
-                    }
-                    else if (verb == kAskVerbNext && m.current + 1 < n)
-                    {
-                        ++m.current;
-                    }
-                    m.awaiting = AskTextTarget::None;
-                    AskStep step;
-                    step.changed = true;
-                    takeStep(step);
+                    // ◀ / ▶ of a keyboard posted before the tab row: one tab back or on, the review counting as the last tab.
+                    const size_t last = n > 1 ? n : 0;
+                    const size_t tab = verb == kAskVerbPrev ? (m.current > 0 ? m.current - 1 : 0) : (std::min)(m.current + 1, last);
+                    takeStep(AskGoTab(m, tab));
                 }
                 else if (verb == kAskVerbSend)
                 {
-                    size_t answered = 0;
-                    size_t notes = 0;
-                    CountAnswers(m, answered, notes);
-                    if (answered == 0)
+                    if (AskAnsweredCount(m) == 0)
                     {
                         toast = L"Answer at least one question first.";
                     }
@@ -1246,24 +1325,36 @@ namespace Agentmaster::Msg
                 {
                     // "Chat about this": the PC's rejection with its clarify request (R4e), so the model asks what to clarify — the
                     // turn goes on, and its next message comes to this topic like any reply.
-                    fx.decisionLine = BuildAskDenyLine(AskChatAboutThisMessage(m.questions, m.choices), false);
-                    fx.askId = c->askId;
-                    decisionPrepared = true;
-                    c->decided = true;
-                    m.phase = AskCardPhase::Clarify;
-                    m.awaiting = AskTextTarget::None;
-                    m.outcomeAtMs = now;
-                    c->finishedMs = now;
-                    ++c->version;
-                    fx.edit = true;
-                    if (c->writePromptMessageId > 0)
-                    {
-                        fx.deleteMessages.push_back(c->writePromptMessageId);
-                        c->writePromptMessageId = 0;
-                    }
+                    finishWith(AskCardPhase::Clarify, BuildAskDenyLine(AskChatAboutThisMessage(m.questions, m.choices), false));
                     fx.logLine = L"[ask] " + ShortId(c->sessionId) + L" request " + std::to_wstring(c->askId) + L": Chat about this, from Telegram";
                     fx.navLine = L"remote telegram question " + ShortId(c->sessionId) + L" -> chat about this";
                     toast = L"\U0001F4AC Claude will ask what you want to clarify.";
+                }
+                else if (verb == kAskVerbCancel)
+                {
+                    // ✖ Cancel ends the turn (the PC's Esc), so a phone tap only ASKS: the card shows the confirmation.
+                    takeStep(AskAskCancel(m));
+                    toast = L"End Claude's turn? \x2716\xFE0F Yes, cancel \x2014 or \x25C0 No, go back.";
+                }
+                else if (verb == kAskVerbCancelNo)
+                {
+                    takeStep(AskCancelBack(m));
+                }
+                else if (verb == kAskVerbCancelYes)
+                {
+                    if (!m.confirmCancel)
+                    {
+                        toast = L"Tap \x2716\xFE0F Cancel first.";
+                    }
+                    else
+                    {
+                        // The PC's Esc: Claude Code's STOP rejection with `interrupt` — measured on 2.1.291, the transcript then holds
+                        // exactly what an Esc leaves (the rejection, "User rejected tool use", the interrupt marker) and the turn ends.
+                        finishWith(AskCardPhase::Cancelled, BuildAskDeclineLine());
+                        fx.logLine = L"[ask] " + ShortId(c->sessionId) + L" request " + std::to_wstring(c->askId) + L": cancelled from Telegram (the PC's Esc: the turn ends)";
+                        fx.navLine = L"remote telegram question " + ShortId(c->sessionId) + L" -> cancelled";
+                        toast = L"\x2716\xFE0F Cancelled \x2014 Claude stops and waits for you.";
+                    }
                 }
                 else if (verb == kAskVerbCancelWrite)
                 {
@@ -1284,7 +1375,7 @@ namespace Agentmaster::Msg
                         const std::wstring text = h->second;
                         const int64_t heldId = h->first;
                         c->held.erase(h);
-                        fx.deleteMessages.push_back(messageId); // the "answer or next prompt?" question has its answer
+                        fx.deleteMessages.push_back(messageId); // the "what is this message?" question has its answer
                         const AskStep step = AskTakeText(m, text, target);
                         if (step.changed)
                         {
@@ -1293,6 +1384,40 @@ namespace Agentmaster::Msg
                                          L" chars=" + std::to_wstring(text.size());
                         }
                         takeStep(step);
+                    }
+                }
+                else if (verb == kAskVerbReplyHeld)
+                {
+                    // "💬 A reply": the held message goes to Claude INSTEAD of answering — Claude Code's own `response` (its remote cards'
+                    // "freeform text the user typed instead of selecting a structured option"). The model reads "The user responded:
+                    // <text>" and goes on; the answers so far are not sent (the model would not read them next to a response).
+                    const auto h = c->held.find(tap->arg);
+                    const std::wstring text = h == c->held.end() ? std::wstring{} : detail::AskJsTrim(h->second);
+                    if (h == c->held.end())
+                    {
+                        toast = L"That message was decided already.";
+                    }
+                    else if (text.empty())
+                    {
+                        toast = L"That message is empty \x2014 nothing was sent.";
+                    }
+                    else if (text.size() > kAskAnswerMaxChars)
+                    {
+                        toast = L"That text is longer than 8,192 characters \x2014 send a shorter one.";
+                    }
+                    else
+                    {
+                        const int64_t heldId = h->first;
+                        c->held.erase(h);
+                        fx.deleteMessages.push_back(messageId); // the "what is this message?" question has its answer
+                        m.reply = text;
+                        finishWith(AskCardPhase::Replied, BuildAskAllowLine(c->toolInput, json::Value::MkObj(), json::Value::MkObj(), text));
+                        fx.reactTo = heldId;
+                        // Sizes only: the reply is the user's words and stays out of the log.
+                        fx.logLine = L"[ask] " + ShortId(c->sessionId) + L" request " + std::to_wstring(c->askId) + L": replied from Telegram instead of answering (" +
+                                     std::to_wstring(text.size()) + L" chars)";
+                        fx.navLine = L"remote telegram question " + ShortId(c->sessionId) + L" -> replied instead chars=" + std::to_wstring(text.size());
+                        toast = L"\U0001F4AC Sent to Claude as your reply.";
                     }
                 }
                 // A tap that only changed the card writes no hooks.log line of its own: the tap's "[msg] tap …" line (§21.28) and the
@@ -1366,13 +1491,23 @@ namespace Agentmaster::Msg
                 return false;
             }
             const bool replyToCard = replyTo > 0 && (replyTo == c->messageId || replyTo == c->writePromptMessageId);
-            switch (RouteAskText(c->model, text, replyToCard))
+            AskTextRoute route = RouteAskText(c->model, text, replyToCard);
+            AskTextTarget target = AskTextTarget::None;
+            if (route == AskTextRoute::Take)
+            {
+                target = c->model.awaiting != AskTextTarget::None ? c->model.awaiting : AskTextTargetFor(c->model);
+                if (target == AskTextTarget::None)
+                {
+                    // A reply to the card on its review with every question answered: no question is left to take it — asked about.
+                    route = AskTextRoute::AskWhich;
+                }
+            }
+            switch (route)
             {
             case AskTextRoute::NotForCard:
                 return false; // a /command: the topic's usual handling
             case AskTextRoute::Take:
             {
-                const AskTextTarget target = c->model.awaiting != AskTextTarget::None ? c->model.awaiting : AskTextTargetFor(c->model);
                 fx.key = c->key;
                 const AskStep step = AskTakeText(c->model, text, target);
                 changed = step.changed;
@@ -1400,7 +1535,8 @@ namespace Agentmaster::Msg
             case AskTextRoute::AskWhich:
             default:
             {
-                // An open card and a plain message: the user's answer (note), or the session's next prompt? Held, and asked.
+                // An open card and a plain message: the user's answer (note), a reply instead of answering, or the session's next
+                // prompt? Held, and asked.
                 if (c->held.size() >= kAskMaxHeld)
                 {
                     c->held.erase(c->held.begin());
@@ -1408,10 +1544,9 @@ namespace Agentmaster::Msg
                 c->held[msgId] = text;
                 fx.key = c->key;
                 askWhich = true;
+                // My answer (note) when a question can take it, a reply to Claude instead of answering, or the next prompt.
                 whichHtml = AskWhichHtml(c->model);
-                const bool note = AskTextTargetFor(c->model) == AskTextTarget::Note;
-                whichRows = { { { note ? L"\U0001F4DD It's my note" : L"\x270D\xFE0F It's my answer", AskCallbackData(c->key, kAskVerbUseHeld, msgId) },
-                                { L"\U0001F4E8 Next prompt", AskCallbackData(c->key, kAskVerbQueueHeld, msgId) } } };
+                whichRows = AskWhichButtons(c->model, c->key, msgId);
                 break;
             }
             }
@@ -1471,7 +1606,8 @@ namespace Agentmaster::Msg
                 // now; its watch names the PC's answer when the transcript shows it.
                 delivered = false;
                 std::lock_guard lk{ _mtx };
-                if (QuestionCard* c = _findQuestionCardLocked(fx.key); c && (c->model.phase == AskCardPhase::Sending || c->model.phase == AskCardPhase::Clarify))
+                if (QuestionCard* c = _findQuestionCardLocked(fx.key); c && (c->model.phase == AskCardPhase::Sending || c->model.phase == AskCardPhase::Clarify ||
+                                                                             c->model.phase == AskCardPhase::Cancelled || c->model.phase == AskCardPhase::Replied))
                 {
                     c->model.phase = AskCardPhase::Closed;
                     c->model.closedWhy = L"it was answered or closed at the PC first";

@@ -2166,6 +2166,7 @@ namespace Agentmaster::Msg
         {
             Answered, // an answer (from the phone or the PC) — `toolUseResult.answers`, or a result without an error
             Rejected, // an error result: "Chat about this", Esc at the PC, or a refusal of the answer
+            TimedOut, // Claude Code's own idle timeout resolved it (`toolUseResult.afkTimeoutMs`): nobody answered
         };
         /// <summary>
         /// One question card: one open — or recently finished — dialog and its message. Under `_mtx`; a pointer to one
@@ -2287,12 +2288,14 @@ namespace Agentmaster::Msg
         /// it); a card closed on the request's side learns that the PC answered it. Call with `_mtx` held.
         /// </summary>
         /// <param name="c">The card.</param>
-        /// <param name="result">Answered or Rejected.</param>
+        /// <param name="result">Answered, Rejected, or TimedOut (Claude Code's own idle timeout resolved the dialog: the card says
+        /// nobody answered in time, with what was selected before it, and releases the hook).</param>
         /// <param name="answerText">The answer as the transcript recorded it (the mirror's answer item text; "" when none).</param>
         /// <param name="now">The clock.</param>
         /// <param name="fx">Out: the release, the edit and the log line it wants.</param>
+        /// <param name="timeoutMs">TimedOut: Claude Code's idle timeout (`afkTimeoutMs`), shown on the card; 0 otherwise.</param>
         /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
-        static void _applyQuestionResultLocked(QuestionCard& c, QuestionResult result, const std::wstring& answerText, int64_t now, QuestionEffects& fx);
+        static void _applyQuestionResultLocked(QuestionCard& c, QuestionResult result, const std::wstring& answerText, int64_t now, QuestionEffects& fx, int64_t timeoutMs = 0);
         /// <summary>
         /// Prepares the phone's ANSWER of a card for the hook: the answers and annotations composed as the PC composes them, the
         /// allow decision built, the card in Sending. An answer past Claude Code's bounds is refused (the toast says so) and the card
@@ -2330,17 +2333,21 @@ namespace Agentmaster::Msg
         /// <param name="sessionId">The topic's session.</param>
         /// <param name="toolUseId">The result's tool_use id.</param>
         /// <param name="answerText">The answer as the item carries it ("" for a plain result).</param>
-        /// <param name="result">Answered or Rejected.</param>
+        /// <param name="result">Answered, Rejected, or TimedOut (the item's `afkTimeoutMs`: Claude Code's own idle timeout).</param>
+        /// <param name="timeoutMs">TimedOut: the idle timeout in ms (the card shows it); 0 otherwise.</param>
         /// <returns>True when a posted card shows this result: the mirror then posts no "You ↩ answer" line.</returns>
         /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
-        bool _onTranscriptAnswer(const std::wstring& sessionId, const std::wstring& toolUseId, const std::wstring& answerText, QuestionResult result);
+        bool _onTranscriptAnswer(const std::wstring& sessionId, const std::wstring& toolUseId, const std::wstring& answerText, QuestionResult result, int64_t timeoutMs = 0);
         /// <summary>
         /// A question card's button ("q:&lt;card&gt;:&lt;verb&gt;[:&lt;arg&gt;]", _handleCallback, inside the tap's scope): an option (single-select
-        /// answers it — a card of one question SENDS at once, as the PC's Enter does — multi-select toggles it), ✍️ write my own
-        /// answer or 📝 a note (a ForceReply prompt opens the phone's keyboard), the note removed or sent alone, ✅ Done, ◀ / ▶,
-        /// 📨 Send answers, 💬 Chat about this (the PC's rejection with its clarify request), 🖼 the previews as a picture, the
-        /// "answer or next prompt?" question's two buttons. A button of a card this run does not know answers "no longer open here"
-        /// and loses its keyboard. Poll thread.
+        /// answers it — a card of one question SENDS at once, as the PC's Enter does; on a card of several the next unanswered tab,
+        /// or the review, comes next — multi-select toggles it), ✍️ write my own answer or 📝 a note (a ForceReply prompt opens the
+        /// phone's keyboard), the note removed or sent alone, ✅ Done, a TAB (a question, or the review: "Review your answers", the
+        /// PC's Submit tab; ◀ / ▶ of an earlier keyboard move one tab), 📨 Submit answers, 💬 Chat about this (the PC's rejection
+        /// with its clarify request), ✖️ Cancel (asked to confirm, then the PC's Esc: the turn ends), 🖼 the previews as a picture,
+        /// and the "what is this message?" question's three buttons (my answer / note, 💬 a reply instead of answering — Claude
+        /// Code's `response` — or the next prompt). A button of a card this run does not know answers "no longer open here" and
+        /// loses its keyboard. Poll thread.
         /// </summary>
         /// <param name="data">The callback data.</param>
         /// <param name="threadId">The topic the button sits in.</param>
@@ -2351,8 +2358,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// A typed message in a session's topic while its question card is open (_handleTopicMessage, poll thread): a /command is
         /// not the card's; a message written after ✍️ / 📝 or as a reply to the card (or its write prompt) is TAKEN — the user's own
-        /// answer (one question: sent at once, as the PC's "Type something." + Enter) or the note — with a 👌 on it; any other
-        /// message is HELD and asked about: the answer (the note), or the session's next prompt?
+        /// answer (one question: sent at once, as the PC's "Type something." + Enter) or the note, for the tab's question (on the
+        /// review: the first one without an answer) — with a 👌 on it; any other message, and a reply when no question is left to
+        /// take it, is HELD and asked about: my answer (note), a reply to Claude instead of answering, or the next prompt?
         /// </summary>
         /// <param name="sessionId">The topic's session.</param>
         /// <param name="msg">The Telegram message.</param>

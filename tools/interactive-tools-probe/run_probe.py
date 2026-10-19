@@ -342,20 +342,86 @@ NOTES_ONLY_TEXT = "none of these, make it a tab strip"
 PC_NOTES_ONLY_TEXT = "neither, put the logo in the footer"
 
 
+def split_multi(answer):
+    """Split a multi-select answer as Claude Code 2.1.291's own parser `H` does.
+
+    The items are joined by ", "; an item that holds ", " or a double quote is written as a JSON string (`Tct`), so the
+    parse reads a quoted item with JSON's rules and a bare one up to the next ", ".
+
+    Args:
+        answer: the joined answer.
+    Returns:
+        The items, or None when the text is not in that form (a bare item with a quote, an unterminated quoted item,
+        a trailing ", ").
+    """
+    items = []
+    rest = answer
+    while True:
+        if rest.startswith('"'):
+            end = -1
+            escaped = False
+            for i in range(1, len(rest)):
+                ch = rest[i]
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == '"':
+                    end = i
+                    break
+            if end < 0:
+                return None
+            try:
+                value = json.loads(rest[:end + 1])
+            except ValueError:
+                return None
+            if not isinstance(value, str):
+                return None
+            items.append(value)
+            rest = rest[end + 1:]
+        else:
+            k = rest.find(", ")
+            piece = rest if k < 0 else rest[:k]
+            if '"' in piece:
+                return None
+            items.append(piece)
+            rest = "" if k < 0 else rest[k:]
+        if rest == "":
+            return items
+        if not rest.startswith(", "):
+            return None
+        rest = rest[2:]
+        if rest == "":
+            return None
+
+
+def join_multi(items):
+    """Join multi-select items as Claude Code 2.1.291's `Tct` does.
+
+    Args:
+        items: the picked labels, then the user's own text when there is one.
+    Returns:
+        The items joined by ", ", an item that holds ", " or a double quote written as a JSON string (JavaScript's
+        JSON.stringify: non-ASCII kept as is).
+    """
+    return ", ".join(json.dumps(t, ensure_ascii=False) if (", " in t or '"' in t) else t for t in items)
+
+
 def expected_result(questions, answers, annotations):
     """The tool result Claude Code 2.1.291 writes for an AskUserQuestion answer (a port of its result mapper).
 
     Each answered or annotated question becomes `"Q"="A"` (or `"Q"=(no option selected)` when there is no
     answer or the answer is the "(notes only)" sentinel), followed by `selected preview:\\n<preview>` and
     `notes: <notes>` when the annotations hold them; the pieces are joined with ", ". With a note anywhere
-    (or an answer that is not an option label) the text takes the "The user answered: … Read the answers
-    carefully …" form; otherwise "Your questions have been answered: …". Used to check that a hook's answer
-    reads to the model exactly like the PC dialog's.
+    (or an answer that is not an option label — for a multi-select question, one that does not split into labels
+    and join back to itself) the text takes the "The user answered: … Read the answers carefully …" form; otherwise
+    "Your questions have been answered: …". Used to check that a hook's answer reads to the model exactly like the PC
+    dialog's.
 
-    Scope: the answers + annotations cases of single-select "choice" questions. Claude Code's `response`,
-    `followUp` and `afkTimeoutMs` forms, its "text" / "number" kinds and its parse of a comma-joined
-    multi-select answer are not ported (the probe asks single-select questions only, so a joined answer is
-    never produced; this port would call one "not plain").
+    Scope: the answers + annotations cases of "choice" questions, single- and multi-select. Claude Code's `response`,
+    `followUp` and `afkTimeoutMs` forms and its "text" / "number" kinds are not ported.
 
     Args:
         questions: the call's `questions` list.
@@ -371,6 +437,19 @@ def expected_result(questions, answers, annotations):
         ans = answers.get(text)
         ann = annotations.get(text) or {}
         has_answer = bool(ans) and ans != "(notes only)"
+        labels = {op["label"] for op in q.get("options") or []}
+        # The plain-form test runs for EVERY question, the unanswered ones included (Claude Code's `e.every(...)`): a note
+        # anywhere, or an answer that names no option (a multi-select one: that does not split into labels and join back
+        # to itself), makes the whole text careful.
+        if ann.get("notes"):
+            all_plain = False
+        if has_answer and ans not in labels:
+            if not q.get("multiSelect"):
+                all_plain = False
+            else:
+                items = split_multi(ans)
+                if items is None or not items or join_multi(items) != ans or not all(i in labels for i in items):
+                    all_plain = False
         if not has_answer and not ann.get("notes"):
             continue
         piece = [f'"{text}"="{ans}"' if has_answer else f'"{text}"=(no option selected)']
@@ -378,10 +457,6 @@ def expected_result(questions, answers, annotations):
             piece.append(f"selected preview:\n{ann['preview']}")
         if ann.get("notes"):
             piece.append(f"notes: {ann['notes']}")
-            all_plain = False
-        labels = {op["label"] for op in q.get("options") or []}
-        if has_answer and ans not in labels:
-            all_plain = False
         parts.append(" ".join(piece))
     joined = ", ".join(parts)
     if not joined:
