@@ -966,6 +966,17 @@ namespace Agentmaster::Msg
             _reply(threadId, L"This session is closed. Resume it from the \U0001F50E Search topic.", false, json::Value{}, messageId);
             return false;
         }
+        // §21.34: /add-dir is a local command whose dialog is answered from here (its watch, below). A BARE /add-dir would open a
+        // path INPUT at the PC instead — nothing a phone can fill, and a box nobody answers: never sent, the usage line instead.
+        // Checked here, the one funnel every queued message takes (a typed one, a backlog [Queue], a held one, /cc /add-dir).
+        std::wstring addDirArgs;
+        const bool addDir = ParseAddDirCommandText(text, addDirArgs);
+        if (addDir && addDirArgs.empty())
+        {
+            _reply(threadId, AddDirUsageHtml(), false, json::Value{}, messageId);
+            LogNav(L"remote telegram refused /add-dir " + ShortId(sessionId) + L" -> usage (no path)");
+            return false;
+        }
         QueuedPrompt p;
         p.id = NewSessionId();
         p.text = text;
@@ -975,6 +986,21 @@ namespace Agentmaster::Msg
         p.origin = PromptOrigin::Autorun; // every delivery-evidence rule keys on Autorun (QueuedPrompt::remoteSource)
         p.guardPattern = std::wstring{ kAnswersQuestionOk }; // the user's own message is the answer to an open question
         p.remoteSource = L"telegram:" + std::to_wstring(messageId);
+        if (addDir)
+        {
+            // §21.34: watched from now on — its dialog becomes a card in this topic, answered by a tap or by itself after a minute.
+            // BEFORE the prompt reaches the queue: the watch reads the transcript from where it stands now, and the runner may
+            // deliver the command (and a command without a dialog write its result) the moment it is queued.
+            try
+            {
+                _watchAddDir(sessionId, p.id, text, addDirArgs, messageId, threadId);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the command still goes (it is queued below); its dialog is then answered at the PC, as before §21.34.
+                LogSwallowedException(L"MessagingService::_queueRemotePrompt (_watchAddDir)");
+            }
+        }
         size_t position = 0;
         _registry->Update(sessionId, [&](SessionInfo& ss) {
             // D30: next in line — before the runner's own planned prompts, after earlier remote ones.
@@ -1033,6 +1059,16 @@ namespace Agentmaster::Msg
             nav(action == SteerAction::Usage ? L"usage" : L"refused:closed");
             return;
         }
+        // §21.34: "/steer /add-dir <path>" is the same command sent now: watched like a queued one (below). A bare one would open a
+        // path INPUT at the PC that nobody here can fill: never sent, the usage line instead.
+        std::wstring addDirArgs;
+        const bool addDir = ParseAddDirCommandText(words, addDirArgs);
+        if (addDir && addDirArgs.empty())
+        {
+            _reply(threadId, AddDirUsageHtml(), false, json::Value{}, msgId);
+            nav(L"usage:add-dir");
+            return;
+        }
         if (!held && IsBacklogUpdate(dateMs, WallMs()))
         {
             // D2: a /steer written while Agentmaster was closed was meant for a turn that is over by now. Asked about like a plain
@@ -1060,6 +1096,20 @@ namespace Agentmaster::Msg
             if (sendNow)
             {
                 _steers[p.id] = SteerWatch{ sessionId, msgId, threadId, nowMs };
+            }
+        }
+        if (addDir)
+        {
+            // §21.34: its dialog's watch, BEFORE the send (the watch reads the transcript from where it stands now). A prompt that
+            // never reaches the queue leaves a watch that ends at its first tick (the prompt is not found).
+            try
+            {
+                _watchAddDir(sessionId, p.id, p.text, addDirArgs, msgId, threadId);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the words still go; the dialog is then answered at the PC, as before §21.34.
+                LogSwallowedException(L"MessagingService::_steerRemotePrompt (_watchAddDir)");
             }
         }
         const bool inserted = _registry->Update(sessionId, [&](SessionInfo& ss) {
@@ -2426,6 +2476,13 @@ namespace Agentmaster::Msg
         if (data.rfind(L"q:", 0) == 0)
         {
             answer(_onQuestionTap(data, threadId, messageId));
+            return;
+        }
+        // §21.34: a MENU CARD's option ("tm:<card>:<digit>") — a local command's dialog (/add-dir's) answered from here. The toast
+        // says what happens; the tap stays busy until the hosting window pressed the option (or said why it did not).
+        if (data.rfind(L"tm:", 0) == 0)
+        {
+            answer(_onMenuTap(data, messageId));
             return;
         }
         // The Search topic's STATELESS buttons (§21.7): "⊘ Clear" and the PICK of an answer's row. They carry no token,
@@ -4901,6 +4958,7 @@ namespace Agentmaster::Msg
         {
             // §21.33: /steer is the one way into a running turn, so the first line names it beside the rule it is the exception to.
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn \x2014 /steer &lt;text&gt; does that: it sends the words NOW, like Send now at the PC). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
+                   L"/add-dir &lt;path&gt; adds a folder to the workspace: Claude Code's question comes here as buttons, and \x201CYes, for this session\x201D is picked by itself after 60 s.\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).

@@ -916,6 +916,7 @@ namespace Agentmaster::Msg
                 _cards.clear();
                 _reacted.clear();
                 _steers.clear(); // §21.33: a watch of the last run names a send this run never made
+                _menuWatches.clear(); // §21.34: a menu watch of the last run names a card this run never posted
                 _outbox.clear();
                 _dirty.clear();
                 _seenLive.clear();
@@ -1893,6 +1894,7 @@ namespace Agentmaster::Msg
                                     _cards.clear();
                                     _reacted.clear();
                                     _steers.clear(); // §21.33: its watches name messages of the OLD bot's chat
+                                    _menuWatches.clear(); // §21.34: and so do the menu watches and their cards
                                     // §21.16.7: the dots' holds and requests name the OLD bot's topics (this runs on the tick
                                     // thread, which owns _frontHeld).
                                     _frontHeld.clear();
@@ -2126,6 +2128,9 @@ namespace Agentmaster::Msg
                 // hook offered within kAskPairWaitMs are posted show-only. After the per-topic pass: the mirror's question items of
                 // this tick are known by then, and no copy of a mirror is out (a new card marks its session's mirror).
                 _questionsTick();
+                // §21.34: the /add-dir commands the topics queued — their dialogs found on the screen become cards, a card's default
+                // is pressed by itself a minute after its dialog opened, and each command's result ends its watch.
+                _menusTick();
                 // The HISTORY replay's next batch (§21.9), then the list's re-sort: both after the per-topic pass, so the
                 // live posts of this tick are queued first (they go first anyway: the replay has the lowest priority).
                 _pumpBackfill();

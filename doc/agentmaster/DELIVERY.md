@@ -1159,3 +1159,51 @@ engine through it, and it is the place where a kill switch would go.
     `[advance-skip] … (tab dormant …)` line, and is sent after the tab is entered;
   - Send now on a Deactivated tab types nothing: the row returns to the upcoming list, and hooks.log
     has the `[send-verify] … NOT sent: the tab is dormant …` line.
+
+## 18. Local commands — their echo is the delivery evidence, and no verdict while a menu is open (2026-10-19, NOT BUILT yet)
+
+Found while building MESSAGING.md §21.34 (`/add-dir` answered from a Telegram topic).
+
+**The gap.** A LOCAL command (`/add-dir`, `/model <id>`, … — one Claude Code runs itself) fires no
+UserPromptSubmit hook and writes no prompt line; measured on 2.1.291 by `tools/add-dir-probe/`. Its
+only record is the transcript's command ECHO (`<command-name>/x</command-name>` + `<command-args>`),
+which the scanner reads as a `Kind::Command` event and, until now, fed only to the CommandWatch. A
+local command delivered by the runner (a Telegram topic's `/model sonnet`, a queued `/add-dir`) was
+therefore never `echoed`: 15 s later the lost-send verdict marked it `Failed` and paused the
+session's runner, and the Telegram message got a 👎 ("not delivered"). `/add-dir` makes it worse: its
+dialog holds the whole record back until it is answered, so even the echo comes late.
+
+**Fix 1 — the echo is consumed as the prompt's PULL echo** (`SessionScanner.cpp`, the `Kind::Command`
+branch; pure rule `Scheduler.h` `PickCommandEchoPrompt` + `CommandEchoMatchesPromptText`):
+- A candidate is an Autorun prompt that is Sent, unechoed and stamped, whose text is the same command
+  (word in any case) with the same arguments (both through the prompt compare key, whitespace runs
+  folded, trimmed).
+- Its delivery (the injection stamp, else the send stamp) may not be newer than the echo's own
+  timestamp by more than `kCommandEchoSkewMs` (2 s — the CR's write and the stamp taken right after it,
+  an Enter-retry press that re-stamped the send): an older echo is an earlier run of the same command.
+  An echo with no timestamp qualifies, as a prompt line does.
+- The OLDEST such delivery is taken (echoes come in delivery order). The choice is made again inside the
+  `Update` against the live record, and the `Update` NOTIFIES: a local command leaves the session at
+  rest with no hook to wake the runner, and the queue's next prompt waits on exactly this echo (the
+  pickup guard).
+- Not gated on the cursor being caught up, like `NoteExternalPrompt`'s consume: the timestamp is the
+  replay guard. Logged `[pull-echo] <sid8> prompt <id8> (the transcript's /x echo: the delivered command ran)`.
+- The race it shares with the prompt line's pull consume: a prompt-type command (a skill) whose push hook
+  arrives AFTER the scanner read its echo would record a second, Typed row. Claude Code finishes its hooks
+  before it writes the transcript, so the hook normally wins.
+
+**Fix 2 — `DecideLostSend` holds while the last box read is `MenuOpen`.** A local command's dialog keeps
+it unechoed for as long as it is open (a Telegram card answers it by itself after a minute; at the PC it
+may stay longer). The hold only delays a verdict — a prompt a menu really ate is judged once the menu
+closes (its ages are long past the settle by then) — and the queue already holds on the same box state
+(`DecideAdvance`). The Enter rescue never pressed into a menu (`DecideEnterRetry`, the verified presser).
+The input box's detector reads the `/add-dir` dialog as `MenuOpen` (pinned on the probe's capture by
+`TestTuiMenus`).
+
+**Tests:** `TestTuiMenus` (tests_tuimenus.cpp) — the echo matched to a delivered prompt (any case,
+whitespace, an invisible character, other arguments, a longer word), the candidate rules (echoed, queued,
+Typed, the skew, two deliveries of one command), and the lost-send verdict held while a menu is open and
+judged once it closed.
+
+**Live check after the build:** `/model sonnet` (or `/add-dir <new folder>`) from a Telegram topic: the
+reaction turns 👨‍💻, no `[lost-send]` line follows, and the runner stays on.

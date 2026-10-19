@@ -4769,6 +4769,146 @@ production.
   starts and the words go once it is up; (4) a question card open: the words wait (QueueMenu) and go after the answer; (5) a
   draft typed at the PC is back in the box after the steer (the draft swap).
 
+### 21.34 `/add-dir` from a topic: its dialog as a MENU CARD, the default picked by itself after a minute (2026-10-19; NOT BUILT yet)
+
+**The user's request** (2026-10-19): "Can you support /add-dir from here and also picker for is supporting the menu that comes
+after of in this session or this folder or whatever that asks you. You can see how we deal with agentmaster's AskUserQuestion
+… The default is the 1st option and we should support in agentmaster auto-answer after 60s in a clean way".
+
+**What Claude Code does** (2.1.291 — measured live by `tools/add-dir-probe/add_dir_probe.py`, seven scenarios, and read in its
+bundle):
+- `/add-dir <path>` is a LOCAL command: Claude Code runs it itself. It fires **no** UserPromptSubmit (and no
+  UserPromptExpansion) hook and writes no prompt line. A path that resolves to a directory the session cannot read yet opens a
+  dialog in place of the input box (the second line is the RESOLVED absolute path; `~` and relative paths are resolved
+  against the session's folder):
+  ```
+  Add directory to workspace
+  Q:\work\other
+  Claude Code will be able to read files in this directory and make edits when auto-accept edits is on.
+  ❯ 1. Yes, for this session
+    2. Yes, and remember this directory      (saved to <cwd>\.claude\settings.local.json, permissions.additionalDirectories)
+    3. No
+  Enter to confirm · Esc to cancel
+  ```
+- A digit picks its option at once (no Enter); Esc is "No". **Nothing reaches the transcript while the dialog is open**; once it
+  is answered three lines land together — a `<local-command-caveat>` meta line, the echo (`<command-name>/add-dir</command-name>`
+  + `<command-args>`) and the result (`<local-command-stdout>`, the path in bold, the hint dim) — and an add fires a
+  DirectoryAdded hook (`source: "slash_command"`). The echo's timestamp is the ANSWER's time.
+- A path that is already readable ("… is already added as a working directory", "… is already the current working directory",
+  "… is already accessible within …"), missing ("Path … was not found."), not a directory, a network share or unreadable opens
+  **no** dialog: the echo and its message land at once. A bare `/add-dir` opens a path INPUT under the same title.
+
+**What a topic does with it now:**
+- **`/add-dir <path>`** is queued like every message (D30) and WATCHED (`MessagingService::_watchAddDir`, started in
+  `_queueRemotePrompt` — the funnel of a typed message, a backlog [Queue], a held message and `/cc /add-dir` — and in
+  `_steerRemotePrompt` for `/steer /add-dir`). Once it is delivered and the dialog shows, the topic gets ONE **menu card**, as a
+  reply to the user's message, with sound (a dialog that answers itself in a minute is a "needs you" moment):
+  ```
+  📁 Claude Code asks · Add directory to workspace
+  Q:\work\other
+  Claude Code will be able to read files in this directory and make edits when auto-accept edits is on.
+
+  ⏱ Picks Yes, for this session by itself in 1 minute — or tap your answer.
+  [ ⏱ 1 · Yes, for this session ]
+  [ 2 · Yes, and remember this directory ]
+  [ 3 · No ]
+  ```
+  The countdown is a `<tg-time … format="r">` the apps keep current (its text, the deadline's clock time, is the fallback).
+- **A tap** turns the card to "⏳ Answering · <option>" and asks the hosting window to press that option's digit; the tap stays
+  busy until the window answered (§21.28). **Nobody answers** within 60 s of the dialog being seen → the DEFAULT, option 1, is
+  pressed the same way (`kTuiMenuAutoAnswerMs`, `kAddDirDefaultOption`; the user's rule — it is also the dialog's own focus,
+  and the one that changes nothing on disk).
+- **The window presses only into the very dialog the card shows** (`DecideMenuAnswer`, TerminalPage.AgentMessaging.cpp's
+  `menu-answer` action): it reads the screen AGAIN at the press, on its UI thread — the one every keystroke of the tab goes
+  through — and types the digit only when the dialog is still open, shows the card's path, and no delivery or draft swap holds
+  the box. Its reply: `pressed` / `gone` (answered or closed at the PC first, or the tab dormant) / `other` (a /add-dir dialog
+  for another path) / `busy` / `failed`. A `busy` press is asked again every 2 s for as long as a delivery may hold the box
+  (75 s, the delivery gate's bound — the command's own delivery holds it up to ~18 s when the user had an unsent draft at the
+  PC); a failed press repeats (3 in all), and so does a press confirmed but with no result within 10 s (the window reads the
+  dialog again first); then the card closes with "answer it at the PC".
+- **The outcome** edits the card (the buttons go): "✅ Added for this session", "✅ Added and remembered", "⚠️ Added for this
+  session, not remembered" (the settings file refused the save), "✖️ Not added", with WHO answered — "answered from Telegram",
+  "⏱ picked by itself after 60 s", or "answered at the PC" (the PC's dialog stays fully usable: the first answer wins; the card
+  credits its own press only when the window confirmed it AND the outcome is that option's) — the time, and Claude Code's own
+  message. "⏹ No longer open here — <why>" when the session closed, its claude ended or was parked, or the dialog went away
+  with no result to read.
+- **A command that opened no dialog** (already readable, missing, …), or whose result came before any card, gets its result as
+  a reply to the user's message: "ℹ️ Already in the workspace · /add-dir" over Claude Code's message.
+- **A bare `/add-dir`** is never sent (a path input nobody here can fill would block the session): the usage line instead.
+- **A terminal that shows a menu this build cannot read** (a Claude Code update changed the dialog, or another menu is in the
+  way) gets one note after 15 screen reads: "⚠️ /add-dir opened a dialog this Agentmaster cannot read — answer it at the PC".
+- **The scope of the clock:** only a dialog of a /add-dir sent from a topic (the card shows its countdown). A /add-dir typed at
+  the PC is answered at the PC, as before.
+
+**How the watch finds and reads it** (Messaging.Menus.cpp, the service's fourth TU; the pure half is `AgentMaster/TuiMenus.h`):
+- **The registry** says when the command was delivered (its prompt Sent and injected) and taken (echoed).
+- **The screen:** from 1 s after the delivery, at most every 2 s and at most 15 times (a command whose Enter the TUI ate is
+  submitted by the Enter rescue within ~15 s), the hosting window reads the terminal's last 40 rows (`menu-screen` action);
+  a command with no dialog has written its result by then, and no screen is read at all. `ParseAddDirMenuScreen` looks for the
+  BOTTOM-MOST title with its three options in
+  order and their exact labels (a label a narrow terminal cut with "…" counts), the path between the title and the dim note
+  (a path Ink wrapped is joined), and at most 4 non-blank rows under the last option (a frame the classic renderer left in the
+  scrollback is followed by more, and the bare command's path input has no options). For a FULL path the dialog must show it
+  (`AddDirMenuBelongsTo`: case, slashes and whitespace do not count); a relative one is resolved by Claude Code, so the dialog
+  is taken as the command's.
+- **The transcript**, from where it stood at the queueing (so a dialog-free command's result, written within milliseconds of
+  its delivery, is never missed): the echo of the same command and arguments (`CommandEchoMatchesPromptText`, the scanner's own
+  rule) and the result line after it (`ClassifyCommandTranscriptText` / `ClassifyAddDirOutput`, the terminal controls
+  stripped). A fork's copies of its source's lines are skipped. A press whose reply has not come holds the read back, so the
+  result is credited to the right answerer.
+
+**Two delivery fixes beside it** (DELIVERY.md §18) — needed for every local command a topic sends, not just /add-dir:
+- **The echo is a local command's delivery evidence.** Before, `/add-dir` and `/model <id>` sent from a topic stayed Sent and
+  unechoed forever (no hook, no prompt line), so 15 s later the lost-send verdict failed them with a 👎 ("not delivered … the
+  runner paused") and paused the session's runner. The scanner now consumes the transcript's command echo as the delivered
+  prompt's PULL echo (`PickCommandEchoPrompt`: a Sent, unechoed Autorun prompt of the same command and arguments, its delivery
+  not newer than the echo by more than `kCommandEchoSkewMs`, the oldest first) — the reaction then turns 👨‍💻, and the runner
+  goes on.
+- **The lost-send verdict waits while a menu is open** (`DecideLostSend`): the dialog holds the command's whole record back, so
+  it reads unechoed for as long as it stays up. The hold only delays a verdict; the queue already holds on the same box state.
+
+**Logs** (hooks.log): `[menu] <sid8> /add-dir from topic (message N) watched: …`; `[menu] <sid8> /add-dir dialog open (<path>):
+card posted; option 1 is pressed by itself in 60 s unless answered`; the window's `[menu] <sid8> /add-dir dialog: option N
+(yes-session | yes-remember | no) -> pressed | gone | other | busy | failed`; `[menu] <sid8> /add-dir dialog unanswered for 60 s:
+option 1 (yes-session) is pressed by itself`; `[menu] <sid8> /add-dir dialog answered (from Telegram | by itself | at the PC):
+the card shows its result`; `[menu] <sid8> /add-dir ran without a dialog: its result answers the message`; `[menu] <sid8>
+/add-dir card closed: <why>`; the scanner's `[pull-echo] <sid8> prompt <id8> (the transcript's /add-dir echo: the delivered
+command ran)`; and `[nav] remote telegram menu <sid8> /add-dir -> option N (…) from Telegram | by itself after 60 s`,
+`[nav] remote telegram refused /add-dir <sid8> -> usage (no path)`, `[nav] remote session-action menu-screen | menu-answer <sid8>`.
+
+**The code:** `AgentMaster/TuiMenus.h` (new, pure: the command, the dialog's texts and options, `ParseAddDirCommandText`,
+`ParseAddDirMenuScreen`, the path rules, the two actions and `MenuAnswerRequest` / `MenuAnswerResult` / `DecideMenuAnswer`,
+`StripTerminalControls`, `ClassifyCommandTranscriptText`, `ClassifyAddDirOutput`, `AddDirOutcomeFitsOption`, the card's model,
+text, buttons and `tm:<key>:<digit>` data, the reply, the usage and the unreadable note); `AgentMaster/Messaging.Menus.cpp` (new:
+`_watchAddDir`, `_menusTick` / `_tickMenuWatch`, `_onMenuScreen`, `_pressMenuOption` / `_onMenuPressed`, `_onMenuTap`,
+`_postMenuCard`, `_queueMenuCardEdit`); Messaging.h (`MenuWatch`, the members); Messaging.Inbound.cpp (the `tm:` route first in
+`_handleCallback` after `q:`, the bare refusal and the watch in `_queueRemotePrompt` and `_steerRemotePrompt`, the help line);
+Messaging.cpp (the tick calls `_menusTick` after `_questionsTick`; `_menuWatches` cleared at a start and at a change of bot);
+TerminalPage.AgentMessaging.cpp (the `menu-screen` and `menu-answer` actions); Scheduler.h (`CommandEchoMatchesPromptText`,
+`PickCommandEchoPrompt`, `kCommandEchoSkewMs`, the `DecideLostSend` hold); SessionScanner.cpp (the echo consume);
+TerminalAppLib.vcxproj; the probe `tools/add-dir-probe/` (re-run it after a Claude Code upgrade that touches /add-dir or its
+menus: the parser keys on the texts it records).
+
+**Tests:** `TestTuiMenus` (tests_tuimenus.cpp, 117 checks) — the queued text read as the command; the screen parser against
+the probe's OWN captures (the open dialog with its path and focus; the bare command's path input and the screen after an answer
+not taken for it) and a terminal's other shapes (a wrapped path, a wrapped note, a cut label, option 2 focused, a frame left
+behind, another menu, the options out of order, two dialogs, CRLF rows); the input box's detector reading the captured dialog
+as a MENU (the lost-send hold depends on it); the paths; the window's press (the argument, the reply words, `DecideMenuAnswer` on
+every case); terminal controls stripped; the probe's echo and result lines; every /add-dir message of the 2.1.291 bundle
+classified; the card's data, its text in every phase and its buttons; the command echo matched to a delivered prompt; and the
+lost-send verdict held while a menu is open and judged once it closed.
+
+**Check after the build** (the dev bot; a scratch folder to add):
+1. `/add-dir Q:\tmp\x` (a new folder) in a session at rest → ✍, then the card rings within ~2 s with the three buttons and the
+   countdown; tap "2" → ⏳ Answering → "✅ Added and remembered · answered from Telegram"; `.claude\settings.local.json` lists the
+   folder; the reaction turns 👨‍💻 (not 👎 — the echo fix); the mirror's "👤 You · command /add-dir …" line follows.
+2. Another new folder, no tap → after 60 s "✅ Added for this session · ⏱ picked by itself after 60 s".
+3. A third, answered at the PC (Esc) → "✖️ Not added · answered at the PC"; a tap on the old card answers "Already answered".
+4. The first folder again → no card, the reply "ℹ️ Already in the workspace"; a missing folder → "Path … was not found."; a bare
+   `/add-dir` → the usage line, nothing sent.
+5. `/model sonnet` from a topic → 👨‍💻 and no 👎 15 s later (the echo fix), the runner still on.
+6. While a card is open, park the tab (Deactivate) → "⏹ No longer open here — its tab's claude stopped".
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
