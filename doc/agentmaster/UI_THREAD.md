@@ -1086,3 +1086,153 @@ restart took the 0.7.10 pre-release, which does not hold these fixes.
 - hooks.log: no `[manager] slow rebuild` line in normal use.
 - With the Agent Manager page on screen for an hour, the process's private memory stays flat, and a heap
   census finds at most 6 board `ScrollViewer`s per window.
+
+## 13. Measured again on 2026-10-20: release 0.6.8.22 at ~700 tabs
+
+The user's request: "Are there any cpu hotspots that can be taken care of? can you kindly figure if the release
+running (via readonly) is suffering from wasted cpu and time?" Production was measured read-only at night
+(02:10–02:45), with its sessions mostly at rest; nothing was suspended, written or attached.
+
+- **The instance:** pid 41148, 0.6.8.22 (the build of ec966a2ca, `Q:\agentmaster-layouts\Release-B`), up since
+  2026-10-19 07:35. It holds every fix of §10 and §12. 4 windows: 556 + 96 + 7 + 47 tabs (the 47-tab window is
+  minimized and shows the Agent Manager page); 34 initialized terminals; 32 live `claude.exe`. The session that
+  measured runs inside it, so its own `claude.exe`, `bash` and `python` are subtracted below.
+- **Tools:** `tools/cpuhunt/proccpu.py` (every process, 60 s), `stacksnap top` (10 s) and `stacksnap sample`
+  (60 s, 3 ms, five threads), `threadcensus` (20 s), `tools/cpuhunt/wakes.py` (the frame thread at 20 ms),
+  `tools/cpuhunt/uiclass.py` (the UI profile by activity), `tools/leakhunt/xamltree.py` on the heap dump of
+  01:02 (MEMORY_LEAKS.md §1), the profile's file times and the process's I/O counters.
+
+### 13a. The process
+
+| Item | Value |
+|---|---|
+| Machine | ~490% of one core in use, 15% of its 32 CPUs (a game took ~93% of a core): not saturated |
+| Production's process | 51.6% of one core (`stacksnap top`); over its life 7.97 h of CPU in 19.1 h = **42% of one core on average** |
+| Its tree's other processes | 32 `claude.exe` 30% (the sessions' own work); 34 `pwsh`, 34 `OpenConsole`, 33 `conhost` ~0.1%; 96 MCP servers 0%; no hook forwarder ran in the window |
+| Production's disk writes | **279 KB/s** in 0.9 writes/s, nearly all the Telegram bot's state file (§13d) |
+| Dev (60 tabs, a Debug build) | 25% of one core in 10 s, 18% over its 8.9 h; its process observer alone 170 ms/s (Debug STL) and its bot's tick 51 ms/s; it writes 32 KB/s the same way |
+
+| Thread | CPU (ms/s) | Wake-ups/s |
+|---|---|---|
+| UI thread (all 4 windows) | 304–358 | 230–301 |
+| `MessagingService::_tickLoop` (the Telegram bot) | 55–57 | 45 |
+| `ProcessObserver::_worker` | 42–48 | 24 |
+| `SessionScanner::_worker` | 35–42 | 30 |
+| thread pool | 10–60 | — |
+| render threads (2 of 34 painted in 20 s) | 7–9 | 24 |
+| XAML frame thread | 2 | **33–38** |
+
+### 13b. The UI thread: three quarters of it is XAML redrawing
+
+60 s profile, 317 ms/s (`uiclass.py`):
+
+| Activity | Share of busy | ms/s |
+|---|---|---|
+| Frame tick: the composition-tree walk | 49.9% | ~158 |
+| Pieces of the walk the sampler did not follow up to the tick (dcomp's `VisualIterator`, CoreMessaging's `AllocateItemForPeer` / `RemoveItem`) | 12.5% | ~40 |
+| Walks that stopped early (critical sections, heap, dcomp release: mostly the walk too) | 17.4% | ~55 |
+| Frame tick: animation tick | 1.8% | ~6 |
+| `_ObserverProbeImpl` | 7.6% | ~24 |
+| `_ScanPendingInputImpl`, `_ReconcileClaudeTabsImpl`, `_ScanCacheWarmTabsImpl`, `_ScanInferredTabColorsImpl`, the side panel's and the Manager page's timers | ~5% | ~16 |
+| Input | 2.8% | ~9 |
+
+- **The walk is ~250 ms/s, a quarter of a core all night.** One frame costs ~6.9 ms (2.7 ms on 10-04, §10).
+- **No animation keeps the loop running.** The animation tick is 2% (§10c's composition pulses hold), and the
+  frame thread wakes in irregular bursts: 0–12 wake-ups per 100 ms, 23 of 101 buckets empty, 33–38 a second.
+  So frames follow property changes. Their sources were not identified. Any change in any of the four windows
+  starts a frame, e.g. a status dot, a card's text, a counter, the Manager page's 1 s countdown in the
+  minimized window, a tooltip, or input. The one painting terminal correlates +0.11 only.
+
+### 13c. Why a frame costs that much: 81% of the nodes are side-panel cards
+
+`xamltree.py nodes` on the dump of 01:02 (every `HWCompTreeNodeWinRT`, its element at +0x98, the element's
+parents at +0x38):
+
+| Where the composition nodes are | Nodes | Share |
+|---|---|---|
+| Side-panel card `Border`s (rounded, with a child, §10h) | 1,467 | 40.4% |
+| Their title bands (rounded top corners, with a child) | 1,462 | 40.2% |
+| Tab items (`TabViewItem`, realized ones) | 354 | 9.7% |
+| Buttons in lists (the side-panel summary's ▸ rows and others) | ~150 | 4% |
+| Everything else | ~200 | 6% |
+| **Total** | **3,634** | |
+
+- **1,466 cards, two nodes each.** Two windows show the side panel **GLOBAL**, so each lists the whole fleet:
+  ~706 cards in the 556-tab window and ~706 in the 96-tab window (window records: `sidePanelGlobal: true`).
+  The other two windows add 47 + 7. The list is a `StackPanel`, so every card is loaded, on screen or not
+  (§8 item 2 / §10a #6, never done). Every frame, triggered by anything in any window, walks all of them.
+- **The same cards hold memory:** `xamltree.py text` finds 13,488 measured TextBlocks in list cards (77% of
+  all measured TextBlocks; the count includes the 47 board cards), **~224 MB** of DirectWrite state at
+  ~17 KB each (MEMORY_LEAKS.md §4.1).
+
+### 13d. The Telegram bot's tick: 441 topics every 1.5 s, the whole state file every 3.2 s
+
+- **The tick** (`MessagingService::_tickLoop`, every `kTickMs` = 1.5 s) walks EVERY topic with a thread: 441
+  here. For each it calls `_session` (`SessionRegistry::Get`: a full `SessionInfo` copy, queued prompts
+  included), copies its `TopicRecord` and `Mirror`, runs `_followTranscript` (opens the transcript and reads
+  its tail), runs `_refreshCard` (renders and hashes the card), then copies the fields back and sets
+  `_stateDirty = true` **unconditionally** (Messaging.cpp:2115 today; :2062 in ec966a2ca, the build in
+  production).
+- **So `_saveStateIfDirty`** (gap `kStateSaveGapMs` = 2 s) rewrites the whole state file every ~3.2 s:
+  measured 20 rewrites a minute, 465 KB each, after a `CopyFileW` of the old file to `state.json.prev`, with
+  `FlushFileBuffers` and a write-through rename. That is the measured 279 KB/s, **~24 GB a day of forced disk
+  writes**. Successive versions were byte-identical whenever no session moved: in the sample, the only change
+  was this investigation's own session's transcript cursor.
+- **Its CPU** (busy samples of the thread): `_followTranscript` ~20%, `_saveStateIfDirty` ~15%, `_syncTopics`
+  ~12% (a `SnapshotLiveForCards` each tick), `_refreshCard` ~10%; the rest is mostly the copies and their
+  allocations.
+
+### 13e. The engine threads and the UI lanes
+
+- **Observer, 42–48 ms/s:** `SnapshotProcesses` 53% (a Toolhelp snapshot of every process on the machine every
+  2 s; 120 of its 154 busy samples were in a kernel call), `ReadClaudeFacts` 9%, `ResolveCodexSessionIn` 7%,
+  `ReadFileHead` 6.5%, `ReadProcessEnv` 5%.
+- **Scanner, 35–42 ms/s:** `_reconcileSession` 70%, in it `ResolveClaudeTranscriptPath` 24%,
+  `TranscriptWatcher::Stamp` 16% and `TranscriptIndex::SequencesFor` 13% (string hashing, compares, `Lower`);
+  `SnapshotLiveForScan` 20% (a lean copy of ~700 live sessions on every pass).
+- **UI lane `_ObserverProbeImpl`, ~24 ms/s:** `weak_ref<Tab>::get` and `IInspectable` comparisons over every
+  tab of the window on each tick. `_ScanPendingInputImpl` makes a full `SessionRegistry::Get` per tab.
+- **Thread pool:** `AgentTabOverlay::_LoadSummaryAsync` → `AnalyzeSessionTranscript`, and
+  `IslandWindow::_TaskbarFrameRunPass` (the 20 s taskbar preview capture, NOTIFICATIONS.md §9).
+
+### 13f. Time the user waits (hooks.log of this run, 07:35 → 02:45)
+
+- **One UI stall of ~44 s at 07:53**, in all four windows, 18 minutes after the start.
+- **15 `[tab-switch-settle]`:** 12.7–13.6 s during the restore, then 0.8–3.1 s (the UI thread was not idle
+  again within 750 ms of the switch).
+- **6 `[manager] slow rebuild`: 1.0–2.7 s per Agent Manager rebuild with 47 board cards**, between 09:59 and
+  20:23. So §12e's check ("no slow rebuild in normal use") does not hold. While the minimized window shows
+  the page, every registry change can start one, 2–5 s apart. The cards are still rebuilt each time (§12d).
+- One `[tab-switch-slow]` (526 ms, the content swap).
+
+### 13g. What to do, by win × ease
+
+| # | Fix | Win (measured basis) | Ease |
+|---|---|---|---|
+| 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
+| 2 | Zero build: switch the 96-tab window's side panel to LOCAL (706 → 96 cards); collapse a side panel that is not needed | LOCAL there: ~1,220 of 3,634 nodes (a third of the walk, ~80 ms/s) and ~5,600 measured TextBlocks (~95 MB). Collapsing hides the list and stops its updates; whether XAML also drops the collapsed cards' nodes from its walk is not measured | The user's toggle, reversible |
+| 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
+| 4 | Virtualize the side panel's list (§10a #6) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
+| 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
+| 6 | Observer: a longer full-survey interval while the roster and the correlated pids did not change (§10a #5, a product decision); cache `ResolveCodexSessionIn` | ~25–40 ms/s | Easy code, product decision |
+| 7 | Scanner: keep each session's resolved path and keys; visit only sessions whose watcher sequence moved | ~20–30 ms/s | Medium |
+| 8 | UI lanes: `_ObserverProbeImpl` by map lookups, not comparisons over every tab; a lean read in `_ScanPendingInputImpl` | ~25 ms/s | Easy to medium |
+| 9 | The Agent Manager rebuild with 47 cards: find why it takes 1–2.7 s (profile it while the page is shown) | up to seconds of UI thread per registry burst | Investigation first |
+
+Estimate, not measured: fixes 1, 3, 5, 6, 7 and 8 together would roughly halve the night-time cost, to about
+20–25% of one core. A one-minute experiment measures the walk's share directly: switch the 96-tab window's
+side panel to LOCAL and run `stacksnap sample` and `wakes.py` again.
+
+### 13h. How to measure again
+
+```bash
+python -I tools/cpuhunt/proccpu.py <pid> 60                    # who uses the CPU: the app, its tree, the machine
+cd <scratch> && cp tools/stacksnap.exe "<SDK>/Debuggers/x64/dbghelp.dll" "<SDK>/Debuggers/x64/symsrv.dll" .
+export STACKSNAP_SYMSRV='srv*Q:\tmp\symcache*https://msdl.microsoft.com/download/symbols'
+./stacksnap.exe top <pid> 10                                   # per-thread CPU + one stack each
+./stacksnap.exe sample <pid> 60 3 <uiTid> <botTid> <scannerTid> <observerTid>
+python -I tools/cpuhunt/uiclass.py stacksnap_<pid>_<uiTid>.folded <ui ms/s>
+dotnet run tools/threadcensus.cs -- <pid> 20                   # frame thread id + wake rate
+python -I tools/cpuhunt/wakes.py <pid> <frameTid>              # animation (steady) or changes (bursts)?
+python -I tools/leakhunt/xamltree.py <dump> <census.tsv> <blocks.tsv> nodes   # needs a snapdump + census + segheap walk
+```
