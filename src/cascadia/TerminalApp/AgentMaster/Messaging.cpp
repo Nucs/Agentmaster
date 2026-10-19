@@ -2005,6 +2005,7 @@ namespace Agentmaster::Msg
                     }
                 }
                 _syncTopics();
+                _flushIdleNotices(WallMs()); // §21.31: the main view names the sessions whose topics just left as idle, once they settled
                 _stateNameTick(); // §21.11 + §21.13: at most one topic name follows its session's state and color per tick, within the budget
                 _directoryTick(); // §21.16: the pinned directory follows the fleet (a check every 15 s, an edit at most every 2 min)
 
@@ -5385,6 +5386,9 @@ namespace Agentmaster::Msg
     void MessagingService::_deleteTopic(const std::wstring& sessionId, const std::wstring& reason)
     {
         int64_t thread = 0;
+        // §21.31: what the topic's name showed (the idle notice names the session the way the topic list did).
+        std::wstring shownTitle;
+        std::wstring shownSquare;
         {
             std::lock_guard lk{ _mtx };
             const auto it = _state.topics.find(sessionId);
@@ -5393,6 +5397,8 @@ namespace Agentmaster::Msg
                 return;
             }
             thread = it->second.threadId;
+            shownTitle = it->second.title;
+            shownSquare = it->second.nameColor;
         }
         auto p = json::Value::MkObj();
         p.Set(L"chat_id", json::Value::MkNum(static_cast<double>(_ownerId)));
@@ -5414,7 +5420,7 @@ namespace Agentmaster::Msg
         }
         {
             std::lock_guard lk{ _mtx };
-            _state.topics.erase(sessionId);
+            const bool erased = _state.topics.erase(sessionId) > 0;
             _mirrors.erase(sessionId);
             _cards.erase(sessionId);
             _stateDirty = true;
@@ -5428,9 +5434,38 @@ namespace Agentmaster::Msg
             {
                 _backfill = BackfillBatch{}; // its answers no longer count (the seq is gone)
             }
+            // §21.31: a topic that left because its session went idle is named in the main view's idle notice. Only when THIS call
+            // erased the record, so a delete that raced another one is never told twice; the other reasons (a closed tab, …) are
+            // not the user's request and stay quiet.
+            if (erased && reason == L"idle")
+            {
+                _idleNoticePending.push_back(IdleNoticeEntry{ sessionId, std::move(shownTitle), std::move(shownSquare), WallMs() });
+            }
         }
         _backfillPostsBy.erase(sessionId);
         _log(L"[msg] topic deleted " + ShortId(sessionId) + L" (" + reason + L")");
+    }
+
+    void MessagingService::_flushIdleNotices(int64_t nowMs)
+    {
+        std::vector<IdleNoticeEntry> due;
+        {
+            std::lock_guard lk{ _mtx };
+            if (!IdleNoticeDue(_idleNoticePending, nowMs))
+            {
+                return; // nothing waits, or a burst is still coming in (the line names it whole once it has settled)
+            }
+            due.swap(_idleNoticePending);
+        }
+        // The chat's main view ("All": no thread), where the pinned directory lives; the topics themselves are gone. Silent (D5:
+        // only a turn's final message rings), at the New priority like a topic's change line, and no card moves (no topic).
+        _sendText(0, BuildIdleNoticeHtml(due), true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+        std::wstring ids;
+        for (const auto& e : due)
+        {
+            ids += (ids.empty() ? L"" : L", ") + ShortId(e.sessionId);
+        }
+        _log(L"[msg] idle notice in the main view: " + std::to_wstring(due.size()) + L" session(s) went idle (" + ids + L")");
     }
 
     void MessagingService::_renameTopic(const std::wstring& sessionId, const std::wstring& title, SessionState state)

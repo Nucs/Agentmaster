@@ -416,7 +416,7 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
 | On the PC (tab, session) | In Telegram |
 |---|---|
 | The session first leaves Idle (its first prompt; a wake; a revive) | Its topic is created: the pinned card, then the backfill (§6.7), then the live mirror |
-| It becomes **Idle** (the 60-minute decay of a read Waiting session; Move to Idle/Done; a restore that normalized it) | The card turns to "💤 Idle — leaves the list at 14:32" with [📌 Pin] and [Wake]; after the **idle grace** (D25, default 10 min) the topic is DELETED, with its messages (Telegram cannot hide or close a private-chat topic) |
+| It becomes **Idle** (the 60-minute decay of a read Waiting session; Move to Idle/Done; a restore that normalized it) | The card turns to "💤 Idle — leaves the list at 14:32" with [📌 Pin] and [Wake]; after the **idle grace** (D25, default 10 min) the topic is DELETED, with its messages (Telegram cannot hide or close a private-chat topic). As built (§21.31): the chat's main view then gets one silent line, "💤 🟧 title is idle — its topic left the list. /idle in 🔎 Search wakes it." |
 | It leaves Idle within the grace | It stays; the card goes back to normal |
 | Woken again later (Move to Waiting-for-you at the PC, or Wake / Revive from 🔎 Search) | A new topic, rebuilt by the backfill (§6.7) |
 | Renamed (F2, the tab menu, the Explorer, or `/rename` in the topic) | `editForumTopic` renames the topic |
@@ -4285,6 +4285,56 @@ the script; the ask pipe end to end (refused, answered, released, a helper that 
 - The PC answers first: the card reads Answered at the PC with the answer, and the helper process is gone within a tick
   (`Get-Process powershell` — no `agentmaster-ask.ps1` left); Esc at the PC: ⏹ closed at the PC.
 - The bot off: no helper waits (a dialog closes no slower than before); a subagent's question: shown at the PC at once.
+
+### 21.31 The main view says when a session's topic leaves as idle (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19): "When session goes idle, I think (confirm) that the topic gets deleted. can we send a
+> message in the all chat that <title> is idle."
+
+**Confirmed: an idle session's topic is deleted** (D25, §5.2; `PlanTopicSync` plans the Delete, `_deleteTopic(…, "idle")`):
+- A session that is Idle and not pinned gets the Idle card ("💤 leaves the list at 14:32 (/pin keeps it, /wake brings it
+  back)"). One idle grace later the topic is DELETED with its messages, because Telegram cannot hide or close a topic of a
+  private chat. The grace is `messagingIdleGraceMinutes` (default 10 min, 0–1440; 0 deletes at once), counted from the
+  later of the moment the topic first saw the session Idle and the session's last activity (`IdleTopicLeavesAtMs`).
+- A session gets Idle from "Waiting for you" (its timeout, default 60 min, once read), from Move to Idle, or from a restore
+  that normalized it. "Waiting for you" alone never deletes a topic, and a pinned session's topic never leaves as idle.
+- hooks.log on 2026-10-19: production deleted 18 topics as idle and 57 as closed (the tab closed); dev 1 and 66.
+
+**What changed** (`MessagingModels.h`, `Messaging.cpp`):
+- A topic deleted as idle (`_deleteTopic` with the reason "idle", and only when that call erased the record) joins a
+  pending list, with the title and the color square its name showed (`IdleNoticeEntry`, `_idleNoticePending`).
+- Each tick, right after the topic sync, `_flushIdleNotices` posts ONE silent line in the chat's MAIN VIEW ("All", no
+  thread: where the pinned directory lives) once the deletes have settled: no topic has left for 10 s
+  (`kIdleNoticeSettleMs`), or the oldest has waited 60 s (`kIdleNoticeMaxWaitMs`); `IdleNoticeDue`. A burst is normal after
+  an app start: every topic whose grace ran out while the app was closed leaves then, at about one delete a second, and a
+  line per session would flood the main view and the chat's ~20-a-minute budget.
+- The line (`BuildIdleNoticeHtml`): for one session, "💤 🟧 Small telegram fixes is idle — its topic left the list. /idle in
+  🔎 Search wakes it."; for several, "💤 3 sessions are idle — their topics left the list. /idle in 🔎 Search wakes them."
+  and then one title per line, in the order the topics left, at most 20 (`kIdleNoticeMaxTitles`) and "… and N more" past
+  them. Each title is a chip in its tab color's look (§21.15), with no link: its topic is gone. Logged `[msg] idle notice in
+  the main view: N session(s) went idle (<ids>)`.
+- The hint names 🔎 Search because the main view takes only /start and /help; `/idle` works in any topic and lists the
+  idle tabs with [Wake n] / [Wake 📌 n] (Wake puts the session back to Waiting for you, and its topic comes back).
+- The other reasons a topic leaves (a closed tab, a tab that is no Claude tab any more) post no line: the request was the
+  idle one.
+- The pending list is in memory only: a quit within the wait (at most 60 s) loses that one line.
+
+**Tests** (`tests/tests_messaging.cpp`, `TestMessaging`, 10 checks): nothing pending tells nothing; one session is told after
+the settle time, with its exact line and a chip in the rich form; a burst waits while it is still coming in and goes once
+it has settled; a steady trickle goes at the latest after the max wait; several sessions: the count, the hint, one title
+per line in order, at most 20 and "… and 10 more"; an empty title shows the short session id; a title is escaped; a clock
+that went back counts as due.
+
+**Check after the build** (each install, with its bot):
+- Move a session to Idle at the PC and wait the grace: its topic goes, and about 10 s later the main view gets the silent
+  line (hooks.log `[msg] topic deleted <id> (idle)`, then `[msg] idle notice in the main view: 1 session(s) went idle`).
+- Restart the app after a while away: the topics whose grace ran out leave together, and the main view gets ONE line naming
+  them.
+- `/idle` in 🔎 Search, then Wake: the session's topic comes back.
+
+**Open, for the user:**
+- A [Wake] button on the line itself, which would save the detour through 🔎 Search.
+- A line for a CLOSED tab's topic too (57 in production's log).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
