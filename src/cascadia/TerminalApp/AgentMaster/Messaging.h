@@ -57,6 +57,7 @@
 #include "MessagingModels.h"
 #include "MessagingNewThread.h" // §21.17: the new-thread folder picker (lists, text, buttons, callback data)
 #include "MessagingNewThreadWizard.h" // §21.25: the new-thread wizard (create a folder, a model, a window; records + persistence)
+#include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
 #include "SessionModels.h" // AppSettings, SessionInfo
@@ -189,7 +190,9 @@ namespace Agentmaster::Msg
 
     // ===== the service ========================================================================
 
-    class MessagingService : public std::enable_shared_from_this<MessagingService>
+    // A TapReleaseSink (§21.28) too: a tapped button's last hold tells the service, which then queues the tap's answer
+    // (OnTapHoldsGone, private — only a TapHold calls it, through the interface).
+    class MessagingService : public std::enable_shared_from_this<MessagingService>, public TapReleaseSink
     {
     public:
         /// <summary>Creates the service stopped. Apply() starts it when the settings ask for it.</summary>
@@ -323,6 +326,13 @@ namespace Agentmaster::Msg
 
     private:
         // ----- lifecycle (Messaging.cpp) -----
+        /// <summary>
+        /// Starts the bot with `token`: the client(s), the one-poller mutex, the state file, every run-time table cleared or restored
+        /// (§21.28: the last run's tapped buttons are marked answered and forgotten — Telegram stopped waiting for them long ago),
+        /// the registry observer, then the poll, send and tick threads (and the secretary's poll thread). Never throws: a failure
+        /// is logged and the status line says the bot failed to start.
+        /// </summary>
+        /// <param name="token">The bot token (from Credential Manager).</param>
         void _start(std::wstring token) noexcept;
         void _pollLoop() noexcept;
         /// <summary>
@@ -333,6 +343,13 @@ namespace Agentmaster::Msg
         /// loop (logged; secretary sends stay off). Never throws (Rule #18 inside).
         /// </summary>
         void _secretaryPollLoop() noexcept;
+        /// <summary>
+        /// The SEND thread: one outbox item per pass, by priority then sequence, paced to the chat's ~1 call/s (kSendGapMs; history
+        /// slower, within kHistoryCallsPerMinute), a long 429 parking only its method; the item's `onDone` runs after the call.
+        /// §21.28: each pass first queues the answers of the tapped buttons that are due (_answerDueTaps), and an item's callback
+        /// runs inside a TapScope of the item's holds, which go with the item at the end of the pass. Never throws (Rule #18
+        /// inside: a failed pass is logged and the loop goes on after 0.5 s).
+        /// </summary>
         void _sendLoop() noexcept;
         void _tickLoop() noexcept;
         /// <summary>
@@ -362,7 +379,9 @@ namespace Agentmaster::Msg
         /// once — its thread goes back to its folder picker with the messages it held, and the thread is told why. A revive is
         /// told the session the window opened (_sweepRevives settles on exactly that one); a refused revive leaves, and its
         /// thread is told why — after _requestLaunch's own "… into a tab…" line (Revive::announced), so the two never swap
-        /// places. Never throws (Rule #18 inside).
+        /// places. Never throws (Rule #18 inside). §21.28: a refusal's notice (and the wizard posted after it) goes inside a scope
+        /// of the launch's tap holds — the revive's, or the new thread's (`_bindTapHolds`) — so it answers the tapped button; a new
+        /// thread's opened tab lets its holds go, and a revive's are kept for its "Opened …" line.
         /// </summary>
         void _settleLaunchAnswers() noexcept;
         /// <summary>
@@ -434,6 +453,14 @@ namespace Agentmaster::Msg
             /// (the send loop makes one call at a time, in order; §21.12).
             /// </summary>
             std::function<void(json::Value&)> beforeSend;
+            /// <summary>
+            /// §21.28: the tapped buttons whose ANSWER waits for this call — one hold per tap whose handler (or one of its
+            /// continuations) queued the item inside its tap scope (_enqueue adds them). The send loop runs `onDone` inside a scope
+            /// of these holds, so what the callback queues in turn holds them too, and drops them with the item after the
+            /// callback: the last hold of a tap to go lets its answer go. A newer item that replaces this one by its key takes them
+            /// over (it carries the change the tap waits for); an item dropped from the outbox lets them go at once.
+            /// </summary>
+            std::vector<TapHoldRef> tapHolds;
         };
         /// <summary>
         /// The Bot API method an outbox item calls, as the traffic census and the flood parking name it: "sendDocument" for a
@@ -446,10 +473,66 @@ namespace Agentmaster::Msg
         {
             return item.document ? std::wstring{ item.photo ? L"sendPhoto" : L"sendDocument" } : item.method;
         }
-        /// <summary>Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).</summary>
+        /// <summary>
+        /// Queues an item; an item with no seq yet (0) gets the next one, an item that carries one keeps it (a fallback, a chunk).
+        /// A queued item with the same non-empty key is replaced. §21.28: inside a TapScope (a tapped button's handler or a
+        /// continuation of its work) the item also gets one hold per tap in scope — the tap's answer then waits until Telegram has
+        /// answered this call — and a replaced item hands its holds to its replacement; an answerCallbackQuery item never holds.
+        /// </summary>
+        /// <param name="item">The item (moved in).</param>
+        /// <exception cref="std::bad_alloc">If the item, its holds or the outbox cannot grow (a hold made so far goes, which may
+        /// answer a tap early, never late).</exception>
         void _enqueue(OutItem item);
         /// <summary>The next outbox sequence number (for a message whose parts and fallbacks must keep one place). Takes `_mtx`.</summary>
         uint64_t _takeOutSeq();
+
+        // ----- §21.28: a tapped button's answer, held while its work runs (MessagingTaps.h) -----
+
+        /// <summary>
+        /// TapReleaseSink: the last hold of `tap` went (its work is done or dropped), so its answer may go. Queues the tap for the
+        /// send loop (`_tapsDue`, under the LEAF lock `_tapMtx`) and wakes it; the answer itself is queued there (_answerDueTaps),
+        /// never here — this runs on whatever thread let the hold go, possibly with `_mtx` held (an outbox item dropped under it),
+        /// and _enqueue takes `_mtx`. Never throws: a tap that cannot be queued (std::bad_alloc, logged) is answered at its hold's
+        /// limit instead, since it is still in `_openTaps`.
+        /// </summary>
+        /// <param name="tap">The tap whose holds count reached 0.</param>
+        void OnTapHoldsGone(const std::shared_ptr<TapAnswer>& tap) noexcept override;
+        /// <summary>
+        /// One new hold for every unanswered tap of the calling thread's TapScope (HoldTapsOfScope with this service as the sink):
+        /// what a continuation captures to finish a tap's work on another thread or later, and what an outbox item queued in a
+        /// scope keeps (_enqueue). Empty outside a scope — the fleet's own traffic, nearly every call.
+        /// </summary>
+        /// <returns>The holds (empty outside a scope).</returns>
+        /// <exception cref="std::bad_alloc">If a hold cannot be allocated.</exception>
+        std::vector<TapHoldRef> _holdTaps();
+        /// <summary>
+        /// Keeps the taps of the calling thread's scope waiting for the NEXT change of `sessionId`'s sticky card (CardState::tapHolds):
+        /// a tapped 🔄 Restart / ▶ Reactivate / 🔧 Resume or a confirmed restart, park or interrupt — whose work happens in the
+        /// window and shows on the card as the new state — and a card refresh that cannot change the card yet. Nothing outside a
+        /// scope, and nothing for a session without a topic (no card will change: the tap is answered when its other holds go).
+        /// Takes `_mtx`: never call it with `_mtx` held.
+        /// </summary>
+        /// <param name="sessionId">The session whose card the taps wait for.</param>
+        /// <exception cref="std::bad_alloc">If a hold or the stash cannot be allocated.</exception>
+        void _awaitCardChange(const std::wstring& sessionId);
+        /// <summary>
+        /// The send loop's look at the taps, once per pass, before it takes `_mtx`: every tap whose last hold went (`_tapsDue`) and
+        /// every open tap past its hold's limit gets its answer queued (_answerTap); answered taps leave `_openTaps`. Send thread.
+        /// Never throws (Rule #18 inside: a pass that fails leaves the rest to the next pass, and the buttons to Telegram's limit).
+        /// </summary>
+        void _answerDueTaps() noexcept;
+        /// <summary>
+        /// Queues `tap`'s answer (answerCallbackQuery) — once: the first of the last hold's release and the hold's limit claims it
+        /// (TapAnswer::TryClaimAnswer), every later call does nothing. It carries the handler's toast, or kTapStillWorkingToast when
+        /// the limit answers a tap whose work still runs (TapAnswerText). The answer goes ahead of every other item of its priority
+        /// (it is no message of the chat, and the button spins until it lands); a refusal (an answer Telegram found too late) is
+        /// logged. One "[msg] tap …" line in hooks.log per tap says how long the button was held and why it stopped. Send thread.
+        /// </summary>
+        /// <param name="tap">The tap.</param>
+        /// <param name="byLimit">True when the hold's limit (kTapAnswerHoldMaxMs) answers it, false when its last hold went.</param>
+        /// <param name="nowTickMs">GetTickCount64 now (the log's held time).</param>
+        /// <exception cref="std::bad_alloc">If the item or the log line cannot be allocated.</exception>
+        void _answerTap(const std::shared_ptr<TapAnswer>& tap, bool byLimit, int64_t nowTickMs);
         /// <summary>
         /// The sendMessage items of one HTML text (chunked at Telegram's limit): the buttons and `onDone` ride the LAST chunk,
         /// the reply reference the first, only the last may ring. Chunk i sorts at (`seq`, `subSeqBase` + 2i); a chunk
@@ -602,8 +685,11 @@ namespace Agentmaster::Msg
         /// Error, a permission prompt; §21.6), which the card itself now says instead of a bot message. `textHash`
         /// (CardTextHash) is recorded as the text the topic shows. The answer is matched to its topic by THREAD,
         /// so a topic carried over to another session meanwhile (a Rekey) still learns its card's message id.
+        /// `prio` is the outbox priority of the old card's delete and the new card's send: the cards' own (CardEdit) by default;
+        /// SendPriority::Final when a tapped button waits for this post (§21.28: a directory dot's re-post, a tap's change that met
+        /// a missing card), so the user's wait is not spent behind the fleet's work logs and card edits.
         /// </summary>
-        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash);
+        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash, SendPriority prio = SendPriority::CardEdit);
         /// <summary>
         /// Fills a NEW topic record from the session's transcript (§21.6): the transcript path, where the mirror
         /// starts (the end of the file for a session at rest — a topic shows the session from now on; the start of
@@ -862,6 +948,11 @@ namespace Agentmaster::Msg
         /// takes it back to Main, where the state's own action is. `tapped`: the user tapped a button that changes the card itself (its
         /// page), so the edit goes at the priority of an answer to the user (SendPriority::Final) instead of the cards' own, and
         /// the keyboard flips at once even behind a busy outbox.
+        /// §21.28: a tapped button that waits for this card's NEXT change (CardState::tapHolds) makes the change go now — past the
+        /// edit gap, at the priority of an answer — and the edit or post that carries it holds the tap's answer until Telegram has
+        /// answered it. A refresh that cannot change the card yet (a post in flight, a refused post's minute) while a tap is in
+        /// scope stashes the tap there (_awaitCardChange), so the change that follows answers it; one that finds the card already
+        /// showing this text holds nothing (the tap is answered at once).
         /// </remarks>
         /// <param name="sessionId">The topic's session.</param>
         /// <param name="force">Edit now, past the edit gap.</param>
@@ -953,6 +1044,12 @@ namespace Agentmaster::Msg
             // HTML). The slow form upgrade skips the card while its text is that one, so a refusal is not retried every gap; a
             // changed text tries the rich form again. 0 = none refused.
             uint32_t richRefusedHash{ 0 };
+            // §21.28: the tapped buttons whose ANSWER waits for this card's NEXT change — a directory dot (its re-post makes the topic
+            // first in the list), a 🔄 Restart / ▶ Reactivate / 🔧 Resume or a confirmed restart, park or interrupt (the card that
+            // shows the new state), and a page flip that met a card post in flight (_awaitCardChange). _refreshCard's next edit or
+            // post takes them (going at once, at an answer's priority) and holds them until Telegram answered it; a card dropped
+            // with its topic lets them go, and the hold's limit answers a tap whose card never changes (kTapAnswerHoldMaxMs).
+            std::vector<TapHoldRef> tapHolds;
         };
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
@@ -999,6 +1096,19 @@ namespace Agentmaster::Msg
         /// <exception cref="std::bad_alloc">If memory runs out (the registry, the held lists and the outbox copy what they
         /// keep); a handler it routes to may throw the same.</exception>
         void _handleMessage(const json::Value& msg, bool edited);
+        /// <summary>
+        /// A tapped inline button (a callback_query update): a stateless Search button, a Search pick, a directory dot, a new
+        /// thread's picker, a card verb ("c:&lt;verb&gt;:&lt;session&gt;") or a single-use token ("t:…"), each carried out on the
+        /// session's state NOW. §21.28: the tap's ANSWER (answerCallbackQuery — the end of the button's loading indicator, and its
+        /// toast) is HELD while what the tap set off runs: the handler runs inside a TapScope of its own hold, so every outbox item
+        /// it queues holds the answer until Telegram answered that call, the continuations it starts carry the tap along, and the
+        /// handler's `answer(text)` only sets the toast. The answer goes when the last hold goes, or at the hold's limit
+        /// (kTapAnswerHoldMaxMs); a tap from anyone but the paired owner is answered at once ("This bot is private."). Poll thread;
+        /// called through _handleUpdate, which catches what it throws (the hold goes with the stack, and the answer then carries
+        /// the toast set so far).
+        /// </summary>
+        /// <param name="cq">The Telegram CallbackQuery object.</param>
+        /// <exception cref="std::bad_alloc">If memory runs out (the tap, its holds, the handler's replies).</exception>
         void _handleCallback(const json::Value& cq);
         /// <summary>
         /// A message in a session's topic: an Agentmaster /command runs, a refused one is answered, anything else is queued as the
@@ -1012,6 +1122,17 @@ namespace Agentmaster::Msg
         void _handleTopicMessage(const std::wstring& sessionId, const json::Value& msg, int64_t threadId, bool held = false);
         void _handleSearchMessage(const json::Value& msg, int64_t threadId);
         bool _queueRemotePrompt(const std::wstring& sessionId, const std::wstring& text, int64_t messageId, int64_t threadId, bool fromBacklog);
+        /// <summary>
+        /// Runs an Agentmaster /command in a session's topic — typed, or a card button that names one (§21.24) — and replies in the
+        /// topic (a refused or unknown one says why). §21.28: called from a tapped button, it runs inside the tap's scope, so its
+        /// replies hold the button's answer; the commands whose answer comes later carry the tap along — /screen and /screenimage
+        /// in the window's reply (and the drawing's worker), /forksession and /newsession in their launch's revive.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="cmd">The command (name and arguments).</param>
+        /// <param name="msg">The command message (its id: a reply quotes it); an empty object for a button.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <exception cref="std::bad_alloc">If a reply, a request or a hold cannot be allocated.</exception>
         void _runSessionCommand(const std::wstring& sessionId, const RemoteCommand& cmd, const json::Value& msg, int64_t threadId);
         void _runSearchCommand(const RemoteCommand& cmd, const json::Value& msg, int64_t threadId);
         void _reply(int64_t threadId, const std::wstring& html, bool sound = false, json::Value markup = json::Value{}, int64_t replyTo = 0);
@@ -1026,10 +1147,12 @@ namespace Agentmaster::Msg
         /// claude exited (Done), is restarted (the same conversation resumes in the same tab; with
         /// CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes on by itself). A running session is left alone.
         /// The card's ▶ Reactivate and 🔧 Resume Session (§21.24) buttons show the outcome as the button's toast (nothing is
-        /// posted in the thread, which is the conversation); `/reactivate` replies with it.
+        /// posted in the thread, which is the conversation); `/reactivate` replies with it. §21.28: from a tapped button (inside its
+        /// scope), a start or a restart keeps the button busy until the card shows the result (_awaitCardChange).
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <returns>The outcome, plain text (one sentence).</returns>
+        /// <exception cref="std::bad_alloc">If the outcome text or a hold cannot be allocated.</exception>
         std::wstring _reactivate(const std::wstring& sessionId);
         /// <summary>
         /// A directory DOT's tap (§21.16.7): puts the tab's topic FIRST in Telegram's thread list — the way into a topic on
@@ -1040,7 +1163,8 @@ namespace Agentmaster::Msg
         /// It also records the topic for `_frontHeld` (via `_frontRequests`), so the quiet re-sort does not move it back. A
         /// topic whose history is still being replayed keeps its card above the history until the replay is in: the move waits
         /// for that, and the toast says so. A second tap on the same dot within kFrontTapGapMs only answers. Runs on the poll
-        /// thread; takes `_mtx` and wakes the tick.
+        /// thread; takes `_mtx` and wakes the tick. §21.28: the dot stays busy until the re-post is in (its holds wait in
+        /// CardState::tapHolds for that post); a dot whose topic still replays its history, and a double tap, are answered at once.
         /// </summary>
         /// <param name="threadId">The topic's thread id, from the dot's callback data (ParseDirectoryFrontCallbackData).</param>
         /// <returns>The toast, plain text (DirectoryFrontAnswer, or why nothing moves).</returns>
@@ -1131,6 +1255,8 @@ namespace Agentmaster::Msg
         /// session it opened is live (_sweepRevives), or why nothing opened (_settleLaunchAnswers), or, after
         /// kRemoteLaunchTimeoutMs without either, that the PC never answered (_expireRevives). The revive is recorded under the
         /// launch's token BEFORE the request goes out (the answer may come back from another thread at once). Poll thread.
+        /// §21.28: called from a tapped button, the revive carries the tap (Revive::tapHolds), so the button stays busy until the
+        /// "Opened …" line or the window's refusal is in the thread (or until the hold's limit).
         /// </summary>
         /// <param name="req">The request (a Resume or Fork without a folder gets the registry's, else the transcript's).</param>
         /// <param name="threadId">The thread to reply in (a session's topic, or the 🔎 Search topic).</param>
@@ -1142,7 +1268,8 @@ namespace Agentmaster::Msg
         /// its topic appears, says "Opened …" in the revive's thread, and forgets the revive. A revive with no answer yet waits
         /// (_expireRevives tells its thread when the wait runs out). Before §21.23 a revive matched the request's own id or
         /// folder, and a /forksession or /newsession in a live session's topic, or 🔎 Search's Fork of a live session, settled on
-        /// the SOURCE (§21.21). Tick thread.
+        /// the SOURCE (§21.21). Tick thread. §21.28: the "Opened …" line is posted inside a scope of the revive's tap holds, so a
+        /// tapped launch button is answered once that line is in.
         /// </summary>
         /// <param name="s">A session the tick looked at (a topic's, or the one an answer named).</param>
         /// <exception cref="std::bad_alloc">If the matched copies or the reply cannot be allocated.</exception>
@@ -1151,6 +1278,7 @@ namespace Agentmaster::Msg
         /// The card's ⚙ Session and ◀ Back (§21.24): shows `page` on the message the button sits on. On the topic's sticky card
         /// the page is remembered (CardState::page, so a re-post keeps it) and the card is edited through _refreshCard (its
         /// hash covers the buttons); on any other message - a /status copy of the card - only that message's buttons change.
+        /// §21.28: the tapped button stays busy until that edit is in (or the one that follows a card post in flight).
         /// </summary>
         /// <param name="sessionId">The card's session.</param>
         /// <param name="messageId">The message the tapped button sits on.</param>
@@ -1159,12 +1287,15 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The card's ⑂ Fork and 🆕 New Session (§21.24): the topic's /forksession and /newsession with no model - a fork, or a
         /// fresh session in the session's folder, opened as a background tab - through the commands' own path (their replies go in
-        /// the thread, so the button and the typed command never differ); the toast only says it was asked for.
+        /// the thread, so the button and the typed command never differ). §21.28: no toast — the button stays busy until the thread
+        /// says how the launch went ("… into a tab…", then "Opened …" or why not: _requestLaunch's revive carries the tap), and a
+        /// toast that said "Forking it…" would only show up after the fact.
         /// </summary>
         /// <param name="sessionId">The card's session (the fork's source; the folder of the new session).</param>
         /// <param name="fork">True for ⑂ Fork, false for 🆕 New Session.</param>
         /// <param name="threadId">The topic.</param>
-        /// <returns>The toast, one plain sentence.</returns>
+        /// <returns>The toast: always "" (the thread's lines are the answer).</returns>
+        /// <exception cref="std::bad_alloc">If the command or a reply cannot be allocated.</exception>
         std::wstring _launchFromCard(const std::wstring& sessionId, bool fork, int64_t threadId);
         /// <summary>
         /// The card's 🔄 Restart Session (§21.24): the topic's /restartsession. A session at rest is restarted at once (the same
@@ -1172,17 +1303,21 @@ namespace Agentmaster::Msg
         /// turn would be cut off), exactly as /restartsession does, and the toast points at that question. A PARKED tab (its claude
         /// never started: restored, deactivated) is started in place, as ▶ Reactivate does — the window's own restart refuses a
         /// connection that never started (`_restartPaneConnection`'s guard: an AV otherwise), so a restart there did nothing.
+        /// §21.28: the button stays busy until the card shows the restarted (or started) session (_awaitCardChange), or until the
+        /// question is in the thread.
         /// </summary>
         /// <param name="sessionId">The card's session.</param>
         /// <param name="threadId">The topic.</param>
         /// <returns>The toast, one plain sentence.</returns>
+        /// <exception cref="std::bad_alloc">If the toast, a reply or a hold cannot be allocated.</exception>
         std::wstring _restartFromCard(const std::wstring& sessionId, int64_t threadId);
         /// <summary>
         /// The second half of 🖼 Screen Image and /screenimage (§21.24), called with the hosting window's answer on ITS UI thread:
         /// parses the snapshot (ScreenSnapshot.h) and draws it as a PNG on a worker thread of its own (ScreenImage.h - ~90 to
         /// ~185 ms of drawing for a 200 x 60 to 300 x 80 screen, measured; never on a UI thread), then sends the picture into
         /// the topic (_sendPhoto). At most kScreenImageMaxRenders pictures are drawn at once; a request past that is answered in
-        /// the thread instead.
+        /// the thread instead. §21.28: the worker takes the holds of the calling scope's taps (a tapped 🖼 Screen Image, through the
+        /// window's reply) and sends inside a scope of them, so the button stays busy until the photo or the line is in.
         /// </summary>
         /// <param name="sessionId">The session.</param>
         /// <param name="threadId">The topic the picture goes to.</param>
@@ -1301,7 +1436,9 @@ namespace Agentmaster::Msg
         /// §21.25: the window step's list. Marks the step "looking at the windows" with a new census serial, renders it, and
         /// asks every window for its strip on a WORKER thread (ServiceHooks::windowCensus blocks up to kNewThreadCensusTimeoutMs;
         /// the poll thread never waits for a window). The answer, with the registry's facts per tab, becomes the step's list
-        /// (_applyNewThreadWindows). With no census hook the step is skipped at once (the engine's choice of window).
+        /// (_applyNewThreadWindows). With no census hook the step is skipped at once (the engine's choice of window). §21.28: the
+        /// worker carries the tapped model button along and applies the answer inside a scope of its holds, so the button stays
+        /// busy until the window step (or the launch it skips to) is in the thread.
         /// </summary>
         /// <param name="threadId">The thread.</param>
         /// <param name="replyTo">The typed message that chose the model (0 = a button): the picker is re-posted below it.</param>
@@ -1322,7 +1459,8 @@ namespace Agentmaster::Msg
         /// session the moment it is live (_adoptBoundThreads). A line in the thread says what is opening; the picker is deleted.
         /// No window to take it (the chosen one closed since the census) puts the wizard back at the step that can fix it. §21.23:
         /// the window ANSWERS the launch — a refusal sends the thread back to the wizard at once, with the messages it held and the
-        /// reason (_settleLaunchAnswers).
+        /// reason (_settleLaunchAnswers). §21.28: a tapped wizard button stays busy until that answer — its holds wait in
+        /// `_bindTapHolds` under the launch's token, recorded in the bind's own lock scope.
         /// </summary>
         /// <param name="threadId">The thread.</param>
         /// <param name="replyTo">The user's message that made the last choice by typing (0 = a button or a census answer): the
@@ -1386,6 +1524,7 @@ namespace Agentmaster::Msg
         /// back into its WIZARD (NewThreadStepAfterRefusal: the window step, or the model step when that was skipped) and shows
         /// it; a launch restored from the state file waits while the windows restore (its session may only be waiting to be
         /// re-homed); and a name the user gave the thread while the launch ran is the session's title (renamed at the bind).
+        /// §21.28: it also drops the tap holds of every launch whose bind is gone (`_bindTapHolds`), so that map never grows.
         /// </summary>
         /// <param name="byId">The sync's live sessions (SnapshotLiveForCards), by id.</param>
         /// <param name="colorMode">The tab color mode of the sync.</param>
@@ -1712,6 +1851,18 @@ namespace Agentmaster::Msg
         uint64_t _outSeq{ 0 };
         int64_t _lastSendMs{ 0 };
         /// <summary>
+        /// §21.28, the tapped buttons whose answer is not sent yet, behind their OWN leaf lock `_tapMtx` — a hold can go on any
+        /// thread, also one that holds `_mtx` (OnTapHoldsGone), so nothing is ever taken while `_tapMtx` is held: `_mtx` before
+        /// `_tapMtx`, never the other way round. ⚠ These lists keep TAPS, never a TapHold: a hold that went while `_tapMtx` is
+        /// held would call OnTapHoldsGone, which takes `_tapMtx` again (a std::mutex: a self-deadlock). `_openTaps`: every tap from its arrival until it is answered (the hold's limit
+        /// reads it). `_tapsDue`: the taps whose last hold went, for the send loop to answer. `_tapAnswersDue` wakes the send loop
+        /// (its wait reads it; a wake-up lost to the race between its check and the store costs one wait, at most 0.5 s).
+        /// </summary>
+        std::mutex _tapMtx;
+        std::vector<std::shared_ptr<TapAnswer>> _openTaps;
+        std::vector<std::shared_ptr<TapAnswer>> _tapsDue;
+        std::atomic<bool> _tapAnswersDue{ false };
+        /// <summary>
         /// The CALL WINDOW (§21.9), under `_mtx`, GetTickCount64 ms: when each call into the chat of the last 60 s was made
         /// (the send loop's items and the tick's direct calls alike). A HISTORY message goes only while it holds fewer than
         /// kHistoryCallsPerMinute: Telegram's flood budget for this chat drains near the documented group limit of 20
@@ -1839,6 +1990,10 @@ namespace Agentmaster::Msg
             RemoteLaunchRequest req;
             int64_t requestedMs{ 0 };
             int64_t threadId{ 0 }; // where to report
+            // §21.28: a tapped ⑂ Fork / 🆕 New Session / ▶ Resume whose answer waits for this launch's outcome in the thread — the
+            // "Opened …" line (_sweepRevives) or the window's refusal (_settleLaunchAnswers posts it inside a scope of these
+            // holds). The revive's end lets them go; the hold's limit answers a slower launch.
+            std::vector<TapHoldRef> tapHolds;
         };
         std::vector<Revive> _revives;
         // §21.24: the pictures of screens being drawn right now (_startScreenImage's worker threads) - at most
@@ -1882,6 +2037,14 @@ namespace Agentmaster::Msg
         /// <summary>§21.25, under `_mtx`: AppSettings::model as the last Apply had it — what the model step's Default stands for.</summary>
         std::wstring _settingsModel;
         uint64_t _launchTokenSeq{ 0 }; // §21.23, under `_mtx`: the last launch token handed out (0 is never one)
+        /// <summary>
+        /// §21.28, under `_mtx`: a new thread's launch (_launchNewThread) by its launch token -> the holds of the tapped wizard
+        /// button that started it (a model or a window). Kept beside the bind, not in it: a bind is persisted (NewThreadBind,
+        /// MessagingNewThreadWizard.h), a hold is a moment of this run. The window's answer ends it (_settleLaunchAnswers: an
+        /// opened tab lets the holds go, a refusal posts its notice and the wizard again inside a scope of them); so does a
+        /// launch no window took, and an entry whose bind is gone (_adoptBoundThreads drops those every tick).
+        /// </summary>
+        std::unordered_map<uint64_t, std::vector<TapHoldRef>> _bindTapHolds;
         /// <summary>
         /// §21.23: one window's answer to a launch of this service, waiting for the tick (_settleLaunchAnswers).
         /// </summary>

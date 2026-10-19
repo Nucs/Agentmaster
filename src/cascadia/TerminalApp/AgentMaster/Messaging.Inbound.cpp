@@ -362,6 +362,9 @@ namespace Agentmaster::Msg
                 }
             }
             LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> start");
+            // §21.28: a tapped ▶ Reactivate / 🔧 Resume / 🔄 Restart stays busy until the card shows the started tab (its button goes);
+            // nothing without a tap (a typed /reactivate is answered by its reply).
+            _awaitCardChange(sessionId);
             return L"\x25B6 Resuming it in its tab. A cut-off turn goes on by itself; a message sent here goes out once it is ready.";
         }
         if (s->state == SessionState::Error || s->state == SessionState::Done)
@@ -380,6 +383,7 @@ namespace Agentmaster::Msg
                 }
             }
             LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> restart (" + (s->state == SessionState::Done ? std::wstring{ L"exited" } : std::wstring{ L"error" }) + L")");
+            _awaitCardChange(sessionId); // §21.28: until the card shows the restarted session (its next state)
             return L"\x25B6 Restarting it \x2014 the same conversation resumes in its tab.";
         }
         LogNav(L"remote telegram reactivate " + ShortId(sessionId) + L" -> already running");
@@ -392,6 +396,9 @@ namespace Agentmaster::Msg
         std::wstring sessionId;
         bool historyPending = false;
         bool repeated = false;
+        // §21.28: the dot stays busy until the re-post has made the topic first in the list — the re-post carries the tap
+        // (CardState::tapHolds). Taken before the lock (it allocates); unused, it goes with this function.
+        std::vector<TapHoldRef> taps = _holdTaps();
         {
             std::lock_guard lk{ _mtx };
             // By THREAD: the dot was drawn with the topic's thread id, which survives a rekey of the topic to the tab's next
@@ -416,6 +423,12 @@ namespace Agentmaster::Msg
                     // it, so a card post in flight or a history replay only delays it), and the tick folds the request into
                     // _frontHeld at its re-sort pass, so the quiet re-sort leaves the topic first.
                     _cards[sessionId].repostWanted = true;
+                    if (!historyPending)
+                    {
+                        // §21.28: a topic still replaying its history moves only once the replay is in (minutes), so its dot is
+                        // answered at once, its toast saying so; any other dot waits for its re-post.
+                        MoveTapHolds(taps, _cards[sessionId].tapHolds);
+                    }
                     _frontRequests[sessionId] = now;
                     _tickRequested = true;
                 }
@@ -1387,9 +1400,13 @@ namespace Agentmaster::Msg
                 return;
             }
             auto self = weak_from_this();
-            _hooks.sessionAction(sessionId, L"screen", L"", [self, threadId](std::wstring text) {
+            // §21.28: a tapped 🖥 Screen Text stays busy until the screen's text is in the topic: the window's reply carries the tap
+            // (its holds go with the reply function: when every window's copy of it is gone).
+            std::vector<TapHoldRef> taps = _holdTaps();
+            _hooks.sessionAction(sessionId, L"screen", L"", [self, threadId, taps](std::wstring text) {
                 if (auto me = self.lock())
                 {
+                    const TapScope tapScope{ taps }; // the reply below holds the tap until Telegram answered it
                     if (text.empty())
                     {
                         me->_reply(threadId, L"The screen could not be read (the tab is dormant, or in another window that is not up).", false);
@@ -1435,10 +1452,14 @@ namespace Agentmaster::Msg
                 last = now;
             }
             auto self = weak_from_this();
-            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, threadId](std::wstring snapshot) {
+            // §21.28: a tapped 🖼 Screen Image stays busy until the picture is in the topic: the window's reply carries the tap to
+            // _startScreenImage, which hands it to the drawing's worker.
+            std::vector<TapHoldRef> taps = _holdTaps();
+            _hooks.sessionAction(sessionId, L"screen-snapshot", L"", [self, sessionId, threadId, taps](std::wstring snapshot) {
                 // The hosting window's UI thread: _startScreenImage only hands the drawing to a worker thread.
                 if (auto me = self.lock())
                 {
+                    const TapScope tapScope{ taps }; // _startScreenImage's own lines and its worker's holds come from it
                     me->_startScreenImage(sessionId, threadId, std::move(snapshot));
                 }
             });
@@ -2167,18 +2188,24 @@ namespace Agentmaster::Msg
             from = f->I64At(L"id", 0);
         }
         const std::wstring cqId = cq.StrAt(L"id");
-        const auto answer = [&](const std::wstring& text) {
-            OutItem item;
-            item.prio = SendPriority::Final;
-            item.method = L"answerCallbackQuery";
-            item.paced = false;
-            item.params = json::Value::MkObj();
-            item.params.Set(L"callback_query_id", json::Value::MkStr(cqId));
-            if (!text.empty())
-            {
-                item.params.Set(L"text", json::Value::MkStr(text.size() > 190 ? text.substr(0, 190) : text));
-            }
-            _enqueue(std::move(item));
+        // §21.28, the user's rule: "buttons we click on should look 'active' as long as they are waiting for serverside to react".
+        // Telegram keeps a tapped button's loading indicator until the bot answers the tap, so the answer is HELD while what the
+        // tap sets off runs. The tap is open from now on (its hold's limit, kTapAnswerHoldMaxMs, counts from here); the handler
+        // runs inside a scope of its own hold, so every outbox item it queues — and every continuation it starts with _holdTaps —
+        // holds the answer too, and the answer goes (from the send loop) once the last of those holds went.
+        const auto tap = std::make_shared<TapAnswer>(cqId, TapAnswerLogLabel(cq.StrAt(L"data")), static_cast<int64_t>(::GetTickCount64()));
+        {
+            std::lock_guard lk{ _tapMtx };
+            _openTaps.push_back(tap);
+        }
+        // The handler's own hold (declared before the scope, so it outlives it): it goes when this function returns — normally or
+        // by a throw — and with nothing else holding the tap, the answer goes at once, as it always did.
+        const std::vector<TapHoldRef> handlerHold{ std::make_shared<TapHold>(tap, std::weak_ptr<TapReleaseSink>{ weak_from_this() }) };
+        const TapScope tapScope{ handlerHold };
+        // The handler's word on the tap: since §21.28 it sets the TOAST its answer carries (the last call wins; "" = none), and the
+        // answer goes when the tap's work is in — never here.
+        const auto answer = [&tap](const std::wstring& text) {
+            tap->SetToast(text);
         };
         if (from == 0 || from != _ownerId)
         {
@@ -2282,9 +2309,10 @@ namespace Agentmaster::Msg
             }
             else if (verb == kCardVerbScreenImage)
             {
-                // §21.24: 🖼 Screen Image - the picture takes a moment to draw, so the toast says it is coming; the photo itself
-                // lands in the topic (or a line saying why it cannot).
-                answer(L"\U0001F5BC Drawing the screen\x2026");
+                // §21.24: 🖼 Screen Image - the photo lands in the topic (or a line saying why it cannot). §21.28: no toast — the
+                // button stays busy until the picture is in (the window's reply and the drawing's worker carry the tap), so a
+                // "Drawing the screen…" toast would only show up after the picture; past the hold's limit the answer says the work
+                // goes on.
                 cmd.name = L"screenimage";
                 _runSessionCommand(sid, cmd, fake, threadId);
                 return;
@@ -2418,6 +2446,9 @@ namespace Agentmaster::Msg
                     _hooks.restartSession(tok.sessionId);
                 }
                 _reply(threadId, L"Restarting the session.", false);
+                // §21.28: the restart is the window's work, and its card shows it (the turn cut off, the state after): the button stays
+                // busy until the card changes.
+                _awaitCardChange(tok.sessionId);
                 LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + L" -> confirmed");
             }
             else if (k == L"confirm-deactivate")
@@ -2427,6 +2458,7 @@ namespace Agentmaster::Msg
                     _hooks.deactivateSession(tok.sessionId);
                 }
                 _reply(threadId, L"Parked.", false);
+                _awaitCardChange(tok.sessionId); // §21.28: until the card shows the parked tab (its ▶ Reactivate)
                 LogNav(L"remote telegram /deactivate " + ShortId(tok.sessionId) + L" -> confirmed");
             }
             else if (k == L"confirm-interrupt")
@@ -2434,6 +2466,10 @@ namespace Agentmaster::Msg
                 // One Esc into the session (the typed path; a linked session will use the link's abort).
                 const bool ok = _registry->Inject(tok.sessionId, L"\x1b");
                 _reply(threadId, ok ? L"\x25A0 Interrupt sent." : L"Could not reach the session (no input bound).", false);
+                if (ok)
+                {
+                    _awaitCardChange(tok.sessionId); // §21.28: until the card shows the stopped turn
+                }
                 LogNav(L"remote telegram /interrupt " + ShortId(tok.sessionId) + (ok ? L" -> sent" : L" -> refused:no-injector"));
             }
             else if (k == L"wake" || k == L"wake-pin")
@@ -2577,6 +2613,9 @@ namespace Agentmaster::Msg
         }
         // §21.23: the revive goes in BEFORE the request goes out, under the launch's token: the window answers on its own thread,
         // possibly before _askLaunch returns, and its answer must find the revive (_settleLaunchAnswers).
+        // §21.28: it also carries a tapped ⑂ Fork / 🆕 New Session / ▶ Resume, whose button stays busy until the thread says how
+        // the launch went ("Opened …", or the window's refusal) — empty for a typed command.
+        std::vector<TapHoldRef> taps = _holdTaps();
         uint64_t token = 0;
         {
             std::lock_guard lk{ _mtx };
@@ -2586,6 +2625,7 @@ namespace Agentmaster::Msg
             rv.req = req;
             rv.requestedMs = WallMs();
             rv.threadId = threadId;
+            rv.tapHolds = std::move(taps);
             _revives.push_back(std::move(rv));
         }
         const auto dropRevive = [this, token]() {
@@ -2633,7 +2673,9 @@ namespace Agentmaster::Msg
         cmd.kind = RemoteKind::AgentmasterCommand;
         cmd.name = fork ? L"forksession" : L"newsession";
         _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
-        return fork ? L"\x2442 Forking it into a new tab\x2026" : L"\U0001F195 Opening a new session in its folder\x2026";
+        // §21.28: no toast. The button stays busy until the thread says how the launch went (the revive carries the tap), and a
+        // "Forking it into a new tab…" toast would only show up after the "Opened …" line.
+        return {};
     }
 
     std::wstring MessagingService::_restartFromCard(const std::wstring& sessionId, int64_t threadId)
@@ -2676,6 +2718,9 @@ namespace Agentmaster::Msg
             return L"The restart could not be asked for (hooks.log says why).";
         }
         LogNav(L"remote telegram restart (card) " + ShortId(sessionId) + L" -> restart");
+        // §21.28: the restart is the window's work, and the card shows it (the next state, the buttons that go with it): the button
+        // stays busy until the card changes.
+        _awaitCardChange(sessionId);
         return L"\U0001F504 Restarting it \x2014 the same conversation resumes in its tab.";
     }
 
@@ -2751,12 +2796,15 @@ namespace Agentmaster::Msg
         }
         try
         {
-            std::thread([self = weak_from_this(), sessionId, threadId, text = std::move(snapshot), title]() noexcept {
+            // §21.28: the worker carries the tapped 🖼 Screen Image along (`taps`, from the window's reply scope: empty for a typed
+            // /screenimage), so the button stays busy until the photo — or the line saying why there is none — is in the topic.
+            std::thread([self = weak_from_this(), sessionId, threadId, text = std::move(snapshot), title, taps = _holdTaps()]() noexcept {
                 const auto me = self.lock();
                 if (!me)
                 {
                     return; // the service is gone (an app quit): nothing to send to
                 }
+                const TapScope tapScope{ taps }; // never throws; the sends below hold the tap until Telegram answered them
                 try
                 {
                     const int64_t startedMs = static_cast<int64_t>(::GetTickCount64());
@@ -2844,6 +2892,9 @@ namespace Agentmaster::Msg
             // §21.15: the title is a chip when rich. §21.23: the answer says HOW it opened — a resume of a session that was open
             // already (its topic may stand: then it is linked, and nothing is "coming up"), or a NEW conversation in place of the one
             // asked for (a resume or a fork with no transcript to continue).
+            // §21.28: the "Opened …" line below answers a tapped launch button (the revive's holds: the line holds them until
+            // Telegram answered it, and the revive's copy goes with `matched`).
+            const TapScope tapScope{ rv.tapHolds };
             const std::wstring title = s.title.empty() ? ShortId(s.id) : s.title;
             const int64_t ownThread = _threadOf(s.id);
             std::wstring line;
@@ -2934,6 +2985,9 @@ namespace Agentmaster::Msg
                 int64_t replyTo{ 0 };
                 bool picker{ false }; // a new thread back at its picker: post the picker after the line
                 bool reloadModels{ false }; // §21.25: back at the model step — its choices are read again (a preset may be fixed)
+                // §21.28: the holds of the tapped button that asked for the launch (a revive's, a new thread's): the notice and the
+                // wizard posted with it answer that tap, so they are posted inside a scope of these holds.
+                std::vector<TapHoldRef> tapHolds;
             };
             std::vector<Notice> notices;
             std::vector<std::wstring> logs; // written after the lock: a log line is a file write, never made with `_mtx` held
@@ -2983,6 +3037,9 @@ namespace Agentmaster::Msg
                         // The bind's own session is live already: whatever the answer says, the tab is up and the tick binds it.
                         if (opened || liveBindSessions.count(bind->sessionId) > 0)
                         {
+                            // §21.28: the tab is up, so the tapped wizard button that launched it has its answer (its "Opening …" line
+                            // is in): its holds go here, under `_mtx` (OnTapHoldsGone only queues the tap).
+                            _bindTapHolds.erase(a.token);
                             bind->answered = true; // the tick binds the thread once the session is live (_adoptBoundThreads)
                             logs.push_back(L"[msg] new thread " + std::to_wstring(bind->threadId) + L": the window opened session " + ShortId(bind->sessionId) +
                                  (opened ? std::wstring{} : L" (it answered " + std::wstring{ RemoteLaunchResultName(a.outcome.result) } + L", but the session is live)"));
@@ -3024,6 +3081,11 @@ namespace Agentmaster::Msg
                         n.replyTo = b.replyTo;
                         n.picker = true;
                         n.reloadModels = inserted && backTo == NewThreadStep::Model;
+                        if (const auto h = _bindTapHolds.find(a.token); h != _bindTapHolds.end())
+                        {
+                            n.tapHolds = std::move(h->second); // §21.28: the refusal and the wizard again answer the tapped button
+                            _bindTapHolds.erase(h);
+                        }
                         notices.push_back(std::move(n));
                         continue;
                     }
@@ -3053,10 +3115,13 @@ namespace Agentmaster::Msg
                         Notice n;
                         n.threadId = rv->threadId;
                         n.html = L"\x26A0 " + TgEscapeHtml(subject) + L" did not open. " + TgEscapeHtml(reason);
+                        n.tapHolds = std::move(rv->tapHolds); // §21.28: the refusal answers the tapped launch button
                         notices.push_back(std::move(n));
                         _revives.erase(rv);
                         continue;
                     }
+                    // §21.28: a new thread's launch whose bind is gone keeps no hold (a belt: _adoptBoundThreads drops those too).
+                    _bindTapHolds.erase(a.token);
                     // Nothing waits for it: the revive or bind gave up on its timeout before the window answered, or the bot was
                     // stopped and started since. The window did what it said; only the line in the chat is missing.
                     logs.push_back(L"[msg] launch token=" + std::to_wstring(a.token) + L" answered " + RemoteLaunchResultName(a.outcome.result) +
@@ -3074,6 +3139,7 @@ namespace Agentmaster::Msg
             }
             for (const auto& n : notices)
             {
+                const TapScope tapScope{ n.tapHolds }; // §21.28: what follows answers the tapped launch button, if one waits
                 _reply(n.threadId, n.html, false, json::Value{}, n.replyTo);
                 if (n.reloadModels)
                 {
@@ -4124,7 +4190,9 @@ namespace Agentmaster::Msg
         const auto registry = _registry;
         try
         {
-            std::thread([self, threadId, serial, folder, census, registry]() noexcept {
+            // §21.28: the worker carries the tapped model button along (`taps`; empty for a typed model id), so the button stays busy
+            // until the window step's list — or the launch it skips to — is in the thread.
+            std::thread([self, threadId, serial, folder, census, registry, taps = _holdTaps()]() noexcept {
                 NewThreadWindowPlan plan;
                 try
                 {
@@ -4162,6 +4230,7 @@ namespace Agentmaster::Msg
                 }
                 if (const auto me = self.lock())
                 {
+                    const TapScope tapScope{ taps }; // §21.28: never throws; the step's render (or launch) holds the tap
                     me->_applyNewThreadWindows(threadId, serial, std::move(plan)); // never throws (it contains its own failures)
                 }
             }).detach();
@@ -4246,6 +4315,10 @@ namespace Agentmaster::Msg
         ThreadBind bind;
         int64_t pickerId = 0;
         std::optional<NewThread> picker; // the thread's record, out of the map while the launch is asked for
+        // §21.28: a tapped window (or model) button stays busy until the window answers the launch — an opened tab, or a refusal and
+        // the wizard again (_settleLaunchAnswers); the holds wait in `_bindTapHolds` under the launch's token. Empty for a typed
+        // choice. Taken before the lock (it allocates); unused, they go with this function.
+        std::vector<TapHoldRef> taps = _holdTaps();
         {
             std::lock_guard lk{ _mtx };
             // One launch per thread at a time: a second launch while one is starting would start a second session for the thread.
@@ -4272,6 +4345,10 @@ namespace Agentmaster::Msg
             _newThreads.erase(it);
             bind.launchToken = ++_launchTokenSeq;
             _threadBinds.push_back(bind);
+            if (!taps.empty())
+            {
+                _bindTapHolds[bind.launchToken] = std::move(taps); // §21.28: in the bind's own lock scope (the answer may come at once)
+            }
             _stateDirty = true;
         }
         RemoteLaunchRequest req;
@@ -4303,6 +4380,8 @@ namespace Agentmaster::Msg
             NewThreadStep backTo = NewThreadStep::Model;
             {
                 std::lock_guard lk{ _mtx };
+                // §21.28: no window will answer, so the tap's holds go; the wizard rendered below, inside the tap's own scope, answers it.
+                _bindTapHolds.erase(bind.launchToken);
                 const auto it = std::find_if(_threadBinds.begin(), _threadBinds.end(), [&bind](const ThreadBind& b) { return b.launchToken == bind.launchToken; });
                 if (it != _threadBinds.end())
                 {
