@@ -690,6 +690,16 @@ namespace Agentmaster
         {
             return lost; // a delivery/clear owns the box right now — judge after it resolves
         }
+        // Agentmaster (MESSAGING.md §21.34): a MENU is open on the terminal. A local command's dialog (/add-dir's "Add directory
+        // to workspace") holds the command's whole record back: Claude Code writes its echo only once the dialog is answered, so
+        // the delivered command reads unechoed for as long as the dialog stays up (the Telegram card answers it by itself after a
+        // minute; at the PC it may stay longer). Judging it now would fail a command that is waiting for its answer. The hold
+        // only DELAYS a verdict — a prompt a menu really ate is still judged once the menu closes (its ages are long past the
+        // settle by then) — and nothing is lost meanwhile: DecideAdvance holds the queue on the same box state.
+        if (s.pendingBoxState == InputBoxState::MenuOpen)
+        {
+            return lost;
+        }
         for (const auto& p : s.queue)
         {
             if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
@@ -708,6 +718,124 @@ namespace Agentmaster
             }
         }
         return lost;
+    }
+
+    // Agentmaster (MESSAGING.md §21.34 — a LOCAL command's delivery evidence): how far a command echo's own transcript timestamp
+    // may sit BEFORE the delivery it vouches for (the prompt's injection stamp, else its send stamp). Claude Code writes the echo
+    // after it read the CR, so a real echo is never older than the delivery; the margin absorbs the moment between the CR's write
+    // and the stamp the window takes right after it, and an Enter-retry press that re-stamped the send. An echo older than that is
+    // an earlier run of the same command (a re-read transcript), which must never vouch for this one.
+    inline constexpr int64_t kCommandEchoSkewMs = 2000;
+
+    // Agentmaster (MESSAGING.md §21.34). PURE: does a transcript command ECHO (ParseCommandEcho's lowercase name without the '/',
+    // and its trimmed arguments) read as the queued prompt `promptText` — "/<name> <args>" as it was typed into the box? The
+    // prompt is read through the prompt compare key (NormalizePromptTextForCompare: line breaks folded, invisible characters
+    // dropped, NFC — what claude's submit made of our paste), its command word compared in ASCII lowercase, and both argument
+    // texts with every run of whitespace folded to one space and trimmed (the echo keeps the arguments as claude parsed them).
+    //   echoName   — the echo's command word (ParseCommandEcho: lowercase, no '/').
+    //   echoArgs   — the echo's arguments.
+    //   promptText — a delivered prompt's text.
+    //   returns    — true when the prompt is that command with those arguments.
+    //   throws     — std::bad_alloc on allocation failure only.
+    inline bool CommandEchoMatchesPromptText(std::wstring_view echoName, std::wstring_view echoArgs, std::wstring_view promptText)
+    {
+        const auto isWs = [](wchar_t c) noexcept { return c == L' ' || c == L'\t' || c == L'\n' || c == L'\r' || c == L'\f' || c == L'\v' || c == 0x00A0; };
+        const auto lower = [](wchar_t c) noexcept { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c; };
+        // Every run of whitespace as one space, no leading or trailing whitespace.
+        const auto foldWs = [&isWs](std::wstring_view v) {
+            std::wstring out;
+            out.reserve(v.size());
+            bool pending = false;
+            for (const wchar_t c : v)
+            {
+                if (isWs(c))
+                {
+                    pending = !out.empty();
+                    continue;
+                }
+                if (pending)
+                {
+                    out.push_back(L' ');
+                    pending = false;
+                }
+                out.push_back(c);
+            }
+            return out;
+        };
+        const std::wstring p = NormalizePromptTextForCompare(promptText);
+        size_t i = 0;
+        while (i < p.size() && isWs(p[i]))
+        {
+            ++i;
+        }
+        if (i >= p.size() || p[i] != L'/')
+        {
+            return false;
+        }
+        ++i;
+        size_t end = i;
+        while (end < p.size() && !isWs(p[end]))
+        {
+            ++end;
+        }
+        std::wstring_view name = echoName;
+        while (!name.empty() && name.front() == L'/')
+        {
+            name.remove_prefix(1);
+        }
+        if (name.empty() || end - i != name.size())
+        {
+            return false;
+        }
+        for (size_t k = 0; k < name.size(); ++k)
+        {
+            if (lower(p[i + k]) != lower(name[k]))
+            {
+                return false;
+            }
+        }
+        return foldWs(std::wstring_view{ p }.substr(end)) == foldWs(NormalizePromptTextForCompare(echoArgs));
+    }
+
+    // Agentmaster (MESSAGING.md §21.34). PURE: which of this session's delivered prompts does a command ECHO in its transcript
+    // vouch for? A LOCAL command (one Claude Code runs itself: /add-dir, /model <id>, …) fires no UserPromptSubmit hook and
+    // writes no prompt line — its echo (<command-name> + <command-args>) is the ONLY sign that the delivered command became
+    // something, and it is written only once the command RAN (after its dialog was answered, for /add-dir). Before this, such a
+    // prompt stayed Sent and unechoed forever, so the lost-send verdict failed it 15 s later and paused the runner — every
+    // /add-dir or /model sent from a Telegram topic got a 👎. The scanner consumes the echo as the prompt's PULL echo, exactly
+    // like NoteExternalPrompt's consume of a prompt line. Candidates: an Autorun prompt that is Sent, unechoed and stamped, whose
+    // text is this command (CommandEchoMatchesPromptText), and whose delivery is not newer than the echo (kCommandEchoSkewMs —
+    // an older echo is an earlier run of the same command). The OLDEST such delivery is picked: echoes come in delivery order.
+    //   s         — the session (the scanner's lean snapshot keeps every open prompt, which is all this reads).
+    //   echoName  — the echo's command word (lowercase, no '/').
+    //   echoArgs  — its arguments.
+    //   lineTsMs  — the echo line's own timestamp (0 when it carries none: then any candidate qualifies, as for a prompt line).
+    //   returns   — the prompt's id, or "" when the echo vouches for none of them.
+    //   throws    — std::bad_alloc on allocation failure only.
+    inline std::wstring PickCommandEchoPrompt(const SessionInfo& s, std::wstring_view echoName, std::wstring_view echoArgs, int64_t lineTsMs)
+    {
+        const QueuedPrompt* best = nullptr;
+        for (const auto& p : s.queue)
+        {
+            if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
+            {
+                continue;
+            }
+            const int64_t deliveredAt = p.injectedAtUnixMs != 0 ? p.injectedAtUnixMs : p.sentAtUnixMs;
+            if (lineTsMs != 0 && lineTsMs + kCommandEchoSkewMs < deliveredAt)
+            {
+                continue; // an echo older than this delivery: an earlier run of the same command, never this one's
+            }
+            if (!CommandEchoMatchesPromptText(echoName, echoArgs, p.text))
+            {
+                continue;
+            }
+            if (!best || p.sentAtUnixMs < best->sentAtUnixMs)
+            {
+                best = &p;
+            }
+        }
+        return best ? best->id : std::wstring{};
     }
 
     // Agentmaster (DELIVERY.md §12 — the UNDELIVERED-SEND reclaim, DecideLostSend's retryable

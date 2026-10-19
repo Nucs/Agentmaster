@@ -160,6 +160,7 @@ int wmain()
     TestMessagingCard(); // MESSAGING.md §21.24 — the card's two pages of buttons, the styled screen snapshot, the Screen Image PNG (tests_messaging_card.cpp)
     TestMessagingTaps(); // MESSAGING.md §21.28 — a tapped button's answer held while its work runs: holds, scopes, the texts (tests_messaging_taps.cpp)
     TestMessagingSteer(); // MESSAGING.md §21.33 — /steer, the words sent NOW: the command, the decision, the texts, the prompt, the watch (tests_messaging_steer.cpp)
+    TestTuiMenus(); // MESSAGING.md §21.34 — /add-dir's dialog answered from Telegram: the screen, the press, the result, the card, the delivery fixes (tests_tuimenus.cpp)
     TestAskQuestion(); // MESSAGING.md §21.30 — Claude's AskUserQuestion answered from Telegram: the answers, the card, the ask pipe (tests_ask.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();

@@ -2162,6 +2162,37 @@ namespace Agentmaster
                 {
                     _commandWatch->OnCommandSighting(s.id, SlashCommand{ ev.commandName, ev.commandArgs }, ev.lineTsMs, NowMs());
                 }
+                // Agentmaster (MESSAGING.md §21.34): the echo is also a LOCAL command's only delivery evidence. /add-dir, /model
+                // <id> and their kind fire no UserPromptSubmit hook and write no prompt line, so a command the runner delivered
+                // (a Telegram topic's /add-dir, a queued /model) stayed Sent and unechoed, and the lost-send verdict below failed
+                // it and paused the runner. The echo is consumed as that prompt's PULL echo (the NoteExternalPrompt twin; its
+                // own timestamp keeps an earlier run of the same command from vouching — PickCommandEchoPrompt). Like the prompt
+                // line's consume it is not gated on the cursor being caught up: the timestamp is the replay guard. The lean
+                // snapshot keeps every open prompt, so the common case (no delivered command waiting) costs no registry call;
+                // the choice is made again inside the Update against the live record, and the Update NOTIFIES — a local
+                // command leaves the session at rest with no hook to wake the runner, and the queue's next prompt waits on
+                // exactly this echo (the pickup guard).
+                if (const std::wstring candidate = PickCommandEchoPrompt(s, ev.commandName, ev.commandArgs, ev.lineTsMs); !candidate.empty())
+                {
+                    std::wstring consumed;
+                    _registry->Update(s.id, [&](SessionInfo& live) {
+                        const std::wstring id = PickCommandEchoPrompt(live, ev.commandName, ev.commandArgs, ev.lineTsMs);
+                        for (auto& p : live.queue)
+                        {
+                            if (!id.empty() && p.id == id)
+                            {
+                                p.echoed = true; // the command ran: its delivery became something (pull evidence)
+                                consumed = id;
+                                break;
+                            }
+                        }
+                    });
+                    if (!consumed.empty())
+                    {
+                        AppendStateLog(L"hooks.log", L"[pull-echo] " + ShortId(s.id) + L" prompt " + ShortId(consumed) + L" (the transcript's /" + ev.commandName +
+                                                         L" echo: the delivered command ran)\n");
+                    }
+                }
             }
             else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
             {

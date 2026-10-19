@@ -6,7 +6,8 @@
 //
 // Agentmaster — TerminalPage, the MESSAGING partial (MESSAGING.md §8.2): the window-hosted half of the
 // Telegram bot. The bot runs on engine threads; what needs a window — starting a dormant tab's claude,
-// reading its screen, the unread ring, a rename that pins the tab title, the tag badges, and opening a
+// reading its screen, the unread ring, a rename that pins the tab title, the tag badges, answering a local
+// command's dialog (§21.34: /add-dir's menu, pressed only after the screen shows it), and opening a
 // session as a background tab — arrives here through the two sinks TerminalPage.AgentEngine.cpp registers
 // (session actions fanned out to every window, launches aimed at the most recently activated one).
 
@@ -16,6 +17,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException (Rule #18)
 #include "AgentMaster/ClaudeSpawn.h" // LogNav, ShortId
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/TuiMenus.h" // MESSAGING.md §21.34: the menu actions (kMenuScreenAction / kMenuAnswerAction, DecideMenuAnswer)
 
 using namespace winrt::Microsoft::Terminal::Control;
 
@@ -65,6 +67,47 @@ namespace winrt::TerminalApp::implementation
             else if (action == L"refresh-favorite")
             {
                 _RefreshTabFavoriteCrown(sessionId);
+            }
+            else if (action == ::Agentmaster::Msg::kMenuScreenAction)
+            {
+                // MESSAGING.md §21.34: the menu watch reads the terminal's last rows to find the dialog a delivered /add-dir opened
+                // (ParseAddDirMenuScreen runs on the bot's side). "" for a dormant tab, whose claude shows nothing.
+                answer = _ReadScreenTextForSession(sessionId, ::Agentmaster::Msg::kMenuScreenRows);
+            }
+            else if (action == ::Agentmaster::Msg::kMenuAnswerAction)
+            {
+                // MESSAGING.md §21.34: press a dialog's option for the bot (a tap on its card, or its default after a minute). A digit
+                // typed anywhere but the dialog lands in the input box as text, so the screen is read again AT the press, on this UI
+                // thread — the one every keystroke of this tab goes through, so nothing of ours runs between the read and the write —
+                // and the digit is typed only into the very dialog the card shows (DecideMenuAnswer: the dialog still open, its path
+                // the card's, and no delivery or draft swap holding the box, whose own keystrokes it would interleave with).
+                ::Agentmaster::Msg::MenuAnswerResult result = ::Agentmaster::Msg::MenuAnswerResult::Failed;
+                std::wstring detail;
+                if (const auto request = ::Agentmaster::Msg::ParseMenuAnswerArg(arg))
+                {
+                    const std::wstring screen = _ReadScreenTextForSession(sessionId, ::Agentmaster::Msg::kMenuScreenRows);
+                    const bool boxHeld = _draftSwapsInFlight.count(sessionId) != 0 || (_sessionRegistry && _sessionRegistry->DeliveryGateHeld(sessionId));
+                    result = ::Agentmaster::Msg::DecideMenuAnswer(*request, screen, boxHeld);
+                    if (result == ::Agentmaster::Msg::MenuAnswerResult::Pressed)
+                    {
+                        // The digit alone: the dialog picks its option on the key (no Enter — an Enter after it would reach the
+                        // input box the dialog gives back).
+                        if (!_sessionRegistry || !_sessionRegistry->Inject(sessionId, std::wstring(1, static_cast<wchar_t>(L'0' + request->digit))))
+                        {
+                            result = ::Agentmaster::Msg::MenuAnswerResult::Failed;
+                            detail = L" (no injector is bound to the session)";
+                        }
+                    }
+                    const auto* option = ::Agentmaster::Msg::AddDirOptionFor(request->digit);
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[menu] " + ::Agentmaster::ShortId(sessionId) + L" /" + request->command + L" dialog: option " +
+                                                                    std::to_wstring(request->digit) + (option ? L" (" + std::wstring{ option->value } + L")" : std::wstring{}) +
+                                                                    L" -> " + std::wstring{ ::Agentmaster::Msg::MenuAnswerResultWord(result) } + detail + L"\n");
+                }
+                else
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[menu] " + ::Agentmaster::ShortId(sessionId) + L" a malformed menu answer was refused: nothing typed\n");
+                }
+                answer = std::wstring{ ::Agentmaster::Msg::MenuAnswerResultWord(result) };
             }
             else
             {

@@ -60,6 +60,7 @@
 #include "MessagingNewThreadWizard.h" // §21.25: the new-thread wizard (create a folder, a model, a window; records + persistence)
 #include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
 #include "MessagingSteer.h" // §21.33: /steer, the words sent NOW (the decision, the texts, the prompt, the watch's verdict)
+#include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
 #include "SessionModels.h" // AppSettings, SessionInfo
@@ -161,9 +162,11 @@ namespace Agentmaster::Msg
     {
         // A window-hosted action on a session's tab: "start" (start a dormant tab's claude in place, no
         // focus), "screen" (reply with the terminal's visible text), "markunread", "refresh-tags" (repaint
-        // the tab's tag badges after a remote tag edit), "refresh-favorite". `reply` is called by the
-        // hosting window with the action's text answer (may be empty); a window that does not host the
-        // session calls nothing.
+        // the tab's tag badges after a remote tag edit), "refresh-favorite", and §21.34's "menu-screen"
+        // (the terminal's last rows, for the dialog a delivered /add-dir opened) and "menu-answer" (press
+        // that dialog's option — only after the screen shows it: TuiMenus.h DecideMenuAnswer; its reply is
+        // MenuAnswerResultWord). `reply` is called by the hosting window with the action's text answer (may
+        // be empty); a window that does not host the session calls nothing.
         std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> sessionAction;
         // Open a session into a tab in the most recently active window (RemoteLaunch.h): true when a window took the request.
         // §21.23: a host that sets launchAnswered (below) may leave this empty — the service's constructor then builds it on top
@@ -2429,5 +2432,151 @@ namespace Agentmaster::Msg
         std::vector<PlainQuestion> _plainQuestions;
         /// <summary>The requests already turned into a card or released by the tick: never a second card for one. Under `_mtx`.</summary>
         std::unordered_set<uint64_t> _asksTaken;
+
+        // ----- §21.34: a LOCAL command's dialog answered from Telegram — /add-dir's menu (Messaging.Menus.cpp; the pure half is
+        //       TuiMenus.h) -----
+
+        /// <summary>
+        /// One /add-dir a topic queued (_queueRemotePrompt), WATCHED from its queueing to its result. The command runs inside
+        /// Claude Code and records nothing until it is done, so the watch has three readers: the registry (the prompt's delivery),
+        /// the screen (the dialog, read by the hosting window — kMenuScreenAction — once the prompt was delivered), and the
+        /// transcript from where it stood at the queueing (the echo and the result Claude Code writes once the command ran). A
+        /// dialog found becomes the MENU CARD (its options as buttons, the countdown of the user's rule: the default is pressed by
+        /// itself kTuiMenuAutoAnswerMs after the dialog was seen); a result without a dialog becomes a reply to the user's
+        /// message. Under `_mtx`; never two for one prompt.
+        /// </summary>
+        struct MenuWatch
+        {
+            std::wstring key; // the card's callback key ([0-9a-z]{10}, random): a button of another card, or of an earlier run, never acts on this one
+            std::wstring sessionId;
+            std::wstring promptId; // the queued prompt: its delivery (Sent, injected) and its echo are read in the registry
+            std::wstring promptText; // what was queued ("/add-dir <path>"): the transcript's echo is matched against it
+            std::wstring args; // the path as the user typed it
+            int64_t messageId{ 0 }; // the user's /add-dir message: the card and the replies answer it
+            int64_t threadId{ 0 }; // the topic (re-read at each post: a recreated topic has a new thread)
+            int64_t createdMs{ 0 };
+            // The transcript reader (ReadMenuTranscript, outside `_mtx`).
+            std::wstring transcriptPath; // "" until it resolves (a session's first command can come before its transcript)
+            int64_t offset{ 0 }; // where the reader goes on: the transcript's size at the queueing, then after each complete line read
+            int64_t lastReadMs{ 0 };
+            bool echoSeen{ false }; // the command's echo was read; its result is the next result line
+            int64_t echoTsMs{ 0 }; // the echo line's time (the outcome's time on the card)
+            // The dialog (the screen reads).
+            bool menuSeen{ false }; // the dialog was found: the card exists (model) and the clock runs
+            int probes{ 0 }; // screen reads asked for (at most kMenuProbeMax)
+            bool probeInFlight{ false };
+            int64_t probeSentMs{ 0 };
+            uint64_t probeSerial{ 0 }; // a reply of an older read (one that timed out) is ignored
+            bool unreadableNoted{ false }; // the "a dialog this Agentmaster cannot read" note went (once)
+            int64_t notStartedSinceMs{ 0 }; // when the tab was first seen without its claude while the card was open (0 = running)
+            // The card.
+            AddDirCardModel model;
+            int64_t cardMessageId{ 0 }; // 0 = not posted (or refused, or deleted), -1 = its post is in flight
+            int64_t postFailedMs{ 0 }; // when the last post was refused (an open card posts again kMenuRepostAfterFailureMs later)
+            uint64_t version{ 1 }; // bumped by every change of what the card shows
+            uint64_t sendingVersion{ 0 }; // the version the edit on its way rendered (its beforeSend)
+            uint64_t shownVersion{ 0 }; // the version Telegram last took: a newer one wants another edit
+            // The press (kMenuAnswerAction).
+            bool pressInFlight{ false };
+            int64_t pressSentMs{ 0 };
+            uint64_t pressSerial{ 0 };
+            int pressAttempts{ 0 }; // presses that counted (at most kMenuPressMaxAttempts; a BUSY answer gives its attempt back)
+            MenuAnswerResult lastPress{ MenuAnswerResult::Failed }; // the window's last reply (meaningful once pressSerial > 0)
+            int64_t lastPressMs{ 0 }; // when it came (or when its wait ran out)
+            int64_t busySinceMs{ 0 }; // the first of an unbroken run of BUSY answers (0 = the last answer was not busy)
+            int64_t finishedMs{ 0 }; // when the watch's work ended (a result, a reply, a close); forgotten kMenuWatchKeepMs later
+        };
+
+        /// <summary>
+        /// _queueRemotePrompt, right after a "/add-dir &lt;path&gt;" went into the queue: starts its watch, with the transcript's size NOW
+        /// as the reader's start (a dialog-free command's result can land within milliseconds of the delivery, before any tick).
+        /// At most kMenuMaxWatches open watches (the oldest open one is dropped beyond it, logged). Poll thread.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="promptId">The queued prompt.</param>
+        /// <param name="promptText">Its text.</param>
+        /// <param name="args">The path as typed (ParseAddDirCommandText).</param>
+        /// <param name="messageId">The user's message.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <exception cref="std::bad_alloc">If the watch cannot be stored (the caller's guard logs it; the command still goes, unwatched).</exception>
+        void _watchAddDir(const std::wstring& sessionId, const std::wstring& promptId, const std::wstring& promptText, const std::wstring& args, int64_t messageId, int64_t threadId);
+        /// <summary>
+        /// The tick's pass over the menu watches (after _questionsTick): each open watch is advanced (_tickMenuWatch), and finished
+        /// ones are forgotten kMenuWatchKeepMs after their end. Tick thread. Never throws (Rule #18: a failure is logged, and the next
+        /// tick runs the pass again).
+        /// </summary>
+        void _menusTick() noexcept;
+        /// <summary>
+        /// One watch's step: reads the prompt's delivery in the registry and the transcript past the watch's offset (both outside
+        /// `_mtx`), then decides under it — the result (the card's outcome, or a reply when no dialog was shown), the session's end,
+        /// a screen read for the dialog, the clock's default press, a press to repeat — and carries out what it decided outside the
+        /// lock. Tick thread.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <param name="now">The tick's wall clock.</param>
+        /// <exception cref="std::bad_alloc">If a copy or a message cannot be allocated (the pass's guard logs it).</exception>
+        void _tickMenuWatch(const std::wstring& key, int64_t now);
+        /// <summary>
+        /// A screen read's reply (the hosting window's UI thread): the dialog of the watched command found on it (ParseAddDirMenuScreen,
+        /// and its path the command's — AddDirMenuBelongsTo) opens the card: phase Open, the clock started, the card posted.
+        /// A reply of an older read is ignored.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <param name="serial">The read's serial (MenuWatch::probeSerial when it was asked for).</param>
+        /// <param name="screen">The terminal's last rows ("" for a dormant tab).</param>
+        /// <exception cref="std::bad_alloc">If the parse or the card cannot be allocated (the window's action guard logs it).</exception>
+        void _onMenuScreen(const std::wstring& key, uint64_t serial, const std::wstring& screen);
+        /// <summary>
+        /// Asks the hosting window to press the card's chosen option (MenuWatch::model.pressed): kMenuAnswerAction with the card's
+        /// path, so the window presses only into that very dialog. `taps` (a tapped option's holds, §21.28) go with the reply, so the
+        /// tapped button stays busy until the window answered. Without a session-action hook (the m5 harness) the press fails at once.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <param name="taps">The holds of the tap that chose the option (empty for the clock's press).</param>
+        /// <exception cref="std::bad_alloc">If the request cannot be allocated.</exception>
+        void _pressMenuOption(const std::wstring& key, std::vector<TapHoldRef> taps);
+        /// <summary>
+        /// The window's reply to a press (MenuAnswerResultWord): recorded for the tick, which waits for the transcript's result after a
+        /// press, repeats a press that found the box busy or failed, and closes the card when the dialog went away with no result.
+        /// A reply of an older press is ignored. The hosting window's UI thread.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <param name="serial">The press's serial.</param>
+        /// <param name="reply">The window's word.</param>
+        /// <exception cref="std::bad_alloc">If the log line cannot be built.</exception>
+        void _onMenuPressed(const std::wstring& key, uint64_t serial, const std::wstring& reply);
+        /// <summary>
+        /// A menu card's button ("tm:&lt;key&gt;:&lt;digit&gt;", _handleCallback, inside the tap's scope): an Open card turns Answering with
+        /// the tapped option and asks the window to press it; any other card says what became of the dialog. A button of a card this
+        /// run does not know (an earlier run's) loses its keyboard. Poll thread.
+        /// </summary>
+        /// <param name="data">The callback data.</param>
+        /// <param name="messageId">The message the button sits on.</param>
+        /// <returns>The tap's toast ("" for none).</returns>
+        /// <exception cref="std::bad_alloc">If the toast or an outbox item cannot be allocated.</exception>
+        std::wstring _onMenuTap(const std::wstring& data, int64_t messageId);
+        /// <summary>
+        /// Posts the card in the watch's CURRENT topic as a reply to the user's /add-dir message, with sound (a dialog that answers
+        /// itself in a minute is a "needs you" moment), at an answer's priority. A post Telegram refuses is tried again
+        /// kMenuRepostAfterFailureMs later while the card is open; a change made while the post was on its way is edited in after.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _postMenuCard(const std::wstring& key);
+        /// <summary>
+        /// Edits the card to what it shows NOW (rendered again right before the call, one queued edit per card): the outcome, the
+        /// answering state, or the close — an edit without a keyboard removes the buttons. A card whose message is gone is not
+        /// edited again.
+        /// </summary>
+        /// <param name="key">The watch's key.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _queueMenuCardEdit(const std::wstring& key);
+        /// <summary>The watch of a key, or nullptr. Caller holds `_mtx`.</summary>
+        /// <param name="key">The key.</param>
+        /// <returns>The watch (valid while `_mtx` is held and the list is not changed).</returns>
+        MenuWatch* _findMenuWatchLocked(std::wstring_view key);
+
+        /// <summary>The /add-dir watches of this run, oldest first. Under `_mtx`; cleared at a start and at a change of bot.</summary>
+        std::vector<MenuWatch> _menuWatches;
     };
 }

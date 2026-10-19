@@ -223,6 +223,9 @@
     <!-- Agentmaster (MESSAGING.md section 21.30): Claude's AskUserQuestion answered from Telegram - the question card's pure
          model, texts, buttons and decision lines (header-only). -->
     <ClInclude Include="AgentMaster\AskQuestion.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.34): a local command's dialog answered from Telegram (/add-dir) - the screen parser,
+         the window's press decision, the transcript's result, the card's text and buttons (header-only, pure). -->
+    <ClInclude Include="AgentMaster\TuiMenus.h" />
     <ClInclude Include="AgentMaster\TelegramApi.h" />
     <ClInclude Include="AgentMaster\Messaging.h" />
     <ClInclude Include="AgentMaster\RemoteLaunch.h" />
@@ -529,6 +532,11 @@
     <!-- Agentmaster (MESSAGING.md section 21.30): the service's question cards - the ask registry's acceptor, the cards, their
          watch, buttons and typed answers. Plain C++, no PCH. -->
     <ClCompile Include="AgentMaster\Messaging.Questions.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.34): the service's menu cards - the watch of a /add-dir a topic queued, the screen
+         reads that find its dialog, the card, its buttons and the default pressed after a minute. Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Menus.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\TelegramApi.cpp">
