@@ -541,6 +541,9 @@ Session] in Error) · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌
 As built (§21.26): the STATE line comes first ("🟡 Waiting for you since 08:21", a 📌 at its end for a pinned session) and
 the title second ("📌 🟦 title", a chip in a rich card); every other line keeps its order under the title.
 
+As built (§21.27): the place line reads "/source/Agentmaster · agentmaster · opus-5-5 · max · 427K". A cut folder has no "…",
+the model has no leading "claude-", and the context size has no "ctx" label.
+
 ### 6.2 What it is doing, or whether it is idle
 
 - **The card's state line** — the state, since when, and while Running the current step ("Bash: npm
@@ -3880,6 +3883,50 @@ on the second line; the rich form starts with the state line, a break, then the 
 **Check after the build** (each install, with its bot): the cards show the state first and the title (its chip / link) second,
 on the phone and on the desktop app; a pinned session's 📌 ends the first line; a parked tab's card reads the state, the title,
 then "💤 not running — …"; `/status` shows the same order.
+
+**Still in no build (checked 2026-10-19 ~15:15, when the user asked again).** A card on the user's phone still showed the title
+first ("📌 🟧 Small telegram fixes" over "🟡 Waiting for you since 14:57"), and none of the four layouts on Q: holds this change.
+Production 0.6.8.22 (`Release-B`, its `TerminalApp.dll` built at 06:41) and dev 0.0.1.30 (`Debug`, 07:03) are builds of
+ec966a2ca, which came before 4621cf9d4 (09:27). `Release` (0.6.8.21) and `Debug-B` (0.0.1.29) are older. The proof was a probe
+of each `TerminalApp.dll` for the wide literal `L"\n📌 "`, which only the state-first code has. It was in none of the four.
+
+### 21.27 A shorter place line (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19), quoting a card's place line: "…/source/Agentmaster · agentmaster · claude-opus-5-5 · max ·
+> ctx 427K" — "Change to: /source/Agentmaster · agentmaster · opus-5-5 · max · 427K".
+
+**What changed** (`MessagingModels.h`): only the words of the place line. Its parts and their order stay as they were (folder,
+branch, model, effort, context size). `/status` replies with the same card.
+- **The folder:** `detail::ShortPath` gained a `markCut` parameter. Its default (true) keeps the "…" for every other caller (the
+  work log's tool lines, the lists of edited files). `BuildCardText` asks for the bare form, so a cut folder starts with its
+  '/' ("/source/Agentmaster"), and a folder of at most two segments is shown whole, its drive first ("K:/source").
+- **The model:** `CardModelLabel` drops a leading "claude-" (in any letter case) and keeps the rest of the id as it is, its
+  dashes and a "[1m]" included. A preset's id ("moonshotai/kimi-k3"), a bare alias ("opus"), a Bedrock id and a bare
+  "claude-" come back unchanged. It is not `ShortModelName` (`SessionModels.h`), which the board, the per-tab overlay and the
+  tab tooltip use: that one writes "opus-5.5", with a dot, and the user asked for "opus-5-5".
+- **The context size:** the "ctx" label is gone ("427K").
+
+The card of the request, with §21.26 and this change:
+
+```
+🟡 Waiting for you since 14:57
+📌 🟧 Small telegram fixes
+/source/Agentmaster · agentmaster · opus-5-5 · max · 427K
+```
+
+**The cost:** the same as §21.26's. Every card's text changes, so the first refresh after the build edits each card once. A
+build that carries d0fbc4e31, §21.26 and this change costs one edit per card in total.
+
+**Tests** (`tests/tests_messaging.cpp`, `TestMessaging`):
+- The card's third line is exactly "/source/Agentmaster · agentmaster · opus-5-5 · max · 182K".
+- `ShortPath`: the marked and the bare form of a cut path, a short path, and an empty one.
+- `CardModelLabel`: the prefix in any letter case, a "[1m]", an alias, a preset id, a Bedrock id, a bare "claude-" and an
+  empty id.
+- A card with a two-segment folder and only a launch model reads "K:/source · fable-5-1 · 5K".
+
+**Check after the build** (each install, with its bot):
+- Every card's place line reads like the one above: no "…", no "claude-", no "ctx", on the phone and on the desktop app.
+- The work log's tool lines still show "Edit: …/TerminalApp/AgentMaster/Messaging.cpp".
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

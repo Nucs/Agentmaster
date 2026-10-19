@@ -685,6 +685,7 @@ void TestMessaging()
         s.stateChangedAtUnixMs = 1000;
         s.branch = L"agentmaster";
         s.currentModel = L"claude-opus-5-5";
+        s.effort = L"max";
         s.contextTokens = 182000;
         s.autorunner.mode = AutorunnerMode::Off;
         QueuedPrompt q;
@@ -706,7 +707,11 @@ void TestMessaging()
         CHECK(card.find(L"Running 3m") == std::wstring::npos, "no relative span in the card (it would re-edit every minute)");
         CHECK(looksLikeClock(TgClockText(1700000000000, 1700000000000)) && TgClockText(1700000000000, 1700000000000).size() == 5, "TgClockText: the same day is HH:MM");
         CHECK(TgClockText(1700000000000 - 3ll * 86400000, 1700000000000).size() > 5 && TgClockText(1700000000000 - 3ll * 86400000, 1700000000000).find(L' ') != std::wstring::npos, "TgClockText: another day adds the date");
-        CHECK(card.find(L"agentmaster \x00B7 claude-opus-5-5 \x00B7 ctx 182K") != std::wstring::npos, "branch · model · ctx");
+        // §21.27 (the user's format of 2026-10-19): the place line (the third line: this session is not live, so no action
+        // line) shows the folder's last two segments from their '/' with no "…", the branch, the model without "claude-",
+        // the effort, and the context size without "ctx". It read "…/source/Agentmaster · agentmaster · claude-opus-5-5 ·
+        // max · ctx 182K" before.
+        CHECK(LineAt(card, 2) == L"/source/Agentmaster \x00B7 agentmaster \x00B7 opus-5-5 \x00B7 max \x00B7 182K", "the place line: /folder · branch · model · effort · context size");
         CHECK(card.find(L"Runner Paused \x00B7 queue 1 \x2014 next: \x201C" L"also update the docs\x201D") != std::wstring::npos, "the runner and the next queued prompt");
         CHECK(card.find(L"unsent at the PC: \x201C" L"and then rebase onto &lt;main&gt;\x201D") != std::wstring::npos, "the unsent draft, escaped");
         CHECK(BuildCardText(s, 5000, 0, true).find(L"(Off globally)") != std::wstring::npos, "the global pause shows");
@@ -782,6 +787,32 @@ void TestMessaging()
         CHECK(BuildCardText(failed, 5000, 0, false).find(L"\U0001F504 Restart Session restarts it") != std::wstring::npos, "a session in Error: the Restart Session line");
         CHECK(TgStripTags(L"<b>a &lt;T&gt;</b> &amp; <code>b</code>") == L"a <T> & b", "TgStripTags drops the tags and unescapes the three entities");
         CHECK(ParseRemoteCommand(L"/reactivate").kind == RemoteKind::AgentmasterCommand && ParseRemoteCommand(L"/reactivate").name == L"reactivate", "/reactivate is an Agentmaster command");
+    }
+
+    // ---- §21.27: the place line's folder and model (the user's format of 2026-10-19) ----
+    {
+        // The folder. Only the card asks for the bare form; ShortPath's other callers (the work log's tool lines, the edited
+        // files) keep the "…" mark. Fully qualified: several engine headers have a namespace named detail.
+        CHECK(Agentmaster::Msg::detail::ShortPath(L"K:\\source\\Agentmaster", 2) == L"\x2026/source/Agentmaster", "ShortPath marks a cut path with a leading '…' by default");
+        CHECK(Agentmaster::Msg::detail::ShortPath(L"K:\\source\\Agentmaster", 2, false) == L"/source/Agentmaster", "ShortPath's bare form: a cut path starts with its '/'");
+        CHECK(Agentmaster::Msg::detail::ShortPath(L"K:\\source\\", 2, false) == L"K:/source" && Agentmaster::Msg::detail::ShortPath(L"K:\\source", 2) == L"K:/source",
+              "a path of at most `keep` segments comes back whole, its drive first, in either form");
+        CHECK(Agentmaster::Msg::detail::ShortPath(L"", 2, false).empty(), "an empty path stays empty");
+        // The model: only a LEADING "claude-" goes, and only when something follows it.
+        CHECK(CardModelLabel(L"claude-opus-5-5") == L"opus-5-5" && CardModelLabel(L"claude-opus-5-5[1m]") == L"opus-5-5[1m]",
+              "the model loses its leading 'claude-' and keeps the rest verbatim (its dashes, the [1m])");
+        CHECK(CardModelLabel(L"Claude-Sonnet-5-5") == L"Sonnet-5-5", "the prefix is matched in any letter case");
+        CHECK(CardModelLabel(L"opus") == L"opus" && CardModelLabel(L"moonshotai/kimi-k3") == L"moonshotai/kimi-k3" &&
+                  CardModelLabel(L"us.anthropic.claude-sonnet-4-5-20250929-v1:0") == L"us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+              "an alias, a preset's id and a Bedrock id come back verbatim");
+        CHECK(CardModelLabel(L"claude-") == L"claude-" && CardModelLabel(L"").empty(), "a bare 'claude-' is kept (the card never shows an empty model); an empty id stays empty");
+        // A card whose folder is short shows it whole; the launch model stands in while no current model is known.
+        SessionInfo s = MakeSession(L"place-1", SessionState::WaitingForInput);
+        s.workingDir = L"K:\\source";
+        s.model = L"claude-fable-5-1";
+        s.contextTokens = 5400;
+        CHECK(LineAt(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)), 2) == L"K:/source \x00B7 fable-5-1 \x00B7 5K",
+              "a short folder whole, the launch model without 'claude-', the context size in thousands");
     }
 
     // ---- §21.18: the card leaves out the runner line while it is the common default ----

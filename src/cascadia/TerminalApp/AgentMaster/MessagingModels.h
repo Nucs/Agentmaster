@@ -86,9 +86,26 @@ namespace Agentmaster::Msg
             return s;
         }
 
-        // The last `keep` path segments ("TerminalApp/AgentMaster/Messaging.cpp" for keep=3), with the
-        // separators normalized to '/'. A short path is returned whole.
-        inline std::wstring ShortPath(std::wstring_view path, size_t keep = 3)
+        /// <summary>
+        /// The last <paramref name="keep"/> segments of a path, the separators normalized to '/' — a path that fits a phone
+        /// line ("TerminalApp/AgentMaster/Messaging.cpp" for keep=3). A path of at most <paramref name="keep"/> segments comes
+        /// back whole ("K:/source"); a longer one is cut to the '/' before its last segments, marked with a leading "…"
+        /// unless the caller asks for the bare form.
+        /// </summary>
+        /// <remarks>
+        /// The bare form (<paramref name="markCut"/> false: "/source/Agentmaster", the sticky card's place line since
+        /// MESSAGING.md §21.27) still shows that the path was cut, by its leading '/', because a Windows path that comes back
+        /// whole starts with its drive ("K:/source"). A POSIX path of exactly <paramref name="keep"/> segments counts its
+        /// empty root as one more segment, so it reads "…/home/u" marked and "/home/u" bare; the bare form is then the whole
+        /// path.
+        /// </remarks>
+        /// <param name="path">The path, '\\' or '/' separated; trailing separators are dropped.</param>
+        /// <param name="keep">How many trailing segments to keep.</param>
+        /// <param name="markCut">True (the default; the work log's tool lines and the edited-file lists use it) puts "…" before a
+        /// cut path; false leaves a cut path starting with its '/'.</param>
+        /// <returns>The shortened path; "" for an empty path.</returns>
+        /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
+        inline std::wstring ShortPath(std::wstring_view path, size_t keep = 3, bool markCut = true)
         {
             std::wstring p{ path };
             for (auto& c : p)
@@ -112,7 +129,8 @@ namespace Agentmaster::Msg
                 }
                 pos = slash;
             }
-            return L"\x2026" + p.substr(pos);
+            // pos is the '/' before the kept segments, so the bare form starts with it.
+            return markCut ? L"\x2026" + p.substr(pos) : p.substr(pos);
         }
 
         // ISO-8601 "2026-10-16T07:29:14.217Z" -> unix ms (UTC); 0 when malformed. Only the shape Claude
@@ -4125,6 +4143,46 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// The model as the sticky card's place line names it (MESSAGING.md §21.27, the user's format of 2026-10-19): the id with
+    /// Claude Code's leading "claude-" dropped and nothing else touched. "claude-opus-5-5" reads "opus-5-5", and
+    /// "claude-opus-5-5[1m]" reads "opus-5-5[1m]".
+    /// </summary>
+    /// <remarks>
+    /// This is deliberately not ShortModelName (SessionModels.h, the form of the board, the per-tab overlay and the tab
+    /// tooltip). That function rewrites the version with dots and drops a date ("opus-5.5"), and the user asked for the id's
+    /// own dashes. Only a LEADING "claude-" goes, in any letter case, and only when something follows it. A preset's id
+    /// ("moonshotai/kimi-k3"), a bare alias ("opus") and a Bedrock id ("us.anthropic.claude-…") come back verbatim, and so
+    /// does a bare "claude-", so the card never shows an empty model. The result is part of the card's text, so a change of
+    /// this rule edits every topic's card once (see BuildCardText).
+    /// </remarks>
+    /// <param name="model">The model id: the transcript's current model, else the launch model.</param>
+    /// <returns>The label; "" for an empty id.</returns>
+    /// <exception cref="std::bad_alloc">If the copy cannot be allocated.</exception>
+    inline std::wstring CardModelLabel(std::wstring_view model)
+    {
+        constexpr std::wstring_view kVendorPrefix{ L"claude-" };
+        if (model.size() <= kVendorPrefix.size())
+        {
+            return std::wstring{ model };
+        }
+        for (size_t i = 0; i < kVendorPrefix.size(); ++i)
+        {
+            // An ASCII fold, because the prefix is ASCII: a hand-typed --model "Claude-Opus-5-5" loses its prefix too, and
+            // no locale can fold another character onto one of the prefix's letters.
+            wchar_t c = model[i];
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+            if (c != kVendorPrefix[i])
+            {
+                return std::wstring{ model };
+            }
+        }
+        return std::wstring{ model.substr(kVendorPrefix.size()) };
+    }
+
+    /// <summary>
     /// The card text's identity for TopicRecord::cardTextHash: FNV-1a 32 over the UTF-16 code units, never 0
     /// (0 means "no card text recorded"). A collision only costs one skipped edit of a card whose next change
     /// re-edits it.
@@ -4297,11 +4355,12 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6, §21.26), as Telegram HTML: the state and since when (a clock
-    /// time from persisted stamps, CardStateSinceMs) on the first line, the title on the second (§21.26: the state leads, the
-    /// user's request of 2026-10-19), a line naming the state's own action — 🔄 Restart Session
-    /// for a session in Error or one whose claude exited (§21.24), ▶ Reactivate for a parked tab —, folder · branch · model ·
-    /// context, the runner and the queue unless they are the
+    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6, §21.26, §21.27), as Telegram HTML: the state and since when (a
+    /// clock time from persisted stamps, CardStateSinceMs) on the first line, the title on the second (§21.26: the state leads,
+    /// the user's request of 2026-10-19), a line naming the state's own action — 🔄 Restart Session
+    /// for a session in Error or one whose claude exited (§21.24), ▶ Reactivate for a parked tab —, the place line (§21.27:
+    /// "/source/Agentmaster · agentmaster · opus-5-5 · max · 427K" — folder, branch, model, effort, context size),
+    /// the runner and the queue unless they are the
     /// common default (an Auto runner with nothing queued and no global pause: no line — §21.18), the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
     /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
@@ -4310,10 +4369,11 @@ namespace Agentmaster::Msg
     /// the title as a chip.
     /// </summary>
     /// <remarks>
-    /// The line ORDER is part of the text the service hashes: a layout change (§21.18's runner line, §21.26's state-first
-    /// order) changes every card's text, so every topic's card is edited — or re-posted, when it is due anyway — once at the
-    /// first refresh after the build that brings it (its persisted cardTextHash no longer matches). That is one call per topic
-    /// on the chat's flood budget, so layout changes belong together, in as few builds as possible.
+    /// The line ORDER and wording are part of the text the service hashes: a layout change (§21.18's runner line, §21.26's
+    /// state-first order, §21.27's shorter place line) changes every card's text, so every topic's card is edited — or
+    /// re-posted, when it is due anyway — once at the first refresh after the build that brings it (its persisted cardTextHash
+    /// no longer matches). That is one call per topic on the chat's flood budget, so layout changes belong together, in as few
+    /// builds as possible.
     /// </remarks>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
@@ -4375,15 +4435,18 @@ namespace Agentmaster::Msg
             out += L"\n⏳ the session's history is being added below; the live conversation follows it";
         }
         out += L"\n";
-        // Place line: folder · branch · model · ctx.
+        // The place line: folder · branch · model · effort · context size. §21.27 (the user's format of 2026-10-19) made it
+        // "/source/Agentmaster · agentmaster · opus-5-5 · max · 427K"; it read "…/source/Agentmaster · agentmaster ·
+        // claude-opus-5-5 · max · ctx 427K" before. A cut folder keeps its leading '/' and loses the "…", the model loses
+        // Claude Code's "claude-" (CardModelLabel), and the context size loses its "ctx" label.
         {
             std::wstring dir = s.inferredWorkingDir.empty() ? s.workingDir : s.inferredWorkingDir;
-            std::wstring place = TgEscapeHtml(detail::ShortPath(dir, 2));
+            std::wstring place = TgEscapeHtml(detail::ShortPath(dir, 2, false));
             if (!s.branch.empty())
             {
                 place += L" \x00B7 " + TgEscapeHtml(s.branch);
             }
-            const std::wstring model = s.currentModel.empty() ? s.model : s.currentModel;
+            const std::wstring model = CardModelLabel(s.currentModel.empty() ? s.model : s.currentModel);
             if (!model.empty())
             {
                 place += L" \x00B7 " + TgEscapeHtml(model);
@@ -4394,7 +4457,7 @@ namespace Agentmaster::Msg
             }
             if (s.contextTokens > 0)
             {
-                place += L" \x00B7 ctx " + std::to_wstring(s.contextTokens / 1000) + L"K";
+                place += L" \x00B7 " + std::to_wstring(s.contextTokens / 1000) + L"K";
             }
             // No line break after it: each line below brings its own, so a line that is left out (the runner's, below)
             // leaves no empty line in the card and no trailing break in the text the hash covers.
