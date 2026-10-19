@@ -6,6 +6,7 @@
 ## Development Rules
 
 - Do not build or deploy or install without the user's permission.
+- Every build writes to `Q:`, never to `K:`: a layout goes to a `Q:\agentmaster-layouts\<slot>` through `-LayoutDir`, and the build trees (`bin`, `obj`, the package's `bin` / `obj` / `AppPackages`) are junctions to Q: (*Building FAST* #1).
 - Do commit changes once done — a single `git add` + `git commit` with an extensive
   message (see *Commit Instructions* in the global guidance). Committing needs no
   permission; only build/deploy/install do.
@@ -982,9 +983,29 @@
 > measured)**; a RAW `msbuild` invocation must add the flag itself. Opt back in with
 > `-WithSymbolPackage` only when you genuinely need a Store symbol bundle.
 
-1. **Build on NVMe, not the A400.** `K:` is a DRAM-less SATA SSD; a WT build is tens of
-   thousands of tiny files and 32 threads thrash it. Prefer **`Q:` (Kingston Fury
-   Renegade, Gen4 NVMe + DRAM, ~546 GB free)** or `C:` (Corsair MP600 PRO).
+1. **Every build writes to Q:, never to K: (the user's rule, 2026-10-19).** `K:` is a nearly full,
+   DRAM-less SATA SSD (a WT build is tens of thousands of tiny files and 32 threads thrash it); `Q:`
+   is a Kingston Fury Renegade Gen4 NVMe with DRAM and ~250 GB free. Only the source tree stays on
+   K:. The setup (checked 2026-10-19):
+   - **Package layouts** go to `Q:\agentmaster-layouts\<Release | Release-B | Debug | Debug-B>`,
+     always through `-LayoutDir`: the instance's pair, the folder it does NOT run from (see *Hot
+     deploy*). The old K: layout slots under `src\cascadia\CascadiaPackage\bin\x64\` were deleted on
+     2026-10-19.
+   - **Build trees are junctions to Q:**, so every build writes there, with or without
+     `-LayoutDir`, through the wrapper, raw msbuild or VS: `obj\x64\Debug` →
+     `Q:\tmp\agentmaster-dev-build`, `obj\x64\Release` → `Q:\tmp\agentmaster-release-build`, `bin` →
+     `Q:\tmp\agentmaster-bin`, `src\cascadia\CascadiaPackage\bin` → `Q:\tmp\agentmaster-package-bin`,
+     `…\CascadiaPackage\obj` → `Q:\tmp\agentmaster-package-obj`, `…\CascadiaPackage\AppPackages` →
+     `Q:\tmp\agentmaster-apppackages`.
+   - **Still on K:**, by design: the `Generated Files` folders of the source tree (~1.1 GB, shared by
+     both configurations and deleted by purges), `packages\` (the NuGet input, ~0.9 GB) and
+     `obj\x64\vcpkg` (the installed vcpkg packages, ~70 MB).
+   - **Before a build**, check the junctions (`cmd /c dir /AL K:\source\Agentmaster`, `…\obj\x64`,
+     `…\src\cascadia\CascadiaPackage`). A missing one puts that build's output on K:; recreate it
+     with `New-Item -ItemType Junction -Path <K: path> -Target <Q: folder>`, after moving to Q: what
+     a build wrote at the K: path. Remove a junction only with `cmd /c rmdir <path>`, which deletes
+     the link and never its target. A new build folder (a configuration, platform or project output
+     that does not exist yet) gets its Q: folder and its junction before its first build.
 
 2. **Use the wrapper** — parallel `/m` + per-file `/MP`, scoped to just the app target
    (`Terminal\CascadiaPackage`), skips the redundant double restore on rebuilds:
@@ -1033,9 +1054,10 @@
 - Deploy the **loose layout** (what VS F5 does) — no signing/cert/admin:
 
 ```powershell
-# one-time per machine (or after the manifest changes): register the loose layout
-# (slot A; a dev hot deploy later moves the registration to bin\x64\Debug-B and back — see below)
-Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
+# first registration on a machine only: register a loose layout built into a Q: folder (every build
+# writes to Q:, Building FAST #1). After that a new build is always SWAPPED in (the hot deploy below
+# moves dev between Q:\agentmaster-layouts\Debug and Debug-B), never registered by hand.
+Add-AppxPackage -Register "Q:\agentmaster-layouts\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
 ```
 
 - Launch any of these ways (the loose layout registers the **DEV identity**, `AgentmasterDev` — the release MSIX owns `Agentmaster`/`agentmaster`; see PROFILES.md):
@@ -1050,7 +1072,7 @@ Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bi
 
 ### Concurrency lock (multi-agent) — REQUIRED before any build, launch, or deploy
 
-- There is exactly ONE dev instance and ONE build output tree (`…\CascadiaPackage\bin\x64\Debug`), so the close→build→relaunch cycle is **process-global and destructive**.
+- There is exactly ONE dev instance and ONE build tree (`bin` + `obj`, junctions to Q: — Building FAST #1), so the close→build→relaunch cycle is **process-global and destructive**.
 - Two actors running it at once — two AI agents, or an agent + a human — collide: one closes the instance the other just launched, two msbuilds race on the same outputs, and the **exe link fails because a running `Agentmaster.exe` locks the very `Agentmaster.exe` being relinked**.
 - **REQUIREMENT: hold the global `build-launch` mutex for the WHOLE cycle before you build (full exe), launch, deploy, OR close our instance.**
 - (A lib-only compile-check — Building FAST #6 — doesn't relink the running exe, so it needs no lock.) The mutex is a filesystem lock (`tools/am-lock.sh`, built on `mkdir(2)` atomicity) under `%USERPROFILE%\.agentmaster\locks\`, so it **persists across separate Bash calls** (each Bash tool call is a fresh shell) and is shared by every agent.
@@ -1072,7 +1094,7 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 - The loose layout is live (binaries update in place), but you **cannot relink `Agentmaster.exe` while the app is running** — it locks the exe.
 - So: close *our* dev instance (spare the Store WT), rebuild, relaunch. The **hot deploy** below avoids the close: it builds while dev runs, and its only downtime is a swap of seconds.
-- ⚠ **Dev can run from either of TWO layout slots** (`…\bin\x64\Debug\` or `…\bin\x64\Debug-B\`), because the hot deploy alternates them. Read `(Get-AppxPackage AgentmasterDev).InstallLocation` first; the recipe below closes and builds THAT folder (`$devDir`). A hard-coded `bin\x64\Debug` is a silent no-op while dev runs from `Debug-B`: the close finds nothing, the build writes the unregistered folder, and the relaunch starts the old binaries.
+- ⚠ **Dev can run from either of TWO layout folders** (`Q:\agentmaster-layouts\Debug` or `Debug-B`), because the hot deploy alternates them. Read `(Get-AppxPackage AgentmasterDev).InstallLocation` first; the recipe below closes and builds THAT folder (`$devDir`). A hard-coded folder is a silent no-op while dev runs from the other one: the close finds nothing, the build writes the unregistered folder, and the relaunch starts the old binaries.
 - **Building, deploying, and installing require the user's permission — always ask first** (see *Development Rules*; the prior "always auto deploy, run without prompting" standing authorization is **revoked**).
 - Just never touch the Store WT (it's not under our path — see Gotchas).
 - **Hold the `build-launch` mutex around the whole cycle** (acquire at step 0, release at step 4 — see *Concurrency lock*).
@@ -1083,11 +1105,11 @@ TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse
 ```
 
 ```powershell
-# 0b. the folder dev is REGISTERED from: bin\x64\Debug or bin\x64\Debug-B (the hot deploy below
-#     alternates them). Every path filter and the build target below use it.
+# 0b. the folder dev is REGISTERED from: Q:\agentmaster-layouts\Debug or Debug-B (the hot deploy
+#     below alternates them). Every path filter and the build target below use it.
 $devDir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')
 # 1. close ONLY our dev instance — the GUI PROCESS ONLY (path filter spares the Store WT AND the
-#    release layout under ...\bin\x64\Release / Release-B — see Gotchas). ⚠ NEVER Stop-Process OpenConsole.exe:
+#    release layout under Q:\agentmaster-layouts\Release / Release-B — see Gotchas). ⚠ NEVER Stop-Process OpenConsole.exe:
 #    a ConPTY host killed outright skips its CTRL_CLOSE broadcast, so that tab's pwsh + claude.exe
 #    (+ MCP node children) live on forever with a DEAD console (35 such pairs + ~140
 #    children from ONE such kill, alive six days — OBSERVER.md §13a). Killing the GUI alone closes
@@ -1103,9 +1125,10 @@ $deadline = (Get-Date).AddSeconds(30)
 do { Start-Sleep -Milliseconds 500; $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" |
   ? { $_.ExecutablePath -like "$devDir\*" } } while ($hosts -and (Get-Date) -lt $deadline)
 # 2. build INTO the registered folder (full exe link; the wrapper skips the ~156s appxsym by default —
-#    see Building FAST). -LayoutDir is what makes a Debug-B registration get the new binaries; for the
-#    stock bin\x64\Debug it names the folder the wapproj defaults to anyway (it only sets OutputPath).
-pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir      # or (stock slot only): msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
+#    see Building FAST). -LayoutDir sends the layout to the registered Q: folder; without it the
+#    wapproj's default folder (src\cascadia\CascadiaPackage\bin\x64\Debug, a junction into
+#    Q:\tmp\agentmaster-package-bin) gets it, and dev never sees the new binaries.
+pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false /p:AgentmasterLayoutDir=$devDir
 # 3. relaunch
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentmasterdev
 ```
@@ -1120,8 +1143,8 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 ### Hot deploy of the local RELEASE install (build while it runs)
 
-- The registered release install (`Agentmaster`) runs from one of two **layout slots**: `…\CascadiaPackage\bin\x64\Release\` (A, the stock layout) or `…\bin\x64\Release-B\` (B). Read `(Get-AppxPackage Agentmaster).InstallLocation`; never assume A.
-- **A layout can also live outside the repo, on another drive.** `-LayoutDir` takes any folder, the swap registers whatever folder it is given, and K: is chronically short of space. Since 2026-10-12 production runs from Q: (first **`Q:\agentmaster-layouts\Release`**, 0.6.8.19, the user's request; the first registration from Q: took 2.2 s at the first attempt), and since 2026-10-13 dev runs from Q: too. Each instance alternates between two folders there, like the K: slots: dev between **`Q:\agentmaster-layouts\Debug`** and **`Debug-B`**, production between **`Release`** and **`Release-B`** (since 2026-10-17 production runs 0.6.8.20 from **`Release-B`**: the Release build of 2026-10-14, staged and checked that day; its binaries name dd8e97e35, which is 07d9c3f25 on the branch since the 2026-10-15 rebase onto origin/agentmaster, but the build does NOT hold the two upstream commits that the rebase put before it, 3b03d07b0 + 7248d2592; `Release` kept 0.6.8.19, the rollback target, until 2026-10-17 11:53, when a purged Release build of 46e3aad42 replaced it for the production swap of MESSAGING.md §21.12.5 — the Telegram feature and everything on the branch, those two commits included; since 2026-10-17 12:01 production runs that build as 0.6.8.21 from `Release`, and `Release-B`'s 0.6.8.20 is the rollback target). Read the InstallLocation before every build: the next build targets the folder the instance does NOT run from, and the folder it left holds the previous build, the rollback target. The K: slots stay usable and hold older builds (dev 0.0.1.5 in `…\bin\x64\Debug`, production 0.6.8.18 in `…\bin\x64\Release-B`).
+- The registered release install (`Agentmaster`) runs from one of two **layout folders** on Q:: `Q:\agentmaster-layouts\Release` or `Release-B` (until 2026-10-12 the K: slots `…\CascadiaPackage\bin\x64\Release\` and `Release-B\`, deleted on 2026-10-19 — every build writes to Q:, Building FAST #1). Read `(Get-AppxPackage Agentmaster).InstallLocation`; never assume one.
+- **A layout can also live outside the repo, on another drive.** `-LayoutDir` takes any folder, the swap registers whatever folder it is given, and K: is chronically short of space. Since 2026-10-12 production runs from Q: (first **`Q:\agentmaster-layouts\Release`**, 0.6.8.19, the user's request; the first registration from Q: took 2.2 s at the first attempt), and since 2026-10-13 dev runs from Q: too. Each instance alternates between two folders there: dev between **`Q:\agentmaster-layouts\Debug`** and **`Debug-B`**, production between **`Release`** and **`Release-B`** (since 2026-10-17 production runs 0.6.8.20 from **`Release-B`**: the Release build of 2026-10-14, staged and checked that day; its binaries name dd8e97e35, which is 07d9c3f25 on the branch since the 2026-10-15 rebase onto origin/agentmaster, but the build does NOT hold the two upstream commits that the rebase put before it, 3b03d07b0 + 7248d2592; `Release` kept 0.6.8.19, the rollback target, until 2026-10-17 11:53, when a purged Release build of 46e3aad42 replaced it for the production swap of MESSAGING.md §21.12.5 — the Telegram feature and everything on the branch, those two commits included; since 2026-10-17 12:01 production runs that build as 0.6.8.21 from `Release`; since 2026-10-19 `Release-B` holds a staged Release build of ec966a2ca instead of 0.6.8.20). Read the InstallLocation before every build: the next build targets the folder the instance does NOT run from, and the folder it left holds the previous build, the rollback target. The K: slots are gone: deleted on 2026-10-19 with dev 0.0.1.5 and production 0.6.8.18 in them, when every build moved to Q: (Building FAST #1).
 - A running instance locks only its own layout (loaded images + the mapped `resources.pri`), never the intermediate `bin\x64\<Config>\<Project>\` / `obj\` trees. Building the package layout into the slot it is NOT registered from (`tools\Build-Agentmaster.ps1 … -LayoutDir <slot>` → `/p:AgentmasterLayoutDir`, which `CascadiaPackage.wapproj` turns into DesktopBridge's `OutputPath` before its props import) therefore needs no close.
 - The icon files follow the slot too: `CopyAgentmasterImagesToLayout` copies `res\terminal\images-Dev` into `$(TargetDir)Images\`. Until 2026-10-02 it hard-coded `bin\x64\<Config>\`, so slot B never had them. A layout without its `Images\` registers and runs, but its taskbar and Start icons are blank; production ran that way from slot B, and its taskbar button showed only the unread-count disc. The swap now refuses a layout that is missing an icon file its manifest names.
 - The only downtime is the swap, `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot>`: it stamps the registered version +1 revision, stops the GUI only (never `OpenConsole.exe`), waits for the ConPTY hosts to drain, re-registers, launches, and reports the measured downtime. The register cannot succeed while any process of the old package lives (`0x80073D02`), and a workspace with many live tabs drains slowly (72 hosts took ~87 s on 2026-10-01), so the script drains for up to 120 s, then retries the register while the old package still reads in use. Only after that does it relaunch the old version. Rolling back is the same script pointed at the previous slot.
@@ -1129,7 +1152,7 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 ### Hot deploy of the DEV instance (build while it runs)
 
-- The same mechanism and the same script serve the dev identity. Dev's two slots are `…\bin\x64\Debug\` (A, the stock layout) and `…\bin\x64\Debug-B\` (B); since 2026-10-13 dev runs from one of two folders on Q:, `Q:\agentmaster-layouts\Debug` or `Debug-B` (see the bullet above).
+- The same mechanism and the same script serve the dev identity. Dev's two folders are `Q:\agentmaster-layouts\Debug` and `Debug-B` (since 2026-10-13; the K: slots `…\bin\x64\Debug\` and `Debug-B\` were deleted on 2026-10-19; see the bullet above).
 - Build the Debug package into the slot dev is NOT registered from (`tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir <slot>`, no `-ReleaseIdentity`), then swap: `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <slot> -PackageName AgentmasterDev`. The swap bumps the revision (0.0.1.1 → 0.0.1.2) and refuses a release-identity layout.
 - Run the swap from a shell OUTSIDE dev (it refuses otherwise): the release instance, Windows Terminal or a plain console.
 - First run (2026-10-05, dev 0.0.1.1 @ `Debug` → 0.0.1.2 @ `Debug-B`, 42 tabs, 16 live claudes, all at rest): a purged build ran for 295 s (`-MaxCpu 4 -ClMpCount 6`) while dev kept serving. The swap's downtime was **8.2 s**: the 16 ConPTY hosts drained by themselves in 5.8 s, and the register took 2.1 s at the first attempt. The window restore then re-homed all 42 tabs.
@@ -1356,7 +1379,7 @@ gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -f default_workf
 ### Closing instances to relink.
 
 - Closing **our** dev instance for the deploy inner loop **requires the user's permission first** (see *Development Rules*; the prior "always auto deploy, no prompt" authorization is **revoked**).
-- Once permitted, kill **the GUI process ONLY** (`Agentmaster.exe`; `WindowsTerminal.exe` pre-rename), path-filtered to the layout you are actually redeploying (`…\bin\x64\Debug\` for dev) — a broad `K:\source\Agentmaster\*` filter ALSO matches the **Release** loose layout (`…\bin\x64\Release`, the registered release install), which can host the very session you're running in (`AM_SESSION` / `CCMGR_HOOK_PIPE` set), so it would **self-kill** it.
+- Once permitted, kill **the GUI process ONLY** (`Agentmaster.exe`; `WindowsTerminal.exe` pre-rename), path-filtered to the layout you are actually redeploying (the instance's InstallLocation, e.g. `Q:\agentmaster-layouts\Debug-B\` for dev) — a broad `Q:\agentmaster-layouts\*` filter (or, before 2026-10-12, `K:\source\Agentmaster\*`) ALSO matches the **Release** loose layout (the registered release install), which can host the very session you're running in (`AM_SESSION` / `CCMGR_HOOK_PIPE` set), so it would **self-kill** it.
 - **⚠ NEVER `Stop-Process` the `OpenConsole.exe` ConPTY hosts** (the old recipe did): a host killed outright never runs its graceful shutdown (`PtySignalInputThread::_Shutdown → CloseConsoleProcessState → CTRL_CLOSE_EVENT` to every attached client), so that tab's `pwsh` wrapper + `claude.exe` (+ its MCP `cmd`/`node` children) keep running forever with a **DEAD console** — unreachable by any terminal, feeding a NEWER instance phantom hooks via `bridge.json`.
 - (OBSERVER.md §13a — the in-app orphan reaper ends such orphaned sessions, but don't create them.)
 - Killing the GUI alone closes its pipe handles; every host then ends its clients and exits by itself — **wait for the layout's `OpenConsole.exe` set to drain** (they lock the binary the build copies) before relinking.
@@ -1366,7 +1389,7 @@ gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -f default_workf
 
 ### Packaging (`PRI210 / 0x800704c8`) can fail to overwrite `resources.pri`.
 
-- The registered loose-layout package keeps `src\cascadia\CascadiaPackage\bin\x64\Debug\resources.pri` memory-mapped, so MakePri's final overwrite-move dies with `0x800704c8` (ERROR_USER_MAPPED_FILE) — and `handle64` shows *no* owning user process (it's a registered-package/kernel mapping).
+- The registered loose-layout package keeps its layout's `resources.pri` (e.g. `Q:\agentmaster-layouts\Debug-B\resources.pri`) memory-mapped, so a build into that folder dies in MakePri's final overwrite-move with `0x800704c8` (ERROR_USER_MAPPED_FILE) — and `handle64` shows *no* owning user process (it's a registered-package/kernel mapping).
 - The exe/dll already linked by then (your code is in the fresh `TerminalApp.dll`, copied into the layout *before* this step), so it's purely the PRI.
 - Fix: **delete that `resources.pri` and rebuild** — MakePri then *creates* it fresh instead of overwriting a mapped target.
 - (The Defender exclusion in Building FAST #3 also reduces the transient-lock variant.)

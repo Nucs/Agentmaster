@@ -30,10 +30,12 @@ CLAUDE.md, CLAUDE.md wins — re-read it (it changes).
 For the LOCAL machine's build flavors, the production (Release-layout) install, the
 self-kill check before closing an instance, and the build/registration troubleshooting
 matrix (PRI210, 0x80070020 re-register collisions, stale mutex), see the **`build-install`**
-skill — it owns the local how; this skill owns the release pipeline. NOTE: Path B's
-pre-validation build (B1) relinks the PRODUCTION instance's Release layout in place —
-close production first (path filter `'*\bin\x64\Release\*'`), and re-stamp the layout
-version afterwards if you re-register it (build-install §4).
+skill — it owns the local how; this skill owns the release pipeline. NOTE: every build writes
+to Q:, never K: (CLAUDE.md *Building FAST* #1). Path B's pre-validation build (B1) must never
+write the layout production runs from: build it with `-LayoutDir` set to the Q: slot production
+does NOT run from (the result is then also a hot-swap candidate, build-install §4a), or with no
+`-LayoutDir` (the wapproj's default folder is a junction into `Q:\tmp\agentmaster-package-bin`,
+which nothing is registered from). Production keeps running either way.
 
 ---
 
@@ -59,8 +61,10 @@ version afterwards if you re-register it (build-install §4).
      `/p:AgentmasterPackageIdentity=Release`. This is what `release.yml` ships.
    - **Dev** = `AgentmasterDev` / `agentmasterdev.exe`, `Package-Dev.appxmanifest` (the default).
      This is the **local loose layout**.
-5. **Close ONLY our instance** — path-filter `ExecutablePath -like 'K:\source\Agentmaster\*'`.
-   NEVER blanket-kill `WindowsTerminal.exe` (spares the user's Store WT).
+5. **Close ONLY the target instance, its GUI process only** — path-filter on its InstallLocation
+   (`ExecutablePath -like "$dir\*"`, a `Q:\agentmaster-layouts\<slot>` folder; the instances
+   alternate between two). Never stop `OpenConsole.exe` (a killed ConPTY host orphans its tab's
+   claude), and NEVER blanket-kill by image name (spares the user's Store WT).
 
 ---
 
@@ -80,19 +84,27 @@ that WIP MUST be committed or the clean build fails. Check it deliberately.
 
 ## Path A — Local deploy (inner loop)
 
-Standing-authorized ("always auto deploy") — run without prompting. Hold the mutex around the
-whole cycle.
+**Needs the user's permission** (CLAUDE.md *Development Rules*: the old "always auto deploy"
+standing authorization is REVOKED). **Prefer the HOT deploy** (build-install §4a: dev keeps
+running, the swap costs seconds); the close cycle below is the fallback, and build-install §3 is its
+full version (the purge check, the drain, the post-launch checks). Hold the mutex around the whole
+cycle. Every build writes to Q:, never K: (CLAUDE.md *Building FAST* #1).
 
 ```bash
 # 0. mutex
 TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse --short HEAD)") || exit 1
 ```
 ```powershell
-# 1. close ONLY our dev instance (spares the Store WT)
-Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
-  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
-# 2. build (full exe link)
-pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore
+# 1. dev's registered folder (Q:\agentmaster-layouts\Debug or Debug-B); close ONLY its GUI process
+#    (never OpenConsole.exe; the hosts end their clients and exit by themselves - wait for them)
+$devDir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')
+Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe'" |
+  ? { $_.ExecutablePath -like "$devDir\*" } | % { Stop-Process -Id $_.ProcessId -Force }
+$deadline = (Get-Date).AddSeconds(30)
+do { Start-Sleep -Milliseconds 500; $hosts = Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" |
+  ? { $_.ExecutablePath -like "$devDir\*" } } while ($hosts -and (Get-Date) -lt $deadline)
+# 2. build INTO that folder (full exe link; without -LayoutDir dev would never see the build)
+pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir
 # 3. relaunch the DEV identity
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentmasterdev
 ```
@@ -100,8 +112,10 @@ Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentm
 # 4. release the mutex
 bash tools/am-lock.sh release --token "$TOKEN"
 ```
-- Re-register the loose layout ONLY when `Package-Dev.appxmanifest` changes:
-  `Add-AppxPackage -Register ".\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion`
+- A changed `Package-Dev.appxmanifest` reaches dev only through a swap: build into the Q: slot dev
+  does NOT run from (`Q:\agentmaster-layouts\Debug` / `Debug-B`) and run
+  `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <that slot> -PackageName AgentmasterDev` (build-install
+  §4a). Never register a K: folder, and never a fresh build by hand.
 - **One-time identity-split migration** (first deploy after the profiles split): the old loose
   registration still owns `Agentmaster_56k4f06dsfp9r` (now the RELEASE family). `Remove-AppxPackage
   Agentmaster_56k4f06dsfp9r`, then re-register (becomes `AgentmasterDev`). First launch shows the
@@ -177,7 +191,9 @@ obj tree fails on missing GENERATED headers (`ITerminalHandoff.h`) because it sk
 generation. Do the **full** package build (it builds dependencies in order):
 ```bash
 TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "validate release $(git rev-parse --short HEAD)") || exit 1
-# Release is a different output tree (bin\x64\Release) from the running Debug instance — no need to close it.
+# A Release build writes the Release build trees (bin\x64\Release and obj\x64\Release, junctions
+# to Q:) and, with no -LayoutDir, the package-bin junction on Q:\tmp: neither instance runs from
+# them, so no close is needed.
 pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release 2>&1 \
   | grep -iE 'error C|error MSB|error LNK|fatal error|Build OK|Build FAILED' | grep -ivE 'PRI263|: warning' | tail -40
 bash tools/am-lock.sh release --token "$TOKEN"
@@ -193,16 +209,16 @@ the engine harness — `tests/run-m5-tests.bat`, ~1700 checks, no lock needed �
 pure-C++ ENGINE TUs only, NOT the WinRT/XAML app TUs where clean-build-only errors bite, so it is
 NOT a substitute for B1.)
 
-**Self-kill caveat — when the release HOST is itself a main-tree Release instance.** If your Claude
-session runs *inside* the production instance (`*\bin\x64\Release\WindowsTerminal.exe`), you CANNOT
-relink the main tree's Release layout — building Release there locks/kills your own host. The
-self-kill-safe local build is an **isolated git worktree** (its own `bin\`), but a fresh worktree is
-a COLD build (full restore + cppwinrt projection, ~15-25 min for Release) that won't beat CI. In that
-case **CI's from-scratch Release build IS the clean-build gate B1 seeks** — trigger it (B3), watch the
-**build** step (B4), and spin a worktree only if it fails (incremental fix-rebuilds in a warm worktree
-are then fast). Reserve the local pre-validate for when you can build Release without self-kill (a
-Debug-hosted dev session, or an already-warm worktree). This is why v0.6.5 leaned on CI, not a local
-Release build.
+**Self-kill caveat — when the release HOST is itself the production instance.** If your Claude
+session runs *inside* production (`Q:\agentmaster-layouts\Release*\Agentmaster.exe` since
+2026-10-12), a Release build is still safe: it writes only the Q: build trees and a layout folder
+production does NOT run from (the slot it is not registered from, or the default package-bin
+junction) — never the registered one. Only a SWAP of production would end your host (CLAUDE.md
+*What a swap ends, and who can run it*). Before the hot deploy, production ran from the main tree's
+`bin\x64\Release` on K:, a Release build relinked it in place, and this paragraph sent such a session
+to CI: **CI's from-scratch Release build IS the clean-build gate B1 seeks** — trigger it (B3) and
+watch the **build** step (B4) — which is why v0.6.5 leaned on CI, not a local Release build. That
+route still works when a local build is not wanted.
 
 ### B2. Commit anything needed for a clean build
 Extensive commit message (project convention). If local diverged from origin by a content-identical

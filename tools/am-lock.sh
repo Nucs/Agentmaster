@@ -4,7 +4,7 @@
 # WHY ------------------------------------------------------------------------------------------
 # The dev inner loop is close -> build -> relaunch (see CLAUDE.md "Deploy & run"). It is
 # DESTRUCTIVE and process-global: there is exactly ONE dev instance and ONE build output tree
-# (src\cascadia\CascadiaPackage\bin\x64\Debug). If two actors run it at once — two AI agents, or
+# (bin + obj, junctions to Q:; the layouts in Q:\agentmaster-layouts). If two actors run it at once — two AI agents, or
 # an agent and a human — they collide:
 #   * one closes the WindowsTerminal.exe the other just launched;
 #   * two msbuilds race on the same bin\x64\Debug outputs (corrupt/partial link);

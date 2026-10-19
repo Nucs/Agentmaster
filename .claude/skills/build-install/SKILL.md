@@ -7,8 +7,9 @@ description: |
   Debug loose layout, close → build → relaunch) and the PRODUCTION instance (Agentmaster,
   Release loose layout: build -ReleaseIdentity → stamp version → register → launch →
   profile picker), including the HOT deploy of either instance — build into the layout slot it is
-  NOT registered from (Build-Agentmaster.ps1 -LayoutDir; production slots bin\x64\Release /
-  Release-B, dev slots bin\x64\Debug / Debug-B) while it keeps running, then a few-second swap
+  NOT registered from (Build-Agentmaster.ps1 -LayoutDir; production slots Q:\agentmaster-layouts\Release /
+  Release-B, dev slots Q:\agentmaster-layouts\Debug / Debug-B — EVERY build writes to Q:, never K:,
+  the build trees are junctions to Q:) while it keeps running, then a few-second swap
   (tools\Swap-AgentmasterLayout.ps1 [-PackageName AgentmasterDev]: GUI-only stop, drain,
   re-register, launch, rollback). Encodes the machine map (two registered identities side by side, one
   repo tree, the Store WT to never touch) and the battle-tested troubleshooting: the
@@ -48,7 +49,7 @@ these build recipes but adds the pipeline/draft/publish flow).
 |---|---|---|
 | Package | `AgentmasterDev_56k4f06dsfp9r` | `Agentmaster_56k4f06dsfp9r` |
 | Manifest source | `Package-Dev.appxmanifest` (default) | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`) |
-| Registered from | **a layout slot** (§4a): `src\cascadia\CascadiaPackage\bin\x64\Debug\` (A), `…\bin\x64\Debug-B\` (B), or a folder outside the repo — since 2026-10-13 dev alternates between `Q:\agentmaster-layouts\Debug` and `Debug-B` — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a layout slot** (§4a): `…\bin\x64\Release\` (A), `…\bin\x64\Release-B\` (B), or a folder outside the repo — **since 2026-10-12 one of `Q:\agentmaster-layouts\Release` / `Release-B`** (`Release-B` since 2026-10-17; K: is short of space) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
+| Registered from | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Debug` or `Debug-B` (since 2026-10-13) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Release` or `Release-B` (since 2026-10-12) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
 | Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
@@ -59,9 +60,16 @@ these build recipes but adds the pipeline/draft/publish flow).
   for either identity:** building a layout into the slot that instance is NOT registered from
   (`Build-Agentmaster.ps1 -LayoutDir`) touches nothing it has loaded, so it keeps running for the
   whole build and only the few-second swap is downtime.
-- Build intermediates live on **Q:** through junctions (K: is chronically full — §5.9):
-  `obj\x64\Debug` → `Q:\tmp\agentmaster-dev-build`, `obj\x64\Release` →
-  `Q:\tmp\agentmaster-release-build` (both user-chosen).
+- **EVERY build writes to Q:, never to K:** (the user's rule, 2026-10-19; CLAUDE.md *Building
+  FAST* #1 has the whole setup). The package layout goes to a `Q:\agentmaster-layouts\<slot>`
+  through `-LayoutDir` (the old K: slots under `src\cascadia\CascadiaPackage\bin\x64\` were deleted
+  on 2026-10-19). The build trees are junctions to Q:, so a build writes there even without
+  `-LayoutDir`: `obj\x64\Debug` → `Q:\tmp\agentmaster-dev-build`, `obj\x64\Release` →
+  `Q:\tmp\agentmaster-release-build`, `bin` → `Q:\tmp\agentmaster-bin`,
+  `src\cascadia\CascadiaPackage\bin` / `obj` / `AppPackages` → `Q:\tmp\agentmaster-package-bin` /
+  `-package-obj` / `-apppackages`. Only the source tree stays on K: (with its `Generated Files`,
+  `packages\` and `obj\x64\vcpkg`). Check the junctions before a build (`cmd /c dir /AL
+  K:\source\Agentmaster`); remove one only with `cmd /c rmdir <path>` (the link, never the target).
 - The per-install profile choice lives in `~\.agentmaster.profiles` (`PFN=dir` lines).
 - The user's **Store Windows Terminal** (`Microsoft.WindowsTerminal_…8wekyb3d8bbwe`, under
   `Program Files\WindowsApps`) hosts their live shells — **NEVER close it**. The separate
@@ -83,22 +91,28 @@ these build recipes but adds the pipeline/draft/publish flow).
 2. **THE SELF-KILL CHECK — before closing ANY instance, verify your own shell isn't hosted
    in it.** Claude sessions on this machine often run INSIDE Agentmaster; closing it kills
    you mid-deploy (it happened — exit code 137, half-finished cycle, stale mutex). Walk your
-   ancestry first; proceed only if the terminal ancestor is the Store WT (or anything not
-   under `K:\source\Agentmaster\*`):
+   ancestry first; proceed only if no ancestor runs from the target instance's InstallLocation
+   (a `Q:\agentmaster-layouts\<slot>` folder; the Store WT and the OTHER instance are fine):
    ```bash
    WINPID=$(ps -p $$ | awk 'NR==2{print $4}')
    powershell -NoProfile -Command "\$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$WINPID\"; while (\$p) { Write-Host (\$p.ProcessId.ToString() + '  ' + \$p.Name + '  ' + \$p.ExecutablePath); \$pp = \$p.ParentProcessId; \$p = if (\$pp) { Get-CimInstance Win32_Process -Filter \"ProcessId=\$pp\" } else { \$null } }"
    ```
    If you ARE hosted in the target instance: stop, tell the user to rehost you (Store WT)
    or to run the close themselves.
-3. **Close by path filter, never by image name** (spares the Store WT):
+3. **Close by path filter, never by image name, and the GUI process ONLY** (spares the Store WT
+   and the other instance). Filter on the instance's InstallLocation, never on a hard-coded slot
+   (the instances alternate between two Q: folders); the trailing `\*` keeps `…\Debug` from
+   matching `…\Debug-B`:
    ```powershell
-   Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
-     ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
+   $dir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')   # or: Agentmaster
+   Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" |
+     ? { $_.ExecutablePath -like "$dir\*" } | % { Stop-Process -Id $_.ProcessId -Force }
    ```
-   To close ONE instance only, additionally match the tree: `-like '*\bin\x64\Debug\*'` (dev)
-   or `'*\bin\x64\Release\*'` (production). Orphaned `claude.exe` children survive the close —
-   they are the user's LIVE sessions; **never kill them** (see §5.3 for the side effect).
+   **Never stop `OpenConsole.exe`**: a ConPTY host killed outright skips its CTRL_CLOSE, so its
+   tab's pwsh + claude live on with a dead console (CLAUDE.md *Gotchas*, OBSERVER.md §13a). The
+   GUI's exit makes every host end its clients and exit by itself; wait for them to drain.
+   Orphaned `claude.exe` children survive the close — they are the user's LIVE sessions;
+   **never kill them** (see §5.3 for the side effect).
 4. **msbuild from Git Bash**: call the full exe with **dash-style switches** (`-m -v:m
    -p:...`) — `/m`-style gets MSYS-path-mangled into `M:/`. Building a `.vcxproj` directly
    REQUIRES `-p:SolutionDir=K:\source\Agentmaster\` (trailing backslash):
@@ -150,10 +164,10 @@ asked for first — the old "always auto deploy" standing authorization is REVOK
 wins over this skill). **Prefer the HOT deploy (§4a)**: dev keeps running for the whole build
 and the swap costs seconds (8.2 s measured, 2026-10-05). The close cycle below is the fallback.
 
-⚠ Dev runs from ONE OF TWO slots (`bin\x64\Debug` or `bin\x64\Debug-B` — the hot deploy
+⚠ Dev runs from ONE OF TWO slots (`Q:\agentmaster-layouts\Debug` or `Debug-B` — the hot deploy
 alternates them), so every filter and the build target follow its REGISTERED folder (`$devDir`).
-A hard-coded `bin\x64\Debug` is a silent no-op while dev runs from `Debug-B`: the close finds
-nothing, the build writes the unregistered folder, and the relaunch starts the old binaries.
+A hard-coded slot is a silent no-op while dev runs from the other one: the close finds nothing,
+the build writes the unregistered folder, and the relaunch starts the old binaries.
 Full cycle:
 
 ```bash
@@ -170,6 +184,8 @@ $devDir = (Get-AppxPackage AgentmasterDev).InstallLocation.TrimEnd('\')
 # 3. build INTO $devDir - EITHER:
 #    incremental (no header/idl hit above):  pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir $devDir
 #    OR purge+clean (header/idl hit, §5.8):  rm -rf "src/cascadia/TerminalApp/Generated Files" "obj/x64/Debug/TerminalApp" "obj/x64/Debug/TerminalAppLib"
+#                                             (+ obj/x64/Debug/agentmaster-cli + agentmaster-sessiondb, and the
+#                                             control set on a TerminalControl .idl change - §5.8)
 #                                             pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -ClMpCount 6 -LayoutDir $devDir
 # 4. relaunch:
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
@@ -202,16 +218,20 @@ production down for the whole build (15–30 min when a header change forces a p
 
 ```bash
 # 0. self-kill check → 1. mutex
-# 2. close ONLY production if running — GUI only (never OpenConsole.exe), path filter on its
-#    CURRENT InstallLocation (slot A or B — §4a), then wait for its ConPTY hosts to drain
-# 3. build the Release-identity package:
-pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity
 ```
 ```powershell
-# 4. stamp a real version into the LAYOUT manifest (build output regenerates it each build —
-#    re-stamp after every Release build; also the fix for the §5.3 collision):
-$p = 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Release\AppxManifest.xml'
-[xml]$m = Get-Content $p; $m.Package.Identity.Version = '0.2.0.0'; $m.Save($p)
+# 2. production's CURRENT folder (a Q: slot — §4a). Close ONLY production if running — GUI only
+#    (never OpenConsole.exe), path filter "$prodDir\*", then wait for its ConPTY hosts to drain.
+$prodDir = (Get-AppxPackage Agentmaster).InstallLocation.TrimEnd('\')
+# 3. build the Release-identity package INTO that folder. Never without -LayoutDir: the default
+#    folder is the package-bin junction into Q:\tmp, which nothing is registered from.
+pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity -LayoutDir $prodDir
+# 4. stamp the registered version + 1 revision into the LAYOUT manifest (the build regenerates it
+#    as 0.0.1.0, and development-mode registration accepts only a newer version; also the fix for
+#    the §5.3 collision):
+$v = [version](Get-AppxPackage Agentmaster).Version
+$p = "$prodDir\AppxManifest.xml"
+[xml]$m = Get-Content $p; $m.Package.Identity.Version = '{0}.{1}.{2}.{3}' -f $v.Major, $v.Minor, $v.Build, ($v.Revision + 1); $m.Save($p)
 # 5. register + launch:
 Add-AppxPackage -Register $p -ForceUpdateFromAnyVersion
 Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
@@ -231,10 +251,11 @@ Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
   ```bash
   mkdir -p "$USERPROFILE/.agentmaster/terminal" && cp -n "$USERPROFILE/.agentmaster-dev/terminal/"{settings.json,state.json} "$USERPROFILE/.agentmaster/terminal/" 2>/dev/null
   ```
-- **Caveat**: a Release package build writes slot A (`bin\x64\Release`) unless given
-  `-LayoutDir` — including a `release-version` pre-validation. When production is registered
-  from slot A that relinks it in place (close it first, then re-stamp the version — the build
-  resets it to 0.0.1.0); when production runs from slot B, a default build is harmless to it.
+- **Caveat**: a package build without `-LayoutDir` (a `release-version` pre-validation, raw
+  msbuild, VS) writes the wapproj's default folder `src\cascadia\CascadiaPackage\bin\x64\<Config>`,
+  which since 2026-10-19 is a junction into `Q:\tmp\agentmaster-package-bin` — on Q: as the rule
+  demands, and harmless to both instances (nothing is registered from it). Before 2026-10-12 that
+  folder WAS production's slot A, and a default Release build relinked production in place.
 - The permanent alternative: install the signed `.msixbundle` from a GitHub release (cert
   import needs an admin/UAC step) — replaces the loose registration's coupling to the repo
   tree. Same-family replace may need `Remove-AppxPackage` of the loose one first (§5.3 risk).
@@ -251,8 +272,12 @@ each deploy builds into the slot production is NOT registered from:
 
 | slot | folder | build it with |
 |---|---|---|
-| A | `src\cascadia\CascadiaPackage\bin\x64\Release\` | no `-LayoutDir` (stock) |
-| B | `src\cascadia\CascadiaPackage\bin\x64\Release-B\` | `-LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Release-B` |
+| A | `Q:\agentmaster-layouts\Release` | `-LayoutDir 'Q:\agentmaster-layouts\Release'` |
+| B | `Q:\agentmaster-layouts\Release-B` | `-LayoutDir 'Q:\agentmaster-layouts\Release-B'` |
+
+Until 2026-10-12 the slots were `src\cascadia\CascadiaPackage\bin\x64\Release\` and `Release-B\`
+on K:; they were deleted on 2026-10-19, when every build moved to Q: (§0). Never build a layout
+on K:, and always pass `-LayoutDir`.
 
 The mechanism: `CascadiaPackage.wapproj` sets DesktopBridge's `OutputPath` (the layout folder,
 defaulted only when empty) from `/p:AgentmasterLayoutDir` BEFORE the DesktopBridge props import;
@@ -272,13 +297,13 @@ overlay. The swap now refuses a layout that is missing any icon file its manifes
 TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "hot-release $(git rev-parse --short HEAD)") || exit 1
 # 2. target slot = the one production is NOT registered from:
 powershell -NoProfile -Command "(Get-AppxPackage Agentmaster).InstallLocation"
-# 3. space (K: AND Q:), the §5.8 purge check, and the target slot's resources.pri (§5.1):
-rm -f src/cascadia/CascadiaPackage/bin/x64/<target-slot>/resources.pri
+# 3. space (Q:), the junctions (§0), the §5.8 purge check, and the target slot's resources.pri (§5.1):
+rm -f '/q/agentmaster-layouts/<target-slot>/resources.pri'
 # 4. build into the target slot — production keeps serving the whole time:
-pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity -ClMpCount 6 -LayoutDir ./src/cascadia/CascadiaPackage/bin/x64/Release-B   # (or no -LayoutDir for slot A)
+pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity -ClMpCount 6 -LayoutDir 'Q:\agentmaster-layouts\<target-slot>'
 # 5. the swap — the ONLY downtime. Stamps registered+1, stops production's GUI (never its
 #    OpenConsole hosts), waits for them to drain, re-registers the new slot, launches, times it:
-pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir ./src/cascadia/CascadiaPackage/bin/x64/Release-B   # -WhatIf = dry run
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'Q:\agentmaster-layouts\<target-slot>'   # -WhatIf = dry run
 # 6. verify (§6: bridge line for the new pid, restore lines, no crash dump) → release the mutex
 bash tools/am-lock.sh release --token "$TOKEN"
 ```
@@ -309,8 +334,8 @@ bash tools/am-lock.sh release --token "$TOKEN"
   `Swap-AgentmasterLayout.ps1 -LayoutDir <previous slot>` re-registers it (the next version
   number) — seconds, no rebuild. If the swap's register step itself fails, the script relaunches
   the still-registered old version on its own before rethrowing.
-- **Close / verify production by its InstallLocation, never by a hardcoded `bin\x64\Release`** —
-  a filter on `*\bin\x64\Release\*` does NOT match slot B (`Release-B\`).
+- **Close / verify production by its InstallLocation, never by a hard-coded slot** — a filter on
+  `*\agentmaster-layouts\Release\*` does NOT match slot B (`Release-B\`).
 - The next deploy's target is the OTHER slot. Before building into a slot, make sure nothing
   still runs from it (a straggler ConPTY host of the previous instance would lock it — the swap
   prints `HostsLeft`).
@@ -321,8 +346,12 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 | slot | folder | build it with |
 |---|---|---|
-| A | `src\cascadia\CascadiaPackage\bin\x64\Debug\` | no `-LayoutDir` (stock) |
-| B | `src\cascadia\CascadiaPackage\bin\x64\Debug-B\` | `-LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Debug-B` |
+| A | `Q:\agentmaster-layouts\Debug` | `-LayoutDir 'Q:\agentmaster-layouts\Debug'` |
+| B | `Q:\agentmaster-layouts\Debug-B` | `-LayoutDir 'Q:\agentmaster-layouts\Debug-B'` |
+
+(Until 2026-10-13 the K: slots `src\cascadia\CascadiaPackage\bin\x64\Debug\` / `Debug-B\`, deleted
+on 2026-10-19.) From a session INSIDE dev the swap needs a one-shot scheduled task (CLAUDE.md *What
+a swap ends, and who can run it*); session 9c3454bb's scratchpad holds working scripts for it.
 
 ```bash
 # 0. self-kill check: your shell must NOT be inside DEV (inside production is fine - the dev
@@ -330,14 +359,14 @@ bash tools/am-lock.sh release --token "$TOKEN"
 TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "hot-dev $(git rev-parse --short HEAD)") || exit 1
 # 2. target slot = the one dev is NOT registered from:
 powershell -NoProfile -Command "(Get-AppxPackage AgentmasterDev).InstallLocation"
-# 3. the §5.8 purge check (purge if it hits), and the target slot's resources.pri (§5.1):
-rm -f src/cascadia/CascadiaPackage/bin/x64/<target-slot>/resources.pri
+# 3. the junctions (§0), the §5.8 purge check (purge if it hits), and the target slot's resources.pri (§5.1):
+rm -f '/q/agentmaster-layouts/<target-slot>/resources.pri'
 # 4. build the Debug package (NO -ReleaseIdentity) into the target slot - dev keeps serving:
-pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -MaxCpu 4 -ClMpCount 6 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B'
+pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -MaxCpu 4 -ClMpCount 6 -LayoutDir 'Q:\agentmaster-layouts\<target-slot>'
 # 5. before the swap: the swap ends each dev claude with CTRL_CLOSE, so check none is mid-turn
-#    (agentmasterdev sessions --json: derivedState / turnInFlight / presence). Then dry-run it:
-pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B' -PackageName AgentmasterDev -WhatIf
-pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug-B' -PackageName AgentmasterDev
+#    (agentmaster sessions --json --instance dev: derivedState, never turnInFlight). Then dry-run it:
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'Q:\agentmaster-layouts\<target-slot>' -PackageName AgentmasterDev -WhatIf
+pwsh -ExecutionPolicy Bypass -File ./tools/Swap-AgentmasterLayout.ps1 -LayoutDir 'Q:\agentmaster-layouts\<target-slot>' -PackageName AgentmasterDev
 # 6. verify (~/.agentmaster-dev/hooks.log: the new pid's "bridge listening", "[rehome] ...
 #    resumed=N", "[ui-stall] watchdog armed"; no crash dump; no Application Error) -> release
 bash tools/am-lock.sh release --token "$TOKEN"
@@ -364,14 +393,14 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 1. **`PRI210 / 0x800704c8` — "File move failed … resources.pri"** during a package build:
    the REGISTERED layout keeps `resources.pri` memory-mapped (no owning process visible).
-   Fix: `rm src/cascadia/CascadiaPackage/bin/x64/<Config>/resources.pri` and rebuild —
-   MakePri then *creates* instead of overwriting. **Recurs reliably, not just "first occurrence
-   per layout"** — hit on the FIRST build of a deploy cycle twice in one session, both times
-   after the dev instance had been running a while before being closed. Cheap prevention: delete
-   it proactively BEFORE the first build of a cycle (same idiom as §5.7's daemon-clear) instead
-   of waiting to hit the error and retry:
+   Fix: `rm` the target slot's `resources.pri` (`Q:\agentmaster-layouts\<slot>\resources.pri`)
+   and rebuild — MakePri then *creates* instead of overwriting. **Recurs reliably, not just
+   "first occurrence per layout"** — hit on the FIRST build of a deploy cycle twice in one
+   session, both times after the dev instance had been running a while before being closed.
+   Cheap prevention: delete it proactively BEFORE the first build of a cycle (same idiom as
+   §5.7's daemon-clear) instead of waiting to hit the error and retry:
    ```bash
-   rm -f "src/cascadia/CascadiaPackage/bin/x64/Debug/resources.pri"
+   rm -f '/q/agentmaster-layouts/<target-slot>/resources.pri'
    ```
 2. **Exe link fails / `LNK1104` on `WindowsTerminal.exe`**: that configuration's instance is
    still running — you skipped the close (or another window respawned). Re-run the path-
@@ -394,10 +423,11 @@ bash tools/am-lock.sh release --token "$TOKEN"
    re-ask; check the dialog exists via an `EnumWindows` for class `#32770` on the new pid.
 6. **Which instance is which / is it up?**
    ```powershell
-   Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe'" |
-     ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | select ProcessId, ExecutablePath
+   Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe'" |
+     ? { $_.ExecutablePath -like 'Q:\agentmaster-layouts\*' } | select ProcessId, ExecutablePath
    ```
-   `…\bin\x64\Debug\…` = dev, `…\bin\x64\Release\…` = production. Engine proof: tail
+   `…\Debug\…` or `…\Debug-B\…` = dev, `…\Release\…` or `…\Release-B\…` = production
+   (`Get-AppxPackage` names which slot each runs from). Engine proof: tail
    `<profile>\hooks.log` for `[engine] bridge listening` / `[observer] census`.
 7. **Build fails with `error C1083: Cannot open compiler generated file: '…\X.obj': Permission
    denied` + `cl : command line error D8040: error creating or communicating with child process`**
@@ -465,10 +495,14 @@ bash tools/am-lock.sh release --token "$TOKEN"
 
 9. **`C1085` / `C1088` / `MSB3191` "There is not enough space on the disk"** (a different failure
    from the PCH-*memory* `C3859`/`C1076`): K: is chronically near-full, and a cold/purged Release
-   build writes ~20 GB of intermediates. Both configurations' `obj\x64\<Config>` are therefore
-   **junctions to Q:** — `Debug` → `Q:\tmp\agentmaster-dev-build`, `Release` →
-   `Q:\tmp\agentmaster-release-build` (user-chosen; `cmd /c dir /AL obj\x64` shows them). If a
-   build dies on space anyway: check `Get-PSDrive K,Q`; confirm the junctions still exist (on
+   build writes ~20 GB of intermediates. **Every build therefore writes to Q:** (the user's rule
+   since 2026-10-19, §0): both configurations' `obj\x64\<Config>` are **junctions to Q:** —
+   `Debug` → `Q:\tmp\agentmaster-dev-build`, `Release` → `Q:\tmp\agentmaster-release-build`
+   (user-chosen; `cmd /c dir /AL obj\x64` shows them) — and so are `bin` (→
+   `Q:\tmp\agentmaster-bin`, 8.4 GB moved there 2026-10-19) and `src\cascadia\CascadiaPackage\`
+   `bin` / `obj` / `AppPackages` (→ `Q:\tmp\agentmaster-package-bin` / `-package-obj` /
+   `-apppackages`; `cmd /c dir /AL K:\source\Agentmaster` and `…\src\cascadia\CascadiaPackage`
+   show them). If a build dies on space anyway: check `Get-PSDrive K,Q`; confirm the junctions still exist (on
    2026-09-26 the whole `obj\` folder — junctions included — was deleted by something outside
    the build while K: sat at 0 bytes; the Q: targets survived); recreate a missing one with
    `New-Item -ItemType Junction -Path K:\source\Agentmaster\obj\x64\<Config> -Target <Q: dir>`.
