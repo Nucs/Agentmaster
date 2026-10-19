@@ -16,14 +16,19 @@ The survey finds those successors with ripgrep, so the two cases are counted apa
 Nothing is written anywhere but stdout. Results of the first run (2026-10-19): doc/agentmaster/INTERACTIVE_TOOLS.md §2.
 
 Usage:
-    python -I survey_interactive.py [<claude-projects-dir>]
+    python -I survey_interactive.py [<claude-projects-dir>] [--real-only]
     (default: %CLAUDE_CONFIG_DIR%\\projects, else ~/.claude/projects; needs `rg` on PATH)
+    --real-only leaves out the transcripts of sessions that worked in a folder under %TEMP% (the probe of
+    run_probe.py and other test runs), so the counts are real use only.
 """
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
+import tempfile
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -198,6 +203,187 @@ def has_restart_successor(projects, stems):
     return found
 
 
+def is_preview_question(q):
+    """Claude Code's own rule (2.1.291 `P4e`) for a question that shows previews and takes notes.
+
+    Only a SINGLE-select question with at least one option that carries a `preview` gets the side-by-side
+    preview layout and the "Notes:" field; a multi-select question's previews are never shown.
+
+    Args:
+        q: one question object from the call's input.
+    Returns:
+        True for a preview question.
+    """
+    opts = q.get("options") or []
+    return not q.get("multiSelect") and any(isinstance(op, dict) and op.get("preview") for op in opts)
+
+
+def report_previews(recs, results):
+    """Print how previews and notes were used in AskUserQuestion answers.
+
+    For every preview question whose call has a result it reads the structured answer
+    (`toolUseResult.answers[question]`) and the annotations (`toolUseResult.annotations[question]`):
+    whether an option was chosen, whether the chosen option's preview was echoed back as
+    `annotations.preview`, whether a note was added, and the note's length. It also counts previews over
+    2,000 characters, which the TUI withholds ("preview cannot be shown in full", 2.1.291 `FXe`).
+
+    Args:
+        recs: the AskUserQuestion (tool_use id, use record) pairs.
+        results: tool_use id -> (timestamp, text, toolUseResult, is_error).
+    Returns:
+        None (the report goes to stdout).
+    """
+    questions = 0
+    multi_with_preview = 0
+    answered = Counter()
+    notes_len = []
+    echoed = 0
+    chose_previewed = 0
+    withheld = 0
+    note_samples = []
+    for tid, u in recs:
+        r = results.get(tid)
+        tur = r[2] if r else None
+        for q in u["input"].get("questions") or []:
+            if not isinstance(q, dict):
+                continue
+            opts = [op for op in (q.get("options") or []) if isinstance(op, dict)]
+            withheld += sum(1 for op in opts if op.get("preview") and len(op["preview"]) > 2000)
+            if q.get("multiSelect") and any(op.get("preview") for op in opts):
+                multi_with_preview += 1
+            if not is_preview_question(q):
+                continue
+            questions += 1
+            if not isinstance(tur, dict):
+                answered["no structured answer (rejected, cut off, still open)"] += 1
+                continue
+            text = q.get("question") or ""
+            answer = (tur.get("answers") or {}).get(text)
+            ann = (tur.get("annotations") or {}).get(text) or {}
+            labels = {op.get("label"): op for op in opts}
+            if answer is None:
+                kind = "no option chosen"
+            elif answer == "(notes only)":
+                kind = "notes only"
+            elif answer in labels:
+                kind = "an option"
+                if labels[answer].get("preview"):
+                    chose_previewed += 1
+                    # The PC dialog echoes the chosen option's (full) preview into the annotations.
+                    echoed += 1 if ann.get("preview") == labels[answer]["preview"] else 0
+            else:
+                kind = "typed text (Other)"
+            note = ann.get("notes")
+            answered[kind + (" + a note" if note else "")] += 1
+            if note:
+                notes_len.append(len(note))
+                if len(note_samples) < 6:
+                    note_samples.append(note[:120].replace("\n", " "))
+    print(f"\n  ---- previews and notes (single-select questions with a preview: {questions}; "
+          f"multi-select questions with previews, never shown: {multi_with_preview}; previews over 2,000 chars, "
+          f"withheld by the TUI: {withheld})")
+    for k, v in answered.most_common():
+        print(f"    {v:5d}  {k}")
+    print(f"    chose an option that has a preview: {chose_previewed}; its preview echoed in annotations.preview: {echoed}")
+    if notes_len:
+        print(f"    notes: {len(notes_len)}, chars median {statistics.median(notes_len):.0f}, p90 {pct(notes_len, 90)}, "
+              f"max {max(notes_len)}")
+        for s in note_samples:
+            print(f"      e.g. {s!r}")
+
+
+def cell_width(line):
+    """A line's width in terminal cells: East Asian wide / fullwidth characters take 2, combining marks 0.
+
+    An approximation of what the TUI's preview box and a phone's monospace block must fit; it ignores
+    emoji presentation and tab stops (a tab counts 1, as the TUI's preview replaces nothing there).
+
+    Args:
+        line: one line of a preview.
+    Returns:
+        The width in cells.
+    """
+    w = 0
+    for ch in line:
+        if unicodedata.combining(ch):
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def report_preview_shapes(recs):
+    """Print the size and shape of every preview question, for choosing how a phone shows the previews.
+
+    Per preview question (Claude Code's `P4e` rule): how many options carry a preview, the previews' total
+    characters, the widest line (in terminal cells), the lines per preview, an estimate of one message that
+    shows the question, every option and every preview inline, what kinds of content the previews hold (box
+    drawing, Markdown tables, headings, fences, HTML-looking tags), and how many preview questions share a
+    call with other questions.
+
+    Args:
+        recs: the AskUserQuestion (tool_use id, use record) pairs.
+    Returns:
+        None (the report goes to stdout).
+    """
+    totals, widest, lines, inline_msg, per_preview_widest = [], [], [], [], []
+    kinds = Counter()
+    in_multi_call = 0
+    calls_with_preview = 0
+    for _tid, u in recs:
+        qs = [q for q in (u["input"].get("questions") or []) if isinstance(q, dict)]
+        pq = [q for q in qs if is_preview_question(q)]
+        if not pq:
+            continue
+        calls_with_preview += 1
+        if len(qs) > 1:
+            in_multi_call += len(pq)
+        for q in pq:
+            opts = [op for op in (q.get("options") or []) if isinstance(op, dict)]
+            previews = [op["preview"] for op in opts if isinstance(op.get("preview"), str) and op["preview"]]
+            totals.append(sum(len(pv) for pv in previews))
+            q_widest = 0
+            for pv in previews:
+                pl = pv.split("\n")
+                lines.append(len(pl))
+                pw = max((cell_width(l) for l in pl), default=0)
+                per_preview_widest.append(pw)
+                q_widest = max(q_widest, pw)
+                # Content kinds, by the cheapest reliable sign of each.
+                if any("─" <= ch <= "▟" for ch in pv):
+                    kinds["box drawing / block elements"] += 1
+                if "```" in pv:
+                    kinds["code fence"] += 1
+                if any(l.lstrip().startswith("#") for l in pl):
+                    kinds["Markdown heading"] += 1
+                if any(set(l.strip()) <= set("|-: ") and "|" in l and "-" in l for l in pl):
+                    kinds["Markdown table"] += 1
+                if "<" in pv and ">" in pv and any(t in pv for t in ("<div", "<pre", "<span", "<table", "<p>", "<br")):
+                    kinds["HTML-looking tags"] += 1
+            widest.append(q_widest)
+            # One message showing it all: the question, then per option "N. label - description" + its preview.
+            inline_msg.append(len(q.get("question") or "") + sum(
+                len(op.get("label") or "") + len(op.get("description") or "") + len(op.get("preview") or "") + 8
+                for op in opts))
+    if not totals:
+        return
+    n = len(totals)
+    print(f"\n  ---- preview shapes ({n} preview questions in {calls_with_preview} calls; {in_multi_call} of them share "
+          f"a call with other questions)")
+    print(f"    previews per question's total chars: median {statistics.median(totals):.0f}, p90 {pct(totals, 90)}, "
+          f"max {max(totals)}")
+    print(f"    one message with every option and preview inline: median {statistics.median(inline_msg):.0f}, "
+          f"p90 {pct(inline_msg, 90)}, max {max(inline_msg)}; over 3,500 chars: "
+          f"{sum(1 for x in inline_msg if x > 3500)}; over 4,096: {sum(1 for x in inline_msg if x > 4096)}")
+    print(f"    lines per preview: median {statistics.median(lines):.0f}, p90 {pct(lines, 90)}, max {max(lines)}")
+    print(f"    widest line per preview (cells): median {statistics.median(per_preview_widest):.0f}, "
+          f"p90 {pct(per_preview_widest, 90)}, max {max(per_preview_widest)}")
+    for limit in (32, 40, 48, 56, 64, 80):
+        fit = sum(1 for x in widest if x <= limit)
+        print(f"    questions whose every preview line fits {limit} cells: {fit} of {n} ({100 * fit / n:.0f}%)")
+    for k, v in kinds.most_common():
+        print(f"    previews with {k}: {v}")
+
+
 def main():
     """Run the survey and print the report.
 
@@ -205,8 +391,10 @@ def main():
         0 on success; 1 when the projects folder does not exist.
     """
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if len(sys.argv) > 1:
-        projects = sys.argv[1]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if positional:
+        projects = positional[0]
     else:
         base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
         projects = os.path.join(base, "projects")
@@ -214,6 +402,13 @@ def main():
         print(f"no projects folder at {projects}")
         return 1
     files = candidate_files(projects)
+    if "--real-only" in flags:
+        # Test runs (this folder's probe, the ConPTY driver's self-tests) work in folders under %TEMP%; their
+        # project folders carry the temp path in Claude Code's encoding (every non-alphanumeric -> "-").
+        temp_key = re.sub(r"[^A-Za-z0-9]", "-", tempfile.gettempdir()).lower()
+        kept = [f for f in files if not os.path.basename(os.path.dirname(f)).lower().startswith(temp_key)]
+        print(f"--real-only: left out {len(files) - len(kept)} transcript(s) whose folder is under {tempfile.gettempdir()}")
+        files = kept
     uses = {}
     results = {}
     for path in files:
@@ -314,6 +509,8 @@ def main():
                       f"label max {max(llen) if llen else 0}")
             if previews:
                 print(f"  options with a preview: {len(previews)} (chars median {statistics.median(previews):.0f}, max {max(previews)})")
+            report_previews(recs, results)
+            report_preview_shapes(recs)
         if plan_len:
             print(f"  plan chars (every call with a plan): {len(plan_len)} plans, median {statistics.median(plan_len):.0f}, "
                   f"p90 {pct(plan_len, 90)}, max {max(plan_len)}; over 4,096 (one Telegram message) "
