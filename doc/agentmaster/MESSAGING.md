@@ -3931,6 +3931,114 @@ build that carries d0fbc4e31, §21.26 and this change costs one edit per card in
 - Every card's place line reads like the one above: no "…", no "claude-", no "ctx", on the phone and on the desktop app.
 - The work log's tool lines still show "Edit: …/TerminalApp/AgentMaster/Messaging.cpp".
 
+### 21.28 A tapped button stays busy until its work is done (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19): "In telegram, buttons we click on should look 'active' as long as they are waiting for
+> serverside to react."
+
+**Why a button went idle at once.** Telegram shows a tapped inline button's loading indicator until the bot answers the
+tap: answerCallbackQuery, and the Bot API's CallbackQuery note says "Telegram clients will display a progress bar until you
+call answerCallbackQuery". `_handleCallback` answered every tap the moment it came in, before the work it asked for had gone
+out. That work (a page flip, a picture, a launch) goes through the paced outbox, about one call per 1.05 s, behind whatever
+is queued. So the button went idle while nothing had happened yet.
+
+**What changed: the answer is HELD while the tap's work runs** (the mechanism is `MessagingTaps.h`, header-only, std only):
+- **What the handler queues.** The handler runs inside a TAP SCOPE of its own hold (`TapScope`, one per thread). `_enqueue`
+  gives every outbox item queued in a scope one hold per tap (`OutItem::tapHolds`), and the item keeps it until Telegram has
+  answered that call. The send loop runs the item's callback inside a scope of the same holds, so a fallback holds the tap
+  too: a refused rich message sent again as HTML, a refused photo sent as a document. A newer item that replaces a queued
+  one by its key takes over the old one's holds. This also applies when a long 429 put the old one back.
+- **Work that finishes elsewhere carries the tap along:**
+  - The hosting window's reply to 🖥 Screen Text and 🖼 Screen Image, and the picture's worker thread.
+  - A launch's revive (`Revive::tapHolds`), until the "Opened …" line or the window's refusal is in the thread.
+  - A new thread's launch (`_bindTapHolds`, by launch token), until the window answers.
+  - The census worker of the wizard's window step.
+  - The sticky card's NEXT change (`CardState::tapHolds`, `_awaitCardChange`), for:
+    - a page flip that met a card post in flight;
+    - a directory dot's re-post;
+    - 🔄 Restart Session, ▶ Reactivate and 🔧 Resume Session;
+    - a confirmed restart, park or interrupt.
+  - The card edit or post that shows such a change goes at once, past the edit gap, at an answer's priority
+    (`SendPriority::Final`).
+- **The answer goes when the tap's LAST hold goes:**
+  - `OnTapHoldsGone` (the service is a `TapReleaseSink`) queues the tap under the leaf lock `_tapMtx`.
+  - The send loop's `_answerDueTaps` then queues the answer ahead of every other item of its priority (`kTapAnswerOutSeq`).
+- **Or at the hold's LIMIT,** `kTapAnswerHoldMaxMs`, 9 s after the tap came in, whichever comes first. The limit's answer
+  carries the handler's toast. With no toast and work still going on, it says "⏳ Still working on it — the result shows up
+  here when it is done." The work itself is never cut short.
+
+**The limit.** Telegram does not document how long it waits for an answer:
+- Measured by others: an answer about 15 s after the tap is refused with `QUERY_ID_INVALID`. The sources are a
+  python-telegram-bot maintainer's test ("Code for checking out the timeout of answerCallbackQuery") and a Stack Overflow
+  answer ("about 15 seconds").
+- Some frameworks say 10 s (GramIO's documentation, nutgram's maintainer).
+- The loading indicator ends at that same limit: the client waits on MTProto `messages.getBotCallbackAnswer`, which fails
+  with `BOT_RESPONSE_TIMEOUT`.
+- 9 s plus the send loop's pass (at most 1.2 s) plus the outbox's gap (1.05 s) lands the answer, and its toast, in time.
+
+**What each button waits for:**
+
+| Button | Its answer goes when |
+|---|---|
+| ⚙️ Session, ◀ Back | the card's new keyboard is in (or the change after a card post in flight) |
+| 🖥 Screen Text | the screen's text is in the topic |
+| 🖼 Screen Image | the picture is in (or the line saying why there is none) |
+| ⑂ Fork, 🆕 New Session | "Opened …" is in the thread (or the window's refusal) |
+| 🔄 Restart Session, ▶ Reactivate, 🔧 Resume Session | the card shows the restarted or started session |
+| Runner, Pin, Queue, Send next now, Transcript | its reply is in (Pin: also the card's edit; Transcript: the file) |
+| Restart now, Park now, Interrupt now (the confirms) | the reply and the card's change |
+| 🔎 Search: ⊘ Clear, a pick number | the "cleared" line, the pick's menu |
+| A pick's ▶ Resume, ⑂ Fork | the menu's edit, then "Opened …" (or the refusal) |
+| A directory dot | its card's re-post (the topic is first in the list); a topic still replaying its history is answered at once |
+| A new thread's wizard | the picker's edit; the model: the window step's list; a window: the window's answer to the launch |
+| Recreate this topic | at once (the topic is deleted a moment later) |
+
+**Toasts.**
+- Removed:
+  - 🖼 Screen Image's "Drawing the screen…".
+  - ⑂ Fork's "Forking it into a new tab…" and 🆕 New Session's "Opening a new session in its folder…".
+  - Each would now show up after the picture, or after the "Opened …" line. The busy button says the same while the work
+    runs.
+- Every other toast is unchanged. It shows when the work is in.
+
+**Not done.** Nothing about the button itself is edited (no "⏳" label): such an edit would cost two edits per tap against
+the chat's flood budget, and Telegram's own indicator does exactly this. A PC-side action with no completion signal of its
+own is judged by what the chat shows: a restart, a park and an interrupt by the card's next change. The window's restart,
+for example, answers nothing.
+
+**The cost.** No new message and no extra call: each tap still gets one answer, only later, through the outbox (about
+1.05 s after the call that answered it). A tapped card's edit and a directory dot's re-post go at `Final` priority.
+
+**Logs** (hooks.log), one line per tap:
+- `[msg] tap c:session: answer queued 2310 ms after the tap (its work is in)`, or `(the hold's limit; its work goes on)`.
+- A refused answer: `[msg] tap …: Telegram refused its answer (…)`. That is mostly "query is too old": the answer came
+  after Telegram stopped waiting.
+
+**Tests** (`tests/tests_messaging_taps.cpp`, `TestMessagingTaps`, 65 checks):
+- The toast's cut, never inside a surrogate pair.
+- The answer's text: the handler's toast, the still-working note at the limit, nothing.
+- The log's label: a card verb without its session, a pick's number, a token hidden.
+- One tap: its deadline, its single answer, its last toast wins.
+- The holds: the sink is told exactly once, when the LAST hold goes; a shared copy keeps the hold; an inert hold and a gone
+  sink tell nothing; moved holds change hands without letting go.
+- The scopes:
+  - nesting, the outer scope's tap kept;
+  - a tap counted once;
+  - another thread never sees a scope;
+  - an empty or inert scope is no scope;
+  - an answered tap gets no new hold.
+- The whole path as the service runs it: a handler and its two items, a callback's fallback, a replaced edit.
+- The service's half, which needs Telegram and a window, is the check after the build.
+
+**Check after the build** (each install, with its bot):
+- ⚙️ Session on a card: the button shows its loading indicator until the keyboard flips. hooks.log has `[msg] tap
+  c:session: answer queued … ms after the tap (its work is in)`.
+- 🖼 Screen Image: the button stays busy until the picture is in. A slow upload past 9 s ends with the toast "⏳ Still
+  working on it …", and the picture still comes.
+- ⑂ Fork: busy until "Opened …" (or the refusal) is in the thread.
+- 🔄 Restart Session on a session in Error: busy until the card shows the next state, or 9 s with the restart's toast.
+- A directory dot: busy until the topic is first in the thread list.
+
 ### 21.29 A rename's change line is its only answer (2026-10-19; NOT BUILT yet)
 
 > The user's request (2026-10-19), after a `/rename` posted two messages, "Renamed to 🟧 Small telegram fixes (the topic

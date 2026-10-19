@@ -50,6 +50,11 @@ namespace Agentmaster::Msg
         // Telegram answered an editMessageText with 429 + retry_after 1526 s (2026-10-16). Every call now
         // keeps the ~1/s per-chat pace; what makes it bearable is that nothing periodic edits any more.
         constexpr int64_t kLightGapMs = 1050;
+        // §21.28: the outbox sequence number of every answer to a tapped button — the lowest one _enqueue keeps (0 means "number
+        // it"). The outbox serves by priority, then by seq, so an answer goes before every other item of its priority (only the
+        // run's very first item is numbered 1 too, and it is long gone by the first tap): it is no message of the chat, and the
+        // button keeps spinning until it lands. Answers among themselves keep the order they were queued in.
+        constexpr uint64_t kTapAnswerOutSeq = 1;
         // How often a work-log message is edited while the turn runs, and how long it may grow before it
         // rolls over into a new message.
         constexpr int64_t kWorkLogEditGapMs = 15 * 1000;
@@ -983,6 +988,23 @@ namespace Agentmaster::Msg
                 _directoryRichRefusedHash = 0;
                 _directoryPinTried = false;
                 _directoryEditLogged = false;
+                // §21.28: a new thread's tap holds are the last run's (no launch of this run has a token yet). Letting them go here,
+                // under `_mtx`, only queues their taps for the send loop (OnTapHoldsGone takes the leaf `_tapMtx`), which the next
+                // step forgets.
+                _bindTapHolds.clear();
+            }
+            {
+                // §21.28: the last run's tapped buttons are past Telegram's limit by now, and the send thread that would have answered
+                // them is gone: each is marked answered — so a hold that goes later (a window's reply still on its way) queues no
+                // answer Telegram would refuse — and forgotten, with the ones the outbox's clear above just let go.
+                std::lock_guard lk{ _tapMtx };
+                for (const auto& tap : _openTaps)
+                {
+                    tap->TryClaimAnswer();
+                }
+                _openTaps.clear();
+                _tapsDue.clear();
+                _tapAnswersDue.store(false);
             }
             // The registry notifies every change of every session; the service only marks the session
             // dirty and wakes the tick (never any work on the notifying thread).
@@ -1535,11 +1557,17 @@ namespace Agentmaster::Msg
         {
             try
             {
+                // §21.28: the tapped buttons whose work is done (their last hold went) and the ones past their hold's limit get their
+                // answers queued first — every pass, so a limit is kept within a pass (0.5 s while the outbox is empty, 1.2 s while
+                // it paces), and outside `_mtx`, which the answer's _enqueue takes.
+                _answerDueTaps();
                 OutItem item;
                 int64_t waitMs = 0;
                 {
                     std::unique_lock lk{ _mtx };
-                    _sendCv.wait_for(lk, std::chrono::milliseconds(500), [this] { return _stop.load() || !_outbox.empty(); });
+                    // §21.28: a tap whose last hold went wakes the wait too (OnTapHoldsGone): with an empty outbox the pass ends at
+                    // once, and the next one queues the answer.
+                    _sendCv.wait_for(lk, std::chrono::milliseconds(500), [this] { return _stop.load() || !_outbox.empty() || _tapAnswersDue.load(); });
                     if (_stop.load())
                     {
                         break;
@@ -1673,11 +1701,18 @@ namespace Agentmaster::Msg
                     _parkForFlood(method, r.retryAfterSec, item.asSecretary);
                     {
                         std::lock_guard lk{ _mtx };
-                        const bool superseded = !item.key.empty() &&
-                                                std::any_of(_outbox.begin(), _outbox.end(), [&item](const OutItem& o) { return o.key == item.key; });
+                        const auto newer = item.key.empty() ? _outbox.end() :
+                                                              std::find_if(_outbox.begin(), _outbox.end(), [&item](const OutItem& o) { return o.key == item.key; });
+                        const bool superseded = newer != _outbox.end();
                         if (!superseded)
                         {
                             _outbox.push_back(std::move(item));
+                        }
+                        else
+                        {
+                            // §21.28: the newer item carries the change a tapped button waits for (the same message, a newer
+                            // text), so it takes over this stale one's holds instead of letting the tap answer before it.
+                            MoveTapHolds(item.tapHolds, newer->tapHolds);
                         }
                     }
                     continue;
@@ -1704,6 +1739,10 @@ namespace Agentmaster::Msg
                 {
                     try
                     {
+                        // §21.28: what the callback queues — a refused rich message sent again as HTML, a refused photo sent as
+                        // a document, the next step of a chain — holds the same tapped buttons as this item (a scope never
+                        // throws); the item's own holds go when it does, at the end of this pass.
+                        const TapScope tapScope{ item.tapHolds };
                         item.onDone(r);
                     }
                     catch (...)
@@ -1856,6 +1895,9 @@ namespace Agentmaster::Msg
                                     // §21.25: the new-thread wizards and their launches name threads of the OLD bot's chat.
                                     _newThreads.clear();
                                     _threadBinds.clear();
+                                    // §21.28: and so do the holds of the taps that started those launches (letting them go here
+                                    // only queues their taps for the send loop: OnTapHoldsGone takes the leaf `_tapMtx`).
+                                    _bindTapHolds.clear();
                                     _state.newThreads = json::Value{};
                                     _newThreadsResumePending = false;
                                     // §21.16: the directory message is a message of the OLD bot's chat; the new bot posts its own.
@@ -2248,15 +2290,26 @@ namespace Agentmaster::Msg
                 }
             }
         }
+        // §21.28: an item queued inside a TAP SCOPE — while a tapped button's handler runs, or a continuation of its work — holds
+        // that tap's answer until Telegram has answered this call (the send loop lets the item's holds go after its callback), so
+        // the button keeps its loading indicator for as long as the work it asked for. An answer itself holds nothing. Outside a
+        // scope (the fleet's own traffic, nearly every call) this is one thread-local read.
+        if (TapScope::Active() && item.method != L"answerCallbackQuery")
+        {
+            std::vector<TapHoldRef> holds = _holdTaps();
+            MoveTapHolds(holds, item.tapHolds);
+        }
         {
             std::lock_guard lk{ _mtx };
             if (!item.key.empty())
             {
-                // A newer item with the same key replaces the queued one (an edit of the same message).
+                // A newer item with the same key replaces the queued one (an edit of the same message). §21.28: it takes over the
+                // replaced item's tap holds — the newer edit carries the change that tap waits for (a newer text still).
                 for (auto it = _outbox.begin(); it != _outbox.end();)
                 {
                     if (it->key == item.key)
                     {
+                        MoveTapHolds(it->tapHolds, item.tapHolds);
                         it = _outbox.erase(it);
                     }
                     else
@@ -2278,6 +2331,144 @@ namespace Agentmaster::Msg
     {
         std::lock_guard lk{ _mtx };
         return ++_outSeq;
+    }
+
+    // ===== §21.28: a tapped button's answer, held while its work runs ========================================================
+
+    void MessagingService::OnTapHoldsGone(const std::shared_ptr<TapAnswer>& tap) noexcept
+    {
+        try
+        {
+            {
+                // The LEAF lock only: this thread may hold `_mtx` (an outbox item dropped under it); the answer itself is queued
+                // by the send loop (_answerDueTaps), outside every lock.
+                std::lock_guard lk{ _tapMtx };
+                _tapsDue.push_back(tap);
+            }
+            _tapAnswersDue.store(true);
+            _sendCv.notify_one();
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the tap stays in `_openTaps`, so its hold's limit answers it — a few seconds late, never lost.
+            LogSwallowedException(L"MessagingService::OnTapHoldsGone");
+        }
+    }
+
+    std::vector<TapHoldRef> MessagingService::_holdTaps()
+    {
+        // The holds tell this service (weakly: a hold that outlives the service — a window's reply after a quit — tells nobody).
+        return HoldTapsOfScope(std::weak_ptr<TapReleaseSink>{ weak_from_this() });
+    }
+
+    void MessagingService::_awaitCardChange(const std::wstring& sessionId)
+    {
+        if (!TapScope::Active())
+        {
+            return; // the fleet's own refreshes and the typed commands: no button waits
+        }
+        std::vector<TapHoldRef> holds = _holdTaps();
+        if (holds.empty())
+        {
+            return; // every tap in scope was answered already (its hold's limit passed)
+        }
+        std::lock_guard lk{ _mtx };
+        const auto it = _state.topics.find(sessionId);
+        if (it == _state.topics.end() || it->second.threadId == 0)
+        {
+            // No topic, so no card that could change: the holds go with this function (after the lock), and the tap is answered
+            // as soon as its other holds go.
+            return;
+        }
+        MoveTapHolds(holds, _cards[sessionId].tapHolds);
+    }
+
+    void MessagingService::_answerDueTaps() noexcept
+    {
+        try
+        {
+            const int64_t now = static_cast<int64_t>(::GetTickCount64());
+            std::vector<std::pair<std::shared_ptr<TapAnswer>, bool>> due; // (the tap, answered by its hold's limit)
+            {
+                std::lock_guard lk{ _tapMtx };
+                // The flag before the take: a hold that goes after the take sets it again and wakes the next pass.
+                _tapAnswersDue.store(false);
+                // The taps whose last hold went come first: a tap that also reached its limit in the same moment is answered as
+                // done (its work is in), and the second claim below finds it answered.
+                for (auto& tap : _tapsDue)
+                {
+                    due.emplace_back(std::move(tap), false);
+                }
+                _tapsDue.clear();
+                for (auto it = _openTaps.begin(); it != _openTaps.end();)
+                {
+                    if ((*it)->Answered())
+                    {
+                        it = _openTaps.erase(it); // answered by its last hold: nothing more to watch
+                    }
+                    else if (now >= (*it)->deadlineMs)
+                    {
+                        due.emplace_back(*it, true);
+                        it = _openTaps.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
+            for (const auto& [tap, byLimit] : due)
+            {
+                _answerTap(tap, byLimit, now);
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the taps taken in this pass go unanswered (their buttons stop at Telegram's own limit); the open
+            // ones that were not taken are looked at again by the next pass.
+            LogSwallowedException(L"MessagingService::_answerDueTaps");
+        }
+    }
+
+    void MessagingService::_answerTap(const std::shared_ptr<TapAnswer>& tap, bool byLimit, int64_t nowTickMs)
+    {
+        if (!tap || !tap->TryClaimAnswer())
+        {
+            return; // answered already: by its last hold, or by its limit a pass ago
+        }
+        const bool workGoesOn = byLimit && tap->holds.load() > 0;
+        const std::wstring text = TapAnswerText(tap->Toast(), workGoesOn);
+        OutItem item;
+        item.prio = SendPriority::Final;
+        // Ahead of every other item of its priority (the outbox serves by priority, then by seq): an answer is no message of the
+        // chat, so it can come before none of them out of order, the work its tap waited for has been answered already (or its
+        // limit is up), and the button spins until the answer lands.
+        item.seq = kTapAnswerOutSeq;
+        item.method = L"answerCallbackQuery";
+        item.paced = false;
+        item.params = json::Value::MkObj();
+        item.params.Set(L"callback_query_id", json::Value::MkStr(tap->queryId));
+        if (!text.empty())
+        {
+            item.params.Set(L"text", json::Value::MkStr(text));
+        }
+        auto self = weak_from_this();
+        const std::wstring label = tap->logLabel;
+        item.onDone = [self, label](const TgResult& r) {
+            if (r.ok)
+            {
+                return;
+            }
+            // Mostly "query is too old" — the answer came after Telegram stopped waiting (the button had stopped spinning by
+            // then); the work itself was done or goes on all the same.
+            if (const auto me = self.lock())
+            {
+                me->_log(L"[msg] tap " + label + L": Telegram refused its answer (" + (r.description.empty() ? std::wstring{ L"no response" } : r.description) + L")");
+            }
+        };
+        _log(L"[msg] tap " + tap->logLabel + L": answer queued " + std::to_wstring(nowTickMs - tap->receivedMs) + L" ms after the tap" +
+             (workGoesOn ? std::wstring{ L" (the hold's limit; its work goes on)" } : (byLimit ? std::wstring{ L" (the hold's limit)" } : std::wstring{ L" (its work is in)" })));
+        _enqueue(std::move(item));
     }
 
     json::Value MessagingService::_buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const
@@ -3939,6 +4130,7 @@ namespace Agentmaster::Msg
             std::lock_guard lk{ _mtx };
             if (_threadBinds.empty())
             {
+                _bindTapHolds.clear(); // §21.28: no launch is waiting, so no tap waits for one (a belt: every end lets its holds go)
                 return;
             }
             const int64_t now = WallMs();
@@ -3974,6 +4166,14 @@ namespace Agentmaster::Msg
                 {
                     ++it;
                 }
+            }
+            // §21.28: the holds of a launch whose bind is gone (expired just now, taken, or ended on a path that kept its entry) go:
+            // the tap is answered long before (its hold's limit is seconds, a bind's timeout minutes), and the map must not grow.
+            for (auto h = _bindTapHolds.begin(); h != _bindTapHolds.end();)
+            {
+                const uint64_t token = h->first;
+                const bool bound = std::any_of(_threadBinds.begin(), _threadBinds.end(), [token](const ThreadBind& b) { return b.launchToken == token; });
+                h = bound ? std::next(h) : _bindTapHolds.erase(h);
             }
         }
         for (const auto& b : expired)
@@ -4325,7 +4525,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash)
+    void MessagingService::_postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash, SendPriority prio)
     {
         {
             std::lock_guard lk{ _mtx };
@@ -4339,9 +4539,10 @@ namespace Agentmaster::Msg
         if (deleteFirst > 0)
         {
             // Same priority as the send that follows and queued first, so the old card is gone before the new
-            // one appears; a card already gone (the user deleted it) is a harmless 400.
+            // one appears; a card already gone (the user deleted it) is a harmless 400. §21.28: `prio` is the cards' own unless
+            // a tapped button waits for this post.
             OutItem del;
-            del.prio = SendPriority::CardEdit;
+            del.prio = prio;
             del.key = L"card-del:" + sessionId;
             del.method = L"deleteMessage";
             del.params = json::Value::MkObj();
@@ -4356,7 +4557,7 @@ namespace Agentmaster::Msg
         // §21.17: the post's title links to its topic when the username is known now (_sendText reads the same value).
         const bool linked = !_linkBot().empty() && TgHasTitleTokens(text);
         // `!ping` = silent: a card is a status message, and only a state the user must know about rings (§21.6).
-        _sendText(threadId, text, !ping, SendPriority::CardEdit, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId, textHash, wantRich, linked](const TgResult& r) {
+        _sendText(threadId, text, !ping, prio, L"card-post:" + sessionId, std::move(markup), [self, sessionId, threadId, textHash, wantRich, linked](const TgResult& r) {
             auto me = self.lock();
             if (!me)
             {
@@ -6077,6 +6278,9 @@ namespace Agentmaster::Msg
         TopicRecord topic;
         bool pingWanted = false;
         bool repostWanted = false;
+        // §21.28: a tapped button waits for this card's NEXT change (CardState::tapHolds): the change goes now, past the edit gap,
+        // at an answer's priority, and the edit or post that carries it takes the holds.
+        bool awaited = false;
         CardPage page = CardPage::Main; // §21.24: the page of buttons this card shows (CardState::page)
         {
             std::lock_guard lk{ _mtx };
@@ -6100,14 +6304,23 @@ namespace Agentmaster::Msg
             pingWanted = card.pingWanted;
             repostWanted = card.repostWanted; // the list's re-sort (_resortTick), kept until a post can carry it
             page = card.page; // §21.24: the page the user opened (Main unless ⚙ Session was tapped); a re-post keeps it
+            // §21.28: a hold of a tap its hold's limit answered already waits for nothing — it goes here (under `_mtx`: its sink
+            // only queues), so it can never force a later, unrelated change of this card past the edit gap.
+            auto& waitingHolds = card.tapHolds;
+            waitingHolds.erase(std::remove_if(waitingHolds.begin(), waitingHolds.end(), [](const TapHoldRef& h) { return !h || !h->Tap() || h->Tap()->Answered(); }),
+                               waitingHolds.end());
+            awaited = !waitingHolds.empty();
         }
         if (topic.cardMessageId < 0)
         {
+            // §21.28: a tap that wants a change of this card now (a page flip) waits for the change that follows the answer.
+            _awaitCardChange(sessionId);
             return; // a post is in flight; its answer sets the id (a wanted ping goes with the next post)
         }
         const int64_t now = WallMs();
         if (topic.cardMessageId == 0 && now - topic.cardPostedMs < kCardRepostAfterFailureMs)
         {
+            _awaitCardChange(sessionId); // §21.28: the next post carries the tap (its hold's limit comes first, a minute being longer)
             return; // Telegram refused the last post: not every tick
         }
         // The idle line's clock comes from the persisted stamps (IdleTopicLeavesAtMs — the same rule the plan deletes
@@ -6141,6 +6354,7 @@ namespace Agentmaster::Msg
         const bool resort = !historyPending && repostWanted;
         if (topic.cardMessageId == 0 || behind || pingWanted || resort)
         {
+            std::vector<TapHoldRef> waiting; // §21.28: the taps that wait for this card's change, taken by the post (below)
             {
                 std::lock_guard lk{ _mtx };
                 auto& card = _cards[sessionId];
@@ -6148,12 +6362,17 @@ namespace Agentmaster::Msg
                 card.repostWanted = false;
                 card.lastEditMs = now;
                 card.lastState = s->state;
+                waiting.swap(card.tapHolds);
             }
             if (pingWanted)
             {
                 _log(L"[msg] " + ShortId(sessionId) + L" card re-posted with sound (" + StateWord(s->state) + L")");
             }
-            _postCard(sessionId, topic.threadId, text, std::move(markup), topic.cardMessageId > 0 ? topic.cardMessageId : 0, pingWanted, hash);
+            // §21.28: the old card's delete and the new card's send hold the waiting taps (a directory dot's re-post, a tap's change
+            // that met a missing card) and, with a tap waiting or in scope, go at an answer's priority.
+            const TapScope tapScope{ waiting };
+            const SendPriority prio = (tapped || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit;
+            _postCard(sessionId, topic.threadId, text, std::move(markup), topic.cardMessageId > 0 ? topic.cardMessageId : 0, pingWanted, hash, prio);
             return;
         }
         const bool wantRich = _titleChipsWanted();
@@ -6177,11 +6396,12 @@ namespace Agentmaster::Msg
             formOnly = true;
         }
         bool send = false;
+        std::vector<TapHoldRef> waiting; // §21.28: the taps that wait for this card's change, taken by the edit (below)
         {
             std::lock_guard lk{ _mtx };
             auto& card = _cards[sessionId];
             const bool stateChanged = card.lastState != s->state;
-            if (formOnly || force || stateChanged || now - card.lastEditMs >= kCardEditGapMs)
+            if (formOnly || force || awaited || stateChanged || now - card.lastEditMs >= kCardEditGapMs)
             {
                 card.lastEditMs = now;
                 card.lastState = s->state;
@@ -6191,6 +6411,11 @@ namespace Agentmaster::Msg
                     _stateDirty = true;
                 }
                 send = true;
+                if (!formOnly)
+                {
+                    // §21.28: a form-only edit (the slow upgrade to chips or links) is not the change a tap waits for: the taps stay.
+                    waiting.swap(card.tapHolds);
+                }
             }
         }
         if (send)
@@ -6200,8 +6425,11 @@ namespace Agentmaster::Msg
             auto self = weak_from_this();
             const int64_t thread = topic.threadId;
             const int64_t cardId = topic.cardMessageId;
+            // §21.28: the edit holds the taps that waited for this change (the tap in scope, if any, holds it anyway).
+            const TapScope tapScope{ waiting };
             // §21.24: a tap on the card's own buttons (⚙ Session, ◀ Back) is answered at once: the edit takes an answer's priority.
-            _editText(topic.cardMessageId, text, tapped ? SendPriority::Final : SendPriority::CardEdit, L"card:" + sessionId, markup, [self, thread, cardId](const TgResult& r) {
+            // §21.28: so does a change a tapped button waits for (a restart that shows on the card, a page flip that met a post).
+            _editText(topic.cardMessageId, text, (tapped || !waiting.empty()) ? SendPriority::Final : SendPriority::CardEdit, L"card:" + sessionId, markup, [self, thread, cardId](const TgResult& r) {
                 if (r.ok || r.NotModified() || r.httpStatus != 400 || r.description.find(L"message to edit not found") == std::wstring::npos)
                 {
                     return;
