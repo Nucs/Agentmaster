@@ -543,7 +543,113 @@ try {
         return script;
     }
 
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost)
+    std::wstring BuildAskHookScript(const std::wstring& stateDir)
+    {
+        // Pure-ASCII Windows PowerShell 5.1 (the exec-form host). One piece: it stays far under MSVC's ~8,190-character limit
+        // for one wide literal (BuildForwarderScript's comment). The wait is an ASYNC read polled every 2 s, because a pipe read
+        // cannot time out and the helper must notice its claude's exit: Claude Code does not end a hook whose dialog the PC
+        // answered (measured), and the engine releases it only once it sees that answer in the transcript.
+        std::wstring script = LR"PSASK($ErrorActionPreference = "SilentlyContinue"
+$AmErrLog = {{AM_ASK_ERRLOG}}
+function NoteAskDrop([string]$why) {
+  # The question hook's local trace (the forwarder's NoteFwdDrop idiom): only for a request that could not reach a running
+  # Agentmaster. Its own try/catch: a diagnostic must never break the dialog.
+  try {
+    $stamp = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff") + "Z"
+    Add-Content -LiteralPath $AmErrLog -Value ($stamp + " AskUserQuestion " + $why)
+  } catch { }
+}
+try {
+  # The payload is UTF-8 JSON: decoded from the RAW stdin stream (the console's input code page would garble it).
+  $raw = ""
+  try {
+    $stdinReader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), (New-Object System.Text.UTF8Encoding($false)))
+    $raw = $stdinReader.ReadToEnd()
+  } catch { }
+  if ([string]::IsNullOrEmpty($raw)) { exit 0 }
+  $j = $null
+  try { $j = $raw | ConvertFrom-Json } catch { $j = $null }
+  if ($j -eq $null) { exit 0 }
+  # A subagent's (or a teammate's) dialog waits for its hooks BEFORE it shows: never hold it, answer at once with nothing.
+  if ($j.agent_id) { exit 0 }
+  if ([string]$j.tool_name -ne "AskUserQuestion") { exit 0 }
+  # The engine's pipe, found like the forwarder finds it; the question pipe is its ".ask" twin.
+  $pipe = $env:CCMGR_HOOK_PIPE
+  if ([string]::IsNullOrEmpty($pipe)) {
+    try {
+      $disc = {{AM_BRIDGE_JSON}}
+      if (Test-Path -LiteralPath $disc) {
+        $b = (Get-Content -LiteralPath $disc -Raw -Encoding UTF8) | ConvertFrom-Json
+        if ($b.pipe) { $pipe = [string]$b.pipe }
+      }
+    } catch { }
+  }
+  if ([string]::IsNullOrEmpty($pipe)) { exit 0 }
+  $name = $pipe
+  $bs = $pipe.LastIndexOf("\")
+  if ($bs -ge 0) { $name = $pipe.Substring($bs + 1) }
+  $name = $name + ".ask"
+  $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::Asynchronous)
+  try {
+    $client.Connect(1500)
+  } catch {
+    NoteAskDrop ("no question pipe " + $name + ": " + $_.Exception.Message)
+    exit 0
+  }
+  try {
+    # ONE request line, sent FIRST: it reaches the engine ~0.45 s after this host starts (measured). The payload goes as claude
+    # wrote it; a raw line break in JSON can only be whitespace between tokens. claudePid is 0: the parent is looked up below,
+    # after the request (Win32_Process costs ~1.7 s, measured), only for the wait's own end.
+    $payload = $raw -replace "`r", " " -replace "`n", " "
+    $line = '{"v":1,"hookPid":' + $PID + ',"claudePid":0,"payload":' + $payload + '}'
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $bytes = $utf8.GetBytes($line + "`n")
+    $client.Write($bytes, 0, $bytes.Length)
+    $client.Flush()
+    $reader = New-Object System.IO.StreamReader($client, $utf8)
+    $task = $reader.ReadLineAsync()
+    # The parent claude.exe (exec form: claude spawned this host directly). The wait ends when it does: Claude Code does not
+    # end a hook whose dialog the PC answered, and the engine's own release needs the transcript or the session's end.
+    $parentPid = 0
+    try { $parentPid = [int](Get-CimInstance Win32_Process -Filter ("ProcessId=" + $PID)).ParentProcessId } catch { $parentPid = 0 }
+    $deadline = [DateTime]::UtcNow.AddHours(24)
+    while (-not $task.Wait(2000)) {
+      if ($parentPid -gt 0) {
+        $p = Get-Process -Id $parentPid -ErrorAction SilentlyContinue
+        if ($p -eq $null) { exit 0 }
+      }
+      if ([DateTime]::UtcNow -gt $deadline) { exit 0 }
+    }
+    $reply = $task.Result
+    if ([string]::IsNullOrEmpty($reply) -or $reply -eq "{}") { exit 0 }
+    # The decision, as UTF-8 BYTES on the raw stdout stream (the engine sends ASCII JSON anyway; a code page never applies).
+    $out = [Console]::OpenStandardOutput()
+    $ob = $utf8.GetBytes($reply)
+    $out.Write($ob, 0, $ob.Length)
+    $out.Flush()
+    exit 0
+  } finally {
+    $client.Dispose()
+  }
+} catch {
+  NoteAskDrop ("error: " + $_.Exception.Message)
+}
+exit 0
+)PSASK";
+        const auto replaceToken = [&script](std::wstring_view token, const std::wstring& value) {
+            const auto at = script.find(token);
+            if (at != std::wstring::npos)
+            {
+                script.replace(at, token.size(), value);
+            }
+        };
+        // Per profile, like the forwarder's: each profile runs its own engine, pipe and bridge.json.
+        replaceToken(L"{{AM_BRIDGE_JSON}}", PsSingleQuote(stateDir + L"\\bridge.json"));
+        replaceToken(L"{{AM_ASK_ERRLOG}}", PsSingleQuote(stateDir + L"\\forwarder-errors.log"));
+        return script;
+    }
+
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost, std::wstring_view askScriptPath)
     {
         const auto base = std::wstring{ L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" } + std::wstring{ forwarderPath } + L"\"";
 
@@ -588,7 +694,17 @@ try {
         // pull floor in charge, so the two stay compatible in both directions.
         json += block(L"PreCompact") + L",\n";
         json += block(L"PostCompact") + L",\n";
-        json += block(L"SessionEnd") + L"\n";
+        json += block(L"SessionEnd");
+        if (!askScriptPath.empty() && !execHost.empty())
+        {
+            // The QUESTION hook (INTERACTIVE_TOOLS.md §6): a PermissionRequest hook on AskUserQuestion only, which Claude Code runs
+            // BESIDE the open dialog and whose `allow` + `updatedInput` it takes as the answer. Its timeout is a day: the helper
+            // waits as long as the question is open (the phone may answer hours later) and never blocks the PC's own answer.
+            const std::wstring args = L"[ \"-NoProfile\", \"-NonInteractive\", \"-ExecutionPolicy\", \"Bypass\", \"-File\", \"" + JsonEscape(askScriptPath) + L"\" ]";
+            json += L",\n    \"PermissionRequest\": [ { \"matcher\": \"AskUserQuestion\", \"hooks\": [ { \"type\": \"command\", \"command\": \"" + JsonEscape(execHost) +
+                    L"\", \"args\": " + args + L", \"timeout\": " + std::to_wstring(kAskHookTimeoutSeconds) + L" } ] } ]";
+        }
+        json += L"\n";
         json += L"  }"; // close "hooks"
 
         // Optional Claude-session settings from the cog. Each is emitted ONLY when it differs
@@ -1930,11 +2046,29 @@ try {
         // claude that supports it, else the classic shell form. Decided per write because this file is
         // shared: whichever claude starts next snapshots it (hooks are captured at claude's start).
         const std::wstring execHost = SelectHookExecHost(claudeExePath);
-        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd, settings.model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost)))
+        // The QUESTION hook (INTERACTIVE_TOOLS.md §6): written beside the forwarder (BOM: a non-ASCII profile path, as above) and
+        // wired only while the Telegram bot is on — nothing else can answer a question from elsewhere, and a dialog then needs no
+        // helper process at all. Its write failing leaves the file without the hook (the dialogs stay with the PC), never without
+        // the forwarder's events.
+        std::wstring askFwd;
+        if (settings.messagingEnabled && !execHost.empty())
+        {
+            const std::wstring askPath = AskHookScriptPath(stateDir);
+            if (WriteFileUtf8(askPath, std::wstring(1, static_cast<wchar_t>(0xFEFF)) + BuildAskHookScript(stateDir)))
+            {
+                askFwd = ToForwardSlashes(askPath);
+            }
+        }
+        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd, settings.model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost, askFwd)))
         {
             return { std::wstring{}, std::wstring{} };
         }
         return { settingsPath, forwarderPath };
+    }
+
+    std::wstring AskHookScriptPath(const std::wstring& stateDir)
+    {
+        return stateDir + L"\\agentmaster-ask.ps1";
     }
 
     std::wstring RenderLaunchExtraArgs(const CompiledClaudeLaunch& launch)
@@ -2006,8 +2140,19 @@ try {
         // The preset's model is the file's `model` (it must beat ~/.claude/settings.json's pinned model);
         // without one, the cog's model keeps applying exactly as in the shared hooks file.
         const std::wstring model = launch.model.empty() ? settings.model : launch.model;
+        // The question hook rides a preset launch too, under the shared file's rule (MaterializeSharedHookFiles wrote the script;
+        // it is referenced only when the file is there, so a failed script write never points claude at nothing).
+        std::wstring askFwd;
+        if (settings.messagingEnabled && !execHost.empty())
+        {
+            const std::wstring askPath = AskHookScriptPath(stateDir);
+            if (::GetFileAttributesW(askPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                askFwd = ToForwardSlashes(askPath);
+            }
+        }
         const std::wstring content = BuildLaunchSettingsJson(
-            BuildHooksSettingsJson(ToForwardSlashes(forwarderPath), model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost),
+            BuildHooksSettingsJson(ToForwardSlashes(forwarderPath), model, settings.includeCoAuthoredBy, settings.skipPermissions, execHost, askFwd),
             launch.settingsEnv);
         // Content-addressed name: <preset>-<16 hex>. The preset part only makes the folder readable; the hash
         // is what guarantees a running session's (watched) file is never rewritten under it.

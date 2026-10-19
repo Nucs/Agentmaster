@@ -159,6 +159,7 @@ int wmain()
     TestMessagingNewThread(); // MESSAGING.md §21.17 — title links, the You lines' title row, the new-thread picker (tests_messaging_newthread.cpp)
     TestMessagingCard(); // MESSAGING.md §21.24 — the card's two pages of buttons, the styled screen snapshot, the Screen Image PNG (tests_messaging_card.cpp)
     TestMessagingTaps(); // MESSAGING.md §21.28 — a tapped button's answer held while its work runs: holds, scopes, the texts (tests_messaging_taps.cpp)
+    TestAskQuestion(); // MESSAGING.md §21.30 — Claude's AskUserQuestion answered from Telegram: the answers, the card, the ask pipe (tests_ask.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();
     TestTaskbarBadge(); // NOTIFICATIONS.md section 8 — the taskbar unread badge's renderer (tests_taskbar.cpp)

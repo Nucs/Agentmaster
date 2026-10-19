@@ -1017,6 +1017,9 @@ namespace Agentmaster::Msg
                     }
                 });
             }
+            // §21.30: the question registry's acceptor (Messaging.Questions.cpp) — before `_running` turns true, so it refuses
+            // until the bot runs, and before the threads, so the tables it clears are not in use yet.
+            _questionsStart();
             _running.store(true);
             _setStatus(L"Starting\x2026");
             _pollThread = std::thread([this]() noexcept { _pollLoop(); });
@@ -1079,6 +1082,8 @@ namespace Agentmaster::Msg
             {
                 _secretaryThread.join();
             }
+            // §21.30: no acceptor any more, and every open question released ("{}"): the PC keeps each dialog while the bot is off.
+            _questionsStop();
             _saveStateIfDirty(true);
             // A clean stop removes the run marker (a marker found at the next start means a crash).
             ::DeleteFileW((_profile + L"\\messaging\\run.marker").c_str());
@@ -2113,6 +2118,10 @@ namespace Agentmaster::Msg
                     }
                     _refreshCard(sid, false);
                 }
+                // §21.30: Claude's questions — new requests become cards, every card reads its dialog's result, and the questions no
+                // hook offered within kAskPairWaitMs are posted show-only. After the per-topic pass: the mirror's question items of
+                // this tick are known by then, and no copy of a mirror is out (a new card marks its session's mirror).
+                _questionsTick();
                 // The HISTORY replay's next batch (§21.9), then the list's re-sort: both after the per-topic pass, so the
                 // live posts of this tick are queued first (they go first anyway: the replay has the lowest priority).
                 _pumpBackfill();
@@ -7011,6 +7020,9 @@ namespace Agentmaster::Msg
                 }
                 break;
             case TopicItemKind::ToolResult:
+                // §21.30: the result of a question card's dialog without answers — an error (Chat about this, Esc at the PC) or none
+                // given — closes the card (a no-op for every other tool's result).
+                _onTranscriptAnswer(sessionId, it.toolUseId, std::wstring{}, it.isError ? QuestionResult::Rejected : QuestionResult::Answered);
                 if (it.isError && verbose)
                 {
                     std::wstring name;
@@ -7039,12 +7051,26 @@ namespace Agentmaster::Msg
                     {
                         html += L"\n" + std::to_wstring(i + 1) + L". " + TgEscapeHtml(it.options[i]);
                     }
-                    html += L"\n\n<i>Answer it at the PC (answering from here comes in a later build).</i>";
                 }
                 // ONE sound per "needs you": silent when the NeedsApproval edge already rang the card (§21.6).
                 const bool sound = !m.approvalPinged;
                 m.awaitingAnswer = true;
-                _postFinal(sessionId, topic, m, html, L"a question", sound);
+                // §21.30: the question is ANSWERED FROM HERE when its question hook reaches Agentmaster: the QUESTION CARD shows it
+                // (_questionsTick), so this item only closes the turn's work log. No hook within kAskPairWaitMs (a claude that started
+                // before the bot was on, or one older than 2.1.139) leaves the text above, posted show-only with the reason.
+                if (_noteTranscriptQuestion(sessionId, it,
+                                            html + L"\n\n<i>Answer it at the PC \x2014 this session's Claude Code did not offer it to Telegram (it started before the bot was on, "
+                                                   L"or it is older than 2.1.139; \U0001F504 Restart Session gives it the question hook).</i>",
+                                            sound, m.promptRef))
+                {
+                    _endTurnQuietly(sessionId, topic, m);
+                    _log(L"[msg] " + ShortId(sessionId) + L" a question: shown by its question card (show-only if no question hook offers it within " +
+                         std::to_wstring(kAskPairWaitMs / 1000) + L" s)");
+                }
+                else
+                {
+                    _postFinal(sessionId, topic, m, html + L"\n\n<i>Answer it at the PC.</i>", L"a question", sound);
+                }
                 break;
             }
             case TopicItemKind::Plan:
@@ -7105,6 +7131,13 @@ namespace Agentmaster::Msg
                 m.workLogDirty = false;
                 ++m.workLogGen;
                 m.awaitingAnswer = false;
+                // §21.30: a question card shows its dialog's answer itself ("Answered from Telegram", or "Answered at the PC" with the
+                // answer): no "You ↩ answer" line under it. A show-only question still waiting for its hook is posted first, above it.
+                if (_onTranscriptAnswer(sessionId, it.toolUseId, it.text, QuestionResult::Answered))
+                {
+                    _log(L"[msg] " + ShortId(sessionId) + L" a question's answer: shown on its question card");
+                    break;
+                }
                 // §21.12: "👤 You · 14:02 · ↩ answer" over the answer; §21.17: the session's title row under the header.
                 const std::wstring html = BuildAnswerLineHtml(it.tsMs, it.text, UserLineTitleRow(topic.title, topic.sessionId, topic.nameColor, topic.threadId));
                 bool asUser = false;

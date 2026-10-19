@@ -74,6 +74,36 @@ namespace Agentmaster
     // modern Stop hook never re-reads the transcript (HOOKS.md "Hook invocation").
     std::wstring BuildForwarderScript(const std::wstring& stateDir);
 
+    /// <summary>
+    /// The QUESTION HOOK helper (INTERACTIVE_TOOLS.md §6, MESSAGING.md §21.30), written to &lt;profile&gt;\agentmaster-ask.ps1
+    /// beside the forwarder: the PermissionRequest hook of an AskUserQuestion dialog. It reads the hook payload (UTF-8, from the
+    /// raw stdin stream), leaves at once with NO output for a subagent's dialog (Claude Code shows a subagent's dialog only
+    /// after its hooks answer), for any other tool, or when Agentmaster's pipe cannot be found; else it sends ONE request line,
+    /// {"v":1,"hookPid":…,"claudePid":0,"payload":&lt;the payload as claude wrote it&gt;}, over the ASK pipe (the hook pipe's name
+    /// + ".ask", discovered like the forwarder's: CCMGR_HOOK_PIPE, else &lt;profile&gt;\bridge.json) and blocks on one reply
+    /// line. A decision line is printed to stdout as UTF-8 bytes (Claude Code then takes it as the dialog's answer); "{}", a
+    /// broken pipe, its parent claude's exit (checked every 2 s — Claude Code does not end a hook whose dialog the PC answered)
+    /// or 24 h print nothing. Every path exits 0: the PC dialog is never blocked, and any failure leaves it to the PC.
+    /// Pure-ASCII script; MaterializeSharedHookFiles writes it with a UTF-8 BOM (the forwarder's reason: a non-ASCII profile path).
+    /// </summary>
+    /// <remarks>
+    /// Measured (2026-10-19, Windows PowerShell 5.1, three helpers each time): the request reached the engine ~2.0 s after the
+    /// host started while the parent lookup (Win32_Process, ~1.7 s of it) came first; with the request FIRST and the lookup after
+    /// it (claudePid is 0), 0.41–0.47 s. A waiting helper holds ~93 MB of working set, ~72 MB private (one per open question
+    /// while the bot runs); a release ends it in ~0.04 s with no output, and its parent's end in ~0.5 s.
+    /// </remarks>
+    /// <param name="stateDir">The ACTIVE profile directory (the bridge.json fallback and the drop log live there).</param>
+    /// <returns>The script.</returns>
+    /// <exception cref="std::bad_alloc">If the script cannot be allocated.</exception>
+    std::wstring BuildAskHookScript(const std::wstring& stateDir);
+
+    /// <summary>
+    /// The question hook's `timeout` (seconds): one day. Claude Code's schema puts no upper limit on a command hook's timeout
+    /// (`positive().optional()`, 2.1.291), and the helper waits as long as the dialog is open (the phone may answer hours
+    /// later); after a day the dialog stays with the PC. Well under JavaScript's 24.8-day timer cap.
+    /// </summary>
+    inline constexpr int kAskHookTimeoutSeconds = 86400;
+
     // Agentmaster (HOOKS.md "Hook invocation"): the per-hook `timeout` (seconds) every forwarder hook
     // carries, except SessionEnd (below). Without it Claude applies its own default (10 minutes on
     // 2.1.2xx), so a forwarder wedged on a dead pipe could stall a turn that long; the forwarder's
@@ -154,9 +184,14 @@ namespace Agentmaster
     //     timeout below. Every Claude Code version understands it.
     //   * both forms carry `"timeout"`: kHookForwarderTimeoutSeconds, and kSessionEndHookTimeoutSeconds
     //     for SessionEnd (which lifts claude's 1.5 s SessionEnd budget).
+    //   * askScriptPath non-empty AND exec form -> a NINTH entry, `"PermissionRequest": [{ "matcher": "AskUserQuestion",
+    //     "hooks": [{ "type": "command", "command": "<execHost>", "args": [-NoProfile, -NonInteractive, -ExecutionPolicy,
+    //     Bypass, -File, <askScriptPath>], "timeout": kAskHookTimeoutSeconds }] }]` — the question hook (BuildAskHookScript;
+    //     INTERACTIVE_TOOLS.md §6). Exec form only: the hook is new, so no claude that predates exec form needs it, and its
+    //     answer path is only measured on 2.1.291. Empty (the default) = the eight-event file, byte for byte as before.
     // `forwarderPath` should already be in a JSON-friendly (forward-slash) form; `execHost` may use
     // backslashes (it is JSON-escaped). Pure. Never throws (beyond std::bad_alloc).
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost = {});
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions, std::wstring_view execHost = {}, std::wstring_view askScriptPath = {});
 
     // Assemble the claude command line. `settingsPath` should be forward-slash form.
     // `skipPermissions` ON => prepend --dangerously-skip-permissions (the app gates risk via
@@ -714,7 +749,16 @@ namespace Agentmaster
     //                   is known; the last writer decides what the next claude snapshots at its start.
     // Returns {settingsPath, forwarderPath} in backslash form, or empty paths on I/O failure. Throws
     // nothing meaningful for the caller.
+    // ⚠ With `settings.messagingEnabled` and exec form it also writes the QUESTION hook (BuildAskHookScript, at
+    // AskHookScriptPath) and wires it as the file's PermissionRequest entry (INTERACTIVE_TOOLS.md §6): turning the Telegram bot
+    // on or off reaches the claudes that START after the next write (engine init, a spawn, the cog's Save).
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings, std::wstring_view claudeExePath = {});
+
+    /// <summary>Where the question hook's script lives in a profile: &lt;stateDir&gt;\agentmaster-ask.ps1.</summary>
+    /// <param name="stateDir">The ACTIVE profile directory.</param>
+    /// <returns>The path (backslash form).</returns>
+    /// <exception cref="std::bad_alloc">If the path cannot be allocated.</exception>
+    std::wstring AskHookScriptPath(const std::wstring& stateDir);
 
     // Agentmaster (PRESETS, doc/agentmaster/HARNESSES.md §6.1): write the settings file a preset launch
     // passes as --settings — the SAME hooks object as the shared hooks file (BuildHooksSettingsJson, so

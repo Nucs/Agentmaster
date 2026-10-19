@@ -826,6 +826,12 @@ namespace Agentmaster::Msg
                         return;
                     }
                 }
+                // §21.30: a message an open question card holds (its "answer or next prompt?" question waits for a tap) takes the
+                // new text there.
+                if (_questionTextEdited(sessionId, msg))
+                {
+                    return;
+                }
                 const std::wstring source = L"telegram:" + std::to_wstring(msgId);
                 bool replaced = false;
                 _registry->Update(sessionId, [&](SessionInfo& s) {
@@ -893,6 +899,13 @@ namespace Agentmaster::Msg
         _registry->UpdateQuiet(sessionId, [](SessionInfo& s) { s.readUnixMs = WallMs(); });
         // The user's own message is now the bottom of the topic: the sticky card follows it (§21.5).
         _noteTopicPosted(threadId);
+        // §21.30: while the session's QUESTION CARD is open, a plain message is the card's — the answer or the note the user asked
+        // to write (✍️ / 📝) or replied to the card with, else asked about (the answer, or the next prompt?). A /command stays a
+        // command; a message a new thread held was written before any question.
+        if (!held && _takeQuestionText(sessionId, msg, threadId))
+        {
+            return;
+        }
 
         const RemoteCommand cmd = ParseRemoteCommand(text);
         switch (cmd.kind)
@@ -2219,6 +2232,14 @@ namespace Agentmaster::Msg
         {
             threadId = m->I64At(L"message_thread_id", 0);
             messageId = m->I64At(L"message_id", 0);
+        }
+        // §21.30: a QUESTION CARD's button ("q:<card>:<verb>[:<arg>]") — an option, the user's own answer or a note, the next
+        // question, Send, Chat about this, the previews' picture, the "answer or next prompt?" question's two buttons. The toast
+        // says what happened; the tap stays busy until the card's edit (and any message it asked for) is in.
+        if (data.rfind(L"q:", 0) == 0)
+        {
+            answer(_onQuestionTap(data, threadId, messageId));
+            return;
         }
         // The Search topic's STATELESS buttons (§21.7): "⊘ Clear" and the PICK of an answer's row. They carry no token,
         // so they work again and after a restart; a pick only opens the action menu, whose buttons are tokens.

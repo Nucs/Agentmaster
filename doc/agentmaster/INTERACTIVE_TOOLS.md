@@ -1,9 +1,11 @@
 # Interactive tools — AskUserQuestion with previews and notes, answered from Telegram
 
-> **2026-10-19 · DESIGN, nothing built.** Read in the Claude Code 2.1.291 bundle and **measured on it**: a live
-> ConPTY probe of seven scenarios (§5) and a survey of every transcript on this machine (§2). The scripts are in
-> `tools/interactive-tools-probe/`. It answers the question half of [`MESSAGING.md`](MESSAGING.md) §7.4
-> (decision D9) and its probes P0-1, P0-3 and P0-22.
+> **2026-10-19 · BUILT the same day, NOT BUILT into the app yet** (§10: what was built, where it differs from the design of
+> §6–§7, and what was checked — the m5 suite, `cl /Zs` with the build's flags, and a LIVE end-to-end run of the shipped hook
+> against Claude Code 2.1.291). The topic's side is [`MESSAGING.md`](MESSAGING.md) §21.30. Read in the Claude Code 2.1.291
+> bundle and **measured on it**: a live ConPTY probe of seven scenarios (§5) and a survey of every transcript on this
+> machine (§2). The scripts are in `tools/interactive-tools-probe/`. It answers the question half of
+> [`MESSAGING.md`](MESSAGING.md) §7.4 (decision D9) and its probes P0-1, P0-3 and P0-22.
 >
 > **Scope, set by the user the same day:** "Forget all about the plan or propose goal. I meant AskUserQuestion
 > with preview as it lets you to show how the choice/option will be used and lets use add note." This document
@@ -53,7 +55,13 @@
   - the answer composed exactly as the PC composes it (§6.4), and the message edited to the outcome.
 
   A smaller first step needs no hook: the mirror's answer line shows the note (§6.7).
-- **Decisions** Q1–Q10 (§7) are open. Three of them need a look at the user's phone first (§8).
+- **Decisions** Q1–Q10 (§7) were the proposal. Three of them needed a look at the user's phone first (§8).
+- **Built** (§10, the user's request of 2026-10-19: "Kindly close the gap, enabling telegram picking a choice, including
+  the user manual text input …"): the hook is a PowerShell helper (`<profile>\agentmaster-ask.ps1`) wired while the bot is
+  on; the engine's ask pipe and question registry; the QUESTION CARD — ONE managed message per dialog with option buttons,
+  the user's own answer and the note through a ForceReply prompt, several questions on one card, the previews inline and as
+  a picture on demand, "Chat about this" — answering exactly as the PC answers (proven live, §10.4); and S0 (the notes in
+  every answer line).
 
 ## 1. AskUserQuestion with previews and notes (Claude Code 2.1.291)
 
@@ -278,7 +286,7 @@ An `allow` whose `updatedInput` is the call's input plus:
 - **So the previews are mostly monospace pictures, and most are wider than a phone's monospace line.** How wide a
   phone's line is must be measured on the user's phone (§8).
 
-## 3. What Agentmaster does with a preview question today
+## 3. What Agentmaster did with a preview question before §10
 
 - **State:** `NeedsApproval` comes from three belts (the `Notification` 6 s after the dialog opens, the scanner's
   `recon-block`, the heartbeat's `waiting`). The question guard keeps queued prompts Pending.
@@ -409,7 +417,7 @@ An `allow` whose `updatedInput` is the call's input plus:
 - **Earlier the same day**, in two runs: A, B and the two plan scenarios (now P1 and P2, run only with
   `--with-plans`) passed both times, with the same timing.
 
-## 6. The design (proposal, nothing built)
+## 6. The design (the proposal; what was built, and how it differs: §10)
 
 ### 6.1 The pieces
 
@@ -609,7 +617,7 @@ whose text becomes the answer) instead of [📝 Note…]. Multi-select options a
 - D9's recommendation for questions becomes this hook. Plans are not designed here (the scope above).
 - P0-1 is not needed for questions; P0-3 is answered by §1–§2; P0-22 is answered by §4.1: the hook needs no mod.
 
-## 7. Decisions (open; the recommendation first)
+## 7. Decisions (the proposal, the recommendation first; what the build chose: §10.3)
 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
@@ -627,7 +635,7 @@ whose text becomes the answer) instead of [📝 Note…]. Multi-select options a
 **Not a decision:** a cue at the PC. Claude Code already prints "Allowed by PermissionRequest hook" under a
 phone's answer.
 
-## 8. Before it is built
+## 8. Before it is built (the plan; done and still owed: §10.4 / §10.5)
 
 - **Phone checks** (the user's phone, through the dev bot; a message is sent only with the user's go-ahead):
   - how a monospace block of 52, 70 and 113 cells shows: wrapped, or scrolled sideways;
@@ -698,3 +706,124 @@ quoted strings (`tools/interactive-tools-probe/grepbin.py`). Byte offsets in 2.1
   (`survey_interactive.py`), and `grepbin.py`.
 - MESSAGING.md §6.3, §7.4, §7.5, §18 (D9, D16, D30), §19, §21.2, §21.24 (Screen Image); MOD_LINK.md §4.4; HOOKS.md
   (hook invocation, the blocked-on-user belts).
+
+## 10. What was built (2026-10-19; NOT BUILT into the app yet)
+
+> The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual
+> text input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
+> including custom answer". The topic's side — what the user sees, the logs, the check after the build — is
+> [`MESSAGING.md`](MESSAGING.md) §21.30.
+
+### 10.1 The code
+
+| Piece | Where | What it does |
+|---|---|---|
+| The question hook | `ClaudeSpawn.cpp` `BuildAskHookScript` → `<profile>\agentmaster-ask.ps1` (UTF-8 BOM, pure-ASCII body) | Windows PowerShell 5.1, spawned directly (exec form). Reads the payload from the raw stdin stream as UTF-8; leaves at once with no output for a subagent (`agent_id`), another tool, or no pipe (`CCMGR_HOOK_PIPE`, else `<profile>\bridge.json`). Else it sends ONE request line `{"v":1,"hookPid":…,"claudePid":0,"payload":<as claude wrote it>}` over the ASK pipe FIRST, then looks its parent claude up (Win32_Process) and waits for one reply line (an async read polled every 2 s). A decision is printed as UTF-8 bytes; "{}", a broken pipe, the parent's exit or 24 h print nothing. Every path exits 0. |
+| Its wiring | `BuildHooksSettingsJson(…, execHost, askScriptPath)`, called by `MaterializeSharedHookFiles` (the shared file) and `MaterializeLaunchSettingsFile` (a preset's) | A NINTH entry, `"PermissionRequest": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": <powershell.exe>, "args": [-NoProfile, -NonInteractive, -ExecutionPolicy, Bypass, -File, <script>], "timeout": 86400 }] }]`. Only while `AppSettings::messagingEnabled`, and only in exec form (claude ≥ 2.1.139). The shared file is rewritten at engine init, every spawn and the cog's Save, so turning the bot on reaches the claudes that START afterwards. Without it the file is the eight-event file, byte for byte. |
+| The pipe | `HooksBridge.{h,cpp}`: `AskBridge`, `AskRegistry` | `\\.\pipe\agentmaster.<pid>.ask`, duplex, a listener and one worker thread per waiting helper. The request line is bounded (1 MiB, 10 s). The registry's ACCEPTOR decides at the door; a refused request hears "{}" at once. A worker waits for its reply, the helper's departure (a one-byte probe read) or Stop ("{}"). States: Open → Answered → Delivered / Released, or Gone. |
+| The pure core | `AskQuestion.h` (header-only, `Agentmaster::Msg`) | The request parser and its signature (== the mirror's question item text); the answers composed as `nJ` composes them, with `Tct`'s multi-select join, `_0t`'s "(notes only)" and the picked preview's echo; the bounds; the allow / deny lines as ASCII JSON; "Chat about this" (`R4e`); the card's model, steps, callback data, text routing, texts, buttons; the previews' sheet (a `ScreenSnapshot`). |
+| The preview rules | `ClaudeInvisibleChars.{h,cpp}` | `ClassifyClaudeQuestionPreview` (`G5`: None / Withheld / Full), `ClaudeQuestionPreviewEcho` (`Nl` = `zet`), `ClaudeCellWidth`. |
+| The service | `Messaging.Questions.cpp` (a third TU of `MessagingService`; its block at the end of `Messaging.h`), hooks in `Messaging.cpp` and `Messaging.Inbound.cpp` | The acceptor; `_questionsTick` (new requests → cards; every card's watch, request, topic and clocks; finished cards forgotten after 30 min; the plain questions whose 8 s ran out); the card's post and edits (an edit renders the card AGAIN right before its call, so it always shows the latest state); `_onQuestionTap`; `_takeQuestionText` (the typed answer or note, the "answer or next prompt?" question). |
+| S0 | `MessagingModels.h` `ClassifyTranscriptLine` | The answer item carries each question's NOTE (`toolUseResult.annotations[q].notes`): "(notes only)" reads as `📝 <note>`, a pick with a note as `<label>\n📝 <note>`. Live and in a history replay. |
+| The engine | `Engine.{h,cpp}` | `asks` (the registry) is handed to the service before its first Apply; `askBridge` starts with the hook pipe, also while the bot is off (a hook then hears "{}" at once). |
+| Tests | `tests/tests_ask.cpp` (`TestAskQuestion`) | §10.4. |
+
+### 10.2 How a question travels
+
+1. The dialog opens at the PC, and Claude Code runs the hook BESIDE it. The helper's request reaches `AskRegistry::Open`,
+   which asks the acceptor (`MessagingService::_acceptsAsk`): the bot runs with topics on, and the session is a live Claude
+   session of the registry. Anything else: "{}" at once, no output, and the PC answers as before.
+2. The registry's listener wakes the tick. `_questionsTick` makes the card and posts it in the session's topic (Final
+   priority; it replies to the turn's prompt and rings, unless the NeedsApproval edge rang the sticky card already — §21.6's
+   one sound per "needs you"). A session without a topic is waited for 30 s, then released.
+3. The card's WATCH reads the request's `transcript_path` (its first read looks back 512 KB) for the dialog's `tool_use` —
+   the newest question item with the card's signature — and then for its tool result. The mirror pairs with the card too:
+   its question item posts nothing when a card shows the dialog, else it waits `kAskPairWaitMs` (8 s) for a hook and is
+   posted show-only with the reason; its answer item posts no "👤 You ↩ answer" line under a card that shows it.
+4. The user answers on the card. AskQuestion.h builds the decision; `AskRegistry::Answer` queues it; the worker writes it;
+   the helper prints it; Claude Code takes it and writes the tool result 0.01–0.02 s later. The card reads ⏳ Sending, then
+   ✅ Answered from Telegram once the watch reads the result (after 60 s without it: "not confirmed").
+5. The other endings:
+   - the PC answers first: the watch reads the result → ✅ Answered at the PC (the answer, notes included), and the hook is
+     RELEASED ("{}"): Claude Code does not end it (§4.4);
+   - Esc / "Chat about this" at the PC: an error result, or the hook ends (Gone) → ⏹ closed at the PC;
+   - the session ends (no longer live): released at once, ⏹ its session ended;
+   - the topic is made again (a recreation): the open card is posted anew in the new topic; the topic gone: released
+     after 30 s;
+   - the bot stops: every open request is released; the PC keeps every dialog;
+   - a decision refused by the registry (the PC was first by a hair): the card says so, and the watch then names the PC's
+     answer.
+
+### 10.3 The card, and where the build differs from the design (§6, §7)
+
+The card is ONE managed message per dialog, edited in place — the user's "a managed message that will cover this
+interaction". MESSAGING.md §21.30 shows it.
+
+| Q | The proposal | What was built | Why |
+|---|---|---|---|
+| Q1 | a `PermissionRequest` hook | **as proposed** | — |
+| Q2 | a native exe (the CLI in a hook mode), copied into the profile | **the PowerShell helper**, exec form, like the forwarder | no new binary to ship and to copy into the profile on every layout swap; the forwarder's discovery and encoding rules carry over. Its cost, measured (§10.4): 0.41–0.47 s from its start to the request (the request goes before the parent lookup, which cost ~1.7 s in front of it), and ~93 MB working set / ~72 MB private while it waits — one per OPEN question while the bot runs. A native helper stays the follow-up if that matters. |
+| Q3 | one picture of every preview, then the question message | **the previews INLINE** in the card as monospace blocks while they fit the message (3,800 characters), and **[🖼 Previews as a picture]** on demand (`BuildAskPreviewSheet` → the Screen Image renderer → `sendPhoto`) | one message per dialog, and nothing posted unasked on the chat's ~1 call/s budget; a picture is one tap away |
+| Q4 | the raw text in the picture | **as proposed** (the echo, TABs expanded, wrapped at 160 columns) | — |
+| Q5 | [📝 Note…] (ForceReply) and a reply to the question message; other messages stay queued prompts (D30) | **[📝] / [✍️] post a ForceReply prompt**; the reply, the next message, or any reply to the card is taken; a PLAIN message while the card is open is HELD and asked about ("your answer, or the next prompt?") | a message typed while a question is open is most likely its answer — but never taken unasked |
+| Q6 | one question: a tap answers at once | **as proposed** (an own answer of a one-question card too) | — |
+| Q7 | one picture + one message per question, Send on the last | **ONE card for all questions**: a list of every answer so far, ◀ / ▶, [📨 Send answers (a of n)] (unanswered ones allowed) | the user's "a managed message" |
+| Q8 | [💬 Chat about this] | **as proposed** (Claude Code's own rejection text, with the answers and notes so far) | — |
+| Q9 | a subagent's question never held | **as proposed** (the helper leaves at once on `agent_id`; the engine refuses one too) | — |
+| Q10 | S0 first | **built together**: the notes in every answer line; the question item's descriptions were not added (the card shows them) | — |
+
+**Also different from §6.3:**
+- The buttons carry a random card key (`q:<10 characters>:<verb>[:<arg>]`), not action tokens: a button of an earlier run, or
+  of a card forgotten 30 min after its outcome, answers "This question is no longer open here." and loses its keyboard.
+- The confirmation is the transcript's tool result, within 60 s (not the `hook_permission_decision` line within 10 s).
+- There is nothing to validate but the bounds: the answer is composed from the request's own input.
+- **Not built:** the request as a fourth `NeedsApproval` belt; an album for a tall sheet; the measure of how blocks of 52,
+  70 and 113 cells look on the phone (§8).
+
+### 10.4 What was checked
+
+- **The m5 suite:** `TestAskQuestion` passes. Against the probe's goldens D, E and G, the composer builds the PC's exact
+  `answers` and `annotations`. The suite's only failures are the 3 known `TestTaskbarBadge` ones.
+- **`cl /Zs` with the last Debug build's recorded flags:** every changed `TerminalAppLib` TU and every TU that includes a
+  changed header passed (`Messaging*.cpp`, `HooksBridge.cpp`, `ClaudeSpawn.cpp`, `Engine.cpp`,
+  `ClaudeInvisibleChars.cpp`, `TerminalPage.AgentMessaging.cpp`, `MessagingSearchBridge.cpp`,
+  `AgentManagerContent.Settings.cpp`, `TerminalPage.AgentEngine.cpp`, `TerminalPage.AgentSessions.cpp`,
+  `TerminalPage.cpp`). The new `Messaging.Questions.cpp` passed with a negative control. The CLI's three changed engine
+  TUs passed at its `/W4 /WX`.
+- **LIVE, end to end** (`tools/interactive-tools-probe/askprobe.py` + `askdrive.cpp`; claude.exe 2.1.291, Haiku 4.5,
+  2026-10-19 17:00). It ran the SHIPPED hook script against the real `AskBridge`, with the decision lines from
+  `AskQuestion.h`. Every verdict was read from the transcript:
+
+| | Scenario | Result |
+|---|---|---|
+| H1 | a preview question: option 2 + a note | ✅ the PC's own form, byte for byte; the stored `toolUseResult` holds the same answers and annotations; the model replied `LAYOUT=Center` |
+| H2 | a preview question: a note alone | ✅ `"…"=(no option selected) notes: none of these, make it a tab strip. Read the answers carefully …` |
+| H3 | a plain question, the hook RELEASED ("{}"), the PC's Enter | ✅ the helper was gone 2.5 s after the release; the result is the PC's `"Red"` |
+| H4 | Chat about this | ✅ an error result whose text is the deny message, verbatim; the model asked "What would you like to clarify about the fruit question?" |
+
+- **The helper measured** (`askmem.py`, three helpers held by `askdrive.exe`):
+
+| What | Measured |
+|---|---|
+| From the host's start to the request at the engine | **0.41–0.47 s** with the request first. It was ~2.0 s with the parent lookup first: `Get-CimInstance Win32_Process` alone takes ~1.7 s (a bare `powershell -Command exit` ~0.27 s). |
+| Memory while it waits | 92.8–94.7 MB working set, 71.4–73.4 MB private |
+| End after a release | 0.04 s, exit code 0, no output |
+| End after its parent's end (`askparent.py`: the helper under a `cmd /c` that is killed) | 0.5 s, no output |
+
+The live run of the table above was repeated with the request-first helper (17:11): H1–H4 passed again.
+
+### 10.5 Check after the build (owed)
+
+- **The phone** (through the dev bot, a test message only with the user's go-ahead): every row of MESSAGING.md §21.30's
+  "Check after the build". Also how the inline preview blocks wrap at 52, 70 and 113 cells, and the ForceReply prompt.
+- **The PC side:**
+  - "Allowed by PermissionRequest hook" under a phone answer;
+  - a helper gone within a tick after a PC answer (no `agentmaster-ask.ps1` left in `Get-Process powershell`);
+  - Esc;
+  - a session closed with a question open;
+  - the bot off (no helper waits);
+  - a subagent's question;
+  - a claude older than 2.1.139 (no question hook: the show-only message, with the reason).
+- **On every Claude Code upgrade** that touches hooks or `AskUserQuestion`, re-run `run_probe.py` (the seven scenarios)
+  and `askprobe.py` (the four of the shipped hook). If `V_r` ever drops the tool, the hook's `allow` is ignored, the dialog
+  stays with the PC, and the card ends as "Answered at the PC".
