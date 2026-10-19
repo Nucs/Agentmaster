@@ -29,7 +29,7 @@ below comes from the corrected walk; the old values are listed in §7.
   `snapdump.exe` had exited, holding ~1.8 GB of commit: `PssFreeSnapshot` alone does not always end it.
   It was terminated after its image, parent, creation time and thread count were checked again
   (production untouched; free commit 31.0 → 32.8 GB), and `snapdump.exe` now ends its clone itself and
-  says so. The ended clone's process object is still listed at 02:15 (0 threads, 84 KB private,
+  says so. The ended clone's process object was still listed at 02:07 (0 threads, 84 KB private,
   signaled), because some other process holds a handle to it.
 - **Dev for comparison:** dev 0.0.1.31 (pid 78828), which holds the §3 fix, dumped at 01:22 (0.75 GB):
   123.8 MB of live heap.
