@@ -7,7 +7,9 @@
 // user's request (2026-10-17): "a pinned message per bot … a nice list of dedicated topics, out of which we right now have
 // Search but will more in future. Also a pin all tags and the tabs in the tag. make sure the message shows titles with coloring
 // and when clicked jumps to the topic … Also a two rows of stats"; and, once the first directory was up, "Tags with 0 tabs
-// should not be shown" — a tag no open tab carries is left out (§21.16.1).
+// should not be shown" — a tag no open tab carries is left out (§21.16.1). On 2026-10-19 the user asked for one more section, at
+// the bottom: "the top 10 tab titles in the order of their recent activity and that are not in stationary status" — the RECENT
+// ACTIVITY section (§21.16.8): the ten newest open Claude tabs that are not Idle or Done, in the topic list's MOST RECENT order.
 //
 // This header is the PURE half: the model the service fills, its two renders — a RICH message whose titles are URL chips in
 // the look nearest the tab's color, and the classic HTML the service sends when Telegram refuses the rich one —, the hash that
@@ -68,6 +70,9 @@ namespace Agentmaster::Msg
     inline constexpr int64_t kDirectoryStallMs = 15 * 60 * 1000;
     // The most open tabs one tag lists; the rest are counted ("… and 4 more").
     inline constexpr size_t kDirectoryMaxTabsPerTag = 20;
+    // The most tabs the Recent activity section lists (§21.16.8): the user's "top 10". The rest are not counted — the stats rows
+    // above already count every state.
+    inline constexpr size_t kDirectoryMaxRecentTabs = 10;
     // The most tag sections the message holds: each is one rich block, and Telegram takes at most 500 blocks per message.
     inline constexpr size_t kDirectoryMaxTagSections = 100;
     // The renders' size limits: the rich one is kept under Telegram's rich limit (kRichMessageMaxChars, counted on the HTML as
@@ -99,6 +104,9 @@ namespace Agentmaster::Msg
         SessionState state{ SessionState::Idle }; // the glyph before its chip (StateGlyph, like the topic names)
         std::wstring colorHex; // the tab color (TabFact::colorHex; "" = none: no square, the plain look)
         int64_t threadId{ 0 }; // its topic (0 = none — an idle tab, a Codex tab: a chip that does nothing)
+        // The session's MOST RECENT key (TabFact::mostRecentMs = MostRecentSortKeyMs: its newest turn boundary, the key the topic
+        // list and the side panel order by). Only the Recent activity section reads it (§21.16.8); 0 = unknown (it ranks last).
+        int64_t recentMs{ 0 };
     };
 
     /// <summary>One bookmark tag and the open tabs that carry it.</summary>
@@ -133,6 +141,12 @@ namespace Agentmaster::Msg
         DirectoryStats stats;
         std::vector<DirectoryTopic> topics;
         std::vector<DirectoryTag> tags; // any order (the render sorts them by name)
+        /// <summary>
+        /// The CANDIDATES of the Recent activity section (§21.16.8): every open Claude tab — the population of the stats rows — in
+        /// any order. The render keeps the ones whose state is not stationary (DirectoryStateIsStationary), newest first, at most
+        /// kDirectoryMaxRecentTabs (PickDirectoryRecentTabs). Empty = the section says that no tab is working or waiting.
+        /// </summary>
+        std::vector<DirectoryTab> recent;
     };
 
     /// <summary>The directory as the service sends it.</summary>
@@ -152,11 +166,18 @@ namespace Agentmaster::Msg
         /// keeps for re-use, Rule #17) — the user's "Tags with 0 tabs should not be shown". Counted for the service's log only.
         /// </summary>
         size_t tagsWithoutTabs{ 0 };
-        size_t tabsShown{ 0 }; // tab chips in the rich render
+        size_t tabsShown{ 0 }; // tab chips under the tags in the rich render (the Recent activity rows are counted in recentShown)
+        /// <summary>
+        /// The rows of the Recent activity section (§21.16.8): the tabs PickDirectoryRecentTabs kept, at most
+        /// kDirectoryMaxRecentTabs. Both renders list the same rows: the section is built before the tag sections, which fill the
+        /// message only up to the room it leaves, so a full message never drops it.
+        /// </summary>
+        size_t recentShown{ 0 };
         /// <summary>
         /// The tabs of the rich render whose state dot is a button (DirectoryFrontCallbackData): the listed tabs that have a
-        /// topic. A tab with no topic keeps a plain dot — there is no card to re-post. The classic render has no dot buttons
-        /// (Telegram HTML cannot hold an in-text callback), so this counts the rich render only.
+        /// topic — under the tags and in the Recent activity section alike (a tab listed in both places has a button in each). A
+        /// tab with no topic keeps a plain dot — there is no card to re-post. The classic render has no dot buttons (Telegram HTML
+        /// cannot hold an in-text callback), so this counts the rich render only.
         /// </summary>
         size_t dotsShown{ 0 };
     };
@@ -275,6 +296,70 @@ namespace Agentmaster::Msg
             }
         }
         return s;
+    }
+
+    /// <summary>
+    /// Whether a tab's state is STATIONARY — the user's word (2026-10-19) for the tabs the Recent activity section leaves out
+    /// (§21.16.8): nothing happens in the tab and nothing is asked of the user. Idle (no turn in flight, nothing waiting) and Done
+    /// (claude ended in the tab) are; Running (a turn in flight), Waiting for you (its turn is over and it waits for the next
+    /// message), Needs approval and Error (each waits for the user's answer) are not. ⚠ A state added to SessionState is NOT
+    /// stationary until it is named here, so a new state shows in the section rather than vanishing from it.
+    /// </summary>
+    /// <param name="state">The tab's state.</param>
+    /// <returns>True for Idle and Done.</returns>
+    inline constexpr bool DirectoryStateIsStationary(SessionState state) noexcept
+    {
+        return state == SessionState::Idle || state == SessionState::Done;
+    }
+
+    /// <summary>
+    /// The tabs of the Recent activity section (§21.16.8, the user's "the top 10 tab titles in the order of their recent activity
+    /// and that are not in stationary status"): the candidates whose state is not stationary (DirectoryStateIsStationary), in the
+    /// TOPIC LIST's order — TopicRanksAbove over DirectoryTab::recentMs, the side panel's MOST RECENT key, so the section lists
+    /// the tabs in the order their threads stand in Telegram's thread list (§21.8) —, at most `max`. The key is a turn boundary
+    /// (a prompt sent, a turn finished), never a tool call, so the order moves only when a turn starts or ends: the moments the
+    /// state glyph and the stats rows change anyway, so the section costs no directory edit of its own. Two tabs the order cannot
+    /// tell apart (an equal key and the same title, case-insensitively) go by session id, so the pick never depends on the order
+    /// of the candidates.
+    /// </summary>
+    /// <param name="candidates">Every open Claude tab (DirectoryModel::recent), any order. A tab with no title is ranked by its
+    /// session id.</param>
+    /// <param name="max">The most tabs to keep (kDirectoryMaxRecentTabs; 0 keeps none).</param>
+    /// <returns>Copies of the kept tabs, the newest first.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    inline std::vector<DirectoryTab> PickDirectoryRecentTabs(const std::vector<DirectoryTab>& candidates, size_t max)
+    {
+        std::vector<const DirectoryTab*> moving;
+        moving.reserve(candidates.size());
+        for (const auto& t : candidates)
+        {
+            if (!DirectoryStateIsStationary(t.state))
+            {
+                moving.push_back(&t);
+            }
+        }
+        // Pointers are sorted, and only the kept ones copied: a fleet of hundreds of waiting tabs costs pointer moves only.
+        std::stable_sort(moving.begin(), moving.end(), [](const DirectoryTab* a, const DirectoryTab* b) {
+            const std::wstring& ta = a->title.empty() ? a->sessionId : a->title;
+            const std::wstring& tb = b->title.empty() ? b->sessionId : b->title;
+            if (TopicRanksAbove(a->recentMs, ta, b->recentMs, tb))
+            {
+                return true;
+            }
+            if (TopicRanksAbove(b->recentMs, tb, a->recentMs, ta))
+            {
+                return false;
+            }
+            return a->sessionId < b->sessionId;
+        });
+        const size_t kept = (std::min)(moving.size(), max); // (std::min): the <windows.h> macro
+        std::vector<DirectoryTab> out;
+        out.reserve(kept);
+        for (size_t i = 0; i < kept; ++i)
+        {
+            out.push_back(*moving[i]);
+        }
+        return out;
     }
 
     namespace detail
@@ -403,6 +488,35 @@ namespace Agentmaster::Msg
                 return glyph;
             }
             return L"<tg-button type=\"callback_data\" data=\"" + TgEscapeHtmlAttribute(data) + L"\">" + glyph + L"</tg-button>";
+        }
+
+        /// <summary>
+        /// One tab's row in the RICH render: its state dot (a callback button when it has a topic, §21.16.7) and its title chip (a
+        /// URL button to its topic in the look of its color's square, disabled without one). The tag sections and the Recent
+        /// activity section (§21.16.8) share it, so a tab reads the same wherever the directory lists it.
+        /// </summary>
+        /// <param name="tab">The tab.</param>
+        /// <param name="botUsername">The bot's username (the links' host part; "" = no links: disabled chips).</param>
+        /// <returns>Telegram rich HTML, no line break (the caller puts the &lt;br&gt; between rows).</returns>
+        /// <exception cref="std::bad_alloc">If the row cannot be allocated.</exception>
+        inline std::wstring DirectoryTabRowRich(const DirectoryTab& tab, std::wstring_view botUsername)
+        {
+            const std::wstring label = DirectoryTabLabel(tab);
+            const std::wstring url = DirectoryTopicUrl(botUsername, tab.threadId);
+            return DirectoryDotHtml(tab.state, tab.threadId) + L" " + DirectoryChipHtml(label, TgTitleColorSquare(tab.colorHex), url);
+        }
+
+        /// <summary>
+        /// One tab's row in the CLASSIC render: the plain state glyph (Telegram HTML has no in-text callback button) and the title
+        /// as a link to its topic — the bare label when it has none. Shared like DirectoryTabRowRich.
+        /// </summary>
+        /// <param name="tab">The tab.</param>
+        /// <param name="botUsername">The bot's username ("" = no links: bare labels).</param>
+        /// <returns>Telegram HTML, no line break (the caller puts the "\n" between rows).</returns>
+        /// <exception cref="std::bad_alloc">If the row cannot be allocated.</exception>
+        inline std::wstring DirectoryTabRowClassic(const DirectoryTab& tab, std::wstring_view botUsername)
+        {
+            return std::wstring{ StateGlyph(tab.state) } + L" " + DirectoryLinkHtml(DirectoryTabLabel(tab), DirectoryTopicUrl(botUsername, tab.threadId));
         }
 
         /// <summary>"&lt;b&gt;5&lt;/b&gt; running": a bold count and its word, the plural word for every count but 1.</summary>
@@ -541,9 +655,18 @@ namespace Agentmaster::Msg
     /// [🔵] [🟦 Agentmaster]
     /// [🟡] [🟩 docs]
     /// ⚪ [🟦 an idle tab]        (a plain dot and a chip that opens nothing: the tab has no topic)
+    /// 🕘 Recent activity
+    /// [🔵] [🟦 Agentmaster]      (the ten newest tabs that are not stationary, newest first)
+    /// [🟠] [🟪 hotfix review]
     /// updated 5 minutes ago
     /// </code>
     /// The stats rows come FIRST: a pinned message's bar shows the start of its text, so the counts read at the top of the chat.
+    /// The Recent activity section comes LAST, before the footer (the user's "At the bottom", §21.16.8): at most
+    /// kDirectoryMaxRecentTabs open Claude tabs whose state is not stationary (Idle and Done are; PickDirectoryRecentTabs), in
+    /// the topic list's MOST RECENT order, each row the same dot and chip as under a tag (detail::DirectoryTabRowRich /
+    /// DirectoryTabRowClassic); one italic line when none is listed. It is built BEFORE the tag sections, which fill the message
+    /// only up to the room it leaves, so a full message never drops it; the legend goes under its heading only when no tag
+    /// section has a dot button (it goes under the first heading whose rows have one).
     /// Tags go in case-insensitive order of their names, the tabs of a tag in case-insensitive order of their titles — orders
     /// that do not move while the fleet works, so the content changes only when a count, a state, a title or a tag does. In the
     /// rich render each title is a chip (a URL button) in the look nearest its color, and the state dot before it is a
@@ -560,7 +683,7 @@ namespace Agentmaster::Msg
     /// <param name="updatedAtMs">When the content was rendered (the footer's date-time entity, Unix ms).</param>
     /// <param name="nowMs">The clock the footer's text uses (TgClockText's "same day" test).</param>
     /// <returns>The two renders, the content hash (without the footer), the truncation counts, the count of the tags left out
-    /// for having no open tab and the count of the dot buttons.</returns>
+    /// for having no open tab, the count of the Recent activity rows and the count of the dot buttons.</returns>
     /// <exception cref="std::bad_alloc">If a render cannot be allocated.</exception>
     inline DirectoryRender RenderDirectory(const DirectoryModel& m, int64_t updatedAtMs, int64_t nowMs)
     {
@@ -620,9 +743,10 @@ namespace Agentmaster::Msg
         const bool anyDot = std::any_of(tags.begin(), tags.end(), [](const DirectoryTag* t) {
             return std::any_of(t->tabs.begin(), t->tabs.end(), [](const DirectoryTab& tab) { return tab.threadId > 0; });
         });
+        const std::wstring legend = L"<p><i>Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).</i></p>";
         if (anyDot)
         {
-            rich += L"<p><i>Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).</i></p>";
+            rich += legend;
         }
         if (tags.empty())
         {
@@ -631,6 +755,37 @@ namespace Agentmaster::Msg
             rich += L"<p><i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i></p>";
             classic += L"\n<i>No open tab carries a tag. A tab's right-click menu \x25B8 Tags adds one.</i>";
         }
+
+        // The Recent activity section (§21.16.8, the user's "the top 10 tab titles in the order of their recent activity and that
+        // are not in stationary status"). It is the LAST section, but it is built HERE, before the tag sections: they fill the
+        // message only up to the room it leaves (their size checks below add it), so a fleet with many tags never pushes the rows
+        // the user asked for out of a full message. Both strings carry their own heading.
+        const std::vector<DirectoryTab> recent = PickDirectoryRecentTabs(m.recent, kDirectoryMaxRecentTabs);
+        const size_t recentDots = static_cast<size_t>(std::count_if(recent.begin(), recent.end(), [](const DirectoryTab& t) { return t.threadId > 0; }));
+        std::wstring richRecent = L"<h3>\U0001F558 Recent activity</h3>";
+        std::wstring classicRecent = L"\n\n<b>\U0001F558 Recent activity</b>";
+        if (recentDots > 0 && !anyDot)
+        {
+            // The legend goes under the first heading whose rows have dot buttons: here, when no tag section has one.
+            richRecent += legend;
+        }
+        if (recent.empty())
+        {
+            // ONE line for "no open tab" and "every open tab is stationary": the reader is told the same either way.
+            richRecent += L"<p><i>No tab is working or waiting for you right now.</i></p>";
+            classicRecent += L"\n<i>No tab is working or waiting for you right now.</i>";
+        }
+        else
+        {
+            richRecent += L"<p>";
+            for (size_t i = 0; i < recent.size(); ++i)
+            {
+                richRecent += (i == 0 ? L"" : L"<br>") + detail::DirectoryTabRowRich(recent[i], m.botUsername);
+                classicRecent += L"\n" + detail::DirectoryTabRowClassic(recent[i], m.botUsername);
+            }
+            richRecent += L"</p>";
+        }
+
         size_t richHidden = 0;
         size_t classicHidden = 0;
         bool richFull = false;
@@ -669,11 +824,10 @@ namespace Agentmaster::Msg
             for (size_t i = 0; i < listed; ++i)
             {
                 const DirectoryTab& tab = *tabs[i];
-                const std::wstring label = detail::DirectoryTabLabel(tab);
-                const std::wstring url = DirectoryTopicUrl(m.botUsername, tab.threadId);
-                // Rich: the dot is the callback button (a tab with a topic), then the title chip; classic: the plain glyph.
-                richSection += L"<br>" + detail::DirectoryDotHtml(tab.state, tab.threadId) + L" " + detail::DirectoryChipHtml(label, TgTitleColorSquare(tab.colorHex), url);
-                classicSection += L"\n" + std::wstring{ StateGlyph(tab.state) } + L" " + detail::DirectoryLinkHtml(label, url);
+                // Rich: the dot is the callback button (a tab with a topic), then the title chip; classic: the plain glyph. The
+                // Recent activity section builds its rows with the same two functions, so a tab reads the same in both places.
+                richSection += L"<br>" + detail::DirectoryTabRowRich(tab, m.botUsername);
+                classicSection += L"\n" + detail::DirectoryTabRowClassic(tab, m.botUsername);
                 if (tab.threadId > 0)
                 {
                     ++sectionDots;
@@ -686,7 +840,9 @@ namespace Agentmaster::Msg
                 classicSection += L"\n" + more;
             }
             richSection += L"</p>";
-            if (!richFull && r.tagsShown < kDirectoryMaxTagSections && rich.size() + richSection.size() + kDirectoryTailReserveChars <= kDirectoryRichMaxChars)
+            // The Recent activity section still to come is counted in (its room is kept), as are the closing lines (the reserve).
+            if (!richFull && r.tagsShown < kDirectoryMaxTagSections &&
+                rich.size() + richSection.size() + richRecent.size() + kDirectoryTailReserveChars <= kDirectoryRichMaxChars)
             {
                 rich += richSection;
                 ++r.tagsShown;
@@ -698,7 +854,7 @@ namespace Agentmaster::Msg
                 richFull = true; // the order is by name: a later, shorter section must not jump the queue
                 ++richHidden;
             }
-            if (!classicFull && classic.size() + classicSection.size() <= kDirectoryClassicMaxChars)
+            if (!classicFull && classic.size() + classicSection.size() + classicRecent.size() <= kDirectoryClassicMaxChars)
             {
                 classic += classicSection;
             }
@@ -716,6 +872,12 @@ namespace Agentmaster::Msg
         {
             classic += L"\n<i>\x2026 and " + std::to_wstring(classicHidden) + (classicHidden == 1 ? L" more tag" : L" more tags") + L" (the message is full)</i>";
         }
+        // The Recent activity section at the bottom (the user's "At the bottom"): after the tags and their "more tags" line, before
+        // the footer — inside the content the hash covers, so a change of the list edits the message.
+        rich += richRecent;
+        classic += classicRecent;
+        r.recentShown = recent.size();
+        r.dotsShown += recentDots;
         r.tagsHidden = richHidden;
         r.hash = CardTextHash(rich); // the content: everything but the footer's clock
         const std::wstring mark = detail::DirectoryUpdatedMark(updatedAtMs, nowMs);
@@ -727,16 +889,21 @@ namespace Agentmaster::Msg
     /// <summary>
     /// What a render lists, in words, for the service's log lines — the directory's post and the first edit of a run, the only
     /// places on the PC where the content of a sent directory can be read back: "2 tag(s), 5 tab chip(s)", then, only when there
-    /// are any, the dot buttons of the rich render (§21.16.7), the tags left out for having no open tab and the tags the full
-    /// message could not hold. The FORM (rich / HTML) is not in it: the post logs the form it asks for, the edit the form
-    /// Telegram took — and only the rich form carries the dot buttons.
+    /// are any, the rows of the Recent activity section (§21.16.8), the dot buttons of the rich render (§21.16.7), the tags left
+    /// out for having no open tab and the tags the full message could not hold. The FORM (rich / HTML) is not in it: the post logs
+    /// the form it asks for, the edit the form Telegram took — and only the rich form carries the dot buttons.
     /// </summary>
     /// <param name="r">The render (RenderDirectory's counts).</param>
-    /// <returns>The words, e.g. "2 tag(s), 5 tab chip(s), 4 dot button(s), 6 tag(s) on no open tab not listed".</returns>
+    /// <returns>The words, e.g. "2 tag(s), 5 tab chip(s), 10 recent tab(s), 14 dot button(s), 6 tag(s) on no open tab not
+    /// listed".</returns>
     /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
     inline std::wstring DescribeDirectoryRender(const DirectoryRender& r)
     {
         std::wstring s = std::to_wstring(r.tagsShown) + L" tag(s), " + std::to_wstring(r.tabsShown) + L" tab chip(s)";
+        if (r.recentShown > 0)
+        {
+            s += L", " + std::to_wstring(r.recentShown) + L" recent tab(s)";
+        }
         if (r.dotsShown > 0)
         {
             s += L", " + std::to_wstring(r.dotsShown) + L" dot button(s)";

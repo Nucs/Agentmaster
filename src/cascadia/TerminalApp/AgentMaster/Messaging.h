@@ -794,8 +794,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The DIRECTORY (§21.16), once per tick after the names, at most every kDirectoryCheckMs: builds the model — the fleet
         /// counts from the sync's facts and the registry's queues, the dedicated topics (_directoryTopics), every tag of the
-        /// session store joined with the open tabs that carry it — renders it (RenderDirectory, which lists only the tags an
-        /// open tab carries: the user's "Tags with 0 tabs should not be shown") and does what DecideDirectoryAction
+        /// session store joined with the open tabs that carry it, and every open Claude tab as a candidate of the Recent activity
+        /// section (§21.16.8) — renders it (RenderDirectory, which lists only the tags an open tab carries: the user's "Tags with 0
+        /// tabs should not be shown", and at the bottom the ten newest tabs that are not stationary) and does what DecideDirectoryAction
         /// says: POST a new message in the chat's main view and pin it (_onDirectoryPosted, _pinDirectory), or EDIT the one it
         /// has (_editDirectory) when its content or form is not the wanted one and the edit gap has passed. Skipped while the
         /// facts are incomplete (the start-up hold, a recreation), before the session store's start-up warm-up is done (its

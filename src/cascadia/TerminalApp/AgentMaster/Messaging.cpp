@@ -5773,7 +5773,11 @@ namespace Agentmaster::Msg
                         continue;
                     }
                     const auto tg = tagsBySession.find(f.sessionId);
-                    if (tg == tagsBySession.end() || tg->second.empty())
+                    const bool tagged = tg != tagsBySession.end() && !tg->second.empty();
+                    // §21.16.8: every open CLAUDE tab is a candidate of the Recent activity section — the stats rows' population
+                    // (a Codex tab has no topic, D23) — and the render keeps the ten newest that are not stationary. A tab that is
+                    // neither (a Codex tab with no tag) is not needed.
+                    if (!tagged && !f.claude)
                     {
                         continue;
                     }
@@ -5782,6 +5786,7 @@ namespace Agentmaster::Msg
                     t.title = f.title;
                     t.state = f.state;
                     t.colorHex = f.colorHex; // the sync resolved it like the tab (§21.13)
+                    t.recentMs = f.mostRecentMs; // the topic list's MOST RECENT key: the Recent activity section's order (§21.16.8)
                     if (const auto topic = _state.topics.find(f.sessionId); topic != _state.topics.end())
                     {
                         t.threadId = topic->second.threadId;
@@ -5790,7 +5795,14 @@ namespace Agentmaster::Msg
                             t.title = topic->second.title;
                         }
                     }
-                    openTabs.emplace_back(std::move(t), tg->second);
+                    if (f.claude)
+                    {
+                        m.recent.push_back(t);
+                    }
+                    if (tagged)
+                    {
+                        openTabs.emplace_back(std::move(t), tg->second);
+                    }
                 }
             }
             m.tags = JoinDirectoryTags(universe, openTabs);
