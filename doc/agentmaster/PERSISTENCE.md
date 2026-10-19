@@ -630,3 +630,146 @@ it runs after the async shells exist), or a synchronous select when there are no
 **Net:** the window layer is **complete & live-verified** end-to-end (geometry + lens + ordered tabs
 + session re-home + shell replay + focused-tab restore). The single remaining refinement is the
 approximate Claude-vs-`Other` tab interleave noted above (cosmetic).
+
+## 14. The restore wake: the tabs that were busy when Agentmaster went down (2026-10-19, NOT BUILT yet)
+
+**The gap (the user's report, 2026-10-19).** `_RestoreWindowTabs` re-homes every tab of a reopened
+window DORMANT: a tab's terminal starts its claude only on the tab's first layout, so after a
+restart only the tab each window opens to starts. That is right for the hundred tabs that sat idle.
+It is wrong for the few that were in the middle of something: with 100 tabs and 5 of them busy, the
+4 busy tabs nobody looks at sit dormant and stuck until someone clicks them.
+
+**What it does.** After a window restore, every re-homed tab whose session was in the middle of
+something when Agentmaster went down starts by itself, in place (the "Activate Tab" path,
+`_ActivateDormantSession`). "In the middle of something" is the user's rule: its state AT THE
+RESTART was anything but Idle / Waiting-for-you / Done, so Running, NeedsApproval or Error. The
+wake waits for two things:
+
+1. the tab EVERY reopened window opens to has finished launching (the cross-window barrier below),
+   so the tabs the user looks at get the machine first;
+2. the window's UI thread is idle (1.5 s of punctual timer ticks, the splash watch's own bar), or
+   30 s since the barrier released it.
+
+The wakes are then paced ACROSS EVERY WINDOW (`RestoreWakePacer`): one tab per slot, slots
+500 ms apart and at most 4 per 10 s for the whole process — the "Activate All Tabs" drip's pace,
+but process-wide, because the barrier releases all windows at the same moment, and four windows
+each running their own drip would start sixteen claudes within 1.5 s. The window's own restore-
+wake timer takes the slots (first come, first served on its 250 ms ticks), so the per-window drip
+is not used and shows no busy state. A user's "Activate All Tabs" meanwhile runs its own drip;
+the restore wake's later candidates then read started and are skipped without a slot.
+
+**Which tabs: `RestoreWakeWantsSession`** (`AgentMaster/RestoreWake.h`). A tab is a candidate when
+its record is live, never started, ours (not `external`), and `SessionInfo::midTurnAtRestore` is
+set. The restore seams set that flag from the persisted state before they normalize it
+(`RestoredMidTurnFlag` → `RestoredSessionState`, HOOKS.md *Cut-off turns*). The state is read again
+at wake time, because the scanner refines a restored record while it waits:
+
+| State at wake time (with the flag) | Woken? | Why |
+|---|---|---|
+| Idle | yes | a persisted Running or Error, normalized to Idle |
+| NeedsApproval | yes | kept by the restore; the question died with its process. Waking brings the conversation back up so it can be answered or continued (what the resumed claude does with the open question is Claude Code's, not verified). The scanner usually re-reads such a dormant tab as a cut-off Error first (HOOKS.md *Cut-off turns*) |
+| Error | yes | the scanner's cut-off or API-error verdict since the restore |
+| Waiting-for-you, unpinned | no | the scanner's recon-stop proved the turn ended |
+| Waiting-for-you, PINNED | yes | the pin hold (`ApplyPinHold`) turns a live pinned Idle into Waiting, so here it still means a normalized Running / Error |
+| Running | no | a live process runs the turn somewhere (another tab's claude on the same conversation); starting this tab would add a second writer |
+| Done | no | |
+
+A record that was Idle, Waiting-for-you or Done at the restart has no flag and is never woken,
+even when the scanner later reads it as Error (an error the user had dismissed comes back as Error
+after a restart): the rule is the state at the restart, and re-running a turn the user abandoned
+would spend tokens on it. A restore-FRESH (the transcript was gone) removes the old id, so it is
+not a candidate: a new conversation has no turn to continue. At wake time a candidate is also
+skipped when its tab started meanwhile (the focused one, or one the user opened), was closed, or
+moved to another window.
+
+**When, per window: the foreground gate** (`RestoreWakeForegroundStep`, ticked every 250 ms by
+`_TickRestoreWake`). "The tab the window opens to" is the managed session the restore focused,
+while this window still hosts it under that id (with shells in the record, the selection lands
+only after the async shell replay, and a shell created meanwhile must not count for it). Otherwise
+it is whatever the window shows now. It counts as LAUNCHED:
+
+| Foreground | Launched when |
+|---|---|
+| no terminal (the Agent Manager page, no tab, a Settings tab) | at once |
+| a terminal that hosts no Claude session (a shell, a Codex) | its connection started |
+| a Claude session's terminal | its connection started AND a hook newer than the restore arrived (its SessionStart, normally); or 15 s after it was first seen started without one (a broken forwarder; a re-forked never-messaged fork, whose startup SessionStart arrives under the SOURCE id and is dropped by the fork-echo guard) |
+| anything | 90 s after the re-home ended, whatever it shows (a focused tab that never starts must not hold every window) |
+
+A hook OLDER than the restore proves nothing: it is the session's earlier life in the same run (a
+window closed and reopened with "Reopen Windows (N)").
+
+**When, across windows: the barrier** (`RestoreWakeBarrier`, one per process,
+`SharedRestoreWakeBarrier()`):
+
+- `Announce` at window CREATION: `TerminalWindow::Initialize` calls
+  `TerminalPage::SetAgentmasterWindowId` for every window the Emperor reopens from a saved record,
+  and the Emperor creates every reopened window before the first one lays out. So every reopened
+  window is waiting in the barrier before any restore ends, and the first window to finish its
+  re-home cannot wake its busy tabs while another window is still restoring. (The windows lay out
+  one after another on the one UI thread; on 2026-10-19 the second window registered 4 ms after
+  the first one's re-home ended.)
+- `Join` at the end of `_RestoreWindowTabs`. A window restored without an announce (the one default
+  window that front-pops a record after a "No" to the reopen prompt) enters here.
+- `NoteForegroundLaunched` once, the tick the window's gate latches.
+- The release rule (`RestoreWakeReleaseVerdict`): when every waiting window has joined and launched
+  its foreground, all of them are released at once. A window with no busy tab still joins, holds the
+  other windows back until its own foreground launched, and then leaves.
+- The cap: 5 minutes after the OLDEST waiting entry, every waiting window is released, ready or not,
+  so an announced window that never restores (destroyed before its first layout) costs the others a
+  late wake, never a lost one. A straggler released by the cap waits only for its own foreground.
+- `Leave`: after the wake, when the window restored nothing (`_RestoreWindowTabs`'s exit guard: the
+  assigned record was gone, the record holds no tab, or the restore threw), when its job failed, and
+  in `~TerminalPage` (thread-safe, any thread).
+- Rounds: windows reopened later (the "Reopen Windows (N)" button) form a round of their own; the
+  released entries of an earlier round no longer count.
+
+**The code.** The decisions are pure and header-only in `AgentMaster/RestoreWake.h` (the predicate,
+the gate, the wake decision, the barrier, the pacer). The glue is in
+`TerminalPage.AgentWindowRecord.cpp`: `_AnnounceRestoreWake` (from `SetAgentmasterWindowId`),
+`_BeginRestoreWake` (the end of `_RestoreWindowTabs`), `_TickRestoreWake`,
+`_ReadRestoreWakeForeground`, `_WakeRestoredBusyTabs` (the release: the plan, then the WAKING
+phase), `_StepRestoreWakeQueue` (one paced wake per free slot, through `_ActivateDormantSession`),
+`_EndRestoreWake`, `_LeaveRestoreWake`. The window's job is `TerminalPage::_restoreWake` (a
+`RestoreWakeWindowJob`) with its timer `_restoreWakeTimer`. Tests: `TestRestoreWake`
+(`tests/tests_restorewake.cpp`).
+
+**The log** (`[restore-wake]` in hooks.log; one line per step and window; the ids and times below are
+made up):
+
+```
+[restore-wake] window {id}: announced - it restores a saved record; ...
+[restore-wake] window {id}: restored; 3 busy tab(s) to wake once the tab every reopened window opens to has launched: 1a2b3c4d(Idle) 5e6f7a8b(NeedsApproval) 9c0d1e2f(Error); focus=7d8e9f0a; barrier: 4 window(s) waiting, 1 restored, 0 launched
+[restore-wake] window {id}: its focused tab finished launching (its claude is up (a hook arrived)) 23810 ms after its restore; 3 busy tab(s) to wake; barrier: ...
+[restore-wake] window {id}: waking 3 busy tab(s) 26190 ms after its restore (every reopened window launched its focused tab; the UI is idle; paced across every window: 500 ms apart, at most 4 per 10 s): 1a2b3c4d(Idle) ...; skipped 1: 3f4e5d6c(running already)
+[nav] activate-dormant 1a2b3c4d
+[restore-wake] window {id}: done - woke 3 busy tab(s), 27240 ms after its restore
+```
+
+One `[nav] activate-dormant <sid8>` per woken tab (`_ActivateDormantSession`'s own line). A window
+that left without waking logs `left the wake barrier - <why>`.
+
+**What it does not do.**
+
+- The wake STARTS the claude; whether the turn continues is Claude Code's. With
+  `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` (in this machine's `~/.claude/settings.json` since
+  2026-10-09) a resumed claude continues an interrupted turn by itself; a turn that died on an API
+  error continues through the API-error rewind, which the restored launch applied before the tab
+  could start (HOOKS.md *API-error turns*, `resumeApiErrorTurns`, default ON). Without the variable
+  the woken claude waits at its box: the tab is up, the question or the error is on screen.
+- A Codex tab is started too, but `codex resume` does not continue a turn.
+- A window reopened mid-session ("Reopen Windows (N)") wakes its busy tabs the same way. Their state
+  is the one they had when the window was closed; a window closed by hand usually delivers its
+  claudes' SessionEnd (Done) before the app quits, so usually nothing wakes there.
+- A Deactivated (parked) tab whose turn was cut off by the park reads Error; at the next restart
+  that Error is "busy at the restart", so it is woken.
+- No setting switches it off yet.
+- ⚠ `TerminalPage` gained data members (`_restoreWake`, `_restoreWakeTimer`): the next build must
+  purge (the build-install skill §5.8).
+
+**Live checks owed after a build:** (1) quit with a turn running in a background tab of window 2 →
+restart → in hooks.log, the `[restore-wake]` steps per window, the wakes only after every window's
+"finished launching" line, and the background tab running again (its claude continues the turn);
+(2) a session sitting at an AskUserQuestion at the restart → woken; note what the resumed claude
+does with the open question; (3) a restart with nothing busy → each window's "no busy tab to wake
+here" line and no wake; (4) busy tabs in several windows → the `[nav] activate-dormant` lines of
+ALL windows together keep the pace (≥ 500 ms apart, at most 4 in any 10 s).

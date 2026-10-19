@@ -165,6 +165,7 @@ int wmain()
     TestTaskbarThumbnail(); // NOTIFICATIONS.md section 9 — the unread frame on a window's taskbar / Alt+Tab preview (tests_taskbar.cpp)
     TestTabTools(); // SESSIONS.md 9.14 — the AI search's window and tab tools + its system prompts' structure (tests_tabtools.cpp)
     TestApiErrorRewind(); // HOOKS.md "API-error turns" — the rewind that lets a resumed session continue a turn an API error ended (tests_rewind.cpp)
+    TestRestoreWake(); // PERSISTENCE.md §14 — after a restart, the restored tabs that were busy wake once every window's focused tab launched (tests_restorewake.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

@@ -548,6 +548,19 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
         }
+        // Agentmaster (the RESTORE WAKE — PERSISTENCE.md §14): stop this window's wait (UI-affine — the same guard as the
+        // timers above), then LEAVE the process-wide wake barrier, so a window that closes while it waits never holds the
+        // other windows' busy tabs back (until the barrier's cap). _LeaveRestoreWake is thread-safe, touches no XAML and
+        // never throws, so it stays bare like the engine detaches below; a no-op for a window that already left.
+        if (_restoreWakeTimer)
+        {
+            try
+            {
+                _restoreWakeTimer.Stop();
+            }
+            CATCH_LOG();
+        }
+        _LeaveRestoreWake(L"the window closed");
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): stop its launch bar's PRESETS hover timer and close
         // an open hover menu and drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread
         // teardown throws RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.
@@ -4299,9 +4312,17 @@ namespace winrt::TerminalApp::implementation
     // Emperor's -s <idx> (multi-window reopen), so _InitAgentmasterEngine claims THAT record (its
     // geometry already applied by TerminalWindow) instead of the front one. Must be set before
     // _OnFirstLayout. Empty => single-window (claim the front record).
+    // Agentmaster (the RESTORE WAKE — PERSISTENCE.md §14): the same call enters this window in the wake barrier. It runs at
+    // window CREATION, and the Emperor creates every reopened window before the first one lays out, so each of them waits
+    // in the barrier before any restore ends — the first window to finish cannot wake its busy tabs while another window
+    // is still restoring. _AnnounceRestoreWake never throws.
     void TerminalPage::SetAgentmasterWindowId(winrt::hstring windowId)
     {
         _assignedWindowId = windowId;
+        if (!windowId.empty())
+        {
+            _AnnounceRestoreWake(std::wstring{ windowId });
+        }
     }
 
     // Agentmaster: TerminalWindow flags a window built from MOVED content (tab tear-out into a new
