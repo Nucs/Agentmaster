@@ -1474,11 +1474,21 @@ namespace Agentmaster::Msg
             }
             if (name == L"restartsession")
             {
-                if (_hooks.restartSession)
+                if (!s->started && !s->external)
                 {
-                    _hooks.restartSession(sessionId);
+                    // §21.24: a PARKED tab (restored or deactivated, its claude never started) is started in place, as
+                    // /reactivate does: the window's restart refuses a connection that never started (_restartPaneConnection's
+                    // guard, an AV otherwise), so a restart there did nothing while this reply said it restarted.
+                    _reply(threadId, TgEscapeHtml(_reactivate(sessionId)), false);
                 }
-                _reply(threadId, L"Restarting the session.", false);
+                else
+                {
+                    if (_hooks.restartSession)
+                    {
+                        _hooks.restartSession(sessionId);
+                    }
+                    _reply(threadId, L"Restarting the session.", false);
+                }
             }
             else
             {
@@ -2630,6 +2640,14 @@ namespace Agentmaster::Msg
             cmd.name = L"restartsession";
             _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
             return L"A turn is running \x2014 confirm the restart below.";
+        }
+        if (!s->started && !s->external)
+        {
+            // A PARKED tab (restored or deactivated, its claude never started): the window's restart refuses a connection that
+            // never started (_restartPaneConnection's guard - an AV otherwise), so it is started in place, as ▶ Reactivate does
+            // (the same conversation resumes; a cut-off turn goes on by itself). The toast is Reactivate's own outcome.
+            LogNav(L"remote telegram restart (card) " + ShortId(sessionId) + L" -> start (parked)");
+            return _reactivate(sessionId);
         }
         if (!_hooks.restartSession)
         {

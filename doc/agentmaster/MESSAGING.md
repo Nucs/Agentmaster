@@ -532,10 +532,10 @@ Runner Paused · queue 2 — next: "also update the docs"
 As built (§21.18): the runner line is left out while it is the common default — an Auto runner, nothing
 queued, no global pause; a Paused runner, the global pause or a queued prompt brings it back as above.
 
-As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, every card's default: the state's own action
-first ([🔧 Resume Session] in Error, [▶ Reactivate] for a parked tab or a claude that exited), then [⚙️ Session]
-[🔄 Restart Session]. **⚙️ Session** turns the keyboard into the Session page: the same first row, [⑂ Fork]
-[🆕 New Session] · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
+As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, every card's default: [⚙️ Session], and beside it
+[🔄 Restart Session] only for a session in Error or one whose claude exited, or [▶ Reactivate] for a parked tab.
+**⚙️ Session** turns the keyboard into the Session page: [⑂ Fork] [🆕 New Session] · [🔄 Restart Session] (+ [🔧 Resume
+Session] in Error) · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
 [🖼 Screen Image] · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
 
 ### 6.2 What it is doing, or whether it is idle
@@ -1207,8 +1207,9 @@ transport's failures and slow calls.
   clear is a UI-thread action a later build routes through the hosting window.
 - **The card's buttons** are five (Pause / Resume the runner, Queue, Pin / Unpin, Transcript, Screen); **More ▸**
   is the `/commands`. *(§21.5 added ▶ Reactivate, the first row while the session is parked, in Error or exited.)*
-  *(§21.24 put them on two pages — Main: ⚙️ Session, 🔄 Restart Session; Session: ⑂ Fork, 🆕 New Session, the five,
-  🖼 Screen Image and ◀ Back — and names the first row 🔧 Resume Session for a session in Error.)*
+  *(§21.24 put them on two pages — Main: ⚙️ Session, plus 🔄 Restart Session in Error or after an exit, or ▶ Reactivate for a
+  parked tab; Session: ⑂ Fork, 🆕 New Session, 🔄 Restart Session with 🔧 Resume Session in Error, the five, 🖼 Screen Image
+  and ◀ Back.)*
 - **The Search topic is created by the bot at its first connection with topics on** (the Bot API cannot pin
   it; the user pins it). Its answers carry one pick button per listed session and ⊘ Clear; a pick opens the
   session's action menu — [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel], no fork-and-pin (§5.4, §21.7); a
@@ -3505,12 +3506,18 @@ service's `_cardMarkupFor`). Two buttons a row at most, so a phone shows every l
 
 | Page | Rows |
 |---|---|
-| **Main** (every card's default) | [🔧 Resume Session] for a session in Error, else [▶ Reactivate] for a parked tab or a claude that exited (no first row for a running or waiting session) · [⚙️ Session] [🔄 Restart Session] |
-| **Session** (after ⚙️ Session) | the same first row · [⑂ Fork] [🆕 New Session] · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] · [◀ Back] |
+| **Main** (every card's default) | [⚙️ Session], and beside it [🔄 Restart Session] for a session in Error or one whose claude exited, or [▶ Reactivate] for a parked tab (nothing beside it for a running, waiting or idle session) |
+| **Session** (after ⚙️ Session) | [⑂ Fork] [🆕 New Session] · [🔄 Restart Session], with [🔧 Resume Session] beside it in Error · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text] [🖼 Screen Image] · [◀ Back] |
 
 > The user's follow-up (2026-10-18), on the first layout, which had [⑂ Fork] [🆕 New Session] on Main: "[⑂ Fork] · [🆕 New
 > Session] should be after ⚙️ Session" — read as: on the page ⚙️ Session opens, so they moved there, as its first row.
 > 🔄 Restart Session stays on Main beside ⚙️ Session.
+>
+> The user's second follow-up (2026-10-19): "Restart Session and Resume Session must be inside [⚙️ Session]. Show
+> [🔄 Restart Session] outside only when the session is in error or done statuses." So both moved to the Session page
+> (Restart always there, Resume beside it in Error), and Main shows Restart only in Error and after an exit (Done).
+> ▶ Reactivate, which the rule does not name, keeps its place on Main for a parked tab only: in Error or after an exit it is
+> the same restart as 🔄 Restart Session, which Main then shows.
 
 A button's data stays `c:<verb>:<session id>`, with no token: the verb acts on the session's state when it is tapped (M5 is
 about answers and queue items). New verbs: `panel` (⚙️ Session), `main` (◀ Back), `fork`, `newsession`, `restart`, `resume`,
@@ -3528,15 +3535,21 @@ The old verbs stay understood, so a card posted before this build keeps working 
   model, through the very same code (`_launchFromCard` → `_runSessionCommand`): the thread gets the commands' own lines
   ("Forking into a tab…", then "Opened <the fork's title> — its topic is coming up.", §21.23), and the toast only says it
   was asked ("⑂ Forking it into a new tab…", "🆕 Opening a new session in its folder…").
-- **🔄 Restart Session** is `/restartsession` (`_restartFromCard`): a session at rest is restarted at once — the same
-  conversation resumes in its tab, toast "🔄 Restarting it — the same conversation resumes in its tab." While a turn RUNS, the
-  command's question with its [Restart now] [Cancel] goes into the thread (the turn would be cut off) and the toast points at
-  it. A closed session's toast says so.
-- **🔧 Resume Session** is ▶ Reactivate under the user's name for a session in Error (`_reactivate`: a parked tab is started
-  in place, a claude that is up is restarted); its outcome is the toast. The card's line reads "🔧 Resume Session restarts it
-  (the same conversation goes on)", or "… starts it in its tab (a cut-off turn goes on by itself)" for a parked tab in Error:
-  `BuildCardText` reads Error FIRST now, so a tab restored after a crash with its turn cut off names the action it needs, not
-  a bare "not running".
+- **🔄 Restart Session** (on the Session page always; on Main for a session in Error or one whose claude exited) is
+  `/restartsession` (`_restartFromCard`): a session at rest is restarted at once — the same conversation resumes in its tab,
+  toast "🔄 Restarting it — the same conversation resumes in its tab." While a turn RUNS, the command's question with its
+  [Restart now] [Cancel] goes into the thread (the turn would be cut off) and the toast points at it. A PARKED tab (its claude
+  never started: restored, deactivated) is started in place, as ▶ Reactivate does, with Reactivate's toast: the window's own
+  restart refuses a connection that never started (`_restartPaneConnection`'s guard — an AV otherwise), so before this a
+  restart there did nothing, also the typed `/restartsession`, which answered "Restarting the session." (fixed the same way).
+  A closed session's toast says so.
+- **🔧 Resume Session** (the Session page, a session in Error) is ▶ Reactivate under the user's name (`_reactivate`: a parked
+  tab is started in place, a claude that is up is restarted); its outcome is the toast.
+- **The card's line** names the button Main shows: "🔄 Restart Session restarts it (the same conversation goes on)" in Error,
+  or "… starts it in its tab (a cut-off turn goes on by itself)" for a parked tab in Error; "⏹ claude exited — 🔄 Restart
+  Session starts it again (the same conversation)" after an exit; a parked tab keeps "💤 not running — a message here or
+  ▶ Reactivate resumes it". `BuildCardText` reads Error FIRST, so a tab restored after a crash with its turn cut off names
+  the action it needs, not a bare "not running".
 - **🖥 Screen Text** is the old 🖥 Screen (`/screen`, the visible text) under the user's name.
 - **🖼 Screen Image** (also `/screenimage`, in the "/" menu and the help) sends the terminal's screen as a PICTURE: toast
   "🖼 Drawing the screen…", then the photo in the topic.
@@ -3606,16 +3619,19 @@ emoji, wide CJK, blocks, rules joined). NOT BUILT; nothing tried live.
 (the build-install skill's §5.8).
 
 **Check after the build** (dev, with the bot):
-1. A topic's card shows [⚙️ Session] [🔄 Restart Session]; ⚙️ Session flips it at once to the Session page, whose first row
-   is [⑂ Fork] [🆕 New Session], and ◀ Back flips it back; a new message in the topic (the card re-posted below it) keeps the
-   page.
+1. A running or waiting session's card shows [⚙️ Session] alone; ⚙️ Session flips it at once to the Session page, whose first
+   rows are [⑂ Fork] [🆕 New Session] and [🔄 Restart Session], and ◀ Back flips it back; a new message in the topic (the card
+   re-posted below it) keeps the page.
 2. 🖼 Screen Image on a live session: "🖼 Drawing the screen…", then a photo of the screen in its colors (hooks.log `[msg]
    screen picture of …`); on a parked tab: "The screen could not be read …". `/screenimage` typed: the same.
 3. ⑂ Fork: "Forking into a tab…", then "Opened <the fork's title> — its topic is coming up."; 🆕 New Session likewise, in the
    session's folder.
 4. 🔄 Restart Session at rest: the toast, and the session resumes in its tab; while a turn runs: the question with
-   [Restart now] [Cancel].
-5. A session in Error (a cut-off turn): the card's first row is [🔧 Resume Session] and its line names it; the tap resumes it.
+   [Restart now] [Cancel]; on a parked tab: "▶ Resuming it in its tab …" and its claude starts (hooks.log `[nav] remote
+   telegram restart (card) <sid8> -> start (parked)`, no `[restart] skipped` line).
+5. A session in Error (a cut-off turn) and one whose claude exited: Main shows [⚙️ Session] [🔄 Restart Session] and the line
+   names it; the Session page of the one in Error shows [🔄 Restart Session] [🔧 Resume Session]; each tap resumes it.
+6. A parked tab: Main shows [⚙️ Session] [▶ Reactivate]; `/restartsession` typed in its topic starts it too.
 
 ### 21.25 A new thread's WIZARD: create a missing folder, pick a model, pick a window — and an aborted creation deletes the thread (2026-10-18; NOT BUILT yet)
 
