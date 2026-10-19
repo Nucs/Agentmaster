@@ -232,8 +232,9 @@ namespace winrt::TerminalApp::implementation
             // The REAL input mode (GettingFocus above), consumed here: every focus change raises its own GettingFocus.
             // Not FocusState(): XAML coerces a programmatic focus to the last input device's state before raising
             // GotFocus, so the side panel card's Focus(Programmatic) right after the "+" click read as Pointer and opened
-            // the list on every "+". Unfocused = no GettingFocus seen (a re-focus of the already focused box, whose
-            // coerced state changed, raises GotFocus alone): then the old read.
+            // the list on every "+" — before the card was laid out at its place (2026-10-12). The card now opens its list
+            // itself once it is placed (OpenPathPicker). Unfocused = no GettingFocus seen (a re-focus of the already
+            // focused box, whose coerced state changed, raises GotFocus alone): then the old read.
             auto fs = self->_cwdBoxFocusArrival;
             self->_cwdBoxFocusArrival = FocusState::Unfocused;
             if (fs == FocusState::Unfocused)
@@ -541,6 +542,28 @@ namespace winrt::TerminalApp::implementation
     void AgentLaunchBar::ClosePathPicker()
     {
         _ClosePathPicker();
+    }
+
+    void AgentLaunchBar::OpenPathPicker() noexcept
+    {
+        try
+        {
+            // After Shutdown the host is going away: its late dispatcher tick must not reopen anything of the bar (the
+            // drop-down Popup would stay open in a window whose launch bar no longer answers).
+            if (_shutDown)
+            {
+                return;
+            }
+            // The same open as a click in the box: the dismissal latch cleared, anchored, sized, re-listed, opened, one
+            // re-anchor round armed. The caller guarantees the box is laid out at its place (see the declaration).
+            _OpenPathPicker();
+        }
+        catch (...)
+        {
+            // A failed re-list or open (XAML refused an element): the Popup opens only after the re-list, so the list is
+            // normally still closed and a click in the box retries. Recorded, never thrown into a host's tick (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar::OpenPathPicker");
+        }
     }
 
     bool AgentLaunchBar::PathPickerOpen() const noexcept
@@ -1717,7 +1740,8 @@ namespace winrt::TerminalApp::implementation
         // ...and once more after the next layout pass, where the box really is then: the anchor above read the box's
         // LAST layout, and a box that just moved is not there yet — a card whose Popup offsets were just written (its
         // child moves only in the next pass), or one never laid out at all (the window's first "+"). A list anchored to
-        // that stale place covered the box and Launch (2026-10-12). The re-anchor writes only on a real move.
+        // that stale place covered the box and Launch (2026-10-12). The re-anchor writes only on a real move. (The side
+        // panel's card runs that pass itself before its own open — OpenPathPicker — so there this round is the belt.)
         _pathPickerReanchorRounds = 0;
         _ArmPathPickerReanchor();
     }

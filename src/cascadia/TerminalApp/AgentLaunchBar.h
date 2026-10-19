@@ -24,11 +24,13 @@
 //     Manager's box) and the dialog anchor (the card, so a "Couldn't create folder" dialog is dark).
 //
 // THE RULES THIS CLASS KEEPS (each one has a comment at its code):
-//   - The drop-down opens only on a USER focus (Pointer / Keyboard), a tap or a keystroke — never on a programmatic
-//     focus — and an Esc / Enter / blur dismissal sticks until the box is refocused or tapped. "User focus" is read
-//     from the box's GettingFocus (the input mode as it was), never from GotFocus's FocusState: XAML reports a
-//     programmatic focus there as Pointer or Keyboard (the last input device). A programmatic text write (SetBoxText,
-//     a Browse… pick) never opens it either, because TextChanged arrives later, when the box may hold focus.
+//   - The drop-down opens on a USER focus (Pointer / Keyboard), a tap, a keystroke, or when the HOST asks for it
+//     (OpenPathPicker: the side panel's card opens with its list showing, 2026-10-19) — never on a programmatic
+//     focus — and an Esc / Enter / blur dismissal sticks until the box is refocused or tapped (or the host opens it
+//     again). "User focus" is read from the box's GettingFocus (the input mode as it was), never from GotFocus's
+//     FocusState: XAML reports a programmatic focus there as Pointer or Keyboard (the last input device). A
+//     programmatic text write (SetBoxText, a Browse… pick) never opens it either, because TextChanged arrives later,
+//     when the box may hold focus.
 //   - An open drop-down re-anchors under the box after the layout pass that follows its open, and after a host moves
 //     the box (ReanchorPathPickerAfterLayout): XAML moves a popup's child to new offsets only in the next layout pass,
 //     so a read before it anchors the list to the box's previous place.
@@ -193,6 +195,20 @@ namespace winrt::TerminalApp::implementation
         void ClickFork();
         // Close the drop-down (no dismissal latch: the next keystroke reopens it). Never throws in practice.
         void ClosePathPicker();
+        // Open the drop-down NOW, on the host's request — exactly what a click in the box does: the dismissal latch
+        // cleared, the list anchored under the box and sized against the window, re-listed for the box's text, opened,
+        // and re-anchored once more after the next layout pass. The side panel's "+" card calls it so the card opens
+        // with its folder list showing (the user's rule, 2026-10-19; the list stayed closed until a click or a key
+        // before). An open list is re-fitted and re-listed; a no-op after Shutdown. The rows read the disk (subfolders,
+        // git branches), as at every open.
+        // ⚠ Call it only once the box is laid out where it will be seen: the anchor reads the box's LAST layout, and a
+        // box inside a popup that was just opened or moved is still at its previous place — (0,0) for one never laid
+        // out — until the next layout pass (the 2026-10-12 report: the list over the box and Launch). The card runs
+        // that pass itself first (UIElement::UpdateLayout); without it the list would show for a frame at the old
+        // place before its re-anchor round moved it.
+        // Never throws: a failure is logged (Rule #18) and the list stays as the failure left it — closed when the
+        // re-list failed (the Popup opens last), so a click in the box opens it again.
+        void OpenPathPicker() noexcept;
         // True while the drop-down is open. Never throws (a failed read answers false).
         bool PathPickerOpen() const noexcept;
         // Re-fit an OPEN drop-down to a resized window on the next dispatcher tick (coalesced). Call from a
@@ -308,7 +324,9 @@ namespace winrt::TerminalApp::implementation
         // Re-list the drop-down for the box's current text (Browse…, RECENT / RECENT MATCHES, GIT WORKTREES,
         // MATCHES / SUBFOLDERS, the empty-state hint). Throws what XAML element creation throws.
         void _RebuildPathPicker();
-        // Clear the dismissal latch, re-fit, re-list and open the drop-down.
+        // Clear the dismissal latch, re-fit, re-list and open the drop-down, then arm one re-anchor round. The box's own
+        // focus / tap / typing handlers call it; OpenPathPicker is the hosts' guarded entry. Throws what XAML element
+        // creation throws in the re-list (the Popup opens only after it, so a failed re-list leaves the list closed).
         void _OpenPathPicker();
         // Anchor the drop-down under the box and size it against the CURRENT window — the width rule (from the box's
         // left edge out to 90% of the host's width, 560-DIP floor) plus the HEIGHT CAP: the list grows with its rows up
@@ -411,8 +429,11 @@ namespace winrt::TerminalApp::implementation
         // XAML coerces a programmatic focus before GotFocus (WinUI CFocusManager::UpdateFocus → CoerceFocusState:
         // Programmatic becomes Pointer after a mouse / touch / pen input, Keyboard after a key). So the side panel card's
         // Focus(Programmatic), right after the "+" click, read as Pointer: the drop-down opened on every "+" — against
-        // the user's choice (the cursor in the box, the list closed until a click or a key) — and before the card was
-        // laid out at its place, which anchored it over the box and Launch (the user's report, 2026-10-12).
+        // the user's choice of that time (the cursor in the box, the list closed until a click or a key) — and before
+        // the card was laid out at its place, which anchored it over the box and Launch (the user's report, 2026-10-12).
+        // Since 2026-10-19 the card opens its list ON PURPOSE (OpenPathPicker), after a layout pass that places it; a
+        // programmatic focus still opens nothing, because a focus cannot know whether its box is laid out yet (and a
+        // Browse… refocus must leave a closed list closed).
         // Unfocused = no GettingFocus since the last GotFocus (a re-focus of the focused box raises none): GotFocus then
         // falls back to FocusState(), the old read.
         winrt::Windows::UI::Xaml::FocusState _cwdBoxFocusArrival{ winrt::Windows::UI::Xaml::FocusState::Unfocused };

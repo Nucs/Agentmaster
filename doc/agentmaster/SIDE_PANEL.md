@@ -452,7 +452,9 @@ width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in 
 ### 2e. The "+" launcher — the Agent Manager's launch box, at the click
 
 Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
-pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in no build yet. The
+pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in dev since 0.0.1.6 and in
+production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) is in no build
+yet. The
 header's **+** button (the first of the right-aligned buttons, left
 of **Sum** — the user's "leftmost, to Sum") opens a small card AT THE CLICK that holds the Agent
 Manager's own launch row, so a session starts from the side panel without leaving the tab:
@@ -493,13 +495,32 @@ Manager's own launch row, so a session starts from the side panel without leavin
    (the bar's `textEdited` → `SetLaunchBoxText`), and writes its last, normalized text back when it
    closes. So the two boxes always read the same; a tab switch then pre-aims the Manager's box as
    always (the card closes first, in `_ApplyAgentTabSelection`, before `_SyncManagerSelectionToTab`).
-5. **Focus:** the box gets PROGRAMMATIC focus one tick after the open — the caret waits in the box,
-   and the drop-down stays closed until a click in the box or a keystroke (the box's own rule: it
-   opens only on a pointer / keyboard focus, a tap or typing).
-   - **The fix of 2026-10-12 (NOT BUILT yet) — the user's report:** "In some cases when pressing +
-     it causes the Browse which is top row to be over the path text box and so it hides the entire
-     textbox and Launch Claude button." Two XAML facts, both read in the WinUI source, broke the rule
-     above:
+5. **Focus, and the folder list OPEN with the card (the user's rule, 2026-10-19, NOT BUILT yet):**
+   "That path selection menu's path textbox's dropdown menu is supposed to be open by default when +
+   the menu is shown." One dispatcher tick after the open, `_SidePanelFinishLaunchCardOpen` runs three
+   steps, in this order:
+   1. **The card is laid out at its place:** one synchronous layout pass (`UpdateLayout` on the card).
+      A popup's child moves to new offsets only in a layout pass (`CPopupRoot::ArrangeOverride`
+      arranges it at `HorizontalOffset` / `VerticalOffset`), so before that pass the box still reads
+      the card's previous place, or (0,0) on a window's first "+" — the 2026-10-12 report below. The
+      call runs the pass XAML would run before its next frame anyway, and does nothing when that pass
+      already ran (WinUI `CLayoutManager::UpdateLayout` returns at once when nothing is dirty).
+   2. **The box gets PROGRAMMATIC focus:** the caret waits in it. A refused focus logs
+      `[sidepanel] launcher card: its box did not take focus` (keys then still go to the terminal).
+   3. **The box's folder list opens right below it** (`AgentLaunchBar::OpenPathPicker`, exactly what a
+      click in the box does). The bar's re-anchor round after the next pass stays as the belt: the
+      card re-places itself when its size settles, and a real move re-anchors the list.
+   - **Before (2026-10-06 to 2026-10-19):** the drop-down stayed closed until a click in the box or a
+     keystroke — the user's answer of 2026-10-06 ("put the cursor in the box, but do not open the
+     folder list. Your click or first key opens it." — "true").
+   - **What it changes:** Esc closes the list first (the box's own Esc, as on the Agent Manager page)
+     and a second Esc closes the card. The list's rows read the disk at every "+" (the subfolders,
+     each recent folder's git branch) — what a click in the box always cost. The Agent Manager page is
+     unchanged: its box opens the list on a click, a Tab or a key.
+   - **The fix of 2026-10-12 (in dev since 0.0.1.6, production since 0.6.8.20) — the user's
+     report:** "In some cases when pressing + it causes the Browse which is top row to be over the
+     path text box and so it hides the entire textbox and Launch Claude button." Two XAML facts, both
+     read in the WinUI source, broke the rule of that time (the list closed until a click or a key):
      - XAML coerces a programmatic focus before `GotFocus` (`CFocusManager::CoerceFocusState`): after
        the "+" click the box's `FocusState` read **Pointer**, so `GotFocus` opened the list on every
        "+". The card's copy of the Agent Manager text did the same, through its late, asynchronous
@@ -508,9 +529,11 @@ Manager's own launch row, so a session starts from the side panel without leavin
        only in the next layout pass (`CPopupRoot::ArrangeOverride`). The list read the card's
        previous place, or (0,0) on a window's first open, and covered the box and Launch. Whether
        the late focus event came before or after that pass decided "some cases".
-   - **Now** the bar reads how focus really arrived from the box's `GettingFocus` (synchronous,
+   - **Since then** the bar reads how focus really arrived from the box's `GettingFocus` (synchronous,
      uncoerced; `_cwdBoxFocusArrival`), and a programmatic write (`SetBoxText`, a Browse… pick)
-     opens no list (`_programmaticTextPending`). An open list re-anchors after the next layout pass
+     opens no list (`_programmaticTextPending`). Both still hold with the list open by default: the
+     card opens its list itself, after step 1, and a programmatic focus or write never does. An open
+     list re-anchors after the next layout pass
      (`_ArmPathPickerReanchor`: a one-shot `LayoutUpdated`, then the queued re-fit), at every open
      and after every real card move (`_SidePanelPlaceLaunchCard` →
      `AgentLaunchBar::ReanchorPathPickerAfterLayout`). A re-anchor that moved the list writes
@@ -575,9 +598,13 @@ press while it is open reads the open popups once and walks the press's ancestor
 
 **Check after the build:** `+` sits left of Sum and toggles the card; a click near the top-left
 opens it down-right with its corner at the click, and after `⇄` (dock right) down-left; the card
-opens with the caret in the box and the folder list CLOSED — the first "+" of a new window, a "+"
-after selecting another tab (the Manager's text changed), and a "+" after `⇄`; a click in the box
-then opens the list right below the box; with the list open, a window resize that moves the card
+opens with the caret in the box and its folder list OPEN right below the box (2026-10-19), never
+over the box or Launch Claude, not even for one frame — the first "+" of a new window, a "+" after
+selecting another tab (the Manager's text changed), a "+" after `⇄`, and a "+" while the box holds a
+session id; a plain "+" writes no `[launchbar] the folder list moved under its box …` line to
+hooks.log (one at every "+" would mean the layout pass before the open did not place the card);
+Esc closes the list and keeps the card, a second Esc closes the card, and after that first Esc a
+click in the box opens the list again; with the list open, a window resize that moves the card
 and a typed session id that shows Fork keep the list under the box; after Browse… the list stays as
 it was; the card
 shows the Manager box's text and the same underline; typing opens the drop-down and mirrors into the
