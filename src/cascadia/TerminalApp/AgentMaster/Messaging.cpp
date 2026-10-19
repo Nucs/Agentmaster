@@ -915,6 +915,7 @@ namespace Agentmaster::Msg
                 _mirrors.clear();
                 _cards.clear();
                 _reacted.clear();
+                _steers.clear(); // §21.33: a watch of the last run names a send this run never made
                 _outbox.clear();
                 _dirty.clear();
                 _seenLive.clear();
@@ -1891,6 +1892,7 @@ namespace Agentmaster::Msg
                                     _mirrors.clear();
                                     _cards.clear();
                                     _reacted.clear();
+                                    _steers.clear(); // §21.33: its watches name messages of the OLD bot's chat
                                     // §21.16.7: the dots' holds and requests name the OLD bot's topics (this runs on the tick
                                     // thread, which owns _frontHeld).
                                     _frontHeld.clear();
@@ -2074,6 +2076,7 @@ namespace Agentmaster::Msg
                     _followTranscript(sid, topic, mirror, *s);
                     _flushWorkLog(sid, topic, mirror, false);
                     _syncReactions(*s);
+                    _sweepSteers(*s); // §21.33: after the reactions, so a steer the window put back gets its ✍ last
                     _updatePromptStatus(topic, mirror, *s); // §21.12: after the reactions (a phone prompt's 👨‍💻 goes first)
                     _sweepRevives(*s);
                     {
@@ -3284,6 +3287,7 @@ namespace Agentmaster::Msg
                 const std::pair<const wchar_t*, const wchar_t*> list[] = {
                     { L"queue", L"the queued prompts (session topic)" },
                     { L"sendnow", L"send the next queued prompt now" },
+                    { L"steer", L"send a message NOW, into a running turn too: /steer <text>" }, // §21.33
                     { L"runner", L"runner auto|paused" },
                     { L"pin", L"never idle: keep this topic" },
                     { L"unpin", L"let the session idle again" },

@@ -59,6 +59,7 @@
 #include "MessagingNewThread.h" // §21.17: the new-thread folder picker (lists, text, buttons, callback data)
 #include "MessagingNewThreadWizard.h" // §21.25: the new-thread wizard (create a folder, a model, a window; records + persistence)
 #include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
+#include "MessagingSteer.h" // §21.33: /steer, the words sent NOW (the decision, the texts, the prompt, the watch's verdict)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
 #include "SessionModels.h" // AppSettings, SessionInfo
@@ -1177,6 +1178,35 @@ namespace Agentmaster::Msg
         void _sweepTokens();
         void _sendnow(const std::wstring& sessionId, int64_t threadId);
         /// <summary>
+        /// /steer (§21.33): the words go into the session's input box NOW — the Manager's Send now with a new prompt, so a running
+        /// turn takes them in at its next step — when DecideSteer says Send; otherwise (a tab whose claude is not started, one whose
+        /// claude ended, a menu on the terminal) they wait FIRST in the queue, the reply says why, and a dormant tab is started.
+        /// The prompt is a remote one (BuildSteerPrompt: its status is a reaction on the /steer message — ⚡ sending, 👨‍💻 taken,
+        /// ✍ queued) placed before every waiting prompt (SteerInsertIndex). A send the delivery gate declines at once goes back to
+        /// the queue and is answered at once; one the hosting window declines later is told by _sweepSteers. A /steer older than
+        /// kBacklogAgeMs (written while Agentmaster was closed) is asked about like a plain message (D2), unless a new thread HELD
+        /// it. Poll thread (from _handleTopicMessage; _runSessionCommand keeps a branch for any other path).
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="words">The words after /steer (ParseRemoteCommand's args).</param>
+        /// <param name="msg">The /steer message (its id: the reaction and the replies; its date: the backlog rule); an empty object
+        /// when no message stands behind it.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="held">The message was held by a new thread's picker (§21.17): it is never backlog.</param>
+        /// <exception cref="std::bad_alloc">If the prompt, a reply or a reaction cannot be allocated.</exception>
+        void _steerRemotePrompt(const std::wstring& sessionId, const std::wstring& words, const json::Value& msg, int64_t threadId, bool held);
+        /// <summary>
+        /// §21.33, once per tick and topic (right after _syncReactions): looks at each steer this service SENT to the session
+        /// (_steers) and acts on its outcome (ClassifySteerWatch). Words the hosting window put back in the queue get ✍ on their
+        /// message and ONE line that says why (SteerDeclinedNoticeHtml over the facts the decline left); a watch that is taken,
+        /// resolved, gone or expired is dropped without a word (the reactions and the delivery's own lines speak for those). Any
+        /// OTHER session's watch past kSteerWatchMaxMs is dropped too: a session whose topic is gone is swept by no tick any more,
+        /// and _steers must not keep its watches for the rest of the run. Tick thread.
+        /// </summary>
+        /// <param name="s">The session (the tick's snapshot).</param>
+        /// <exception cref="std::bad_alloc">If a notice cannot be allocated.</exception>
+        void _sweepSteers(const SessionInfo& s);
+        /// <summary>
         /// REACTIVATE (§21.5, §21.6): a parked tab's claude is started in place; a session in Error, or one whose
         /// claude exited (Done), is restarted (the same conversation resumes in the same tab; with
         /// CLAUDE_CODE_RESUME_INTERRUPTED_TURN a cut-off turn goes on by itself). A running session is left alone.
@@ -1988,6 +2018,12 @@ namespace Agentmaster::Msg
         std::unordered_map<std::wstring, Mirror> _mirrors;
         std::unordered_map<std::wstring, CardState> _cards; // session id -> its card's transient state (CardState)
         std::unordered_map<std::wstring, PromptStatus> _reacted; // prompt id -> the status its Telegram message shows
+        /// <summary>
+        /// §21.33: the steers this service SENT and still watches (prompt id -> SteerWatch), until _sweepSteers learns their
+        /// outcome. Written by the poll thread (_steerRemotePrompt), read and pruned by the tick (_sweepSteers); guarded by `_mtx`.
+        /// Cleared with _reacted at a start and at a change of bot (a watch names a message of the old chat).
+        /// </summary>
+        std::unordered_map<std::wstring, SteerWatch> _steers;
         std::unordered_map<std::wstring, int64_t> _dirty; // session ids the registry notified since the last tick (-> ms)
         /// <summary>
         /// §21.16.7, under `_mtx`: the topics a directory DOT put first, not yet seen by the tick — session id -> when the tap
