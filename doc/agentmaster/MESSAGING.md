@@ -4389,6 +4389,10 @@ behind 192.168.50.5's proxy under a sysd.cc name); how long a link stays valid.
 
 ### 21.32.1 `cc.sysd.cc`: who answers a file link (2026-10-19; DESIGN ONLY, the owner's decisions open)
 
+**Superseded in part by §21.32.2** (the owner's second round, the same day): its proposal and its four modes gave way to a
+LAN listener and a hosted `cc.sysd.cc` behind Cloudflare; the checked facts, the link template and the request engine
+below still hold.
+
 > The user (2026-10-19): "Lets do cc.sysd.cc (first cc is claude code) But how will sysd.cc be linked to the telegram
 > message via agentmaster? does agentmaster host or rely on user to provide a template in settings that has %FILENAME% or
 > %PATH% and anything really needed and any segements or ext and thus user can configure how to reach his webserver.
@@ -4511,6 +4515,82 @@ secret patterns; the template and the request engine built so modes 2 to 4 can f
 Mini App only after its server check is tried with a LAN name. **Open:** which modes; the gate on `cc.sysd.cc` (kept:
 Telegram's own downloads work at home only, Chrome or Brave also through the VPN; left out: everything works through the
 VPN, the link's key the only check); the lifetime; snapshot or live; which folders may be linked.
+
+### 21.32.2 The plan, second round: a LAN listener, and `cc.sysd.cc` through Cloudflare (2026-10-19; DESIGN ONLY, decisions open)
+
+> The user (2026-10-19, "Still planning.."): "Have the self-hosted to listen to lan and provide in settings the urls we
+> listen to in a dropdown" — "Also cc.sysd.cc will only require mtls and is going to still go through cloudflare and not
+> to my network directly. The hosted service will require the session id hash in custom hash to serve as the key to the
+> session. In K:/source/proxmox/CLAUDE.md we have more info" — "This download mechanism is explicitly for MESSAGING and as
+> we only support telegram, eplicitly telegram for now."
+
+This replaces §21.32.1's proposal (`cc.sysd.cc` as a LAN-only name behind Caddy) and its four modes with two. §21.32.1's
+checked facts, link template and request engine still hold.
+
+**The decisions so far.**
+- **Telegram only.** The file links are a part of the Telegram service: the settings sit in the cog's Messaging tab, the
+  rewrite runs in the Telegram message builders only (live posts, the history replay, the Search answers), the keys are
+  minted for the topic's session, and the listener runs only while the bot runs.
+- **Self-hosted = a listener in Agentmaster on the LAN.** The tab lists the URLs it listens on in a dropdown; the one
+  picked is the base of every link.
+- **Hosted = `cc.sysd.cc` through Cloudflare, mTLS only.** A public name of the Cloudflare zone, checked at the edge for the
+  sysd access certificate (no Access sign-in), that reaches home only through Cloudflare, never straight into the LAN. The
+  hosted service takes a custom hash of the session id as the key to that session.
+
+**Self-hosted, what follows** (Telegram Android's source and AOSP's DownloadProvider, read 2026-10-19):
+- Telegram allows plain `http://` (`android:usesCleartextTraffic="true"`), so its in-app browser loads a LAN URL, and the
+  DownloadManager it hands the download to fetches it too (DownloadManager applies the asking app's cleartext rule,
+  `DownloadThread.java`).
+- So a tap works inside Telegram on the home Wi-Fi and through the sysd VPN (the owner's grant reaches the whole LAN; VPN
+  users arrive from 192.168.50.71), with no certificate: the network and the link's key are the checks. Without the VPN,
+  away from home, no link works.
+- **The dropdown.** The listener binds each LAN IPv4 address of an interface that is up (never loopback or link-local;
+  WSL, Hyper-V and VPN adapters marked as such) and lists `http://<address>:<port>/` for each, plus the PC's name when the
+  LAN DNS resolves it. The pick is the links' base; a pick whose address is gone (a new DHCP lease) shows as stale. Each
+  install has its own port (dev and production run side by side).
+- **The firewall.** One inbound rule for that port from the LAN (192.168.50.0/24 holds the VPN's .71), made once by an
+  administrator. A rule by PORT, not by program path: the layout folder changes at every swap (`Release` ↔ `Release-B`).
+- **The link:** `http://192.168.50.17:<port>/f/%KEY%/%FILENAME%` (the name last: the in-app browser names the download
+  after the URL's last segment).
+
+**Hosted, what follows.**
+- **Telegram cannot pass an mTLS check.** Its in-app browser, its DownloadManager hand-off and a Mini App's `downloadFile`
+  never present a client certificate (§21.32.1), so Cloudflare blocks each of them. The phone needs one setting, once:
+  Telegram → Settings → Chat Settings → **Web Browser** → **Don’t open in-app** → **Add Website** → `sysd.cc` ("These sites
+  will always be opened in external browser"; a subdomain matches its parent; the list is kept with the account's
+  browser settings). A tap then opens Chrome or Brave, which asks for the access certificate once per site and browser
+  run, and downloads. The Mini App way is out under mTLS.
+- **The zone's rules apply** (`K:\source\proxmox\CLAUDE.md` §5.9, the sysd skill's architecture): the post-quantum guard
+  (a ClientHello under 1200 bytes is blocked; Chrome and Brave pass), Israel only, the hosts rule (it admits `sysd.cc` and
+  `vpn.sysd.cc` only, so `cc.sysd.cc` must be added), the certificate rule, and the Managed Challenge (to leave out for
+  `cc.sysd.cc`: "only mtls"). The Free zone's 5 custom rules are all in use, so this is an edit of existing rules
+  (`sysd/cloudflare/10-zone.sh`), the owner's.
+- **Where the hosted service runs, and where the bytes come from** ("not to my network directly" reads two ways):
+  - **H1, a tunnel home:** Cloudflare → a tunnel → the service at home (a fastrun app, or Caddy alone) → the file PULLED from
+    the self-hosted listener over the LAN. The PC must be on; nothing is stored. The homelab side is
+    `sysd/gateway-design.md`'s third tunnel and its connector container (design only), or a tunnel for this one name.
+  - **H2, nothing at home:** a Cloudflare Worker on `cc.sysd.cc` with an R2 bucket. Agentmaster UPLOADS each linked file when
+    the bot posts (§21.32.1's request engine: `PUT` or `POST`, a header with a secret from Credential Manager), and the
+    Worker serves it from R2; it works while the PC is off, and the edge rules guard the Worker's route like any request.
+    Free: R2 10 GB-month, 1 million writes and 10 million reads a month, no egress fee; Workers 100,000 requests a day for
+    the whole account (shared with `mail-gate` and the other scripts) at 10 ms of CPU each; a request body of at most
+    100 MB on the Free plan, so a larger file needs a multipart upload or is not linked.
+  - fastrun fits H1 only: it keeps no file.
+- **The session key:** `%SESSIONKEY%` = a keyed hash of the session id — HMAC-SHA256 with a secret that Agentmaster
+  (Credential Manager) and the hosted service share, base64url, cut to 22 characters (132 bits). A plain hash would be no
+  key: anyone who knows the session id could compute it, and session ids are printed in many places (hooks.log, the CLI,
+  the Sessions page, the bot's own answers). The key opens that one session; a per-file part beside it keeps a leaked link
+  to one file: `https://cc.sysd.cc/s/%SESSIONKEY%/%KEY%/%FILENAME%`. Replacing the secret ends every hosted link.
+- **What the hosted service checks:** the key's form, then a signature that it can verify alone (`%SIG%`: HMAC over the
+  path and `%EXP%` with the shared secret) before it reads its store or asks the PC; in H1 the PC's listener checks the
+  keys again.
+
+**Open (the owner's):**
+- **"Custom hash":** the keyed HMAC above, or a hash defined in the tab (algorithm, salt, length)?
+- **H1 or H2:** where the hosted service runs and how it gets the file.
+- **One link or two:** with both modes on, the file name links to the hosted URL and a small LAN link follows it — or one
+  mode per install?
+- The lifetime, the size cap, the allowed folders, snapshot or live (§21.32.1).
 
 ### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; NOT BUILT yet)
 
