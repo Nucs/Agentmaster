@@ -4,7 +4,8 @@
 // Agentmaster M5 — MESSAGING.md §21.16: the pinned DIRECTORY, its pure half (MessagingDirectory.h) — the topic links, the two
 // stats rows, the join of the tags with the open tabs, both renders (the rich message with URL chips in the tab colors and the
 // tabs' state dots as callback buttons, and the classic HTML fallback), the content hash that decides an edit, the post / edit
-// decision and the "message is gone" rule, the dot's callback data and its toast (§21.16.7) — plus the state file's new fields,
+// decision and the "message is gone" rule, the dot's callback data and its toast (§21.16.7), the Recent activity section at the
+// bottom (§21.16.8: the stationary states, the pick, its place, its room in a full message) — plus the state file's new fields,
 // the census kind of its edits, and the tag palette the directory shares with the app (SessionStore.h, Rule #17). The service's
 // sends, pins and the dot's re-post (Messaging.cpp, Messaging.Inbound.cpp) need Telegram; the live check is the dev bot.
 
@@ -64,11 +65,19 @@ namespace
         t.threadId = threadId;
         return t;
     }
+
+    // A candidate of the Recent activity section (§21.16.8): a tab with its MOST RECENT key.
+    DirectoryTab DirRecentTab(const wchar_t* id, const wchar_t* title, SessionState state, const wchar_t* colorHex, int64_t threadId, int64_t recentMs)
+    {
+        DirectoryTab t = DirTab(id, title, state, colorHex, threadId);
+        t.recentMs = recentMs;
+        return t;
+    }
 }
 
 void TestMessagingDirectory()
 {
-    wprintf(L"== TestMessagingDirectory (MESSAGING.md 21.16: the pinned directory - links, stats, tags x tabs, renders, hash, decision, state, palette) ==\n");
+    wprintf(L"== TestMessagingDirectory (MESSAGING.md 21.16: the pinned directory - links, stats, tags x tabs, recent activity, renders, hash, decision, state, palette) ==\n");
 
     // ---- the links ----
     CHECK(DirectoryTopicUrl(L"ClaudeSessionsDebugGateBot", 25027) == L"https://t.me/ClaudeSessionsDebugGateBot/25027?topic=25027",
@@ -296,8 +305,8 @@ void TestMessagingDirectory()
     }
     // The structure is balanced, and nothing private reaches Telegram.
     CHECK(DirCount(r.rich, L"<tg-button ") == DirCount(r.rich, L"</tg-button>") && DirCount(r.rich, L"<p>") == DirCount(r.rich, L"</p>") &&
-              DirCount(r.rich, L"<b>") == DirCount(r.rich, L"</b>") && DirCount(r.rich, L"<h3>") == 2,
-          "the rich HTML's elements are balanced");
+              DirCount(r.rich, L"<b>") == DirCount(r.rich, L"</b>") && DirCount(r.rich, L"<h3>") == 3,
+          "the rich HTML's elements are balanced (three headings: Dedicated topics, Tags, Recent activity)");
     CHECK(r.rich.find(kTgTitleTokenOpen) == std::wstring::npos && r.classic.find(kTgTitleTokenOpen) == std::wstring::npos, "no title token in either render");
     CHECK(r.classic.size() <= kDirectoryClassicMaxChars + kDirectoryTailReserveChars && TgChunkHtml(r.classic).size() == 1, "the classic render is ONE message");
     {
@@ -384,6 +393,179 @@ void TestMessagingDirectory()
         CHECK(hr.classic.size() <= kDirectoryClassicMaxChars + kDirectoryTailReserveChars && TgChunkHtml(hr.classic).size() == 1 &&
                   hr.classic.find(L" more tags (the message is full)</i>") != std::wstring::npos,
               "the classic render stops sooner and stays one message");
+    }
+
+    // ---- the Recent activity section (§21.16.8): the ten newest tabs that are not stationary, at the bottom ----
+    {
+        CHECK(DirectoryStateIsStationary(SessionState::Idle) && DirectoryStateIsStationary(SessionState::Done),
+              "Idle and Done are stationary: nothing happens in the tab and nothing is asked of the user");
+        CHECK(!DirectoryStateIsStationary(SessionState::Running) && !DirectoryStateIsStationary(SessionState::WaitingForInput) &&
+                  !DirectoryStateIsStationary(SessionState::NeedsApproval) && !DirectoryStateIsStationary(SessionState::Error),
+              "Running, Waiting for you, Needs approval and Error are not");
+
+        // The pick: the stationary tabs out, the newest MOST RECENT key first, at most ten.
+        std::vector<DirectoryTab> cands;
+        for (int k = 0; k < 12; ++k)
+        {
+            const std::wstring id = L"rec" + std::to_wstring(100 + k);
+            cands.push_back(DirRecentTab(id.c_str(), id.c_str(), k % 2 == 0 ? SessionState::Running : SessionState::WaitingForInput, L"#61AFEF", 9000 + k, 1000 + k));
+        }
+        cands.push_back(DirRecentTab(L"idlenew", L"idle but newest", SessionState::Idle, L"#61AFEF", 9100, 99999));
+        cands.push_back(DirRecentTab(L"donenew", L"done but newer", SessionState::Done, L"#61AFEF", 9101, 88888));
+        const auto picked = PickDirectoryRecentTabs(cands, kDirectoryMaxRecentTabs);
+        bool newestFirst = picked.size() == 10;
+        for (size_t i = 0; newestFirst && i < picked.size(); ++i)
+        {
+            newestFirst = picked[i].recentMs == 1011 - static_cast<int64_t>(i);
+        }
+        CHECK(newestFirst, "ten tabs, the newest key first: the two oldest are left out, and so are the two stationary ones, though newer");
+        const std::vector<DirectoryTab> reversedCands(cands.rbegin(), cands.rend());
+        const auto pickedReversed = PickDirectoryRecentTabs(reversedCands, kDirectoryMaxRecentTabs);
+        bool sameOrder = pickedReversed.size() == picked.size();
+        for (size_t i = 0; sameOrder && i < picked.size(); ++i)
+        {
+            sameOrder = pickedReversed[i].sessionId == picked[i].sessionId;
+        }
+        CHECK(sameOrder, "the pick does not depend on the order of the candidates");
+        CHECK(PickDirectoryRecentTabs(cands, 0).empty() && PickDirectoryRecentTabs({}, kDirectoryMaxRecentTabs).empty(), "no room, or no candidate: nothing");
+        // Equal keys: by title, case-insensitively (the topic list's TopicRanksAbove; a tab with no title by its session id), then
+        // by session id.
+        const std::vector<DirectoryTab> ties = {
+            DirRecentTab(L"s3", L"Beta", SessionState::Running, L"", 0, 500),
+            DirRecentTab(L"s2", L"SAME", SessionState::Running, L"", 0, 500),
+            DirRecentTab(L"s1", L"same", SessionState::Running, L"", 0, 500),
+            DirRecentTab(L"s0", L"alpha", SessionState::Running, L"", 0, 500),
+            DirRecentTab(L"aaa", L"", SessionState::Running, L"", 0, 500),
+        };
+        const auto tied = PickDirectoryRecentTabs(ties, kDirectoryMaxRecentTabs);
+        CHECK(tied.size() == 5 && tied[0].sessionId == L"aaa" && tied[1].sessionId == L"s0" && tied[2].sessionId == L"s3" && tied[3].sessionId == L"s1" &&
+                  tied[4].sessionId == L"s2",
+              "equal keys go by title case-insensitively (no title: the session id), then by session id");
+
+        // The render: the section at the bottom, right before the footer; each row the dot and chip of a tagged tab.
+        const std::wstring legendText = L"<p><i>Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread first in the list (any app).</i></p>";
+        DirectoryModel withRecent = m;
+        withRecent.recent = {
+            DirRecentTab(L"aaaa2222", L"Agentmaster", SessionState::Running, L"#61AFEF", 26785, 5000), // also listed under the "release" tag
+            DirRecentTab(L"wwww1111", L"docs", SessionState::WaitingForInput, L"#98C379", 31, 9000),
+            DirRecentTab(L"apap3333", L"hotfix review", SessionState::NeedsApproval, L"#AB47BC", 0, 7000), // no topic yet
+            DirRecentTab(L"erer4444", L"zeta error", SessionState::Error, L"#E06C75", 77, 3000),
+            DirRecentTab(L"idid5555", L"idle newest", SessionState::Idle, L"#61AFEF", 81, 99999),
+            DirRecentTab(L"dodo6666", L"done tab", SessionState::Done, L"#61AFEF", 82, 88888),
+        };
+        const DirectoryRender wr = RenderDirectory(withRecent, updatedAt, updatedAt);
+        const std::wstring docsRow = L"<tg-button type=\"callback_data\" data=\"d:front:31\">\U0001F7E1</tg-button> "
+                                     L"<tg-button type=\"url\" style=\"success\" url=\"https://t.me/Bot/31?topic=31\">\U0001F7E9 docs</tg-button>";
+        const std::wstring hotfixRow = L"\U0001F7E0 <tg-button type=\"disabled\">\U0001F7EA hotfix review</tg-button>";
+        const std::wstring agentRow = L"<tg-button type=\"callback_data\" data=\"d:front:26785\">\U0001F535</tg-button> "
+                                      L"<tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</tg-button>";
+        const std::wstring zetaRow = L"<tg-button type=\"callback_data\" data=\"d:front:77\">\U0001F534</tg-button> "
+                                     L"<tg-button type=\"url\" style=\"danger\" url=\"https://t.me/Bot/77?topic=77\">\U0001F7E5 zeta error</tg-button>";
+        const std::wstring section = L"<h3>\U0001F558 Recent activity</h3><p>" + docsRow + L"<br>" + hotfixRow + L"<br>" + agentRow + L"<br>" + zetaRow + L"</p>";
+        CHECK(wr.rich.find(section + L"<footer>") != std::wstring::npos,
+              "the rich section: the four tabs that are not stationary, newest first, each with its dot and title chip, right before the footer");
+        const std::wstring classicSection = L"\n\n<b>\U0001F558 Recent activity</b>"
+                                            L"\n\U0001F7E1 <a href=\"https://t.me/Bot/31?topic=31\">\U0001F7E9 docs</a>"
+                                            L"\n\U0001F7E0 \U0001F7EA hotfix review"
+                                            L"\n\U0001F535 <a href=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</a>"
+                                            L"\n\U0001F534 <a href=\"https://t.me/Bot/77?topic=77\">\U0001F7E5 zeta error</a>";
+        CHECK(wr.classic.find(classicSection + L"\n\n<i>updated ") != std::wstring::npos, "the classic section: plain dots and links, right before the footer");
+        CHECK(wr.rich.find(L"idle newest") == std::wstring::npos && wr.rich.find(L"done tab") == std::wstring::npos &&
+                  wr.classic.find(L"idle newest") == std::wstring::npos && wr.classic.find(L"done tab") == std::wstring::npos,
+              "a stationary tab is not listed, however new");
+        CHECK(wr.rich.find(L"<h3>\U0001F558 Recent activity</h3>") > wr.rich.find(L"<b>\U0001F7E8 release</b>") && DirCount(wr.rich, L"<h3>") == 3,
+              "the section comes after the tag sections");
+        CHECK(DirCount(wr.rich, legendText) == 1 && wr.rich.find(L"<h3>\U0001F3F7\xFE0F Tags</h3>" + legendText) != std::wstring::npos,
+              "the legend once, under the Tags heading, when the tag sections have dot buttons");
+        CHECK(wr.recentShown == 4 && wr.tabsShown == 5 && wr.dotsShown == 4 + 3,
+              "the counts: four recent rows, the tag chips as before, a dot button for every listed tab with a topic in either place");
+        CHECK(DescribeDirectoryRender(wr) == L"2 tag(s), 5 tab chip(s), 4 recent tab(s), 7 dot button(s), 1 tag(s) on no open tab not listed",
+              "the log's words count the recent rows");
+        CHECK(DirCount(wr.rich, L"<tg-button ") == DirCount(wr.rich, L"</tg-button>") && DirCount(wr.rich, L"<p>") == DirCount(wr.rich, L"</p>"),
+              "the rich HTML stays balanced");
+        // No tag section with a dot button: the legend goes under the Recent activity heading instead.
+        DirectoryModel dotlessTags = withRecent;
+        for (auto& tag : dotlessTags.tags)
+        {
+            for (auto& tab : tag.tabs)
+            {
+                tab.threadId = 0;
+            }
+        }
+        const DirectoryRender dt = RenderDirectory(dotlessTags, updatedAt, updatedAt);
+        CHECK(dt.rich.find(L"<h3>\U0001F558 Recent activity</h3>" + legendText + L"<p>") != std::wstring::npos && DirCount(dt.rich, legendText) == 1,
+              "no tag section has a dot button: the legend goes under the Recent activity heading, once");
+        // Nothing to list.
+        const std::wstring emptyRich = L"<h3>\U0001F558 Recent activity</h3><p><i>No tab is working or waiting for you right now.</i></p><footer>";
+        const std::wstring emptyClassic = L"\n\n<b>\U0001F558 Recent activity</b>\n<i>No tab is working or waiting for you right now.</i>\n\n<i>updated ";
+        CHECK(r.rich.find(emptyRich) != std::wstring::npos && r.classic.find(emptyClassic) != std::wstring::npos && r.recentShown == 0,
+              "no candidate: one line says no tab is working or waiting");
+        DirectoryModel allStill = m;
+        allStill.recent = { DirRecentTab(L"x1", L"still one", SessionState::Idle, L"#61AFEF", 5, 100), DirRecentTab(L"x2", L"still two", SessionState::Done, L"#61AFEF", 6, 200) };
+        const DirectoryRender still = RenderDirectory(allStill, updatedAt, updatedAt);
+        CHECK(still.rich == r.rich && still.hash == r.hash, "only stationary candidates render exactly like none: the same line, the same hash");
+
+        // The hash follows what the section shows, and nothing else.
+        DirectoryModel plusStill = withRecent;
+        plusStill.recent.push_back(DirRecentTab(L"zzzz9999", L"another idle", SessionState::Idle, L"#61AFEF", 90, 777777));
+        CHECK(RenderDirectory(plusStill, updatedAt, updatedAt).hash == wr.hash, "a stationary candidate, however new, does not change the hash");
+        DirectoryModel recentReversed = withRecent;
+        std::reverse(recentReversed.recent.begin(), recentReversed.recent.end());
+        CHECK(RenderDirectory(recentReversed, updatedAt, updatedAt).hash == wr.hash, "the candidates' order does not matter");
+        DirectoryModel stateMoved = withRecent;
+        stateMoved.recent[1].state = SessionState::Running; // docs: Waiting for you -> Running
+        CHECK(RenderDirectory(stateMoved, updatedAt, updatedAt).hash != wr.hash, "a listed tab's state that moved changes the hash");
+        DirectoryModel wentIdle = withRecent;
+        wentIdle.recent[3].state = SessionState::Idle; // zeta error -> Idle
+        const DirectoryRender wi = RenderDirectory(wentIdle, updatedAt, updatedAt);
+        CHECK(wi.hash != wr.hash && wi.recentShown == 3 && wi.rich.find(L"zeta error") == std::wstring::npos, "a tab that went idle leaves the section");
+        DirectoryModel reranked = withRecent;
+        reranked.recent[3].recentMs = 9500; // zeta error's turn ended: its key is now the newest
+        const DirectoryRender rk = RenderDirectory(reranked, updatedAt, updatedAt);
+        CHECK(rk.hash != wr.hash && rk.rich.find(L"<h3>\U0001F558 Recent activity</h3><p>" + zetaRow + L"<br>" + docsRow) != std::wstring::npos,
+              "a new turn boundary moves its tab to the top, and changes the hash");
+
+        // At most ten; one older than the ten listed changes nothing.
+        DirectoryModel eleven = m;
+        for (int k = 0; k < 11; ++k)
+        {
+            const std::wstring id = L"many" + std::to_wstring(10 + k);
+            eleven.recent.push_back(DirRecentTab(id.c_str(), id.c_str(), SessionState::Running, L"#61AFEF", 9000 + k, 1000 + k));
+        }
+        const DirectoryRender er = RenderDirectory(eleven, updatedAt, updatedAt);
+        const size_t erHead = er.rich.find(L"<h3>\U0001F558 Recent activity</h3>");
+        CHECK(er.recentShown == kDirectoryMaxRecentTabs && erHead != std::wstring::npos && er.rich.find(L"d:front:9010", erHead) != std::wstring::npos &&
+                  er.rich.find(L"d:front:9001", erHead) != std::wstring::npos && er.rich.find(L"d:front:9000", erHead) == std::wstring::npos,
+              "at most ten tabs: the oldest of eleven is left out");
+        DirectoryModel olderStill = eleven;
+        olderStill.recent.push_back(DirRecentTab(L"older", L"older", SessionState::Running, L"#61AFEF", 9999, 10));
+        CHECK(RenderDirectory(olderStill, updatedAt, updatedAt).hash == er.hash, "a tab older than the ten listed does not change the hash");
+
+        // A full message keeps the section whole: the tag sections fill only the room it leaves.
+        DirectoryModel full = m;
+        full.tags.clear();
+        for (int t = 0; t < 60; ++t)
+        {
+            DirectoryTag tag;
+            tag.name = L"tag" + std::to_wstring(100 + t);
+            tag.colorHex = L"#61AFEF";
+            for (int k = 0; k < 20; ++k)
+            {
+                const std::wstring id = L"s" + std::to_wstring(t * 100 + k);
+                tag.tabs.push_back(DirTab(id.c_str(), L"a tab title that takes some room in its chip", SessionState::Idle, L"#61AFEF", 5000 + t * 100 + k));
+            }
+            full.tags.push_back(std::move(tag));
+        }
+        full.recent = eleven.recent;
+        const DirectoryRender fr = RenderDirectory(full, updatedAt, updatedAt);
+        const size_t frRichHead = fr.rich.find(L"<h3>\U0001F558 Recent activity</h3>");
+        const size_t frClassicHead = fr.classic.find(L"<b>\U0001F558 Recent activity</b>");
+        CHECK(fr.recentShown == kDirectoryMaxRecentTabs && fr.tagsHidden > 0 && fr.rich.size() <= kDirectoryRichMaxChars && frRichHead != std::wstring::npos &&
+                  DirCount(fr.rich.substr(frRichHead), L"d:front:90") == kDirectoryMaxRecentTabs,
+              "a full rich message: tags left out, the ten recent rows kept whole, within the rich limit");
+        CHECK(frClassicHead != std::wstring::npos && DirCount(fr.classic.substr(frClassicHead), L"https://t.me/Bot/90") == kDirectoryMaxRecentTabs &&
+                  fr.classic.size() <= kDirectoryClassicMaxChars + kDirectoryTailReserveChars && TgChunkHtml(fr.classic).size() == 1,
+              "the classic render keeps the ten rows too, and stays one message");
     }
 
     // ---- the decision ----
