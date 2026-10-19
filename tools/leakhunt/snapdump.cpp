@@ -17,6 +17,9 @@
 // Deliberately NOT captured: handle names (PSS_CAPTURE_HANDLE_NAME_INFORMATION). Querying the name of
 // a synchronous pipe handle can block, and the capture runs while the target is paused.
 //
+// The clone is terminated explicitly when the dump is done (TerminateClone): PssFreeSnapshot alone once
+// left a thread-less clone of production alive (2026-10-20, ~1.8 GB of commit held until it was ended).
+//
 // Build (VS 2022 x64 developer prompt): cl /nologo /EHsc /O2 /std:c++20 snapdump.cpp /link dbghelp.lib
 // Usage:   snapdump <pid> <out.dmp> [--heap] [--force]
 //   --heap   private read-write memory only (heaps, stacks; no mapped files or image pages) - smaller
@@ -66,6 +69,53 @@ namespace
             output->Status = S_FALSE;
         }
         return TRUE;
+    }
+
+    /// Terminates the snapshot's VA clone process and waits for it to exit.
+    /// @param snapshot the PSS snapshot captured with PSS_CAPTURE_VA_CLONE, not freed yet.
+    /// @returns true when the clone was ended (or there was none); false when the snapshot could not be
+    ///          queried, the clone could not be opened, or it did not exit within 10 s - the caller then tells
+    ///          the user to look for a thread-less copy of the target.
+    /// @remarks Never throws. The terminate goes through a handle of its own, opened by the clone's pid with
+    ///          PROCESS_TERMINATE | SYNCHRONIZE: the handle PssQuerySnapshot returns belongs to the snapshot,
+    ///          lacks those rights (measured: the first version, which used it, never ended the clone), and is
+    ///          closed by PssFreeSnapshot, not here. Call this BEFORE PssFreeSnapshot: while the snapshot's
+    ///          handle is open the clone's pid cannot be recycled, so the pid opened is the clone's.
+    ///          Terminating the clone never touches the target: the clone only shares its pages copy-on-write,
+    ///          and ending it releases that share and the commit it charged.
+    bool TerminateClone(HPSS snapshot) noexcept
+    {
+        PSS_VA_CLONE_INFORMATION info{};
+        const DWORD q = PssQuerySnapshot(snapshot, PSS_QUERY_VA_CLONE_INFORMATION, &info, sizeof(info));
+        if (q != ERROR_SUCCESS)
+        {
+            fwprintf(stderr, L"  clone: PssQuerySnapshot failed %lu\n", q);
+            return false;
+        }
+        if (!info.VaCloneHandle)
+        {
+            return true;
+        }
+        const DWORD clonePid = GetProcessId(info.VaCloneHandle);
+        // Reopened by pid with exactly the rights the terminate and the wait need (the clone is ours: same
+        // user, created by this process's PssCaptureSnapshot).
+        HANDLE clone = clonePid ? OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, clonePid) : nullptr;
+        if (!clone)
+        {
+            fwprintf(stderr, L"  clone: pid %lu could not be opened (%lu)\n", clonePid, GetLastError());
+            return false;
+        }
+        if (!TerminateProcess(clone, 0))
+        {
+            fwprintf(stderr, L"  clone: TerminateProcess failed (%lu)\n", GetLastError());
+        }
+        const DWORD w = WaitForSingleObject(clone, 10000);
+        if (w != WAIT_OBJECT_0)
+        {
+            fwprintf(stderr, L"  clone: wait answered %lu (%lu)\n", w, GetLastError());
+        }
+        CloseHandle(clone);
+        return w == WAIT_OBJECT_0;
     }
 
     /// Prints one GetLastError-style failure with its system message, for the refusal / failure paths.
@@ -188,10 +238,16 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
-    // Freeing the snapshot terminates the clone; done on every path so no hidden clone outlives us.
+    // End the clone EXPLICITLY, on every path, before freeing the snapshot. PssFreeSnapshot alone is not
+    // enough: on 2026-10-20 the clone of production's fourth dump (pid 46688, 0 threads, parent = the
+    // target) was still alive 17 minutes later and still held ~1.8 GB of commit, while the three clones
+    // before it had gone. A thread-less clone never exits by itself, so it is terminated here and waited
+    // for; the handle stays the snapshot's (PssFreeSnapshot closes it).
+    const bool cloneEnded = TerminateClone(snapshot);
     PssFreeSnapshot(GetCurrentProcess(), snapshot);
     QueryPerformanceCounter(&t3);
-    wprintf(L"snapshot freed (%.1f ms)\n", ElapsedMs(t2.QuadPart ? t2 : t1, t3));
+    wprintf(L"clone %ls; snapshot freed (%.1f ms)\n", cloneEnded ? L"terminated" : L"NOT confirmed ended - check for a thread-less copy of the target",
+            ElapsedMs(t2.QuadPart ? t2 : t1, t3));
     CloseHandle(process);
     return rc;
 }

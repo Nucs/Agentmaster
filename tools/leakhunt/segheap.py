@@ -13,12 +13,17 @@ The layouts are Windows 11 26200's, read from ntdll's public PDB (diatype.exe ud
     _HEAP_SEG_CONTEXT: SegmentMask +0x00, UnitShift +0x08, FirstDescriptorIndex +0x0A, SegmentListHead +0x48
     _HEAP_PAGE_SEGMENT: ListEntry +0x00, Signature +0x10, DescArray[256] of 0x20-byte descriptors
     _HEAP_PAGE_RANGE_DESCRIPTOR: RangeFlags +0x18, UnitOffset +0x1A, UnitSize +0x1F
-    _HEAP_LFH_SUBSEGMENT: BlockCount +0x22, BlockOffsets.EncodedData +0x28, BlockBitmap +0x40 (2 bits/block)
+    _HEAP_LFH_SUBSEGMENT: State +0x10, FreeCount +0x20, BlockCount +0x22, BlockOffsets.EncodedData +0x28,
+                          HighWatermarkBlockIndex +0x30, PrivateFormat +0x33 bit 0, BlockBitmap +0x40
     _HEAP_VS_SUBSEGMENT (0x28): Size +0x20; chunks follow, each a 16-byte encoded _HEAP_VS_CHUNK_HEADER
     _RTLP_HP_HEAP_GLOBALS (ntdll!RtlpHpHeapGlobals, RVA passed in): HeapKey +0x00, LfhKey +0x08
 The encodings (LFH offsets: data ^ LfhKey ^ subsegment>>12; VS header: bits ^ chunk ^ HeapKey) are the
 documented segment-heap ones (Yason, "Windows 10 Segment Heap Internals"); every decoded value is
 sanity-checked, and the counts of rejected structures are printed so a layout drift is visible.
+The LFH BlockBitmap is NOT the paper's: on 26200 it is one qword per 32 blocks, its low dword the busy
+bits and its high dword the "unused bytes" bits (walk_lfh has the measurement). Until 2026-10-20 this
+walker read the paper's two interleaved bits per block, which marks about half of the busy LFH blocks
+free: every LFH result it gave before that date is wrong (doc/agentmaster/MEMORY_LEAKS.md §7).
 
 Usage (python -I segheap.py ...):
     segheap.py <dump> --globals-rva 0x1CCEC0 [--census <heapcensus.tsv>] [--top N] [--blocks-out <file>]
@@ -144,6 +149,20 @@ class Walk:
 def walk_lfh(d, w, sub, range_size, lfh_key):
     """Record the busy blocks of one LFH subsegment.
 
+    The 26200 BlockBitmap at +0x40 holds ONE QWORD PER 32 BLOCKS: bit k of its low dword is block
+    (32 * word + k)'s busy bit, bit k of its high dword that block's "unused bytes" bit (set only on a
+    busy block whose request was smaller than the block). The last qword's bits past BlockCount read
+    busy, so the allocator never hands out a block that does not exist. Measured on production's dump
+    of 2026-10-20: every one of 2,828 referenced objects of four tab-scoped classes (706 Tab, 707
+    TabHeaderControl, 709 AgentTabOverlay, 706 TermControl) reads busy; FreeCount equals the clear busy
+    bits in 13,646 of 13,848 subsegments and is never above them; the unused-bytes bit is never set on
+    a free block; and the 381,056 closed 144-byte UText clones (sizeof(UText) == 144, so no unused bytes)
+    all read busy with that bit clear. The 2016 paper's layout (two interleaved bits per block), which
+    this walker read until then, marked 393 of the 706 live Tab objects free.
+
+    A thread-private subsegment (PrivateFormat) keeps its own free list in State, and the blocks on it
+    may still read busy; on that dump they were 160 blocks in all, so they are not subtracted.
+
     Args:
         d: the Dump.
         w: the Walk to append to.
@@ -152,7 +171,9 @@ def walk_lfh(d, w, sub, range_size, lfh_key):
         lfh_key: RtlpHpHeapGlobals.LfhKey.
 
     Returns:
-        Nothing; rejects are counted in w.stats["lfh-bad"].
+        Nothing; rejects are counted in w.stats["lfh-bad"], and a FreeCount above the clear busy bits (a
+        layout drift: the allocator can never count more free blocks than its bitmap holds) in
+        w.stats["lfh-freecount-above-clear-bits"].
 
     Raises:
         Nothing.
@@ -161,22 +182,36 @@ def walk_lfh(d, w, sub, range_size, lfh_key):
     if not hdr:
         w.stats["lfh-unreadable"] += 1
         return
-    block_count = struct.unpack_from("<H", hdr, 0x22)[0]
+    free_count, block_count = struct.unpack_from("<HH", hdr, 0x20)
     enc = struct.unpack_from("<I", hdr, 0x28)[0]
     data = enc ^ (lfh_key & 0xFFFFFFFF) ^ ((sub >> 12) & 0xFFFFFFFF)
     block_size, first = data & 0xFFFF, data >> 16
-    if not block_size or block_size & 7 or first < 0x48 or first + block_count * block_size > range_size:
+    words = (block_count + 31) // 32
+    # The bitmap must end before the first block; a decode that says otherwise is not an LFH header.
+    if (not block_size or block_size & 7 or first < 0x40 + words * 8
+            or first + block_count * block_size > range_size):
         w.stats["lfh-bad"] += 1
         return
-    bitmap = d.read(sub + 0x40, (block_count * 2 + 7) // 8)
+    bitmap = d.read(sub + 0x40, words * 8)
     if bitmap is None:
         w.stats["lfh-unreadable"] += 1
         return
-    bits = int.from_bytes(bitmap, "little")
     base = sub + first
-    for i in range(block_count):
-        if (bits >> (2 * i)) & 1:
-            w.blocks.append((base + i * block_size, block_size, "lfh"))
+    busy = 0
+    for wi, word in enumerate(struct.unpack_from(f"<{words}Q", bitmap)):
+        busy_bits = word & 0xFFFFFFFF
+        for k in range(min(32, block_count - wi * 32)):
+            if (busy_bits >> k) & 1:
+                w.blocks.append((base + (wi * 32 + k) * block_size, block_size, "lfh"))
+                busy += 1
+    # FreeCount below the clear bits happens (202 subsegments of that dump; the cause is not established,
+    # four of the five inspected carried a delay-free list); above them it cannot be, so it flags a
+    # misread layout.
+    clear = block_count - busy
+    if free_count > clear:
+        w.stats["lfh-freecount-above-clear-bits"] += 1
+    elif free_count < clear:
+        w.stats["lfh-freecount-below-clear-bits"] += 1
     w.stats["lfh-subsegments"] += 1
 
 

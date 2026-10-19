@@ -21,7 +21,8 @@ scripts need Python 3.8+ and nothing else; run them with `python -I`.
    exhaustion is what froze production on 2026-08-22. Handle names are not captured (a name query
    can block while the target is paused). Write dumps to Q:, never C: or K:. ⚠ A dump holds
    everything in the process (transcripts, prompts, the Telegram bot token): keep it local, delete it
-   when done.
+   when done. It ends the clone itself and prints `clone terminated`; any other line there means a
+   thread-less copy of the target (same image, the target as parent) may still hold commit - end it.
 3. **Census by vftable:** `heapcensus.exe <dmp> --sym <layout folder> --sym Q:\symcache --sym Q:\tmp\symcache --refs --out census.tsv`.
    Every 8-byte slot of private read-write memory whose value is a known vftable (public `??_7`
    symbols of every module whose PDB matches the dump's RSDS GUID + age) counts one (sub)object of
@@ -35,7 +36,9 @@ scripts need Python 3.8+ and nothing else; run them with `python -I`.
    (keys from `ntdll!RtlpHpHeapGlobals`, whose RVA comes from ntdll's PDB: 0x1CCEC0 on 26200) and
    reports the exact live blocks, live objects per class with their bytes, and the blocks without a
    vftable grouped by size. The decoding facts that differ from the 2016 paper are measured and
-   commented in the script (segment signature, range flags).
+   commented in the script (segment signature, range flags, the LFH bitmap layout). Before trusting
+   a walk on a new Windows build, check it against objects whose number you know: one live `Tab` per
+   open tab, and `walk stats` with no `lfh-freecount-above-clear-bits`.
 5. **Diff two dumps of the same process:** `python -I censustool.py live live-1.tsv live-2.tsv`. Growth
    of LIVE bytes per class / per block size is the leak test a single dump cannot give.
    `censustool.py bytes census.tsv` and `censustool.py diff old.tsv new.tsv` work on raw censuses.
@@ -73,3 +76,11 @@ scripts need Python 3.8+ and nothing else; run them with `python -I`.
   densely allocated types; use `segheap.py` for real sizes.
 - In `owners.py` output, "(outside the heap)" includes STALE pointers left in freed heap memory, not
   only stacks and globals.
+- ⚠ The 26200 LFH busy bitmap is NOT the 2016 paper's two interleaved bits per block: it is one qword
+  per 32 blocks, the low dword their busy bits, the high dword their unused-bytes bits. Read the
+  paper's way it marks about half of the live blocks free: until 2026-10-20 `segheap.py` did, and
+  called 313 of 706 live `Tab` objects free, halved the `UText` leak and invented an "unowned pool"
+  of DirectWrite buffers whose owners it had misread (MEMORY_LEAKS.md §7).
+- `PssFreeSnapshot` does not always end a VA clone: production's fourth dump left a thread-less clone
+  holding ~1.8 GB of commit. Terminate it through a handle opened by its pid (the snapshot's own
+  handle lacks the rights) before freeing the snapshot, as `snapdump.cpp` does.
