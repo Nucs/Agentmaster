@@ -911,6 +911,13 @@ namespace Agentmaster::Msg
         switch (cmd.kind)
         {
         case RemoteKind::AgentmasterCommand:
+            if (cmd.name == kSteerCommand)
+            {
+                // §21.33: /steer is taken HERE, not in _runSessionCommand, because only this path knows whether a new thread held
+                // the message (it is then no backlog, however long the folder pick took). _runSessionCommand keeps a branch for it.
+                _steerRemotePrompt(sessionId, cmd.args, msg, threadId, held);
+                return;
+            }
             _runSessionCommand(sessionId, cmd, msg, threadId);
             return;
         case RemoteKind::RefusedNoRecord:
@@ -1009,6 +1016,179 @@ namespace Agentmaster::Msg
         return true;
     }
 
+    void MessagingService::_steerRemotePrompt(const std::wstring& sessionId, const std::wstring& words, const json::Value& msg, int64_t threadId, bool held)
+    {
+        const int64_t msgId = msg.I64At(L"message_id", 0);
+        const int64_t dateMs = msg.I64At(L"date", 0) * 1000;
+        const auto s = _registry->Get(sessionId);
+        // A session the registry no longer knows reads as closed (no open tab): the same answer as a closed one.
+        const SteerAction action = s ? DecideSteer(words, s->live, s->started, s->external, s->state, s->pendingBoxState) :
+                                       DecideSteer(words, false, false, false, SessionState::Idle, InputBoxState::Unknown);
+        const auto nav = [&](const wchar_t* outcome) {
+            LogNav(L"remote telegram /steer " + ShortId(sessionId) + L" chars=" + std::to_wstring(words.size()) + L" -> " + outcome);
+        };
+        if (action == SteerAction::Usage || action == SteerAction::Closed)
+        {
+            _reply(threadId, SteerReplyHtml(action), false, json::Value{}, msgId);
+            nav(action == SteerAction::Usage ? L"usage" : L"refused:closed");
+            return;
+        }
+        if (!held && IsBacklogUpdate(dateMs, WallMs()))
+        {
+            // D2: a /steer written while Agentmaster was closed was meant for a turn that is over by now. Asked about like a plain
+            // message of the backlog: [Queue] queues its words as a plain prompt (the backlog-queue token), [Drop] forgets them.
+            const std::wstring age = TgShortSpan(WallMs() - dateMs);
+            const std::wstring token = _tokenFor(L"backlog-queue", sessionId, std::to_wstring(msgId) + L"|" + words, kTokenTtlMsFor(2));
+            const std::wstring drop = _tokenFor(L"backlog-drop", sessionId, std::to_wstring(msgId), kTokenTtlMsFor(2));
+            _reply(threadId,
+                   L"This /steer is " + age + L" old (sent while Agentmaster was closed), and the turn it was meant for is over. Queue its message now?",
+                   false,
+                   _buttons({ { { L"Queue", token }, { L"Drop", drop } } }),
+                   msgId);
+            nav(L"asked:backlog");
+            return;
+        }
+        const bool sendNow = action == SteerAction::Send;
+        const int64_t nowMs = WallMs();
+        const QueuedPrompt p = BuildSteerPrompt(NewSessionId(), words, msgId, sendNow, nowMs);
+        // The reaction's record and the watch go in BEFORE the prompt reaches the queue: the tick may meet the prompt the moment it
+        // is there, and a prompt it meets already taken (Sent and echoed) with no record of it is recorded WITHOUT its 👨‍💻 reaction
+        // (_syncReactions' rule for the prompts of an earlier run).
+        {
+            std::lock_guard lk{ _mtx };
+            _reacted[p.id] = PromptStatus::Pending;
+            if (sendNow)
+            {
+                _steers[p.id] = SteerWatch{ sessionId, msgId, threadId, nowMs };
+            }
+        }
+        const bool inserted = _registry->Update(sessionId, [&](SessionInfo& ss) {
+            ss.queue.insert(ss.queue.begin() + static_cast<std::ptrdiff_t>(SteerInsertIndex(ss.queue)), p);
+        });
+        if (!inserted)
+        {
+            // The session left the registry between the look above and now: nothing was queued, so nothing is watched either.
+            {
+                std::lock_guard lk{ _mtx };
+                _reacted.erase(p.id);
+                _steers.erase(p.id);
+            }
+            _reply(threadId, SteerReplyHtml(SteerAction::Closed), false, json::Value{}, msgId);
+            nav(L"refused:closed");
+            return;
+        }
+        if (sendNow)
+        {
+            _react(msgId, kSteerSendingReaction);
+            if (_registry->SubmitPrompt({ sessionId, p.id, p.text, false }))
+            {
+                // Accepted: the hosting window types the words (its draft swap keeps the user's unsent draft, its verified
+                // placement reads the box first) and owns the outcome from here. Their echo turns the reaction to 👨‍💻
+                // (_syncReactions); a decline puts them back in the queue, and _sweepSteers says so.
+                _log(L"[msg] " + ShortId(sessionId) + L" steered from topic (message " + std::to_wstring(msgId) + L", " + std::to_wstring(p.text.size()) +
+                     L" chars): sent now");
+                nav(L"sent");
+                return;
+            }
+            // Declined at once: the delivery gate is held (another delivery, or a box clear, owns the input box). The watch goes
+            // BEFORE the rollback, so the tick can never tell this a second time; the words wait first in the queue, and the runner
+            // sends them at the next ready moment (a remote prompt goes whatever the runner's mode, D30).
+            {
+                std::lock_guard lk{ _mtx };
+                _steers.erase(p.id);
+            }
+            _registry->RollbackPromptToPending(sessionId, p.id, false);
+            _react(msgId, kSteerQueuedReaction);
+            _reply(threadId, SteerDeclinedNoticeHtml(SteerDecline::BoxHeld), false, json::Value{}, msgId);
+            _log(L"[msg] " + ShortId(sessionId) + L" steer from topic (message " + std::to_wstring(msgId) + L") declined at once (the input box is held): queued first");
+            nav(L"queued:box-held");
+        }
+        else
+        {
+            // Not sent at once (DecideSteer): first in the queue, and the reply says why.
+            _react(msgId, kSteerQueuedReaction);
+            _reply(threadId, SteerReplyHtml(action), false, json::Value{}, msgId);
+            const wchar_t* outcome = action == SteerAction::QueueDormant ? L"queued:dormant" : (action == SteerAction::QueueEnded ? L"queued:ended" : L"queued:menu");
+            _log(L"[msg] " + ShortId(sessionId) + L" steer from topic (message " + std::to_wstring(msgId) + L") not sent at once (" + outcome + L"): queued first");
+            nav(outcome);
+            if (action == SteerAction::QueueDormant && _hooks.sessionAction)
+            {
+                // A dormant tab (restored, revived, parked) is started so the words can go, as for a plain message (§7.1).
+                try
+                {
+                    _hooks.sessionAction(sessionId, L"start", L"", nullptr);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the words stay first in the queue; they go when the tab is entered or activated.
+                    LogSwallowedException(L"MessagingService::_steerRemotePrompt (start)");
+                }
+            }
+        }
+        if (_scheduler)
+        {
+            _scheduler->RequestAdvance(sessionId);
+        }
+    }
+
+    void MessagingService::_sweepSteers(const SessionInfo& s)
+    {
+        // The watches of THIS session, copied out: the outcome needs no lock, and a reply must never be queued under _mtx (_enqueue
+        // takes it, and it is not recursive).
+        const int64_t nowMs = WallMs();
+        std::vector<std::pair<std::wstring, SteerWatch>> watched;
+        {
+            std::lock_guard lk{ _mtx };
+            for (auto it = _steers.begin(); it != _steers.end();)
+            {
+                if (it->second.sessionId == s.id)
+                {
+                    watched.emplace_back(it->first, it->second);
+                    ++it;
+                }
+                else if (nowMs - it->second.sinceMs >= kSteerWatchMaxMs)
+                {
+                    // Another session's watch past its limit: it would only read Expired, and a session whose topic is gone is
+                    // swept by no tick any more — so it goes here, and the map never grows.
+                    it = _steers.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+        if (watched.empty())
+        {
+            return;
+        }
+        for (const auto& [promptId, w] : watched)
+        {
+            const auto q = std::find_if(s.queue.begin(), s.queue.end(), [&](const QueuedPrompt& x) { return x.id == promptId; });
+            const SteerOutcome outcome = ClassifySteerWatch(q == s.queue.end() ? nullptr : &*q, w.sinceMs, nowMs);
+            if (outcome == SteerOutcome::Watching)
+            {
+                continue;
+            }
+            bool stillWatched = false;
+            {
+                std::lock_guard lk{ _mtx };
+                stillWatched = _steers.erase(promptId) > 0;
+            }
+            if (!stillWatched || outcome != SteerOutcome::BackInQueue)
+            {
+                // Taken (👨‍💻 says so), resolved (the delivery's own 👎 line), gone or expired: nothing more to tell. A watch another
+                // pass already ended is told by nobody twice.
+                continue;
+            }
+            // The hosting window put the words back in the queue: ✍ on the message, and one line that says why.
+            _react(w.messageId, kSteerQueuedReaction);
+            _reply(w.threadId, SteerDeclinedNoticeHtml(SteerDeclineFor(s.pendingBoxState, s.started, s.external)), false, json::Value{}, w.messageId);
+            _log(L"[msg] " + ShortId(s.id) + L" steer from topic (message " + std::to_wstring(w.messageId) + L") came back to the queue: the window declined it");
+            LogNav(L"remote telegram /steer " + ShortId(s.id) + L" -> queued:declined");
+        }
+    }
+
     // ===== commands in a session's topic ====================================================
 
     void MessagingService::_runSessionCommand(const std::wstring& sessionId, const RemoteCommand& cmd, const json::Value& msg, int64_t threadId)
@@ -1082,6 +1262,13 @@ namespace Agentmaster::Msg
         {
             _sendnow(sessionId, threadId);
             done(L"ok");
+            return;
+        }
+        if (name == kSteerCommand)
+        {
+            // §21.33: the belt for a path that reaches a session command without _handleTopicMessage, which takes /steer itself.
+            // _steerRemotePrompt logs its own outcome.
+            _steerRemotePrompt(sessionId, cmd.args, msg, threadId, false);
             return;
         }
         if (name == L"unqueue")
@@ -4712,8 +4899,9 @@ namespace Agentmaster::Msg
         }
         else
         {
-            html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
-                   L"/queue \x00B7 /sendnow \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
+            // §21.33: /steer is the one way into a running turn, so the first line names it beside the rule it is the exception to.
+            html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn \x2014 /steer &lt;text&gt; does that: it sends the words NOW, like Send now at the PC). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
+                   L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"

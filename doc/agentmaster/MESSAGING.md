@@ -681,7 +681,8 @@ cost of minutes for a long session ("rebuilding 120 / 480" on the card meanwhile
 
 Anything you type in a session's topic is exactly a prompt — delivered as if typed into the box, recorded
 in the session's queue with the origin `Remote`, sanitized like any paste (DELIVERY.md §15) — and it is
-**enqueued, never a steer**: it never reaches a running turn.
+**enqueued, never a steer**: it never reaches a running turn. The one way into a running turn is the explicit `/steer
+<message>` (§21.33, the user's request of 2026-10-19): its words go into the box at once, like Send now at the PC.
 
 | The session is | What happens to your message |
 |---|---|
@@ -4510,6 +4511,74 @@ secret patterns; the template and the request engine built so modes 2 to 4 can f
 Mini App only after its server check is tried with a LAN name. **Open:** which modes; the gate on `cc.sysd.cc` (kept:
 Telegram's own downloads work at home only, Chrome or Brave also through the VPN; left out: everything works through the
 VPN, the link's key the only check); the lifetime; snapshot or live; which folders may be linked.
+
+### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; NOT BUILT yet)
+
+**The user's request** (2026-10-19): "Add support for /steer which is like send-now".
+
+- **What it does:** `/steer <message>` in a session's topic types the words into the session's input box at once and submits
+  them — the Manager's Send now, through the one send seam (`SessionRegistry::SubmitPrompt`: the delivery gate, the draft swap
+  that keeps the user's unsent draft at the PC, the verified placement, the Enter rescue), with a NEW prompt instead of the
+  first queued one. `/sendnow` stays what it was: it sends the next QUEUED prompt now.
+- **In a running turn the words are a STEER**, by Claude Code's own handling of a message submitted while it works: it holds
+  the message, the running turn takes it in at its next step (a `queued_command` attachment in the transcript, "absorbed
+  mid-turn"), and a turn that ends first starts the next one with it. A session at rest (Waiting for you, Idle, Error) starts
+  a turn with the words. D8 stands for every other message: queued, sent when the turn ends (§7.1).
+- **When the words are not sent at once** (`DecideSteer`, the facts read in this order):
+
+  | The session | What /steer does |
+  |---|---|
+  | No words | The usage line |
+  | Closed (no open tab) | "This session is closed. Resume it from the 🔎 Search topic." Nothing is queued. |
+  | Its claude not started (a restored or parked tab) | The tab is started; the words wait FIRST in the queue and go once it is up |
+  | Claude ended in the tab (Done) | Never typed: the tab may hold the shell that hosted claude, where typed words would RUN as a command. The words wait first; /reactivate starts it again |
+  | A menu on the terminal (the last box read: a question, a permission prompt, a picker) | Never typed: Enter would pick an option. The words wait first and go once it is closed |
+  | Anything else: Running, Waiting for you, Idle, Error, a stale Needs approval whose box reads as a plain one | Sent now |
+
+  "First" means before every prompt that waits (`SteerInsertIndex`), the topic's own and the runner's alike; the runner sends
+  them at the session's next ready moment, whatever its mode (D30).
+- **The status is a reaction** on the /steer message, as for every message of a topic: ⚡ while the words are being sent
+  (`kSteerSendingReaction`, one of the reactions a bot may set, written without a variation selector), 👨‍💻 once claude took
+  them (their echo, `_syncReactions`), ✍ while they wait in the queue. No text reply when they are sent.
+- **A send that is declined** comes back to the queue as the first waiting prompt and is told ONCE: at once when the delivery
+  gate is held (another delivery, or a box clear, owns the input box), or by the tick when the hosting window declines later —
+  its pre-flight found a menu that opened in between or no box, the tab turned out dormant, a draft it could not move aside.
+  `_sweepSteers` watches each steer the service SENT (`_steers`, `SteerWatch`) until claude took it, it came back, it failed or
+  10 minutes passed (`kSteerWatchMaxMs`; `ClassifySteerWatch`): "↩ Not sent now: <the reason>. Your message waits first in
+  the queue and goes out when the session is ready." (`SteerDeclinedNoticeHtml`, the reason read from the facts the decline
+  left: the tab's start, the box state the pre-flight recorded.)
+- **The prompt** (`BuildSteerPrompt`) is a remote one like every message of the topic: the Autorun origin, the question
+  guard's pass, `remoteSource = telegram:<message id>` — the reactions go to the /steer message, and the mirror does not post
+  the words again (the turn's absorbed line is matched to the queue by its text). Sent now, it is marked Sent the way Send now
+  marks one.
+- **The backlog rule (D2):** a /steer older than 10 minutes when it arrives (written while Agentmaster was closed) is asked
+  about like a plain message — [Queue] / [Drop] —, since the turn it was meant for is over. A /steer that a new thread held
+  (§21.17) is never backlog: `_handleTopicMessage` takes the command itself, because only it knows the held flag.
+- **Where:** a session's topic. The 🔎 Search topic refuses it as a session's command. `/cc /steer` forces the word through to
+  Claude Code, which has no /steer of its own (checked in the 2.1.291 binary).
+- **A known effect, not new:** the hook of a message submitted mid-turn is counted as type-ahead (HOOKS.md *State machine*), so
+  the turn's real Stop can read Running for ~2.5 s until the quiescent recon-stop settles it — measured for Claude Code's own
+  mid-turn deliveries in the compat audit of 2026-09-25.
+- **The menu and the help:** `setMyCommands` lists `/steer`; `/help` names it in the topic's first line ("never typed into a
+  running turn — /steer <text> does that").
+- **Logs:** `[nav] remote telegram /steer <sid8> chars=N -> sent | usage | refused:closed | asked:backlog | queued:dormant |
+  queued:ended | queued:menu | queued:box-held | queued:declined`, `[msg] <sid8> steered from topic (message N, M chars): sent
+  now`, and the window's own `[draft-swap]` / `[send-verify]` / `[delivered]` lines.
+- **The code:** `AgentMaster/MessagingSteer.h` (new, pure: `kSteerCommand`, `DecideSteer`, `SteerReplyHtml`, `SteerDeclineFor`
+  / `SteerDeclinedNoticeHtml`, `SteerInsertIndex`, `BuildSteerPrompt`, `SteerWatch`, `ClassifySteerWatch`, the reactions);
+  MessagingModels.h (`steer` in `kAgentmasterCommands`); Messaging.Inbound.cpp (`_handleTopicMessage` takes /steer with the
+  held flag, `_runSessionCommand`'s branch for any other path, `_steerRemotePrompt`, `_sweepSteers`, the help); Messaging.cpp
+  (the tick calls `_sweepSteers` after `_syncReactions`; `_steers` cleared at a start and at a change of bot; the menu);
+  Messaging.h; TerminalAppLib.vcxproj (the header).
+- **Tests:** `TestMessagingSteer` (tests_messaging_steer.cpp) — the command's reading (any case, a `@bot` suffix, every line,
+  `/cc` forcing it through, a longer word not taken, refused in the Search topic), the decision on every fact and state and the
+  order of the facts, the texts (the queued cases, the usage line, the declined notice by its reason, the reactions), the
+  prompt sent and queued and its place in the queue, and the watch's verdict on every status and at its limit.
+- **Check after the build** (the dev bot): (1) a session in the middle of a long turn, `/steer also print the time` → ⚡, then
+  👨‍💻 within seconds; claude takes it at its next step (the transcript has a `queued_command` attachment); no "👤 You" line
+  repeats it; (2) a session at rest: a turn starts at once; (3) a parked tab: "The tab's claude is not running: …", the tab
+  starts and the words go once it is up; (4) a question card open: the words wait (QueueMenu) and go after the answer; (5) a
+  draft typed at the PC is back in the box after the steer (the draft swap).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

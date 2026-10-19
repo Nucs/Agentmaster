@@ -219,6 +219,7 @@
     <ClInclude Include="AgentMaster\MessagingDirectory.h" />
     <ClInclude Include="AgentMaster\MessagingStartNote.h" />
     <ClInclude Include="AgentMaster\MessagingTaps.h" />
+    <ClInclude Include="AgentMaster\MessagingSteer.h" />
     <!-- Agentmaster (MESSAGING.md section 21.30): Claude's AskUserQuestion answered from Telegram - the question card's pure
          model, texts, buttons and decision lines (header-only). -->
     <ClInclude Include="AgentMaster\AskQuestion.h" />
