@@ -4336,6 +4336,55 @@ that went back counts as due.
 - A [Wake] button on the line itself, which would save the detour through 🔎 Search.
 - A line for a CLOSED tab's topic too (57 in production's log).
 
+### 21.32 A file link that downloads the file — what Telegram allows (2026-10-19; RESEARCH ONLY, nothing built)
+
+> The user's request (2026-10-19): "The hyperlinks to a file should download that file when user clicks on the file name.
+> Check if thats possible to do with telegram without sending a message with a file".
+
+**Today.** Claude writes a file mention as a Markdown link to `file:///K:/…` (the user's own rule for every reply). The rich
+path passes it to Telegram as it is (`TgPrepareRichMarkdown`), so the phone shows a hyperlink to a path on the PC, which
+does nothing there. The classic HTML path keeps it as text: it makes an `<a>` only for `http(s)://` and `tg://`.
+
+**What Telegram allows** (core.telegram.org, read 2026-10-19):
+- A link in a message, or a URL button, is an `http(s)://` or `tg://` URL. Nothing in the Bot API puts a file on the phone
+  from a tap except a message that carries the file, or a web page.
+- `t.me/<bot>?start=<param>` (at most 64 base64url characters) shows a Start button, even in a chat that is started; a tap
+  sends `/start <param>` from the user. The bot can answer with the file (`sendDocument`), but that is a message with a file.
+- `answerCallbackQuery`'s `url` opens only a game or a `t.me/<bot>?start=…` link.
+- A Mini App can call `Telegram.WebApp.downloadFile({url, file_name})` (Bot API 8.0+): Telegram shows its own native popup
+  and downloads the file, with no message. The `url` must be HTTPS, and the server should send `Content-Disposition:
+  attachment; filename="…"` and `Access-Control-Allow-Origin: https://web.telegram.org`. A bot's MAIN Mini App (set in
+  @BotFather) opens from a plain text link `https://t.me/<bot>?startapp=<param>` (`&mode=compact` for a half-height sheet),
+  the parameter reaching the page as `start_param`. The page itself must be an HTTPS URL.
+- The phone loads the Mini App page and the file itself; Telegram does not fetch them for it. So the PC must serve the file
+  where the phone can reach it.
+
+**So it is possible without a file message, but only through a web server the phone can reach.** Two ways:
+1. **A plain link** to the file on a server of ours. The text `Messaging.cpp` links to `https://<host>/f/<token>`; a tap
+   opens the browser, which downloads the file. The simplest, and every client handles it. A plain `http://` link works on
+   the LAN (no certificate). The token is the only key: anyone holding the link can fetch the file while it is valid.
+2. **A Mini App link**, `https://t.me/<bot>?startapp=f_<token>`. A tap opens the bot's Mini App (compact), which calls
+   `downloadFile`: Telegram's own download popup, and no browser. It needs HTTPS with a certificate the phone trusts, a Main
+   Mini App per bot in @BotFather (dev and production), and a small page. It can also prove the tap came from the owner: the
+   Mini App's `initData` is signed with the bot token, so the PC can check that its user is the paired owner.
+
+**What either one needs** (a design, not built):
+- A small HTTP(S) endpoint on the PC, in Agentmaster or behind the LAN reverse proxy that serves catalog.sysd.cc
+  (192.168.50.5): `GET /f/<token>` streams the file with the two headers above.
+- A token per linked file, minted when the bot sends the message (the `file:///` link is rewritten to the endpoint or to
+  the startapp link): random, mapped to that one path, expiring, persisted in `state.json` so links survive a restart.
+  A path never appears in a URL.
+- Reachability: this PC (192.168.50.17) serves nothing on ports 80 or 443 today, and the LAN services (catalog.sysd.cc
+  resolves to 192.168.50.5) are LAN and VPN only. A link would work on the home network or the VPN, not on mobile data
+  without the VPN. Opening it to the internet (a tunnel) would let anyone holding a link fetch a file from the PC.
+- No 50 MB limit: the file never goes through Telegram.
+
+**The fallback with no server:** `t.me/<bot>?start=f_<token>`. A tap shows Start, and the bot answers with the file as a
+document. It works anywhere and needs nothing else, but it is a message with a file, posted at the bottom of the topic.
+
+**Decisions for the user:** way 1, way 2 or the fallback; where the endpoint runs (Agentmaster's own listener on the LAN, or
+behind 192.168.50.5's proxy under a sysd.cc name); how long a link stays valid.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
