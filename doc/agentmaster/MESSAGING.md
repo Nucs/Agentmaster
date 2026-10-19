@@ -4386,6 +4386,131 @@ document. It works anywhere and needs nothing else, but it is a message with a f
 **Decisions for the user:** way 1, way 2 or the fallback; where the endpoint runs (Agentmaster's own listener on the LAN, or
 behind 192.168.50.5's proxy under a sysd.cc name); how long a link stays valid.
 
+### 21.32.1 `cc.sysd.cc`: who answers a file link (2026-10-19; DESIGN ONLY, the owner's decisions open)
+
+> The user (2026-10-19): "Lets do cc.sysd.cc (first cc is claude code) But how will sysd.cc be linked to the telegram
+> message via agentmaster? does agentmaster host or rely on user to provide a template in settings that has %FILENAME% or
+> %PATH% and anything really needed and any segements or ext and thus user can configure how to reach his webserver.
+> Support also headers we need to send in the request. have choice like a webhook, GET or POST with body and so on Answer
+> the missing parts first. In K:/source/fastrun we can host a program here but thats if we rely on user to host. What if
+> we provide both our hosting or hosted. What are the optionals"
+
+**Checked on 2026-10-19 (read-only):**
+- **The name.** `sysd.cc` is a Cloudflare zone. `catalog.sysd.cc` exists only in the LAN DNS (a Technitium zone for exactly
+  that name, an A record to Caddy on CT 104, 192.168.50.5); public DNS has nothing for it, by the homelab's rule that
+  nothing at home listens on the internet. `cc.sysd.cc` resolves nowhere yet.
+- **The certificate.** Caddy serves the `*.sysd.cc` names with a Let's Encrypt wildcard (`CN=*.sysd.cc`, issuer YE1, a
+  chain to ISRG Root X1), so a phone trusts `cc.sysd.cc` with nothing installed.
+- **The route already exists.** `catalog.sysd.cc` has the shape a server in Agentmaster would have: `catalog-service.exe`
+  on this PC listens on `192.168.50.17:32593`, a Windows firewall rule admits only Caddy's host, and Caddy's block is
+  `import sysd_tls` + `reverse_proxy 192.168.50.17:32593` (`K:\source\proxmox\caddy\Caddyfile`; the steps: the sysd
+  skill's `references/operations.md` §12).
+- **The gate.** `sysd_tls` carries the sysd gate. A request from the LAN needs nothing; a request through the sysd VPN
+  (NATed to 192.168.50.71) gets 403 unless the client shows a listed **access certificate** (`client_auth mode request`,
+  decided for each request by `gate.caddy`).
+- **Telegram's Android app** (its source, DrKLO/Telegram `master`):
+  - It never answers a client-certificate request: GitHub's code search finds no `onReceivedClientCertRequest` in it, so
+    its in-app browser and its Mini Apps reach a site without a certificate.
+  - Its in-app browser downloads a plain link: on a `Content-Disposition: attachment` answer (`setDownloadListener`,
+    `ui/web/BotWebViewContainer.java`) it gives the URL to Android's **DownloadManager**, which fetches it AGAIN, with no
+    cookie and no certificate, and names the file after the URL's last path segment when that has an extension. A file
+    over the auto-download size asks first.
+  - A Mini App's `downloadFile` is first checked by Telegram's servers (`bots.checkDownloadFileParams` with the bot, the
+    URL and the file name; the popup shows only on `true`); then `ui/bots/BotDownloads.java` reads the size with one `GET`
+    and gives the URL to DownloadManager. Whether the server check accepts a name that only the LAN resolves is not known:
+    to try.
+- **fastrun** (the homelab's k3s runner, `K:\source\fastrun`): an app (an image or a Dockerfile build) serves a port of
+  2101–2199 behind a Caddy name, starting on the first connection and stopping when idle. It keeps no file (an instance's
+  disk is memory and goes with the instance; state lives in a ConfigMap of at most 1 MiB), and it has no public address.
+- **Storage in the homelab:** the QNAP NAS only (SMB; its RAID was offline from 2026-10-07 to 10-17). No object store.
+- **Link previews:** the HTML sends turn them off (`link_preview_options.is_disabled`); the rich send sets nothing. Telegram's
+  preview fetcher cannot reach a LAN-only name, but a public name later would need previews off on every send.
+
+**Where a tap downloads, with the gate as it is:**
+
+| The phone | Plain link, Telegram's in-app browser | Plain link, Chrome or Brave | Mini App `downloadFile` |
+|---|---|---|---|
+| On the home Wi-Fi | works (DownloadManager) | works | only if Telegram's server check accepts the URL |
+| Away, on the sysd VPN | 403: no certificate | works: Android asks "Select certificate" once per host and browser run | 403: DownloadManager shows no certificate |
+| Away, no VPN | no: the name resolves only in the LAN DNS | no | no |
+
+For Telegram's own downloads to work through the VPN, the `cc.sysd.cc` block would leave the gate out (a TLS snippet
+without `gate.caddy`), the link's own key standing in for the access certificate. That loosens a sysd rule: the owner's
+call.
+
+**The missing parts.**
+- **How a link reaches the message.** Agentmaster rewrites each file link while the bot builds the message: Claude's
+  `[report.md](file:///K:/x/report.md)` becomes `[report.md](https://cc.sysd.cc/f/<key>/report.md)`, the text unchanged.
+  The name lives only in a setting (the link template); the LAN DNS and Caddy map it to whatever answers. Proposed: only an
+  existing regular file is linked (no folder), only under the allowed folders, and never one that looks like a secret
+  (`.env`, `*.pem`, `*.key`, `*.pfx`, a `secrets` or `.ssh` folder, the sysd secrets folder). The history replay (§21.9)
+  rewrites the same way.
+- **The bytes are on this PC, so a template moves nothing.** Whatever answers `cc.sysd.cc` gets the file either at the tap
+  (**pull**: a program on this PC serves it, so the PC must be on) or when the bot posts the message (**push**: Agentmaster
+  sends a copy, which the server must store). There is no third way: a template for the owner's own server still needs
+  one of the two.
+- **The key.** A link in a chat is a bearer key: whoever holds the message can download while it is valid, so the URL
+  never carries the authority as a bare path. Either a random token in `state.json` (one link can be revoked; short
+  enough for a Mini App's `startapp`, at most 64 characters) or a SEALED key: the path, the expiry and the file's size and
+  time encrypted and signed with a key that only Agentmaster holds (Credential Manager). A sealed key needs no storage (the
+  history replay mints thousands) and survives restarts, but it is too long for `startapp`, and replacing the key ends
+  every such link. Either kind serves every fetch until it expires: one tap fetches the URL two or three times.
+- **Snapshot or live.** Pull serves the file as it is at the tap (changed or gone since: answer 410, or serve the new
+  one); push serves the copy of the post time.
+- **What a listener in Agentmaster needs:** a plain Winsock listener (`http.sys` would need an administrator's URL
+  reservation), a port of its own per install (dev and production run apart; a second name or a path prefix for dev), and
+  a firewall rule that admits only Caddy (an administrator, once, like the catalog's `catalog-32593`). TLS stays Caddy's.
+
+**The options.**
+
+| # | Mode | What answers `cc.sysd.cc` | Bytes | PC off | Agentmaster | The owner's side |
+|---|---|---|---|---|---|---|
+| 1 | **Built-in** ("our hosting") | a listener in Agentmaster, behind Caddy | pull | fails | listener, rewrite, keys | the DNS zone, the Caddy block, the firewall rule (the catalog's steps) |
+| 2 | **Relay** | the owner's server (e.g. a fastrun app), fetching from mode 1's listener | pull | fails | mode 1, its firewall rule admitting the relay | the relay: the Mini App page, an owner check through `initData`, logs |
+| 3 | **Upload** ("hosted") | the owner's server, from its copy | push | works | the request engine below | storage: none in fastrun; the NAS or a new store |
+| 4 | **Link only** | the owner's server, reading the file itself (a share of the folder) | none | as that server | the template with `%SIG%` | the files, and a check of `%SIG%` |
+
+"Both" is one setting with these modes (Off, Built-in, Relay, Upload, Link only) over the same rewrite; modes 2 to 4
+share the template and the request engine, and mode 2 reuses mode 1's listener.
+
+**The link template** (every mode): a URL with placeholders, each encoded for its place (a path segment, a query value).
+- `%KEY%` the link's key; `%FILENAME%` the name with its extension; `%NAME%` without it; `%EXT%` the extension; `%PATH%`
+  the whole path as one encoded value (for a query); `%PATHSEG%` the path as encoded segments (`K/source/x/report.md`);
+  `%DIR%`; `%RELPATH%` the path under the session's folder; `%SIZE%`; `%MTIME%`; `%SHA256%` (read only when the template
+  names it); `%MIME%`; `%EXP%` the expiry (Unix seconds); `%SIG%` an HMAC-SHA256 over the method, the path and `%EXP%`
+  with a shared key (Credential Manager); `%SESSION%`, `%TOPIC%`, `%BOT%`, `%INSTALL%` (release or dev).
+- A path placeholder in the link is allowed only with `%SIG%` and `%EXP%` (mode 4): else the URL alone would open any file
+  of the PC. It also shows the path to whoever sees the link (Telegram already does: today's `file:///` URL is in the
+  message).
+- Mode 1's default: `https://cc.sysd.cc/f/%KEY%/%FILENAME%` (the name last, so Telegram's in-app browser names the
+  download after it).
+
+**The request engine** (modes 2 to 4: what Agentmaster sends to the owner's server, and when):
+- **Method:** `GET` (the values in the query string, no body), `POST`, `PUT` or `PATCH`; `DELETE` when a link expires or
+  is revoked.
+- **URL and headers** as templates (`Authorization: Bearer %SECRET:<name>%`, `X-File-Name: %FILENAME%`). A
+  `%SECRET:<name>%` comes from Credential Manager, in headers and bodies only, never in a link. A CR or LF in a header
+  value is refused.
+- **Body:** none; the raw file (`Content-Type: %MIME%`); multipart (the file and fields); JSON from a template
+  (`%CONTENT_BASE64%`, small files only); form fields.
+- **Webhook:** the JSON form of an event, signed like GitHub's (`X-Agentmaster-Signature: sha256=<HMAC of the body>`):
+  `file.linked` (key, name, size, SHA-256, expiry, session, topic), `file.expired`, `file.revoked`. For a relay that wants
+  to know a key before its first tap (mode 2), or a server that reads the files itself (mode 4).
+- **When:** in the background after the message (its link works once the upload lands) or before it (the message waits);
+  retries with backoff, a timeout, a size cap.
+- **The link** from the template, or from the answer (a JSON field such as `url`, or the `Location` header).
+
+**fastrun.** It fits mode 2: a relay app on a free port of 2101–2199 behind `cc.sysd.cc` (`--warm frozen` for an instant
+first byte), which can host the Mini App page and check `initData`, with the bot token as a k8s Secret (today the tokens
+live only in Credential Manager on this PC). It does not fit mode 3 without a store behind it, since it keeps no file, and
+it reaches no farther than mode 1: the same LAN DNS and the same gate.
+
+**Proposed** (the owner decides): mode 1 first, with sealed keys valid 30 days, a size cap, the allowed folders and the
+secret patterns; the template and the request engine built so modes 2 to 4 can follow without changing the rewrite; the
+Mini App only after its server check is tried with a LAN name. **Open:** which modes; the gate on `cc.sysd.cc` (kept:
+Telegram's own downloads work at home only, Chrome or Brave also through the VPN; left out: everything works through the
+VPN, the link's key the only check); the lifetime; snapshot or live; which folders may be linked.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
