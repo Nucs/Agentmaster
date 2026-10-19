@@ -36,6 +36,13 @@
 //     so a read before it anchors the list to the box's previous place.
 //   - The drop-down rows never take focus (IsTabStop false, AllowFocusOnInteraction false): a row that took focus
 //     would let the box's LostFocus tear the drop-down down before the click lands.
+//   - ONE click on Launch launches, even while its hover menu is up (2026-10-19, the user's report: Launch needed a
+//     double-click). The hover menu is a light-dismiss flyout, and XAML EATS the press that dismisses it: the press
+//     only closes the menu and never reaches the button, and the next pointer move reopened the menu, so only a
+//     double-click (no move between its presses) got through. The bar completes such a click itself: a press that
+//     closes the menu arms it (_NoteLaunchMenuClosing), and the release on Launch that follows runs ClickLaunch when
+//     the press was on Launch too (_OnLaunchButtonReleased). A second ClickLaunch within the double-click time is
+//     ignored, so a double-click out of habit still launches once.
 //   - A programmatic Text write re-validates EXPLICITLY: TextChanged does not fire reliably while the box is off the
 //     live tree (a hidden Manager page, a closed card), so the underline would stay on the previous text's state.
 //   - The drop-down's geometry is never computed inside a layout pass: a resize goes through QueuePathPickerRelayout
@@ -188,8 +195,12 @@ namespace winrt::TerminalApp::implementation
         // Repaint the agent element (● Claude / ● Codex). Throws as ValidateLaunchBox.
         void UpdateLaunchAgentButton();
         // Exactly what a click on Launch does: stop the hover-menu timer and close an open hover menu (a click is a
-        // decision), then launch with the Default target. The side panel's key-up Enter on a focused Launch button calls
-        // it. Throws what the host callbacks throw (a click's own exposure); the menu close itself never throws.
+        // decision), then launch with the Default target. The Launch button's Click, the click the bar completes after
+        // its hover menu ate the press (_OnLaunchButtonReleased), and the side panel's key-up Enter on a focused Launch
+        // button call it. It also drops a pending eaten press (this IS the click), and it ignores a call that comes within
+        // the system double-click time of the previous one (logged), so a double-click on Launch starts ONE session —
+        // two clicks that fast are a habit from when the first click was eaten, never two launches.
+        // Throws what the host callbacks throw (a click's own exposure); the menu close itself never throws.
         void ClickLaunch();
         // Exactly what a click on Fork does. Throws what the host callbacks throw.
         void ClickFork();
@@ -267,15 +278,38 @@ namespace winrt::TerminalApp::implementation
         // contact (a mouse with no button held, a hovering pen). A pointer that arrives IN contact (a touch, a pen
         // touching down) still waits the 450 ms hold (_launchHoverTimer), so a tap launches without the menu flashing.
         // Shown TransientWithDismissOnPointerMoveAway: no focus taken, closed once the pointer is 80 DIP away, and every
-        // press passes through it (a click on the button still lands). Offered only while the button launches a NEW
-        // Claude session (not in Codex mode, not when the box holds a session id, not while the button is disabled) and
-        // never after Shutdown. A pick launches through _OnLaunch(target). Never throws (a failed open is logged).
+        // press that dismisses it is EATEN by XAML (the 2026-10-10 note here said every press passed through; the user's
+        // double-click report of 2026-10-19 showed it does not) — the bar completes such a click itself
+        // (_NoteLaunchMenuClosing, _OnLaunchButtonReleased). Offered only while the button launches a NEW Claude session
+        // (not in Codex mode, not when the box holds a session id, not while the button is disabled), never after
+        // Shutdown, and not while an eaten press waits for its release (_LaunchEatenPressPending). A pick launches
+        // through _OnLaunch(target). Never throws (a failed open is logged).
         void _ShowLaunchMenu();
         // Close the Launch hover menu when one is open (ClickLaunch: a click is a decision; Shutdown: nothing of the bar
         // may stay open). Hide is asynchronous — the menu's Closed handler clears _launchMenu — so a hover right after
         // still finds it set and stacks nothing. Never throws: a failure (a torn-down menu, a pool-thread teardown) is
         // logged (Rule #18).
         void _CloseLaunchMenu() noexcept;
+        // The hover menu is closing (its Closing event; its Closed event calls it too, as a belt). When the primary mouse
+        // button is down at that moment, the close was a light-dismiss PRESS — XAML ate it, no element under the pointer
+        // got it — and the press is ARMED: its time and the cursor's screen position are kept for _OnLaunchButtonReleased,
+        // which turns it into a click if its release lands on Launch. A close with the button up (a menu pick, Esc, the
+        // pointer moving away, ClickLaunch's own close) arms nothing, and an arm already pending is kept (its cursor is the
+        // press point; Closed comes later). Never throws: a failed read arms nothing, and the press stays eaten (as before).
+        void _NoteLaunchMenuClosing() noexcept;
+        // True while an eaten press is armed and younger than kLaunchEatenPressMaxMs. While it is, the hover menu does not
+        // reopen (_ShowLaunchMenu): the release of that press finds the pointer over Launch again, and a menu reopened
+        // there would eat the next press too — the reason only a double-click got through. Never throws.
+        bool _LaunchEatenPressPending() const noexcept;
+        // The Launch button's PointerReleased, registered with handledEventsToo (ButtonBase marks every release handled).
+        // Completes an eaten press: when one is armed, this release is the primary button's, and the PRESS point lies on
+        // Launch — the release point moved back by the cursor's screen delta since the press, converted to DIPs with the
+        // island's rasterization scale — the arm is dropped and ClickLaunch runs, as the button's Click would have. A
+        // release that Launch turned into a real Click finds no arm: ClickLaunch dropped it, and ButtonBase raises Click
+        // in OnPointerReleased, which runs before this instance handler. Logs one [launchbar] line per completed click.
+        // Never throws (logged; the press then stays eaten, as before).
+        //   e - the release's event args (its position on Launch and the button that was released).
+        void _OnLaunchButtonReleased(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) noexcept;
         // The Launch button's action. `target` (PRESETS): the hover menu's pick — "" = Default (a plain click), a model
         // id, or "@<presetId>" — handed to spawnClaude for a NEW session in the typed folder. A session id in the box
         // resumes that session on its own snapshot and ignores `target`. Throws what the host callbacks throw.
@@ -410,6 +444,15 @@ namespace winrt::TerminalApp::implementation
         // second menu).
         winrt::Windows::UI::Xaml::DispatcherTimer _launchHoverTimer{ nullptr };
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _launchMenu{ nullptr };
+        // An EATEN PRESS (_NoteLaunchMenuClosing): GetTickCount64 when a press closed the hover menu; 0 = none armed.
+        // Dropped by ClickLaunch, by its completion (_OnLaunchButtonReleased) and by age (kLaunchEatenPressMaxMs).
+        uint64_t _launchEatenPressTick{ 0 };
+        // The cursor at that press, in screen pixels (GetCursorPos): the release maps it into Launch's own coordinates.
+        int32_t _launchEatenPressX{ 0 };
+        int32_t _launchEatenPressY{ 0 };
+        // GetTickCount64 of the last ClickLaunch; 0 = none yet. A ClickLaunch within the system double-click time of it is
+        // ignored, so a double-click launches once.
+        uint64_t _lastClickLaunchTick{ 0 };
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr }; // the drop-down Popup (in host.popupHost)
         winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr }; // the drop-down's dark panel (the Popup's child)
         // The drop-down list's scroller. Its MaxHeight IS the list's height cap (the Border around it adds only fixed

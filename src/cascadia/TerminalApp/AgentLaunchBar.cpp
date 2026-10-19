@@ -82,6 +82,12 @@ namespace winrt::TerminalApp::implementation
         // that belonged to another window on this UI thread; the cap keeps a list from chasing a box forever.
         constexpr uint8_t kPathPickerReanchorMaxRounds = 3;
 
+        // How long a press that closed the Launch hover menu stays ARMED for its release, in ms (_NoteLaunchMenuClosing,
+        // _OnLaunchButtonReleased). A click's release follows its press within a few hundred ms, and a slow, deliberate
+        // press still completes. Bounded, so a stale arm can never turn a much later release into a launch, and so the
+        // hover menu — which does not reopen while a press is armed — comes back soon after a press that went elsewhere.
+        constexpr uint64_t kLaunchEatenPressMaxMs = 3000;
+
         // COM identity of two projected objects (their IUnknown), null-safe. GettingFocus names the new focus as a
         // DependencyObject and the box is a TextBox: two projections of one object are equal only by identity.
         //   a, b    — the objects to compare (either may be null).
@@ -385,9 +391,17 @@ namespace winrt::TerminalApp::implementation
         //     button held, or a pen hovering over the screen. The menu takes no focus and closes again once the
         //     pointer is 80 DIP away from it (TransientWithDismissOnPointerMoveAway, in _ShowLaunchMenu; the distance
         //     is WinUI's FlyoutBase::OnRootVisualPointerMoved), so a pointer that only crosses the button flashes the
-        //     menu and is never trapped by it. A click on the button still lands while the menu is up: a transient
-        //     flyout's pass-through element is the root visual, which lets EVERY press through its light-dismiss layer
-        //     (WinUI PointerInputProcessor), and ClickLaunch closes the menu as well.
+        //     menu and is never trapped by it.
+        //   - A CLICK on the button while the menu is up launches too (2026-10-19). The note here used to say that every
+        //     press passed through the menu's light-dismiss layer (read in the WinUI 3 source: a transient flyout makes
+        //     the root visual its pass-through element). The user's report said otherwise: Launch needed a DOUBLE-click.
+        //     The menu is light-dismiss, and XAML eats the press that dismisses it (Microsoft's flyout docs: light
+        //     dismiss "eats" the first click unless the target is the flyout's OverlayInputPassThroughElement — and even
+        //     that cannot reach an element inside ANOTHER popup, such as the side panel's card, because WinUI's re-hit-test
+        //     disables the whole popup root). The first press only closed the menu, the next pointer move over the
+        //     button reopened it, and only a double-click (no move between its presses) reached the button. Now the
+        //     menu's Closing arms such a press (_NoteLaunchMenuClosing) and its release on Launch completes the click
+        //     (the PointerReleased handler below, _OnLaunchButtonReleased).
         //   - A pointer that arrives IN CONTACT keeps the old 450 ms hold (_launchHoverTimer): a touch, a pen touching
         //     down, a mouse dragging in with a button held. A touch has no hover — its PointerEntered comes with the
         //     press of a tap — so opening at once would flash the menu over every tap's launch; with the hold, the
@@ -444,6 +458,18 @@ namespace winrt::TerminalApp::implementation
                 self->_launchHoverTimer.Stop();
             }
         });
+        // The release that completes a press the hover menu ate (above). handledEventsToo: ButtonBase marks EVERY release
+        // handled — the ones it turns into a Click and the ones it cannot (it never saw their press). The handler holds
+        // only the bar's weak_ptr, never the button it is registered on (a self-capture would keep both alive).
+        _launchBtn.AddHandler(
+            UIElement::PointerReleasedEvent(),
+            winrt::box_value(PointerEventHandler{ [weak](const IInspectable&, const PointerRoutedEventArgs& e) {
+                if (const auto self = weak.lock())
+                {
+                    self->_OnLaunchButtonReleased(e); // noexcept: a failure is logged inside
+                }
+            } }),
+            true /* handledEventsToo */);
 
         // Fork — hidden unless the box holds a FOUND session id; forks that conversation into a
         // NEW one (the original transcript is untouched), mirroring the Sessions page's "Fork here".
@@ -528,9 +554,24 @@ namespace winrt::TerminalApp::implementation
             _launchHoverTimer.Stop(); // a click is a decision: the hover menu must not pop after it
         }
         // ...nor stay up over the launch: a mouse hover opens it at once, so it is normally open when the button is
-        // clicked. The click's own press closes a transient menu as well; this covers the keyboard path (the side
-        // panel's key-up Enter on a focused Launch) and a touch whose press arrived together with the menu's open.
+        // clicked. A press that closed it was eaten, and this click is its completion (_OnLaunchButtonReleased); this
+        // covers the keyboard path (the side panel's key-up Enter on a focused Launch) and a touch whose press arrived
+        // together with the menu's open.
         _CloseLaunchMenu();
+        // This IS the click: drop an eaten press that still waits for its release — completed later it would launch a
+        // second time — and any arm our own close above could leave. AFTER the close, so its Closing cannot re-arm.
+        _launchEatenPressTick = 0;
+        // The second click of a double-click is no second launch. Before 2026-10-19 the hover menu ate Launch's first
+        // click, so users double-click it out of habit, and with the first click completed the second could land on a
+        // Launch button that is still on screen (the Agent Manager page until the new tab is selected). The interval is
+        // the user's own double-click setting (GetDoubleClickTime, 500 ms by default).
+        const uint64_t now = ::GetTickCount64();
+        if (_lastClickLaunchTick != 0 && now - _lastClickLaunchTick < static_cast<uint64_t>(::GetDoubleClickTime()))
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] a second Launch click within the double-click time was ignored (a double-click launches once)\n");
+            return;
+        }
+        _lastClickLaunchTick = now;
         _OnLaunch();
     }
 
@@ -846,6 +887,13 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // A press the previous menu ate still waits for its release. That release finds the pointer over Launch again
+        // (its PointerEntered comes first), and a menu opened now would eat the next press as well — exactly how Launch
+        // came to need a double-click (2026-10-19).
+        if (_LaunchEatenPressPending())
+        {
+            return;
+        }
         try
         {
             MenuFlyout menu;
@@ -869,11 +917,23 @@ namespace winrt::TerminalApp::implementation
                 },
                 _host.specifyModel,
                 addPresets);
+            // A press that closes the menu is eaten by XAML's light dismiss: arm it while that press is being processed
+            // (WinUI CPopupRoot::CloseTopmostPopup raises the flyout's Closing synchronously, before it closes the popup),
+            // so its release on Launch can complete the click (_OnLaunchButtonReleased).
+            menu.Closing([weak](const Primitives::FlyoutBase&, const Primitives::FlyoutBaseClosingEventArgs&) {
+                if (auto self = weak.lock())
+                {
+                    self->_NoteLaunchMenuClosing(); // noexcept
+                }
+            });
             // Forget the menu when it closes, so the next hover can open a fresh one (the list may have
             // changed: a Settings Save adds or renames presets).
             menu.Closed([weak](const IInspectable&, const IInspectable&) {
                 if (auto self = weak.lock())
                 {
+                    // A belt for a close that raised no Closing: arms only while the primary button is still down, and a
+                    // pending arm (Closing's, with the press point) is kept.
+                    self->_NoteLaunchMenuClosing(); // noexcept
                     self->_launchMenu = nullptr;
                 }
             });
@@ -908,6 +968,104 @@ namespace winrt::TerminalApp::implementation
             // A torn-down menu, or Shutdown on a pool thread (RPC_E_WRONG_THREAD): the menu goes away with its window
             // then. Recorded (Rule #18), never thrown: Shutdown runs from a destructor.
             ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: close the Launch hover menu");
+        }
+    }
+
+    void AgentLaunchBar::_NoteLaunchMenuClosing() noexcept
+    {
+        try
+        {
+            if (_LaunchEatenPressPending())
+            {
+                return; // armed already (Closing, then the belt in Closed): keep the press point
+            }
+            // Was this close a PRESS? Read the PHYSICAL primary button: GetAsyncKeyState reads physical buttons, and
+            // SM_SWAPBUTTON says which one is primary. Deliberately not GetKeyState: that reads the thread's message-time
+            // state, which the island's pointer input may never update — a stale "down" would arm every close, and an
+            // armed press keeps the hover menu from reopening. The cost: a press the UI thread processes only after the
+            // physical release (a busy thread) reads "up" and stays eaten, as before this fix.
+            const int primary = ::GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON;
+            if ((::GetAsyncKeyState(primary) & 0x8000) == 0)
+            {
+                return; // a menu pick, Esc, the pointer moving away, ClickLaunch's own close: nothing was eaten
+            }
+            POINT cursor{};
+            if (!::GetCursorPos(&cursor))
+            {
+                return; // no press point to check the release against: the press stays eaten
+            }
+            _launchEatenPressX = cursor.x;
+            _launchEatenPressY = cursor.y;
+            _launchEatenPressTick = ::GetTickCount64();
+        }
+        catch (...)
+        {
+            // Nothing above throws in practice; the guard keeps a noexcept event handler noexcept. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: arm the press that closed the Launch hover menu");
+        }
+    }
+
+    bool AgentLaunchBar::_LaunchEatenPressPending() const noexcept
+    {
+        return _launchEatenPressTick != 0 && ::GetTickCount64() - _launchEatenPressTick <= kLaunchEatenPressMaxMs;
+    }
+
+    void AgentLaunchBar::_OnLaunchButtonReleased(const PointerRoutedEventArgs& e) noexcept
+    {
+        try
+        {
+            if (!_LaunchEatenPressPending() || !_launchBtn || _shutDown)
+            {
+                return; // no eaten press waiting: a plain release (a real Click already ran ClickLaunch, which dropped any arm)
+            }
+            if (!_launchBtn.IsEnabled())
+            {
+                _launchEatenPressTick = 0; // the box turned red between press and release: a disabled button never clicks
+                return;
+            }
+            const auto point = e.GetCurrentPoint(_launchBtn);
+            // Only the primary button's release completes a click (XAML reports it as the left button, swapped or not).
+            if (point.Properties().PointerUpdateKind() != winrt::Windows::UI::Input::PointerUpdateKind::LeftButtonReleased)
+            {
+                return;
+            }
+            // Where was the PRESS, in Launch's own coordinates? The release point moved back by how far the cursor
+            // travelled since the press: screen pixels converted to DIPs with the island's rasterization scale. So no
+            // window or island position is needed, only the cursor's delta. A press that began elsewhere (the box, a row of
+            // the menu) and was dragged onto Launch is no click on it, exactly as for a plain Button.
+            POINT now{};
+            if (!::GetCursorPos(&now))
+            {
+                return;
+            }
+            double scale = 1.0;
+            if (const auto xamlRoot = _launchBtn.XamlRoot())
+            {
+                scale = xamlRoot.RasterizationScale();
+            }
+            if (!(scale > 0.0))
+            {
+                scale = 1.0; // never divide by an unset or broken scale
+            }
+            const auto at = point.Position();
+            const double pressX = static_cast<double>(at.X) + static_cast<double>(_launchEatenPressX - now.x) / scale;
+            const double pressY = static_cast<double>(at.Y) + static_cast<double>(_launchEatenPressY - now.y) / scale;
+            const bool pressOnLaunch = pressX >= 0.0 && pressY >= 0.0 && pressX <= _launchBtn.ActualWidth() && pressY <= _launchBtn.ActualHeight();
+            _launchEatenPressTick = 0; // one press, one release: consumed whatever the answer
+            if (!pressOnLaunch)
+            {
+                return;
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] Launch clicked while its hover menu was up: the menu took the press, its release on Launch completed the click\n");
+            // What the button's Click would have run (it runs inside ButtonBase::OnPointerReleased too, during this same
+            // release): the hover menu closed, the Default launch, the host's follow-up (the side panel's card closes).
+            ClickLaunch();
+        }
+        catch (...)
+        {
+            // A launch that threw past its host's own containment, or a failed read: recorded (Rule #18), never thrown into
+            // XAML's pointer routing. The user's next click on Launch works normally (the menu is closed by now).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: complete the Launch click that the hover menu ate");
         }
     }
 
