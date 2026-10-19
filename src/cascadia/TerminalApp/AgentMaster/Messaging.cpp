@@ -6021,7 +6021,8 @@ namespace Agentmaster::Msg
             {
                 card.pingWanted = true; // kept until a post can carry it (below)
                 // §21.24: a card that starts to RING (a session that exited, errs or needs approval - a state CHANGE, so once
-                // per episode) goes back to its Main page, where the state's own action is (🔧 Resume Session, ▶ Reactivate).
+                // per episode) goes back to its Main page, where the state's own action is (🔄 Restart Session for an exit or an
+                // error).
                 // Only when the ring is raised: a page the user opens after that is kept, the ringing re-post included - the
                 // tap is the newer word.
                 card.page = CardPage::Main;

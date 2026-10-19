@@ -583,9 +583,9 @@ namespace Agentmaster::Msg
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
         /// <summary>
-        /// The card's buttons on one page (§21.24 - Main: ⚙ Session · 🔄 Restart Session; Session: ⑂ Fork · 🆕 New Session, the
-        /// card's buttons of before, 🖼 Screen Image and ◀ Back), each page led by the state's own action (🔧 Resume Session for a
-        /// session in Error, ▶ Reactivate for a parked tab or a claude that exited). BuildCardButtonRows lays them out.
+        /// The card's buttons on one page (§21.24 - Main: ⚙ Session, plus 🔄 Restart Session in Error or after an exit, or
+        /// ▶ Reactivate for a parked tab; Session: ⑂ Fork · 🆕 New Session, 🔄 Restart Session with 🔧 Resume Session beside it in
+        /// Error, the card's other buttons of before, 🖼 Screen Image and ◀ Back). BuildCardButtonRows lays them out.
         /// </summary>
         /// <param name="sessionId">The card's session (it goes into every button's data).</param>
         /// <param name="facts">What the labels and the first row depend on (CardButtonFactsFor).</param>
@@ -1161,7 +1161,9 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The card's 🔄 Restart Session (§21.24): the topic's /restartsession. A session at rest is restarted at once (the same
         /// conversation resumes in its tab) and the toast says so; while a turn runs, the restart asks first in the thread (the
-        /// turn would be cut off), exactly as /restartsession does, and the toast points at that question.
+        /// turn would be cut off), exactly as /restartsession does, and the toast points at that question. A PARKED tab (its claude
+        /// never started: restored, deactivated) is started in place, as ▶ Reactivate does — the window's own restart refuses a
+        /// connection that never started (`_restartPaneConnection`'s guard: an AV otherwise), so a restart there did nothing.
         /// </summary>
         /// <param name="sessionId">The card's session.</param>
         /// <param name="threadId">The topic.</param>

@@ -4158,10 +4158,12 @@ namespace Agentmaster::Msg
     // ===== the card's buttons: two pages (§21.24) ==============================================
 
     /// <summary>
-    /// The two pages of buttons a sticky card can show (MESSAGING.md §21.24). MAIN is what every card shows by default: ⚙ Session
-    /// and 🔄 Restart Session. ⚙ Session turns the card's keyboard into the SESSION page: ⑂ Fork and 🆕 New Session in the folder
-    /// first (the user's placement of 2026-10-18: "after ⚙ Session"), then every button the card had before (the runner, the
-    /// queue, the pin, the transcript, the screen as text), the screen as a picture, and ◀ Back.
+    /// The two pages of buttons a sticky card can show (MESSAGING.md §21.24). MAIN is what every card shows by default: ⚙ Session,
+    /// and beside it 🔄 Restart Session only for a session in Error or one whose claude exited (the user's rule of 2026-10-19),
+    /// or ▶ Reactivate for a parked tab. ⚙ Session turns the card's keyboard into the SESSION page: ⑂ Fork and 🆕 New Session in
+    /// the folder first (the user's placement of 2026-10-18: "after ⚙ Session"), then 🔄 Restart Session with 🔧 Resume Session
+    /// beside it in Error (the user's rule of 2026-10-19: both live on this page), then every other button the card had before
+    /// (the runner, the queue, the pin, the transcript, the screen as text), the screen as a picture, and ◀ Back.
     /// </summary>
     /// <remarks>
     /// The page belongs to the card the button sits on: the service remembers the sticky card's page per topic in memory
@@ -4171,8 +4173,8 @@ namespace Agentmaster::Msg
     /// </remarks>
     enum class CardPage
     {
-        Main, // ⚙ Session · 🔄 Restart Session
-        Session, // ⑂ Fork · 🆕 New Session · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
+        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
+        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
     };
 
     /// <summary>What the card's buttons depend on, read from the session at render time (CardButtonFactsFor).</summary>
@@ -4180,11 +4182,12 @@ namespace Agentmaster::Msg
     {
         bool pinned{ false }; // 📌 Unpin rather than 📌 Pin
         bool runnerAuto{ false }; // ⏸ Pause runner (the runner is Auto) rather than ▶ Runner auto (it is Paused)
-        bool reactivatable{ false }; // ▶ Reactivate first on both pages: a parked tab, or a claude that exited (SessionIsReactivatable)
-        bool error{ false }; // 🔧 Resume Session first instead: the session is in Error (§21.24 - the user's "in case of error")
+        bool reactivatable{ false }; // SessionIsReactivatable: a parked tab, a session in Error, or a claude that exited - ▶ Reactivate is offered for a parked tab only (the other two show 🔄 Restart Session, which does the same for them)
+        bool error{ false }; // the session is in Error: 🔄 Restart Session on Main, 🔧 Resume Session beside it on the Session page (§21.24)
+        bool done{ false }; // claude exited (Done): 🔄 Restart Session on Main too (the user's rule of 2026-10-19)
     };
 
-    /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, and whether its state has an action of its own.</summary>
+    /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, and whether its state has an action of its own (an error, an exit, a parked tab).</summary>
     /// <param name="s">The session (a lean record is enough: no queue is read).</param>
     /// <returns>The facts.</returns>
     inline CardButtonFacts CardButtonFactsFor(const SessionInfo& s) noexcept
@@ -4193,6 +4196,7 @@ namespace Agentmaster::Msg
         f.pinned = s.pinned;
         f.runnerAuto = s.autorunner.mode == AutorunnerMode::Full;
         f.error = s.live && s.state == SessionState::Error;
+        f.done = s.live && s.state == SessionState::Done;
         f.reactivatable = SessionIsReactivatable(s);
         return f;
     }
@@ -4210,9 +4214,9 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kCardVerbFork = L"fork";
     /// <summary>🆕 New Session: the topic's /newsession (a fresh session in the same folder, a new background tab).</summary>
     inline constexpr std::wstring_view kCardVerbNewSession = L"newsession";
-    /// <summary>🔄 Restart Session: the topic's /restartsession (it asks first while a turn runs: the turn would be cut off).</summary>
+    /// <summary>🔄 Restart Session (the Session page; Main too for a session in Error or one whose claude exited): the topic's /restartsession — it asks first while a turn runs (the turn would be cut off), and a parked tab is started in place.</summary>
     inline constexpr std::wstring_view kCardVerbRestart = L"restart";
-    /// <summary>🔧 Resume Session: what ▶ Reactivate does, for a session in Error (a parked tab is started, a claude that is up is restarted).</summary>
+    /// <summary>🔧 Resume Session (the Session page, a session in Error): what ▶ Reactivate does (a parked tab is started, a claude that is up is restarted).</summary>
     inline constexpr std::wstring_view kCardVerbResume = L"resume";
     /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
     inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
@@ -4233,37 +4237,55 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The sticky card's buttons on one page, as rows of (label, callback data) - the service turns them into Telegram's
-    /// inline keyboard. Both pages START with the state's own action when it has one, because that is what a card in that
-    /// state is for: 🔧 Resume Session for a session in Error, else ▶ Reactivate for a parked tab or a claude that exited.
-    /// Main then holds ⚙ Session · 🔄 Restart Session; Session holds ⑂ Fork · 🆕 New Session, the runner · 📋 Queue,
-    /// 📌 Pin · 📄 Transcript, 🖥 Screen Text · 🖼 Screen Image, and ◀ Back.
+    /// inline keyboard. MAIN is one row: ⚙ Session, and beside it 🔄 Restart Session for a session in Error or one whose claude
+    /// exited (the user's rule of 2026-10-19: Restart shows outside the Session page only then), or ▶ Reactivate for a parked
+    /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
+    /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; and ◀ Back.
     /// </summary>
+    /// <remarks>
+    /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
+    /// offered only for a parked tab, which it starts in place (and Restart, tapped on a parked tab, does the same since §21.24 —
+    /// the window's own restart refuses a connection that never started). 🔧 Resume Session is Reactivate's name in Error, kept
+    /// beside Restart because the user asked for both.
+    /// </remarks>
     /// <param name="sessionId">The card's session (it goes into every button's data).</param>
-    /// <param name="facts">The facts the labels and the first row depend on (CardButtonFactsFor).</param>
+    /// <param name="facts">The facts the labels and the conditional buttons depend on (CardButtonFactsFor).</param>
     /// <param name="page">The page.</param>
     /// <returns>The rows, top to bottom; two buttons a row at most, so a phone shows every label whole.</returns>
     /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
     inline std::vector<std::vector<std::pair<std::wstring, std::wstring>>> BuildCardButtonRows(std::wstring_view sessionId, const CardButtonFacts& facts, CardPage page)
     {
         std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
-        if (facts.error)
-        {
-            rows.push_back({ { L"\U0001F527 Resume Session", CardCallbackData(kCardVerbResume, sessionId) } });
-        }
-        else if (facts.reactivatable)
-        {
-            rows.push_back({ { L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) } });
-        }
+        // 🔄 Restart Session outside the Session page only where a restart is what the card is for (the user's rule, 2026-10-19).
+        const bool restartOnMain = facts.error || facts.done;
+        // ▶ Reactivate only for a parked tab: in Error or after an exit it is a restart, which 🔄 Restart Session offers there.
+        const bool reactivateParked = facts.reactivatable && !facts.error && !facts.done;
         if (page == CardPage::Main)
         {
-            // The cog carries U+FE0F so every app draws it as the emoji (U+2699 alone may be drawn as a text glyph).
-            rows.push_back({ { L"\x2699\xFE0F Session", CardCallbackData(kCardVerbSessionPage, sessionId) },
-                             { L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) } });
+            // The cog carries U+FE0F so every app draws it as the emoji (U+2699 alone may be drawn as a text glyph). It comes
+            // first in every state, so it never moves under the user's thumb.
+            std::vector<std::pair<std::wstring, std::wstring>> row{ { L"\x2699\xFE0F Session", CardCallbackData(kCardVerbSessionPage, sessionId) } };
+            if (restartOnMain)
+            {
+                row.push_back({ L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) });
+            }
+            else if (reactivateParked)
+            {
+                row.push_back({ L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) });
+            }
+            rows.push_back(std::move(row));
             return rows;
         }
         // The user's placement (2026-10-18): ⑂ Fork and 🆕 New Session come right after ⚙ Session is tapped, at the top of its page.
         rows.push_back({ { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) },
                          { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) } });
+        // The session's lifecycle (the user's rule of 2026-10-19: Restart and Resume live on this page), Resume in Error only.
+        std::vector<std::pair<std::wstring, std::wstring>> lifecycle{ { L"\U0001F504 Restart Session", CardCallbackData(kCardVerbRestart, sessionId) } };
+        if (facts.error)
+        {
+            lifecycle.push_back({ L"\U0001F527 Resume Session", CardCallbackData(kCardVerbResume, sessionId) });
+        }
+        rows.push_back(std::move(lifecycle));
         rows.push_back({ { facts.runnerAuto ? L"\x23F8 Pause runner" : L"\x25B6 Runner auto", CardCallbackData(L"runner", sessionId) },
                          { L"\U0001F4CB Queue", CardCallbackData(L"queue", sessionId) } });
         rows.push_back({ { facts.pinned ? L"\U0001F4CC Unpin" : L"\U0001F4CC Pin", CardCallbackData(L"pin", sessionId) },
@@ -4276,8 +4298,8 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6), as Telegram HTML: the title, the state and since
-    /// when (a clock time from persisted stamps, CardStateSinceMs), a line naming the state's own action — 🔧 Resume Session
-    /// for a session in Error (§21.24), ▶ Reactivate for a parked tab or a claude that exited —, folder · branch · model ·
+    /// when (a clock time from persisted stamps, CardStateSinceMs), a line naming the state's own action — 🔄 Restart Session
+    /// for a session in Error or one whose claude exited (§21.24), ▶ Reactivate for a parked tab —, folder · branch · model ·
     /// context, the runner and the queue unless they are the
     /// common default (an Auto runner with nothing queued and no global pause: no line — §21.18), the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
@@ -4316,15 +4338,16 @@ namespace Agentmaster::Msg
             out += L" \U0001F4CC";
         }
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
-        // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand — also for a claude
-        // that exited, which a restart of the same conversation recovers. §21.24: a session in ERROR names the card's
-        // 🔧 Resume Session instead (the same action: a parked tab is started in place, a claude that is up is restarted),
-        // and Error is read FIRST: a tab restored after a crash with its turn cut off is parked AND in Error, and resuming
-        // the turn is what it needs, not a bare "not running".
+        // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand. §21.24 (the user's rule of
+        // 2026-10-19): a session in ERROR, or one whose claude EXITED, names 🔄 Restart Session instead - the one button
+        // besides ⚙ Session that Main shows for them (🔧 Resume Session, Reactivate's name in Error, is on the Session page) -
+        // and Error is read FIRST: a tab restored after a crash with its turn cut off is parked AND in Error, and resuming the
+        // turn is what it needs, not a bare "not running". The card's Restart starts a parked tab in place (the window's own
+        // restart refuses a connection that never started), so the parked line is as true as the restarted one.
         if (s.live && s.state == SessionState::Error)
         {
-            out += (!s.started && !s.external) ? L"\n\U0001F527 Resume Session starts it in its tab (a cut-off turn goes on by itself)" :
-                                                 L"\n\U0001F527 Resume Session restarts it (the same conversation goes on)";
+            out += (!s.started && !s.external) ? L"\n\U0001F504 Restart Session starts it in its tab (a cut-off turn goes on by itself)" :
+                                                 L"\n\U0001F504 Restart Session restarts it (the same conversation goes on)";
         }
         else if (s.live && !s.started && !s.external)
         {
@@ -4332,7 +4355,7 @@ namespace Agentmaster::Msg
         }
         else if (s.live && s.state == SessionState::Done)
         {
-            out += L"\n\x23F9 claude exited \x2014 \x25B6 Reactivate starts it again (the same conversation)";
+            out += L"\n\x23F9 claude exited \x2014 \U0001F504 Restart Session starts it again (the same conversation)";
         }
         if (idleLeavesAtMs > 0)
         {

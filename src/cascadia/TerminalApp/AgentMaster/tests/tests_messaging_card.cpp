@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster M5 — MESSAGING.md §21.24: the sticky card's buttons, refactored on the user's request of 2026-10-18 —
-//   1. two PAGES (MessagingModels.h BuildCardButtonRows / CardButtonFactsFor): Main holds ⚙ Session and 🔄 Restart Session;
-//      ⚙ Session turns the keyboard into the Session page — ⑂ Fork and 🆕 New Session first (the user's placement), then every
-//      button the card had before (the runner, the queue, the pin, the transcript, the screen as text), 🖼 Screen Image and
-//      ◀ Back; both pages start with the state's own action (🔧 Resume Session in Error, ▶ Reactivate for a parked tab or a
-//      claude that exited), and the card's text names it;
+//   1. two PAGES (MessagingModels.h BuildCardButtonRows / CardButtonFactsFor): Main holds ⚙ Session, and beside it
+//      🔄 Restart Session only in Error or after an exit (the user's rule of 2026-10-19) or ▶ Reactivate for a parked tab;
+//      ⚙ Session turns the keyboard into the Session page — ⑂ Fork and 🆕 New Session first (the user's placement), then
+//      🔄 Restart Session with 🔧 Resume Session beside it in Error, then every other button the card had before (the runner,
+//      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image and ◀ Back; the card's text names the state's
+//      action (🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab);
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -199,30 +200,33 @@ void TestMessagingCard()
     {
         const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
         const CardButtonFacts f = CardButtonFactsFor(waiting);
-        CHECK(!f.error && !f.reactivatable && f.runnerAuto && !f.pinned, "facts of a waiting session: no state action, the runner Auto, unpinned");
+        CHECK(!f.error && !f.done && !f.reactivatable && f.runnerAuto && !f.pinned, "facts of a waiting session: no state action, the runner Auto, unpinned");
 
+        // Main: the cog alone while nothing is wrong (the user's rule of 2026-10-19: Restart shows outside only in Error / Done).
         const Rows main = BuildCardButtonRows(kCardSid, f, CardPage::Main);
-        CHECK(main.size() == 1, "Main: one row (no state action for a waiting session)");
-        CHECK(main.size() == 1 && main[0].size() == 2, "Main: the cog and Restart Session side by side");
+        CHECK(main.size() == 1 && main[0].size() == 1, "Main of a waiting session: the cog alone");
         CHECK(HasData(main, L"c:panel:" + kCardSid) && HasLabel(main, L"Session"), "Main: the cog Session button opens the Session page");
-        CHECK(HasData(main, L"c:restart:" + kCardSid) && HasLabel(main, L"Restart Session"), "Main: Restart Session");
-        CHECK(main.size() == 1 && main[0][0].first.rfind(L"\x2699\xFE0F", 0) == 0, "Main: the first button is the cog (with VS16, drawn as the emoji)");
+        CHECK(main.size() == 1 && !main[0].empty() && main[0][0].first.rfind(L"\x2699\xFE0F", 0) == 0, "Main: the first button is the cog (with VS16, drawn as the emoji)");
+        CHECK(!HasData(main, L"c:restart:" + kCardSid) && !HasData(main, L"c:resume:" + kCardSid), "Main of a waiting session: no Restart, no Resume (both on the Session page)");
         CHECK(!HasData(main, L"c:fork:" + kCardSid) && !HasData(main, L"c:newsession:" + kCardSid), "Main: Fork and New Session are on the Session page (the user's placement)");
         CHECK(!HasData(main, L"c:queue:" + kCardSid) && !HasData(main, L"c:screen:" + kCardSid), "Main: the session's own buttons are on the other page");
 
         const Rows page = BuildCardButtonRows(kCardSid, f, CardPage::Session);
-        CHECK(page.size() == 5, "Session: five rows");
-        CHECK(page.size() == 5 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
+        CHECK(page.size() == 6, "Session: six rows");
+        CHECK(page.size() == 6 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
                   page[0][1].second == L"c:newsession:" + kCardSid && page[0][1].first.find(L"New Session") != std::wstring::npos,
               "Session: Fork and New Session first, side by side (right after the cog's tap)");
+        CHECK(page.size() == 6 && page[1].size() == 1 && page[1][0].second == L"c:restart:" + kCardSid && page[1][0].first.find(L"Restart Session") != std::wstring::npos,
+              "Session: Restart Session next, alone while the session is not in Error");
         CHECK(HasData(page, L"c:runner:" + kCardSid) && HasLabel(page, L"Pause runner"), "Session: the runner button (Auto -> Pause runner)");
         CHECK(HasData(page, L"c:queue:" + kCardSid), "Session: Queue");
         CHECK(HasData(page, L"c:pin:" + kCardSid) && HasLabel(page, L"\U0001F4CC Pin"), "Session: Pin (unpinned)");
         CHECK(HasData(page, L"c:transcript:" + kCardSid), "Session: Transcript");
         CHECK(HasData(page, L"c:screen:" + kCardSid) && HasLabel(page, L"Screen Text"), "Session: Screen Text (the old Screen's verb)");
         CHECK(HasData(page, L"c:screenimg:" + kCardSid) && HasLabel(page, L"Screen Image"), "Session: Screen Image");
-        CHECK(page.size() == 5 && page[4].size() == 1 && page[4][0].second == L"c:main:" + kCardSid && page[4][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
-        CHECK(!HasData(page, L"c:restart:" + kCardSid) && !HasData(page, L"c:panel:" + kCardSid), "Session: no Main buttons");
+        CHECK(page.size() == 6 && page[5].size() == 1 && page[5][0].second == L"c:main:" + kCardSid && page[5][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
+        CHECK(!HasData(page, L"c:panel:" + kCardSid) && !HasData(page, L"c:resume:" + kCardSid) && !HasData(page, L"c:reactivate:" + kCardSid),
+              "Session of a waiting session: no cog, no Resume, no Reactivate");
 
         SessionInfo paused = waiting;
         paused.autorunner.mode = AutorunnerMode::Off;
@@ -231,39 +235,62 @@ void TestMessagingCard()
         CHECK(HasLabel(pausedPage, L"Runner auto") && !HasLabel(pausedPage, L"Pause runner"), "Session: a Paused runner offers Runner auto");
         CHECK(HasLabel(pausedPage, L"Unpin"), "Session: a pinned session offers Unpin");
 
-        // The state's own action, first on BOTH pages.
+        // Error: Restart Session beside the cog on Main; Restart and Resume side by side on the Session page.
         const SessionInfo error = CardSession(SessionState::Error);
-        for (const CardPage p : { CardPage::Main, CardPage::Session })
-        {
-            const Rows rows = BuildCardButtonRows(kCardSid, CardButtonFactsFor(error), p);
-            CHECK(!rows.empty() && rows[0].size() == 1 && rows[0][0].second == L"c:resume:" + kCardSid && rows[0][0].first.find(L"Resume Session") != std::wstring::npos,
-                  "Error: Resume Session is the first row (both pages)");
-            CHECK(!HasData(rows, L"c:reactivate:" + kCardSid), "Error: no Reactivate beside it");
-        }
-        const SessionInfo parked = CardSession(SessionState::WaitingForInput, false);
+        const CardButtonFacts ef = CardButtonFactsFor(error);
+        CHECK(ef.error && !ef.done, "facts of a session in Error");
+        const Rows errMain = BuildCardButtonRows(kCardSid, ef, CardPage::Main);
+        CHECK(errMain.size() == 1 && errMain[0].size() == 2 && errMain[0][0].second == L"c:panel:" + kCardSid && errMain[0][1].second == L"c:restart:" + kCardSid &&
+                  errMain[0][1].first.find(L"Restart Session") != std::wstring::npos,
+              "Error, Main: the cog, then Restart Session");
+        CHECK(!HasData(errMain, L"c:resume:" + kCardSid) && !HasData(errMain, L"c:reactivate:" + kCardSid), "Error, Main: no Resume Session (it is on the Session page), no Reactivate");
+        const Rows errPage = BuildCardButtonRows(kCardSid, ef, CardPage::Session);
+        CHECK(errPage.size() == 6 && errPage[1].size() == 2 && errPage[1][0].second == L"c:restart:" + kCardSid && errPage[1][1].second == L"c:resume:" + kCardSid &&
+                  errPage[1][1].first.find(L"Resume Session") != std::wstring::npos,
+              "Error, Session: Restart Session and Resume Session side by side");
+        CHECK(!HasData(errPage, L"c:reactivate:" + kCardSid), "Error, Session: no Reactivate");
+
+        // Done (claude exited): Restart Session on Main too; on the Session page Restart alone (Reactivate would be the same restart).
         const SessionInfo exited = CardSession(SessionState::Done);
-        for (const SessionInfo* s : { &parked, &exited })
-        {
-            for (const CardPage p : { CardPage::Main, CardPage::Session })
-            {
-                const Rows rows = BuildCardButtonRows(kCardSid, CardButtonFactsFor(*s), p);
-                CHECK(!rows.empty() && rows[0].size() == 1 && rows[0][0].second == L"c:reactivate:" + kCardSid, "parked / exited: Reactivate is the first row (both pages)");
-                CHECK(!HasData(rows, L"c:resume:" + kCardSid), "parked / exited: no Resume Session");
-            }
-        }
+        const CardButtonFacts df = CardButtonFactsFor(exited);
+        CHECK(df.done && !df.error && df.reactivatable, "facts of a claude that exited");
+        const Rows doneMain = BuildCardButtonRows(kCardSid, df, CardPage::Main);
+        CHECK(doneMain.size() == 1 && doneMain[0].size() == 2 && doneMain[0][1].second == L"c:restart:" + kCardSid, "Done, Main: the cog, then Restart Session");
+        CHECK(!HasData(doneMain, L"c:reactivate:" + kCardSid), "Done, Main: no Reactivate beside Restart (the same restart)");
+        const Rows donePage = BuildCardButtonRows(kCardSid, df, CardPage::Session);
+        CHECK(donePage.size() == 6 && donePage[1].size() == 1 && donePage[1][0].second == L"c:restart:" + kCardSid, "Done, Session: Restart Session alone");
+        CHECK(!HasData(donePage, L"c:resume:" + kCardSid) && !HasData(donePage, L"c:reactivate:" + kCardSid), "Done, Session: no Resume, no Reactivate");
+
+        // A parked tab: Reactivate beside the cog on Main (the button it had before; the rule names only Restart); the Session page
+        // has Restart alone (tapped on a parked tab, it starts it in place, as Reactivate does).
+        const SessionInfo parked = CardSession(SessionState::WaitingForInput, false);
+        const Rows parkedMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parked), CardPage::Main);
+        CHECK(parkedMain.size() == 1 && parkedMain[0].size() == 2 && parkedMain[0][1].second == L"c:reactivate:" + kCardSid && parkedMain[0][1].first.find(L"Reactivate") != std::wstring::npos,
+              "parked, Main: the cog, then Reactivate");
+        CHECK(!HasData(parkedMain, L"c:restart:" + kCardSid), "parked, Main: no Restart (not in Error, not exited)");
+        const Rows parkedPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parked), CardPage::Session);
+        CHECK(parkedPage.size() == 6 && parkedPage[1].size() == 1 && parkedPage[1][0].second == L"c:restart:" + kCardSid, "parked, Session: Restart Session alone");
+        CHECK(!HasData(parkedPage, L"c:reactivate:" + kCardSid) && !HasData(parkedPage, L"c:resume:" + kCardSid), "parked, Session: no Reactivate (Restart starts it), no Resume");
+
+        // A parked tab in Error (a cut-off turn after a crash): the Error rule wins.
         const SessionInfo parkedError = CardSession(SessionState::Error, false);
         const Rows pe = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parkedError), CardPage::Main);
-        CHECK(!pe.empty() && pe[0][0].second == L"c:resume:" + kCardSid, "a parked tab in Error (a cut-off turn after a crash): Resume Session wins");
+        CHECK(pe.size() == 1 && pe[0].size() == 2 && pe[0][1].second == L"c:restart:" + kCardSid, "a parked tab in Error: Restart Session on Main (Error wins over parked)");
+        CHECK(!HasData(pe, L"c:reactivate:" + kCardSid), "a parked tab in Error: no Reactivate on Main");
+        const Rows pePage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parkedError), CardPage::Session);
+        CHECK(HasData(pePage, L"c:resume:" + kCardSid) && HasData(pePage, L"c:restart:" + kCardSid), "a parked tab in Error: Restart and Resume on the Session page");
+
+        // A closed session: nothing to restart in a tab, so Main is the cog alone.
         SessionInfo closed = CardSession(SessionState::Error);
         closed.live = false;
         const Rows cl = BuildCardButtonRows(kCardSid, CardButtonFactsFor(closed), CardPage::Main);
-        CHECK(cl.size() == 1, "a closed session has no state action (nothing to resume in a tab)");
+        CHECK(cl.size() == 1 && cl[0].size() == 1, "a closed session: Main is the cog alone (nothing to restart in a tab)");
 
         // Telegram's limits: callback data within 64 bytes, ASCII; every button with a label.
         bool fits = true;
         bool labeled = true;
         bool twoARow = true;
-        for (const SessionInfo* s : { &waiting, &error, &parked })
+        for (const SessionInfo* s : { &waiting, &error, &exited, &parked, &parkedError })
         {
             for (const CardPage p : { CardPage::Main, CardPage::Session })
             {
@@ -290,15 +317,17 @@ void TestMessagingCard()
     {
         const auto text = [](const SessionInfo& s) { return TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)); };
         const std::wstring err = text(CardSession(SessionState::Error));
-        CHECK(err.find(L"\U0001F527 Resume Session restarts it") != std::wstring::npos, "Error: the line names Resume Session (a restart of the same conversation)");
-        CHECK(err.find(L"Reactivate") == std::wstring::npos, "Error: no Reactivate wording any more");
+        CHECK(err.find(L"\U0001F504 Restart Session restarts it") != std::wstring::npos, "Error: the line names Restart Session (the button Main shows in Error)");
+        CHECK(err.find(L"Reactivate") == std::wstring::npos && err.find(L"Resume Session") == std::wstring::npos, "Error: no Reactivate / Resume Session wording on the line");
         const std::wstring parkedErr = text(CardSession(SessionState::Error, false));
-        CHECK(parkedErr.find(L"Resume Session starts it in its tab") != std::wstring::npos, "a parked tab in Error: Resume Session starts it (Error is read first)");
+        CHECK(parkedErr.find(L"\U0001F504 Restart Session starts it in its tab") != std::wstring::npos, "a parked tab in Error: Restart Session starts it (Error is read first)");
         CHECK(parkedErr.find(L"not running") == std::wstring::npos, "a parked tab in Error: not the bare not-running line");
         const std::wstring parked = text(CardSession(SessionState::WaitingForInput, false));
         CHECK(parked.find(L"not running") != std::wstring::npos && parked.find(L"\x25B6 Reactivate resumes it") != std::wstring::npos, "parked: the not-running line with Reactivate (unchanged)");
         const std::wstring done = text(CardSession(SessionState::Done));
-        CHECK(done.find(L"claude exited") != std::wstring::npos && done.find(L"\x25B6 Reactivate starts it again") != std::wstring::npos, "exited: the Reactivate line (unchanged)");
+        CHECK(done.find(L"claude exited") != std::wstring::npos && done.find(L"\U0001F504 Restart Session starts it again") != std::wstring::npos,
+              "exited: the line names Restart Session (the button Main shows after an exit)");
+        CHECK(done.find(L"Reactivate") == std::wstring::npos, "exited: no Reactivate wording any more");
     }
 
     // ===== 3. the styled snapshot's format =====
