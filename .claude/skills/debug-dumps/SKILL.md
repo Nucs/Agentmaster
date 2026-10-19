@@ -72,13 +72,17 @@ the exception in flight.
 Symbolization is only correct if the PDB matches the exact binary that crashed. **Compare timestamps:**
 
 ```bash
-ls -la --time-style=full-iso src/cascadia/CascadiaPackage/bin/x64/Debug/TerminalApp.{dll,pdb}
+ls -la --time-style=full-iso '/q/agentmaster-layouts/<slot>'/TerminalApp.{dll,pdb}   # the crashed instance's InstallLocation
 git log --format='%h %ci %s' -1 <your-fix-commit>   # did the crashed binary even contain your fix?
 ```
 
 If the crashed binary was built AFTER a fix commit, that fix was present and **insufficient** — a real
-signal (this is how we proved 5 tooltip fixes were each incomplete). Debug PDBs are in
-`bin\x64\Debug`, Release in `bin\x64\Release`. Pass that dir as `<bindir>` to the tools.
+signal (this is how we proved 5 tooltip fixes were each incomplete). The matching PDBs ship IN the
+layout the instance runs from (`(Get-AppxPackage AgentmasterDev).InstallLocation` or `Agentmaster`'s
+— a `Q:\agentmaster-layouts\<slot>` folder, 17 PDBs each): pass that folder as `<bindir>` to the
+tools. The build tree's copies (`bin\x64\<Config>\<Project>\`, a junction to `Q:\tmp\agentmaster-bin`
+since 2026-10-19 — every build writes to Q:) belong to the LAST build and are overwritten by the next
+one, so they match a crashed instance only when nothing was built since its layout.
 
 ## 3. Read the exception — `dumpexc`
 

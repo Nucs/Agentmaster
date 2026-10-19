@@ -36,7 +36,7 @@
   # HOT build of the release package while the installed release keeps running: write the
   # package layout into the folder the app is NOT registered from (see -LayoutDir), then swap.
   .\tools\Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity `
-      -LayoutDir .\src\cascadia\CascadiaPackage\bin\x64\Release-B
+      -LayoutDir Q:\agentmaster-layouts\Release-B
 #>
 [CmdletBinding()]
 param(
@@ -78,7 +78,10 @@ param(
     # resolved against the CURRENT location here (msbuild alone would resolve it against the
     # wapproj's folder), and the trailing backslash is trimmed so it can't escape a closing quote
     # on the native command line (the wapproj adds it back). Empty (the default) keeps the stock
-    # location. Does NOT register anything: registering, closing and relaunching stay separate.
+    # location - on the author's machine a junction into Q:\tmp\agentmaster-package-bin, because
+    # every build there writes to Q: (CLAUDE.md "Building FAST" #1); a layout meant for an instance
+    # always gets a Q:\agentmaster-layouts slot. Does NOT register anything: registering, closing
+    # and relaunching stay separate.
     [string]$LayoutDir
 )
 
