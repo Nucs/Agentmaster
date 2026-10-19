@@ -41,6 +41,8 @@ namespace Agentmaster
 {
     class SessionRegistry;
     class HooksBridge;
+    class AskRegistry; // INTERACTIVE_TOOLS.md §6 — the open AskUserQuestion dialogs whose question hook waits (HooksBridge.h)
+    class AskBridge; // the question hooks' pipe server (HooksBridge.h)
     class Scheduler;
     class SessionScanner;
     class ProcessObserver;
@@ -91,6 +93,12 @@ namespace Agentmaster
         // prompt. Runs while AppSettings::messagingEnabled with a stored token and a paired owner; the cog's Save
         // re-applies the settings to it (Apply). Never null after init.
         std::shared_ptr<Msg::MessagingService> messaging;
+        // Agentmaster (INTERACTIVE_TOOLS.md §6, MESSAGING.md §21.30): Claude Code's AskUserQuestion dialogs, ANSWERED FROM
+        // TELEGRAM. Every question hook (<profile>\agentmaster-ask.ps1, wired in hooks-settings.json while the bot is on) sends its
+        // dialog over the question pipe (`askBridge`, `\\.\pipe\agentmaster.<pid>.ask`) into `asks`; the messaging service is its
+        // acceptor and shows each one as a question card in the session's topic. Never null after init.
+        std::shared_ptr<AskRegistry> asks;
+        std::shared_ptr<AskBridge> askBridge;
 
         // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
         // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY

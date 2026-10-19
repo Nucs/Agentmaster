@@ -233,4 +233,66 @@ namespace Agentmaster
     //   throws  — never in practice (noexcept is not declared only because the fallback walks a
     //             std::wstring_view; no allocation happens on any path).
     size_t CountGraphemeClusters(std::wstring_view text);
+
+    // ===== AskUserQuestion's option PREVIEWS (doc/agentmaster/INTERACTIVE_TOOLS.md §1.2) =====
+    // Claude Code 2.1.291 maps every option's `preview` before its question dialog shows it (`G5`), and the PC dialog echoes the
+    // picked option's mapped preview back to the model as `annotations[question].preview` (`nJ`). An answer composed elsewhere
+    // (Agentmaster's Telegram question card) must apply the SAME two rules, or the model reads a different text than a PC answer
+    // gives it — and a preview the dialog withholds must not be echoed at all.
+
+    /// <summary>The longest preview the dialog shows, in UTF-16 units (JavaScript's String.length): `FXe` = 2,000. A longer one is withheld.</summary>
+    inline constexpr size_t kClaudeQuestionPreviewMaxChars = 2000;
+
+    /// <summary>How the question dialog treats one option's preview (2.1.291's `G5`).</summary>
+    enum class ClaudePreviewKind
+    {
+        /// <summary>No preview: the option has none, or nothing in it is visible (only whitespace and invisible characters).</summary>
+        None,
+        /// <summary>
+        /// Withheld: longer than kClaudeQuestionPreviewMaxChars, or holding Claude Code's own truncation marker ("… [+N
+        /// graphemes]") or a run of more than 8 stacked combining / zero-width marks. The dialog shows "(preview cannot be shown
+        /// in full — compare the option labels and descriptions instead)", and a pick of the option echoes NO preview.
+        /// </summary>
+        Withheld,
+        /// <summary>Full: shown, and echoed (as ClaudeQuestionPreviewEcho) when the option is picked.</summary>
+        Full,
+    };
+
+    /// <summary>
+    /// The kind of one option's preview, exactly as the question dialog decides it (`G5`: the length test, `zz`'s visible-text
+    /// test, `e0`'s truncation-marker and long-mark-run tests). Ordinary previews — ASCII mockups, box drawing, code — are Full.
+    /// </summary>
+    /// <param name="preview">The option's `preview` as the model wrote it (an empty string is None).</param>
+    /// <returns>None, Withheld or Full.</returns>
+    /// <exception cref="std::bad_alloc">If the scratch copy cannot be allocated.</exception>
+    ClaudePreviewKind ClassifyClaudeQuestionPreview(std::wstring_view preview);
+
+    /// <summary>
+    /// A Full preview as the PC dialog echoes it into `annotations[question].preview` (`zet` = `Nl`): every invisible or unsafe
+    /// character (a default-ignorable code point, a format character, LS / PS, a surrogate half, U+10EEEE) becomes U+FFFD except
+    /// ZWNJ, ZWJ, LRM, RLM, ALM, the variation selectors, the Mongolian selectors and U+2800; then VS15 / VS16 are DROPPED, every
+    /// control character but TAB and LF (C0, DEL, C1 — a CR included), ALM and the bidi embeddings and isolates become U+FFFD, and
+    /// TABs expand to the next multiple of 8 display columns. Plain text comes back unchanged: on this machine 101 of 101 echoes
+    /// of picked previews were byte-identical to the model's preview.
+    /// </summary>
+    /// <remarks>
+    /// Not ported: the per-line grapheme-width repair (`Ba`), which replaces a grapheme cluster whose terminal width is not
+    /// additive with U+FFFD — a few exotic emoji and combining sequences only. The over-budget line truncation (`wR`) cannot
+    /// apply: it starts beyond 4,096 characters a line, and a Full preview is at most 2,000. Call it for a Full preview only (a
+    /// Withheld one is never echoed).
+    /// </remarks>
+    /// <param name="preview">The option's preview as the model wrote it.</param>
+    /// <returns>The echoed text.</returns>
+    /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+    std::wstring ClaudeQuestionPreviewEcho(std::wstring_view preview);
+
+    /// <summary>
+    /// How many terminal columns one code point takes in Claude Code's TUI and in Agentmaster's drawn previews: 0 for a combining
+    /// mark, a format character and a default-ignorable code point (they ride on the cell before them), 2 for an East Asian Wide
+    /// or Fullwidth character (CJK, most emoji), 1 for everything else. An approximation of the TUI's string width per code point
+    /// (it measures grapheme clusters), exact for every character an ASCII or box-drawing mockup holds.
+    /// </summary>
+    /// <param name="cp">The code point (a lone surrogate counts 1, as the U+FFFD it is drawn as).</param>
+    /// <returns>0, 1 or 2.</returns>
+    int ClaudeCellWidth(char32_t cp) noexcept;
 }

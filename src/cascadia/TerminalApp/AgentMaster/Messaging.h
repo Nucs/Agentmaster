@@ -52,6 +52,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "AskQuestion.h" // §21.30: Claude's question dialogs answered from Telegram (the card's model, its renders, the decision lines)
 #include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
 #include "MessagingStartNote.h" // the start note's facts, kind, sound and text (§21.18)
 #include "MessagingModels.h"
@@ -67,6 +68,8 @@ namespace Agentmaster
 {
     class SessionRegistry;
     class Scheduler;
+    class AskRegistry; // §21.30: the open question dialogs whose hook waits for an answer (HooksBridge.h)
+    struct AskEntryInfo; // §21.30: one of them, as AskRegistry::Snapshot shows it (HooksBridge.h)
 }
 
 namespace Agentmaster::Msg
@@ -263,6 +266,17 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="source">The source; an empty one removes the current source.</param>
         void SetLaunchMenuSource(LaunchMenuSource source) noexcept;
+
+        /// <summary>
+        /// §21.30: hands the service the process's QUESTION registry (Engine.cpp, before the first Apply) — the open AskUserQuestion
+        /// dialogs whose question hook waits on the ask pipe for an answer. The service wakes its tick on every change of the
+        /// registry (its listener), and while the bot runs it is the registry's ACCEPTOR: a question of a live Claude session of
+        /// the fleet is taken, shown in the session's topic as a QUESTION CARD and answered from it; while the bot is off every
+        /// question is refused at once and stays with the PC. Without a registry (the m5 harness) a question is posted show-only,
+        /// as before. Any thread; call it once. Never throws: a failure is logged, and the questions then stay with the PC.
+        /// </summary>
+        /// <param name="registry">The registry (null removes the current one: its listener and acceptor are cleared).</param>
+        void SetAskRegistry(std::shared_ptr<AskRegistry> registry) noexcept;
 
         // ----- the bot token (Windows Credential Manager; never in a profile file — M4) -----
 
@@ -2076,5 +2090,286 @@ namespace Agentmaster::Msg
         std::deque<std::wstring> _searchRowOrder;
         int64_t _searchLastUsedMs{ 0 };
         bool _searchParked{ true };
+
+        // ===== §21.30: Claude's QUESTIONS answered from Telegram (Messaging.Questions.cpp; AskQuestion.h, HooksBridge.h) =====
+        //
+        // An AskUserQuestion dialog at the PC runs Agentmaster's question hook beside it (ClaudeSpawn.cpp BuildAskHookScript); its
+        // request reaches `_asks` over the ask pipe, and the tick turns it into the QUESTION CARD: ONE managed message in the
+        // session's topic that shows the questions with their options, previews and notes, and takes the answer — an option, the
+        // user's own words, a note, or "Chat about this" — composed exactly as the PC composes it (AskQuestion.h), and edited as
+        // the user goes. The card's own WATCH reads the transcript for the dialog's result: the phone's answer confirmed, or the
+        // PC's answer, which RELEASES the hook ("{}"), since Claude Code does not end a hook whose dialog the PC answered.
+
+        /// <summary>How a dialog ended in the transcript: its tool result carried answers (or none, without an error), or an error.</summary>
+        enum class QuestionResult
+        {
+            Answered, // an answer (from the phone or the PC) — `toolUseResult.answers`, or a result without an error
+            Rejected, // an error result: "Chat about this", Esc at the PC, or a refusal of the answer
+        };
+        /// <summary>
+        /// One question card: one open — or recently finished — dialog and its message. Under `_mtx`; a pointer to one
+        /// (_findQuestionCardLocked) is valid only while the lock is held.
+        /// </summary>
+        struct QuestionCard
+        {
+            uint64_t askId{ 0 }; // the AskRegistry request the decision goes to
+            std::wstring key; // the callback key ([0-9a-z]{10}, random): a button of another card, or of an earlier run, never acts on this one
+            std::wstring sessionId;
+            int64_t threadId{ 0 }; // the topic the card is in
+            int64_t messageId{ 0 }; // the card's message: 0 = none (not posted, refused, or deleted), -1 = its post is in flight
+            int64_t postFailedMs{ 0 }; // when the last post was refused (an open card posts again kAskRepostAfterFailureMs later)
+            AskCardModel model; // the questions, the user's choices, the question the card shows, the phase
+            std::wstring signature; // AskQuestionsSignature: the transcript's question item of the same dialog has this text
+            json::Value toolInput; // the call's input as the request carried it: the allow decision's base
+            std::wstring toolUseId; // the transcript's tool_use id of the dialog, once known (the watch, or the mirror's question item)
+            std::wstring transcriptPath; // the request's transcript_path: what the card's watch reads
+            int64_t watchOffset{ -1 }; // where the watch reads on (-1 = not started: its first read looks back kAskWatchSeedBytes)
+            int64_t lastWatchMs{ 0 }; // when the watch last read
+            bool resultSeen{ false }; // the transcript showed the dialog's result: the watch stops
+            int64_t openedMs{ 0 }; // when the request arrived (the registry's clock)
+            int64_t sentMs{ 0 }; // when the phone's decision was handed to the hook
+            int64_t noTopicSinceMs{ 0 }; // when the card found its session without a topic (0 = it has one)
+            bool sound{ true }; // the first post rings — the session's one "needs you" sound (§21.6); a re-post never does
+            std::shared_ptr<PromptRef> replyRef; // the turn's prompt: the first post replies to it (§21.12)
+            uint64_t version{ 1 }; // bumped by every change of what the card shows
+            uint64_t sendingVersion{ 0 }; // the version the edit on its way rendered (its beforeSend)
+            uint64_t shownVersion{ 0 }; // the version Telegram last took (a post or an edit): a newer version wants another edit
+            AskTextTarget writePromptFor{ AskTextTarget::None }; // what the ForceReply prompt asks for
+            int64_t writePromptMessageId{ 0 }; // the ✍️ / 📝 ForceReply prompt (0 = none, -1 = in flight); deleted when it is done
+            std::map<int64_t, std::wstring> held; // messages the "answer or next prompt?" question holds: message id -> text
+            bool pictureDrawing{ false }; // the current question's previews are being drawn (one picture at a time per card)
+            bool decided{ false }; // a decision or a release went to the registry: nothing more goes to the hook
+            int64_t finishedMs{ 0 }; // when the card left Open / Sending for good (0 = not yet); forgotten kAskCardKeepMs later
+        };
+        /// <summary>
+        /// A question the mirror met that no card shows yet: it waits kAskPairWaitMs for its hook's request, then is posted as the
+        /// show-only message ("answer it at the PC", with why). A card made meanwhile from a request of the same session and
+        /// content takes it over (its sound, its tool_use id, its reply). Under `_mtx`.
+        /// </summary>
+        struct PlainQuestion
+        {
+            std::wstring sessionId;
+            std::wstring toolUseId;
+            std::wstring signature; // the question item's text (AskQuestionsSignature's form)
+            std::wstring html; // the show-only message
+            bool sound{ true };
+            int64_t seenMs{ 0 };
+            std::shared_ptr<PromptRef> replyRef;
+        };
+        /// <summary>What a tap, a typed text or the tick decided about a card, carried out by _applyQuestionEffects outside `_mtx`.</summary>
+        struct QuestionEffects
+        {
+            std::wstring key; // the card ("" = none)
+            bool edit{ false }; // the card's text or buttons changed: edit its message
+            bool post{ false }; // post the card (anew: its topic changed, or its last post was refused)
+            uint64_t askId{ 0 }; // the request the decision or the release goes to
+            std::string decisionLine; // non-empty: hand this decision to the hook (AskRegistry::Answer)
+            std::wstring releaseWhy; // non-empty: release the hook ("{}": the dialog stays with the PC), for this reason
+            AskTextTarget writePrompt{ AskTextTarget::None }; // post the ForceReply prompt that asks for this
+            std::vector<int64_t> deleteMessages; // the bot's own transient messages to delete (a write prompt, an "answer or prompt?")
+            int64_t reactTo{ 0 }; // the user's message whose text the card took: a 👌 on it
+            std::wstring logLine; // one hooks.log line ("" = none)
+            std::wstring navLine; // one [nav] line for a decision the user made ("" = none)
+        };
+
+        /// <summary>
+        /// _start: forgets the last run's cards (their buttons answer "no longer open here") and becomes the question registry's
+        /// ACCEPTOR. Called before the threads start, while `_running` is still false — the acceptor refuses until the bot runs.
+        /// </summary>
+        /// <exception cref="std::bad_alloc">If the acceptor cannot be stored (the caller's catch logs it; questions then stay with the PC).</exception>
+        void _questionsStart();
+        /// <summary>
+        /// Stop, after the threads are joined: drops the acceptor and RELEASES every open request — while the bot is off nothing
+        /// can show or answer a question, so the PC keeps each dialog (the helper prints nothing and ends). Never throws.
+        /// </summary>
+        void _questionsStop() noexcept;
+        /// <summary>
+        /// The acceptor (an ask worker thread): a question is taken while the bot runs with topics on, from a live Claude session
+        /// the registry knows (only those can have a topic). Never throws: anything unexpected refuses, and the PC answers.
+        /// </summary>
+        /// <param name="sessionId">The hook payload's session_id.</param>
+        /// <returns>True to take the question.</returns>
+        bool _acceptsAsk(const std::wstring& sessionId) const noexcept;
+        /// <summary>
+        /// The tick's question pass, after the per-topic mirror pass: every new request becomes a card in its session's topic (one
+        /// whose session has no topic is waited for kAskNoTopicReleaseMs, then released); every card's watch reads its dialog's
+        /// result, and the card follows its request (gone at the PC), its topic (made again: the card is posted anew), and its
+        /// confirmation clock; finished cards are forgotten kAskCardKeepMs after their outcome; the plain questions whose wait
+        /// ended are posted show-only. Tick thread. Never throws (Rule #18 inside: the next tick tries again).
+        /// </summary>
+        void _questionsTick() noexcept;
+        /// <summary>
+        /// Makes the card of a new request and posts it: it takes over a plain question of the same session and content (its
+        /// sound and tool_use id), else takes the sound from the session's mirror and marks the mirror as waiting for an answer, so
+        /// the NeedsApproval edge that follows rings nothing more (§21.6). Tick thread.
+        /// </summary>
+        /// <param name="entry">The request as the registry shows it.</param>
+        /// <param name="req">The parsed request (ParseAskRequestLine; at least one question).</param>
+        /// <param name="threadId">The session's topic.</param>
+        /// <exception cref="std::bad_alloc">If the card cannot be stored.</exception>
+        void _openQuestionCard(const AskEntryInfo& entry, AskRequest req, int64_t threadId);
+        /// <summary>
+        /// One card's turn in the tick: its watch (the transcript read since the last turn: the dialog's tool_use id and its result),
+        /// its request's state (gone at the PC before an answer from here; a write that failed), its session's end (no longer live:
+        /// the hook is released at once), its confirmation clock (kAskConfirmTimeoutMs), its topic (made again, or gone), and a
+        /// refused post tried again. Tick thread.
+        /// </summary>
+        /// <param name="key">The card's key.</param>
+        /// <param name="entry">Its request in this tick's registry snapshot (null = not in the registry any more).</param>
+        /// <param name="now">The tick's clock (WallMs).</param>
+        /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
+        void _tickQuestionCard(const std::wstring& key, const AskEntryInfo* entry, int64_t now);
+        /// <summary>
+        /// Applies the dialog's RESULT to a card (the watch's, or the mirror's answer item — whichever reads it first; the second
+        /// finds `resultSeen`): an open card becomes "answered at the PC" (with the answer) or "closed at the PC", and its hook is
+        /// released; a card whose phone answer was on its way is confirmed (or, for an error, closed: Claude Code did not take
+        /// it); a card closed on the request's side learns that the PC answered it. Call with `_mtx` held.
+        /// </summary>
+        /// <param name="c">The card.</param>
+        /// <param name="result">Answered or Rejected.</param>
+        /// <param name="answerText">The answer as the transcript recorded it (the mirror's answer item text; "" when none).</param>
+        /// <param name="now">The clock.</param>
+        /// <param name="fx">Out: the release, the edit and the log line it wants.</param>
+        /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
+        static void _applyQuestionResultLocked(QuestionCard& c, QuestionResult result, const std::wstring& answerText, int64_t now, QuestionEffects& fx);
+        /// <summary>
+        /// Prepares the phone's ANSWER of a card for the hook: the answers and annotations composed as the PC composes them, the
+        /// allow decision built, the card in Sending. An answer past Claude Code's bounds is refused (the toast says so) and the card
+        /// stays open. Call with `_mtx` held.
+        /// </summary>
+        /// <param name="c">The card.</param>
+        /// <param name="now">The clock.</param>
+        /// <param name="fx">Out: the decision, the edit, the log and nav lines, the write prompt to delete.</param>
+        /// <param name="toast">Out: the tap's toast (or the reply to a typed answer).</param>
+        /// <exception cref="std::bad_alloc">If the decision cannot be built.</exception>
+        static void _prepareQuestionAnswerLocked(QuestionCard& c, int64_t now, QuestionEffects& fx, std::wstring& toast);
+        /// <summary>Under `_mtx`: the card with this key, or null. The pointer dies with the lock (the vector may move).</summary>
+        /// <param name="key">The card's key.</param>
+        /// <returns>The card, or null.</returns>
+        QuestionCard* _findQuestionCardLocked(std::wstring_view key);
+        /// <summary>
+        /// The mirror met a QUESTION item (Messaging.cpp _applyItems, tick thread). A card of the session that shows the same
+        /// questions takes it (its tool_use id recorded); else, with a question registry, it waits as a PlainQuestion for its hook's
+        /// request. Either way the caller only closes the turn's work log — nothing is posted now.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="it">The question item (its text is the questions' signature, its toolUseId the dialog's).</param>
+        /// <param name="html">The show-only message, posted if no hook offers the question within kAskPairWaitMs.</param>
+        /// <param name="sound">The show-only message rings (the turn's one "needs you" sound).</param>
+        /// <param name="replyRef">The turn's prompt (the message replies to it).</param>
+        /// <returns>True when a card shows it or it waits for one; false without a question registry (the m5 harness): the caller
+        /// posts the question at once, as before §21.30.</returns>
+        /// <exception cref="std::bad_alloc">If the plain question cannot be stored.</exception>
+        bool _noteTranscriptQuestion(const std::wstring& sessionId, const TopicItem& it, const std::wstring& html, bool sound, const std::shared_ptr<PromptRef>& replyRef);
+        /// <summary>
+        /// The mirror met a TOOL RESULT (an answer item, or a plain result) of a dialog (tick thread): a card with that tool_use id
+        /// takes it as its result (_applyQuestionResultLocked) and shows the answer itself; a plain question of that tool_use that
+        /// still waits for its hook is posted NOW, so it lands above the answer line that follows. Cheap for every other tool's result.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="toolUseId">The result's tool_use id.</param>
+        /// <param name="answerText">The answer as the item carries it ("" for a plain result).</param>
+        /// <param name="result">Answered or Rejected.</param>
+        /// <returns>True when a posted card shows this result: the mirror then posts no "You ↩ answer" line.</returns>
+        /// <exception cref="std::bad_alloc">If a text cannot be allocated.</exception>
+        bool _onTranscriptAnswer(const std::wstring& sessionId, const std::wstring& toolUseId, const std::wstring& answerText, QuestionResult result);
+        /// <summary>
+        /// A question card's button ("q:&lt;card&gt;:&lt;verb&gt;[:&lt;arg&gt;]", _handleCallback, inside the tap's scope): an option (single-select
+        /// answers it — a card of one question SENDS at once, as the PC's Enter does — multi-select toggles it), ✍️ write my own
+        /// answer or 📝 a note (a ForceReply prompt opens the phone's keyboard), the note removed or sent alone, ✅ Done, ◀ / ▶,
+        /// 📨 Send answers, 💬 Chat about this (the PC's rejection with its clarify request), 🖼 the previews as a picture, the
+        /// "answer or next prompt?" question's two buttons. A button of a card this run does not know answers "no longer open here"
+        /// and loses its keyboard. Poll thread.
+        /// </summary>
+        /// <param name="data">The callback data.</param>
+        /// <param name="threadId">The topic the button sits in.</param>
+        /// <param name="messageId">The message the button sits on (the card, or an "answer or next prompt?" question).</param>
+        /// <returns>The tap's toast ("" = none).</returns>
+        /// <exception cref="std::bad_alloc">If a text, the decision or an outbox item cannot be allocated.</exception>
+        std::wstring _onQuestionTap(const std::wstring& data, int64_t threadId, int64_t messageId);
+        /// <summary>
+        /// A typed message in a session's topic while its question card is open (_handleTopicMessage, poll thread): a /command is
+        /// not the card's; a message written after ✍️ / 📝 or as a reply to the card (or its write prompt) is TAKEN — the user's own
+        /// answer (one question: sent at once, as the PC's "Type something." + Enter) or the note — with a 👌 on it; any other
+        /// message is HELD and asked about: the answer (the note), or the session's next prompt?
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The Telegram message.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>True when the card took or held it (the caller does nothing more); false: the topic's usual handling.</returns>
+        /// <exception cref="std::bad_alloc">If a text, the decision or an outbox item cannot be allocated.</exception>
+        bool _takeQuestionText(const std::wstring& sessionId, const json::Value& msg, int64_t threadId);
+        /// <summary>An EDIT of a message the "answer or next prompt?" question holds (poll thread): its new text replaces the held one.</summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="msg">The edited message.</param>
+        /// <returns>True when a card held it.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be copied.</exception>
+        bool _questionTextEdited(const std::wstring& sessionId, const json::Value& msg);
+        /// <summary>
+        /// Carries out a change outside `_mtx`: the decision to the hook (refused when the PC was first: the card then says so),
+        /// a release, the transient deletes, the 👌, the card's post or edit, the ForceReply prompt, the log and nav lines.
+        /// </summary>
+        /// <param name="fx">What to do.</param>
+        /// <returns>False when a decision was refused because the request was no longer open (the PC answered or closed it first).</returns>
+        /// <exception cref="std::bad_alloc">If an outbox item or a line cannot be allocated.</exception>
+        bool _applyQuestionEffects(QuestionEffects fx);
+        /// <summary>
+        /// Posts a card's message (its first post rings when `sound`, and replies to the turn's prompt); its answer records the
+        /// message id and queues the edit that catches up with any change made while the post was on its way. A refused post is
+        /// tried again by the tick while the card is open. Nothing while a post is in flight.
+        /// </summary>
+        /// <param name="key">The card's key.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _postQuestionCard(const std::wstring& key);
+        /// <summary>
+        /// Queues the edit of a card's message (one per card in the outbox: "qcard:&lt;key&gt;" replaces a queued one). The text is
+        /// rendered AGAIN right before the call (the item's beforeSend), so the edit always shows the card's latest state however
+        /// many changes came while it waited; its answer queues one more edit when a change came after that render. Nothing for a
+        /// card whose message is not known (its post's answer catches up instead).
+        /// </summary>
+        /// <param name="key">The card's key.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _queueQuestionCardEdit(const std::wstring& key);
+        /// <summary>
+        /// Posts the ForceReply prompt of ✍️ / 📝 (silent, outside the sticky card's clock): Telegram opens the phone's keyboard
+        /// as a reply to it, with a placeholder. One per card at a time; deleted when the text came, or the writing was cancelled.
+        /// </summary>
+        /// <param name="key">The card's key.</param>
+        /// <param name="target">Answer or Note.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _postQuestionWritePrompt(const std::wstring& key, AskTextTarget target);
+        /// <summary>
+        /// Deletes one of the bot's own transient messages (a write prompt, an "answer or next prompt?" question) — at the answers'
+        /// priority, since a tapped button that asked for it waits for it (§21.28). A refusal is logged only.
+        /// </summary>
+        /// <param name="messageId">The message (0 or less = nothing).</param>
+        /// <exception cref="std::bad_alloc">If the outbox item cannot be allocated.</exception>
+        void _deleteQuestionMessage(int64_t messageId);
+        /// <summary>
+        /// Posts a plain question show-only into its session's CURRENT topic (a recreation may have made it anew meanwhile); none
+        /// when the session has no topic any more.
+        /// </summary>
+        /// <param name="p">The plain question.</param>
+        /// <exception cref="std::bad_alloc">If the text or the outbox item cannot be allocated.</exception>
+        void _postPlainQuestion(const PlainQuestion& p);
+        /// <summary>
+        /// 🖼: draws the card's current question's previews (BuildAskPreviewSheet) into a PICTURE on a worker thread of its own and
+        /// sends it to the topic as a photo — box drawing and ASCII mockups survive a phone's narrow screen there. One picture per
+        /// card at a time, and the screen pictures' shared bound (kAskPictureMaxRenders). The tapped button stays busy until the
+        /// photo is in (the worker carries the tap's holds, §21.28). Poll thread.
+        /// </summary>
+        /// <param name="key">The card's key.</param>
+        /// <returns>The tap's toast ("" when the drawing started).</returns>
+        /// <exception cref="std::bad_alloc">If the sheet cannot be built.</exception>
+        std::wstring _startQuestionPicture(const std::wstring& key);
+
+        /// <summary>The process's question registry (SetAskRegistry; null in the m5 harness). Under `_mtx`; never called with `_mtx` held.</summary>
+        std::shared_ptr<AskRegistry> _asks;
+        /// <summary>The question cards of this run, oldest first (at most kAskMaxCards). Under `_mtx`.</summary>
+        std::vector<QuestionCard> _questionCards;
+        /// <summary>The questions the mirror met that wait for their hook's request (kAskPairWaitMs). Under `_mtx`.</summary>
+        std::vector<PlainQuestion> _plainQuestions;
+        /// <summary>The requests already turned into a card or released by the tick: never a second card for one. Under `_mtx`.</summary>
+        std::unordered_set<uint64_t> _asksTaken;
     };
 }

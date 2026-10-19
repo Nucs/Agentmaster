@@ -4172,6 +4172,120 @@ The gaps were rare in practice, but once the reply is gone each would leave a re
 - A rename while a topic's history is replayed (a new topic of a long session, or `/recreate`): the name changes at once,
   and the line comes after the last history message.
 
+### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual text
+> input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
+> including custom answer". The research, the probe and the design are [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md)
+> §1–§9; what was built, where it differs from that design, and what was checked is its §10. This section is the topic's
+> side.
+
+**What the topic shows.** A Claude Code `AskUserQuestion` dialog at the PC becomes ONE managed message in the session's
+topic, the QUESTION CARD, edited in place as the user goes (before §21.30: a show-only `❓` line that said "answering from
+here comes in a later build"):
+```
+❓ Claude is asking · Layout
+
+Which footer layout do you prefer?
+
+1. Left — Logo positioned on the left
++--------------+
+|[LOGO]        |
++--------------+
+2. Center — Logo positioned in the center
+…
+📝 Note: use rounded corners
+
+Tap an option to answer. A note goes with the option you tap — or alone, as your own answer.
+[ 1 · Left ] [ 2 · Center ]
+[ 3 · Right ]
+[ ✏️ Change the note ] [ ✖ Remove the note ]
+[ 📨 Send the note alone ]
+[ 🖼 Previews as a picture ]
+[ 💬 Chat about this ]
+```
+- **The options**, with their descriptions (the PC's preview layout hides them) and, for a PREVIEW question, each option's
+  preview as a monospace block while they fit the message (3,800 characters; else a line points at 🖼). Two buttons to a row
+  when every label is short.
+- **A tap on an option** answers a card of ONE question at once, with the note if one is set (the PC's Enter). On a card of
+  several questions it records the pick and moves on to the next unanswered one; on a multi-select question it toggles
+  (☐ / ☑) and [📨 Send (n)] / [✅ Done ▶] finishes.
+- **The user's own words** (the PC's "Type something." / Notes field): [✍️ Write my own answer] on a plain question,
+  [📝 Add a note] on a preview question (where the Notes field is the only free text, as at the PC). Either posts a
+  ForceReply prompt ("✍️ Your answer to: …", placeholder "Your answer"), so the phone opens its keyboard as a reply; the
+  reply — or the next message, or any reply to the card itself — is TAKEN (a 👌 on it) and the prompt is deleted. An own
+  answer of a one-question card sends at once; a note is stored ([📨 Send the note alone] answers "(notes only)").
+- **A plain message while the card is open** is no longer queued silently (D30): it is HELD and asked about, as a reply to
+  it: "❓ Claude's question is still open: … Is this message your answer to it, or the session's next prompt?"
+  [✍️ It's my answer] / [📝 It's my note] · [📨 Next prompt]. An edit of the held message changes what it holds. A
+  `/command` stays a command.
+- **Several questions** share the card: a list with every answer so far, "Question k of n", [◀ Question k-1] /
+  [Question k+1 ▶] and [📨 Send answers (a of n)] (unanswered ones are allowed, as at the PC).
+- **[💬 Chat about this]** sends Claude Code's own rejection with its clarify request, each question's answer so far and
+  its note; the turn goes on, and Claude's next message (it asks what to clarify) comes like any reply.
+- **[🖼 Previews as a picture]** draws the current question's previews into ONE picture (`BuildAskPreviewSheet` → the
+  Screen Image renderer of §21.24, a worker thread, `sendPhoto`): box drawing and ASCII mockups stay intact, and the phone
+  zooms. The button stays busy until the photo is in (§21.28).
+- **The answer is composed exactly as the PC composes it** (`AskQuestion.h`: `answers` + `annotations` with the picked
+  preview's echo and the trimmed note, Tct's multi-select join, "(notes only)"), so Claude reads the very text a PC answer
+  gives it; proven live against Claude Code 2.1.291 (INTERACTIVE_TOOLS.md §10.4).
+- **The outcome** replaces the text and removes the buttons: ⏳ Sending your answer to Claude… → ✅ Answered from Telegram
+  · 14:02 (the questions and the answers, notes included; ⚠ "Claude Code did not confirm this answer" when the transcript
+  shows no result within 60 s); ✅ Answered at the PC · 14:03 (the PC's answer, notes included); 💬 You asked Claude to
+  clarify; ⏹ No longer open here — it was closed at the PC / its session ended / its topic is gone.
+- **The mirror around it:** the transcript's question item posts nothing while a card shows the dialog, and the answer
+  item posts no "👤 You ↩ answer" line under a card that shows the answer. A question no hook offers within 8 s (a claude
+  that started before the bot was on, or one older than 2.1.139) is posted show-only as before, with the reason and
+  "🔄 Restart Session gives it the question hook". §21.30's first step needs no hook at all: every answer line (live and in
+  a history replay) now carries the NOTES (`📝 …`), and "(notes only)" reads as the note alone.
+
+**How it gets there** (INTERACTIVE_TOOLS.md §10.2):
+- The hooks settings file (`hooks-settings.json`, and a preset's launch-settings file) carries a NINTH entry while the bot
+  is on: a `PermissionRequest` hook on `AskUserQuestion`, exec form, `<profile>\agentmaster-ask.ps1`, `timeout` 86400.
+  Claude Code runs it BESIDE the open dialog; the PC dialog stays fully usable, and the first answer wins.
+- The helper sends one request line over `\\.\pipe\agentmaster.<pid>.ask` (the hook pipe's twin) and waits for one reply
+  line: a decision (it prints it; Claude Code takes it) or "{}" (nothing; the PC keeps the dialog).
+- The service is the question registry's ACCEPTOR while its bot runs with topics on: a question of a live Claude session
+  is taken; anything else hears "{}" at once. The tick makes the card (`_questionsTick`), and the card's own WATCH reads
+  the transcript for the dialog's result: the phone's answer confirmed, or the PC's answer — which RELEASES the hook,
+  since Claude Code does not end a hook whose dialog the PC answered. A card whose session ended releases it too; Stop
+  releases every open one; a topic made again gets the card posted anew while it is open.
+
+**The code:** `AskQuestion.h` (pure: the request, the composer, the decision lines, the card's model, steps, routing,
+texts, buttons, the previews' sheet), `Messaging.Questions.cpp` (the service: the acceptor, `_questionsTick`, the card's
+post / edit / watch, `_onQuestionTap`, `_takeQuestionText`), small hooks in `Messaging.cpp` (`_start` / `Stop` / the tick /
+the mirror's question, tool-result and answer items) and `Messaging.Inbound.cpp` (the `q:` buttons first in
+`_handleCallback`, typed text at the top of `_handleTopicMessage`, an edit of a held message), `HooksBridge.{h,cpp}`
+(`AskRegistry`, `AskBridge`), `ClaudeSpawn.cpp` (`BuildAskHookScript`, the settings entry), `ClaudeInvisibleChars.cpp`
+(the preview rules), `Engine.{h,cpp}` (`asks` + `askBridge`), `MessagingModels.h` (the notes in the answer item). Buttons
+are `q:<card key>:<verb>[:<arg>]` (a random 10-character key per card): a button of an earlier run answers "This
+question is no longer open here." and loses its keyboard.
+
+**Logs** (hooks.log): `[ask] question pipe listening on …`; per request `[ask] <sid8> question open (request N); answerable
+from Telegram` or `… question not taken here (the Telegram bot is off, or the session is not one of ours) …`;
+`[ask] <sid8> request N: question card posted in its topic (k question(s)[, after the transcript's question])`;
+`… answered from Telegram (a of n question(s) answered, m note(s), b bytes)`; `… sending -> answered from Telegram`,
+`… open -> answered at the PC (the transcript's result)`, `… open -> closed (its session ended)`;
+`[ask] <sid8> request N answered from Telegram (b bytes)` / `released to the PC (2 bytes)` from the pipe's worker; and
+`[nav] remote telegram question <sid8> -> answered (…) | chat about this | own answer chars=N | note chars=N | a held
+message queued as the next prompt`. The words themselves never go to the log.
+
+**Tests** (`tests/tests_ask.cpp`, `TestAskQuestion`): the composer against the probe's goldens (D, E, G), a plain pick,
+Tct, an own answer, the note's trim, the bounds; the allow / deny lines; the preview rules; the request and its signature
+against the mirror's question item; the answer item with its notes; the callback data, the routing, the steps, every
+phase's text and buttons and the budget; the previews' sheet drawn into a real PNG; Chat about this; the settings entry and
+the script; the ask pipe end to end (refused, answered, released, a helper that leaves, Stop).
+
+**Check after the build** (each install, with its bot; a test message only with the user's go-ahead):
+- A preview question from a session: the card rings once (not the sticky card too); a tap on an option answers; the PC's
+  dialog closes, and the PC prints "Allowed by PermissionRequest hook"; the card reads ✅ Answered from Telegram.
+- 📝 a note, then an option; 📝 a note, then 📨 Send the note alone; ✍️ an own answer on a plain question; a reply to the
+  card; a plain message (the "answer or next prompt?" question, both buttons); 🖼 the picture; 💬 Chat about this.
+- Two questions in one call (◀ / ▶, Send answers 1 of 2); a multi-select question (☐ / ☑, ✍️ Add my own, Send).
+- The PC answers first: the card reads Answered at the PC with the answer, and the helper process is gone within a tick
+  (`Get-Process powershell` — no `agentmaster-ask.ps1` left); Esc at the PC: ⏹ closed at the PC.
+- The bot off: no helper waits (a dialog closes no slower than before); a subagent's question: shown at the PC at once.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

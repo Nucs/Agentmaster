@@ -510,10 +510,28 @@ namespace Agentmaster::Msg
                             }
                             return std::wstring{};
                         };
+                        // §21.30: a preview question's NOTE (the PC's Notes field, `toolUseResult.annotations[question].notes`) is the
+                        // user's words too — before §21.30 the mirror dropped every note.
+                        const json::Value* annotations = tur->Find(L"annotations");
+                        const auto noteOf = [annotations](const std::wstring& question) {
+                            if (annotations && annotations->type == json::Value::Type::Obj)
+                            {
+                                if (const auto* a = annotations->Find(question); a && a->type == json::Value::Type::Obj)
+                                {
+                                    return a->StrAt(L"notes");
+                                }
+                            }
+                            return std::wstring{};
+                        };
                         std::wstring text;
                         for (const auto& [question, answer] : answers->members)
                         {
-                            const std::wstring value = answer.type == json::Value::Type::Str ? answer.str : std::wstring{};
+                            std::wstring value = answer.type == json::Value::Type::Str ? answer.str : std::wstring{};
+                            if (const std::wstring note = noteOf(question); !note.empty())
+                            {
+                                // "(notes only)" is Claude Code's answer for a note without a pick (`_0t`): the note alone says it.
+                                value = (value.empty() || value == L"(notes only)") ? L"\U0001F4DD " + note : value + L"\n\U0001F4DD " + note;
+                            }
                             if (value.empty())
                             {
                                 continue;

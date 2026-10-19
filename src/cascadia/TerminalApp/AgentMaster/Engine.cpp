@@ -562,6 +562,10 @@ namespace Agentmaster
                 // each window's UI thread). The service calls it on a worker thread of its own, never on a UI thread.
                 hooks.windowCensus = [](uint32_t timeoutMs) { return CollectWindowCensus(timeoutMs); };
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
+                // INTERACTIVE_TOOLS.md §6: the question registry, BEFORE Apply — the service becomes its acceptor when its bot runs,
+                // so a question hook that connects the moment the pipe opens (below) is already judged by it.
+                e->asks = std::make_shared<AskRegistry>();
+                e->messaging->SetAskRegistry(e->asks);
                 e->messaging->Apply(LoadAppSettings());
             }
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
@@ -583,6 +587,14 @@ namespace Agentmaster
                     4);
             }
             e->bridge->Start();
+            // The QUESTION pipe (INTERACTIVE_TOOLS.md §6): the hook pipe's ".ask" twin, where each question hook waits for an answer
+            // from Telegram. Started even while the bot is off: a hook from a claude that started while it was on (and so carries
+            // the hook) then hears "{}" at once instead of finding no pipe — the same outcome, without the helper's connect wait.
+            e->askBridge = std::make_shared<AskBridge>(pipeName + L".ask", e->asks);
+            if (!e->askBridge->Start())
+            {
+                AppendStateLog(L"hooks.log", L"[ask] the question pipe could not start; questions stay with the PC\n");
+            }
 
             // (B+D+C — observe & control sessions we did NOT Launch): make a hand-typed `claude`
             // in any `+` tab self-wire for hooks and get adopted.

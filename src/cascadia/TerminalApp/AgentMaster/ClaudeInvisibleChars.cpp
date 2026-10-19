@@ -899,4 +899,283 @@ namespace Agentmaster
         ubrk_close(it);
         return clusters;
     }
+
+    // ===== AskUserQuestion's option PREVIEWS (INTERACTIVE_TOOLS.md §1.2; Claude Code 2.1.291) =====
+    // Each helper names the bundle identifier it mirrors. The module of `Nl` / `zz` / `e0` / `zet` starts at byte 210,378,231 of
+    // the 2.1.291 claude.exe; `Vs` / `Wa` / `Rae` / `Ha` / `Ka` / `mR` / `gR` live in the module imported from chunk-bbhdeztd
+    // (byte ~208,072,600–208,075,800); `G5` (which calls them) at 237,369,819.
+
+    namespace
+    {
+        // `D`: the characters a terminal cannot be trusted to draw — a default-ignorable code point, LS, PS, U+2800, a surrogate
+        // half, U+10EEEE, or a format character (\p{Cf}).
+        //   c — a code point (a lone surrogate arrives as its own value).  returns — true when unsafe.  throws — never.
+        bool IsPreviewUnsafe(Cp c) noexcept
+        {
+            if (c == 0x2028 || c == 0x2029 || c == 0x2800 || (c >= 0xD800 && c <= 0xDFFF) || c == 0x10EEEE)
+            {
+                return true;
+            }
+            const UChar32 u = AsUChar32(c);
+            return u_hasBinaryProperty(u, UCHAR_DEFAULT_IGNORABLE_CODE_POINT) != 0 || u_charType(u) == U_FORMAT_CHAR;
+        }
+
+        // `an`: the unsafe characters `Nl` KEEPS (its predicate `ln` is `D && !an`) — ZWNJ, ZWJ, LRM, RLM (U+200C–U+200F), ALM
+        // (U+061C), the variation selectors (U+FE00–U+FE0F), the Mongolian free variation selectors (U+180B–U+180F), U+2800.
+        //   c — a code point.  returns — true when `Nl` leaves it in place.  throws — never.
+        bool IsPreviewKeptUnsafe(Cp c) noexcept
+        {
+            return (c >= 0x200C && c <= 0x200F) || c == 0x061C || (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x180B && c <= 0x180F) || c == 0x2800;
+        }
+
+        // `Ha`: a control character the TUI never draws — every C0 control but TAB and LF (a CR too), DEL and the C1 controls.
+        //   c — a code point.  returns — true for such a control.  throws — never.
+        bool IsPreviewControl(Cp c) noexcept
+        {
+            if (c == 0x09 || c == 0x0A)
+            {
+                return false;
+            }
+            return c < 0x20 || (c >= 0x7F && c <= 0x9F);
+        }
+
+        // `Ka`: ALM, the bidi embeddings and overrides (U+202A–U+202E) and the bidi isolates (U+2066–U+2069).
+        //   c — a code point.  returns — true for such a control.  throws — never.
+        bool IsPreviewBidiControl(Cp c) noexcept
+        {
+            return c == 0x061C || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069);
+        }
+
+        // JavaScript's `\s` (the WhiteSpace and LineTerminator sets): what `zz` folds away before it asks whether anything
+        // visible is left.
+        //   c — a code point.  returns — true for JS whitespace.  throws — never.
+        bool IsJsWhiteSpace(Cp c) noexcept
+        {
+            switch (c)
+            {
+            case 0x09:
+            case 0x0A:
+            case 0x0B:
+            case 0x0C:
+            case 0x0D:
+            case 0x20:
+            case 0xA0:
+            case 0x1680:
+            case 0x2028:
+            case 0x2029:
+            case 0x202F:
+            case 0x205F:
+            case 0x3000:
+            case 0xFEFF:
+                return true;
+            default:
+                return c >= 0x2000 && c <= 0x200A;
+            }
+        }
+
+        // `Vs` without its grapheme-width repair `Ba` (see ClaudeQuestionPreviewEcho's remarks): `Wa` drops VS15 / VS16 (`mR`)
+        // and turns every `Ha` / `Ka` character and every surrogate half (`gR`) into U+FFFD; then `Rae` → `iur` expands each TAB
+        // to the next multiple of 8 display columns (`Ykt` = 8), counting each other piece by its terminal width and starting the
+        // count again after a LF. `Rae` also rewrites ANSI escape sequences, but `Wa` has already turned their ESC / CSI / C1
+        // introducers into U+FFFD, so only the TABs are left for it.
+        //   text    — the text after `Nl`'s first step (or any text).
+        //   returns — the terminal-safe text.
+        //   throws  — std::bad_alloc if the result cannot be allocated.
+        std::wstring PreviewTerminalSafe(std::wstring_view text)
+        {
+            std::wstring out;
+            out.reserve(text.size());
+            bool hasTab = false;
+            for (size_t i = 0; i < text.size();)
+            {
+                const Decoded d = DecodeAt(text, i);
+                const bool loneSurrogate = d.units == 1 && d.cp >= 0xD800 && d.cp <= 0xDFFF;
+                if (d.cp == 0xFE0E || d.cp == 0xFE0F)
+                {
+                    i += d.units; // `mR`: dropped, not replaced
+                    continue;
+                }
+                if (IsPreviewControl(d.cp) || IsPreviewBidiControl(d.cp) || loneSurrogate)
+                {
+                    out.push_back(static_cast<wchar_t>(0xFFFD));
+                }
+                else
+                {
+                    hasTab = hasTab || d.cp == 0x09;
+                    out.append(text.substr(i, d.units));
+                }
+                i += d.units;
+            }
+            if (!hasTab)
+            {
+                return out; // `Rae` returns its input when it holds no TAB (and no escape sequence is left)
+            }
+            std::wstring expanded;
+            expanded.reserve(out.size() + 16);
+            size_t column = 0;
+            for (size_t i = 0; i < out.size();)
+            {
+                const Decoded d = DecodeAt(out, i);
+                if (d.cp == 0x09)
+                {
+                    const size_t pad = 8 - column % 8;
+                    expanded.append(pad, L' ');
+                    column += pad;
+                }
+                else if (d.cp == 0x0A)
+                {
+                    expanded.push_back(L'\n');
+                    column = 0;
+                }
+                else
+                {
+                    expanded.append(out, i, d.units);
+                    column += static_cast<size_t>(ClaudeCellWidth(d.cp));
+                }
+                i += d.units;
+            }
+            return expanded;
+        }
+
+        // `zz`: is anything VISIBLE in the preview? `k2e` turns every `D` character (the kept ones too) into U+FFFD and applies
+        // `Vs` and `Ym`; `zz` then removes every U+FFFD, folds whitespace and trims, and asks for a non-empty text of non-zero
+        // width. Equivalent per code point: some character that is not `D`, `Ha`, `Ka`, a surrogate half, VS15 / VS16 or JS
+        // whitespace, and whose width is not 0 (a mark alone draws nothing).
+        //   preview — the option's preview.  returns — true when something is visible.  throws — never.
+        bool PreviewHasVisibleText(std::wstring_view preview) noexcept
+        {
+            for (size_t i = 0; i < preview.size();)
+            {
+                const Decoded d = DecodeAt(preview, i);
+                i += d.units;
+                const bool loneSurrogate = d.units == 1 && d.cp >= 0xD800 && d.cp <= 0xDFFF;
+                if (loneSurrogate || IsPreviewUnsafe(d.cp) || IsPreviewControl(d.cp) || IsPreviewBidiControl(d.cp) || d.cp == 0xFE0E || d.cp == 0xFE0F ||
+                    IsJsWhiteSpace(d.cp))
+                {
+                    continue;
+                }
+                if (ClaudeCellWidth(d.cp) > 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // `Ske` = /… \[\+\d+ graphemes\]/: Claude Code's own truncation marker — a preview that carries one was cut by an
+        // earlier pass and is withheld rather than shown as if whole.
+        //   text — the echoed preview.  returns — true when the marker occurs.  throws — never.
+        bool HasPreviewTruncationMarker(std::wstring_view text) noexcept
+        {
+            constexpr std::wstring_view kHead{ L"\x2026 [+" }; // an escape, not the literal character: the literal's bytes depend on /utf-8
+            constexpr std::wstring_view kTail{ L" graphemes]" };
+            for (size_t at = text.find(kHead); at != std::wstring_view::npos; at = text.find(kHead, at + 1))
+            {
+                size_t p = at + kHead.size();
+                const size_t digitsFrom = p;
+                while (p < text.size() && text[p] >= L'0' && text[p] <= L'9')
+                {
+                    ++p;
+                }
+                if (p > digitsFrom && text.substr(p, kTail.size()) == kTail)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // `Ee` = `Ym(x) !== x`: does the text hold a run of MORE than 8 (`pn`) consecutive marks or zero-width characters
+        // (`qQr`: \p{M}, or a character of no visible width once VS15 / VS16 / the Mongolian selectors are gone)? `Ym` replaces
+        // such a run's tail with U+FFFD — the "Zalgo" guard — and a preview it would change is withheld. A LF or any visible
+        // character ends a run.
+        //   text — the echoed preview.  returns — true when a run longer than 8 occurs.  throws — never.
+        bool HasPreviewLongMarkRun(std::wstring_view text) noexcept
+        {
+            size_t run = 0;
+            for (size_t i = 0; i < text.size();)
+            {
+                const Decoded d = DecodeAt(text, i);
+                i += d.units;
+                if (d.cp == 0x0A)
+                {
+                    run = 0;
+                    continue;
+                }
+                const bool zeroWidth = d.cp == 0xFE0E || d.cp == 0xFE0F || (d.cp >= 0x180B && d.cp <= 0x180F) || ClaudeCellWidth(d.cp) == 0;
+                if (!(IsMark(d.cp) || zeroWidth))
+                {
+                    run = 0;
+                    continue;
+                }
+                if (++run > 8)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    ClaudePreviewKind ClassifyClaudeQuestionPreview(std::wstring_view preview)
+    {
+        // `G5`, in its own order: the length (in UTF-16 units, JavaScript's String.length) first, then `zz`, then `e0` on `Nl`.
+        if (preview.size() > kClaudeQuestionPreviewMaxChars)
+        {
+            return ClaudePreviewKind::Withheld;
+        }
+        if (!PreviewHasVisibleText(preview))
+        {
+            return ClaudePreviewKind::None;
+        }
+        const std::wstring echo = ClaudeQuestionPreviewEcho(preview);
+        if (HasPreviewTruncationMarker(echo) || HasPreviewLongMarkRun(echo))
+        {
+            return ClaudePreviewKind::Withheld;
+        }
+        return ClaudePreviewKind::Full;
+    }
+
+    std::wstring ClaudeQuestionPreviewEcho(std::wstring_view preview)
+    {
+        // `Nl` = `Vs(Ce(e, ln))`: first every unsafe character but the kept ones becomes U+FFFD (`Ce` walks code points, so a
+        // valid surrogate PAIR is one character and only a lone half is a surrogate here), then the terminal-safe pass.
+        std::wstring step;
+        step.reserve(preview.size());
+        for (size_t i = 0; i < preview.size();)
+        {
+            const Decoded d = DecodeAt(preview, i);
+            if (IsPreviewUnsafe(d.cp) && !IsPreviewKeptUnsafe(d.cp))
+            {
+                step.push_back(static_cast<wchar_t>(0xFFFD));
+            }
+            else
+            {
+                step.append(preview.substr(i, d.units));
+            }
+            i += d.units;
+        }
+        return PreviewTerminalSafe(step);
+    }
+
+    int ClaudeCellWidth(char32_t cp) noexcept
+    {
+        if (cp >= 0xD800 && cp <= 0xDFFF)
+        {
+            return 1; // a lone surrogate half is drawn as the one-column U+FFFD
+        }
+        const UChar32 u = AsUChar32(cp);
+        const int8_t type = u_charType(u);
+        // Marks ride on the cell before them; format characters, controls and default-ignorable code points draw nothing.
+        if (type == U_NON_SPACING_MARK || type == U_ENCLOSING_MARK || type == U_FORMAT_CHAR || type == U_CONTROL_CHAR)
+        {
+            return 0;
+        }
+        if (u_hasBinaryProperty(u, UCHAR_DEFAULT_IGNORABLE_CODE_POINT) != 0)
+        {
+            return 0;
+        }
+        const int32_t ea = u_getIntPropertyValue(u, UCHAR_EAST_ASIAN_WIDTH);
+        return (ea == U_EA_WIDE || ea == U_EA_FULLWIDTH) ? 2 : 1;
+    }
 }
