@@ -45,6 +45,7 @@ namespace winrt::Microsoft::Terminal::Settings
 #include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
 #include "AgentMaster/RemoteLaunch.h" // Agentmaster (MESSAGING.md §8.2): RemoteLaunchRequest — what the Telegram bot's launch sink asks this window to open
+#include "AgentMaster/RestoreWake.h" // Agentmaster (PERSISTENCE.md §14): RestoreWakeWindowJob — the restore wake's per-window job (by-value member)
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
@@ -554,6 +555,20 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::DispatcherTimer _activateAllTimer{ nullptr };
         int _activateAllBatchWoken{ 0 }; // wakes in the current 4-per-10s batch
         int _activateAllWokenTotal{ 0 }; // total woken by the running drip (the drained-log count)
+        // Agentmaster (the RESTORE WAKE — PERSISTENCE.md §14, the user's request of 2026-10-19): after a window restore,
+        // the tabs whose session was in the middle of something when Agentmaster went down (persisted Running /
+        // NeedsApproval / Error) are woken by themselves — once the tab EVERY reopened window opens to has finished
+        // launching (the process-wide RestoreWakeBarrier) and this window's UI thread is idle — one tab per slot of the
+        // process-wide RestoreWakePacer (the drip's 500 ms / 4 per 10 s, but across every window), never through the
+        // per-window drip above, so the windows released together cannot burst.
+        // _restoreWake is the job: its barrier key (set by SetAgentmasterWindowId's announce, or at the join), the
+        // candidates _RestoreWindowTabs picked, the session the restore focused, the gate's memory, and the wake queue of
+        // the WAKING phase (RestoreWake.h). _restoreWakeTimer ticks _TickRestoreWake every kRestoreWakeTickMs from the end
+        // of the re-home until the queue is drained (or the job fails); it is stopped by _EndRestoreWake and in
+        // ~TerminalPage, and a dead page's weak Tick stops it. UI thread only, except the key, which ~TerminalPage reads
+        // (any thread) to leave the barrier.
+        ::Agentmaster::RestoreWakeWindowJob _restoreWake{};
+        winrt::Windows::UI::Xaml::DispatcherTimer _restoreWakeTimer{ nullptr };
         // Agentmaster (cross-window settings broadcast): this window's settings sink on the shared
         // engine — a GLOBAL settings change in ANOTHER window (the cog Save, or the Explorer-Tree /
         // Triage-Board sort toggle) hops to this window's UI thread and re-applies it live (the sort
@@ -1572,6 +1587,43 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _PumpDraftRestores(); // ticked beside _PumpHandoverInjections (TerminalPage.AgentObserver.cpp); self-marshals to the UI thread
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
+        // Agentmaster (the RESTORE WAKE — PERSISTENCE.md §14; RestoreWake.h is the pure half, TerminalPage.AgentWindowRecord.cpp
+        // the glue): after a restore, start by themselves the restored tabs whose session was in the middle of something when
+        // Agentmaster went down — once the tab every reopened window opens to has finished launching and the UI is idle.
+        // _AnnounceRestoreWake — SetAgentmasterWindowId (at window creation, before any window lays out) enters this window
+        //   in the process-wide barrier, so a window that finishes its restore first cannot wake its tabs while another
+        //   window is still restoring. key = the Emperor-assigned record id. Never throws (a failure is logged; the window
+        //   then joins at its restore instead).
+        // _BeginRestoreWake — the end of _RestoreWindowTabs: join the barrier with the picked candidates (strip order) and
+        //   the managed session the restore focused ("" = a shell / the Agent Manager page / none), then start the timer.
+        //   Called even with no candidate: this window's focused tab still holds back the OTHER windows' wakes until it
+        //   launched. Never throws; a failure leaves the barrier so no window waits on this one.
+        // _TickRestoreWake — the timer: punctuality, the foreground gate (tells the barrier once), then the wake decision;
+        //   in the WAKING phase it only drains the queue (_StepRestoreWakeQueue). Never throws; a failure ends the job (logged).
+        // _ReadRestoreWakeForeground — what the window opens to right now, as the gate's facts: the restore-focused
+        //   session's control while this window hosts it, else the current foreground (the Agent Manager page / no tab /
+        //   no terminal read as "nothing to wait for"). Never throws: a failed read is logged and answers "nothing to wait
+        //   for", so a broken read can delay no window.
+        // _WakeRestoredBusyTabs — the barrier released this window: re-check every candidate (RestoreWakeWantsSession on the
+        //   fresh record + hosted here), log who wakes and who is skipped and why, leave the barrier (the other windows no
+        //   longer need this one), and enter the WAKING phase with the rest queued. Never throws.
+        // _StepRestoreWakeQueue — one tick of the WAKING phase: skip the queued sessions that no longer want a wake (no slot
+        //   spent), take a slot from the process-wide RestoreWakePacer (500 ms apart, at most 4 per 10 s across EVERY
+        //   window) and wake ONE tab in place (_ActivateDormantSession, the "Activate Tab" path); log the total and end the
+        //   job when the queue is empty. Never throws.
+        // _EndRestoreWake — stop the timer, leave the barrier, drop the candidates and the queue; `why` non-empty is logged.
+        //   UI thread (the timer). Never throws.
+        // _LeaveRestoreWake — leave the barrier and forget the key (any thread: ~TerminalPage calls it from wherever the
+        //   page dies); `why` non-empty is logged. Never throws — and `why` is a VIEW, so even building the argument (a
+        //   literal at every call site, the destructor's included) cannot allocate and throw before the call.
+        void _AnnounceRestoreWake(const std::wstring& key) noexcept;
+        void _BeginRestoreWake(std::vector<std::wstring> candidates, const std::wstring& focusSessionId) noexcept;
+        void _TickRestoreWake() noexcept;
+        ::Agentmaster::RestoreWakeForeground _ReadRestoreWakeForeground() noexcept;
+        void _WakeRestoredBusyTabs(::Agentmaster::RestoreWakeWakeReason reason) noexcept;
+        void _StepRestoreWakeQueue(uint64_t nowTickMs) noexcept;
+        void _EndRestoreWake(std::wstring_view why) noexcept;
+        void _LeaveRestoreWake(std::wstring_view why) noexcept;
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)
         int _JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index); // Agentmaster (SUMMARY_JUMP.md): center the session tab's view on the i-th prompt; returns the row or -1
         std::vector<int> _JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs); // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 == not on screen) for icon dimming
