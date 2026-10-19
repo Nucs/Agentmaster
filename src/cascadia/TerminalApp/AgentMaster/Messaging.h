@@ -763,7 +763,26 @@ namespace Agentmaster::Msg
         /// <param name="state">Its state (the icon, or the name's glyph in the glyph form).</param>
         /// <param name="verbose">The topic's own verbose mode.</param>
         void _createTopic(const std::wstring& sessionId, const std::wstring& title, const std::wstring& colorHex, SessionState state, int verbose = -1);
+        /// <summary>
+        /// Deletes a session's topic with deleteForumTopic and forgets it: the record, the mirror, the card state, the outbox items
+        /// queued for it and its history batch. A refusal of Telegram's flood control keeps the record (the sync plans the delete
+        /// again after the pause); any other failure drops the record anyway, and a topic already gone is no failure. §21.31: a
+        /// topic deleted because its session went IDLE (`reason` "idle", the sync's D25 grace) also joins the main view's idle
+        /// notice (_idleNoticePending, told by _flushIdleNotices), with the title and the square its name showed. Tick thread (a
+        /// direct call, paced by _awaitCallSlot).
+        /// </summary>
+        /// <param name="sessionId">The session whose topic goes.</param>
+        /// <param name="reason">Why, for the log and the idle notice: "idle", "closed", "not a claude tab", "left its tab", ….</param>
         void _deleteTopic(const std::wstring& sessionId, const std::wstring& reason);
+        /// <summary>
+        /// Tells the chat's MAIN VIEW which sessions went idle (§21.31, the user's request of 2026-10-19: "send a message in the all
+        /// chat that &lt;title&gt; is idle"): once IdleNoticeDue says the collected deletes have settled, ONE silent line names them
+        /// all (BuildIdleNoticeHtml), so a burst — an app start lets every expired idle topic go at once — never floods the main
+        /// view or the chat's flood budget. The pending entries live in memory only: a quit within the wait (at most
+        /// kIdleNoticeMaxWaitMs) loses that line, never anything else. Tick thread, after the topic sync.
+        /// </summary>
+        /// <param name="nowMs">The clock (Unix ms).</param>
+        void _flushIdleNotices(int64_t nowMs);
         /// <summary>
         /// Updates a session's topic in ONE editForumTopic: its ICON to the state's (StateTopicIcon) and its name to
         /// TopicDisplayName(state, square, title, true) while state icons are wanted (§21.22) — a state change then changes only
@@ -1639,6 +1658,9 @@ namespace Agentmaster::Msg
 
         int64_t _ownerId{ 0 }; // the paired Telegram user (AppSettings::messagingTelegramOwnerId)
         std::atomic<int64_t> _idleGraceMs{ 10 * 60 * 1000 };
+        // Under `_mtx` (§21.31): the sessions whose topics left the list because they went idle and the main view's idle notice has
+        // not named yet (_deleteTopic adds, _flushIdleNotices takes them all at once). In memory only.
+        std::vector<IdleNoticeEntry> _idleNoticePending;
         std::wstring _searchThinkingWord{ L"high" };
         /// <summary>
         /// §21.11: the default mode of the topics (AppSettings::messagingVerbose), whether Claude's Markdown goes as rich

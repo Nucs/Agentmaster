@@ -477,6 +477,48 @@ void TestMessaging()
         CHECK(IdleTopicLeavesAtMs(now, now - 5000, grace) == now + grace, "decayed long after its activity: a full grace from the decay");
         CHECK(IdleTopicLeavesAtMs(now - 5000, now, grace) == now + grace, "used after it went idle: a full grace from the use");
 
+        // §21.31 — the chat main view's IDLE NOTICE (the user's "send a message in the all chat that <title> is idle"): the sessions
+        // whose topics left the list as idle, ONE line per burst once it has settled.
+        {
+            const std::wstring orange = L"\U0001F7E7";
+            const std::wstring blue = L"\U0001F7E6";
+            const int64_t t0 = 1700000000000;
+            std::vector<IdleNoticeEntry> pending;
+            CHECK(!IdleNoticeDue(pending, t0) && BuildIdleNoticeHtml(pending).empty(), "idle notice: nothing pending, nothing to tell");
+            pending.push_back(IdleNoticeEntry{ L"0e72743f-0000-0000-0000-000000000000", L"Small telegram fixes", orange, t0 });
+            CHECK(!IdleNoticeDue(pending, t0 + kIdleNoticeSettleMs - 1) && IdleNoticeDue(pending, t0 + kIdleNoticeSettleMs),
+                  "idle notice: one topic left - told once nothing else has left for the settle time");
+            CHECK(TgRenderTitleTokensClassic(BuildIdleNoticeHtml(pending)) ==
+                      L"\U0001F4A4 <b>\U0001F7E7 Small telegram fixes</b> is idle \x2014 its topic left the list. /idle in \U0001F50E Search wakes it.",
+                  "idle notice, one session: its title with its square, and how to wake it");
+            CHECK(TgRichHtmlFromClassic(BuildIdleNoticeHtml(pending)).find(L"<tg-button type=\"copy_text\"") != std::wstring::npos, "idle notice, rich: the title is a chip");
+
+            // A burst: each departure restarts the settle time, and the oldest never waits past the cap.
+            pending.push_back(IdleNoticeEntry{ L"669df9b3-0000-0000-0000-000000000000", L"docs", blue, t0 + 8000 });
+            CHECK(!IdleNoticeDue(pending, t0 + 12000) && IdleNoticeDue(pending, t0 + 18000), "idle notice: a burst still coming in waits, then goes once it has settled");
+            for (int i = 2; i < 30; ++i)
+            {
+                pending.push_back(IdleNoticeEntry{ L"s" + std::to_wstring(i), L"t" + std::to_wstring(i), L"", t0 + 2000LL * i }); // one every 2 s, the last at t0 + 58 s
+            }
+            CHECK(!IdleNoticeDue(pending, t0 + 59000) && IdleNoticeDue(pending, t0 + kIdleNoticeMaxWaitMs), "idle notice: a steady trickle is told at the latest after the max wait");
+            const std::wstring many = TgRenderTitleTokensClassic(BuildIdleNoticeHtml(pending));
+            CHECK(many.rfind(L"\U0001F4A4 <b>30 sessions</b> are idle \x2014 their topics left the list. /idle in \U0001F50E Search wakes them.\n\U0001F7E7 Small telegram fixes\n\U0001F7E6 docs\nt2\n", 0) == 0,
+                  "idle notice, several: the count, the hint, then one title per line in the order the topics left");
+            CHECK(CountOf(many, L"\n") == kIdleNoticeMaxTitles + 1 && many.size() >= 13 && many.compare(many.size() - 13, 13, L"\x2026 and 10 more") == 0,
+                  "idle notice: at most kIdleNoticeMaxTitles titles, the rest counted");
+
+            // An empty title shows the short session id; a title is escaped; a clock that went back is no reason to wait.
+            std::vector<IdleNoticeEntry> odd;
+            odd.push_back(IdleNoticeEntry{ L"61e3e3ff-0000-0000-0000-000000000000", L"", L"", t0 });
+            odd.push_back(IdleNoticeEntry{ L"x", L"a <b> & c", orange, t0 });
+            const std::wstring oddText = TgRenderTitleTokensClassic(BuildIdleNoticeHtml(odd));
+            CHECK(oddText.find(L"\n61e3e3ff\n") != std::wstring::npos && oddText.find(L"\U0001F7E7 a &lt;b&gt; &amp; c") != std::wstring::npos,
+                  "idle notice: an empty title shows the short session id, and a title is escaped");
+            std::vector<IdleNoticeEntry> ahead;
+            ahead.push_back(IdleNoticeEntry{ L"c", L"clock", L"", t0 + 5000 });
+            CHECK(IdleNoticeDue(ahead, t0), "idle notice: a clock that went back past a stamp counts as due (never held until it catches up)");
+        }
+
         // A brand-new tab gets a Create at once.
         {
             std::map<std::wstring, TopicRecord> topics;

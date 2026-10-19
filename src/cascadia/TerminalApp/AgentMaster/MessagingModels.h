@@ -2331,6 +2331,93 @@ namespace Agentmaster::Msg
         return (std::max)(idleSinceMs, lastActivityMs) + (std::max)(int64_t{ 0 }, idleGraceMs); // (std::max): the <windows.h> macro
     }
 
+    /// <summary>
+    /// One session in the chat main view's IDLE NOTICE (§21.31): a topic that left the list because its session went idle (D25:
+    /// Idle and untouched for the idle grace, not pinned). Its name is what the topic list showed, so the line names the session
+    /// the way the user last saw it there.
+    /// </summary>
+    struct IdleNoticeEntry
+    {
+        std::wstring sessionId; // the session: the log names it; the line shows its short id only when the title is empty
+        std::wstring title; // the topic's name as last set (TopicRecord::title)
+        std::wstring colorSquare; // the square the topic's name showed (TopicRecord::nameColor; "" = none)
+        int64_t leftAtMs{ 0 }; // when the topic was deleted (Unix ms)
+    };
+
+    // §21.31: an idle notice waits until no topic has left for kIdleNoticeSettleMs, so one burst makes ONE line — after an app start
+    // every topic whose grace ran out while the app was closed leaves at about one delete a second (each call waits for its slot) —
+    // and at most kIdleNoticeMaxWaitMs, so a steady trickle of idle topics never holds the line forever.
+    inline constexpr int64_t kIdleNoticeSettleMs = 10 * 1000;
+    inline constexpr int64_t kIdleNoticeMaxWaitMs = 60 * 1000;
+    // §21.31: the most titles one idle notice lists; the rest are counted ("… and 12 more"), so a burst never fills the main view.
+    inline constexpr size_t kIdleNoticeMaxTitles = 20;
+
+    /// <summary>
+    /// Whether the waiting idle notice goes now (§21.31): no topic has left for kIdleNoticeSettleMs, or the oldest one has waited
+    /// kIdleNoticeMaxWaitMs. Pure, so the m5 suite drives it with a fake clock.
+    /// </summary>
+    /// <param name="pending">The sessions whose topics left and are not told yet, in any order.</param>
+    /// <param name="nowMs">The clock (Unix ms).</param>
+    /// <returns>True when the notice should go now; false with nothing pending. A clock that went back past an entry's stamp
+    /// counts as due, so a clock change can never hold the notice until the clock catches up.</returns>
+    inline bool IdleNoticeDue(const std::vector<IdleNoticeEntry>& pending, int64_t nowMs) noexcept
+    {
+        if (pending.empty())
+        {
+            return false;
+        }
+        int64_t oldest = pending.front().leftAtMs;
+        int64_t newest = oldest;
+        for (const auto& e : pending)
+        {
+            oldest = (std::min)(oldest, e.leftAtMs); // (std::min) / (std::max): the <windows.h> macros
+            newest = (std::max)(newest, e.leftAtMs);
+        }
+        return nowMs < newest || nowMs - newest >= kIdleNoticeSettleMs || nowMs - oldest >= kIdleNoticeMaxWaitMs;
+    }
+
+    /// <summary>
+    /// The chat MAIN VIEW's line when topics left the list because their sessions went idle (§21.31, the user's request of
+    /// 2026-10-19: "send a message in the all chat that &lt;title&gt; is idle"). An idle topic is DELETED with its messages after
+    /// the idle grace (D25: Telegram cannot hide or close a topic of a private chat), so without this line a session vanished from
+    /// the list with no word. Each title is a title TOKEN with its color square (§21.15: a chip in a rich message, `🟧 title` in a
+    /// classic one) and no link, because its topic is gone. The line says how to bring a session back: `/idle` in 🔎 Search lists
+    /// the idle tabs with a Wake button each (the main view itself takes only /start and /help).
+    /// </summary>
+    /// <remarks>
+    /// One session: `💤 <b>🟧 title</b> is idle — its topic left the list. /idle in 🔎 Search wakes it.` Several (a burst the
+    /// service collected, IdleNoticeDue): the count, the same hint, then one title per line in the order the topics left, at most
+    /// kIdleNoticeMaxTitles and `… and N more` past them.
+    /// </remarks>
+    /// <param name="entries">The sessions to tell, in the order their topics left.</param>
+    /// <returns>Telegram HTML with title tokens; "" for no entry.</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated.</exception>
+    inline std::wstring BuildIdleNoticeHtml(const std::vector<IdleNoticeEntry>& entries)
+    {
+        if (entries.empty())
+        {
+            return {};
+        }
+        const auto mention = [](const IdleNoticeEntry& e) {
+            return TgTitleToken(TgTitleForm::Plain, e.colorSquare, e.title.empty() ? std::wstring_view{ e.sessionId }.substr(0, 8) : std::wstring_view{ e.title });
+        };
+        if (entries.size() == 1)
+        {
+            return L"\U0001F4A4 <b>" + mention(entries.front()) + L"</b> is idle \x2014 its topic left the list. /idle in \U0001F50E Search wakes it.";
+        }
+        std::wstring html = L"\U0001F4A4 <b>" + std::to_wstring(entries.size()) + L" sessions</b> are idle \x2014 their topics left the list. /idle in \U0001F50E Search wakes them.";
+        const size_t shown = (std::min)(entries.size(), kIdleNoticeMaxTitles);
+        for (size_t i = 0; i < shown; ++i)
+        {
+            html += L"\n" + mention(entries[i]);
+        }
+        if (entries.size() > shown)
+        {
+            html += L"\n\x2026 and " + std::to_wstring(entries.size() - shown) + L" more";
+        }
+        return html;
+    }
+
     // What the sync must do to make the topics equal the qualifying tabs.
     struct TopicSyncOp
     {
