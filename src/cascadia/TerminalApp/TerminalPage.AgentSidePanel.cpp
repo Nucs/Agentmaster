@@ -3360,6 +3360,9 @@ namespace winrt::TerminalApp::implementation
     // THE BOX IS THE MANAGER'S: the card opens on the Manager box's text, mirrors every edit into it live, and writes
     // its last text back when it closes — so the two boxes always read the same ("keep the last, same one we have in
     // agent manager tab"). Both bars push into ONE recent-folders list (AgentManagerContent::LaunchRecentDirs).
+    // THE FOLDER LIST OPENS WITH THE CARD (the user's rule, 2026-10-19): right under the box, once a layout pass has put
+    // the card at its place (_SidePanelFinishLaunchCardOpen) — never at the card's previous place, over the box and
+    // Launch (the 2026-10-12 report). Esc closes the list first, a second Esc the card.
     // LIFETIME: built on the first "+" click and kept for the window's life (a window that never opens it pays
     // nothing); closed by a press outside it, Esc, "+" again, a launch, a tab switch, a collapse and a dock flip.
     // Interactive like a tooltip that can be entered: nothing closes on pointer-leave.
@@ -3803,30 +3806,15 @@ namespace winrt::TerminalApp::implementation
             // a tick later would show for a frame at the previous spot first.
             _SidePanelPlaceLaunchCard();
             ::Agentmaster::LogNav(fromPress ? L"sidepanel launcher open (at the click)" : L"sidepanel launcher open (under the + button)");
-            // Focus the box one tick later: on the FIRST open the card was only just realized, and a same-tick Focus on
-            // a TextBox that has not been laid out can do nothing (the tag editor's lesson). PROGRAMMATIC focus: the
-            // box's GotFocus opens the drop-down only for a pointer / keyboard focus, so the caret waits in the box and
-            // the list opens on the first click or keystroke (the user's choice for a card that pops up). The bar reads
-            // that from the box's GettingFocus, because XAML reports this focus as Pointer in GotFocus (the last input
-            // was the "+" click) — until 2026-10-12 it did read GotFocus, and every "+" opened the list, sometimes over
-            // the box and Launch (the card was not laid out at its place yet). The text copied above is a programmatic
-            // write too: its late TextChanged opens nothing either.
+            // The rest one tick later: on the FIRST open the card was only just realized, and a same-tick Focus on a
+            // TextBox that has not been laid out can do nothing (the tag editor's lesson). That tick lays the card out at
+            // its place, focuses its box and opens the box's folder list right under it — the list shows whenever the
+            // card does (the user's rule, 2026-10-19; _SidePanelFinishLaunchCardOpen has the steps and their order). The
+            // text copied above is a programmatic write: its late TextChanged re-lists an open list and opens nothing.
             Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
-                const auto self = weakThis.get();
-                if (!self || !self->_SidePanelLaunchCardOpen() || !self->_sidePanelLaunchBar)
+                if (const auto self = weakThis.get())
                 {
-                    return; // closed again before the tick ran
-                }
-                try
-                {
-                    if (const auto box = self->_sidePanelLaunchBar->CwdBox())
-                    {
-                        box.Focus(FocusState::Programmatic);
-                    }
-                }
-                catch (...)
-                {
-                    ::Agentmaster::AgentLogCaughtException(L"side panel launcher: focus the box"); // a click in the box still focuses it
+                    self->_SidePanelFinishLaunchCardOpen(); // never throws; a no-op when the card closed before the tick ran
                 }
             });
         }
@@ -3846,6 +3834,64 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AgentLogCaughtException(L"side panel launcher: open rollback");
             }
         }
+    }
+
+    void TerminalPage::_SidePanelFinishLaunchCardOpen()
+    {
+        if (!_SidePanelLaunchCardOpen() || !_sidePanelLaunchBar || !_sidePanelLaunchCard)
+        {
+            return; // closed again before the tick ran (Esc, "+" again, an outside press): nothing to finish
+        }
+        // 1. Lay the card out NOW, at the offsets _SidePanelPlaceLaunchCard wrote in the open's tick. A popup's child is
+        //    placed at its offsets only in a layout pass (WinUI CPopupRoot::ArrangeOverride; the offset write only
+        //    invalidates that arrange), so until one runs, the box still reads the card's previous place — (0,0) on a
+        //    window's first "+" — and a list anchored there covered the box and Launch (the report of 2026-10-12).
+        //    UpdateLayout runs that pass synchronously for the card's tree (its root visual, the popup root included —
+        //    WinUI CUIElement::UpdateLayout → the tree's CLayoutManager): the work XAML would do before its next frame
+        //    anyway, and a no-op when that frame's pass already ran (nothing is dirty then). Safe here: a fresh dispatcher tick, outside any layout pass (inside one, XAML skips the call —
+        //    the layout manager's reentrancy guard), and the SizeChanged / LayoutUpdated handlers it raises only queue
+        //    their work (the card's own re-placement, the bar's re-fit), never move a Popup inside the pass.
+        try
+        {
+            _sidePanelLaunchCard.UpdateLayout();
+        }
+        catch (...)
+        {
+            // The list then anchors to the box's last layout, and the bar's re-anchor round moves it under the box one
+            // frame later (the belt it arms at every open). Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: lay the card out before its folder list opens");
+        }
+        if (!_SidePanelLaunchCardOpen())
+        {
+            return; // a handler run by that pass closed the card (none does today): open nothing over a closed card
+        }
+        // 2. Focus the box PROGRAMMATICALLY: the caret waits in it, and Enter / Escape reach the card's key handlers. The
+        //    bar reads this focus's real input mode from the box's GettingFocus — GotFocus would report the last input
+        //    device's state instead (Pointer after the "+" click) — so the focus itself opens nothing; step 3 opens the
+        //    list, once.
+        try
+        {
+            if (const auto box = _sidePanelLaunchBar->CwdBox())
+            {
+                if (!box.Focus(FocusState::Programmatic))
+                {
+                    // Keys then still go where focus was (the terminal): an Esc meant for the list would reach that claude.
+                    // Never seen; logged so a report of it can be traced (a click in the box focuses it).
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] launcher card: its box did not take focus (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+                }
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"side panel launcher: focus the box"); // a click in the box still focuses it
+        }
+        // 3. Open the box's folder list right under it — the user's rule (2026-10-19): "the path textbox's dropdown menu is
+        //    supposed to be open by default when + the menu is shown". The bar anchors it to the box as step 1 laid it out
+        //    and re-anchors once more after the next pass (a belt: the card re-places itself when its size settles, and a
+        //    real move re-anchors the list through _SidePanelPlaceLaunchCard). Before, the list stayed closed until a click
+        //    in the box or a keystroke (the user's answer of 2026-10-06). Opened even when step 2 failed: the rows work
+        //    with the mouse, and a row click focuses the box.
+        _sidePanelLaunchBar->OpenPathPicker(); // noexcept: a failure is logged inside, and a click in the box opens the list
     }
 
     void TerminalPage::_SidePanelCloseLaunchCard(std::wstring_view reason)

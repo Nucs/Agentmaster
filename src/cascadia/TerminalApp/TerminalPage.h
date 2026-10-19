@@ -2427,12 +2427,25 @@ namespace winrt::TerminalApp::implementation
         // build failed — logged (Rule #18); the next "+" click tries again from scratch.
         bool _SidePanelEnsureLaunchCard();
         // Open the card: build it if needed, anchor it (`fromPress` = at the recorded press point, else under the "+"
-        // button), copy the Agent Manager's box text into it, fit the box to the window, place the card toward the
-        // window's center (PointerCardPlacement.h) and focus its box programmatically — the caret in the box, the
-        // drop-down still closed until a click or a keystroke (the user's choice). Logs [nav] sidepanel launcher open.
+        // button), copy the Agent Manager's box text into it, fit the box to the window and place the card toward the
+        // window's center (PointerCardPlacement.h), then queue _SidePanelFinishLaunchCardOpen for the next dispatcher
+        // tick (the card's layout pass, the caret in its box, its folder list OPEN under the box — the user's rule of
+        // 2026-10-19; before, the list stayed closed until a click or a keystroke). Logs [nav] sidepanel launcher open.
         // Never throws (a failure is logged and the card stays closed).
         //   fromPress - true when _sidePanelLaunchAnchor holds the press that led to this open.
         void _SidePanelOpenLaunchCard(bool fromPress);
+        // The open's second half, one dispatcher tick after _SidePanelOpenLaunchCard (the card is realized by then):
+        //   1. lay the card out at the offsets the open wrote — one synchronous layout pass (UIElement::UpdateLayout),
+        //      because a popup's child moves to new offsets only in a layout pass, and a list anchored before it covered
+        //      the box and Launch (2026-10-12);
+        //   2. focus the box programmatically (the caret in it; a refused focus is logged — keys then still go to the
+        //      terminal);
+        //   3. open the box's folder list right under it (AgentLaunchBar::OpenPathPicker), so the list shows whenever the
+        //      card does (the user's rule, 2026-10-19).
+        // A no-op when the card closed before the tick ran. Never throws: each step is guarded and logged on its own
+        // (Rule #18), so a failed layout or focus still opens the list (the bar's re-anchor round then corrects a stale
+        // anchor one frame later).
+        void _SidePanelFinishLaunchCardOpen();
         // Close the open card: drop an armed key, dismiss the bar (its drop-down closed, the box normalized), mirror the
         // box's final text into the Agent Manager's box, close the Popup and log [nav] sidepanel launcher close
         // (<reason>). When the card held keyboard focus, focus goes back to the current tab on a later tick
