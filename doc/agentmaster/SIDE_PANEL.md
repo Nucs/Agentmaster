@@ -453,8 +453,8 @@ width (the 320 px `ToolTip` cap above); no `[exc] Side-panel card …` lines in 
 
 Built 2026-10-06 (commit f73481af7); in production 0.6.8.19 since 2026-10-12 and in the v0.7.9
 pre-release. The fix of item 5 below (2026-10-12, commit bd9ba2eae) is in dev since 0.0.1.6 and in
-production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) is in no build
-yet. The
+production since 0.6.8.20. The folder list opening WITH the card (item 5, 2026-10-19) and the
+one-click Launch (item 8, 2026-10-19) are in no build yet. The
 header's **+** button (the first of the right-aligned buttons, left
 of **Sum** — the user's "leftmost, to Sum") opens a small card AT THE CLICK that holds the Agent
 Manager's own launch row, so a session starts from the side panel without leaving the tab:
@@ -567,6 +567,34 @@ Manager's own launch row, so a session starts from the side panel without leavin
    `_ResumeSessionFromDisk`, `_ForkSessionFromDisk`), with the page's own "Claude not detected"
    notice (`_PromptClaudeMissing`). Both bars push into ONE recent-folders list
    (`AgentManagerContent::LaunchRecentDirs`).
+   - **ONE click on Launch launches (2026-10-19, NOT BUILT yet) — the user's report:** "Can Launch
+     Claude work exactly like it does now but on a single-click … instead of double-click". The
+     hover menu is a light-dismiss `MenuFlyout`, and XAML EATS the press that dismisses one: the
+     press closed the menu and never reached Launch, and the next pointer move over the button
+     reopened the menu (PointerEntered opens it at once), so only a double-click — no move between
+     its presses — got through. The note of 2026-10-10 said every press passed through (read in the
+     WinUI 3 source, where a transient flyout makes the root visual its pass-through element); the
+     installed builds do not behave so, and even an explicit `OverlayInputPassThroughElement` could
+     not reach the card's Launch, which sits in ANOTHER popup (WinUI's re-hit-test disables the whole
+     popup root). Production's hooks.log of 08:53: the card opened, then closed 4 s later on an
+     outside press, with no launch.
+   - **Now** the menu's `Closing` (raised synchronously while the press is processed — WinUI
+     `CPopupRoot::CloseTopmostPopup`) ARMS the press when the physical primary button is down
+     (`GetAsyncKeyState`, `SM_SWAPBUTTON`; `_NoteLaunchMenuClosing`), keeping the cursor's screen
+     position; the menu does not reopen while a press is armed; and the release on Launch
+     (`PointerReleased`, handledEventsToo — ButtonBase never saw the press, so it raises no Click)
+     completes the click when the press point, mapped into Launch's coordinates through the cursor's
+     screen delta and the island's rasterization scale, lies on Launch (`_OnLaunchButtonReleased` →
+     `ClickLaunch`). An arm lives 3 s at most (`kLaunchEatenPressMaxMs`). Logged
+     `[launchbar] Launch clicked while its hover menu was up: …`.
+   - **A double-click launches once:** `ClickLaunch` ignores a call within the system double-click
+     time of the previous one (`GetDoubleClickTime`; logged `[launchbar] a second Launch click within
+     the double-click time was ignored …`) — the habit the eaten click taught.
+   - **Not covered:** a press that a busy UI thread processes only after the physical release reads
+     "up" and stays eaten (`GetKeyState` would see it, but it may never be updated by the island's
+     pointer input, and a stale "down" would arm every close); a touch or pen press (no mouse button
+     state). The same light dismiss still eats a first click anywhere else (the box, a folder row)
+     while the hover menu is up.
 
 **Keys act on the KEY-UP** (the `AgentModelPrompt.h` rule): the card's `PreviewKeyDown` arms
 Escape (drop-down closed) or Enter on the focused Launch / Fork button and marks it handled; its
@@ -609,8 +637,12 @@ and a typed session id that shows Fork keep the list under the box; after Browse
 it was; the card
 shows the Manager box's text and the same underline; typing opens the drop-down and mirrors into the
 Manager's box (open the Agent Manager page beside it to watch); Browse… / a RECENT row / a GIT
-WORKTREES row work; hovering Launch opens the model / preset menu at once (no wait), a click on
-Launch while that menu is up still launches (one click, not two), and Specify… keeps the card open
+WORKTREES row work; hovering Launch opens the model / preset menu at once (no wait), ONE click on
+Launch while that menu is up launches the Default (2026-10-19: one
+`[launchbar] Launch clicked while its hover menu was up …` line per such click in hooks.log), on
+the card AND on the Agent Manager page, also with the pointer moved a little before the click; a
+double-click starts ONE session (a `[launchbar] a second Launch click … ignored` line); a press on
+Launch dragged off and released elsewhere launches nothing; and Specify… keeps the card open
 until its pick launches; Launch, a typed session id's Resume and Fork each start the session and
 close the card; Esc closes the drop-down first, then the card, and no ESC reaches the terminal (a
 running claude keeps running); Enter on a focused Launch launches on the key-up and no CR reaches
