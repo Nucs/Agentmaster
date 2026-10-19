@@ -43,6 +43,16 @@ namespace Agentmaster::Msg
         {
             return !ok && httpStatus == 400 && description.find(L"message is not modified") != std::wstring::npos;
         }
+        /// <summary>
+        /// Telegram's "TOPIC_NOT_MODIFIED": an editForumTopic that asked for the name and icon the topic shows already. The topic
+        /// is as wanted, so the caller treats it as done (MESSAGING.md §21.29: the rename's change line is still told). It is not
+        /// NotModified(), whose "message is not modified" Telegram answers only to a MESSAGE edit.
+        /// </summary>
+        /// <returns>True for that answer; false for every other one, a success included.</returns>
+        bool TopicNotModified() const noexcept
+        {
+            return !ok && httpStatus == 400 && description.find(L"TOPIC_NOT_MODIFIED") != std::wstring::npos;
+        }
         // Telegram's "message thread not found": the user deleted the topic (or it never existed here).
         bool ThreadNotFound() const noexcept
         {

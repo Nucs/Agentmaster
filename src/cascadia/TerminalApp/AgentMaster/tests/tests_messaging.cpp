@@ -16,6 +16,7 @@
 #include "../MessagingModels.h"
 #include "../MessagingNewThread.h" // §21.22: StripTopicNameDecoration reads an icon-form name (the user's rename of a thread)
 #include "../MessagingStartNote.h" // §21.18: the start note's marker, version word, kind, sound and text
+#include "../TelegramApi.h" // §21.29: TgResult::TopicNotModified (the struct only; the client is never called)
 #include "../TelegramFormat.h"
 
 using namespace Agentmaster;
@@ -1702,6 +1703,127 @@ void TestMessaging()
             ex.colorSquare = blue;
             CHECK(LineAt(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false, &ex)), 1) == L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>", "the card: the pin, the square, the title");
             CHECK(LineAt(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)), 1) == L"\U0001F4CC <b>agent manager tab</b>", "no square: the card as before");
+        }
+
+        // §21.29 — the change line is a rename's ONLY answer (the user's rule of 2026-10-19: a /rename in the topic posts no reply
+        // of its own), so it is never dropped: a topic whose history is being replayed HOLDS it and tells it once the replay is
+        // done, and Telegram's "TOPIC_NOT_MODIFIED" counts as a rename that took.
+        {
+            const std::wstring blue = L"\U0001F7E6";
+            const std::wstring green = L"\U0001F7E9";
+            const std::wstring red = L"\U0001F7E5";
+
+            // Telegram's answer to a topic edit that changes nothing; a MESSAGE edit's "not modified" is another answer.
+            TgResult sameTopic;
+            sameTopic.httpStatus = 400;
+            sameTopic.description = L"Bad Request: TOPIC_NOT_MODIFIED";
+            TgResult sameMessage;
+            sameMessage.httpStatus = 400;
+            sameMessage.description = L"Bad Request: message is not modified: specified new message content and reply markup are exactly the same";
+            TgResult took;
+            took.ok = true;
+            took.httpStatus = 200;
+            TgResult noAnswer;
+            noAnswer.transportFailed = true;
+            noAnswer.description = L"WinHTTP error 12007";
+            CHECK(sameTopic.TopicNotModified() && !sameTopic.NotModified(), "TOPIC_NOT_MODIFIED: the topic is as wanted, and it is not a message edit's answer");
+            CHECK(!sameMessage.TopicNotModified() && sameMessage.NotModified() && !took.TopicNotModified() && !noAnswer.TopicNotModified(), "...and only that answer is");
+
+            // A topic in the middle of its history replay (bytes [10, 100) still to send), named "old" in blue.
+            TopicRecord t;
+            t.sessionId = L"held-1";
+            t.threadId = 77;
+            t.title = L"old";
+            t.nameColor = blue;
+            t.backfillPath = L"C:\\t.jsonl";
+            t.backfillPos = 10;
+            t.backfillEnd = 100;
+            HoldTopicChangeLine(t, false, L"old", blue, blue, blue);
+            CHECK(!t.changeLineHeld && !TakeHeldTopicChangeLine(t).has_value(), "a change with nothing to tell holds no line");
+            // old -> new during the replay: held from what the topic showed, and not told while the replay is pending.
+            HoldTopicChangeLine(t, true, L"old", blue, blue, blue);
+            t.title = L"new";
+            CHECK(t.changeLineHeld && t.changeLineFromTitle == L"old" && t.changeLineFromSquare == blue, "a rename during the replay is held from what the topic showed");
+            CHECK(!TakeHeldTopicChangeLine(t).has_value() && t.changeLineHeld, "nothing is told while the replay is pending");
+            // new -> newer keeps the start; once the replay is done, ONE line from the first title to the last.
+            HoldTopicChangeLine(t, true, L"new", blue, blue, blue);
+            t.title = L"newer";
+            t.backfillPos = t.backfillEnd;
+            const auto line = TakeHeldTopicChangeLine(t);
+            CHECK(line.has_value() && TgRenderTitleTokensClassic(*line) == L"<i>\x201C\U0001F7E6 old\x201D changed the title to \x201C\U0001F7E6 newer\x201D</i>",
+                  "once the replay is done: one line from the first title to the last");
+            CHECK(!t.changeLineHeld && t.changeLineFromTitle.empty() && t.changeLineFromSquare.empty() && !TakeHeldTopicChangeLine(t).has_value(), "taking the line clears it: told once");
+
+            // Renames that undo each other are released with nothing to tell.
+            t.backfillPos = 10;
+            HoldTopicChangeLine(t, true, L"newer", blue, blue, blue);
+            t.title = L"x";
+            HoldTopicChangeLine(t, true, L"x", blue, blue, blue);
+            t.title = L"newer";
+            t.backfillPos = t.backfillEnd;
+            const auto undone = TakeHeldTopicChangeLine(t);
+            CHECK(undone.has_value() && undone->empty() && !t.changeLineHeld, "renames that undo each other: released, nothing to tell");
+
+            // §21.13's quiet rule survives the hold: a later QUIET re-square (NoticeOldSquare gave the new square) moves the held
+            // square along, so a mode switch during a long replay is not told as a recolor...
+            t.backfillPos = 10;
+            t.title = L"a";
+            t.nameColor = blue;
+            HoldTopicChangeLine(t, true, L"a0", blue, blue, blue);
+            HoldTopicChangeLine(t, false, L"a", green, blue, green);
+            t.nameColor = green;
+            t.backfillPos = t.backfillEnd;
+            const auto quiet = TakeHeldTopicChangeLine(t);
+            CHECK(quiet.has_value() && TgRenderTitleTokensClassic(*quiet) == L"<i>\x201C\U0001F7E9 a0\x201D changed the title to \x201C\U0001F7E9 a\x201D</i>",
+                  "a quiet re-square during the hold is not told as a recolor");
+            // ...but never hides a REAL recolor held before it.
+            t.backfillPos = 10;
+            t.title = L"b";
+            t.nameColor = blue;
+            HoldTopicChangeLine(t, true, L"b", blue, blue, red);
+            t.nameColor = red;
+            HoldTopicChangeLine(t, false, L"b", green, red, green);
+            t.nameColor = green;
+            t.backfillPos = t.backfillEnd;
+            const auto real = TakeHeldTopicChangeLine(t);
+            CHECK(real.has_value() && TgRenderTitleTokensClassic(*real) == L"<i>\x201C\U0001F7E6 b\x201D changed the color to \U0001F7E9</i>",
+                  "a real recolor held first is still told after a later quiet one");
+
+            // A replay that is gone (a rekey's new conversation without history: _seedFromTranscript resets it) lets the line go.
+            TopicRecord cut;
+            cut.title = L"c";
+            cut.nameColor = blue;
+            cut.backfillPath = L"C:\\t.jsonl";
+            cut.backfillPos = 5;
+            cut.backfillEnd = 50;
+            HoldTopicChangeLine(cut, true, L"c0", blue, blue, blue);
+            cut.backfillPath.clear();
+            cut.backfillPos = 0;
+            cut.backfillEnd = 0;
+            const auto cutLine = TakeHeldTopicChangeLine(cut);
+            CHECK(cutLine.has_value() && !cutLine->empty(), "a replay that is gone lets the held line go");
+
+            // The state file keeps a held line (a restart in the middle of a replay); nothing held writes no key; an older file
+            // holds none; the strings count only with the flag.
+            MessagingState st;
+            TopicRecord h;
+            h.sessionId = L"h";
+            h.threadId = 9;
+            h.changeLineHeld = true;
+            h.changeLineFromTitle = L"from";
+            h.changeLineFromSquare = blue;
+            st.topics[L"h"] = h;
+            const auto back = StateFromJson(StateToJson(st));
+            CHECK(back && back->topics.count(L"h") && back->topics.at(L"h").changeLineHeld && back->topics.at(L"h").changeLineFromTitle == L"from" &&
+                      back->topics.at(L"h").changeLineFromSquare == blue,
+                  "a held change line round-trips");
+            MessagingState unheld;
+            unheld.topics[L"n"].sessionId = L"n";
+            CHECK(json::Dump(StateToJson(unheld)).find(L"changeLine") == std::wstring::npos, "nothing held: no key is written");
+            const auto older = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
+            CHECK(older && older->topics.count(L"o") && !older->topics.at(L"o").changeLineHeld && older->topics.at(L"o").changeLineFromTitle.empty(), "an older file: no change line waits");
+            const auto stray = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"s\",\"threadId\":5,\"changeLineFromTitle\":\"x\"}]}"));
+            CHECK(stray && stray->topics.count(L"s") && !stray->topics.at(L"s").changeLineHeld && stray->topics.at(L"s").changeLineFromTitle.empty(), "the held strings count only with the flag");
         }
 
         // §21.22 — the STATE ICON: a session's state is its topic's ICON (one of Telegram's topic icons), and the name keeps only

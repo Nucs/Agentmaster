@@ -1173,6 +1173,16 @@ namespace Agentmaster::Msg
                 _reply(threadId, L"Usage: /rename &lt;new title&gt;", false);
                 return;
             }
+            // §21.29: the title the session has already, as typed or as the topic PRINTS it (TgOneLineTitle: a multi-line tab title on
+            // one line), changes nothing, so no change line will come, and this reply is the command's only answer. The tab's title
+            // is left as it is (a multi-line one is not flattened), the rule of a thread rename (_onUserTopicRenamed).
+            if (s->title == title || TgOneLineTitle(s->title) == title)
+            {
+                // §21.15: a chip in a rich reply; §21.17: a link to the session's topic.
+                _reply(threadId, L"The title is already <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title, _threadOf(sessionId)) + L"</b>.", false);
+                done(L"unchanged");
+                return;
+            }
             if (_hooks.sessionAction)
             {
                 _hooks.sessionAction(sessionId, L"rename", title, nullptr); // the hosting window pins the tab + the registry (Rule #11)
@@ -1181,9 +1191,11 @@ namespace Agentmaster::Msg
             {
                 _registry->Update(sessionId, [&](SessionInfo& ss) { ss.title = title; });
             }
-            // §21.13: the new title with the tab's color square (the topic's name, and a line saying what changed, follow).
-            // §21.15: a chip in a rich reply; §21.17: a link to the session's topic.
-            _reply(threadId, L"Renamed to <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title, _threadOf(sessionId)) + L"</b> (the topic follows in a moment).", false);
+            // §21.29, the user's rule of 2026-10-19 ("We dont need the first as long as second always sends on a change"): NO reply.
+            // It used to answer "Renamed to 🟦 new (the topic follows in a moment).", and the topic's change line ("“🟦 old” changed
+            // the title to “🟦 new”", _renameTopic) followed it, two messages for one rename. The change line is the one answer now:
+            // the topic sync renames the topic within a tick or two of the registry's new title, and the line follows every change —
+            // held while the topic's history is replayed, and the rename made again when its call got no answer.
             done(L"ok");
             return;
         }
