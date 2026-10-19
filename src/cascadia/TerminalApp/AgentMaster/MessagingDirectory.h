@@ -9,7 +9,8 @@
 // and when clicked jumps to the topic … Also a two rows of stats"; and, once the first directory was up, "Tags with 0 tabs
 // should not be shown" — a tag no open tab carries is left out (§21.16.1). On 2026-10-19 the user asked for one more section, at
 // the bottom: "the top 10 tab titles in the order of their recent activity and that are not in stationary status" — the RECENT
-// ACTIVITY section (§21.16.8): the ten newest open Claude tabs that are not Idle or Done, in the topic list's MOST RECENT order.
+// ACTIVITY section (§21.16.8): the ten newest open Claude tabs whose claude has not ended (Done), in the topic list's MOST RECENT
+// order. Idle tabs are listed too: the first version left them out, and the user asked the same day "Do include idle ones please".
 //
 // This header is the PURE half: the model the service fills, its two renders — a RICH message whose titles are URL chips in
 // the look nearest the tab's color, and the classic HTML the service sends when Telegram refuses the rich one —, the hash that
@@ -144,7 +145,7 @@ namespace Agentmaster::Msg
         /// <summary>
         /// The CANDIDATES of the Recent activity section (§21.16.8): every open Claude tab — the population of the stats rows — in
         /// any order. The render keeps the ones whose state is not stationary (DirectoryStateIsStationary), newest first, at most
-        /// kDirectoryMaxRecentTabs (PickDirectoryRecentTabs). Empty = the section says that no tab is working or waiting.
+        /// kDirectoryMaxRecentTabs (PickDirectoryRecentTabs). Nothing to list = the section says so in one line.
         /// </summary>
         std::vector<DirectoryTab> recent;
     };
@@ -300,16 +301,18 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// Whether a tab's state is STATIONARY — the user's word (2026-10-19) for the tabs the Recent activity section leaves out
-    /// (§21.16.8): nothing happens in the tab and nothing is asked of the user. Idle (no turn in flight, nothing waiting) and Done
-    /// (claude ended in the tab) are; Running (a turn in flight), Waiting for you (its turn is over and it waits for the next
-    /// message), Needs approval and Error (each waits for the user's answer) are not. ⚠ A state added to SessionState is NOT
-    /// stationary until it is named here, so a new state shows in the section rather than vanishing from it.
+    /// (§21.16.8): Done, a tab whose claude has ended — nothing happens in it until it is restarted. Every other state is listed:
+    /// Running (a turn in flight), Waiting for you (its turn is over and it waits for the next message), Needs approval and
+    /// Error (each waits for the user's answer), and Idle. Idle was stationary in the first version (e42c75fcf: nothing happens
+    /// in the tab and nothing is asked of the user); the user asked the same day to list it: "Do include idle ones please". ⚠ A
+    /// state added to SessionState is NOT stationary until it is named here, so a new state shows in the section rather than
+    /// vanishing from it.
     /// </summary>
     /// <param name="state">The tab's state.</param>
-    /// <returns>True for Idle and Done.</returns>
+    /// <returns>True for Done only.</returns>
     inline constexpr bool DirectoryStateIsStationary(SessionState state) noexcept
     {
-        return state == SessionState::Idle || state == SessionState::Done;
+        return state == SessionState::Done;
     }
 
     /// <summary>
@@ -662,7 +665,7 @@ namespace Agentmaster::Msg
     /// </code>
     /// The stats rows come FIRST: a pinned message's bar shows the start of its text, so the counts read at the top of the chat.
     /// The Recent activity section comes LAST, before the footer (the user's "At the bottom", §21.16.8): at most
-    /// kDirectoryMaxRecentTabs open Claude tabs whose state is not stationary (Idle and Done are; PickDirectoryRecentTabs), in
+    /// kDirectoryMaxRecentTabs open Claude tabs whose state is not stationary (only Done is: claude ended; PickDirectoryRecentTabs), in
     /// the topic list's MOST RECENT order, each row the same dot and chip as under a tag (detail::DirectoryTabRowRich /
     /// DirectoryTabRowClassic); one italic line when none is listed. It is built BEFORE the tag sections, which fill the message
     /// only up to the room it leaves, so a full message never drops it; the legend goes under its heading only when no tag
@@ -771,9 +774,9 @@ namespace Agentmaster::Msg
         }
         if (recent.empty())
         {
-            // ONE line for "no open tab" and "every open tab is stationary": the reader is told the same either way.
-            richRecent += L"<p><i>No tab is working or waiting for you right now.</i></p>";
-            classicRecent += L"\n<i>No tab is working or waiting for you right now.</i>";
+            // ONE line for "no open tab" and "every open tab has ended" (only Done is stationary): one sentence says both.
+            richRecent += L"<p><i>No tab to list: none is open, or every open one has ended.</i></p>";
+            classicRecent += L"\n<i>No tab to list: none is open, or every open one has ended.</i>";
         }
         else
         {

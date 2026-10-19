@@ -2529,7 +2529,7 @@ title as an in-text copy_text button of a rich message, in each of Telegram's bu
 > (commit e4c953201) and is LIVE on dev 0.0.1.28 since 2026-10-18 00:09 (`Q:\agentmaster-layouts\Debug`, the build of
 > 2404f7838): its first start EDITED message 916 with one dot button; a tap on it is not checked yet. Not in production
 > (0.6.8.21 is the build of 46e3aad42) — a production build and swap need the user's word. The RECENT ACTIVITY section
-> (§21.16.8: at the bottom, the ten newest open tabs that are not stationary — not Idle or Done) was written 2026-10-19
+> (§21.16.8: at the bottom, the ten newest open tabs whose claude has not ended — Idle ones included, at the user's word) was written 2026-10-19
 > (NOT BUILT yet).
 
 **The user's request** (2026-10-17): "I want a pinned message per bot, can we pin a message with a nice list of dedicated
@@ -2554,7 +2554,7 @@ Tap a title to open its thread (Desktop, iPhone). Tap its dot to put the thread 
 [🔵] [🟦 Agentmaster]       the dot is a button (§21.16.7), the title a link
 [🟡] [🟩 docs]
 ⚪ [🟦 an idle tab]          a plain dot and a chip that opens nothing: the tab has no topic
-🕘 Recent activity           (§21.16.8: the ten newest tabs that are not Idle or Done)
+🕘 Recent activity           (§21.16.8: the ten newest tabs, Done ones left out)
 [🟡] [🟩 docs]
 [🔵] [🟦 Agentmaster]
 updated 5 minutes ago
@@ -2815,12 +2815,14 @@ updated 5 minutes ago
 #### 21.16.8 The RECENT ACTIVITY section: the ten newest tabs that are not stationary (2026-10-19; NOT BUILT yet)
 
 - **The user's request** (2026-10-19): "In the telegram pinned message we specify the tabs we have. At the bottom add the top
-  10 tab titles in the order of their recent activity and that are not in stationary status."
+  10 tab titles in the order of their recent activity and that are not in stationary status." Once the first version was
+  written (e42c75fcf, which left Idle tabs out): "Do include idle ones please".
 - **What it shows** — the directory's last section, right before the footer:
 
   ```
   🕘 Recent activity
-  [🟡] [🟩 docs]               the newest first
+  [⚪] [🟦 notes]              the newest first; an Idle tab is listed too
+  [🟡] [🟩 docs]
   🟠 [🟪 hotfix review]        no topic yet: a plain dot and a chip that opens nothing
   [🔵] [🟦 Agentmaster]
   [🔴] [🟥 zeta error]
@@ -2831,12 +2833,15 @@ updated 5 minutes ago
   build both (`detail::DirectoryTabRowRich` / `DirectoryTabRowClassic`; the tag sections call them too now, their output
   unchanged byte for byte): in the rich render the dot is a callback button when the tab has a topic (§21.16.7) and the
   chip a URL button to its topic in its color's look; in the classic render a plain glyph and a link. The rest are not
-  counted: the stats rows above count every state. With nothing to list, one line: "No tab is working or waiting for you
-  right now."
-- **"Stationary"** (`DirectoryStateIsStationary`; the user's word, read as): a state in which nothing happens in the tab and
-  nothing is asked of the user — **Idle** and **Done** (claude ended in the tab). Listed: **Running**, **Waiting for you**,
-  **Needs approval** and **Error**. The section reads the state only, so a pinned session (§5.3) that is Idle is left out
-  like any other. ⚠ A state added to `SessionState` later is listed until it is named in `DirectoryStateIsStationary`.
+  counted: the stats rows above count every state. With nothing to list (no open tab, or every open one has ended), one
+  line: "No tab to list: none is open, or every open one has ended."
+- **"Stationary"** (`DirectoryStateIsStationary`): **Done** only — a tab whose claude has ended; nothing happens in it until
+  it is restarted. Listed: **Running**, **Waiting for you**, **Needs approval**, **Error** and **Idle**. The first version
+  (e42c75fcf) read the user's word as "nothing happens in the tab and nothing is asked of the user" and left Idle out too;
+  the user's answer the same day: "Do include idle ones please". So on a quiet fleet the section lists the ten tabs used
+  last, whatever their state. An Idle tab past its topic's idle grace (D25) has no topic: its row is a plain dot and a chip
+  that opens nothing until its next turn. ⚠ A state added to `SessionState` later is listed until it is named in
+  `DirectoryStateIsStationary`.
 - **The order — "recent activity"** (`PickDirectoryRecentTabs`): the side panel's MOST RECENT key (`MostRecentSortKeyMs`:
   the newest turn boundary — a prompt sent, a turn finished —; for a session with no turn yet, its creation instant),
   compared by the topic list's own rule (`TopicRanksAbove`, §21.8), so the section lists the tabs in the order their
@@ -2853,24 +2858,24 @@ updated 5 minutes ago
 - **The legend** ("Tap a title … Tap its dot …") goes under the first heading whose rows have dot buttons: under Tags as
   before, or under Recent activity when no tag section has one. Once at most.
 - **The hash** covers the section, so a change of what it lists — a tab joining or leaving, a state, the order, a title —
-  edits the directory (at most every two minutes, §21.16.4); a stationary tab, the order of the candidates and an eleventh,
-  older tab change nothing. The first start of a build with it EDITS the directory once (the new section moves the hash).
+  edits the directory (at most every two minutes, §21.16.4); a Done tab, the order of the candidates and an eleventh, older
+  tab change nothing. The first start of a build with it EDITS the directory once (the new section moves the hash).
 - **Logs:** `DescribeDirectoryRender` adds `, N recent tab(s)` to the words of the post and of a run's first edit;
   `dotsShown` (`, M dot button(s)`) counts the section's dot buttons too.
 - **The code:** MessagingDirectory.h (`kDirectoryMaxRecentTabs`, `DirectoryTab::recentMs`, `DirectoryModel::recent`,
   `DirectoryRender::recentShown`, `DirectoryStateIsStationary`, `PickDirectoryRecentTabs`, `detail::DirectoryTabRowRich` /
   `DirectoryTabRowClassic`, `RenderDirectory`, `DescribeDirectoryRender`); Messaging.cpp (`_directoryTick` fills the
   candidates from the sync's facts: `TabFact::mostRecentMs`, the topic's thread); Messaging.h (`_directoryTick`'s doc).
-- **Tests** (`TestMessagingDirectory`): the stationary states; the pick (the ten newest, the stationary ones left out
-  however new, the candidates' order irrelevant, ties by title and then session id, no room, no candidate); the section right
-  before the footer in both renders with its exact rows (dot buttons, a tab with no topic, four chip looks) and after the tag
-  sections; the legend once, under Tags or under Recent activity; the counts and the log's words; the empty line, and only
-  stationary candidates rendering exactly like none; the hash (a stationary candidate, the order and an older eleventh out; a
-  state, a tab going idle and a new turn boundary in); ten at most; a full message keeping all ten rows in both renders, the
-  classic one still one message.
-- **Open:** the look on the phone; whether the user counts **Waiting for you** as stationary — production saves ~400 tabs
-  Waiting, so on a quiet fleet the section lists the newest of them (one line of `DirectoryStateIsStationary` changes it);
-  a build and swap need the user's word.
+- **Tests** (`TestMessagingDirectory`): the stationary states (Done only; Idle listed); the pick (the ten newest, an Idle tab
+  listed, a Done one left out however new, the candidates' order irrelevant, ties by title and then session id, no room, no
+  candidate); the section right before the footer in both renders with its exact rows (dot buttons, an Idle tab's dot, a tab
+  with no topic, four chip looks) and after the tag sections; an Idle tab alone listed with a plain dot; the legend once,
+  under Tags or under Recent activity; the counts and the log's words; the empty line, and only Done candidates rendering
+  exactly like none; the hash (a Done candidate, the order and an older eleventh out; a state, a tab going idle — it stays,
+  its dot changes —, a tab ending — it leaves — and a new turn boundary in); ten at most; a full message keeping all ten rows
+  in both renders, the classic one still one message.
+- **Open:** the look on the phone; a build and swap need the user's word. Done is the one state still left out (one line of
+  `DirectoryStateIsStationary` lists it too).
 
 ### 21.17 Every title opens its topic, the "👤 You" line names its session, turns reply to turns, and a NEW THREAD starts a session (2026-10-18; LIVE on dev 0.0.1.29 since 02:27)
 

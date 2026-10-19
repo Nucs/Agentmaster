@@ -397,11 +397,11 @@ void TestMessagingDirectory()
 
     // ---- the Recent activity section (§21.16.8): the ten newest tabs that are not stationary, at the bottom ----
     {
-        CHECK(DirectoryStateIsStationary(SessionState::Idle) && DirectoryStateIsStationary(SessionState::Done),
-              "Idle and Done are stationary: nothing happens in the tab and nothing is asked of the user");
-        CHECK(!DirectoryStateIsStationary(SessionState::Running) && !DirectoryStateIsStationary(SessionState::WaitingForInput) &&
-                  !DirectoryStateIsStationary(SessionState::NeedsApproval) && !DirectoryStateIsStationary(SessionState::Error),
-              "Running, Waiting for you, Needs approval and Error are not");
+        CHECK(DirectoryStateIsStationary(SessionState::Done), "Done is stationary: claude ended in the tab");
+        CHECK(!DirectoryStateIsStationary(SessionState::Idle) && !DirectoryStateIsStationary(SessionState::Running) &&
+                  !DirectoryStateIsStationary(SessionState::WaitingForInput) && !DirectoryStateIsStationary(SessionState::NeedsApproval) &&
+                  !DirectoryStateIsStationary(SessionState::Error),
+              "Idle (the user's \"Do include idle ones please\"), Running, Waiting for you, Needs approval and Error are not");
 
         // The pick: the stationary tabs out, the newest MOST RECENT key first, at most ten.
         std::vector<DirectoryTab> cands;
@@ -413,12 +413,13 @@ void TestMessagingDirectory()
         cands.push_back(DirRecentTab(L"idlenew", L"idle but newest", SessionState::Idle, L"#61AFEF", 9100, 99999));
         cands.push_back(DirRecentTab(L"donenew", L"done but newer", SessionState::Done, L"#61AFEF", 9101, 88888));
         const auto picked = PickDirectoryRecentTabs(cands, kDirectoryMaxRecentTabs);
-        bool newestFirst = picked.size() == 10;
-        for (size_t i = 0; newestFirst && i < picked.size(); ++i)
+        bool newestFirst = picked.size() == 10 && picked[0].sessionId == L"idlenew";
+        for (size_t i = 1; newestFirst && i < picked.size(); ++i)
         {
-            newestFirst = picked[i].recentMs == 1011 - static_cast<int64_t>(i);
+            newestFirst = picked[i].recentMs == 1012 - static_cast<int64_t>(i);
         }
-        CHECK(newestFirst, "ten tabs, the newest key first: the two oldest are left out, and so are the two stationary ones, though newer");
+        CHECK(newestFirst,
+              "ten tabs, the newest key first: the idle tab is listed (the newest), the done one left out though newer than the rest, the three oldest drop off");
         const std::vector<DirectoryTab> reversedCands(cands.rbegin(), cands.rend());
         const auto pickedReversed = PickDirectoryRecentTabs(reversedCands, kDirectoryMaxRecentTabs);
         bool sameOrder = pickedReversed.size() == picked.size();
@@ -461,25 +462,28 @@ void TestMessagingDirectory()
                                       L"<tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</tg-button>";
         const std::wstring zetaRow = L"<tg-button type=\"callback_data\" data=\"d:front:77\">\U0001F534</tg-button> "
                                      L"<tg-button type=\"url\" style=\"danger\" url=\"https://t.me/Bot/77?topic=77\">\U0001F7E5 zeta error</tg-button>";
-        const std::wstring section = L"<h3>\U0001F558 Recent activity</h3><p>" + docsRow + L"<br>" + hotfixRow + L"<br>" + agentRow + L"<br>" + zetaRow + L"</p>";
+        const std::wstring idleRow = L"<tg-button type=\"callback_data\" data=\"d:front:81\">\x26AA</tg-button> "
+                                     L"<tg-button type=\"url\" style=\"primary\" url=\"https://t.me/Bot/81?topic=81\">\U0001F7E6 idle newest</tg-button>";
+        const std::wstring section = L"<h3>\U0001F558 Recent activity</h3><p>" + idleRow + L"<br>" + docsRow + L"<br>" + hotfixRow + L"<br>" + agentRow + L"<br>" + zetaRow +
+                                     L"</p>";
         CHECK(wr.rich.find(section + L"<footer>") != std::wstring::npos,
-              "the rich section: the four tabs that are not stationary, newest first, each with its dot and title chip, right before the footer");
+              "the rich section: the five tabs that are not stationary (the idle one too), newest first, each with its dot and title chip, right before the footer");
         const std::wstring classicSection = L"\n\n<b>\U0001F558 Recent activity</b>"
+                                            L"\n\x26AA <a href=\"https://t.me/Bot/81?topic=81\">\U0001F7E6 idle newest</a>"
                                             L"\n\U0001F7E1 <a href=\"https://t.me/Bot/31?topic=31\">\U0001F7E9 docs</a>"
                                             L"\n\U0001F7E0 \U0001F7EA hotfix review"
                                             L"\n\U0001F535 <a href=\"https://t.me/Bot/26785?topic=26785\">\U0001F7E6 Agentmaster</a>"
                                             L"\n\U0001F534 <a href=\"https://t.me/Bot/77?topic=77\">\U0001F7E5 zeta error</a>";
         CHECK(wr.classic.find(classicSection + L"\n\n<i>updated ") != std::wstring::npos, "the classic section: plain dots and links, right before the footer");
-        CHECK(wr.rich.find(L"idle newest") == std::wstring::npos && wr.rich.find(L"done tab") == std::wstring::npos &&
-                  wr.classic.find(L"idle newest") == std::wstring::npos && wr.classic.find(L"done tab") == std::wstring::npos,
-              "a stationary tab is not listed, however new");
+        CHECK(wr.rich.find(L"done tab") == std::wstring::npos && wr.classic.find(L"done tab") == std::wstring::npos,
+              "a stationary tab (Done: claude ended) is not listed, however new");
         CHECK(wr.rich.find(L"<h3>\U0001F558 Recent activity</h3>") > wr.rich.find(L"<b>\U0001F7E8 release</b>") && DirCount(wr.rich, L"<h3>") == 3,
               "the section comes after the tag sections");
         CHECK(DirCount(wr.rich, legendText) == 1 && wr.rich.find(L"<h3>\U0001F3F7\xFE0F Tags</h3>" + legendText) != std::wstring::npos,
               "the legend once, under the Tags heading, when the tag sections have dot buttons");
-        CHECK(wr.recentShown == 4 && wr.tabsShown == 5 && wr.dotsShown == 4 + 3,
-              "the counts: four recent rows, the tag chips as before, a dot button for every listed tab with a topic in either place");
-        CHECK(DescribeDirectoryRender(wr) == L"2 tag(s), 5 tab chip(s), 4 recent tab(s), 7 dot button(s), 1 tag(s) on no open tab not listed",
+        CHECK(wr.recentShown == 5 && wr.tabsShown == 5 && wr.dotsShown == 4 + 4,
+              "the counts: five recent rows, the tag chips as before, a dot button for every listed tab with a topic in either place");
+        CHECK(DescribeDirectoryRender(wr) == L"2 tag(s), 5 tab chip(s), 5 recent tab(s), 8 dot button(s), 1 tag(s) on no open tab not listed",
               "the log's words count the recent rows");
         CHECK(DirCount(wr.rich, L"<tg-button ") == DirCount(wr.rich, L"</tg-button>") && DirCount(wr.rich, L"<p>") == DirCount(wr.rich, L"</p>"),
               "the rich HTML stays balanced");
@@ -496,19 +500,25 @@ void TestMessagingDirectory()
         CHECK(dt.rich.find(L"<h3>\U0001F558 Recent activity</h3>" + legendText + L"<p>") != std::wstring::npos && DirCount(dt.rich, legendText) == 1,
               "no tag section has a dot button: the legend goes under the Recent activity heading, once");
         // Nothing to list.
-        const std::wstring emptyRich = L"<h3>\U0001F558 Recent activity</h3><p><i>No tab is working or waiting for you right now.</i></p><footer>";
-        const std::wstring emptyClassic = L"\n\n<b>\U0001F558 Recent activity</b>\n<i>No tab is working or waiting for you right now.</i>\n\n<i>updated ";
+        const std::wstring emptyRich = L"<h3>\U0001F558 Recent activity</h3><p><i>No tab to list: none is open, or every open one has ended.</i></p><footer>";
+        const std::wstring emptyClassic = L"\n\n<b>\U0001F558 Recent activity</b>\n<i>No tab to list: none is open, or every open one has ended.</i>\n\n<i>updated ";
         CHECK(r.rich.find(emptyRich) != std::wstring::npos && r.classic.find(emptyClassic) != std::wstring::npos && r.recentShown == 0,
-              "no candidate: one line says no tab is working or waiting");
-        DirectoryModel allStill = m;
-        allStill.recent = { DirRecentTab(L"x1", L"still one", SessionState::Idle, L"#61AFEF", 5, 100), DirRecentTab(L"x2", L"still two", SessionState::Done, L"#61AFEF", 6, 200) };
-        const DirectoryRender still = RenderDirectory(allStill, updatedAt, updatedAt);
-        CHECK(still.rich == r.rich && still.hash == r.hash, "only stationary candidates render exactly like none: the same line, the same hash");
+              "no candidate: one line says there is no tab to list");
+        DirectoryModel allEnded = m;
+        allEnded.recent = { DirRecentTab(L"x1", L"ended one", SessionState::Done, L"#61AFEF", 5, 100), DirRecentTab(L"x2", L"ended two", SessionState::Done, L"#61AFEF", 6, 200) };
+        const DirectoryRender ended = RenderDirectory(allEnded, updatedAt, updatedAt);
+        CHECK(ended.rich == r.rich && ended.hash == r.hash, "only stationary (Done) candidates render exactly like none: the same line, the same hash");
+        DirectoryModel onlyIdle = m;
+        onlyIdle.recent = { DirRecentTab(L"y1", L"quiet tab", SessionState::Idle, L"#61AFEF", 0, 100) };
+        const DirectoryRender oi = RenderDirectory(onlyIdle, updatedAt, updatedAt);
+        const std::wstring quietSection = L"<h3>\U0001F558 Recent activity</h3><p>\x26AA <tg-button type=\"disabled\" style=\"primary\">\U0001F7E6 quiet tab</tg-button></p>";
+        CHECK(oi.recentShown == 1 && oi.rich.find(quietSection) != std::wstring::npos,
+              "an idle tab alone is listed: a plain dot and a chip that opens nothing while it has no topic");
 
         // The hash follows what the section shows, and nothing else.
-        DirectoryModel plusStill = withRecent;
-        plusStill.recent.push_back(DirRecentTab(L"zzzz9999", L"another idle", SessionState::Idle, L"#61AFEF", 90, 777777));
-        CHECK(RenderDirectory(plusStill, updatedAt, updatedAt).hash == wr.hash, "a stationary candidate, however new, does not change the hash");
+        DirectoryModel plusEnded = withRecent;
+        plusEnded.recent.push_back(DirRecentTab(L"zzzz9999", L"another ended", SessionState::Done, L"#61AFEF", 90, 777777));
+        CHECK(RenderDirectory(plusEnded, updatedAt, updatedAt).hash == wr.hash, "a stationary (Done) candidate, however new, does not change the hash");
         DirectoryModel recentReversed = withRecent;
         std::reverse(recentReversed.recent.begin(), recentReversed.recent.end());
         CHECK(RenderDirectory(recentReversed, updatedAt, updatedAt).hash == wr.hash, "the candidates' order does not matter");
@@ -518,12 +528,17 @@ void TestMessagingDirectory()
         DirectoryModel wentIdle = withRecent;
         wentIdle.recent[3].state = SessionState::Idle; // zeta error -> Idle
         const DirectoryRender wi = RenderDirectory(wentIdle, updatedAt, updatedAt);
-        CHECK(wi.hash != wr.hash && wi.recentShown == 3 && wi.rich.find(L"zeta error") == std::wstring::npos, "a tab that went idle leaves the section");
+        CHECK(wi.hash != wr.hash && wi.recentShown == 5 && wi.rich.find(L"data=\"d:front:77\">\x26AA</tg-button>") != std::wstring::npos,
+              "a tab that went idle stays listed, its dot now the idle one (and the hash moves)");
+        DirectoryModel wentDone = withRecent;
+        wentDone.recent[3].state = SessionState::Done; // zeta error: claude ended in the tab
+        const DirectoryRender wd = RenderDirectory(wentDone, updatedAt, updatedAt);
+        CHECK(wd.hash != wr.hash && wd.recentShown == 4 && wd.rich.find(L"zeta error") == std::wstring::npos, "a tab whose claude ended leaves the section");
         DirectoryModel reranked = withRecent;
-        reranked.recent[3].recentMs = 9500; // zeta error's turn ended: its key is now the newest
+        reranked.recent[3].recentMs = 9500; // zeta error's turn ended: its key is now newer than every tab but the idle one
         const DirectoryRender rk = RenderDirectory(reranked, updatedAt, updatedAt);
-        CHECK(rk.hash != wr.hash && rk.rich.find(L"<h3>\U0001F558 Recent activity</h3><p>" + zetaRow + L"<br>" + docsRow) != std::wstring::npos,
-              "a new turn boundary moves its tab to the top, and changes the hash");
+        CHECK(rk.hash != wr.hash && rk.rich.find(L"<h3>\U0001F558 Recent activity</h3><p>" + idleRow + L"<br>" + zetaRow + L"<br>" + docsRow) != std::wstring::npos,
+              "a new turn boundary moves its tab up, and changes the hash");
 
         // At most ten; one older than the ten listed changes nothing.
         DirectoryModel eleven = m;
