@@ -171,7 +171,7 @@ design it is the better route into a session, wherever a session has it:
 | Claude Code's slash commands | `command` → `$.command.run` | typed like a prompt |
 | `/interrupt` | `abort` → `$.turn.abort` | one Esc through the hosting window |
 | What it is doing, and the turn's end (the final message) | exact `turn.start` / `turn.complete {reason}` / background work / `session.compact` events | the scanner's states and the transcript tail |
-| Questions and plans | `tool.call` on `AskUserQuestion` / `ExitPlanMode`, carrying the questions | the transcript's pending `tool_use` + the screen's menu |
+| Questions and plans | `tool.call` on `AskUserQuestion` / `ExitPlanMode`, carrying the questions | the transcript's pending `tool_use` + the screen's menu; since 2026-10-19 designed through a `PermissionRequest` hook that carries the questions and takes the answer, with no mod ([`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md), measured on 2.1.291) |
 | The settle before a queued send | 3 s (linked states do not flap) | 40 s |
 
 The transcript stays the record either way (MOD_LINK §13), so a topic's mirror always follows the
@@ -759,6 +759,12 @@ As built (§21.24): `/screenimage` (the screen as a picture — the card's 🖼 
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
+> **2026-10-19: superseded for `AskUserQuestion` and `ExitPlanMode`** by [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md).
+> Claude Code accepts the answer to both from a `PermissionRequest` hook, which runs beside the dialog and may
+> wait for the phone. That was measured on 2.1.291: a hook answered a question, approved a plan, and rejected a
+> plan with feedback. So these two tools need no key plan and no screen read. What stays from this section is
+> the message shape and the "answered elsewhere" edit. The text below is the earlier design.
+
 - **What is open:** in a linked session, the link's `question` / `permission` events (from `tool.call` on
   `AskUserQuestion` / `ExitPlanMode`, carrying the questions; MOD_LINK §4.4); otherwise the transcript's
   pending `tool_use` (the questions with their options and `multiSelect`; the plan text) — a new bounded
@@ -1092,7 +1098,7 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | **D2** | Messages sent while Agentmaster was closed (Telegram keeps them 24 h) | Handled at the next start; older than 10 min → asked before queueing; Operate never from the backlog | Drop them |
 | **D4** | A paired owner's level | **Operate** with confirmations on restart / deactivate / interrupt while running; the drive PIN offered, off | Steer |
 | **D6** | "Silent while I'm at the PC" (the final message too) | Offered, **off** (the rule as specified) | On by default |
-| **D9** | Answering questions and plans from a topic | Yes, by verified key plans (§7.4) | Leave them to the terminal |
+| **D9** | Answering questions and plans from a topic | Yes, through a `PermissionRequest` hook ([`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md), measured 2026-10-19; it replaces the verified key plans of §7.4; its own decisions are I1–I8) | Verified key plans (§7.4); leave them to the terminal |
 | **D10–D12** | Teams: route, tenant, endpoint | Teams Lite first; the tenant is the user's call; Cloudflare Tunnel on the PC for the bot | Bot first; dev tunnel / ngrok |
 | **D13** | Bots per install | One for release, one for dev — **the user's decision, 2026-10-17** (the move of §21.12.4: dev polls `@ClaudeSessionsDebugGateBot`, the release install `@ClaudeSessionsGateBot`) | One install only |
 | **D15** | The external contract | JSON-RPC over stdio, a child process | In-process plugins |
@@ -1113,9 +1119,9 @@ tunnel (one path per connection); the provider's signature check is part of its 
 
 | # | Question | How |
 |---|---|---|
-| P0-1 | The key plan of each menu: `AskUserQuestion` (single, multi, several questions, "Other"), plan approval, a permission prompt | claude-wrap-ConPTY driver |
+| P0-1 | The key plan of each menu: `AskUserQuestion` (single, multi, several questions, "Other"), plan approval, a permission prompt | claude-wrap-ConPTY driver. **Not needed (2026-10-19):** a `PermissionRequest` hook answers all three without keystrokes ([`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) §5) |
 | P0-2 | `SubmitPrompt` right after a turn ends, and into a dormant tab that was just started | the same driver |
-| P0-3 | How the transcript records `AskUserQuestion` and its answer | the corpus |
+| P0-3 | How the transcript records `AskUserQuestion` and its answer | the corpus. **Answered (2026-10-19):** [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) §1.1 (the answer's shape and the texts the model reads), §2 (1,055 calls: waits, outcomes, sizes), §5.5 (a hook's decision is recorded as `hook_permission_decision`) |
 | P0-4 | Per-topic pinned messages (the card) on Android, iOS, Desktop | a test bot |
 | P0-6 | Teams: custom app upload, Workflows, phone alerts in the user's tenant | the user's Teams |
 | P0-7 | Bot Connector JWT issuers for a single-tenant bot | Microsoft's page + one real request |
@@ -1133,7 +1139,7 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | P0-20 | `edited_message` for a message in a private-chat topic | a test bot |
 | P0-21 | Topic creation and deletion: is the user notified, is a deletion instant on every client? | a test bot |
 
-| P0-22 | Through the session link: can a mod answer an open `AskUserQuestion` / plan / permission dialog, or only observe it (`$.prompt.fill` answers `isFilled: false` under a dialog)? | MOD_LINK's probes (its Q4, Q6) |
+| P0-22 | Through the session link: can a mod answer an open `AskUserQuestion` / plan / permission dialog, or only observe it (`$.prompt.fill` answers `isFilled: false` under a dialog)? | MOD_LINK's probes (its Q4, Q6). **Answered for this use (2026-10-19, read in the code):** a mod's `tool.call` `{result}` can answer a question, but it cannot approve a plan, because `ExitPlanMode` restores the mode in its own `call()`, which a `{result}` skips. The hook route needs no mod ([`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) §4) |
 
 (P0-5 and P0-10 of the earlier drafts are retired: drafts are P0-18; channels are not used, D16.)
 
@@ -1192,7 +1198,9 @@ transport's failures and slow calls.
 - **Questions and plans are shown, not answered (§7.4).** A question arrives with its options as a numbered
   list, a plan with its text, both as the turn's final message; answering is at the PC (the key plans of
   P0-1 are unmeasured). A permission prompt shows as the state edge's "Needs your approval at the PC". *(Since §21.6
-  there is no such line: the card is re-sent at the bottom of the topic with sound.)*
+  there is no such line: the card is re-sent at the bottom of the topic with sound. Since 2026-10-19
+  [`INTERACTIVE_TOOLS.md`](INTERACTIVE_TOOLS.md) designs answering both from the topic through a
+  `PermissionRequest` hook, measured on Claude Code 2.1.291; not built.)*
 - **`/interrupt` is one Esc through the registry's injector** (with a confirmation while running), not the
   link's abort (the session link is not built).
 - **`/takedraft` queues a COPY** of the unsent draft (the box at the PC keeps it); the mail button's verified
