@@ -538,6 +538,9 @@ As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, ever
 Session] in Error) · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
 [🖼 Screen Image] · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
 
+As built (§21.26): the STATE line comes first ("🟡 Waiting for you since 08:21", a 📌 at its end for a pinned session) and
+the title second ("📌 🟦 title", a chip in a rich card); every other line keeps its order under the title.
+
 ### 6.2 What it is doing, or whether it is idle
 
 - **The card's state line** — the state, since when, and while Running the current step ("Bash: npm
@@ -3834,6 +3837,45 @@ paths (no wizard, the model unchecked, §21.21); a held command still replays as
 session restores under a NEW id (restore-fresh), so a launch restored from the state file can time out and send its thread back
 into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
 or post.
+
+### 21.26 The card leads with its state, the title under it (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19), with a card pasted from the dev bot (its first two lines: "📌 🟧 messaging bot answer
+> questions" / "🟡 Waiting for you since 08:21"): "swap the row of status waiting for you and the title when we send this
+> message to telegram".
+
+**What changed** (`MessagingModels.h` `BuildCardText`): the card's first two lines traded places. The STATE line comes first
+(the state, since when, and the 📌 that ends it for a pinned session, §5.3), the title line second (`📌 🟧 <b>title</b>`, a
+chip in a rich card, §21.15, and a link to its topic, §21.17). Nothing else moved: the state's own action line (a parked tab,
+an Error, an exit: §21.24), the idle line, the history line, the place line, the runner, the draft, the error and the recap
+follow the title in their old order. Inside a topic the title is the topic's own name already, so the card now opens with what
+changes. `/status` replies with the same card. The card of the request now reads:
+
+```
+🟡 Waiting for you since 08:21
+📌 🟧 messaging bot answer questions
+…/source/Agentmaster · agentmaster · claude-opus-5-5 · max · ctx 907K
+Runner Paused · queue 0
+✎ unsent at the PC: “TODO get the jsonl of with examples.”
+
+📝 Recap · 08:24
+You asked how Telegram could answer…
+```
+
+**The cost: one edit per topic, once.** The service compares a hash of the card's classic text and buttons with the one the
+topic's record holds (`TopicRecord::cardTextHash`, persisted, §21.6). Every card's text changed, so the first refresh after the
+build edits each card once (or re-posts it, where a re-post is due anyway): one call per topic on the chat's flood budget, at
+the outbox's ~1 call/s. d0fbc4e31 (§21.24's Restart rule, also in no build yet) changes the Main keyboard of every card too,
+and the hash covers the buttons, so a build that carries both costs ONE edit per card, not two. The function's `<remarks>`
+now says that the line order is part of the hash.
+
+**Tests** (`tests/tests_messaging.cpp`, `TestMessaging`, through a new `LineAt` helper): the card leads with the state line
+("🔵 Running since HH:MM") and its second line is the title; the §21.13 square checks and the §21.15 chip checks read the title
+on the second line; the rich form starts with the state line, a break, then the pin and the chip.
+
+**Check after the build** (each install, with its bot): the cards show the state first and the title (its chip / link) second,
+on the phone and on the desktop app; a pinned session's 📌 ends the first line; a parked tab's card reads the state, the title,
+then "💤 not running — …"; `/status` shows the same order.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

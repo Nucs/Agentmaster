@@ -39,6 +39,30 @@ namespace
         }
         return n;
     }
+
+    /// <summary>
+    /// One line of a text, counted from 0. The card's LINE ORDER is pinned with it (§21.26: the state line first, the title
+    /// second), which a find() anywhere in the card cannot see.
+    /// </summary>
+    /// <param name="text">The text, its lines separated by line feeds (a card's classic render).</param>
+    /// <param name="index">The line's index; 0 is the first line.</param>
+    /// <returns>The line without its line feed; "" past the last line, so a check on a missing line fails instead of throwing.</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be copied.</exception>
+    std::wstring LineAt(const std::wstring& text, size_t index)
+    {
+        size_t start = 0;
+        for (size_t i = 0; i < index; ++i)
+        {
+            const size_t lineFeed = text.find(L'\n', start);
+            if (lineFeed == std::wstring::npos)
+            {
+                return {};
+            }
+            start = lineFeed + 1; // at most text.size(): substr below then yields "" for an empty last line
+        }
+        const size_t end = text.find(L'\n', start);
+        return text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+    }
 }
 
 void TestMessaging()
@@ -669,7 +693,9 @@ void TestMessaging()
         s.queue.push_back(q);
         s.pendingInput = L"and then rebase onto <main>";
         const std::wstring card = TgRenderTitleTokensClassic(BuildCardText(s, 1000 + 3 * 60 * 1000, 0, false)); // §21.15: the title is a token; the classic text
-        CHECK(card.find(L"<b>Agentmaster/feature</b>") != std::wstring::npos, "the card leads with the title");
+        // §21.26 (the user's request of 2026-10-19): the state line leads, the title is the second line.
+        CHECK(LineAt(card, 0).rfind(L"\U0001F535 Running since ", 0) == 0, "the card leads with the state line");
+        CHECK(LineAt(card, 1) == L"\U0001F4CC <b>Agentmaster/feature</b>", "the title is the card's second line");
         // The "since" is a LOCAL clock time ("HH:MM" — the same day in the test's epochs), never a span: the
         // card is re-edited on every text change, and a span changed every minute on every topic.
         const auto looksLikeClock = [](std::wstring_view t) {
@@ -1636,15 +1662,15 @@ void TestMessaging()
             const auto old = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}"));
             CHECK(old && old->topics.count(L"o") && old->topics.at(L"o").nameColor.empty() && old->topics.at(L"o").nameColorMode == -1, "an older file: no square, the mode unknown (re-squared once, quietly)");
 
-            // The card's title wears the square the name shows.
+            // The card's title wears the square the name shows (on the card's second line since §21.26: the state line leads).
             SessionInfo s;
             s.id = L"card-session";
             s.title = L"agent manager tab";
             s.live = true;
             CardExtras ex;
             ex.colorSquare = blue;
-            CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false, &ex)).rfind(L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>\n", 0) == 0, "the card: the pin, the square, the title");
-            CHECK(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)).rfind(L"\U0001F4CC <b>agent manager tab</b>\n", 0) == 0, "no square: the card as before");
+            CHECK(LineAt(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false, &ex)), 1) == L"\U0001F4CC \U0001F7E6 <b>agent manager tab</b>", "the card: the pin, the square, the title");
+            CHECK(LineAt(TgRenderTitleTokensClassic(BuildCardText(s, 5000, 0, false)), 1) == L"\U0001F4CC <b>agent manager tab</b>", "no square: the card as before");
         }
 
         // §21.22 — the STATE ICON: a session's state is its topic's ICON (one of Telegram's topic icons), and the name keeps only
@@ -1823,7 +1849,7 @@ void TestMessaging()
             CHECK(TgRichHtmlFromClassic(L"\n\n").empty() && TgRichHtmlFromClassic(L"plain").compare(L"<p>plain</p>") == 0, "rich: nothing visible gives nothing; a text without tokens is only structured");
 
             // The card: one text, two renders — the classic one is the §21.13 line (its hash is what the record holds), the rich one
-            // leads with the chip.
+            // shows the chip there. Both on the card's second line, under the state line (§21.26).
             SessionInfo s;
             s.id = L"chip-session";
             s.title = L"docs 2";
@@ -1831,9 +1857,11 @@ void TestMessaging()
             CardExtras ex;
             ex.colorSquare = blue;
             const std::wstring card = BuildCardText(s, 5000, 0, false, &ex);
-            CHECK(TgRenderTitleTokensClassic(card).rfind(L"\U0001F4CC \U0001F7E6 <b>docs 2</b>\n", 0) == 0, "the card's classic render: the §21.13 line, unchanged");
-            CHECK(TgRichHtmlFromClassic(card).rfind(L"<p>\U0001F4CC <tg-button type=\"copy_text\" style=\"primary\" text=\"docs 2\">\U0001F7E6 docs 2</tg-button><br>", 0) == 0,
-                  "the card's rich form: the pin, then the chip");
+            CHECK(LineAt(TgRenderTitleTokensClassic(card), 1) == L"\U0001F4CC \U0001F7E6 <b>docs 2</b>", "the card's classic render: the §21.13 line, unchanged");
+            CHECK(TgRichHtmlFromClassic(card).rfind(L"<p>" + std::wstring{ StateLabel(s.state) } +
+                                                        L"<br>\U0001F4CC <tg-button type=\"copy_text\" style=\"primary\" text=\"docs 2\">\U0001F7E6 docs 2</tg-button><br>",
+                                                    0) == 0,
+                  "the card's rich form: the state line, then the pin and the chip");
 
             // The card's form round-trips; an older file reads as a classic card (the slow upgrade converts it later).
             MessagingState st;
