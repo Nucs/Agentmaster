@@ -448,6 +448,21 @@ bash tools/am-lock.sh release --token "$TOKEN"
    known-good deploy touches `SessionModels.h`, `SessionRegistry.{h,cpp}`, or any `.idl` file** —
    don't wait for the crash to prove it's needed.
 
+   **The purge set grows with what changed.** `agentmaster-cli` and `agentmaster-sessiondb` compile
+   the engine units themselves, so their `obj/x64/<Config>/<project>` go with every purge. A
+   **`src/cascadia/TerminalControl/*.idl`** change also needs the control's own glue and objects
+   (`src/cascadia/TerminalControl/Generated Files`, `obj/x64/<Config>/Microsoft.Terminal.Control`,
+   `…/Microsoft.Terminal.Control.Lib`) and every project that CALLS `TermControl` / `ControlCore`
+   members: TerminalApp, and the settings editor (`src/cascadia/TerminalSettingsEditor/Generated
+   Files`, `obj/x64/<Config>/Microsoft.Terminal.Settings.Editor` — its appearance preview sets
+   `CursorVisibility`). The reason: a member inserted MID-interface moves the vtable slot of every
+   member declared after it, and a stale caller then calls the wrong method. On 2026-10-19
+   `ReadScreenSnapshot` (4d8826851) was inserted in the middle of both interfaces, with upstream
+   members such as `SendInput`, `CursorVisibility` and the events after it. Purged that way, the
+   two builds took 1,400 s (Release, 3 compilers) and 1,247 s (Debug, 2 compilers), and MSBuild
+   recompiled the settings model by itself (it references the control's winmd). Session 9c3454bb's
+   scratchpad `stagebuild.ps1` applies this whole rule.
+
 9. **`C1085` / `C1088` / `MSB3191` "There is not enough space on the disk"** (a different failure
    from the PCH-*memory* `C3859`/`C1076`): K: is chronically near-full, and a cold/purged Release
    build writes ~20 GB of intermediates. Both configurations' `obj\x64\<Config>` are therefore
