@@ -4297,17 +4297,24 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6), as Telegram HTML: the title, the state and since
-    /// when (a clock time from persisted stamps, CardStateSinceMs), a line naming the state's own action — 🔄 Restart Session
+    /// The topic's STICKY card (MESSAGING.md §6.1, §21.5, §21.6, §21.26), as Telegram HTML: the state and since when (a clock
+    /// time from persisted stamps, CardStateSinceMs) on the first line, the title on the second (§21.26: the state leads, the
+    /// user's request of 2026-10-19), a line naming the state's own action — 🔄 Restart Session
     /// for a session in Error or one whose claude exited (§21.24), ▶ Reactivate for a parked tab —, folder · branch · model ·
     /// context, the runner and the queue unless they are the
     /// common default (an Auto runner with nothing queued and no global pause: no line — §21.18), the unsent
     /// draft, and Claude Code's own recap while it is fresh. Pure, so the service compares two renders and edits
     /// only on a change — which is why nothing in it may be a relative span (see TgClockText): every change is an
-    /// API call on the one chat. The title is a title TOKEN (§21.15, TgTitleForm::Bold): the classic render reads
+    /// API call on the one chat. The title is a title TOKEN (§21.15, TgTitleForm::Bold): the classic render of its line reads
     /// "📌 🟦 <b>title</b>" exactly as before (the hash the service compares is taken over that render), a rich message shows
     /// the title as a chip.
     /// </summary>
+    /// <remarks>
+    /// The line ORDER is part of the text the service hashes: a layout change (§21.18's runner line, §21.26's state-first
+    /// order) changes every card's text, so every topic's card is edited — or re-posted, when it is due anyway — once at the
+    /// first refresh after the build that brings it (its persisted cardTextHash no longer matches). That is one call per topic
+    /// on the chat's flood budget, so layout changes belong together, in as few builds as possible.
+    /// </remarks>
     /// <param name="s">The session (a full record: the queue is read).</param>
     /// <param name="nowMs">The clock.</param>
     /// <param name="idleLeavesAtMs">When an Idle topic leaves the list (0 = not idle).</param>
@@ -4318,12 +4325,8 @@ namespace Agentmaster::Msg
     inline std::wstring BuildCardText(const SessionInfo& s, int64_t nowMs, int64_t idleLeavesAtMs, bool globalPause, const CardExtras* extras = nullptr)
     {
         std::wstring out;
-        // §21.13: the title with the tab's color square before it (the square the topic's name shows; none without extras);
-        // §21.15: as a title token — "🟦 <b>title</b>" in a classic card, a chip in a rich one.
-        out += L"\U0001F4CC ";
-        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title, extras ? extras->threadId : 0);
-        out += L"\n";
-        // State line.
+        // State line FIRST (§21.26, the user's request of 2026-10-19 — it was the second line, under the title). Inside a topic
+        // the title is the topic's own name already, so the card opens with what changes.
         out += StateLabel(s.state);
         // CLOCK TIMES, never spans: the service edits the card whenever this text changes, so a "3m" that
         // became "4m" re-edited every card every minute — 47 topics' cards made ~47 edits a minute and
@@ -4337,6 +4340,11 @@ namespace Agentmaster::Msg
         {
             out += L" \U0001F4CC";
         }
+        // The title, on the second line. §21.13: with the tab's color square before it (the square the topic's name shows; none
+        // without extras); §21.15: as a title token — "🟦 <b>title</b>" in a classic card, a chip in a rich one. Only the title
+        // and the state line traded places (§21.26): the state's own action line and every line after it keep their order.
+        out += L"\n\U0001F4CC ";
+        out += TgTitleToken(TgTitleForm::Bold, extras ? std::wstring_view{ extras->colorSquare } : std::wstring_view{}, s.title.empty() ? s.id.substr(0, 8) : s.title, extras ? extras->threadId : 0);
         // The user is not supposed to care whether a tab is "activated" (§21.5): a message here starts a parked
         // tab by itself, and ▶ Reactivate (the card's button, /reactivate) does it on demand. §21.24 (the user's rule of
         // 2026-10-19): a session in ERROR, or one whose claude EXITED, names 🔄 Restart Session instead - the one button
