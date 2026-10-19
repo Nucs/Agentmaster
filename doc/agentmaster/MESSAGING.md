@@ -4525,7 +4525,8 @@ VPN, the link's key the only check); the lifetime; snapshot or live; which folde
 > we only support telegram, eplicitly telegram for now."
 
 This replaces §21.32.1's proposal (`cc.sysd.cc` as a LAN-only name behind Caddy) and its four modes with two. §21.32.1's
-checked facts, link template and request engine still hold.
+checked facts, link template and request engine still hold. **Superseded in part by §21.32.3** (the third round, the same
+day): H1 chosen, one open download pattern instead of mTLS, a custom SHA-256 instead of the HMAC, `/download`.
 
 **The decisions so far.**
 - **Telegram only.** The file links are a part of the Telegram service: the settings sit in the cog's Messaging tab, the
@@ -4591,6 +4592,114 @@ checked facts, link template and request engine still hold.
 - **One link or two:** with both modes on, the file name links to the hosted URL and a small LAN link follows it — or one
   mode per install?
 - The lifetime, the size cap, the allowed folders, snapshot or live (§21.32.1).
+
+### 21.32.3 The plan, third round: H1, one open download pattern instead of mTLS, a custom SHA-256, `/download` (2026-10-19; DESIGN ONLY, decisions open)
+
+> The user (2026-10-19, "Still planning"): "The cc.sysd.cc must require mtls ceritficate as the gateway requires. but the
+> user doesnt need to go through the gateway" — "We go we H1" — "Simplify, no hmac, use just a custom modified sha256 on
+> both sides so we have custom cryptography." — "Instead of mtls, cloudflare will only open
+> cc.sysd.cc/station-homepc/{sessionid-hash}/<exact-path> any other request to a wrong url shall not pass cloudflare, if
+> possible, incl the hash correct characters." — "Make sure that /download will also use this mechanism of delivery with
+> option of telegram-upload via that endpoint anyways if possible"
+
+Read as: `cc.sysd.cc` keeps the gateway's rule (no URL without the access certificate) except ONE open pattern, the
+download URL, which needs no certificate; every other URL of the name is refused at Cloudflare's edge. This replaces
+§21.32.2's mTLS-only hosting, its HMAC key and its per-file key; §21.32.2's Telegram-only scope and the self-hosted mode
+with its dropdown stay.
+
+**The link, one shape for both modes:** `<base>/station-<station>/<hash>/<exact path>`.
+- `<base>`: `https://cc.sysd.cc` (hosted, H1) or a LAN URL from the dropdown (self-hosted).
+- `<station>`: this PC in the path, `homepc` by default (a setting; dev gets its own name, e.g. `homepc-dev`, and its own
+  port).
+- `<hash>`: the session's key, 64 lowercase hex characters (below).
+- `<exact path>`: the file's own path, the drive as its first segment, each segment percent-encoded:
+  `K:\source\x\report.md` → `/K/source/x/report.md` (the name last: Telegram's in-app browser names the download after
+  it).
+
+**The hash: a custom SHA-256** (the user's "no hmac"):
+- SHA-256 (`AgentMaster/Sha256.h`) with its eight initial hash words replaced by the eight words of a 32-byte secret; the
+  input `<station>:<session id>`; the output 64 lowercase hex characters.
+- ⚠ **The repository is public** (github.com/Nucs/Agentmaster), so the change to SHA-256 cannot be the secret: anyone can
+  read it. The secret is the eight words, kept in Credential Manager (Generate and Copy in the tab; Copy for any second side
+  that must compute the same hash). With known initial words, anyone who sees a session id (hooks.log, the CLI, the
+  Sessions page, the bot's own answers) could compute that session's key.
+- It is as strong as SHA-256 while the secret stays secret. Replacing the secret ends every link. Length extension gains
+  nothing: the listener accepts only the hashes of its own sessions (a map from each session's hash to its id).
+- "Both sides" in H1 are the bot, which computes a link's hash, and the listener, which builds the map; nothing else
+  needs it.
+
+**What the listener serves** (the one place that knows the sessions):
+- The hash must be one of its sessions' hashes, and the path one that the bot LINKED in that session: the rewrite and
+  `/download` add each linked path to the session's linked set (persisted). Otherwise one link would open any file of the
+  PC by editing its URL. A path that is not a regular file, lies outside the allowed folders or looks like a secret is
+  never linked (§21.32.1).
+- GET and HEAD only; the file streamed with `Content-Disposition: attachment; filename*=UTF-8''<name>`, its
+  `Content-Length`, and no caching.
+
+**Cloudflare's edge** (the Free zone; Cloudflare's rules-language docs, read 2026-10-19):
+- Regular expressions (`matches`) need a Business or Enterprise plan, and a wildcard pattern knows only `*`. But
+  `substring`, `len`, `remove_bytes` and `starts_with` carry no plan note, and `remove_bytes` deletes every listed byte
+  (the docs' example turns `www.cloudflare.com` into `cloudflarecom` with `"\x2e\x77"`). So the edge can check the hash's
+  length and characters with no regular expression. The pattern D, a draft for Cloudflare's rule editor to validate
+  (`/station-homepc/` is 16 bytes, the hash bytes 16 to 79):
+
+  ```
+  http.host eq "cc.sysd.cc"
+  and http.request.method in {"GET" "HEAD"}
+  and starts_with(http.request.uri.path, "/station-homepc/")
+  and len(http.request.uri.path) gt 81
+  and substring(http.request.uri.path, 80, 81) eq "/"
+  and len(remove_bytes(substring(http.request.uri.path, 16, 80), "0123456789abcdef")) eq 0
+  and http.request.uri.query eq ""
+  ```
+
+- The zone's 5 custom rules are all in use, so D goes into existing ones: the hosts rule blocks `cc.sysd.cc` unless D
+  holds (that opens the name AND refuses every other URL of it at the edge); the certificate rule and the Managed
+  Challenge skip D; the Israel rule stays. The post-quantum guard: below.
+- A well-formed but WRONG hash still passes the edge: the edge cannot know the sessions (a rule's `sha256()` is an
+  Enterprise add-on), so the listener answers it 404 at home. Only real hashes past the edge would take a Worker on
+  `cc.sysd.cc` with a KV list of the valid hashes (Agentmaster writes one per new session; KV Free allows 1,000 writes a
+  day), and every request would then count against the account's 100,000 Worker requests a day. Optional.
+
+**H1, the route home:**
+- A tunnel for `cc.sysd.cc` whose connector runs in a container of its own (the sysd rule for connectors: not CT 104, and
+  not this workstation, whose tunnels the owner took down on purpose). Its ingress sends `cc.sysd.cc` with the path
+  regex `^/station-homepc/[0-9a-f]{64}/` to `http://192.168.50.17:<port>` and everything else to `http_status:404`
+  (cloudflared matches an ingress path by regular expression, so the exact check repeats at home). One station needs no
+  relay program; another station is one more ingress line.
+- The PC's firewall admits the listener's port from the connector's address (and from the LAN for the self-hosted mode),
+  by port, not by program path (§21.32.2).
+- No Technitium zone for `cc.sysd.cc`: the LAN resolves it publicly and goes out through Cloudflare and back, so a hosted
+  link works at home too.
+
+**The post-quantum guard and Telegram's downloads:**
+- The zone blocks a ClientHello under 1200 bytes, i.e. one without a post-quantum key share. Telegram's in-app browser is
+  Android System WebView (Chromium), whose TLS offers X25519MLKEM768 by default since Chrome 131. But an attachment goes to
+  Android's DownloadManager, which uses the platform TLS (Conscrypt): a hands-on test of April 2026 found the platform TLS
+  without a post-quantum key exchange even on the Android 17 beta (thinglab.org: WebView apps worked against a server that
+  demands it, apps on the platform stack did not), and an article of August 2026 says it ships through a Play system update
+  but cites nothing. So: to test once on the phone when the route exists (a tap on a hosted link; a block shows in
+  Cloudflare's security events).
+- If the platform TLS fails the guard: (a) `sysd.cc` on Telegram's "Don’t open in-app" list (§21.32.2), so Chrome or Brave
+  downloads with its own post-quantum TLS (and no certificate prompt now: D needs none); (b) D exempt from the guard, one
+  exception to the owner's rule "everything public-facing is post-quantum protected"; or (c) a text file served inline
+  instead of as an attachment (WebView fetches it), an attachment only for the rest.
+
+**`/download`** (new, in a session's topic):
+- `/download <path>` (absolute, or under the session's folder) answers with the file's link through the same resolver as
+  the rewrite: the same checks, and the path added to the session's linked set. A **📤 Send as file** button under the
+  answer uploads the file from the PC (`sendDocument`, multipart, at most 50 MB, any type — Screen Image's document path).
+- "Telegram upload via that endpoint" — `sendDocument` given the hosted URL, Telegram's servers fetching it — is narrow:
+  the Bot API sends a document by URL "only for .PDF and .ZIP files", at most 20 MB, and Telegram's servers come from
+  outside Israel, so D would have to open to every country (and probably skip the post-quantum guard). Not proposed: the
+  button's upload reads the file through the same resolver, so the delivery checks are the same.
+- A folder is refused (a zip is a later option); a bare `/download` lists the session's linked files as buttons
+  (proposal).
+
+**Open (the owner's):** the reading of "the user doesnt need to go through the gateway"; the post-quantum test and the
+fallback if it fails; the Worker for exact hashes (optional); a link's lifetime (a session's hash never expires: prune the
+linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
+production.
 
 ### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; NOT BUILT yet)
 
