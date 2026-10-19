@@ -1,303 +1,321 @@
-# Interactive tools — Claude Code's questions, plans and goals, answered from Telegram
+# Interactive tools — AskUserQuestion with previews and notes, answered from Telegram
 
 > **2026-10-19 · DESIGN, nothing built.** Read in the Claude Code 2.1.291 bundle and **measured on it**: a live
-> ConPTY probe (§6) and a survey of every transcript on this machine (§2). It answers the open half of
-> [`MESSAGING.md`](MESSAGING.md) §7.4 (decision D9) and its probes P0-1, P0-3 and P0-22. The probe and the
-> survey scripts are in `tools/interactive-tools-probe/`.
+> ConPTY probe of seven scenarios (§5) and a survey of every transcript on this machine (§2). The scripts are in
+> `tools/interactive-tools-probe/`. It answers the question half of [`MESSAGING.md`](MESSAGING.md) §7.4
+> (decision D9) and its probes P0-1, P0-3 and P0-22.
+>
+> **Scope, set by the user the same day:** "Forget all about the plan or propose goal. I meant AskUserQuestion
+> with preview as it lets you to show how the choice/option will be used and lets use add note." This document
+> covers `AskUserQuestion`, above all its **previews** and its **notes**. Plan approval (`ExitPlanMode`),
+> `EnterPlanMode` and `ProposeGoal` are out of scope. What was read and measured on them is in this file's first
+> version (commit 2c896eea1), and the probe still runs its two plan scenarios with `--with-plans`.
 
 ## 0. Summary
 
-- **The gap.** Four Claude Code tools stop and wait for the user:
-  - `AskUserQuestion`: questions with options;
-  - `ExitPlanMode`: approve a plan;
-  - `EnterPlanMode`: switch to plan mode;
-  - `ProposeGoal`: propose a session goal.
+- **A preview question** is a single-select question in which at least one option carries a `preview`. Claude
+  Code's tool description tells the model to use previews "when presenting concrete artifacts that users need to
+  visually compare": ASCII mockups, code snippets, diagram variations, configuration examples (§1.1).
+- **The PC shows it side by side** (§1.3):
+  - the option labels on the left;
+  - on the right, the preview of the **focused** option, drawn as Markdown in a monospace box;
+  - under the box, a **Notes** field ("press n to add notes").
 
-  Agentmaster's Telegram bot shows a question as a numbered list and a plan as text. It cannot answer
-  either; the user must go to the PC (MESSAGING.md §21.2). **There is no `ProposePlan` tool** in 2.1.291:
-  the plan tool is `ExitPlanMode`.
-- **How much it matters** (§2):
-  - 1,055 questions in 600 sessions. The median wait was 2.6 min; 114 waited more than 30 min and 54 more
-    than 2 h.
-  - 132 plan approvals; 11 of them waited more than 30 min. 109 of 126 plans are longer than one Telegram
-    message.
-- **The way in** (§4, §5): a **`PermissionRequest` hook**. Claude Code runs it when the question or plan
-  dialog opens, at the same time as the dialog, and the first answer wins. For exactly these two tools it
-  accepts the hook's answer:
-  - `allow` + `updatedInput` carries the answers of a question, or approves a plan (optionally with a mode
-    change);
-  - `deny` + a message is "keep planning" feedback.
+  ↑/↓ or a digit moves the focus; Enter picks the focused option.
+- **A note belongs to the question, not to an option** (§1.6):
+  - the PC sends it as `annotations[question].notes`;
+  - a pick of a previewed option always sends that option's preview back as `annotations[question].preview`,
+    with or without a note;
+  - a note without a pick sends the answer `"(notes only)"`.
 
-  The schema puts no upper limit on a hook's `timeout`. So Agentmaster's hook can hold the dialog for the
-  phone for hours, and the PC dialog stays usable the whole time.
-- **Proven live** (§6), four scenarios, each checked on the transcript:
-  - the hook answers a question;
-  - the PC answers first, and the hook's late answer is ignored;
-  - the hook approves a plan, and the mode from before plan mode comes back;
-  - the hook rejects a plan with feedback, then approves the revision with a mode change.
+  The model then reads `"Q"="Center" selected preview:\n<preview> notes: <note>` (§1.7).
+- **How it is used on this machine** (§2, real sessions only): 172 preview questions in 133 calls; 85 of them
+  share a call with other questions. Of the 151 that were answered:
+  - 95 with a pick, 15 with a pick and a note;
+  - **39 with a note and no pick**: the user turned every option down and wrote what they wanted instead;
+  - 2 with neither.
 
-  ⚠ When the PC answers first, Claude Code does **not** kill the waiting hook. Agentmaster must release it
-  (§7.5).
-- **The design** (§7):
-  - a small helper is the hook;
-  - a duplex pipe to the engine;
-  - a table of open dialogs in the engine;
-  - Telegram messages with buttons, edited to the outcome.
+  So a third of the answers carry a note. Notes are short: median 55 characters, max 1,373.
+- **Today's Telegram mirror** (§3) shows a question as `❓` plus the first question's option labels. It shows no
+  preview and no description, and it drops the note: a notes-only answer arrives as the literal text
+  "(notes only)".
+- **The way in** (§4) is a **`PermissionRequest` hook**. Claude Code runs it beside the open dialog, and the first
+  answer wins. Its `allow` + `updatedInput` carries the answers and the annotations.
+- **Proven live** (§5), every scenario checked on the transcript:
+  - the PC's own answers were recorded: a pick with a note, a note without a pick, a plain pick;
+  - the hook reproduced the first two, and the model read exactly the text the PC's answers give;
+  - when the PC answers first, its answer wins, and the hook's late answer is dropped.
+- **The design** (§6):
+  - every option's preview drawn as ONE picture by the existing Screen Image renderer (the PC shows one preview at
+    a time; a phone can show all of them and zoom);
+  - a question message under the picture: one button per option, **[📝 Note…]** (the note is a reply),
+    **[💬 Chat about this]**;
+  - the answer composed exactly as the PC composes it (§6.4), and the message edited to the outcome.
 
-  `ProposeGoal` needs no hook: its approval is `/goal <condition>`, which a topic can send as a prompt.
-  `EnterPlanMode` never asks in Agentmaster's bypass launches.
-- **Decisions** I1–I8 (§8) are open.
+  A smaller first step needs no hook: the mirror's answer line shows the note (§6.7).
+- **Decisions** Q1–Q10 (§7) are open. Three of them need a look at the user's phone first (§8).
 
-## 1. The tools that wait for the user (Claude Code 2.1.291)
+## 1. AskUserQuestion with previews and notes (Claude Code 2.1.291)
 
-| Tool | Waits how | The user's answer reaches the model as | Can a hook answer it? |
-|---|---|---|---|
-| `AskUserQuestion` | a permission dialog in every mode, bypass included (`checkPermissions` always asks; `requiresUserInteraction`) | the tool result (§1.1) | **yes**: `allow` + `updatedInput.answers` (measured) |
-| `ExitPlanMode` | a permission dialog "Exit plan mode?" (plan mode only) | the tool result; on approval the mode changes (§1.3) | **yes**: `allow` + `updatedInput: {}`, optionally `setMode`; `deny` = feedback (measured) |
-| `EnterPlanMode` | no dialog of its own; the mode's rules decide. Under bypass it never asks | "Entered plan mode. …" | only as a normal permission prompt (default mode) |
-| `ProposeGoal` | **no permission ask.** A dialog under the input box; the turn goes on | approval queues `/goal <condition>` | **no**: no hook sees it (§1.4) |
-| Any other tool (permission prompt) | a permission dialog when the mode does not allow the call | allowed or rejected | yes, but out of scope here (§7.6) |
+### 1.1 What the model sends, and what it is told
 
-### 1.1 AskUserQuestion
+- **The input** (the bundled typings, `claude-code-tools/index.d.ts`):
+  - `questions`: 1–4 questions, each with:
+    - `question`: the text;
+    - `header`: a chip, at most 12 characters recommended;
+    - `options`: 2–4 options, each `{label, description, preview?}`;
+    - `multiSelect`.
+  - `metadata.source`, optional.
+- **The preview guidance in the tool's description** (`M8o.markdown`, verbatim):
 
-**The model passes** (the bundled typings, `claude-code-tools/index.d.ts`):
-- `questions`: 1–4 questions, each with:
-  - `question`: the text;
-  - `header`: a chip of at most 12 characters (recommended);
-  - `options`: 2–4 options, each `{label, description, preview?}`;
-  - `multiSelect`.
-- `metadata.source`, optional.
+  > Use the optional `preview` field on options when presenting concrete artifacts that users need to visually compare:
+  > - ASCII mockups of UI layouts or components
+  > - Code snippets showing different implementations
+  > - Diagram variations
+  > - Configuration examples
+  >
+  > Preview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When
+  > any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and
+  > preview on the right. Do not use previews for simple preference questions where labels and descriptions
+  > suffice. Note: previews are only supported for single-select questions (not multiSelect).
 
-The output schema also knows an extended form: a `title`, and kinds `choice` / `text` / `number`. It is
-behind a feature gate that reads off here.
+- **An HTML form exists.** `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=html` tells the model to send "a self-contained
+  HTML fragment". Claude Code then refuses a preview that holds `<html>`, `<body>`, `<!DOCTYPE>`, `<script>` or
+  `<style>`, or no tag at all. Agentmaster's launches do not set the variable, so its sessions use Markdown.
+- **The description also says** "Users will always be able to select 'Other' to provide custom text input". In
+  the preview layout that free text is the Notes field: there is no "Type something." row (§1.3).
 
-**What the user sees** (the probe's screen):
+### 1.2 Which questions show previews
+
+- **The rule** (`P4e`): a question gets the preview layout when it is single-select and at least one option has a
+  preview after the mapping below. In screen-reader mode the plain list is shown instead, and no notes are sent.
+- **Each option's preview is mapped** (`G5`, with `FXe = 2000`):
+  - longer than 2,000 characters → **withheld**. The box shows "(preview cannot be shown in full — compare the
+    option labels and descriptions instead)";
+  - nothing visible (only whitespace or invisible characters) → no preview;
+  - Claude Code's own truncation marker (`… [+N graphemes]`), or a run of more than 8 stacked combining or
+    zero-width marks → withheld;
+  - otherwise **full**: the text, with each invisible format character replaced by U+FFFD (`zet` = `Nl`). That
+    covers Unicode `Cf` and the default-ignorable code points, except ZWJ / ZWNJ, LRM / RLM, ALM, the variation
+    selectors and the Mongolian selectors.
+- **A multi-select question's previews are never shown.** This machine has 1 such question.
+
+### 1.3 What the PC shows (the probe's screen, 160 × 50)
 
 ```
- ☐ Color
+ ☐ Layout
 
-Which color do you prefer?
+Which header layout do you prefer?
 
-❯ 1. Red
-     The color red
-  2. Blue
-     The color blue
-  3. Type something.
-────────────────────────────────────────────────
-  4. Chat about this
+  1. Left                         ┌──────────────────────────────────────────┐
+❯ 2. Center                       │ +--------------+                         │
+  3. Right                        │ |   [LOGO]     |                         │
+                                  │ +--------------+                         │
+                                  └──────────────────────────────────────────┘
 
-Enter to select · ↑/↓ to navigate · Esc to cancel
+                                  Notes: use rounded corners
+
+──────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · ctrl+g to edit in <editor> · Esc to cancel
 ```
 
-- **"Type something."** is the free-text "Other". **"Chat about this"** is offered for single-select only.
-- A multi-select question shows toggles, and an option with a `preview` opens a side-by-side preview pane
-  (PENDING_INPUT.md met that pane).
-- A dialog opened while the user has a draft in the box stays hidden. The box line says "Claude has a
-  question for you — it shows once you send or clear what you're typing."
+- **The option list** is 30 columns wide and holds the labels only. **Descriptions are not shown in this
+  layout.** `❯` marks the focus; a green ✔ marks the option already picked (on a question the user came back to).
+- **The box shows the focused option's preview** (`A5` → `p5` / `ohe`):
+  - it is drawn by Claude Code's terminal Markdown renderer (`wIt`, the `marked` lexer): headings, bold, lists,
+    quotes, and code fences with syntax highlighting;
+  - its width is the terminal's columns − 34, and a longer line is hard-wrapped;
+  - its height is at most the terminal's rows − 26 lines. The rest is cut, with a `─── ✂ ─── N lines hidden` line;
+  - an option without a preview shows "No preview available".
+- **Notes:** the field reads "press n to add notes" until a note is typed. While the user types, it is a 60-column
+  input with the placeholder "Add notes on this design…".
+- **"Chat about this"** is a row under the list (↓ from the last option reaches it).
+- **The plain list** (a question without previews) is different: it shows the descriptions, a "Type something."
+  row for free text, and no Notes field.
 
-**The answer** (`call()` and `mapToolResultToToolResultBlockParam`) is the updated input plus:
-- `answers`: question text → answer. An answer is the option label. A multi-select answer is the labels
-  joined with ", ", and a label that holds ", " or `"` is JSON-quoted (`Tct`). A typed "Other" answer is
-  the text itself.
-- `annotations`: question text → `{preview?, notes?}`. The PC dialog adds `annotations: {}` even when it is
-  empty.
-- `response`: free text instead of answers.
-- `followUp: true`: the user asks for more questions first.
-- `afkTimeoutMs`: set only by the idle auto-continue.
+### 1.4 The keys, and what each does (`A5`)
 
-The sentinel `"(notes only)"` means notes without a choice.
-
-**The texts the model reads** (verbatim, 2.1.291):
-
-| Case | Tool result |
+| Key | Effect |
 |---|---|
-| every answer is an option label (or a well-formed list) | `Your questions have been answered: "Q"="A", …. You can now continue with these answers in mind.` |
-| an "Other" text among them | `The user answered: "Q"="A". Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.` |
-| a preview / notes | each pair gets `selected preview:\n<preview>` and `notes: <notes>` |
-| `response` | `The user responded: <text>` |
-| `followUp` | `The user asked for more questions before you proceed. So far they answered: …. Call AskUserQuestion again with follow-up questions …` |
-| nothing answered | `The user did not answer the questions.` |
-| the idle auto-continue | `No response after Ns — the user may be away from keyboard. Proceed using your best judgment …` |
-| "Chat about this" | a **rejection**: `The user doesn't want to proceed with this tool use. … To tell you how to proceed, the user said:\nThe user wants to clarify these questions. … Start by asking them what they would like to clarify. Questions asked: - "<q>" Answer: … / (No answer provided)` |
-| Esc | a **rejection that ends the turn**: `… STOP what you are doing and wait for the user to tell you how to proceed.` |
+| ↑ / ↓, Ctrl+P / Ctrl+N | move the focus; ↓ from the last option focuses "Chat about this" |
+| 1–9 | **focus** that option (it does not pick it) |
+| Enter | pick the focused option; a one-question call is answered at once |
+| n | open the Notes field |
+| Enter in Notes | close the field and answer, by the rule below |
+| Esc in Notes | close the field; the note is kept |
+| Ctrl+G in Notes | edit the note in the external editor |
+| Esc | cancel: a rejection that ends the turn |
+| Tab / Shift+Tab, → / ← | the next / previous question (several questions) |
 
-**The idle auto-continue:**
-- Off unless the setting `askUserQuestionTimeout` is `60s` / `5m` / `10m` (the default is `never`) or
-  `CLAUDE_AFK_TIMEOUT_MS` is set.
-- Claude Code switches it off while a Remote Control bridge races the dialog.
+**Enter in the Notes field** (`zn`) answers by the first case that holds:
+1. the note is not empty and the focus moved since the question opened → pick the focused option, with the note;
+2. an option was picked before → answer it again, with the note;
+3. the note is not empty → answer `"(notes only)"` (`_0t`).
 
-**A remote card's answer** (Claude Code's own remote surfaces, `admitCardAnswer`):
-- It may add only `answers`, `annotations`, `response` and `followUp`.
-- It may not change anything shown, and it may not set `afkTimeoutMs`.
-- Each answer is at most 8,192 characters, and all of them together at most 32,768.
-- A hook's answer is **not** checked by this function; it passes the permission re-check of §5.3 instead.
-  Agentmaster applies the same limits itself (§7.3).
+So "2, n, the note, Enter" picks option 2 with the note (case 1), and "n, the note, Enter" sends the note alone
+(case 3). Both were run in the probe (§5, C and F).
 
-### 1.2 EnterPlanMode
+### 1.5 Several questions
 
-- **No input, and no `checkPermissions` of its own.** The permission mode decides.
-  - In `bypassPermissions` (Agentmaster's default launch) it runs at once. The corpus has 88 calls, every
-    one answered in under 1 s.
-  - In `default` mode it is a normal permission dialog titled "Enter plan mode?".
-- **Main session only:** "Only the main session can enter plan mode."
-- **The user can also switch to plan mode with Shift+Tab**, with no tool call.
-- **Result:** `Entered plan mode. You should now focus on exploring the codebase and designing an
-  implementation approach.` It is followed by the six-step plan-mode list and "DO NOT write or edit any
-  files yet."
+- **One tab per question** in a header row (each question's `header`, else `Q1`, `Q2`, …). A pick moves on to the
+  next question.
+- **After the last question, the review screen:**
+  - "Review your answers";
+  - the warning "You have not answered all questions" while some are open;
+  - each answer under its question;
+  - "Ready to submit your answers?" with **[Submit answers]** / **[Cancel]**.
 
-### 1.3 ExitPlanMode
+  Unanswered questions are allowed.
+- **A one-question call has no review:** a pick sends at once.
 
-- **The model passes** `{allowedPrompts?}` (deprecated, unused). Before the permission check, Claude Code adds
-  `plan` and `planFilePath` from the plan file (`~/.claude/plans/<three-word-slug>.md`); the hook's
-  `tool_input` carried both (§6).
-- **Validation:** outside plan mode the call is refused with "You are not in plan mode. …".
-- **`checkPermissions`:** asks "Exit plan mode?". In a teammate the call is allowed, and the plan goes to the
-  team lead's inbox instead.
-- **The dialog**, in a session launched with `--dangerously-skip-permissions` (the probe's screen):
+### 1.6 What the PC sends (`nJ`)
 
-```
-Claude has written up a plan and is ready to execute. Would you like to proceed?
+An `allow` whose `updatedInput` is the call's input plus:
+- **`answers`**: question → the picked option's label; `"(notes only)"` for a note without a pick.
+- **`annotations`**: per preview question, `{preview?, notes?}`:
+  - `preview`: the picked option's preview, when its kind is full (§1.2). It is sent **with or without a note**;
+  - `notes`: the note, trimmed, when it is not empty;
+  - the entry is left out when it has neither, and `annotations` is `{}` when no question has one.
+- **Images** pasted into the dialog travel as extra content blocks (`contentBlocks`), outside the input.
 
-❯ 1. Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session
-  2. Yes, manually approve edits
-  3. Tell Claude what to change
-     shift+tab to approve with this feedback
+### 1.7 What the model reads (the result mapper, verbatim)
 
-ctrl+g to edit in <editor> · ~\.claude\plans\glistening-noodling-lagoon.md
-```
+- **Each answered or annotated question becomes `"Q"="A"`**, or `"Q"=(no option selected)` for `(notes only)`.
+  `selected preview:\n<preview>` and `notes: <note>` follow when the annotations hold them, and the pieces are
+  joined with ", ".
+- **Any note switches the whole text to the careful form** ("The user answered: … Read the answers carefully …").
+  With no note, and only option labels as answers, it is the plain form ("Your questions have been answered: …").
+- **The probe's results** (§5), each the exact tool result:
 
-- **The option builder** (`u9e`) and what each option returns (`g9e`):
+  A pick, no note (G):
+  ```
+  Your questions have been answered: "Which menu layout do you prefer?"="Left" selected preview:
+  +--------------+
+  |[LOGO]        |
+  +--------------+. You can now continue with these answers in mind.
+  ```
+  A pick and a note (C, and the hook's D):
+  ```
+  The user answered: "Which header layout do you prefer?"="Center" selected preview:
+  +--------------+
+  |   [LOGO]     |
+  +--------------+ notes: use rounded corners. Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.
+  ```
+  A note, no pick (F, and the hook's E):
+  ```
+  The user answered: "Which logo position do you prefer?"=(no option selected) notes: neither, put the logo in the footer. Read the answers carefully — they may request clarification, changes, or that you not proceed — and follow what they actually say.
+  ```
+  Nothing at all: `The user did not answer the questions.`
+- **"Chat about this" is a rejection** (`R4e`), and the turn goes on. The notes travel with it:
+  ```
+  The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:
+  The user wants to clarify these questions.
+      This means they may have additional information, context or questions for you.
+      Take their response into account and then reformulate the questions if appropriate.
+      Start by asking them what they would like to clarify.
 
-| Option | Shown when | Returns |
-|---|---|---|
-| Yes, clear context (N% used) and bypass permissions / use auto mode / auto-accept edits | only with the setting `showClearContextOnPlanAccept` (default **false**) | a **rejection** of the call, and Claude Code then starts a fresh conversation in the same process with the first message `Implement the following plan:\n\n<plan>\n\nIf you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: <path>` (+ `User feedback on this plan: …`), in the chosen mode — the plan-restart link Agentmaster's `TranscriptTurns` already follows |
-| Yes, and switch to BYPASS PERMISSIONS … / Yes, auto-accept edits / resume auto mode | one of them, by what the session allows | `allow`, `updatedInput: {}` (or `{plan}` when the user edited the plan with Ctrl+G), and a `setMode` update for the session |
-| Yes, manually approve edits | always | the same with `setMode: default` |
-| No, refine with Ultraplan in a cloud session | when Ultraplan is available | a rejection with a canned hand-off text |
-| No, keep planning (the box "Tell Claude what to change") | always | with text: a rejection with the text as feedback; the turn goes on. Without text: nothing |
+      Questions asked:
+  - "<question>"
+    Answer: <answer>            (or: (No answer provided))
+    User notes: <note>          (preview questions with a note only)
+  ```
+- **Esc is the STOP rejection**, and the turn ends: "… STOP what you are doing and wait for the user to tell you
+  how to proceed."
+- **The mapper has more forms** (`response`, `followUp`, the idle auto-continue). The preview layout produces
+  none of them.
 
-- **`call()` itself restores the mode** from before plan mode (`prePlanMode`, default `default`) when the
-  session is still in plan mode. A `plan` in the input is written to the plan file and marks the plan
-  "edited by user".
-- **The texts the model reads:**
-  - approved: `User has approved your plan. You can now start coding. Start with updating your todo list if
-    applicable\n\nYour plan has been saved to: <file>\nYou can refer back to it if needed during
-    implementation.…\n\n## Approved Plan:\n<plan>`. The heading reads `## Approved Plan (edited by user):`
-    after an edit.
-  - approved without a plan: `User has approved exiting plan mode. You can now proceed.`
-  - rejected with feedback: `The user doesn't want to proceed with this tool use. The tool use was rejected
-    (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the
-    user said:\n<feedback>`. The model keeps planning.
-  - Esc: the STOP text of §1.1; the turn ends.
+### 1.8 The bounds of a remote answer
 
-### 1.4 ProposeGoal
+- **Claude Code's own remote cards** (`admitCardAnswer`) may add only `answers`, `annotations`, `response` and
+  `followUp`. Each answer is at most 8,192 characters, and all of them together at most 32,768.
+- **A hook's answer is not checked by that function.** Agentmaster applies the same limits itself (§6.4). A
+  Telegram message is at most 4,096 characters, so a note typed on the phone always fits.
 
-- **The model passes** `{condition (at most 500 characters), ask_user?}`.
-- **Where it runs:** only in interactive local sessions, and only behind a feature gate. It is refused:
-  - in plan mode ("propose the goal after the plan is approved");
-  - in agents;
-  - when the user switched off model-proposed goals.
-- **It is not a permission ask.** The tool returns at once, and a dialog opens **under** the input box
-  (`requestDialog`, `place: "under"`) while the turn goes on.
-- **On approval** Claude Code queues `/goal <condition>` (origin `auto-continuation`). With `ask_user: false`
-  (when the settings allow it) it queues the goal directly.
-- **No hook sees it.** The corpus has 0 calls.
+## 2. How previews and notes are used (the corpus, 2026-10-19 09:40)
 
-### 1.5 Permission prompts, and the Notification Agentmaster uses today
+**Method:** `tools/interactive-tools-probe/survey_interactive.py --real-only`. It reads every transcript under
+`~/.claude/projects`, leaves out subagent files, and leaves out the 4 sessions that worked in a folder under
+`%TEMP%` (this probe and the ConPTY driver's self-tests).
 
-- **Any other tool call** that the mode does not allow opens a permission dialog. Under `bypassPermissions`
-  that is only the safety checks that always ask.
-- **Six seconds after any ask** (`kUt = 6000` ms), Claude Code fires `Notification` with
-  `{message: "Claude needs your permission to use <tool>", notificationType: "permission_prompt"}`, for
-  `AskUserQuestion` and `ExitPlanMode` too. `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` turns it
-  off. This is what Agentmaster turns into `NeedsApproval`.
-- **A "person-only" ask** (some safety checks, a few internal confirmations) runs no hooks at all.
+**AskUserQuestion overall:** 1,055 calls in 601 transcripts. The median wait was 2.6 min and the p90 34.8 min;
+114 calls waited more than 30 min and 54 more than 2 h (of the 1,040 with a result).
 
-## 2. How often, how long (the corpus survey, 2026-10-19)
+**Preview questions:**
+- 462 options carry a preview: median 232 characters, max 1,298. None is over 2,000, so none was withheld.
+- 172 preview questions in 133 calls. **85 of them share a call with other questions.**
+- 1 multi-select question has previews (never shown).
 
-**Method:** every transcript under `~/.claude/projects`, subagent files left out (1,081 files hold one of the
-four tools before the probe; `tools/interactive-tools-probe/survey_interactive.py`). Each `tool_use` was paired with its
-`tool_result`, and the wait is the time between them. The numbers include the first probe session of §6 (2
-questions, 3 plan approvals, 2 `EnterPlanMode` calls); real use before it was 1,053 questions, 129 plan
-approvals and 88 `EnterPlanMode` calls, the newest plan call on 2026-10-10.
+| Outcome of the 172 preview questions | Count |
+|---|---|
+| a pick | 95 |
+| a pick + a note | 15 |
+| **a note, no pick** (`(notes only)`) | **39** |
+| neither an option nor a note | 2 |
+| no structured answer (rejected, cut off, still open) | 21 |
 
-| | AskUserQuestion | ExitPlanMode | EnterPlanMode | ProposeGoal |
-|---|---|---|---|---|
-| Calls / transcripts | 1,055 / 600 | 132 / 87 | 90 / 82 | 0 |
-| Wait: median · p75 · p90 · max | 2.6 min · 7.4 min · 34.8 min · 350.8 h | 1.7 min · 5.0 min · 23.1 min · 22.6 h | 0 s (all within 1 s) | — |
-| Waited > 5 min / > 30 min / > 2 h | 341 / 114 / 54 (of 1,040) | 31 / 11 / 5 (of 126) | 0 | — |
+- **Every pick of a previewed option (101 of 101) echoed that option's preview** in `annotations.preview`.
+- **54 notes:** median 55 characters, p90 163, max 1,373. They read like conditions on the pick ("only if …"),
+  changes to it ("and remove …"), or a different design instead of every option ("How about a 'page' with back
+  button that covers entire window…").
 
-**AskUserQuestion outcomes:**
-- 832 answered; 127 answered with notes or a preview.
-- 36 "Chat about this"; 31 Esc.
-- 3 auto-continued while idle.
-- 11 errors: 5 calls cut off by the session's end, 4 input-validation errors, and 2 whose result is the bare
-  text "Answer questions?".
-- 39 answers were `(notes only)`.
+**What the previews hold** (for choosing how a phone shows them):
 
-**AskUserQuestion shapes:**
-- Questions per call: 1 in 716, 2 in 190, 3 in 73, 4 in 73 (and 2 malformed calls).
-- Options per question: 2 in 394, 3 in 840, 4 in 372 (and 1 with 6).
-- 115 multi-select questions.
-- 458 options carry a preview (median 229 characters, max 1,298).
-- Question text: median 109 characters, max 755. Header at most 21 characters; label at most 112.
+| | Median | p90 | Max |
+|---|---|---|---|
+| Lines per preview | 7 | 14 | 39 |
+| Widest line (terminal cells) | 52 | 70 | 113 |
+| A question's previews together (characters) | 644 | 1,309 | 3,731 |
+| One message with the question, every option and every preview | 1,416 | 2,296 | 4,575 (1 of 172 over 4,096) |
 
-**ExitPlanMode outcomes:**
-- 22 approved in place (19 with a plan, 3 without; 2 of them the probe's).
-- **66 approved with "clear context"**: the old default. Each is recorded as a rejection, plus a fresh
-  conversation that names it in "read the full transcript at". 66 of the 71 such rejections have that
-  successor.
-- 33 "keep planning" with feedback (1 of them the probe's); 5 rejected (Esc).
+| Every preview line of the question fits | 32 cells | 40 | 48 | 56 | 64 | 80 |
+|---|---|---|---|---|---|---|
+| Share of the 172 questions | 2% | 8% | 22% | 42% | 69% | 92% |
 
-**Plan length** (every call whose input holds a plan, 126): median 9,607 characters, p90 22,660, max 91,116.
-**109 of the 126 are longer than one Telegram message (4,096 characters).**
+- **Content**, by preview (of 462): box drawing or block elements 84, Markdown headings 39, Markdown tables 6,
+  code fences 6, HTML-looking tags 3. The rest are plain-text mockups (`+---+`, `|`, `[ ]`).
+- **So the previews are mostly monospace pictures, and most are wider than a phone's monospace line.** How wide a
+  phone's line is must be measured on the user's phone (§8).
 
-## 3. What Agentmaster does today
+## 3. What Agentmaster does with a preview question today
 
-- **State.** `NeedsApproval` comes from three independent belts (HOOKS.md; CLAUDE.md, "blocked-on-user"):
-  - the `Notification(permission_prompt)` 6 s after the dialog;
-  - the scanner's `recon-block` on an unanswered `AskUserQuestion` in the transcript;
-  - claude's heartbeat `waiting`.
-
-  It leaves `NeedsApproval` on the answer. The question guard keeps queued prompts Pending.
-- **Telegram** (MessagingModels.h):
-  - The transcript's `tool_use` becomes a `Question` item (the headers and question texts, the FIRST
-    question's option labels, `multiSelect`) or a `Plan` item (`input.plan`).
-  - They are shown as `❓ <question>` with numbered options, and `📋 Plan` with the text (cut at 3,000
-    characters in HTML, 20,000 in a rich message).
-  - The user's answer appears as a `↩ answer` line, and the card is re-sent with sound on `NeedsApproval`.
-  - **No buttons.** A message typed in the topic is a queued prompt (D30); it waits until the dialog is gone
-    and then goes as a new turn.
+- **State:** `NeedsApproval` comes from three belts (the `Notification` 6 s after the dialog opens, the scanner's
+  `recon-block`, the heartbeat's `waiting`). The question guard keeps queued prompts Pending.
+- **The Telegram mirror** (`MessagingModels.h`):
+  - The `tool_use` becomes a `Question` item: `❓ <header>: <question>` for every question, then the FIRST
+    question's option labels, numbered. **No descriptions, no previews, no buttons.**
+  - The answer becomes an `Answer` item made from `toolUseResult.answers` alone. **The annotations are never
+    read**, so a note never reaches Telegram, and a notes-only answer is posted as the text "(notes only)". That
+    was 39 of the 151 preview answers on this machine.
+  - A message typed in the topic is a queued prompt (D30). It waits until the dialog is gone.
+- **MESSAGING.md §7.4** (the verified key plans of D9) is not built. For `AskUserQuestion` this document replaces
+  it.
 - ⚠ **The transcript can write a pending question's `tool_use` line late**, 10+ minutes (CLAUDE.md, the
-  blocked-on-user belts; in the probe it was written at once). The mirror then shows the question late, or after
-  it was answered. The hook gets the question at once (§5.2).
-- **MESSAGING.md §7.4** (D9, recommended "verified key plans": keystrokes into the menu, checked by re-reading
-  the screen) **is not built**, and its probes P0-1, P0-3 and P0-22 were never run. This document answers them
-  (§8).
+  blocked-on-user belts; in the probe it was written at once). The hook gets the question at once (§4.2).
 
-## 4. The ways in
+## 4. The way in: a PermissionRequest hook (Claude Code 2.1.291)
 
-| Route | Answers questions | Approves plans | Cost and risk | Verdict |
-|---|---|---|---|---|
-| **A. A `PermissionRequest` hook** | yes: `allow` + `updatedInput.answers` | yes: `allow` + `{}` (± `setMode`); `deny` + message = feedback | one waiting helper process per open dialog; a reply channel into the engine; Claude Code's documented hook | **recommended; measured (§6)** |
-| B. The session link mod (MOD_LINK.md) | a `tool.call` hook can return `{result}` in place of the call | **no:** a `{result}` skips `call()`, so the session STAYS in plan mode (the mode is restored in `call()`); it would need the mod's `classic.PermissionRequest`, i.e. route A again | nothing built; ~85 MB per claude for the mod runtime | not needed for this |
-| C. Key plans (MESSAGING.md §7.4) | keystrokes into the menu, verified on the screen | the same | fragile: the menu's layout, a dialog hidden behind a draft, focus; never measured (P0-1) | superseded for these two tools |
-| D. Claude Code channels | **no:** the relay skips tools that require user interaction | no | a development flag and a start-up modal | excluded (D16) |
-| E. Claude Code's Remote Control | yes, in the Claude app | yes | the user's claude.ai account and app, not Telegram | beside it, not instead of it |
-
-## 5. The PermissionRequest hook in Claude Code 2.1.291
-
-### 5.1 When it runs
+### 4.1 When it runs, and the other routes
 
 - **In the main session it runs IN PARALLEL with the dialog.** The dialog is shown, the hooks start, and the
-  first answer from either side wins (`zo`; `claim()`). The dialog stays fully usable while the hook waits.
-  Other racers are the Remote Control relay, a channel relay and a server-approval watch.
+  first answer from either side wins (`zo`; `claim()`). The dialog stays fully usable while the hook waits. It
+  also runs while the dialog is hidden behind a draft in the input box.
 - ⚠ **For subagents and teammates the hooks run BEFORE the dialog, and the dialog waits for them**
-  (`awaitAutomatedChecksBeforeDialog`). A long-waiting hook would hide a subagent's dialog from the PC. The
-  helper therefore answers at once for a request that carries `agent_id` (§7.2).
+  (`awaitAutomatedChecksBeforeDialog`). A long-waiting hook would hide a subagent's question from the PC, so the
+  helper answers at once when the payload carries `agent_id` (§6.2).
 - **No hooks run** for a person-only ask or a remote ("served") call.
+- **The other routes:**
 
-### 5.2 What it receives (measured)
+| Route | Verdict |
+|---|---|
+| **A `PermissionRequest` hook** | **recommended; measured (§5)** |
+| The session link mod (MOD_LINK.md): a `tool.call` hook returns `{result}` in place of the call | could answer; nothing built; the mod runtime costs a claude ~85 MB |
+| Key plans (MESSAGING.md §7.4): keystrokes into the dialog, checked on the screen | fragile here: a digit only focuses, and whether the focus moved changes what Enter in the Notes field does (§1.4); never measured |
+| Claude Code channels | no: the relay skips tools that require user interaction (D16) |
+| Claude Code's Remote Control | answers in the Claude app, not in Telegram |
+
+### 4.2 What it receives (measured)
 
 ```json
 {
@@ -309,307 +327,360 @@ approvals and 88 `EnterPlanMode` calls, the newest plan call on 2026-10-10.
 }
 ```
 
+- **The previews arrive in `tool_input`**, each option's `preview` as the model wrote it.
 - **In a subagent:** also `agent_id` and `agent_type`.
-- **For an MCP tool:** `mcp_server`.
-- **`permission_suggestions`** is absent for these two tools.
-- **For `ExitPlanMode`**, `tool_input` is `{plan, planFilePath}`, injected from the plan file, and
-  `permission_mode` is `plan`.
-- ⚠ **There is no `tool_use_id`.** `prompt_id` names the user turn: both `ExitPlanMode` calls of one turn
-  carried the same id. `session_id` is the current conversation (it changes on `/clear`; Agentmaster maps it
-  like any hook).
+- ⚠ **There is no `tool_use_id`.** `prompt_id` names the user's turn. `session_id` is the current conversation (it
+  changes on `/clear`; Agentmaster maps it like any hook).
 
-### 5.3 What it may answer
+### 4.3 What it may answer
 
 ```json
-{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{…},"updatedPermissions":[…]}}}
+{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{…}}}}
 {"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…","interrupt":false}}}
 ```
 
-- **Accepted for exactly two tools.** For a tool that requires user interaction, an `allow` WITHOUT
-  `updatedInput` is ignored, and the dialog stays. An `allow` WITH `updatedInput` is accepted only for the
-  set `V_r = {ExitPlanMode, AskUserQuestion}` (`f5n`).
-- **The rewritten input goes through the permission re-check** (`mC` with `hookUpdatedInput`). A deny or ask
-  rule can still override it (logged "PermissionRequest hook allowed … with updatedInput, but … rule
-  overrides").
-- **`updatedPermissions` are applied the way the dialog's are** (`persistPermissions`). The dialog's own
-  approve rows are `[{type: "setMode", mode, destination: "session"}]` (measured with `default`).
-- **A `deny` gives the model the message verbatim.** The tool result reads `Error: <message>`. With
-  `interrupt: true` the turn is aborted (like Esc).
-- **For a plan, approve with `updatedInput: {}`.** Echoing `tool_input` back would carry `plan` and mark the
-  plan "edited by user". The dialog itself sends `{}` unless the plan was edited (§1.3).
+- **`allow` + `updatedInput` is accepted for `AskUserQuestion`** (the set `V_r` = {ExitPlanMode,
+  AskUserQuestion}, `f5n`). For a tool that requires user interaction, an `allow` WITHOUT `updatedInput` is
+  ignored, and the dialog stays.
+- **The rewritten input goes through the permission re-check** (`mC` with `hookUpdatedInput`). A deny or ask rule
+  can still override it.
+- **The PC's conversation shows who answered.** Claude Code records the decision as
+  `decisionReason: {type: "hook", hookName: "PermissionRequest"}`, and the PC prints "⎿ Allowed by
+  PermissionRequest hook" under the answer (the probe's screen).
+- **A `deny` makes its message the tool result, verbatim** (measured: the transcript's `tool_result` content is
+  exactly the message, with `is_error: true`). Without a message it reads "Permission denied by PermissionRequest
+  hook". With `interrupt: true` the turn is aborted, like Esc. So a phone's "Chat about this" sends Claude Code's
+  own rejection text (§1.7) as the message.
 
-### 5.4 Timeout and lifetime
+### 4.4 Timeout and lifetime
 
 - **A command hook's `timeout` is `positive().optional()` in the schema: no upper limit.** The run applies
-  `timeout × 1000` ms (`wn = e.timeout ? e.timeout*1000 : zl`), and the default `zl` is 600,000 ms (10 min).
-  The JavaScript timer caps any delay at 2^31−1 ms (24.8 days); keep the timeout well under that (§7.2: 24 h).
+  `timeout × 1000` ms (`wn`); the default `zl` is 600,000 ms (10 min). The JavaScript timer caps any delay at
+  2^31−1 ms (24.8 days); keep the timeout well under that (§6.2: 24 h).
 - ⚠ **When the dialog is answered at the PC, Claude Code does NOT stop the hook.** Its late answer is dropped
-  (`if (!L || !A()) return`). Measured: the hook process was alive 3 s after the PC answer, and exited only
-  when it answered on its own. The hook can end early only through the turn's abort signal (Esc; read in the
-  code, not measured) or its own timeout.
+  (`if (!L || !A()) return`). Measured: the hook process was alive 3 s after the PC's answer, and exited only when
+  it answered on its own. Only the turn's abort signal (Esc; read in the code, not measured) or its own timeout
+  ends it early.
 
-### 5.5 What the transcript records
+### 4.5 What the transcript records
 
-- **A hook's decision is written as an attachment line just before the tool result:**
-  `{"type":"attachment","attachment":{"type":"hook_permission_decision","decision":"allow"|"deny","toolUseID":"toolu_…","hookEvent":"PermissionRequest"}}`
-  This is the on-disk proof that the answer came from a hook, and it carries the `tool_use` id that the hook
-  payload lacks.
-- **A PC answer writes no such line**, and its `toolUseResult` carries `annotations: {}`.
-- **Plan mode leaves `plan_mode` / `plan_mode_exit` attachments** with the plan file's path.
+- **A hook's decision is an attachment line written just before the tool result:**
+  `{"type":"attachment","attachment":{"type":"hook_permission_decision","decision":"allow"|"deny","toolUseID":"toolu_…","hookEvent":"PermissionRequest"}}`.
+  It is the on-disk proof that the answer came from a hook, and it carries the `tool_use` id that the payload
+  lacks. In the probe, exactly the three hook answers (A, D, E) wrote one.
+- **A PC answer writes no such line.** Its `toolUseResult` carries `answers` and `annotations` (`{}` when empty).
 
-### 5.6 Traps
+### 4.6 Traps
 
 - ⚠ **A `PreToolUse` / `PermissionRequest` hook entry that cannot be loaded makes Claude Code skip the
-  permissions declared in the same settings file** (a fatal validation note: "nothing it sits in is applied
-  until the entry is fixed or removed"). Agentmaster's `hooks-settings.json` must stay exactly valid.
-- **Output exactly one JSON object, or nothing.** Plain text or two documents are ignored as non-JSON output.
-  An exit code other than 0 or 2 is a hook error; 2 is a blocking error.
-- **A `setMode` to `bypassPermissions` needs a session that may bypass.** For the Remote Control bridge Claude
-  Code falls back to `default` otherwise; the hook path was not tested with it. The recommended buttons (§7.4)
-  never ask for it: "Approve" restores the pre-plan mode, which is bypass for an Agentmaster launch.
+  permissions declared in the same settings file** (a fatal validation note: "nothing it sits in is applied until
+  the entry is fixed or removed"). Agentmaster's `hooks-settings.json` must stay exactly valid.
+- **Output exactly one JSON object, or nothing.** Plain text or two documents are ignored as non-JSON output. An
+  exit code other than 0 or 2 is a hook error; 2 is a blocking error.
 
-## 6. The probe (2026-10-19)
+## 5. The probe (2026-10-19)
 
-**How it was run** (`tools/interactive-tools-probe/run_probe.py`):
-- The `claude-wrap-ConPTY` driver ran a real `claude.exe` 2.1.291 TUI (Haiku 4.5, 160×50) in a throwaway
-  folder.
+**How it was run** (`tools/interactive-tools-probe/run_probe.py`, 09:32):
+- The `claude-wrap-ConPTY` driver ran a real `claude.exe` 2.1.291 TUI (Haiku 4.5, 160 × 50) in a throwaway
+  folder, with `--dangerously-skip-permissions` like Agentmaster's launches.
 - `CLAUDE_CODE_SANDBOXED=1` skipped the workspace-trust dialog without writing `~/.claude.json`.
-- The launch carried `--dangerously-skip-permissions` (like Agentmaster's) and a `--settings` file whose only
-  hook is a `PermissionRequest` command hook (matcher `AskUserQuestion|ExitPlanMode`, `timeout: 600`).
-- That hook (`perm_hook.py`) logs its payload and long-polls for a reply file, like Agentmaster's helper
-  would.
+- The `--settings` file's only hook is a `PermissionRequest` command hook (matcher `AskUserQuestion`,
+  `timeout: 600`). That hook (`perm_hook.py`) logs its payload and long-polls for a reply file, as Agentmaster's
+  helper would.
+- For C–G the model was told to ask one single-select question with three options, Left, Center and Right, each
+  with a three-line ASCII mockup as its `preview`. It did so every time.
 - Every verdict was read from the transcript.
 
 | | Scenario | Result |
 |---|---|---|
-| A | The hook answers a question (`allow`, `updatedInput` = the input + `answers: {"Which color do you prefer?": "Blue"}`) | ✅ `Your questions have been answered: "Which color do you prefer?"="Blue". …`; the model replied `CHOSEN=Blue` |
-| B | The PC answers first (Enter on option 1) | ✅ `…"Apple"`; the hook was still alive 3 s later; its later "Pear" was ignored; the model said `FRUIT=Apple` |
-| C | The hook approves the plan (`allow`, `updatedInput: {}`, no `updatedPermissions`) | ✅ `User has approved your plan. …`; the footer showed "bypass permissions on" again (the pre-plan mode); `toolUseResult` had no `planWasEdited` |
-| D | The hook rejects the plan with Claude Code's own "keep planning" text + "Change step 1 to print bye.", then approves the revision with `setMode: default` | ✅ the model rewrote the plan ("Step 1: print bye") and asked again; after the approval the footer showed "manual mode on" |
+| A | The hook answers a plain question (`answers` only) | ✅ `Your questions have been answered: "Which color do you prefer?"="Blue". …`; the model replied `CHOSEN=Blue` |
+| B | The PC answers first (Enter on option 1) | ✅ `…"Apple"`; the hook was still alive 3 s later; its later "Pear" was dropped |
+| C | **The PC:** key 2 (focus), n, the note "use rounded corners", Enter | ✅ the PC sent `answers` = Center and `annotations` = {Center's mockup as `preview`, `notes`}; the text is the careful form of §1.7 |
+| D | **The hook** sends that same shape for another question | ✅ the same text form, exactly as the mapper builds it; the stored `toolUseResult` holds the hook's answers and annotations; the model replied `LAYOUT=Center` |
+| E | **The hook** sends `(notes only)` + the note "none of these, make it a tab strip" | ✅ `"…"=(no option selected) notes: none of these, make it a tab strip. Read the answers carefully …`; the model offered to design a tab strip |
+| F | **The PC:** n, the note, Enter (the focus not moved) | ✅ the PC sent `"(notes only)"` and `{notes}` with no preview: the form E reproduced |
+| G | **The PC:** Enter on the first option, no note | ✅ the PC sent the label AND `{preview}`; the plain form with `selected preview:` |
 
-**Timing** (the transcript's times against the hook log):
-- The hook process started 0.11–0.28 s after the transcript's `tool_use` line, including the Python start.
-- The tool result was written 0.01–0.02 s after the hook answered.
-- In B the PC's answer came 3.7 s before the hook's late one, which was dropped.
+- **The evidence** lives in the probe's folder: `C-pc-answer.json`, `F-pc-answer.json`, `G-pc-answer.json` (the
+  PC's own answers) and `D-hook-answer.json`, `E-hook-answer.json` (the hook's). Each holds the call's input, the
+  stored `toolUseResult` and the text. They become the composer's golden tests (§8).
+- **Timing** (the transcript's times against the hook log): the hook started 0.10–0.25 s after the `tool_use`
+  line, Python start included. The result was written 0.011–0.014 s after the hook answered.
+- **Earlier the same day**, in two runs: A, B and the two plan scenarios (now P1 and P2, run only with
+  `--with-plans`) passed both times, with the same timing.
 
-**Reproduced:** the committed script ran again at 08:11 the same day, in a fresh folder and session, with the
-same four results.
+## 6. The design (proposal, nothing built)
 
-## 7. The design (proposal, nothing built)
-
-### 7.1 The pieces
+### 6.1 The pieces
 
 ```
-claude.exe ──PermissionRequest (exec form, matcher AskUserQuestion|ExitPlanMode, timeout 86400)──▶ agentmaster ask helper
-                                                                                                       │ one JSON line each way
-                                                                                                       ▼
-                                                     \\.\pipe\agentmaster.<pid>.ask (duplex) ── Engine: open-dialog table
-                                                                                                       │
-                                                       Messaging service ◀── a question / plan message with buttons
-                                                       a tap / a reply ──▶ the decision ──▶ the helper prints it ──▶ claude
+claude.exe ──PermissionRequest (exec form, matcher AskUserQuestion, timeout 86400)──▶ agentmaster ask helper
+                                                                                          │ one JSON line each way
+                                                                                          ▼
+                                          \\.\pipe\agentmaster.<pid>.ask (duplex) ── Engine: open-question table
+                                                                                          │
+                                          Messaging service ◀── a preview picture + a question message with buttons
+                                          a tap / a reply ──▶ the composed answer ──▶ the helper prints it ──▶ claude
 ```
 
-### 7.2 The helper
+### 6.2 The helper
 
 - **One more hook in `hooks-settings.json`**, written by the same three writers as today (engine init, every
-  spawn, the cog's Save) and in exec form like the forwarder:
+  spawn, the cog's Save), in exec form like the forwarder:
   ```json
-  "PermissionRequest": [ { "matcher": "AskUserQuestion|ExitPlanMode",
+  "PermissionRequest": [ { "matcher": "AskUserQuestion",
       "hooks": [ { "type": "command", "command": "<profile>\\bin\\agentmaster-ask.exe", "args": [], "timeout": 86400 } ] } ]
   ```
   - Only for a claude ≥ 2.1.139 (exec form). An older claude gets no ask hook and keeps today's show-only
     behavior.
-  - The 24 h timeout is long enough for a phone answer; after it the dialog stays with the PC.
-- **A native exe, not the PowerShell forwarder** (decision I2):
-  - It waits for as long as the dialog is open. A waiting Windows PowerShell 5.1 holds tens of MB and starts in
+  - The 24 h timeout is long enough for a phone answer. After it, the dialog stays with the PC.
+- **A native exe, not the PowerShell forwarder** (decision Q2):
+  - It waits as long as the dialog is open. A waiting Windows PowerShell 5.1 holds tens of MB and starts in
     0.3–0.7 s warm (HOOKS.md); a native helper holds a few MB.
   - It can be the CLI binary in a hook mode (`agentmaster-cli.exe hook-ask`).
   - It is copied into the profile, the way the GUI copies the session database service into
-    `<profile>\sessiondb\bin`, so that the path in the settings file survives a layout swap.
+    `<profile>\sessiondb\bin`, so the path in the settings file survives a layout swap.
 - **What it does:**
   1. Read the payload from stdin.
   2. Print nothing and exit 0 at once when any of these holds:
-     - `agent_id` is present (a subagent's dialog waits for its hooks, §5.1);
-     - the tool is not one of the two;
+     - `agent_id` is present (a subagent's dialog waits for its hooks, §4.1);
+     - the tool is not `AskUserQuestion`;
      - Agentmaster's pipe cannot be found (the forwarder's discovery: `CCMGR_HOOK_PIPE`, else `bridge.json`).
-  3. Connect to `\\.\pipe\agentmaster.<pid>.ask`. Write one request line: the payload plus the helper's pid and
+  3. Connect to `\\.\pipe\agentmaster.<pid>.ask`, and write one request line: the payload, the helper's pid and
      its parent claude's pid.
-  4. Block on one reply line. Print it as the hook output when it is a decision; print nothing when it is
-     `{}`. Exit 0.
-- **It ends by itself** when:
-  - the reply arrives;
-  - the pipe breaks (the app quit);
-  - its parent claude exits (it holds the claude's process handle; Claude Code does not end it, §5.4);
-  - the 24 h deadline passes.
+  4. Block on one reply line. Print it as the hook output when it is a decision; print nothing when it is `{}`.
+     Exit 0.
+- **It ends by itself** when the reply arrives, when the pipe breaks (the app quit), when its parent claude exits
+  (it holds the claude's process handle; Claude Code does not end it, §4.4), or at the 24 h deadline.
 - **It fails open everywhere:** any doubt means no output and exit 0, and the dialog stays with the PC.
 
-### 7.3 The engine
+### 6.3 The engine
 
 - **The ask server** is a duplex pipe beside the hook pipe (`HooksBridge`; today's hook pipe is
-  `PIPE_ACCESS_INBOUND`). It keeps one connection per waiting helper, with the same access as the hook pipe.
-  It answers `{}` at once when:
-  - no remote surface is connected (Telegram off or not connected);
-  - the session is not managed;
-  - the request is malformed.
-- **The open-dialog table** (`PendingInteraction`, transient, never persisted) holds per entry:
-  - a nonce;
-  - the registry session (mapped from `session_id` like a hook);
-  - the tool, its input (the questions, or the plan + its file), `prompt_id` and the open time;
+  `PIPE_ACCESS_INBOUND`). It keeps one connection per waiting helper, with the same access as the hook pipe. It
+  answers `{}` at once when no remote surface is connected (Telegram off or not connected), when the session is not
+  managed, or when the request is malformed.
+- **The open-question table** (`PendingQuestion`, transient, never persisted) holds per entry:
+  - a nonce, the registry session (mapped from `session_id` like a hook), `prompt_id` and the open time;
+  - the call's input (the questions, their options and previews);
+  - per question: the pick (or the picks, multi-select), the note, an "Other" text, and the Telegram message ids
+    (its picture and its question message);
   - the waiting connection;
-  - a state: open / answering / closed;
-  - when closed, the outcome and its origin: phone / PC / Esc / exit / timeout.
-- **A new state signal:** a request is an exact "a dialog is open now". It can set `NeedsApproval` at once,
-  instead of the `Notification` 6 s later, and carry the question to the board and the badge. It is a fourth
-  belt beside today's three, never the only one.
+  - a state: open / answering / closed. When closed: the outcome and its origin (phone / PC / Esc / exit /
+    timeout).
+- **A new state signal:** a request is an exact "a question is open now". It can set `NeedsApproval` at once,
+  instead of the `Notification` 6 s later. It is a fourth belt beside today's three, never the only one.
 - **Answering from the phone:**
-  1. `AnswerInteraction(nonce, choice)` checks the choice against the stored input:
-     - the question texts are the same;
-     - every label exists;
-     - an answer is at most 8,192 characters, and all of them together at most 32,768 (Claude Code's own
-       bound for remote answers, §1.1).
-  2. It builds the decision (§7.4) and writes it to the connection.
-  3. It logs `[ask] <sid8> answered from telegram: …`.
-  4. It verifies: within ~10 s the transcript must hold a `hook_permission_decision` for the session and the
-     tool's result. Otherwise the message is edited to "not confirmed — look at the PC".
-- **Answered elsewhere.** Any of these closes the entry with `{}`; the helper exits:
-  - the transcript shows the tool's result, or a `hook_permission_decision` line, for the session after the
-    open;
+  1. The engine composes the answer (§6.4) and validates it against the stored input: the question texts and
+     labels are unchanged; an answer is at most 8,192 characters, and all of them together at most 32,768
+     (§1.8).
+  2. It writes the decision to the connection and logs `[ask] <sid8> answered from telegram: …`.
+  3. It verifies: within ~10 s the transcript must hold a `hook_permission_decision` and the tool's result.
+     Otherwise the message is edited to "not confirmed — look at the PC".
+- **Answered elsewhere.** Any of these closes the entry with `{}`, and the helper exits:
+  - the transcript shows the tool's result, or a `hook_permission_decision`, for the session after the open;
   - the heartbeat leaves `waiting`;
-  - the turn is interrupted;
-  - the claude exits;
-  - the tab closes.
+  - the turn is interrupted, the claude exits, or the tab closes.
 
-  The phone message is then edited to the answer given, read from the transcript's `toolUseResult`.
+  The phone's messages are then edited to the answer given, read from the transcript's `toolUseResult`,
+  annotations included.
 - **Pairing with the mirror:** the request has no `tool_use` id. The open entry pairs with the transcript's
-  `tool_use` by session, tool and content. The `hook_permission_decision` line confirms the pairing
-  afterwards.
+  `tool_use` by session, tool and content; the `hook_permission_decision` line confirms the pairing afterwards.
 
-### 7.4 Telegram
+### 6.4 The answer composer (pure)
 
-- **A question message**, sent at once with sound. It replaces today's `❓` item for this `tool_use`.
+- **`ComposeQuestionAnswer(input, choices)` → the `updatedInput`**, built as `nJ` builds it (§1.6):
+  - a pick → `answers[q]` = the label. A multi-select pick → the labels joined with ", ", a label that holds ", "
+    or `"` JSON-quoted (`Tct`). A typed "Other" (a question without previews) → the text;
+  - a preview question → `annotations[q]` = {`preview`: the picked option's preview when `PreviewKind` says full,
+    sanitized as Claude Code sanitizes it; `notes`: the note, trimmed, when not empty}. The entry is left out when
+    it has neither;
+  - a note without a pick → `answers[q]` = `"(notes only)"`;
+  - `annotations` = `{}` when no question has an entry (the PC sends it so).
+- **`PreviewKind(text)`** ports the mapping of §1.2: none / withheld / full (sanitized). The invisible-character
+  test needs ICU, which `ClaudeInvisibleChars` already links.
+- **`ComposeChatAboutThis(input, choices)` → the `deny` message:** the rejection prefix plus `R4e`'s text, its
+  whitespace included, with each question's answer and note (§1.7).
+- **Tests:** the probe's JSON files are the goldens (§8). The PC's C, F and G must come out of the composer byte
+  for byte from the same picks and notes.
 
+### 6.5 Telegram
+
+**The previews: one picture of all of them** (recommended; Q3).
+- **Drawn from the call's input, never from the PC's screen.** The PC shows one option at a time, and moving its
+  focus would change what its Enter does (§1.4).
+- **Each option's preview as a framed monospace block** under its number and label, stacked:
   ```
-  ❓ Color · Which color do you prefer?
-   1. Red — The color red
-   2. Blue — The color blue
-  [ Red ] [ Blue ]
-  [ ✍️ Other… ] [ 💬 Reply instead… ]
+  ┌ 1 · Left ───────────────────┐
+  │ +--------------+            │
+  │ |[LOGO]        |            │
+  │ +--------------+            │
+  └─────────────────────────────┘
+  ┌ 2 · Center ─────────────────┐
+  │ +--------------+            │
+  │ |   [LOGO]     |            │
+  │ +--------------+            │
+  └─────────────────────────────┘
+  ┌ 3 · Right ──────────────────┐
+  │ …                           │
   ```
+- **Built as a `ScreenSnapshot`** (one row per line, the dark terminal's default colors) and drawn by
+  `RenderScreenSnapshotPng` (ScreenImage.h; the card's 🖼 Screen Image, MESSAGING.md §21.24, ~90–185 ms for a full
+  screen, on a worker thread). The widest preview here (113 cells) is ~1,800 px wide at 16 px a cell, inside the
+  renderer's 2,400 px.
+- **Kept as the PC words it:** a withheld preview shows Claude Code's placeholder text, and an option without a
+  preview says "No preview available".
+- **Sent with `sendPhoto`**, silent (the question message rings), with the caption `Previews · <header>`. A sheet
+  taller than a threshold (to measure on the phone, §8) goes as an album of one picture per option.
 
-  - One row of option buttons per question. For a single single-select question, a tap sends at once.
-  - Multi-select options are toggles (☐ / ☑).
-  - With several questions, each pick ticks in place, and **[✅ Send answers]** sends them all. Claude Code
-    accepts an unanswered question.
-  - **✍️ Other…** asks for a reply (ForceReply). The reply's text becomes that question's answer, which gives
-    "The user answered: …".
-  - **💬 Reply instead…** sends the reply's text as `response` ("The user responded: …").
-  - A preview is shown under its option as an expandable quote.
-- **A plan message**, also with sound:
-
+**The question message**, one per question, sent right after its picture, with sound:
+```
+❓ Layout · Which header layout do you prefer?
+1. Left — Logo on the left
+2. Center — Logo in the middle
+3. Right — Logo on the right
+📝 Note: —
+[ 1 · Left ] [ 2 · Center ] [ 3 · Right ]
+[ 📝 Note… ] [ 💬 Chat about this ]
+```
+- **The descriptions are shown** (the PC's preview layout hides them; on a phone they are cheap context).
+- **The option buttons:** two to a row, or one to a row when a label is long.
+- **A tap on an option** answers a one-question call at once, with the note if one is set, like the PC's Enter
+  (Q6). With several questions it ticks the pick (✅) and waits for Send.
+- **[📝 Note…]** posts "📝 Note for “Layout”: reply to this message" with a ForceReply (placeholder "Note on this
+  design…"). The reply's text becomes the question's note, the prompt is deleted, and the question message is
+  edited:
   ```
-  📋 Plan ready for approval
-  <the first ~3,000 characters, as Markdown>
-  📎 plan.md (the whole plan as a document — 109 of 126 plans need it)
-  [ ✅ Approve ] [ ✅ Approve · ask before edits ]
-  [ ✏️ Keep planning… ] [ ⏹ Stop ]
+  📝 Note: use rounded corners
+  [ 1 · Left + note ] [ 2 · Center + note ] [ 3 · Right + note ]
+  [ 📝 Send only the note ] [ ✏️ Change ] [ ✖ Remove ]
+  [ 💬 Chat about this ]
   ```
+  A Telegram reply to the question message sets the note the same way (Q5). Any other message in the topic stays
+  a queued prompt (D30).
+- **[📝 Send only the note]** answers `(notes only)` with the note: a quarter of the preview answers on this
+  machine.
+- **[💬 Chat about this]** sends Claude Code's own rejection (§1.7), with the picks and notes so far.
+- **Several questions** (half of the preview questions): one picture and one question message per question, and
+  the last message carries **[📨 Send answers (k of n)]**, the PC's review screen. Unanswered questions are
+  allowed (Q7).
+- **The outcome:** the question message is edited and its buttons removed:
+  - `✅ Center · 📝 use rounded corners — from the phone, 14:02`;
+  - `✅ Left — answered at the PC, 14:03` (read from the transcript, annotations included);
+  - `📝 neither, put the logo in the footer — no option, answered at the PC`;
+  - `💬 asked to clarify`, `⏹ cancelled at the PC`, `⌛ no answer (the session ended)`.
+- **Buttons are action tokens** (MESSAGING.md §7.5). They bind the open entry's nonce; a stale tap answers
+  "already answered: …".
 
-  | Button | Decision |
-  |---|---|
-  | **Approve** | `allow`, `updatedInput: {}`, no `updatedPermissions`: back to the mode from before plan mode (case C) |
-  | **Approve · ask before edits** | the same with `setMode: default` (case D) |
-  | **Keep planning…** | asks for a reply; `deny` with Claude Code's own text, `The user doesn't want to proceed with this tool use. … To tell you how to proceed, the user said:\n` + the reply. The model reads what the PC's "Tell Claude what to change" gives it (case D) |
-  | **Stop** | `deny` + `interrupt: true` with the STOP text (like Esc) |
+**A question without previews** (every question of 922 of the 1,055 calls) takes the same flow without a
+picture. The PC's plain list has "Type something." instead of Notes, so the phone offers **[✍️ Other…]** (a reply
+whose text becomes the answer) instead of [📝 Note…]. Multi-select options are toggles (☐ / ☑).
 
-- **The outcome:** the message is edited and its buttons removed:
-  - `✅ Blue — from the phone, 14:02`;
-  - `✅ Apple — answered at the PC, 14:03`;
-  - `⏹ stopped at the PC`;
-  - `⌛ no answer (the session ended)`.
-
-  The card stops ringing with the state.
-- **Buttons are action tokens** (MESSAGING.md §7.5). They bind the open entry's nonce; a stale tap (already
-  closed) answers "already answered: …".
-
-### 7.5 Lifecycle
+### 6.6 Lifecycle
 
 | Event | Engine | Helper | Telegram |
 |---|---|---|---|
-| The dialog opens | entry open; `NeedsApproval` | waits | question / plan message |
-| A tap or reply on the phone | decision written; entry answering → closed on the transcript's proof | prints the decision, exits | edited to the answer |
-| The PC answers first | the transcript / heartbeat shows it → `{}` | exits | edited to the PC's answer |
-| Esc at the PC | the rejection in the transcript closes the entry with `{}` | ended by the turn's abort signal (read in the code, not measured), else by the `{}` | "stopped at the PC" |
+| The dialog opens | entry open; `NeedsApproval` | waits | the picture + the question message |
+| A note on the phone | stored on the entry, per question | waits | the question message edited ("📝 Note: …") |
+| A tap on the phone | answer composed and written; entry answering → closed on the transcript's proof | prints the decision, exits | edited to the answer |
+| The PC answers first | the transcript / heartbeat shows it → `{}` | exits | edited to the PC's answer, with its note |
+| Esc at the PC | the rejection in the transcript closes the entry with `{}` | ended by the turn's abort signal (read in the code, not measured), else by the `{}` | "cancelled at the PC" |
 | claude exits, the tab closes | `{}` / entry dropped | exits (parent gone or pipe) | "no answer (the session ended)" |
 | The app quits | the pipe breaks | exits; **the dialog stays usable at the PC** | stale buttons answer "Agentmaster is not running" (after the restart: "already closed") |
 | Telegram is not connected | `{}` at once | exits within ~0.1 s | — |
-| A subagent's question | never reaches the engine | `{}` at once (§5.1) | today's show-only item |
+| A subagent's question | never reaches the engine | `{}` at once (§4.1) | today's show-only item |
 | 24 h pass | — | exits at its deadline; the dialog stays | edited to "no longer answerable from here" |
 
-### 7.6 The other tools
+- ⚠ **A note half-typed at the PC is lost when the phone answers first.** The first answer wins; that is Claude
+  Code's race, not Agentmaster's.
 
-- **ProposeGoal:** a topic message with **[🎯 Set this goal]**, which queues `/goal <condition>` as a remote
-  prompt (D30), the very command the approval queues. No hook is involved, and the dialog at the PC stays
-  until it is answered or dismissed there. The corpus has 0 calls, so this is low priority.
-- **EnterPlanMode:** nothing to do under bypass. In `default` mode it is a normal permission prompt.
-- **Generic permission prompts** (sessions not launched with skip-permissions): the same hook with matcher `.*`
-  can answer Allow once / Always allow (from `permission_suggestions`, as `updatedPermissions`) / Deny. That
-  is the `permission` message type of MESSAGING.md §6.3. Later, off by default (decision I6).
+### 6.7 A first step that needs no hook (S0)
 
-### 7.7 What this changes in MESSAGING.md
+- **The answer line shows the note.** The mirror's `Answer` item reads `annotations` too:
+  `Center · 📝 use rounded corners`, and `(notes only)` becomes `📝 neither, put the logo in the footer`.
+- **The question item lists the descriptions**, and says how many options carry a preview.
+- **Size:** pure `MessagingModels.h` changes with m5 tests. No hook, no new process, no answering. Today it would
+  turn a quarter of this machine's preview answers from "(notes only)" into the user's own words.
 
-- §7.4's key plans are superseded for `AskUserQuestion` and `ExitPlanMode`. `ReadMenuSnapshot` / `MenuSnapshot.h`
-  are not needed for them.
-- D9's recommendation becomes this hook.
-- P0-1 is not needed for these two tools. P0-3 is answered by §1–§2. P0-22 is answered by §4 B: a mod's
-  `{result}` cannot approve a plan.
+### 6.8 What this changes in MESSAGING.md
 
-## 8. Decisions (open; the recommendation first)
+- §7.4's key plans are superseded for `AskUserQuestion`. `ReadMenuSnapshot` / `MenuSnapshot.h` are not needed for
+  it.
+- D9's recommendation for questions becomes this hook. Plans are not designed here (the scope above).
+- P0-1 is not needed for questions; P0-3 is answered by §1–§2; P0-22 is answered by §4.1: the hook needs no mod.
+
+## 7. Decisions (open; the recommendation first)
 
 | # | Decision | Recommended | Alternative |
 |---|---|---|---|
-| **I1** | Answer questions and plans from Telegram | **Yes, through a `PermissionRequest` hook** (this document; replaces D9's key plans) | key plans (MESSAGING.md §7.4); leave them to the PC |
-| **I2** | The helper | a native exe (the CLI in a hook mode), copied into the profile | the PowerShell forwarder with a duplex pipe (tens of MB while it waits) |
-| **I3** | The plan buttons | Approve (the pre-plan mode) · Approve · ask before edits · Keep planning… · Stop | mirror the PC's rows exactly (bypass / auto-accept / manual) |
-| **I4** | A text message in the topic while a question or plan is open | a REPLY to the question / plan message answers it ("Other" / feedback); any other message stays a queued prompt (D30) | every message answers the open dialog |
-| **I5** | "Approve in a fresh session" (Claude Code's clear-context option, the most used on this machine until it became opt-in) | not offered (Claude Code hides it by default now) | offered, carried out by Agentmaster: deny + interrupt, then `/clear` and the "Implement the following plan:" first message |
-| **I6** | Generic permission prompts from the phone | later, off by default, only for sessions not in bypass | never |
-| **I7** | A subagent's question | never held (the helper answers at once) | answerable too; its dialog then waits for the phone before the PC sees it |
-| **I8** | A cue at the PC | none: the dialog is unchanged and the first answer wins | "📱 answerable from Telegram" on the tab badge |
+| **Q1** | Answer `AskUserQuestion` from Telegram | **yes, through a `PermissionRequest` hook** (this document; it replaces D9's key plans for questions) | key plans (MESSAGING.md §7.4); leave questions to the PC |
+| **Q2** | The helper | a native exe (the CLI in a hook mode), copied into the profile | the PowerShell forwarder with a duplex pipe (tens of MB while it waits) |
+| **Q3** | How the previews look on the phone | **one picture of every option's preview** (a sheet, drawn by the Screen Image renderer), then the question message | a carousel: one photo message with the focused option's preview, where ◀ / ▶ replace the photo (the PC's own one-at-a-time model); text only: a monospace block per option (92% of the previews need more than 40 cells, so most would wrap; §8) |
+| **Q4** | Markdown in a preview picture | the raw text, as the 84 box-drawing mockups need (Markdown markers stay visible in the 39 with headings) | styled like the PC's terminal renderer (bold headings, highlighted code), e.g. through `MarkdownBlocks` |
+| **Q5** | How a note is written | [📝 Note…] (a ForceReply prompt) and a Telegram reply to the question message | only the button; any message in the topic while a question is open (that would change D30) |
+| **Q6** | One question: when a tap answers | at once, with the note if one is set (the PC's Enter) | every answer needs a [Send] tap |
+| **Q7** | Several questions | one picture + one question message per question, and [📨 Send answers (k of n)] on the last (the PC's review screen) | one message edited from question to question (the PC's tabs) |
+| **Q8** | [💬 Chat about this] on the phone | offered, as Claude Code's own rejection text with the picks and notes so far | not offered |
+| **Q9** | A subagent's question | never held: the helper answers at once, and the PC answers | answerable too; its dialog then waits for the phone before the PC sees it |
+| **Q10** | S0 (§6.7) before the hook | yes: small, independent, and it fixes the lost notes now | only together with the hook |
 
-## 9. Before it is built
+**Not a decision:** a cue at the PC. Claude Code already prints "Allowed by PermissionRequest hook" under a
+phone's answer.
 
+## 8. Before it is built
+
+- **Phone checks** (the user's phone, through the dev bot; a message is sent only with the user's go-ahead):
+  - how a monospace block of 52, 70 and 113 cells shows: wrapped, or scrolled sideways;
+  - the sheet picture with 3 and 4 options and a 39-line preview: readable without zoom? where the album threshold
+    sits;
+  - the [📝 Note…] ForceReply prompt and a plain reply to the question message;
+  - the buttons with long labels (up to 112 characters on this machine).
 - **Pure tests (m5):**
-  - the answer composer: single, multi-select with the quoting rule, "Other", `response`, `(notes only)`;
-  - the plan decisions;
-  - the validation against the stored input;
-  - the request parser (every field; `agent_id`; an unknown tool);
-  - the helper's output (exactly one JSON object, or nothing);
-  - the open-dialog table's transitions.
-- **The pipe:** a duplex round trip; a broken pipe; two helpers at once.
-- **Live, through the app and the dev bot** (the four probe scenarios, then the rest):
-  - from the phone: a single answer, a multi-select answer, an "Other" answer, a reply instead;
-  - the PC first: the message is edited and the helper is gone;
-  - a plan approved: the mode is back;
-  - keep planning, then approve the revision;
-  - Esc at the PC;
-  - the app quit with a dialog open (the dialog stays usable);
-  - Telegram off (no wait);
-  - a subagent's question (not delayed);
-  - a claude older than 2.1.139 (no ask hook).
+  - the composer against the probe's goldens (C, F, G from the PC; D, E from the hook), and the multi-select
+    quoting rule, "Other", and an unanswered question in a call of several;
+  - `PreviewKind`: 2,000 and 2,001 characters, whitespace only, an invisible format character (→ U+FFFD), the
+    truncation marker, 9 stacked marks;
+  - `ComposeChatAboutThis` against Claude Code's text, whitespace included;
+  - the bounds (8,192 / 32,768) and the validation against the stored input;
+  - the request parser (every field; `agent_id`; another tool) and the helper's output (one JSON object, or
+    nothing);
+  - the sheet builder: a 113-cell preview, wide CJK characters, a 39-line preview, a withheld one;
+  - S0's answer line: a pick with a note, `(notes only)`, several questions.
+- **Live, through the app and the dev bot:**
+  - from the phone: a pick, a pick with a note, a note alone, several questions with [📨 Send answers], "Chat
+    about this", a question without previews with "Other";
+  - the PC first (the messages are edited and the helper is gone), a note half-typed at the PC;
+  - Esc at the PC; the app quit with a question open (the dialog stays usable); Telegram off (no wait);
+  - a subagent's question (not delayed); a claude older than 2.1.139 (no ask hook).
 - **To measure:** the helper's start time and its memory while it waits.
-- **Re-check on every Claude Code upgrade** that changes the hooks or these tools: run
-  `tools/interactive-tools-probe/run_probe.py` (four scenarios, a few Haiku turns). If `V_r` ever drops a
-  tool, the hook's `allow` is ignored, the dialog stays with the PC, and Agentmaster should fall back to
-  show-only.
+- **Re-check on every Claude Code upgrade** that changes hooks or `AskUserQuestion`: run
+  `tools/interactive-tools-probe/run_probe.py` (seven scenarios, ~1.5 min of Haiku turns). If `V_r` ever drops the
+  tool, the hook's `allow` is ignored, the dialog stays with the PC, and Agentmaster falls back to show-only.
 
-## 10. Sources
+## 9. Sources
 
 **The Claude Code 2.1.291 bundle** (`~/.local/bin/claude.exe`, a Bun single-file binary). Its plain JS chunks
 start at about byte 200,000,000. Minified names are chunk-local and change with every release: search by the
 quoted strings (`tools/interactive-tools-probe/grepbin.py`). Byte offsets in 2.1.291:
 
-| Function | Name | Byte offset |
+| What | Name | Byte offset |
 |---|---|---|
+| the tool's preview guidance | `M8o` | 213,909,976 |
+| `"(notes only)"` | `_0t` | 222,627,667 |
+| the result mapper | `mapToolResultToToolResultBlockParam` | 222,632,953 |
+| the preview limit and its placeholder | `FXe` / `Xge` | 237,345,602 |
+| the preview box | `ohe` / `p5` | 237,346,212 |
+| the question tabs | `QS` | 237,348,733 |
+| the preview layout (keys, Notes, the submit rule) | `A5` | 237,351,068 |
+| the review screen ("Ready to submit your answers?") | `K5` | 237,366,631 |
+| the preview kinds | `G5` | 237,369,819 |
+| what the PC sends | `nJ` | 237,384,141 |
+| "Chat about this" | `R4e` | 237,384,750 |
+| the preview-question rule | `P4e` | 237,385,571 |
+| the preview's sanitizer | `Nl` (`zet`) | 210,386,115 (210,393,687) |
+| the odd-character test | `e0` / `Ym` | 210,392,840 / 210,386,771 |
+| the terminal Markdown renderer | `wIt` | 220,595,646 |
+| the hook's allow / deny | | 233,387,760 |
 | `executePermissionRequestHooks` | `ABe` | 217,614,218 |
 | the runner's `runHooks` | | 235,984,685 |
 | the dialog-vs-hooks race | `zo` | 236,017,181 |
@@ -618,22 +689,12 @@ quoted strings (`tools/interactive-tools-probe/grepbin.py`). Byte offsets in 2.1
 | the default hook timeout | `zl = 600000` | 217,474,842 |
 | a command hook's timeout | `wn` | 217,530,299 |
 | the hook command schema (`timeout: positive().optional()`) | | 207,214,649 |
-| `ExitPlanMode` | | 222,337,232 |
-| its dialog's options | `u9e` / `g9e` | 237,417,237 |
-| the clear-context restart | | 237,424,220 |
-| `EnterPlanMode` | | 222,585,949 |
-| `ProposeGoal` | | 239,912,042 |
-| the `AskUserQuestion` chunk | | 222,615,275–222,635,325 |
-| "Chat about this" | `R4e` | 237,384,830 |
-| the rejection texts | | 218,877,401 |
-| `cancelAndAbort` | | 235,984,349 |
 | the 6 s permission Notification | | 233,378,382 |
-| the hook payload's base fields | `yd` | 217,515,842 |
 
 **Other sources:**
 - The typings Claude Code writes beside a mod: `~/.claude/mods/<mod>/.claude-plugin/types/claude-code-tools/index.d.ts`
   (the tools' inputs and outputs) and `…/claude-code/index.d.ts` (hooks).
-- `tools/interactive-tools-probe/`: the probe (`run_probe.py` + `perm_hook.py`) and the corpus survey
-  (`survey_interactive.py`).
-- MESSAGING.md §6.3, §7.4, §7.5, §18 (D9, D16, D30), §19, §21.2; MOD_LINK.md §4.4; HOOKS.md (hook invocation,
-  the blocked-on-user belts).
+- `tools/interactive-tools-probe/`: the probe (`run_probe.py` + `perm_hook.py`), the corpus survey
+  (`survey_interactive.py`), and `grepbin.py`.
+- MESSAGING.md §6.3, §7.4, §7.5, §18 (D9, D16, D30), §19, §21.2, §21.24 (Screen Image); MOD_LINK.md §4.4; HOOKS.md
+  (hook invocation, the blocked-on-user belts).
