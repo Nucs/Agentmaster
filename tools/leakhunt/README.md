@@ -83,4 +83,7 @@ scripts need Python 3.8+ and nothing else; run them with `python -I`.
   of DirectWrite buffers whose owners it had misread (MEMORY_LEAKS.md §7).
 - `PssFreeSnapshot` does not always end a VA clone: production's fourth dump left a thread-less clone
   holding ~1.8 GB of commit. Terminate it through a handle opened by its pid (the snapshot's own
-  handle lacks the rights) before freeing the snapshot, as `snapdump.cpp` does.
+  handle lacks the rights) before freeing the snapshot, as `snapdump.cpp` does. An ENDED clone can
+  still be listed (0 threads, ~84 KB private, `GetExitCodeProcess` even reads STILL_ACTIVE) while some
+  process holds a handle to it: before ending a listed clone again, open it with SYNCHRONIZE and check
+  `WaitForSingleObject(h, 0)` - 0 means it is already gone.
