@@ -61,6 +61,7 @@ scripts need Python 3.8+ and nothing else; run them with `python -I`.
 | `censustool.py` | class folding, byte ranking, raw and live diffs |
 | `dumpview.py` | read memory and object strings out of a dump |
 | `ownerchain.py`, `owners.py` | ownership: one chain, or the owners of a population |
+| `xamltree.py` | where XAML's composition nodes (what every frame walks) and measured TextBlocks sit in the element tree (UI_THREAD.md §13c) |
 | `utext_clone_leak_repro.cpp` | standalone proof of the UTextAdapter clone leak and its fix (system ICU) |
 | `build.bat` | builds `snapdump.exe` and `heapcensus.exe` |
 
