@@ -3493,7 +3493,7 @@ scheduler's timing test "woken tab: the queue resumes by itself…", which passe
 3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
 4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
 
-### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; NOT BUILT yet)
+### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 NOT BUILT yet)
 
 > The user's request (2026-10-18): "The buttons in a topic's bottom pinned status message (with title and status which keeps
 > getting updated), we need to refactor the buttons a bit. — Have a button "<cog>Session" that then changes the buttons of the
@@ -3614,9 +3614,17 @@ three first runs each also failed one scheduler timing check, a different one ev
 `TerminalPage.AgentMessaging.cpp` and `TermControl.cpp` fail only on `ReadScreenSnapshot` missing from the generated
 projection, which the build regenerates from the changed `.idl` files; negative controls fail as they must. The picture was
 looked at: a Claude Code–like screen drawn by the scratch benchmark (colors, bold, italic, underline, strikethrough, color
-emoji, wide CJK, blocks, rules joined). NOT BUILT; nothing tried live.
+emoji, wide CJK, blocks, rules joined). NOT BUILT then; nothing tried live.
 ⚠ `ControlCore.idl` and `TermControl.idl` changed, and the messaging service gained data members: the next build must purge
 (the build-install skill's §5.8).
+
+**Built** (checked 2026-10-19): the purged builds of ec966a2ca that another session swapped in on 2026-10-19 — production
+0.6.8.22 (`Q:\agentmaster-layouts\Release-B`) and dev 0.0.1.30 (`Q:\agentmaster-layouts\Debug`) — hold 4d8826851 and
+bcc546a30 (git ancestry; a UTF-16LE probe of both installed `TerminalApp.dll` files finds `screen-snapshot`, `screenimg` and
+` Screen Image`). So both installs show the first two layouts: Main [⚙️ Session] [🔄 Restart Session] led by the state row,
+Fork and New Session on the Session page. The rule of 2026-10-19 (d0fbc4e31: Restart and Resume on the Session page, Restart
+on Main only in Error / Done, Restart starting a parked tab) is in no build yet; it changes no `.idl`. Nothing was checked
+from the phone.
 
 **Check after the build** (dev, with the bot):
 1. A running or waiting session's card shows [⚙️ Session] alone; ⚙️ Session flips it at once to the Session page, whose first
