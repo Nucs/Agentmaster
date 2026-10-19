@@ -2199,6 +2199,9 @@ own line"**, worded `"<from>" changed the title to "<to>"`.
 - **With other lines**: a `/rename` from the topic gets its reply (`Renamed to 🟦 new …`) and then the line; a topic carried
   over to the next conversation in its tab (a Rekey, §21.6) with a new title gets "— a new conversation in this tab —" and
   then the line.
+- **As built (§21.29)**: a `/rename` gets no reply of its own; the line is its one answer. A topic whose history is being
+  replayed HOLDS its line and posts it once the replay is done. A rename that got no answer is made again at the next tick,
+  and Telegram's `TOPIC_NOT_MODIFIED` counts as a rename that took.
 - **Cost**: a title change = the rename (1) + Telegram's notice deleted (1) + the line (1) + the card's edit (1); a color
   change the same, paced by the name tick; a quiet re-square 3.
 
@@ -3927,6 +3930,69 @@ build that carries d0fbc4e31, §21.26 and this change costs one edit per card in
 **Check after the build** (each install, with its bot):
 - Every card's place line reads like the one above: no "…", no "claude-", no "ctx", on the phone and on the desktop app.
 - The work log's tool lines still show "Edit: …/TerminalApp/AgentMaster/Messaging.cpp".
+
+### 21.29 A rename's change line is its only answer (2026-10-19; NOT BUILT yet)
+
+> The user's request (2026-10-19), after a `/rename` posted two messages, "Renamed to 🟧 Small telegram fixes (the topic
+> follows in a moment)." and then "🟧 Agentmaster changed the title to 🟧 Small telegram fixes": "We dont need the first as
+> long as second always sends on a change".
+
+**What changed — the reply** (`Messaging.Inbound.cpp`, `_runSessionCommand`):
+- `/rename <title>` posts no reply of its own. The topic's change line (§21.13) is its answer, a tick or two later, when
+  the topic sync renames the topic.
+- `/rename` with the title the session has already (as typed, or as the topic prints it, on one line) changes nothing, so
+  no line would come. That case alone gets a reply: "The title is already 🟧 x." The tab's title is left as it is (a
+  multi-line title is not flattened), the rule a rename of the thread follows (`_onUserTopicRenamed`).
+
+**What changed — the line goes out for every change** (`Messaging.cpp` `_renameTopic`). Three cases used to post no line:
+1. **While the topic's history is replayed** (§21.9). The line was dropped, because it would land among the old turns. It
+   is now HELD: the topic's record keeps what it showed before the first held change (`TopicRecord::changeLineHeld`,
+   `changeLineFromTitle`, `changeLineFromSquare`; persisted in `state.json` while held; `HoldTopicChangeLine`). Once
+   nothing of the replay is left, `_pumpBackfill` posts ONE line from there to the name the topic shows then
+   (`TakeHeldTopicChangeLine`). That happens when the replay is done (its position moves on only when its last message
+   was answered, so the line lands below the history), when it was cut short, or when a rekey's new conversation has no
+   history. Details:
+   - Renames that undo each other post nothing.
+   - A quiet re-square during the hold (a mode switch) is not told as a recolor.
+   - A real recolor held before a quiet one is still told.
+   - Logged `[msg] topic <id> changed (title|color): the line is held until its history is in`, then `[msg] topic <id>
+     told: the change held while its history came in`.
+2. **A rename that got no answer** (a network failure, `TgResult::transportFailed`). It was recorded as done, so the topic
+   kept its old name and no line came, ever. It now stays due, and the next tick makes it again (logged `[msg] topic rename
+   of <id> got no answer (…); it is made again at the next tick`).
+3. **Telegram's `TOPIC_NOT_MODIFIED`**, its answer to an `editForumTopic` that changes nothing: a retried rename whose
+   first answer was lost, or a title change past the name's 128-character cut. It was logged as a failed rename, with no
+   line, because `TgResult::NotModified()` knows only a message edit's "message is not modified".
+   `TgResult::TopicNotModified()` now counts it as a rename that took: the line and the card follow.
+
+Every path that changes a title goes through this: `/rename`, the user's rename of the thread (§21.17), a rename at the
+PC, and a rekey's new title (§21.6).
+
+**What the logs showed** (hooks.log, 2026-10-19):
+
+| Install | Topic renames | Title lines told | Failed renames | Lines dropped by a replay |
+|---|---|---|---|---|
+| Production | 619 | 9 | 15, every one a 429 (before 4f3c643d9, §21.14, which retries those) | 0 |
+| Dev | 188 | 2 | 0 | 0 |
+
+The gaps were rare in practice, but once the reply is gone each would leave a rename with no answer at all.
+
+**Tests** (`tests/tests_messaging.cpp`, `TestMessaging`, 15 checks):
+- `TopicNotModified` matches that answer and nothing else.
+- A change with nothing to tell holds no line.
+- A rename during the replay is held, and nothing is told while the replay is pending.
+- Two renames tell one line, from the first title to the last; taking the line clears it.
+- Renames that undo each other tell nothing.
+- A quiet re-square is not told as a recolor, and a real recolor held first is still told.
+- A replay that is gone lets the line go.
+- The held fields round-trip; nothing held writes no key; an older file holds none; the strings count only with the flag.
+
+**Check after the build** (each install, with its bot):
+- `/rename x` in a topic: no reply. A tick or two later the topic's name changes and the silent line "“🟧 old” changed the
+  title to “🟧 x”" appears (hooks.log `[msg] topic <id> told: its title changed`).
+- `/rename` with the current title: "The title is already 🟧 x.", and nothing else.
+- A rename while a topic's history is replayed (a new topic of a long session, or `/recreate`): the name changes at once,
+  and the line comes after the last history message.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

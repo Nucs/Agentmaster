@@ -669,13 +669,21 @@ namespace Agentmaster::Msg
         /// TopicDisplayName(state, square, title, true) while state icons are wanted (§21.22) — a state change then changes only
         /// the icon —, else the glyph form with any state icon the topic shows removed. Records the title, the state, the square
         /// and the form (a refused rename is recorded too, so it is not retried every tick — except a refusal of Telegram's flood
-        /// control, and a refused ICON, which turns the state icons off for the run and leaves the topic due in the glyph form).
+        /// control, a refused ICON, which turns the state icons off for the run and leaves the topic due in the glyph form, and a
+        /// call that got NO ANSWER at all, which stays due and is made again at the next tick, §21.29).
         /// The square is ChooseNameColor's: the tab's color once it has held, else the one the name shows. When the TITLE
         /// changed, or the tab's COLOR changed from one square to another under a settled mode, a silent line in the topic says
         /// so (BuildTopicChangeNoticeHtml — the user's "a message like whatsapp does for group chat name changed", §21.13); a
-        /// state-only change, a quiet re-square or re-form and a topic whose history is still being replayed get none. The card
-        /// is refreshed after a rename Telegram took. Tick thread (a direct call, paced by _awaitCallSlot).
+        /// state-only change and a quiet re-square or re-form get none. The card is refreshed after a rename Telegram took.
+        /// Tick thread (a direct call, paced by _awaitCallSlot).
         /// </summary>
+        /// <remarks>
+        /// §21.29 (the user's rule of 2026-10-19): the change line is a rename's ONLY answer (a /rename in the topic posts no reply
+        /// of its own), so it is never dropped. A topic whose history is still being replayed HOLDS its line (HoldTopicChangeLine,
+        /// persisted in the topic's record), and _pumpBackfill tells it once the replay is done (TakeHeldTopicChangeLine): one line
+        /// from the first held change's start to the name the topic shows then. TOPIC_NOT_MODIFIED (the topic shows this name and
+        /// icon already) counts as a rename Telegram took, so a rename whose lost answer was made again still tells its line.
+        /// </remarks>
         /// <param name="sessionId">The session.</param>
         /// <param name="title">The title the name shows from now on.</param>
         /// <param name="state">The state the topic shows (its icon, or its name's glyph in the glyph form).</param>

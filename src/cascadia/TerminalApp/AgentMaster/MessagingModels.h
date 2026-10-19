@@ -1893,6 +1893,19 @@ namespace Agentmaster::Msg
         std::wstring promptText;
         int promptStatus{ 0 };
         bool promptInterrupted{ false };
+        /// <summary>
+        /// A CHANGE LINE that waits for the topic's HISTORY replay (§21.29). A rename's line (BuildTopicChangeNoticeHtml) is not
+        /// posted while the topic's history is still being replayed, because it would land among the old turns. Since the user's
+        /// rule of 2026-10-19 that line is a rename's ONLY answer, so it is held instead of dropped: `changeLineHeld` set, with
+        /// what the topic showed before the first held change — `changeLineFromTitle`, and `changeLineFromSquare`, the square that
+        /// change's line would quote (NoticeOldSquare). Once no replay is pending, ONE line from there to the name the topic shows
+        /// then is posted (TakeHeldTopicChangeLine) and the three are cleared. Persisted (omitted while nothing is held), so a
+        /// restart in the middle of a replay keeps the line. Written only under the service's lock, never by the tick's copy
+        /// write-back, so no copy of a record can undo a hold.
+        /// </summary>
+        bool changeLineHeld{ false };
+        std::wstring changeLineFromTitle;
+        std::wstring changeLineFromSquare;
     };
 
     /// <summary>Whether a topic shows the whole session (verbose) or the conversation only (§21.11).</summary>
@@ -2088,6 +2101,13 @@ namespace Agentmaster::Msg
                 to.Set(L"promptStatus", json::Value::MkNum(static_cast<double>(t.promptStatus)));
                 to.Set(L"promptInterrupted", json::Value::MkBool(t.promptInterrupted));
             }
+            if (t.changeLineHeld)
+            {
+                // §21.29: a change line held while the history is replayed (omitted while none is held).
+                to.Set(L"changeLineHeld", json::Value::MkBool(true));
+                to.Set(L"changeLineFromTitle", json::Value::MkStr(t.changeLineFromTitle));
+                to.Set(L"changeLineFromSquare", json::Value::MkStr(t.changeLineFromSquare));
+            }
             topics.Push(std::move(to));
         }
         o.Set(L"topics", std::move(topics));
@@ -2195,6 +2215,13 @@ namespace Agentmaster::Msg
                 t.promptText = to.StrAt(L"promptText");
                 t.promptStatus = std::clamp(static_cast<int>(to.I64At(L"promptStatus", 0)), 0, static_cast<int>(PromptTurnStatus::Interrupted));
                 t.promptInterrupted = to.BoolAt(L"promptInterrupted", false);
+                // §21.29 (absent in an older file, or nothing held: no change line waits). The strings count only with the flag.
+                t.changeLineHeld = to.BoolAt(L"changeLineHeld", false);
+                if (t.changeLineHeld)
+                {
+                    t.changeLineFromTitle = to.StrAt(L"changeLineFromTitle");
+                    t.changeLineFromSquare = to.StrAt(L"changeLineFromSquare");
+                }
                 s.topics[t.sessionId] = std::move(t);
             }
         }
@@ -3200,6 +3227,72 @@ namespace Agentmaster::Msg
             return before.nameColor;
         }
         return after.square;
+    }
+
+    /// <summary>
+    /// HOLDS a rename's change line while the topic's history is replayed (§21.29). The line would land among the old turns,
+    /// so the topic remembers where its change started, and TakeHeldTopicChangeLine tells it once the replay is done. Since
+    /// the user's rule of 2026-10-19 ("We dont need the first as long as second always sends on a change") the change line is
+    /// a rename's ONLY answer — a /rename in the topic posts no reply of its own — so a change must never go untold.
+    /// </summary>
+    /// <remarks>
+    /// Holding starts only with a change worth a line (`tellable`: its BuildTopicChangeNoticeHtml is not empty); it records
+    /// the title and the square the topic showed before that change. Later changes while the line waits keep that start, so
+    /// the line tells the first title against the last one, and renames that undo each other tell nothing. One exception
+    /// keeps §21.13's quiet rule: a later change whose square changed QUIETLY (`fromSquare` == `newSquare`: a mode switch, a
+    /// topic just made, the "Remove colors" mode) moves the held square along with it, unless a real recolor is held already
+    /// (the held square is not the one the topic showed before this change). So a mode switch during a long replay is never
+    /// told as a recolor, and a later quiet change never hides a real recolor.
+    /// </remarks>
+    /// <param name="t">The topic record, under the service's lock.</param>
+    /// <param name="tellable">Whether this change alone is worth a line (its notice is not empty).</param>
+    /// <param name="fromTitle">The title the topic showed before this change (the rename's `before.title`).</param>
+    /// <param name="fromSquare">The square this change's line would quote as the old one (NoticeOldSquare: the new square
+    /// itself when the square changed quietly).</param>
+    /// <param name="shownSquare">The square the topic showed before this change (the rename's `before.nameColor`).</param>
+    /// <param name="newSquare">The square the topic shows after it.</param>
+    /// <exception cref="std::bad_alloc">If a held string cannot be allocated (nothing is held then: the flag is set last).</exception>
+    inline void HoldTopicChangeLine(TopicRecord& t, bool tellable, std::wstring_view fromTitle, std::wstring_view fromSquare, std::wstring_view shownSquare, std::wstring_view newSquare)
+    {
+        if (!t.changeLineHeld)
+        {
+            if (!tellable)
+            {
+                return; // nothing to tell, and no line waiting that this change could alter
+            }
+            t.changeLineFromTitle = std::wstring{ fromTitle };
+            t.changeLineFromSquare = std::wstring{ fromSquare };
+            t.changeLineHeld = true;
+            return;
+        }
+        if (fromSquare == newSquare && t.changeLineFromSquare == shownSquare)
+        {
+            t.changeLineFromSquare = std::wstring{ newSquare };
+        }
+    }
+
+    /// <summary>
+    /// The change line a topic HOLDS (§21.29, HoldTopicChangeLine), once nothing of its history replay is left: the replay
+    /// done, cut short (its transcript gone or shorter), or replaced by a rekey's new conversation that has no history. The
+    /// line runs from what the topic showed before the first held change to the name it shows now (its record's title and
+    /// square). Taking it clears the held fields.
+    /// </summary>
+    /// <param name="t">The topic record, under the service's lock.</param>
+    /// <returns>nullopt while nothing is held, or while the replay is still pending (the record is unchanged then); else the
+    /// line, "" when the held changes undid each other (BuildTopicChangeNoticeHtml has nothing to tell), with the held fields
+    /// cleared.</returns>
+    /// <exception cref="std::bad_alloc">If the line cannot be allocated (the record is unchanged then).</exception>
+    inline std::optional<std::wstring> TakeHeldTopicChangeLine(TopicRecord& t)
+    {
+        if (!t.changeLineHeld || TopicBackfillPending(t))
+        {
+            return std::nullopt;
+        }
+        std::wstring line = BuildTopicChangeNoticeHtml(t.changeLineFromTitle, t.changeLineFromSquare, t.title, t.nameColor, t.threadId);
+        t.changeLineHeld = false;
+        t.changeLineFromTitle.clear();
+        t.changeLineFromSquare.clear();
+        return line;
     }
 
     // ===== what a message in a topic is ======================================================

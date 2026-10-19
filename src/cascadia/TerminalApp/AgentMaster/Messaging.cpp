@@ -4580,6 +4580,42 @@ namespace Agentmaster::Msg
                 }
             }
 
+            // 1b. §21.29: the CHANGE LINES held while a topic's history came in (_renameTopic, HoldTopicChangeLine) are told once
+            //     nothing of the replay is left. The replay's position moves on only when its last message was answered, so the
+            //     line lands below the history; a replay cut short, or a rekey's new conversation that has no history, lets its
+            //     line go too. Before step 2, so neither a recreation nor the start-up hold delays a live line. One silent line
+            //     per topic, like the change line it stands for; a scan of booleans under the lock, sent outside it.
+            {
+                struct HeldLine
+                {
+                    std::wstring sessionId;
+                    int64_t threadId{ 0 };
+                    std::wstring html; // "" = the held changes undid each other: nothing to tell
+                };
+                std::vector<HeldLine> released;
+                {
+                    std::lock_guard lk{ _mtx };
+                    for (auto& [id, rec] : _state.topics)
+                    {
+                        if (auto line = TakeHeldTopicChangeLine(rec))
+                        {
+                            _stateDirty = true;
+                            released.push_back(HeldLine{ id, rec.threadId, std::move(*line) });
+                        }
+                    }
+                }
+                for (const auto& h : released)
+                {
+                    if (h.html.empty() || h.threadId <= 0)
+                    {
+                        _log(L"[msg] topic " + ShortId(h.sessionId) + L": the changes held while its history came in undid each other; no line");
+                        continue;
+                    }
+                    _sendText(h.threadId, h.html, true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+                    _log(L"[msg] topic " + ShortId(h.sessionId) + L" told: the change held while its history came in");
+                }
+            }
+
             // 2. Nothing is replayed while a RECREATION deletes the old topics or makes the new list (a minute or two; at most
             //    kRecreateListWaitMs): the replay then goes most recent first over the whole list.
             {
@@ -5268,12 +5304,22 @@ namespace Agentmaster::Msg
                 return;
             }
         }
+        // §21.29: NO ANSWER at all (DNS, TLS, a timeout, an abort: transportFailed) is not a refusal, because Telegram may never
+        // have seen the call. It is NOT recorded, so the name stays due and the next tick makes it again. Recorded "either way"
+        // (below), as it was before, a network blip lost the new name and its change line for good, and since the change line is
+        // a rename's only answer (the user's rule of 2026-10-19) that left a /rename unanswered. A rename Telegram applied
+        // before its answer was lost comes back as TOPIC_NOT_MODIFIED at the retry, which counts as done.
+        if (r.transportFailed)
+        {
+            _log(L"[msg] topic rename of " + ShortId(sessionId) + L" got no answer (" + r.description + L"); it is made again at the next tick");
+            return;
+        }
         {
             std::lock_guard lk{ _mtx };
             if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
             {
                 // Remember the title and the state either way (a refusal other than the flood control's or an icon's — a name
-                // Telegram will not take — must not be retried every tick).
+                // Telegram will not take — must not be retried every tick; a call with no answer at all returned above, §21.29).
                 it->second.title = title;
                 it->second.nameState = static_cast<int>(state);
                 it->second.nameSetMs = WallMs();
@@ -5283,30 +5329,54 @@ namespace Agentmaster::Msg
                 _stateDirty = true;
             }
         }
-        if (r.ok)
+        // §21.29: TOPIC_NOT_MODIFIED means the topic shows this name and icon already: a rename whose lost answer was made
+        // again (above), or a title change that only the cut part of a long name holds. That is a rename that took, for the line
+        // and the card too. Before §21.29 it was logged as a failed rename, and its change line was never told.
+        const bool took = r.ok || r.TopicNotModified();
+        if (took)
         {
-            _log(L"[msg] topic renamed " + ShortId(sessionId) + L" \x2192 " + (wantIcon ? std::wstring{ icon.emoji } + L" " : std::wstring{}) + L"\x201C" + name + L"\x201D");
+            if (r.ok)
+            {
+                _log(L"[msg] topic renamed " + ShortId(sessionId) + L" \x2192 " + (wantIcon ? std::wstring{ icon.emoji } + L" " : std::wstring{}) + L"\x201C" + name + L"\x201D");
+            }
+            else
+            {
+                _log(L"[msg] topic " + ShortId(sessionId) + L" shows its name already (TOPIC_NOT_MODIFIED); taken as renamed");
+            }
             // §21.13, the CHANGE LINE (the user's "a message like whatsapp does for group chat name changed"): a new title, or
             // the tab's color changed from one square to another under a settled mode. Silent, and it does not move the sticky
             // card (one call, not three: the next real post moves the card below it). Telegram's own "topic renamed" notice is
-            // deleted when it arrives (_handleMessage). None while the topic's history is being replayed: it would land among
-            // the old turns, and the name shows the change anyway.
-            const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs), title, color.square, before.threadId);
-            if (!notice.empty())
+            // deleted when it arrives (_handleMessage). §21.29: the line is a rename's ONLY answer since the user's rule of
+            // 2026-10-19 (a /rename in the topic posts no reply of its own), so it is never dropped. While the topic's history is
+            // being replayed, where it would land among the old turns, the line is HELD (HoldTopicChangeLine), and _pumpBackfill
+            // tells it once the replay is done.
+            const std::wstring oldSquare = NoticeOldSquare(before, color, now, _colorModeChangedMs, kColorModeSettleMs);
+            const std::wstring notice = BuildTopicChangeNoticeHtml(before.title, oldSquare, title, color.square, before.threadId);
+            // Which change the line tells, by the line's own rule (the titles as it PRINTS them, 2026-10-18): titles that differ
+            // only in a line break or past the cut tell their color, if anything, so the log never says "title" for a line that
+            // names none. Read only for a line that has something to tell.
+            const auto what = [&before, &title]() -> const wchar_t* { return TopicChangeShowsTitle(before.title, title) ? L"title" : L"color"; };
+            if (TopicBackfillPending(before))
             {
-                // Which change the line tells, by the line's own rule (the titles as it PRINTS them, 2026-10-18): titles that
-                // differ only in a line break or past the cut tell their color, if anything, so the log never says "title" for
-                // a line that names none.
-                const wchar_t* const what = TopicChangeShowsTitle(before.title, title) ? L"title" : L"color";
-                if (TopicBackfillPending(before))
+                // On the record itself, under the lock: the tick's copy write-back never touches the held fields. A change with
+                // nothing to tell still moves a held line's quietly changed square along (HoldTopicChangeLine's remarks).
                 {
-                    _log(L"[msg] topic " + ShortId(sessionId) + L" changed (" + what + L"): no line while its history is being added");
+                    std::lock_guard lk{ _mtx };
+                    if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
+                    {
+                        HoldTopicChangeLine(it->second, !notice.empty(), before.title, oldSquare, before.nameColor, color.square);
+                        _stateDirty = true;
+                    }
                 }
-                else
+                if (!notice.empty())
                 {
-                    _sendText(thread, notice, true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
-                    _log(L"[msg] topic " + ShortId(sessionId) + L" told: its " + what + L" changed");
+                    _log(L"[msg] topic " + ShortId(sessionId) + L" changed (" + what() + L"): the line is held until its history is in");
                 }
+            }
+            else if (!notice.empty())
+            {
+                _sendText(thread, notice, true, SendPriority::New, L"", json::Value{}, nullptr, 0, false);
+                _log(L"[msg] topic " + ShortId(sessionId) + L" told: its " + what() + L" changed");
             }
             _refreshCard(sessionId, true);
         }
