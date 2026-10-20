@@ -136,8 +136,63 @@ namespace Agentmaster::Msg
         constexpr int kStartNoteMaxAttempts = 12;
         // A Search topic whose creation was refused is asked for again this much later (_ensureSearchTopic), not every tick.
         constexpr int64_t kSearchCreateRetryMs = 60 * 1000;
-        // The state file is saved at most this often while dirty (and at once on Stop).
+        // The state file is saved at most this often while a STRUCTURAL change is dirty (and at once on Stop, at the topic
+        // recreation and when the app's last window closes; StateSaveDue).
         constexpr int64_t kStateSaveGapMs = 2000;
+        // ... and at most this often while only PROGRESS is dirty: the live mirror's cursors, recap facts and prompt lines
+        // (CopyBackTopicProgress), a work log's new id, a topic's posted clock (_noteTopicPosted) and its card's stored hash.
+        // Progress moves on every tick while any session works, and each save rewrites the whole file (465 KB with
+        // production's 441 topics, flushed). Saved as a structural change, it was a save every ~3.2 s — with the backup copy
+        // before each, the measured 279 KB/s, ~24 GB a day (UI_THREAD.md §13d). The cost of the gap: after an UNEXPECTED end,
+        // up to this much of the mirrored lines is posted again at the next start (a normal quit flushes first,
+        // NoteAppClosing), a card may be edited once more, and a card may stay above newer posts until the topic's next post.
+        constexpr int64_t kStateProgressSaveGapMs = 10 * 1000;
+        // The backup copy (state.json.prev) is refreshed at most this often (StatePrevCopyDue): it is the last resort for an
+        // unreadable state.json, and copying it before every save doubled every save's writes.
+        constexpr int64_t kStatePrevCopyGapMs = 60 * 1000;
+        // The app-close flush (NoteAppClosing) waits at most this long for each of the save lock and the service's lock. It runs
+        // under the engine's window mutex, so it must never wait without a bound: a bot thread holding `_mtx` might itself wait
+        // for something that needs that mutex. The bot's threads hold `_mtx` only briefly (a few percent of the time with 441
+        // topics) and a running save holds the save lock for one write, so the wait almost always ends within milliseconds.
+        constexpr int64_t kAppCloseSaveLockWaitMs = 250;
+
+        /// <summary>
+        /// Takes a DEFERRED lock, waiting at most `waitMs`. Use the bounded form only where a caller must not depend on the lock's
+        /// holder making progress (the app-close flush, which holds the engine's window mutex); everywhere else pass a negative
+        /// wait, which is a plain blocking lock.
+        /// </summary>
+        /// <remarks>
+        /// The bounded form polls try_lock about every millisecond (std::mutex has no timed lock; Sleep(1) may last up to a
+        /// timer tick, ~15.6 ms), so it can give up although the lock was free for a moment between two polls — the caller must
+        /// treat "not acquired" as an ordinary outcome. The wait is rare and short: it costs nothing on the tick's paths.
+        /// </remarks>
+        /// <typeparam name="Lock">A std::unique_lock over a mutex, not yet owning it.</typeparam>
+        /// <param name="lock">The deferred lock; it owns the mutex on a true return and does not on a false one.</param>
+        /// <param name="waitMs">The longest wait in milliseconds; negative = wait as long as it takes.</param>
+        /// <returns>Whether the lock is now held (always true for a negative wait).</returns>
+        /// <exception cref="std::system_error">From std::unique_lock when it already owns its mutex or has none (a caller bug).</exception>
+        template<typename Lock>
+        bool AcquireLockWithin(Lock& lock, int64_t waitMs)
+        {
+            if (waitMs < 0)
+            {
+                lock.lock();
+                return true;
+            }
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+            for (;;)
+            {
+                if (lock.try_lock())
+                {
+                    return true;
+                }
+                if (std::chrono::steady_clock::now() >= deadline)
+                {
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
         // A Search agent idle this long is parked (its claude.exe holds ~400 MB).
         constexpr int64_t kSearchParkMs = 10 * 60 * 1000;
         // Action tokens live this long (M5: a stale button is refused).
@@ -371,11 +426,41 @@ namespace Agentmaster::Msg
             return out;
         }
 
-        // Reads [cursor, size) of a transcript (at most kMaxReadPerTick bytes), returning the bytes and
-        // the file's size; an unreadable file returns an empty string with size -1.
+        /// <summary>
+        /// Reads [cursor, size) of a transcript (at most kMaxReadPerTick bytes), returning the bytes and the file's size; an
+        /// unreadable file returns an empty string with size -1. Pass an infinite cursor (0x7FFF...) to learn only the size.
+        /// </summary>
+        /// <remarks>
+        /// The size comes from a STAT first, and the file is opened only when it holds bytes past the cursor: the tick asks
+        /// every topic's transcript on every tick (441 topics every 1.5 s on production, ~294 opens a second, nearly all of
+        /// files that had not grown; UI_THREAD.md §13d), and the "size only" callers pass an infinite cursor. The stat
+        /// (GetFileAttributesExW, a query-open of the file's metadata, not the directory listing's cached size) reports the
+        /// size the file system holds, as GetFileSizeEx on an open handle does; a file that grows between the stat and the
+        /// open is read up to its size at the open, and whatever it gains after that is read at the next tick. One
+        /// difference from the open-first form: a file that exists but cannot be opened right now (a sharing violation) and
+        /// holds nothing past the cursor reports its real size instead of -1, so the caller keeps its path rather than
+        /// resolving it again.
+        /// </remarks>
+        /// <param name="path">The transcript.</param>
+        /// <param name="cursor">The byte offset already read; a value at or past the end reads nothing.</param>
+        /// <param name="sizeOut">Receives the file's size, or -1 when it is gone or could not be opened for a read it needed.</param>
+        /// <returns>The bytes from the cursor (empty when there are none, or on a failed read).</returns>
+        /// <exception cref="std::bad_alloc">When the read buffer (up to kMaxReadPerTick bytes) cannot be allocated.</exception>
         std::string ReadTranscriptTail(const std::wstring& path, int64_t cursor, int64_t& sizeOut)
         {
             sizeOut = -1;
+            WIN32_FILE_ATTRIBUTE_DATA attributes{};
+            if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attributes))
+            {
+                return {}; // gone or unreadable: the same answer the open used to give (size -1)
+            }
+            const int64_t statSize = static_cast<int64_t>((static_cast<uint64_t>(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow);
+            if (statSize <= cursor)
+            {
+                // Nothing past the cursor (or the file shrank, which the caller sees in the size): no open needed.
+                sizeOut = statSize;
+                return {};
+            }
             HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h == INVALID_HANDLE_VALUE)
             {
@@ -1281,6 +1366,7 @@ namespace Agentmaster::Msg
     {
         MessagingState loaded;
         const std::string bytes = ReadFileBytes(_stateFile);
+        bool loadedFromFile = false; // the state came from state.json itself (not the backup, not empty)
         if (!bytes.empty())
         {
             if (const auto doc = json::Parse(Profiles::detail::Utf8ToWide(bytes)))
@@ -1288,12 +1374,13 @@ namespace Agentmaster::Msg
                 if (auto s = StateFromJson(*doc))
                 {
                     loaded = std::move(*s);
+                    loadedFromFile = true;
                 }
             }
             else
             {
-                // A torn file: try the previous copy (kept at every save), else start fresh — the topics then
-                // become orphans the bot cannot find (§10.5) and new ones are created.
+                // A torn file: try the previous copy (refreshed at most once a minute by the saves, StatePrevCopyDue), else
+                // start fresh — the topics then become orphans the bot cannot find (§10.5) and new ones are created.
                 const std::string prev = ReadFileBytes(_stateFile + L".prev");
                 if (const auto doc2 = prev.empty() ? std::nullopt : json::Parse(Profiles::detail::Utf8ToWide(prev)))
                 {
@@ -1309,22 +1396,48 @@ namespace Agentmaster::Msg
                 }
             }
         }
+        {
+            // What the file holds now: a save that would write exactly these bytes writes nothing (_saveStateIfDirty). A state
+            // taken from the backup, or a fresh one, has no such bytes, so its first save always writes. A new bot start also
+            // refreshes the backup at its first save (StatePrevCopyDue's 0) — but only from a state.json this run could READ:
+            // copying a torn (or unknown) file over the backup would destroy the one readable version left, so after such a
+            // load the backup waits until a save has written a good file.
+            std::lock_guard saveLk{ _stateSaveMtx };
+            _lastSavedStateBytes = loadedFromFile ? bytes : std::string{};
+            _lastPrevCopyMs = 0;
+            _stateFileReadable = loadedFromFile;
+        }
         std::lock_guard lk{ _mtx };
         _state = std::move(loaded);
         _stateDirty = false;
+        _stateProgressDirty = false;
     }
 
-    void MessagingService::_saveStateIfDirty(bool force)
+    void MessagingService::_saveStateIfDirty(bool force, int64_t lockWaitMs)
     {
-        json::Value doc;
+        // ONE WRITER at a time (`_stateSaveMtx`, taken before `_mtx`): the tick, Stop, the topic recreation and the app's
+        // last window (NoteAppClosing, on another thread) all save through here, and two of them writing state.json.tmp at
+        // once would make one fail. The app-close flush runs under the engine's window mutex and must never wait on the
+        // service's locks without a bound: it passes kAppCloseSaveLockWaitMs and gives up when a lock stays held that long
+        // (logged; the state then keeps what the last save wrote).
+        std::unique_lock saveLk{ _stateSaveMtx, std::defer_lock };
+        if (!AcquireLockWithin(saveLk, lockWaitMs))
         {
-            std::lock_guard lk{ _mtx };
-            if (!_stateDirty)
+            _log(L"[msg] state.json was not flushed: another save held the file for " + std::to_wstring(lockWaitMs) + L" ms");
+            return;
+        }
+        json::Value doc;
+        int64_t now = 0;
+        {
+            std::unique_lock lk{ _mtx, std::defer_lock };
+            if (!AcquireLockWithin(lk, lockWaitMs))
             {
+                _log(L"[msg] state.json was not flushed: the service's lock stayed held for " + std::to_wstring(lockWaitMs) + L" ms");
                 return;
             }
-            const int64_t now = WallMs();
-            if (!force && now - _lastStateSaveMs < kStateSaveGapMs)
+            now = WallMs();
+            // A structural change goes within kStateSaveGapMs, the mirror's progress alone within kStateProgressSaveGapMs.
+            if (!StateSaveDue(_stateDirty, _stateProgressDirty, now, _lastStateSaveMs, force, kStateSaveGapMs, kStateProgressSaveGapMs))
             {
                 return;
             }
@@ -1334,17 +1447,42 @@ namespace Agentmaster::Msg
             _state.newThreads = (_newThreads.empty() && _threadBinds.empty()) ? json::Value{} : NewThreadsToJson(_newThreads, _threadBinds);
             doc = StateToJson(_state);
             _stateDirty = false;
+            _stateProgressDirty = false;
             _lastStateSaveMs = now;
         }
-        const std::string bytes = Profiles::detail::WideToUtf8(json::Dump(doc));
-        // Keep the previous copy: the Bot API cannot list topics, so this file is their only record.
-        ::CopyFileW(_stateFile.c_str(), (_stateFile + L".prev").c_str(), FALSE);
+        std::string bytes = Profiles::detail::WideToUtf8(json::Dump(doc));
+        // A save of the bytes the file already holds writes nothing — no copy, no write, no flush. Several paths mark the state
+        // dirty with values that did not change (a stamp written again, a flag set again); this gate makes them cost a
+        // serialization at most, never a disk write.
+        if (bytes == _lastSavedStateBytes)
+        {
+            return;
+        }
+        // Keep a previous copy: the Bot API cannot list topics, so this file is their only record. Refreshed at most once a
+        // minute (StatePrevCopyDue): it only has to be a recent readable version for a state.json that cannot be read. Never
+        // from a file this run could not read (`_stateFileReadable`, set by _loadState and by every good write below).
+        if (_stateFileReadable && StatePrevCopyDue(now, _lastPrevCopyMs, kStatePrevCopyGapMs))
+        {
+            if (::CopyFileW(_stateFile.c_str(), (_stateFile + L".prev").c_str(), FALSE))
+            {
+                _lastPrevCopyMs = now;
+            }
+        }
         if (!WriteFileAtomic(_stateFile, bytes))
         {
             _log(L"[msg] state.json could not be written (error " + std::to_wstring(::GetLastError()) + L")");
-            std::lock_guard lk{ _mtx };
-            _stateDirty = true;
+            // Dirty again, so the next tick tries again (a STRUCTURAL mark, so it retries within kStateSaveGapMs). The bounded
+            // wait of the app-close flush applies here too: the process ends next, and the mark only matters if it does not.
+            // `_lastSavedStateBytes` keeps the old file's bytes, which is what a failed atomic write leaves on disk.
+            std::unique_lock lk{ _mtx, std::defer_lock };
+            if (AcquireLockWithin(lk, lockWaitMs))
+            {
+                _stateDirty = true;
+            }
+            return;
         }
+        _lastSavedStateBytes = std::move(bytes);
+        _stateFileReadable = true;
     }
 
     // ===== the threads =======================================================================
@@ -2088,31 +2226,18 @@ namespace Agentmaster::Msg
                             // Keep the fields the mirror advanced; the sync may have changed the others (never the
                             // card clocks: _noteTopicPosted and the card's callbacks write those under the lock).
                             auto& rec = it->second;
-                            rec.cursor = topic.cursor;
-                            rec.transcriptPath = topic.transcriptPath;
                             // A work-log create whose answer landed while this session was processed: the copy still
                             // says "in flight" (-1), the record already holds the answer (the new message's id, or 0
                             // for a refusal; _flushWorkLog marks the record -1 when it sends) — keep it, or the next
                             // tick waits for an answer that already came and the work log stops for the turn.
                             const bool workLogAnswerLanded = topic.workLogMessageId < 0 && rec.workLogMessageId >= 0;
-                            if (!workLogAnswerLanded)
+                            // Only a REAL change marks the file dirty, and as PROGRESS (saved within kStateProgressSaveGapMs):
+                            // marking it on every tick for every topic rewrote the whole file every ~3 s even when nothing
+                            // had changed (UI_THREAD.md §13d).
+                            if (CopyBackTopicProgress(rec, topic, workLogAnswerLanded))
                             {
-                                rec.workLogMessageId = topic.workLogMessageId;
+                                _stateProgressDirty = true;
                             }
-                            rec.recapText = topic.recapText;
-                            rec.recapAtMs = topic.recapAtMs;
-                            rec.lastMessageAtMs = topic.lastMessageAtMs;
-                            rec.errorAnnounced = topic.errorAnnounced;
-                            // §21.12: the last prompt's line — only this thread writes these fields (a send's answer lands in the
-                            // mirror's PromptRef, which _updatePromptStatus copies over).
-                            rec.promptMessageId = topic.promptMessageId;
-                            rec.promptBotLine = topic.promptBotLine;
-                            rec.promptTsMs = topic.promptTsMs;
-                            rec.promptSource = topic.promptSource;
-                            rec.promptText = topic.promptText;
-                            rec.promptStatus = topic.promptStatus;
-                            rec.promptInterrupted = topic.promptInterrupted;
-                            _stateDirty = true;
                             auto& cur = _mirrors[sid];
                             if (workLogAnswerLanded && cur.workLogGen == mirror.workLogGen && cur.workLogMessageId > 0)
                             {
@@ -2122,7 +2247,10 @@ namespace Agentmaster::Msg
                             cur = std::move(mirror);
                         }
                     }
-                    _refreshCard(sid, false);
+                    // The session copy this pass already holds: a second full Get per topic per tick (the queue and every
+                    // text copied again) cost as much as the first. A change the pass made to the session in the registry
+                    // meanwhile reaches the card at the next tick.
+                    _refreshCard(sid, false, false, false, &*s);
                 }
                 // §21.30: Claude's questions — new requests become cards, every card reads its dialog's result, and the questions no
                 // hook offered within kAskPairWaitMs are posted show-only. After the per-topic pass: the mirror's question items of
@@ -2871,7 +2999,10 @@ namespace Agentmaster::Msg
             if (kv.second.threadId == threadId)
             {
                 kv.second.lastPostedMs = WallMs();
-                _stateDirty = true;
+                // PROGRESS, not a structural change (§21.35): every message a topic gets stamps this, and a structural mark
+                // saved the whole state file within kStateSaveGapMs of each one while sessions worked. Lost after an
+                // unexpected end, it only delays the card's move below the newer posts until the topic's next post.
+                _stateProgressDirty = true;
                 return;
             }
         }
@@ -3517,10 +3648,18 @@ namespace Agentmaster::Msg
                 _log(L"[msg] the app's last window closed, but run.closed could not be written (error " + std::to_wstring(::GetLastError()) +
                      L"): the next start note will say this run did not close normally");
             }
+            // The STATE FILE as well: the app ends with TerminateProcess, so Stop never saves it, and the mirror's progress since
+            // the last save (up to kStateProgressSaveGapMs) would be mirrored a second time at the next start. Forced, and AFTER
+            // the stamp (a slow or refused save must not cost the clean-end record). This runs under the engine's window mutex,
+            // so the wait for the service's locks is bounded (kAppCloseSaveLockWaitMs): a save the tick is making right now is
+            // waited for, then this one writes whatever that save did not include.
+            _saveStateIfDirty(true, kAppCloseSaveLockWaitMs);
         }
         catch (...)
         {
-            LogSwallowedException(L"MessagingService::NoteAppClosing"); // Rule #18; recovery: no stamp (the safe side)
+            // Rule #18; recovery: no stamp (the safe side), or no state flush (the next start then mirrors the last few
+            // seconds again).
+            LogSwallowedException(L"MessagingService::NoteAppClosing");
         }
     }
 
@@ -6333,12 +6472,20 @@ namespace Agentmaster::Msg
         return TopicIsVerbose(t, _defaultVerbose.load());
     }
 
-    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping, bool tapped)
+    void MessagingService::_refreshCard(const std::wstring& sessionId, bool force, bool ping, bool tapped, const SessionInfo* known)
     {
-        const auto s = _session(sessionId);
+        // The tick passes the session copy its per-topic pass holds (`known`); every other caller has none and reads the
+        // registry here.
+        std::optional<SessionInfo> fetched;
+        const SessionInfo* s = known;
         if (!s)
         {
-            return;
+            fetched = _session(sessionId);
+            if (!fetched)
+            {
+                return;
+            }
+            s = &*fetched;
         }
         TopicRecord topic;
         bool pingWanted = false;
@@ -6473,7 +6620,10 @@ namespace Agentmaster::Msg
                 if (const auto it = _state.topics.find(sessionId); it != _state.topics.end())
                 {
                     it->second.cardTextHash = hash;
-                    _stateDirty = true;
+                    // PROGRESS (§21.35): the stored hash only spares the next start a re-edit of an unchanged card; lost after an
+                    // unexpected end, that card is edited once more. A structural mark saved the file within kStateSaveGapMs of
+                    // every card edit.
+                    _stateProgressDirty = true;
                 }
                 send = true;
                 if (!formOnly)
@@ -6710,6 +6860,9 @@ namespace Agentmaster::Msg
                     return; // the session's topic was made again meanwhile (a recreation, §21.8): this message is the old topic's
                 }
                 it->second.workLogMessageId = id;
+                // The new id is saved with the mirror's progress: the tick's write-back keeps this record value
+                // (workLogAnswerLanded) and so reports no change of its own for it.
+                me->_stateProgressDirty = true;
                 mm.workLogMessageId = id;
                 if (id != 0)
                 {

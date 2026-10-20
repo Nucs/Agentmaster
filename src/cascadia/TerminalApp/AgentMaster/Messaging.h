@@ -242,9 +242,14 @@ namespace Agentmaster::Msg
         /// and then proves nothing (StartNoteRunClosedCleanly). Does nothing while the bot is not running — there is no
         /// marker of this run for the stamp to be compared with. From the stamp on, the tick does not rewrite the run marker
         /// for kAppClosingMarkerHoldMs (Messaging.cpp): a marker written between the stamp and the process's end would make
-        /// a clean quit read as a crash. Any thread; takes none of the service's locks, only the log's (it runs under the
-        /// engine's window mutex). Never throws: a failed write is logged, and the next note then reads the end as
-        /// unexpected — the safe side, since a false "it closed" would hide a crash.
+        /// a clean quit read as a crash. It then FLUSHES the state file (_saveStateIfDirty, forced): the mirror's progress is
+        /// saved only every kStateProgressSaveGapMs, and the next start re-reads every transcript from the saved cursors, so
+        /// a cursor lost at a quit would post up to that many seconds of messages twice. Any thread. It runs under the
+        /// engine's window mutex, so it never waits for a service lock WITHOUT A BOUND: the flush waits at most
+        /// kAppCloseSaveLockWaitMs (250 ms) for each of `_stateSaveMtx` and `_mtx` and is skipped, with a log line, when one
+        /// stays held that long; the save itself (serialize + write + flush, tens of ms with 441 topics) runs on the
+        /// caller's thread. Never throws: a failed write is logged, and the next note then reads the end as unexpected — the
+        /// safe side, since a false "it closed" would hide a crash.
         /// </summary>
         void NoteAppClosing() noexcept;
 
@@ -414,8 +419,34 @@ namespace Agentmaster::Msg
         int64_t _nowMs() const noexcept;
 
         // ----- the state file -----
+        /// <summary>
+        /// Reads state.json (or its backup state.json.prev when state.json is torn) into `_state` at a bot start, and records the
+        /// bytes it read as the file's content (`_lastSavedStateBytes`), so the first save of an unchanged state writes nothing.
+        /// </summary>
+        /// <remarks>Clears both dirty flags and the backup's refresh stamp (the first save of this start refreshes the backup), and
+        /// records whether state.json itself was readable (`_stateFileReadable`: a torn or unknown file is never copied over the
+        /// backup).</remarks>
+        /// <exception cref="std::bad_alloc">On allocation failure; `_state` is then left as it was.</exception>
         void _loadState();
-        void _saveStateIfDirty(bool force);
+        /// <summary>
+        /// Saves the state file when a save is DUE (StateSaveDue): a structural change within kStateSaveGapMs, the live mirror's
+        /// progress alone within kStateProgressSaveGapMs. The file is serialized whole; bytes equal to the last write are not
+        /// written at all (no copy, no write, no flush), and the backup copy is refreshed at most once a minute
+        /// (StatePrevCopyDue), never from a state.json this run could not read. A failed write marks the state dirty again for
+        /// the next tick.
+        /// </summary>
+        /// <remarks>
+        /// Saves are serialized by `_stateSaveMtx`, taken BEFORE `_mtx` (lock order: `_stateSaveMtx` → `_mtx`); a caller must
+        /// hold neither. With a `lockWaitMs` of 0 or more (the app-close flush, NoteAppClosing, which runs under the engine's
+        /// window mutex) each lock is waited for at most that long, and the save is skipped (logged) when one stays held, so the
+        /// caller never depends on a bot thread making progress.
+        /// </remarks>
+        /// <param name="force">Save now whatever the gaps, if anything is dirty (Stop, the recreation's orphan list, the app's close).</param>
+        /// <param name="lockWaitMs">The longest wait for each lock in milliseconds; negative (the default) = wait as long as it takes.</param>
+        /// <exception cref="std::bad_alloc">Serializing may fail to allocate; the dirty flags are then already cleared and the next
+        /// change sets them again (the file on disk is untouched).</exception>
+        /// <exception cref="std::system_error">From std::unique_lock on a lock failure the OS reports (not expected).</exception>
+        void _saveStateIfDirty(bool force, int64_t lockWaitMs = -1);
 
         // ----- the outbox -----
         /// <summary>
@@ -996,7 +1027,10 @@ namespace Agentmaster::Msg
         /// <param name="force">Edit now, past the edit gap.</param>
         /// <param name="ping">Re-post the card with sound (kept until a post can carry it).</param>
         /// <param name="tapped">A button on the card changed it: edit at the priority of an answer.</param>
-        void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false, bool tapped = false);
+        /// <param name="known">The session as the caller already copied it (the tick's per-topic pass), so the card is built from
+        /// that copy instead of a second full SessionRegistry::Get; nullptr = read the registry now. A copy taken earlier in the
+        /// same pass may miss a change made since then; that change reaches the card at the next refresh.</param>
+        void _refreshCard(const std::wstring& sessionId, bool force, bool ping = false, bool tapped = false, const SessionInfo* known = nullptr);
         /// <summary>
         /// The SLOW FORM UPGRADE's gate (§21.15): whether the card of `sessionId`, unchanged but shown in the other form, may be
         /// re-edited now. One such edit per kCardFormatGapMs across all topics, none while a 429 pause runs or a long one parks
@@ -1752,8 +1786,38 @@ namespace Agentmaster::Msg
         std::wstring _status;
         std::wstring _stateFile;
         MessagingState _state;
+        /// <summary>
+        /// A STRUCTURAL change of `_state` is not saved yet (saved within kStateSaveGapMs): anything the next start cannot
+        /// learn again (a topic made, rekeyed or deleted, a card's message id, an offset, a bind). Guarded by `_mtx`.
+        /// </summary>
         bool _stateDirty{ false };
+        /// <summary>
+        /// Only PROGRESS changed since the last save: the live mirror's cursors, recap facts and prompt lines
+        /// (CopyBackTopicProgress), a work log's new id, a topic's posted clock (_noteTopicPosted) and its card's stored hash —
+        /// what costs at most a repeated post or edit when lost at an unexpected end. Saved within kStateProgressSaveGapMs, or
+        /// with the next structural change. ⚠ Mark a change here only when losing its last kStateProgressSaveGapMs is harmless;
+        /// anything that would orphan a message or a topic is structural. Guarded by `_mtx`.
+        /// </summary>
+        bool _stateProgressDirty{ false };
         int64_t _lastStateSaveMs{ 0 };
+        /// <summary>
+        /// One state-file writer at a time (_saveStateIfDirty): the tick, Stop, the recreation and the app-close flush. Taken
+        /// before `_mtx`, never after it. Guards `_lastSavedStateBytes`, `_lastPrevCopyMs` and `_stateFileReadable`.
+        /// </summary>
+        std::mutex _stateSaveMtx;
+        /// <summary>
+        /// The bytes state.json holds as far as this run knows (the last write, or what _loadState read): a save that would write
+        /// the same bytes writes nothing. ~0.5 MB with 441 topics. Guarded by `_stateSaveMtx`.
+        /// </summary>
+        std::string _lastSavedStateBytes;
+        /// <summary>When a save last refreshed state.json.prev (0 = not yet in this bot start). Guarded by `_stateSaveMtx`.</summary>
+        int64_t _lastPrevCopyMs{ 0 };
+        /// <summary>
+        /// state.json is a file this run could READ (_loadState parsed it) or wrote itself: only then may a save copy it over the
+        /// backup. After a start that found it torn (and took the backup) or unknown, the backup is kept until a good write.
+        /// Guarded by `_stateSaveMtx`.
+        /// </summary>
+        bool _stateFileReadable{ false };
         uint64_t _registryObserver{ 0 };
         bool _tickRequested{ false };
         int64_t _lastMarkerMs{ 0 };

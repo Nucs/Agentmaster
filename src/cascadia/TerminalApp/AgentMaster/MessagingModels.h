@@ -1970,6 +1970,111 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
+    /// The tick's COPY WRITE-BACK of one topic (MessagingService::_tickLoop): the per-topic pass works on a copy of the record
+    /// outside the service's lock and then writes back, under the lock, the fields only the live mirror advances — the
+    /// transcript cursor and path, the work-log message, the recap facts, the error flag and the last prompt's line. Any other
+    /// field may have been changed meanwhile by another thread (a send's callback, a rename, the sync) and is left as the
+    /// record holds it.
+    /// </summary>
+    /// <remarks>
+    /// Returns whether anything CHANGED, so that the caller marks the state file dirty only for a real change. Before
+    /// 2026-10-20 the tick marked it on every tick for every topic, and the whole state file was rewritten every ~3.2 s
+    /// even when it was byte-identical: ~280 KB/s, ~24 GB a day of forced writes on production's 441 topics
+    /// (UI_THREAD.md §13d). An assignment of an equal value is skipped, so the record ends exactly as the old unconditional
+    /// assignments left it. ⚠ A field the mirror starts to advance must be added here, or its changes are lost at the next
+    /// tick (the copy that carries them is dropped) — and they would not mark the file dirty either.
+    /// </remarks>
+    /// <param name="rec">The stored record, written in place (the caller holds the service's lock).</param>
+    /// <param name="topic">The tick's working copy, after the mirror ran.</param>
+    /// <param name="keepRecordWorkLog">True when a work-log create was answered while the copy was out (the copy still says
+    /// "in flight", -1, and the record already holds the answer): the record's `workLogMessageId` is kept, not overwritten.</param>
+    /// <returns>True when at least one written-back field differed from the record's value.</returns>
+    /// <exception cref="std::bad_alloc">Copying a string may fail to allocate; the fields copied before the failure stay
+    /// copied, the rest keep the record's values (no field is left half-written).</exception>
+    inline bool CopyBackTopicProgress(TopicRecord& rec, const TopicRecord& topic, bool keepRecordWorkLog)
+    {
+        bool changed = false;
+        // One comparison per field: the values are small (ids, stamps, flags) except three strings, and an equal string is
+        // compared, never copied.
+        const auto take = [&changed](auto& stored, const auto& advanced) {
+            if (!(stored == advanced))
+            {
+                stored = advanced;
+                changed = true;
+            }
+        };
+        take(rec.cursor, topic.cursor);
+        take(rec.transcriptPath, topic.transcriptPath);
+        if (!keepRecordWorkLog)
+        {
+            take(rec.workLogMessageId, topic.workLogMessageId);
+        }
+        take(rec.recapText, topic.recapText);
+        take(rec.recapAtMs, topic.recapAtMs);
+        take(rec.lastMessageAtMs, topic.lastMessageAtMs);
+        take(rec.errorAnnounced, topic.errorAnnounced);
+        // §21.12: the last prompt's line. Only the tick writes these (a send's answer lands in the mirror's PromptRef, which
+        // _updatePromptStatus copies into the working copy).
+        take(rec.promptMessageId, topic.promptMessageId);
+        take(rec.promptBotLine, topic.promptBotLine);
+        take(rec.promptTsMs, topic.promptTsMs);
+        take(rec.promptSource, topic.promptSource);
+        take(rec.promptText, topic.promptText);
+        take(rec.promptStatus, topic.promptStatus);
+        take(rec.promptInterrupted, topic.promptInterrupted);
+        return changed;
+    }
+
+    /// <summary>
+    /// The state file's SAVE GATE (MessagingService::_saveStateIfDirty): whether a save is due now. The state has two kinds of
+    /// change. A STRUCTURAL one (a topic made, rekeyed or deleted, a card id, a bind, a wizard, an offset: anything the next start
+    /// cannot learn again) is saved within `structuralGapMs`. PROGRESS alone (the live mirror's cursors, recap facts and prompt
+    /// lines, CopyBackTopicProgress; a work log's new id; a topic's posted clock; a card's stored hash) moves on every tick while
+    /// any session works, and is saved at most every `progressGapMs`.
+    /// </summary>
+    /// <remarks>
+    /// The trade-off of `progressGapMs`: the mirror re-reads from the saved cursor at the next start, so the lines of the last
+    /// `progressGapMs` before an UNEXPECTED end are posted to their topics a second time. A normal quit loses nothing: the app's
+    /// last window flushes the state first (MessagingService::NoteAppClosing). A structural change pending at the same time takes
+    /// the progress with it (one file holds both).
+    /// </remarks>
+    /// <param name="structuralDirty">A structural change is not saved yet.</param>
+    /// <param name="progressDirty">A progress change is not saved yet.</param>
+    /// <param name="nowMs">The wall clock now.</param>
+    /// <param name="lastSaveMs">When the last save ran (0 = none in this run).</param>
+    /// <param name="force">Save now whatever the gaps (Stop, the topic recreation's orphan list, the app's last window).</param>
+    /// <param name="structuralGapMs">The shortest gap between saves of a structural change.</param>
+    /// <param name="progressGapMs">The shortest gap between saves of progress alone.</param>
+    /// <returns>True when the state should be serialized now; false when nothing is dirty or the gap has not passed.</returns>
+    inline bool StateSaveDue(bool structuralDirty, bool progressDirty, int64_t nowMs, int64_t lastSaveMs, bool force, int64_t structuralGapMs, int64_t progressGapMs) noexcept
+    {
+        if (!structuralDirty && !progressDirty)
+        {
+            return false;
+        }
+        if (force)
+        {
+            return true;
+        }
+        return nowMs - lastSaveMs >= (structuralDirty ? structuralGapMs : progressGapMs);
+    }
+
+    /// <summary>
+    /// Whether a save also refreshes the BACKUP copy (state.json.prev, read when state.json is unreadable at a start). The
+    /// backup is a last resort, not a journal: it may be up to `gapMs` older than the file, and refreshing it on every save
+    /// doubled every save's writes (a full copy of the file, before the new file was written).
+    /// </summary>
+    /// <param name="nowMs">The wall clock now.</param>
+    /// <param name="lastCopyMs">When the backup was last refreshed in this run (0 = not yet: the first save of a run refreshes
+    /// it, so it never holds a version older than the one this run started from).</param>
+    /// <param name="gapMs">The shortest gap between two refreshes.</param>
+    /// <returns>True when the backup should be refreshed by this save.</returns>
+    inline bool StatePrevCopyDue(int64_t nowMs, int64_t lastCopyMs, int64_t gapMs) noexcept
+    {
+        return lastCopyMs == 0 || nowMs - lastCopyMs >= gapMs;
+    }
+
+    /// <summary>
     /// The topic LAYOUT this build makes topics under (§21.8). A state file whose topics were made under an older
     /// layout gets them deleted and made again ONCE — the RECREATION — when the service starts. Layout 1 (§21.8): the
     /// topics in MOST RECENT order (before it they were created in session-id order, in the formats §21.4–§21.6

@@ -1181,6 +1181,12 @@ parents at +0x38):
 - **Its CPU** (busy samples of the thread): `_followTranscript` ~20%, `_saveStateIfDirty` ~15%, `_syncTopics`
   ~12% (a `SnapshotLiveForCards` each tick), `_refreshCard` ~10%; the rest is mostly the copies and their
   allocations.
+- **Fixed in code on 2026-10-20, NOT BUILT** ([`MESSAGING.md`](MESSAGING.md) §21.35):
+  - The write-back marks the state dirty only for a field that changed, and as PROGRESS. Progress is saved at most
+    every 10 s; a structural change still within 2 s.
+  - A save whose bytes equal the file's writes nothing, and the backup is copied at most once a minute.
+  - The app's last window flushes the state.
+  - The card refresh reuses the pass's session copy, and a transcript is opened only when it grew past the cursor.
 
 ### 13e. The engine threads and the UI lanes
 
@@ -1209,11 +1215,11 @@ parents at +0x38):
 
 | # | Fix | Win (measured basis) | Ease |
 |---|---|---|---|
-| 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
+| 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute. **Done in code 2026-10-20, NOT BUILT** (MESSAGING.md §21.35): a byte compare, `.prev` once a minute, progress saved every 10 s, a flush when the app's last window closes | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
 | 2 | Zero build: switch the 96-tab window's side panel to LOCAL (706 → 96 cards); collapse a side panel that is not needed | LOCAL there: ~1,220 of 3,634 nodes (a third of the walk, ~80 ms/s) and ~5,600 measured TextBlocks (~95 MB). Collapsing hides the list and stops its updates; whether XAML also drops the collapsed cards' nodes from its walk is not measured | The user's toggle, reversible |
 | 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
 | 4 | Virtualize the side panel's list (§10a #6) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
-| 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
+| 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed. **Part done in code 2026-10-20, NOT BUILT** (MESSAGING.md §21.35): one `Get` per topic instead of two, and a transcript opened only when it grew (a stat first); the rest is open | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
 | 6 | Observer: a longer full-survey interval while the roster and the correlated pids did not change (§10a #5, a product decision); cache `ResolveCodexSessionIn` | ~25–40 ms/s | Easy code, product decision |
 | 7 | Scanner: keep each session's resolved path and keys; visit only sessions whose watcher sequence moved | ~20–30 ms/s | Medium |
 | 8 | UI lanes: `_ObserverProbeImpl` by map lookups, not comparisons over every tab; a lean read in `_ScanPendingInputImpl` | ~25 ms/s | Easy to medium |

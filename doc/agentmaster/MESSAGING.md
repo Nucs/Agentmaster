@@ -5013,6 +5013,98 @@ lost-send verdict held while a menu is open and judged once it closed.
 5. `/model sonnet` from a topic → 👨‍💻 and no 👎 15 s later (the echo fix), the runner still on.
 6. While a card is open, park the tab (Deactivate) → "⏹ No longer open here — its tab's claude stopped".
 
+### 21.35 The loop saves the state file only when something changed (2026-10-20; NOT BUILT yet)
+
+**The user's request** (2026-10-20): "Reduce wasted cpu and disk on the Telegram bot's background loop" — fix 1 and part of
+fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
+
+**What was measured** (production 0.6.8.22 at ~700 tabs and 441 topics, read-only, UI_THREAD.md §13d):
+- The tick (`_tickLoop`, every 1.5 s) visits every topic with a thread. Per topic it copied the session twice (`_session`
+  for the pass, and again in `_refreshCard`: a full `SessionRegistry::Get` each, queued prompts and texts included), and
+  `ReadTranscriptTail` opened every transcript: ~294 opens a second, nearly all of files that had not grown.
+- The copy write-back then set `_stateDirty = true` for EVERY topic on EVERY tick, so `_saveStateIfDirty` rewrote the whole
+  state.json (465 KB) every ~3.2 s — 20 saves a minute, each after a `CopyFileW` to state.json.prev, with `FlushFileBuffers`
+  and a write-through rename: 279 KB/s, ~24 GB of forced writes a day. Successive versions were byte-identical whenever no
+  session moved.
+- The bot's thread used 55–57 ms of CPU a second.
+
+**What changed:**
+- **A change is marked only when it happened.** `CopyBackTopicProgress` (MessagingModels.h) writes back the 14 fields the mirror
+  owns (cursor and path, the work-log message, the recap facts, the error flag, the last prompt's line), each compared first,
+  and says whether any differed. The tick marks the state dirty only then. An equal value is not written, so the record ends
+  exactly as the old unconditional assignments left it.
+- **Two kinds of change, two gaps** (`StateSaveDue`):
+  - A STRUCTURAL change (anything the next start cannot learn again: a topic made, rekeyed or deleted, a card's message id, an
+    update offset, a bind, a wizard) is saved within `kStateSaveGapMs`, 2 s, as before.
+  - PROGRESS alone is saved within `kStateProgressSaveGapMs`, 10 s. That is the mirror's cursors, recap facts and prompt lines,
+    a work log's new id (the create's answer), a topic's posted clock (`_noteTopicPosted`, stamped on every message the topic
+    gets) and its card's stored hash (every card edit). These last two were structural, so every post and every card edit
+    saved the file within 2 s.
+  - A structural save takes the pending progress with it (one file holds both).
+- **Bytes equal to the file's are never written**: no copy, no write, no flush. `_lastSavedStateBytes` holds what the file
+  holds (the last write, or what `_loadState` read).
+- **The backup, state.json.prev**, is refreshed at the first save of a bot start and then at most once a minute
+  (`StatePrevCopyDue`, `kStatePrevCopyGapMs`). It is never refreshed from a state.json this run could not read
+  (`_stateFileReadable`). Before, the first save after a start that found state.json torn copied the torn file over the
+  only readable version.
+- **A normal quit loses nothing.** The app ends with TerminateProcess, so Stop never saves. `NoteAppClosing` (the app's last
+  window, Engine.cpp) now also flushes the state, forced, after its run.closed stamp. It runs under the engine's window
+  mutex, so it waits at most `kAppCloseSaveLockWaitMs` (250 ms) for each of the save lock and `_mtx`, and logs
+  `[msg] state.json was not flushed: …` when it gives up.
+- **One writer at a time**: `_stateSaveMtx`, always taken before `_mtx`. The app-close flush runs on another thread than the
+  tick, and the temp file is opened without sharing, so two writers would make one fail.
+- **One session copy per topic per tick**: the card refresh reuses the pass's copy (`_refreshCard`'s new `known` argument). A
+  change the pass itself made to the session reaches the card at the next tick.
+- **A transcript is opened only when it grew**: `ReadTranscriptTail` stats it first (`GetFileAttributesExW`) and reads only
+  when it holds bytes past the cursor. One difference: a file that exists but cannot be opened at the moment, with nothing new,
+  reports its size instead of -1, so the mirror keeps its path instead of resolving it again.
+
+**The trade-off.** After an UNEXPECTED end (a crash, a kill), up to 10 s of progress is lost, where it was about 3 s before:
+- the mirror re-reads from the saved cursor, so the lines of those seconds are posted to their topics a second time;
+- a card may be edited once more;
+- a card may stay above newer posts until the topic's next post.
+
+**Expected effect** (an estimate, not measured yet):
+- At rest, no write at all. The night of §13d would have saved 0 times a minute instead of 20.
+- While sessions work, at most one save per 10 s for progress, plus one within 2 s of each structural change. Each save is
+  skipped when its bytes are unchanged.
+- Half the per-topic session copies, and transcript opens only for the files that grew.
+
+**Still open:**
+- A save is still a whole-file rewrite. A journal, or a file per topic, would be the next step.
+- The tick still visits every topic and copies each session once. The rest of §13g fix 5: follow a transcript only when the
+  transcript watcher's sequence moved, and refresh a card only when its inputs changed.
+
+**The code:**
+- MessagingModels.h: `CopyBackTopicProgress`, `StateSaveDue`, `StatePrevCopyDue`.
+- Messaging.cpp: the constants, `AcquireLockWithin`, `ReadTranscriptTail`, `_loadState`, `_saveStateIfDirty(force,
+  lockWaitMs)`, the tick's write-back and card refresh, `_noteTopicPosted`, the card edit, the work log's create answer,
+  `NoteAppClosing`.
+- Messaging.h: the members `_stateProgressDirty`, `_stateSaveMtx`, `_lastSavedStateBytes`, `_lastPrevCopyMs` and
+  `_stateFileReadable`, and `_refreshCard`'s `known`.
+- ⚠ `MessagingService` gained data members: the next build must purge (the build-install skill §5.8;
+  [`CLAUDE.md`](../../CLAUDE.md)'s purge rule).
+- ⚠ A new persisted field must decide its kind: progress only when losing its last 10 s is harmless; anything that would
+  orphan a message or a topic is structural.
+
+**Tests:** `TestMessaging` (tests_messaging.cpp, the §21.35 block, 52 checks):
+- `CopyBackTopicProgress`: no change reported for an unchanged copy; each of the 14 fields reported and written; 8 fields it
+  must never write back (the thread, the card's id, its clocks and hash, the title, the tab, the name's color); the work-log
+  answer that landed while the copy was out; 441 unchanged topics marking nothing.
+- `StateSaveDue`: every gap at its edge; force; the run's first save; a simulated minute of steady progress plus one
+  structural change (5 saves, against 20 before).
+- `StatePrevCopyDue`.
+
+**Check after the build** (dev first, ~60 tabs; production after):
+1. At rest, `(Get-Item <profile>\messaging\telegram\state.json).LastWriteTime` stays put for minutes, and the process's
+   I/O counters (`WriteTransferCount` over 60 s, as in UI_THREAD.md §13) show its writes near 0; they were 32 KB/s on dev and
+   279 KB/s on production.
+2. While a session works, the file changes at most every ~10 s, and within ~2 s of a new topic.
+3. state.json.prev changes at most once a minute.
+4. Quit the app normally while a session works, start it again: no line of that session is posted twice. hooks.log has no
+   `[msg] state.json was not flushed` line.
+5. The bot's thread in `stacksnap top`: below its 55–57 ms/s.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

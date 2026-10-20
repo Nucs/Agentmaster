@@ -719,6 +719,172 @@ void TestMessaging()
         CHECK(!StateFromJson(json::Value::MkArr()).has_value(), "a non-object is refused");
     }
 
+    // ---- §21.35: the tick's state saves (2026-10-20: the whole state file was rewritten every ~3.2 s although nothing had
+    //      changed — the tick marked it dirty for every topic on every tick). A change is marked only when it happened, the
+    //      mirror's progress is saved less often than a structural change, and the backup is refreshed once a minute. ----
+    {
+        // The stored record, with every written-back field set to a value the cases below can change.
+        TopicRecord stored;
+        stored.sessionId = L"s-1";
+        stored.threadId = 42;
+        stored.cardMessageId = 100;
+        stored.workLogMessageId = 55;
+        stored.title = L"title";
+        stored.cursor = 4567;
+        stored.transcriptPath = L"C:\\t.jsonl";
+        stored.lastPostedMs = 11;
+        stored.cardPostedMs = 10;
+        stored.recapText = L"recap";
+        stored.recapAtMs = 9;
+        stored.lastMessageAtMs = 8;
+        stored.cardTextHash = 0x1234u;
+        stored.tabToken = L"wt-1";
+        stored.errorAnnounced = false;
+        stored.nameColor = L"x";
+        stored.promptMessageId = 31;
+        stored.promptBotLine = true;
+        stored.promptTsMs = 1000;
+        stored.promptSource = 1;
+        stored.promptText = L"hi";
+        stored.promptStatus = 2;
+        stored.promptInterrupted = false;
+        // The record as the state file holds it: equal dumps = equal persisted records.
+        const auto dumpOf = [](const TopicRecord& r) {
+            MessagingState st;
+            st.topics[r.sessionId] = r;
+            return json::Dump(StateToJson(st));
+        };
+        {
+            TopicRecord rec = stored;
+            const TopicRecord copy = stored;
+            CHECK(!CopyBackTopicProgress(rec, copy, false) && dumpOf(rec) == dumpOf(stored),
+                  "copy-back: an unchanged copy reports NO change and leaves the record as it was (the file is not marked dirty)");
+            CHECK(!CopyBackTopicProgress(rec, copy, true) && dumpOf(rec) == dumpOf(stored), "copy-back: ... also with the record's work log kept");
+        }
+        // Each field the mirror advances: a change of that one field is reported, and the record takes the copy's value.
+        struct FieldCase
+        {
+            const char* name;
+            void (*change)(TopicRecord&);
+            bool (*same)(const TopicRecord&, const TopicRecord&);
+        };
+        const FieldCase written[] = {
+            { "cursor", [](TopicRecord& t) { t.cursor += 10; }, [](const TopicRecord& a, const TopicRecord& b) { return a.cursor == b.cursor; } },
+            { "transcriptPath", [](TopicRecord& t) { t.transcriptPath = L"D:\\u.jsonl"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.transcriptPath == b.transcriptPath; } },
+            { "workLogMessageId", [](TopicRecord& t) { t.workLogMessageId = 0; }, [](const TopicRecord& a, const TopicRecord& b) { return a.workLogMessageId == b.workLogMessageId; } },
+            { "recapText", [](TopicRecord& t) { t.recapText = L"newer recap"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.recapText == b.recapText; } },
+            { "recapAtMs", [](TopicRecord& t) { t.recapAtMs = 99; }, [](const TopicRecord& a, const TopicRecord& b) { return a.recapAtMs == b.recapAtMs; } },
+            { "lastMessageAtMs", [](TopicRecord& t) { t.lastMessageAtMs = 98; }, [](const TopicRecord& a, const TopicRecord& b) { return a.lastMessageAtMs == b.lastMessageAtMs; } },
+            { "errorAnnounced", [](TopicRecord& t) { t.errorAnnounced = true; }, [](const TopicRecord& a, const TopicRecord& b) { return a.errorAnnounced == b.errorAnnounced; } },
+            { "promptMessageId", [](TopicRecord& t) { t.promptMessageId = 32; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptMessageId == b.promptMessageId; } },
+            { "promptBotLine", [](TopicRecord& t) { t.promptBotLine = false; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptBotLine == b.promptBotLine; } },
+            { "promptTsMs", [](TopicRecord& t) { t.promptTsMs = 2000; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptTsMs == b.promptTsMs; } },
+            { "promptSource", [](TopicRecord& t) { t.promptSource = 3; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptSource == b.promptSource; } },
+            { "promptText", [](TopicRecord& t) { t.promptText = L"hello"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptText == b.promptText; } },
+            { "promptStatus", [](TopicRecord& t) { t.promptStatus = 4; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptStatus == b.promptStatus; } },
+            { "promptInterrupted", [](TopicRecord& t) { t.promptInterrupted = true; }, [](const TopicRecord& a, const TopicRecord& b) { return a.promptInterrupted == b.promptInterrupted; } },
+        };
+        for (const auto& c : written)
+        {
+            TopicRecord rec = stored;
+            TopicRecord copy = stored;
+            c.change(copy);
+            const bool changed = CopyBackTopicProgress(rec, copy, false);
+            const std::string what = std::string{ "copy-back: a change of " } + c.name + " is reported and written into the record";
+            CHECK(changed && c.same(rec, copy) && !c.same(rec, stored), what.c_str());
+            // Everything else stays: written again, the record now equals the copy in every written-back field.
+            const std::string again = std::string{ "copy-back: the same copy written again reports no change (" } + c.name + ")";
+            CHECK(!CopyBackTopicProgress(rec, copy, false), again.c_str());
+        }
+        // The fields the mirror does NOT own: another thread may have changed them in the record while the copy was out (a
+        // send's callback, a rename, the sync). The copy's stale values are never written back, and are no change.
+        const FieldCase kept[] = {
+            { "threadId", [](TopicRecord& t) { t.threadId = 7; }, [](const TopicRecord& a, const TopicRecord& b) { return a.threadId == b.threadId; } },
+            { "cardMessageId", [](TopicRecord& t) { t.cardMessageId = 7; }, [](const TopicRecord& a, const TopicRecord& b) { return a.cardMessageId == b.cardMessageId; } },
+            { "title", [](TopicRecord& t) { t.title = L"other"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.title == b.title; } },
+            { "lastPostedMs", [](TopicRecord& t) { t.lastPostedMs = 7; }, [](const TopicRecord& a, const TopicRecord& b) { return a.lastPostedMs == b.lastPostedMs; } },
+            { "cardPostedMs", [](TopicRecord& t) { t.cardPostedMs = 7; }, [](const TopicRecord& a, const TopicRecord& b) { return a.cardPostedMs == b.cardPostedMs; } },
+            { "cardTextHash", [](TopicRecord& t) { t.cardTextHash = 7u; }, [](const TopicRecord& a, const TopicRecord& b) { return a.cardTextHash == b.cardTextHash; } },
+            { "tabToken", [](TopicRecord& t) { t.tabToken = L"wt-9"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.tabToken == b.tabToken; } },
+            { "nameColor", [](TopicRecord& t) { t.nameColor = L"y"; }, [](const TopicRecord& a, const TopicRecord& b) { return a.nameColor == b.nameColor; } },
+        };
+        for (const auto& c : kept)
+        {
+            TopicRecord rec = stored;
+            TopicRecord copy = stored;
+            c.change(copy);
+            const std::string what = std::string{ "copy-back: the copy's stale " } + c.name + " is not written back and is no change";
+            CHECK(!CopyBackTopicProgress(rec, copy, false) && c.same(rec, stored), what.c_str());
+        }
+        // The work log's answer that landed while the copy was out (the copy still says "in flight", -1).
+        {
+            TopicRecord rec = stored; // the record holds the answer: message 55
+            TopicRecord copy = stored;
+            copy.workLogMessageId = -1;
+            CHECK(!CopyBackTopicProgress(rec, copy, true) && rec.workLogMessageId == 55, "copy-back: a work-log answer that landed is kept, and is no change by itself");
+            copy.cursor += 5;
+            CHECK(CopyBackTopicProgress(rec, copy, true) && rec.workLogMessageId == 55 && rec.cursor == copy.cursor, "copy-back: ... while the cursor beside it is written back");
+            TopicRecord plain = stored;
+            CHECK(CopyBackTopicProgress(plain, copy, false) && plain.workLogMessageId == -1, "copy-back: without the answer the copy's in-flight mark is written back");
+        }
+        // The old tick's cost: with 441 topics and NOTHING moving, no topic reports a change, so the file is never marked dirty.
+        {
+            std::vector<TopicRecord> records(441, stored);
+            const std::vector<TopicRecord> copies(441, stored);
+            size_t changes = 0;
+            for (size_t i = 0; i < records.size(); ++i)
+            {
+                changes += CopyBackTopicProgress(records[i], copies[i], false) ? 1 : 0;
+            }
+            CHECK(changes == 0, "copy-back: 441 unchanged topics mark nothing (every one marked the file dirty before)");
+        }
+
+        // The save gate: a structural change within its gap, progress alone within the longer one, force past both.
+        constexpr int64_t structuralGap = 2000;
+        constexpr int64_t progressGap = 10000;
+        CHECK(!StateSaveDue(false, false, 100000, 0, false, structuralGap, progressGap) && !StateSaveDue(false, false, 100000, 0, true, structuralGap, progressGap),
+              "save gate: nothing dirty is never saved, forced or not");
+        CHECK(!StateSaveDue(true, false, 1999, 0, false, structuralGap, progressGap) && StateSaveDue(true, false, 2000, 0, false, structuralGap, progressGap),
+              "save gate: a structural change waits exactly its gap since the last save");
+        CHECK(!StateSaveDue(false, true, 9999, 0, false, structuralGap, progressGap) && StateSaveDue(false, true, 10000, 0, false, structuralGap, progressGap),
+              "save gate: progress alone waits its own, longer gap");
+        CHECK(!StateSaveDue(false, true, 5000, 0, false, structuralGap, progressGap), "save gate: progress alone is NOT saved at the structural gap");
+        CHECK(StateSaveDue(true, true, 2000, 0, false, structuralGap, progressGap), "save gate: a structural change takes the pending progress with it at its own gap");
+        CHECK(StateSaveDue(false, true, 1, 0, true, structuralGap, progressGap) && StateSaveDue(true, false, 1, 0, true, structuralGap, progressGap),
+              "save gate: a forced save (Stop, the recreation, the app's close) goes at once if anything is dirty");
+        CHECK(StateSaveDue(true, false, 1700000000000, 0, false, structuralGap, progressGap) && StateSaveDue(false, true, 1700000000000, 0, false, structuralGap, progressGap),
+              "save gate: a run's first save (no save yet) is due at once on the wall clock");
+        // A minute of a working fleet: progress on every 1.5 s tick, one structural change at 30 s. The old tick marked every
+        // tick dirty as a structural change: a save every second tick, 20 a minute (production measured 20).
+        {
+            const int64_t start = 1000000; // the wall clock of the run's last save before the minute
+            int64_t lastSave = start;
+            bool structural = false;
+            bool progress = false;
+            int saves = 0;
+            for (int64_t now = start + 1500; now <= start + 60000; now += 1500)
+            {
+                progress = true; // the mirror moved (a session works)
+                if (now == start + 30000)
+                {
+                    structural = true; // a topic was made
+                }
+                if (StateSaveDue(structural, progress, now, lastSave, false, structuralGap, progressGap))
+                {
+                    ++saves;
+                    lastSave = now;
+                    structural = progress = false;
+                }
+            }
+            // At 10.5 s and 21 s (progress), 30 s (the structural change), 41 s and 51.5 s (progress).
+            CHECK(saves == 5, "save gate: a minute of steady progress plus one structural change is 5 saves, not 20");
+        }
+
+        // The backup copy: the first save of a run refreshes it, then at most once a minute.
+        CHECK(StatePrevCopyDue(5000, 0, 60000), "backup: the run's first save refreshes it");
+        CHECK(!StatePrevCopyDue(64999, 5000, 60000) && StatePrevCopyDue(65000, 5000, 60000), "backup: then again only once its gap has passed");
+    }
+
     // ---- the card ----
     {
         SessionInfo s = MakeSession(L"card-1");
