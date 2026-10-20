@@ -657,7 +657,7 @@ running claude keeps running); Enter on a focused Launch launches on the key-up 
 the new tab; a click on the terminal, a tab, the side panel or `+` closes it; a window resize keeps
 it inside the window; no `[exc] side panel launcher …` lines in hooks.log.
 
-### 2f. Only the cards near the viewport exist, and a card adds no composition node (2026-10-20, NOT BUILT yet)
+### 2f. Only the cards near the viewport exist, and a card adds no composition node (2026-10-20, in dev since 0.0.1.32, not in production)
 
 The user's request, after the CPU report of UI_THREAD.md §13: "draw each card's rounded corners on a background
 element instead of the card itself (about 80% of the redraw cost), then load only the cards on screen" — "Kindly
