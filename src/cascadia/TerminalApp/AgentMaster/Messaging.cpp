@@ -831,6 +831,9 @@ namespace Agentmaster::Msg
                     _search->SetThinkingLevel(_searchThinkingWord);
                 }
             }
+            // §21.32.4: the FILE LINKS' settings, before any return below — so a later start of the bot finds them, and a
+            // running bot's server follows a changed mode or port at once (Messaging.Files.cpp).
+            _filesApply(settings);
             if (!settings.messagingEnabled)
             {
                 if (_running.load())
@@ -1107,6 +1110,9 @@ namespace Agentmaster::Msg
             // §21.30: the question registry's acceptor (Messaging.Questions.cpp) — before `_running` turns true, so it refuses
             // until the bot runs, and before the threads, so the tables it clears are not in use yet.
             _questionsStart();
+            // §21.32.4: the FILE LINKS — the linked set read once per process, the secret and the server when they are on
+            // (Messaging.Files.cpp). Before the threads, so the mirror's first pass already rewrites links; never throws.
+            _filesStart();
             _running.store(true);
             _setStatus(L"Starting\x2026");
             _pollThread = std::thread([this]() noexcept { _pollLoop(); });
@@ -1171,6 +1177,8 @@ namespace Agentmaster::Msg
             }
             // §21.30: no acceptor any more, and every open question released ("{}"): the PC keeps each dialog while the bot is off.
             _questionsStop();
+            // §21.32.4: the file links' server stops with the bot, and the linked set is saved.
+            _filesStop();
             _saveStateIfDirty(true);
             // A clean stop removes the run marker (a marker found at the next start means a crash).
             ::DeleteFileW((_profile + L"\\messaging\\run.marker").c_str());
@@ -1986,6 +1994,9 @@ namespace Agentmaster::Msg
                     }
                     _log(line);
                 }
+                // §21.32.4: the file links' housekeeping (the linked set saved and pruned, a server that could not start tried
+                // again, the summary line); quick unless one of those is due.
+                _filesTick(now);
                 // Threaded Mode: topics need it; until it is on, getMe is re-asked every minute and the owner
                 // gets one note with the switch's location.
                 if (!_topicsEnabled.load())
@@ -3432,6 +3443,7 @@ namespace Agentmaster::Msg
                     { L"summary", L"the session's summary" },
                     { L"screen", L"the terminal's visible text" },
                     { L"screenimage", L"the terminal's screen as a picture" }, // §21.24 (the card's 🖼 Screen Image)
+                    { L"download", L"a file's download link: /download <path>" }, // §21.32.4 (the file links)
                     { L"status", L"the session's card / the fleet" },
                     { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19
                     // §21.19: a menu command's name holds only a-z, 0-9 and "_" (Telegram refuses the WHOLE list otherwise), so
@@ -3654,6 +3666,9 @@ namespace Agentmaster::Msg
             // so the wait for the service's locks is bounded (kAppCloseSaveLockWaitMs): a save the tick is making right now is
             // waited for, then this one writes whatever that save did not include.
             _saveStateIfDirty(true, kAppCloseSaveLockWaitMs);
+            // §21.32.4: the linked set too (its lock is never held across I/O, so the wait is short): links made in the last
+            // seconds would otherwise answer 404 after the restart.
+            _filesSaveStore(true);
         }
         catch (...)
         {
@@ -5031,7 +5046,10 @@ namespace Agentmaster::Msg
                          L" to " + std::to_wstring(t.backfillEnd) + L" of its transcript into thread " + std::to_wstring(t.threadId));
                     _backfillPostsBy.emplace(sid, 0);
                 }
-                const HistoryWindow w = ReadHistoryWindow(t.backfillPath, t.backfillPos, t.backfillEnd);
+                HistoryWindow w = ReadHistoryWindow(t.backfillPath, t.backfillPos, t.backfillEnd);
+                // §21.32.4: the history shows the same links the live mirror would (a file still on disk is linked; a no-op with
+                // file links off).
+                _filesRewriteItems(sid, w.items);
                 if (w.consumedTo < 0)
                 {
                     // The file is gone, or shorter than where the replay stands (replaced): what is left cannot be read, so the
@@ -6980,6 +6998,9 @@ namespace Agentmaster::Msg
         }
         if (!items.empty())
         {
+            // §21.32.4: Claude's links to files on this PC become download links before anything renders them (a no-op with
+            // file links off; the tick thread, no lock held, so the file checks never block another thread).
+            _filesRewriteItems(sessionId, items);
             _applyItems(sessionId, topic, m, items, s);
         }
     }

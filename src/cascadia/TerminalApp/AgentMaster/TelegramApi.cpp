@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException
@@ -201,8 +202,12 @@ namespace Agentmaster::Msg
                 r.description = L"WinHttpOpen failed (" + std::to_wstring(::GetLastError()) + L")";
                 return r;
             }
-            // Resolve / connect / send are short; only the receive waits for a long poll.
-            ::WinHttpSetTimeouts(hSession, 15000, 15000, 30000, static_cast<int>(timeoutMs));
+            // Resolve / connect / send are short; only the receive waits for a long poll. The SEND of a big body is not short: the
+            // whole body goes in one WinHttpSendRequest, and §21.32.4's "📤 Send as file" uploads up to 50 MB — 30 s is ~14 Mbit/s
+            // for that, more than many home uplinks give. So the send timeout grows with the body: 30 s, or the body at 256 KB/s
+            // (~2 Mbit/s; 50 MB -> ~205 s), whichever is longer. Every other call's body is small and keeps the 30 s.
+            const int sendTimeoutMs = static_cast<int>((std::max)(uint64_t{ 30000 }, static_cast<uint64_t>(body.size()) / 256));
+            ::WinHttpSetTimeouts(hSession, 15000, 15000, sendTimeoutMs, static_cast<int>(timeoutMs));
             hConnect = ::WinHttpConnect(hSession, kHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
             if (!hConnect)
             {
