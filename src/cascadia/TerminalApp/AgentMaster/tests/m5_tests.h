@@ -251,6 +251,13 @@ void TestSessionTimingText();
 // clamped, NaN / infinite / negative inputs neutralized, and a seeded 20000-case sweep of the invariants
 // (tests_sidepanel.cpp)
 void TestPointerCardPlacement();
+// VirtualListWindow.h (SIDE_PANEL.md §2f): which rows of the VIRTUALIZED side-panel card list get cards — the row
+// arithmetic at exact boundaries and outside the content, the viewport clamp of a list that shrank, the NEAR / FAR
+// hysteresis (kept while NEAR is covered, FAR otherwise, trimmed past twice FAR), the reveal range (it holds the row,
+// and the plan after either minimum scroll keeps it), the spacer heights, the median stride, and seeded sweeps:
+// every visible row has its card, every plan is a fixed point, a one-row-per-step scroll re-plans at most every 4
+// rows (tests_sidepanel.cpp)
+void TestVirtualListWindow();
 // tests_presets.cpp — HARNESSES.md, PRESETS (LaunchPresets.h, the pure core): the list starts EMPTY (no template is added
 // by itself) and an empty list offers "Add presets…" with help text naming the way to the Presets tab (a list of hidden
 // presets does not); one click adds a template as a linked, visible "p-" preset and "Add all tested" adds the five tested

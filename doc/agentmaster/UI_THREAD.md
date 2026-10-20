@@ -543,7 +543,7 @@ children is drawn with an alpha mask and gets no node.
 
 | Source | Nodes |
 |---|---|
-| Side-panel cards (`_SidePanelMakeCard`; `_SidePanelCreateCardView` since §10j, the same two shapes): the card `Border` (`CornerRadius(4)`, child: the card body) and the title band (`CornerRadius(3,3,0,0)`, child: the title). All cards are loaded (a `StackPanel`), on screen or not. | 2 per card: ~1,100 for the ~550 cards of the three open side panels |
+| Side-panel cards (`_SidePanelMakeCard`; `_SidePanelCreateCardView` since §10j, the same two shapes): the card `Border` (`CornerRadius(4)`, child: the card body) and the title band (`CornerRadius(3,3,0,0)`, child: the title). All cards are loaded (a `StackPanel`), on screen or not. | 2 per card: ~1,100 for the ~550 cards of the three open side panels. Since §14 (2026-10-20, not built): 0 per card, and only the cards near the viewport exist |
 | The side-panel summary: a `Button` (the stock template is rounded and has content) for each ▸ jump — one per prompt of the selected session's current part, after its last /compact — and for each earlier-session separator | tens per window |
 | The tab strip: each realized tab's `TabContainer` (rounded top corners and children, WinUI 2.8.4 `TabView.xaml`) and its rounded close button | ~2 per realized tab (the visible ones plus about two viewports on each side) |
 | Popups (the 7 tag-badge rows, a tooltip), per-tab overlay badges, `ScrollViewer`s, terminal `SwapChainPanel`s | a few dozen |
@@ -576,9 +576,9 @@ rate to lower (§10f).
 |---|---|---|
 | Flash ring by `Opacity` (or a composition opacity loop) instead of `Visibility` | no layout pass every 600 ms; with a composition loop, no frames either | Easy. Done in the code (§10i, not built) |
 | Side-panel timing text: set it only when it changed, from a lean read | no re-measure of every card every 30 s | Very easy. Done in the code (§10j, not built) |
-| Card and title band: move the rounded corners to a childless background element behind the content | ~2 fewer nodes per card, ~1,100 in all: likely the largest share of every frame | Easy to medium (check the look) |
+| Card and title band: move the rounded corners to a childless background element behind the content | ~2 fewer nodes per card, ~1,100 in all: likely the largest share of every frame | Easy to medium (check the look). Done in the code (§14, 2026-10-20, not built) |
 | Summary ▸ jump and separators: no stock rounded `Button` template (a `CornerRadius` 0 style, or a tap handler on the row) | tens of nodes per window | Easy |
-| Side panel: update cards in place, or virtualize (#6) | small rebuilds; only on-screen cards hold nodes | Hard. In place: done in the code (§10j, not built). Virtualize: open |
+| Side panel: update cards in place, or virtualize (#6) | small rebuilds; only on-screen cards hold nodes | Hard. In place: done in the code (§10j). Virtualize: done in the code (§14, 2026-10-20, not built) |
 
 To measure the side panel's share before any build: collapse the big window's side panel for one minute,
 and sample again (`stacksnap sample`, §9). The walk's cost should drop by its share of the nodes.
@@ -1161,6 +1161,7 @@ parents at +0x38):
   ~706 cards in the 556-tab window and ~706 in the 96-tab window (window records: `sidePanelGlobal: true`).
   The other two windows add 47 + 7. The list is a `StackPanel`, so every card is loaded, on screen or not
   (§8 item 2 / §10a #6, never done). Every frame, triggered by anything in any window, walks all of them.
+  Both the nodes and the off-screen cards are fixed in code since 2026-10-20, NOT BUILT (§14).
 - **The same cards hold memory:** `xamltree.py text` finds 13,488 measured TextBlocks in list cards (77% of
   all measured TextBlocks; the count includes the 47 board cards), **~224 MB** of DirectWrite state at
   ~17 KB each (MEMORY_LEAKS.md §4.1).
@@ -1216,9 +1217,9 @@ parents at +0x38):
 | # | Fix | Win (measured basis) | Ease |
 |---|---|---|---|
 | 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute. **Done in code 2026-10-20, NOT BUILT** (MESSAGING.md §21.35): a byte compare, `.prev` once a minute, progress saved every 10 s, a flush when the app's last window closes | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
-| 2 | Zero build: switch the 96-tab window's side panel to LOCAL (706 → 96 cards); collapse a side panel that is not needed | LOCAL there: ~1,220 of 3,634 nodes (a third of the walk, ~80 ms/s) and ~5,600 measured TextBlocks (~95 MB). Collapsing hides the list and stops its updates; whether XAML also drops the collapsed cards' nodes from its walk is not measured | The user's toggle, reversible |
-| 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
-| 4 | Virtualize the side panel's list (§10a #6) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
+| 2 | Zero build: switch the 96-tab window's side panel to LOCAL (706 → 96 cards); collapse a side panel that is not needed. Not needed any more once §14 is built (a GLOBAL list then holds only the cards near its viewport) | LOCAL there: ~1,220 of 3,634 nodes (a third of the walk, ~80 ms/s) and ~5,600 measured TextBlocks (~95 MB). Collapsing hides the list and stops its updates; whether XAML also drops the collapsed cards' nodes from its walk is not measured | The user's toggle, reversible |
+| 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h). **Done in code 2026-10-20, NOT BUILT** (§14) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
+| 4 | Virtualize the side panel's list (§10a #6). **Done in code 2026-10-20, NOT BUILT** (§14) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
 | 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed. **Part done in code 2026-10-20, NOT BUILT** (MESSAGING.md §21.35): one `Get` per topic instead of two, and a transcript opened only when it grew (a stat first); the rest is open | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
 | 6 | Observer: a longer full-survey interval while the roster and the correlated pids did not change (§10a #5, a product decision); cache `ResolveCodexSessionIn` | ~25–40 ms/s | Easy code, product decision |
 | 7 | Scanner: keep each session's resolved path and keys; visit only sessions whose watcher sequence moved | ~20–30 ms/s | Medium |
@@ -1242,3 +1243,69 @@ dotnet run tools/threadcensus.cs -- <pid> 20                   # frame thread id
 python -I tools/cpuhunt/wakes.py <pid> <frameTid>              # animation (steady) or changes (bursts)?
 python -I tools/leakhunt/xamltree.py <dump> <census.tsv> <blocks.tsv> nodes   # needs a snapdump + census + segheap walk
 ```
+
+## 14. The side panel's cards: childless rounded shapes and a virtualized list (2026-10-20, NOT BUILT yet)
+
+The user's request, quoting §13g rows 3 and 4 ("draw each card's rounded corners on a background element instead of
+the card itself (about 80% of the redraw cost), then load only the cards on screen"): "Kindly fix". Both are in
+the code; nothing is built. The design, the known limits and the checks are in
+[`SIDE_PANEL.md`](SIDE_PANEL.md) §2f.
+
+### 14a. Why the cards cost every frame (the WinUI source)
+
+- **A rounded element WITH children is a composition node.** `CFrameworkElement::UpdateRequiresCompNodeForRoundedCorners`
+  (`dxaml/xcp/core/core/elements/framework.cpp`) sets `CompositionRequirement::HasRoundedCorners` when the
+  element's `CornerRadius` is non-zero AND it has children, and unsets it otherwise; it runs when a
+  `Border` / `Grid` / `StackPanel` / `RelativePanel` / `ContentPresenter` `CornerRadius` changes, and production's
+  dump shows it follows the children too (the old card set its radius before its child, and still had its node).
+  The node exists so that XAML can clip the children to the curve.
+- **Every frame walks every node.** `HWCompTreeNode::UpdateTreeVirtual` pushes each node's properties and recurses
+  into its children (`hwcompnode.cpp`, §10h), with no dirty check at that level. A childless rounded `Border` is
+  drawn as render data inside its parent's node (an alpha mask, §10h), and the render walk skips a clean subtree,
+  so it costs nothing in a frame that did not change it.
+- **The old card had two nodes:** a rounded `Border` holding the card body, and the title band, a rounded
+  `Border` holding the title. 1,466 cards × 2 = 2,929 of production's 3,634 nodes (§13c).
+
+### 14b. What changed
+
+- **The shapes** (`_SidePanelCreateCardView`): the card is a `Grid` with a CHILDLESS rounded `Border` behind the
+  body in the same cell (the #333 fill, the 1 px border that carries the hover / selection ring), and the band
+  area is a `Grid` with a CHILDLESS rounded band behind the title (the folder color, the top corners). The paddings
+  became the content's margins, so nothing moves by a pixel. No content needs the clip.
+- **The list** (`_SidePanelSyncRealizedCards`, `AgentMaster/VirtualListWindow.h`): one model per listed row, a card
+  only for the rows of one range around the viewport, two spacers for the rest (the extent stays `count × stride`),
+  re-planned on `ViewChanged` with a half-viewport hysteresis, re-measured after a pass that built cards, and a
+  reveal that realizes the rows around a far card before it jumps there.
+
+### 14c. What to expect (estimates, to be measured after the build)
+
+- **Nodes:** production's shape (two GLOBAL lists of ~706 rows) loses the 2,929 card nodes: ~700 nodes remain
+  (§13c's tab items, buttons and the rest). The walk scales with the nodes (§10h), so a frame should cost
+  ~1.5 ms instead of ~6.9 ms, and the UI thread's ~250 ms/s of walking at 33–38 frames/s about a fifth of that.
+- **Memory:** each GLOBAL list holds 20–40 cards instead of ~706, so most of the ~224 MB of DirectWrite state of
+  the cards' measured TextBlocks (§13c) goes, with the elements and handlers of ~1,400 cards.
+- **Layout:** the panel's StackPanel measures and arranges ~30 children instead of ~706.
+- **Not changed:** the Triage Board's cards (`AgentManagerContent::_MakeCard`) still have the old two shapes (47
+  in production, on the minimized window's Agent Manager page), and the side-panel summary's ▸ buttons keep the
+  stock rounded template (§10h).
+
+### 14d. Checked without a build
+
+- `TestVirtualListWindow` (m5, `tests/tests_sidepanel.cpp`): the policy's arithmetic, its hysteresis on the
+  release's shape, the reveal's no-second-pass property, and seeded sweeps (SIDE_PANEL.md §2f lists them).
+- `cl /Zs` of the 17 translation units that include `TerminalPage.h`, with a negative control inside
+  `_SidePanelSyncRealizedCards`.
+- The m5 suite on an isolated tree (HEAD + this change): 9,156 checks, every check of `TestVirtualListWindow`
+  passes, and the only failures are the three known `TestTaskbarBadge` checks. (A first run also failed one STATE
+  SETTLE timing check of the scheduler, which fails under load; it passed on the rerun.)
+
+### 14e. The next builds must purge
+
+`TerminalPage.h` gained data members and `AgentSidePanelCardView` changed shape. `TerminalPage.h` is not on the
+purge-trigger list, so the next Debug AND Release builds must purge by force (the build-install skill §5.8).
+
+### 14f. Check after the build
+
+SIDE_PANEL.md §2f's list, and the numbers of §13 again (§13h): `xamltree.py nodes` on a snapshot dump (no node on
+a side-panel card), `stacksnap sample` + `uiclass.py` (the frame walk's ms/s), and `wakes.py` (the frame rate,
+which this change should not move: frames follow property changes, §13b).

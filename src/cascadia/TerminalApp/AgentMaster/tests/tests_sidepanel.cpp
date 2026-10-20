@@ -22,12 +22,22 @@
 // the click's half, the exact middle counting as the left / top half), clamped inside the window with a margin, a card
 // larger than the window pinned to the near margin, an unmeasured window never clamped, and every NaN / infinity /
 // negative input neutralized; plus a seeded sweep of the invariants over random clicks, cards and windows.
+//
+// TestVirtualListWindow pins which rows of the VIRTUALIZED card list get cards (AgentMaster/VirtualListWindow.h,
+// SIDE_PANEL.md section 2f): the row arithmetic at exact row boundaries and outside the content, the viewport clamp
+// for a list that just shrank, the policy's hysteresis (the realized range is kept while it covers the viewport's
+// NEAR rows, replaced by the FAR rows otherwise, trimmed when much larger), the reveal range (it holds the asked-for
+// row, and after either minimum scroll the plan keeps it - no second pass), the spacer heights (the content is
+// count * stride tall whatever is realized), the median stride (an outlier cannot move it), and a seeded scroll
+// simulation over random lists, strides and viewports: the visible rows always have cards, the realized range stays
+// bounded, and a scroll of one row per step re-plans only every few rows.
 
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
+#include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
 #include <algorithm>
 #include <cmath> // std::fabs / std::nan / HUGE_VAL - TestPointerCardPlacement
@@ -563,5 +573,320 @@ void TestPointerCardPlacement()
         CHECK(wrongDirection == 0, "card placement sweep: every direction follows the click's half of the window");
         CHECK(outside == 0, "card placement sweep: a card that fits always lands inside the margins; one that doesn't is pinned to the near margin");
         CHECK(notAtClick == 0, "card placement sweep: an unclamped card always has its corner exactly gap away from the click");
+    }
+}
+
+namespace
+{
+    // One row-range case: checks both ends and prints what came back when they differ, so a failing case names its
+    // numbers instead of only its label.
+    //   got   - the range under test.
+    //   first - the expected first row.
+    //   last  - the expected one-past-the-last row.
+    //   what  - the case's label (the CHECK message).
+    void ExpectRows(const RowRange& got, size_t first, size_t last, const char* what)
+    {
+        const bool ok = got.first == first && got.last == last;
+        if (!ok)
+        {
+            std::wprintf(L"    got [%zu, %zu), want [%zu, %zu)\n", got.first, got.last, first, last);
+        }
+        CHECK(ok, what);
+    }
+
+    // A deterministic random source for the sweeps (splitmix64), so a failure reproduces exactly from its seed.
+    struct SweepRandom
+    {
+        uint64_t state;
+
+        // A double in [0, span) (0 for span <= 0). Never throws.
+        //   span    - the upper bound (exclusive).
+        //   returns - the next value.
+        double Next(double span) noexcept
+        {
+            state += 0x9E3779B97F4A7C15ull;
+            uint64_t z = state;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            return span > 0.0 ? span * static_cast<double>(z >> 11) / 9007199254740992.0 : 0.0;
+        }
+
+        // An index in [0, count) (0 for count 0). The product can round up to `count` exactly for 1 draw in 2^53, so
+        // the result is clamped. Never throws.
+        //   count   - the number of indexes.
+        //   returns - the next index.
+        size_t NextIndex(size_t count) noexcept
+        {
+            if (count == 0)
+            {
+                return 0;
+            }
+            return (std::min)(count - 1, static_cast<size_t>(Next(static_cast<double>(count))));
+        }
+    };
+}
+
+// Which rows of the side panel's VIRTUALIZED card list get cards (AgentMaster/VirtualListWindow.h, SIDE_PANEL.md section
+// 2f). The named cases use the release's GLOBAL list where it matters: 706 rows of 60 DIPs under a 600-DIP viewport,
+// so the NEAR margin is 300 DIPs (5 rows) and the FAR margin 600 DIPs (10 rows) on each side.
+void TestVirtualListWindow()
+{
+    std::wprintf(L"\n[TestVirtualListWindow]\n");
+    const double nan = std::nan("");
+    const double inf = HUGE_VAL;
+
+    // --- RowRange: half-open [first, last) ---
+    {
+        const RowRange r{ 3, 7 };
+        const RowRange inverted{ 7, 3 };
+        const RowRange none{};
+        CHECK(r.Size() == 4 && !r.Empty(), "row range: [3, 7) holds 4 rows");
+        CHECK(inverted.Size() == 0 && inverted.Empty() && RowRange{}.Empty(), "row range: an inverted or default range is empty, size 0");
+        CHECK(r.Contains(3) && r.Contains(6) && !r.Contains(7) && !r.Contains(2), "row range: Contains is half-open");
+        CHECK(r.Covers(RowRange{ 4, 6 }) && r.Covers(r), "row range: a range covers its sub-ranges and itself");
+        CHECK(!r.Covers(RowRange{ 2, 6 }) && !r.Covers(RowRange{ 4, 8 }), "row range: a range does not cover one that sticks out on either side");
+        CHECK(r.Covers(none) && r.Covers(RowRange{ 9, 9 }) && none.Covers(none), "row range: an empty range is covered by any range (no row must exist)");
+        CHECK(!none.Covers(RowRange{ 0, 1 }), "row range: an empty range covers no row");
+        const RowRange same{ 3, 7 };
+        const RowRange longer{ 3, 8 };
+        CHECK(r == same && !(r == longer), "row range: equality compares both ends");
+    }
+
+    // --- RowsInSpan: the rows with any part inside [top, bottom), clamped to the list ---
+    ExpectRows(RowsInSpan(706, 60, 0, 60), 0, 1, "span: [0, 60) is row 0 alone");
+    ExpectRows(RowsInSpan(706, 60, 60, 120), 1, 2, "span: [60, 120) is row 1 alone - the row starting at 120 is outside (half-open)");
+    ExpectRows(RowsInSpan(706, 60, 59.9, 60.1), 0, 2, "span: a span across a row boundary touches both rows");
+    ExpectRows(RowsInSpan(706, 60, -100, 100), 0, 2, "span: a span starting above the content is clamped to row 0");
+    ExpectRows(RowsInSpan(706, 60, 42000, 99999), 700, 706, "span: a span running past the end is clamped to the last row");
+    CHECK(RowsInSpan(706, 60, -500, -100).Empty(), "span: a span above the content holds no row");
+    CHECK(RowsInSpan(706, 60, 50000, 60000).Empty(), "span: a span below the content holds no row");
+    CHECK(RowsInSpan(706, 60, 100, 100).Empty() && RowsInSpan(706, 60, 100, 50).Empty(), "span: an empty or inverted span holds no row");
+    CHECK(RowsInSpan(0, 60, 0, 600).Empty(), "span: an empty list has no rows");
+    ExpectRows(RowsInSpan(706, 0, 0, 10), 0, 10, "span: a zero stride counts as 1 DIP");
+    ExpectRows(RowsInSpan(706, nan, 0, 10), 0, 10, "span: a NaN stride counts as 1 DIP");
+    ExpectRows(RowsInSpan(706, -60, 0, 10), 0, 10, "span: a negative stride counts as 1 DIP");
+    CHECK(RowsInSpan(706, 60, nan, 600).Empty() && RowsInSpan(706, 60, 0, inf).Empty() && RowsInSpan(706, 60, -inf, 600).Empty(),
+          "span: a non-finite edge holds no row");
+
+    // --- ClampViewTop: [0, count * stride - viewHeight] ---
+    CHECK(ClampViewTop(706, 60, 1234.5, 600) == 1234.5, "clamp: an offset inside the content is kept");
+    CHECK(ClampViewTop(706, 60, 50000, 600) == 41760, "clamp: an offset past the end is clamped to the last full viewport (42360 - 600)");
+    CHECK(ClampViewTop(706, 60, -10, 600) == 0 && ClampViewTop(706, 60, nan, 600) == 0, "clamp: a negative or NaN offset reads as 0");
+    CHECK(ClampViewTop(5, 60, 100, 600) == 0, "clamp: a list shorter than its viewport cannot scroll");
+    CHECK(ClampViewTop(706, 60, 50000, 0) == 41640, "clamp: a viewport with no height yet counts as 720 DIPs (42360 - 720)");
+
+    // --- WidenedViewportRows: the building block of NEAR and FAR ---
+    ExpectRows(WidenedViewportRows(706, 60, 6000, 600, 0, 0), 100, 110, "widened: no margin = the visible rows 100..109");
+    ExpectRows(WidenedViewportRows(706, 60, 6000, 600, kVirtualRowsNearViewports, kVirtualRowsNearMinRows), 95, 115,
+               "widened: NEAR adds half a viewport (300 DIPs = 5 rows) on each side");
+    ExpectRows(WidenedViewportRows(706, 60, 6000, 600, kVirtualRowsFarViewports, kVirtualRowsFarMinRows), 90, 120,
+               "widened: FAR adds a viewport (600 DIPs = 10 rows) on each side");
+    ExpectRows(WidenedViewportRows(706, 60, 6000, 100, kVirtualRowsNearViewports, kVirtualRowsNearMinRows), 96, 106,
+               "widened: under a short viewport NEAR is 4 rows on each side, not half a viewport");
+    ExpectRows(WidenedViewportRows(706, 60, 6000, 100, kVirtualRowsFarViewports, kVirtualRowsFarMinRows), 92, 110,
+               "widened: ... and FAR 8 rows");
+
+    // --- PlanRealizedRows: keep the range while it covers NEAR, else realize FAR ---
+    const RowRange firstPlan = PlanRealizedRows(706, 60, 0, 600, RowRange{});
+    ExpectRows(firstPlan, 0, 20, "plan: a list's first plan realizes FAR: the 10 visible rows + 10 below");
+    CHECK(PlanRealizedRows(706, 60, 300, 600, firstPlan) == firstPlan, "plan: half a viewport down, the range still covers NEAR - kept");
+    ExpectRows(PlanRealizedRows(706, 60, 301, 600, firstPlan), 0, 26, "plan: one DIP further NEAR needs row 20 - the new viewport's FAR rows");
+    ExpectRows(PlanRealizedRows(706, 60, 361, 600, firstPlan), 0, 27, "plan: ... at 361 DIPs FAR reaches row 26");
+    const RowRange middle = PlanRealizedRows(706, 60, 6000, 600, firstPlan);
+    ExpectRows(middle, 90, 120, "plan: a jump to row 100 replaces the range with that viewport's FAR rows");
+    CHECK(PlanRealizedRows(706, 60, 5700, 600, middle) == middle && PlanRealizedRows(706, 60, 6300, 600, middle) == middle,
+          "plan: a fresh range survives half a viewport of scrolling either way");
+    CHECK(!(PlanRealizedRows(706, 60, 5699, 600, middle) == middle) && !(PlanRealizedRows(706, 60, 6301, 600, middle) == middle),
+          "plan: ... and not one DIP more");
+    CHECK(PlanRealizedRows(706, 60, 6000, 600, middle) == middle, "plan: a plan is a fixed point - planning again for the same viewport changes nothing");
+    ExpectRows(PlanRealizedRows(706, 60, 6000, 600, RowRange{ 0, 706 }), 90, 120, "plan: a range much larger than FAR (every row) is trimmed back to FAR");
+    ExpectRows(PlanRealizedRows(706, 60, 6000, 600, RowRange{ 75, 135 }), 75, 135, "plan: a range exactly twice FAR's size is kept");
+    ExpectRows(PlanRealizedRows(706, 60, 6000, 600, RowRange{ 75, 136 }), 90, 120, "plan: ... one row more and it is trimmed");
+    ExpectRows(PlanRealizedRows(10, 60, 0, 600, RowRange{ 0, 50 }), 0, 10, "plan: a range past the end of a list that shrank is clamped to it");
+    ExpectRows(PlanRealizedRows(100, 60, 30000, 600, RowRange{}), 80, 100,
+               "plan: an offset the shrunk content no longer allows plans from the clamped one (the last viewport, rows 90..99, + 10 above)");
+    CHECK(PlanRealizedRows(0, 60, 0, 600, RowRange{ 3, 9 }).Empty(), "plan: an empty list realizes nothing");
+    ExpectRows(PlanRealizedRows(706, 60, 0, 0, RowRange{}), 0, 24, "plan: a viewport with no height yet counts as 720 DIPs (12 rows + 12 below)");
+    ExpectRows(PlanRealizedRows(706, 60, 0, nan, RowRange{}), 0, 24, "plan: ... so does a NaN height");
+    ExpectRows(PlanRealizedRows(5, 60, 0, 600, RowRange{}), 0, 5, "plan: a list shorter than its viewport realizes every row");
+
+    // --- RowsAroundRow: the reveal of a card whose row has none ---
+    const RowRange around = RowsAroundRow(706, 60, 500, 600);
+    ExpectRows(around, 481, 520, "reveal: row 500 realizes both viewports a minimum scroll can end in (rows 491..509) + FAR (10 rows) on each side");
+    CHECK(PlanRealizedRows(706, 60, 29460, 600, around) == around, "reveal: scrolled from above (row 500 at the bottom edge), the plan keeps the range - no second pass");
+    CHECK(PlanRealizedRows(706, 60, 30000, 600, around) == around, "reveal: scrolled from below (row 500 at the top edge), the plan keeps it too");
+    ExpectRows(RowsAroundRow(706, 60, 0, 600), 0, 20, "reveal: the first row's range is clamped at the top");
+    const RowRange lastRow = RowsAroundRow(706, 60, 705, 600);
+    ExpectRows(lastRow, 686, 706, "reveal: the last row's range is clamped at the end");
+    CHECK(PlanRealizedRows(706, 60, 41760, 600, lastRow) == lastRow, "reveal: ... and the plan at the end of the list keeps it");
+    CHECK(RowsAroundRow(706, 60, 706, 600).Empty() && RowsAroundRow(0, 60, 0, 600).Empty(), "reveal: a row past the end gives no range");
+    CHECK(RowsAroundRow(706, 60, 300, 0).Contains(300) && RowsAroundRow(706, nan, 300, nan).Contains(300),
+          "reveal: the range holds the row whatever the stride and viewport read");
+
+    // --- SpacersFor: the content is count * stride tall whatever is realized ---
+    {
+        const auto spacers = SpacersFor(706, 60, around);
+        CHECK(spacers.top == 28860 && spacers.bottom == 11160, "spacers: rows 481..519 realized = 481 rows above (28860 DIPs) and 186 below (11160)");
+        CHECK(spacers.top + static_cast<double>(around.Size()) * 60.0 + spacers.bottom == 706 * 60.0, "spacers: ... the two and the realized rows make the whole list");
+        const auto nothing = SpacersFor(706, 60, RowRange{});
+        CHECK(nothing.top == 0 && nothing.bottom == 42360, "spacers: nothing realized = one bottom spacer as tall as the list");
+        const auto past = SpacersFor(10, 60, RowRange{ 50, 60 });
+        CHECK(past.top == 600 && past.bottom == 0, "spacers: a range past the end of a shrunk list is clamped (every row in the top spacer)");
+        const auto badStride = SpacersFor(706, nan, RowRange{ 0, 1 });
+        CHECK(badStride.top == 0 && badStride.bottom == 705, "spacers: a NaN stride counts as 1 DIP");
+    }
+
+    // --- MedianRowHeight / StrideChanged: a stride one card cannot move ---
+    CHECK(MedianRowHeight({}, 57.5) == 57.5, "stride: no measurement returns the fallback");
+    CHECK(MedianRowHeight({ 60.0 }, 0) == 60.0, "stride: one measurement is the stride");
+    CHECK(MedianRowHeight({ 62.0, 58.0, 60.0 }, 0) == 60.0, "stride: the middle of three");
+    CHECK(MedianRowHeight({ 60.0, 60.0, 60.0, 120.0 }, 0) == 60.0, "stride: one taller card (an emoji title from a fallback font) does not move it");
+    CHECK(MedianRowHeight({ 60.0, 62.0 }, 0) == 62.0, "stride: an even count takes the upper middle value");
+    CHECK(MedianRowHeight({ nan, -5.0, 0.0, inf, 61.0 }, 0) == 61.0, "stride: NaN, infinite, negative and zero heights (cards not laid out yet) are ignored");
+    CHECK(MedianRowHeight({ nan, 0.0 }, 57.5) == 57.5, "stride: only unusable heights return the fallback");
+    CHECK(!StrideChanged(60.0, 60.0) && !StrideChanged(60.0, 60.04), "stride: rounding noise (under 0.05 DIP) is no change");
+    CHECK(StrideChanged(60.0, 60.06) && StrideChanged(60.0, 59.9) && StrideChanged(60.0, 75.0), "stride: a real change in either direction is one");
+
+    // --- a seeded sweep of the reveal: wherever the minimum scroll ends, the range covers that viewport and the plan
+    //     made there keeps it (the reveal never needs a second realize pass) ---
+    {
+        SweepRandom random{ 0xD1B54A32D192ED03ull };
+        size_t missingRow = 0; // a range without its own row
+        size_t uncovered = 0; // a viewport after the minimum scroll with a row outside the range
+        size_t secondPass = 0; // a plan at that viewport that differs from the range
+        size_t cases = 0;
+        for (int i = 0; i < 20000; ++i)
+        {
+            const size_t count = 1 + random.NextIndex(2000);
+            const double stride = 20.0 + random.Next(150.0);
+            const double height = 50.0 + random.Next(2000.0);
+            const size_t row = random.NextIndex(count);
+            const double maxTop = (std::max)(0.0, static_cast<double>(count) * stride - height);
+            const double viewTop = random.Next(maxTop);
+            const RowRange range = RowsAroundRow(count, stride, row, height);
+            missingRow += range.Contains(row) ? 0 : 1;
+            // The minimum scroll that shows the whole row (StartBringIntoView with default options), clamped like the
+            // ScrollViewer clamps it.
+            const double rowTop = static_cast<double>(row) * stride;
+            double top = viewTop;
+            if (rowTop < viewTop)
+            {
+                top = rowTop; // the row above the viewport: it ends at the top edge
+            }
+            else if (rowTop + stride > viewTop + height)
+            {
+                top = rowTop + stride - height; // below: at the bottom edge
+            }
+            top = std::clamp(top, 0.0, maxTop);
+            uncovered += range.Covers(RowsInSpan(count, stride, top, top + height)) ? 0 : 1;
+            secondPass += PlanRealizedRows(count, stride, top, height, range) == range ? 0 : 1;
+            ++cases;
+        }
+        CHECK(cases == 20000, "reveal sweep: 20000 random lists, strides, viewports and rows");
+        CHECK(missingRow == 0, "reveal sweep: every range holds its row");
+        CHECK(uncovered == 0, "reveal sweep: after the minimum scroll every visible row is realized");
+        CHECK(secondPass == 0, "reveal sweep: the plan at the scrolled-to viewport always keeps the range (no second pass)");
+    }
+
+    // --- a seeded scroll simulation: wheel notches, thumb jumps and panel resizes over random lists ---
+    {
+        SweepRandom random{ 0x2545F4914F6CDD1Dull };
+        size_t outOfList = 0; // a plan with first > last or last > count
+        size_t uncovered = 0; // a visible row without a card
+        size_t oversized = 0; // a plan larger than the trim allows
+        size_t unstable = 0; // a plan that is not a fixed point of the policy
+        size_t steps = 0;
+        for (int trial = 0; trial < 300; ++trial)
+        {
+            const size_t count = random.NextIndex(1500); // 0 rows included: the empty list
+            const double stride = 30.0 + random.Next(90.0);
+            double height = 100.0 + random.Next(1400.0);
+            RowRange current{};
+            double top = 0.0;
+            for (int step = 0; step < 400; ++step)
+            {
+                const double pick = random.Next(1.0);
+                if (pick < 0.70)
+                {
+                    top += (random.Next(1.0) < 0.5 ? -1.0 : 1.0) * (stride + random.Next(5.0 * stride)); // a wheel notch or a short drag
+                }
+                else if (pick < 0.90)
+                {
+                    top = random.Next(static_cast<double>(count) * stride); // a thumb jump
+                }
+                else
+                {
+                    height = 100.0 + random.Next(1400.0); // the panel resized
+                }
+                top = ClampViewTop(count, stride, top, height); // the ScrollViewer never leaves its extent
+                const RowRange plan = PlanRealizedRows(count, stride, top, height, current);
+                // (not named `far`: <windows.h> defines far / near as empty macros)
+                const RowRange farRows = WidenedViewportRows(count, stride, top, height, kVirtualRowsFarViewports, kVirtualRowsFarMinRows);
+                outOfList += (plan.first <= plan.last && plan.last <= count) ? 0 : 1;
+                uncovered += plan.Covers(RowsInSpan(count, stride, top, top + height)) ? 0 : 1;
+                oversized += plan.Size() <= kVirtualRowsTrimFactor * (std::max)(farRows.Size(), size_t{ 1 }) ? 0 : 1;
+                unstable += PlanRealizedRows(count, stride, top, height, plan) == plan ? 0 : 1;
+                current = plan;
+                ++steps;
+            }
+        }
+        CHECK(steps == 300 * 400, "scroll sweep: 300 random lists, 400 steps each");
+        CHECK(outOfList == 0, "scroll sweep: every plan stays inside its list");
+        CHECK(uncovered == 0, "scroll sweep: every visible row always has its card");
+        CHECK(oversized == 0, "scroll sweep: no plan is larger than twice the FAR range");
+        CHECK(unstable == 0, "scroll sweep: every plan is a fixed point (a ViewChanged at the same offset starts no pass)");
+    }
+
+    // --- one row per step, top to bottom and back: the hysteresis keeps re-plans to one per several rows ---
+    {
+        struct Shape
+        {
+            size_t count;
+            double stride;
+            double height;
+        };
+        const Shape shapes[] = {
+            { 706, 60.0, 600.0 }, // the release's GLOBAL list: a re-plan every 6 rows
+            { 706, 60.0, 100.0 }, // a viewport shorter than 8 rows: the 4- / 8-row margins decide (every 5 rows)
+            { 706, 37.3, 913.7 }, // fractional sizes: rounding at the row boundaries
+            { 2000, 45.5, 1400.0 },
+            { 96, 58.25, 820.0 }, // the release's 96-tab window
+        };
+        size_t uncovered = 0;
+        size_t tooEager = 0;
+        for (const auto& shape : shapes)
+        {
+            const double maxTop = (std::max)(0.0, static_cast<double>(shape.count) * shape.stride - shape.height);
+            RowRange current = PlanRealizedRows(shape.count, shape.stride, 0.0, shape.height, RowRange{});
+            size_t replans = 0;
+            size_t moves = 0;
+            const auto stepTo = [&](double top) {
+                const RowRange plan = PlanRealizedRows(shape.count, shape.stride, top, shape.height, current);
+                replans += plan == current ? 0 : 1;
+                uncovered += plan.Covers(RowsInSpan(shape.count, shape.stride, top, top + shape.height)) ? 0 : 1;
+                current = plan;
+                ++moves;
+            };
+            for (double top = shape.stride; top < maxTop; top += shape.stride)
+            {
+                stepTo(top);
+            }
+            stepTo(maxTop);
+            for (double top = maxTop - shape.stride; top > 0.0; top -= shape.stride)
+            {
+                stepTo(top);
+            }
+            stepTo(0.0);
+            // The FAR margin exceeds the NEAR one by at least 4 rows, so a fresh range lasts at least 4 one-row steps in
+            // either direction.
+            if (replans > moves / 4 + 2)
+            {
+                ++tooEager;
+                std::wprintf(L"    %zu rows of %g DIPs under %g: %zu re-plans over %zu one-row steps\n", shape.count, shape.stride, shape.height, replans, moves);
+            }
+        }
+        CHECK(uncovered == 0, "row-by-row: every visible row always has its card");
+        CHECK(tooEager == 0, "row-by-row: a scroll of one row per step re-plans at most once per 4 rows");
     }
 }
