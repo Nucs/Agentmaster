@@ -21,7 +21,8 @@ REM TranscriptWatcher.cpp: SessionScanner's ReadDirectoryChangesW change feed (H
 REM version.lib (ClaudeSpawn's claude.exe version read) needs no entry here: ClaudeSpawn.cpp links it via #pragma comment.
 REM tests_sidepanel.cpp: the side panel card list's order planner (SIDE_PANEL.md 2c - KeyedListDiff.h, header-only, so no engine .cpp joins)
 REM and the cards' and rows' "created 4d1h, active 2m4s ago" timing line (SessionTimingText.h, header-only too),
-REM and where the header's "+" launcher card opens (SIDE_PANEL.md 2e - PointerCardPlacement.h, header-only too).
+REM where the header's "+" launcher card opens (SIDE_PANEL.md 2e - PointerCardPlacement.h, header-only too),
+REM and which rows of the virtualized card list get cards (SIDE_PANEL.md 2f - VirtualListWindow.h, header-only too).
 REM tests_taskbar.cpp: the taskbar unread badge (NOTIFICATIONS.md section 8) and the unread frame on a window's taskbar preview
 REM (section 9, TaskbarThumbnail.h); gdi32.lib comes in through both headers' #pragma comment.
 REM tests_turns.cpp + TranscriptTurns.cpp: the Copy > Transcript levels; the fixtures + goldens it reads are in turns\ (beside the exe).

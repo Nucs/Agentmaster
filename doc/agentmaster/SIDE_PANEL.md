@@ -103,7 +103,8 @@ the panel:
   "here" means); the header's **LOCAL / GLOBAL** toggle (`_SidePanelToggleScope`) widens THIS
   window's list to every window's sessions. It is a SEPARATE state from the Manager's tree/board
   scope (they answer different questions — the fleet lens vs. what sits beside your terminal) and
-  is persisted **per window only** (§4). The list is **edited in place, never rebuilt** (§2c), off
+  is persisted **per window only** (§4). The list is **edited in place, never rebuilt** (§2c), and only
+  the cards near the viewport exist (§2f, **virtualized**); it is updated off
   the page's already-batched registry drain, min-gap throttled (500ms), fully deferred while
   collapsed (the Manager-lens rebuild-tax discipline) — plus, while LOCAL, a per-tick **hosted-set
   diff** (`_SidePanelPeriodicTickImpl`): a tab docked into / torn out of the window changes
@@ -203,12 +204,14 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
   lens push), and the Agent Manager page itself (no tab is selected there).
 - **Minimal and one-shot.** The scroll is `UpdateLayout()` + `StartBringIntoView()` on the card — the
   Manager board's own `BringSelectedIntoView` recipe — so a card already fully visible never moves
-  and a far one stops at the nearest edge. Keyboard focus never leaves the terminal.
+  and a far one stops at the nearest edge. Keyboard focus never leaves the terminal. A session whose
+  row has no card (it lies outside the realized rows, §2f) first gets the rows around it realized, and
+  the card is then reached in ONE jump, without the scroll animation.
 - **An owed reveal.** `_SidePanelRevealTabCard` records the id (`_sidePanelRevealPendingId`) and
   queues ONE coalesced Low-priority tick (`_SidePanelQueueReveal` → `_SidePanelRevealPendingNow`), so
   rapid Ctrl+Tab cycling folds into one scroll to the LAST tab, and the tick measures the list after
-  whatever list update / content swap ran first. The debt is consumed by the first tick that finds the card
-  **rendered**, and survives until then: a just-launched session's card (it lands on the NEXT
+  whatever list update / content swap ran first. The debt is consumed by the first tick that finds the session
+  **listed** (its row realized first when it has no card, §2f), and survives until then: a just-launched session's card (it lands on the NEXT
   update — `_SidePanelRebuildCards` re-queues), a collapsed panel (the expand re-queues), a card the
   filter hides (paid when the filter admits it).
 - **Cancelling it.** A card click (the user's own pick outranks a pending scroll — cleared in
@@ -270,12 +273,13 @@ never push the tags off the card. An untagged card's band is exactly the old tit
   The next entry into the card's body attaches it again: the card push re-hosts whenever nothing is
   attached. The `+N` has no floating tip in this mode (the rich card lists every tag), and a mode
   switch rebuilds the strip so the `+N` always matches the mode.
-- **Data + freshness**: the list keeps each rendered card's tags in a per-card cache
-  (`_sidePanelTagsById`). `GetSessionTags` (SessionStore's (size,mtime)-validated record cache: one
-  file stat) runs only for a card new to the list, and for every rendered card once the
+- **Data + freshness**: the list keeps each listed row's tags in a per-row cache
+  (`_sidePanelTagsById`; every row, realized or not, since every row keeps its model — §2f).
+  `GetSessionTags` (SessionStore's (size,mtime)-validated record cache: one
+  file stat) runs only for a row new to the list, and for every listed row once the
   **tag-change epoch** moved: `SessionTagsEpoch()`, a process-wide counter that SessionStore moves
   after every write that CHANGED a session's tag list or a tag's color. `LoadAllTagColors()` runs
-  once per epoch, and only when a rendered card is tagged. So an update with no tag change reads no
+  once per epoch, and only when a listed row is tagged. So an update with no tag change reads no
   tag file at all; it used to stat one record per rendered card, ~466 per update in the release's
   biggest window. The epoch is loaded BEFORE any tag read: a write that lands during the reads
   leaves the older epoch cached, and the next update reads again — a cache refreshed once too often,
@@ -297,11 +301,13 @@ Each update brings the list up to date with the fewest XAML edits. The old updat
 built every card again: ~466 cards and ~940 composition nodes in the release's biggest window, up to
 twice a second while sessions changed, and once more every 30 s to move the "ago" texts.
 
-- **A model per card.** `SidePanelCardModelFor` computes everything a card shows from its live
+- **A model per row.** `SidePanelCardModelFor` computes everything a card shows from its live
   session — the title, the band color and ink, the state, the codex pill, the draft dots (with their
   color and whether they pulse), the timing text, the dir line, the tags with their RESOLVED colors,
-  the tooltip — into a plain `AgentSidePanelCardModel` (`TerminalPage.h`). The card keeps the model it
-  shows (`AgentSidePanelCardView::model`).
+  the tooltip — into a plain `AgentSidePanelCardModel` (`TerminalPage.h`). Since §2f only the rows near
+  the viewport have cards, but EVERY listed row keeps its model (`_sidePanelRowIds` /
+  `_sidePanelRowModels`), so a row that a scroll realizes shows its current model at once. A card keeps
+  the model it shows (`AgentSidePanelCardView::model`).
 - **Only the differences are written.** `_SidePanelApplyCardModel` compares the new model with the one
   the card shows, value by value, and writes only what changed. An optional part (the codex pill, the
   draft dots, the timing text, the band's tag strip) is added or removed only when its presence
@@ -320,7 +326,9 @@ twice a second while sessions changed, and once more every 30 s to move the "ago
   reorder of the panel's item array, with no `Unloaded`/`Loaded`, so a moved card keeps its elements,
   its pulsing dots and its hover state.
 - **The mirror.** `_sidePanelCardOrder` (the shown order, as session ids) and `_sidePanelCardViews`
-  (id → card) must match the panel's children exactly; every edit is made on both in step. Before an
+  (id → card) must match the panel's children exactly; every edit is made on both in step. Since §2f
+  they hold the REALIZED rows only, and the panel's children are [top spacer][the realized cards]
+  [bottom spacer], so every planned index is the mirror's + 1 and the spacers never move. Before an
   update edits anything, the panel size, the mirror and the map are compared; after it, the mirror
   must equal the new order and the panel must hold that many children. A mismatch, or a throw midway
   (a XAML edit refused, a torn-down tree), resets the list to empty (`_SidePanelResetCards`, logged
@@ -649,6 +657,97 @@ running claude keeps running); Enter on a focused Launch launches on the key-up 
 the new tab; a click on the terminal, a tab, the side panel or `+` closes it; a window resize keeps
 it inside the window; no `[exc] side panel launcher …` lines in hooks.log.
 
+### 2f. Only the cards near the viewport exist, and a card adds no composition node (2026-10-20, NOT BUILT yet)
+
+The user's request, after the CPU report of UI_THREAD.md §13: "draw each card's rounded corners on a background
+element instead of the card itself (about 80% of the redraw cost), then load only the cards on screen" — "Kindly
+fix". Measured there on production 0.6.8.22: two windows show their panel GLOBAL, ~706 cards each, all built and
+loaded even when scrolled out of view; every frame of a window walked 3,634 composition nodes, 81% of them
+side-panel cards (two per card); the cards held ~224 MB of DirectWrite state. The why and the evidence:
+UI_THREAD.md §14.
+
+**1. The rounded shapes are childless.** XAML gives an element with a non-zero `CornerRadius` AND children its
+own composition node, so that it can clip the children to the curve (WinUI `framework.cpp`,
+`CFrameworkElement::UpdateRequiresCompNodeForRoundedCorners`), and every frame walks every node (§10h). The card
+was a rounded `Border` holding the body, its band a rounded `Border` holding the title: two nodes per card. Now
+each is a plain Grid with two layers in one cell:
+
+```
+card       (Grid, margin 4,2,4,2, NO corner radius)
+├─ cardBack  (Border: #333 fill, 1 px border, radius 4, NO child)    ← the hover / selection ring is its BorderBrush
+└─ body      (StackPanel, margin 1: inside the border, where the old Border laid out its child)
+   ├─ bandArea  (Grid, NO corner radius)
+   │  ├─ band     (Border: the folder color, top corners 3, NO child)
+   │  └─ title    (margin 6,2,6,2 = the old band padding), or [ title * ][ tag strip ] in a grid with that margin
+   ├─ state line
+   └─ dir line
+```
+
+- A childless rounded Border draws the same shape as plain render data, with no node. Nothing needs the clip:
+  the band rounds its own top corners, and no content reaches a corner.
+- ⚠ Never give `cardBack` or `band` a child, and never set a `CornerRadius` on `card` or `bandArea`: a Grid has
+  that property too, so the compiler would not object.
+
+**2. Only the rows near the viewport have cards.** The list update still makes one model per LISTED session —
+the rows (`_sidePanelRowIds` + `_sidePanelRowModels`, in sort order) — but only the rows of ONE contiguous range
+have cards. The rows above that range are one top spacer of `first × stride` DIPs, the rows below it one bottom
+spacer of `(count − last) × stride` (transparent Borders, so a wheel over a spacer still scrolls). The list is
+therefore always `count × stride` tall: realizing other rows never changes the scroll extent, so a scroll in
+flight (inertia, a thumb drag) is never disturbed.
+
+- **The stride** is one row: a card's height + its 2 × 2 DIP vertical margins. Every card has the same shape
+  (one-line texts of fixed sizes), and the stride is the MEDIAN of the realized cards' measured heights, so a card
+  whose emoji title came from a taller fallback font cannot move it; it changes only when most cards change (a DPI
+  or text-size change), by more than 0.05 DIP. Before any card was measured it is 60 DIPs
+  (`kSidePanelCardDefaultStride`).
+- **The policy** (`PlanRealizedRows`, `AgentMaster/VirtualListWindow.h`, pure): NEAR = the viewport ± max(half a
+  viewport, 4 rows), FAR = the viewport ± max(one viewport, 8 rows). While the realized range covers the NEAR rows,
+  nothing changes; otherwise the FAR rows are realized — so an edit runs about every half viewport of scrolling.
+  A range larger than twice FAR (a viewport that shrank) is trimmed to FAR. A viewport with no height yet (the
+  first update runs before the first layout) counts as 720 DIPs. For the release's 706-row list under a ~600 DIP
+  viewport that is 20–30 cards instead of 706.
+- **When it runs.** The ScrollViewer's `ViewChanged` plans on every offset change (a few multiplications) and edits
+  the list only when the plan changed — synchronously: ViewChanged is raised after the offset changed, never
+  inside a layout pass, and a queued edit would leave a frame of blank spacer during a fast wheel scroll. Its
+  `SizeChanged` (the "Sum" toggle, a splitter drag, a window resize) queues one Low-priority re-check, and so does
+  every pass that built cards (`_SidePanelQueueRealize`): their heights are known only after the next layout pass,
+  and the re-check measures them. A list update plans too, and writes the new models into the realized cards that
+  stay.
+- **The edit** (`_SidePanelSyncRealizedCards`) is §2c's, over the realized rows. A row that leaves the range loses
+  its card (with "Sum" off, its rich tooltip is shut down first — §2d); a row that enters gets a new card from its
+  stored model (with "Sum" off, its rich tooltip is armed from `GetWithoutQueue`, a lean one-session read). A
+  scroll pass writes no model (the realized cards already show their rows'). A mismatch or a throw resets the list
+  to empty and marks it dirty, as in §2c (logged `[sidepanel] card list … pass ended out of step …` /
+  `[exc] _SidePanelRunRealizePass`).
+- **The ⌖ reveal** (§2a) of a row without a card first realizes the rows around it (`RowsAroundRow`: both
+  viewports a minimum scroll can end in — the row at the top edge or at the bottom edge — plus the FAR margin),
+  then scrolls with `StartBringIntoView` WITHOUT the animation: an animated scroll across hundreds of rows would
+  realize and drop cards at every offset on its way. The plan after that scroll keeps the range, so the reveal
+  needs no second pass (tested).
+- **What it changes elsewhere:** the selection restyle, the hover ring, the tag strip and the "Sum" switch act on
+  the realized cards; a row realized later gets its look (selected or not) from its first, full apply. UI
+  Automation (Narrator, Inspect) sees only the realized cards.
+- **Known limits:**
+  - The rows are taken to be equal. A card taller than the stride (a fallback-font title) shifts the content by
+    the difference when it leaves the range ABOVE the viewport: a few DIPs, at most once per pass.
+  - A stride change (DPI, text size) moves the content above the viewport by `first × Δstride`. Not compensated.
+- **Tested** (no build): `TestVirtualListWindow` (`tests/tests_sidepanel.cpp`) — the row arithmetic at exact
+  boundaries, the clamp of an offset the shrunk content no longer allows, the hysteresis on the release's shape
+  (a range is kept for half a viewport of scrolling and not one DIP more), the trim, the reveal range and its
+  no-second-pass property, the spacer total, the median stride; a 20,000-case reveal sweep, a 300-list × 400-step
+  scroll simulation (every visible row always has its card, every plan is a fixed point, no plan larger than
+  twice FAR) and one-row-per-step scrolls (at most one re-plan per 4 rows). The 17 translation units that include
+  `TerminalPage.h` pass `cl /Zs`, with a negative control inside `_SidePanelSyncRealizedCards`.
+- **Check after the build:**
+  - The cards look as before: the border, the band's corners, the ring on hover and selection, the tag ribbons
+    hung from the band's top edge.
+  - In the 556-tab window's GLOBAL list, a wheel scroll, a thumb drag and a scroll by keyboard show no blank band
+    and no jump; ⌖ reaches a far tab's card in one jump; a sort or filter change lands on the right cards; with
+    "Sum" off a card scrolled into view shows its rich card on hover.
+  - `tools/leakhunt/xamltree.py nodes` on a dump: no node on a side-panel card (production had 2 per card); the
+    UI thread's frame walk (`stacksnap sample` + `uiclass.py`) far below ~250 ms/s.
+  - No `[sidepanel] … out of step` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -768,6 +867,10 @@ below).
 
 ## 5. Perf + safety rules upheld
 
+- The list is VIRTUALIZED (§2f): only the cards near the viewport exist (20–40 in a ~600 DIP list,
+  whatever the session count), and a scroll edits the list only about every half viewport. The card's
+  and the band's rounded backgrounds are CHILDLESS Borders, so a card adds no composition node to the
+  walk XAML runs on every frame of the window (UI_THREAD.md §14).
 - Updates: batched-drain trigger + 500ms min gap + collapsed-defers; the list is edited in place
   with the fewest removes / inserts / moves, and a card gets only its changed values written (§2c) —
   never `Children().Clear()` + rebuild (the reset after a failed edit is the one exception); the
@@ -837,4 +940,8 @@ below).
   `TerminalPage.AgentSidePanel.cpp` (the button, the card, its keys, hooks, fit and placement),
   `TerminalPage.AgentEngine.cpp` (the tab-switch close, the destructor's `Shutdown`),
   `TerminalPage.h` (members + decls), `TerminalAppLib.vcxproj` (the new TU + headers),
-  `tests/tests_sidepanel.cpp` (`TestPointerCardPlacement`).
+  `tests/tests_sidepanel.cpp` (`TestPointerCardPlacement`). The virtualized list and the childless
+  rounded shapes (§2f): `AgentMaster/VirtualListWindow.h` (the realized-rows policy, pure),
+  `TerminalPage.AgentSidePanel.cpp` (`_SidePanelSyncRealizedCards`, the scroll / measure / reveal passes,
+  the spacers, the card's two layers), `TerminalPage.h` (the rows, the spacers, the realized range, the
+  stride, the card view's `cardBack` / `bandArea`), `tests/tests_sidepanel.cpp` (`TestVirtualListWindow`).

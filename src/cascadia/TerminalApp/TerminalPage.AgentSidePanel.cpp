@@ -51,6 +51,11 @@
 // cached per card until SessionTagsEpoch moves. The ~30s timing refresh runs the same update, so
 // only the timing texts that changed are written; cards carry NO eager flyouts (the context menu is
 // built lazily at right-click).
+// Since SIDE_PANEL.md §2f the list is VIRTUALIZED: only the rows near the viewport have cards
+// (AgentMaster/VirtualListWindow.h decides which; two spacers stand in for the rest, so the scroll
+// extent never moves), and a card's rounded shapes are CHILDLESS layers behind its content — a
+// rounded element with children is a composition node of its own, which every frame walks
+// (UI_THREAD.md §10h / §14: two per card were 81% of production's nodes on 2026-10-20).
 // ======================================================================================
 //
 // This file implements TerminalPage methods (same class, separate TU — the TabManagement.cpp
@@ -76,6 +81,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live
 #include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
+#include "AgentMaster/VirtualListWindow.h" // PlanRealizedRows / RowsAroundRow / SpacersFor / MedianRowHeight — which rows of the card list have cards (SIDE_PANEL.md §2f)
 #include "AgentMaster/PointerCardPlacement.h" // PlacePointerCard — the "+" launcher card opens at the click, toward the window's center (SIDE_PANEL.md §2e)
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings + EffectiveWorkingDir / ResolveSessionColorHex + LoadDirColorIndex (one color snapshot per list update)
 #include "AgentMaster/ProcessInspect.h" // ExternalClaudeRow (the Internal.h MakeSortKey overload's parameter type)
@@ -144,6 +150,31 @@ namespace
     constexpr double kSidePanelSearchBoxMinHeightPx = 22.0;
     constexpr uint64_t kSidePanelRebuildMinGapMs = 500; // registry-drain rebuild throttle (a storm folds into the periodic catch-up)
     constexpr uint64_t kSidePanelTimingRefreshMs = 30'000; // the in-place "ago" text refresh cadence
+
+    // --- One card, and the row it takes in the list (SIDE_PANEL.md §2c / §2f) ---------------------------------------
+    // A card's margins in the list: 4 DIPs at the sides, 2 above and 2 below (two cards stand 4 apart). The vertical
+    // pair is part of the row height the virtualized list computes with (the stride = a card's height + both).
+    constexpr double kSidePanelCardMarginX = 4.0;
+    constexpr double kSidePanelCardMarginY = 2.0;
+    // The card's constant 1px border (selection and hover recolor it, never resize it, so the list never jiggles
+    // under the pointer). It is drawn by the card's CHILDLESS background, so the content sits this far inside it —
+    // where the old Border placed its child.
+    constexpr double kSidePanelCardBorderPx = 1.0;
+    // The card's corner radius, and the band's top corners: they follow the card's INNER curve (the outer radius
+    // minus the border), as they did when the card's Border clipped the band to that curve.
+    constexpr double kSidePanelCardCornerRadius = 4.0;
+    constexpr double kSidePanelBandCornerRadius = kSidePanelCardCornerRadius - kSidePanelCardBorderPx;
+    // The title band's padding: the MARGIN of whatever the band area shows over the band (the title alone, or the
+    // [title][tag strip] grid while tagged) — the band itself is childless, so it has no padding of its own.
+    constexpr double kSidePanelBandPadX = 6.0;
+    constexpr double kSidePanelBandPadY = 2.0;
+    // The row height the list computes with before any card was measured: a card plus its vertical margins at 100%
+    // text size (the 12px title line + its 2px pads, the 10px state line + its 3px gap, the 10px dir line + its 4px
+    // gap, the 1px border twice, the 2px margins twice: ~59.6 DIPs). Only the first plan of a window uses it; the
+    // pass queued after the first layout measures the real cards (_SidePanelSyncRealizedCards).
+    constexpr double kSidePanelCardDefaultStride = 60.0;
+    // _SidePanelSyncRealizedCards' anchorRow when the plan follows the viewport (no row to realize around).
+    constexpr size_t kSidePanelNoAnchorRow = SIZE_MAX;
     // The header's ICON buttons (⌖ scroll-to-tab, ⇄ dock flip, «/» collapse) and the collapsed strip's chevron:
     // one size above the 11px text buttons (Sum / LOCAL / sort), so the single-glyph controls read as clearly as
     // the worded ones beside them. One place, so the three header icons and the strip can never drift apart.
@@ -283,25 +314,32 @@ namespace
     // hover == the state color at half alpha, rest == transparent. CONSTANT thickness on purpose —
     // the board's 0/1/2px scheme reflows the column on hover; a fixed-width side list must not
     // jiggle under the pointer.
-    void SidePanelStyleCardBorder(const Border& card, const Color& stateColor, bool selected, bool hover)
+    //   cardBack   — the card's CHILDLESS rounded background (AgentSidePanelCardView::cardBack), which draws the
+    //                border; a null element is a no-op (a card torn down mid-event).
+    //   stateColor — the color of the state the card shows.
+    //   selected   — the card is the selected one.
+    //   hover      — the pointer is on the card.
+    // Throws winrt::hresult_error only when XAML refuses the property write (a torn-down tree) — the list update's
+    // catch resets the list; the pointer handlers run it on a live card.
+    void SidePanelStyleCardBorder(const Border& cardBack, const Color& stateColor, bool selected, bool hover)
     {
-        if (!card)
+        if (!cardBack)
         {
             return;
         }
         if (selected)
         {
-            card.BorderBrush(SolidColorBrush{ stateColor });
+            cardBack.BorderBrush(SolidColorBrush{ stateColor });
         }
         else if (hover)
         {
             Color c = stateColor;
             c.A = 0x80;
-            card.BorderBrush(SolidColorBrush{ c });
+            cardBack.BorderBrush(SolidColorBrush{ c });
         }
         else
         {
-            card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x00, 0, 0, 0) });
+            cardBack.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x00, 0, 0, 0) });
         }
     }
 
@@ -973,16 +1011,48 @@ namespace winrt::TerminalApp::implementation
             _sidePanelBody.RowDefinitions().Append(r2);
         }
 
-        // TOP: the scrollable card list (its OWN scroll, independent of the summary's).
+        // TOP: the scrollable card list (its OWN scroll, independent of the summary's). VIRTUALIZED (SIDE_PANEL.md
+        // §2f): only the rows near the viewport have cards; two spacers stand in for the rows above and below them,
+        // so the list's height — and the scroll extent — is the same whichever rows are realized.
         _sidePanelCards = StackPanel{};
         _sidePanelCards.Orientation(Orientation::Vertical);
-        ScrollViewer cardsScroll{};
-        cardsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        cardsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-        cardsScroll.Content(_sidePanelCards);
+        // The spacers: plain Borders whose Height is all they are. TRANSPARENT, not null: a null background is not
+        // hit-testable, and a wheel over a spacer (the instant before its rows are realized) would then land on the
+        // cards area behind the ScrollViewer and never scroll it.
+        _sidePanelCardsTopSpacer = Border{};
+        _sidePanelCardsTopSpacer.Height(0.0);
+        _sidePanelCardsTopSpacer.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelCardsBottomSpacer = Border{};
+        _sidePanelCardsBottomSpacer.Height(0.0);
+        _sidePanelCardsBottomSpacer.Background(SolidColorBrush{ Colors::Transparent() });
+        _sidePanelCards.Children().Append(_sidePanelCardsTopSpacer);
+        _sidePanelCards.Children().Append(_sidePanelCardsBottomSpacer);
+        _sidePanelCardsScroll = ScrollViewer{};
+        _sidePanelCardsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _sidePanelCardsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        _sidePanelCardsScroll.Content(_sidePanelCards);
+        // A scroll moves the viewport over the rows: re-plan the realized range (a pass only when the plan changes —
+        // usually every half viewport of scrolling). Raised on the UI thread after the offset changed, never inside a
+        // layout pass, so the pass may edit the list synchronously (no blank frame while a wheel scroll runs).
+        // Weak page capture and no element capture: the ScrollViewer owns this handler (no element -> handler ->
+        // element cycle — the 2026-10-14 leak class).
+        _sidePanelCardsScroll.ViewChanged([weakThis](const IInspectable&, const ScrollViewerViewChangedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelOnCardsViewChanged();
+            }
+        });
+        // A taller (or shorter) viewport needs other rows — the "Sum" toggle, a splitter drag, a window resize. A
+        // layout-driven trigger, so the re-check is QUEUED, never run inside the pass (the E_LAYOUTCYCLE rule).
+        _sidePanelCardsScroll.SizeChanged([weakThis](const IInspectable&, const SizeChangedEventArgs&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_SidePanelQueueRealize();
+            }
+        });
         Border cardsArea{};
         cardsArea.Background(Fill(0xFF, 0x2A, 0x2A, 0x2A));
-        cardsArea.Child(cardsScroll);
+        cardsArea.Child(_sidePanelCardsScroll);
         Grid::SetRow(cardsArea, 0);
         _sidePanelBody.Children().Append(cardsArea);
 
@@ -1691,15 +1761,19 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // The reveal tick's body: pay the owed scroll when its card is RENDERED. UpdateLayout first — a card
-    // created by the rebuild that queued this tick has no size until measured, and StartBringIntoView on
-    // it would silently do nothing — then StartBringIntoView: the Manager board's own recipe
-    // (BringSelectedIntoView). Default BringIntoViewOptions mean the MINIMUM scroll that shows the card, so
-    // a card already fully on screen never moves and a far one stops at the nearest edge. The request walks
-    // up to the cards ScrollViewer only (the panel has no outer scroller) and never touches keyboard focus,
-    // so the terminal keeps its typing focus through every reveal. The debt is consumed BEFORE the XAML
-    // calls, so a throwing reveal can't turn into one that retries on every later rebuild; a card that is
-    // NOT rendered yet (filtered out, not built) keeps it owed for the next rebuild.
+    // The reveal tick's body: pay the owed scroll when its session is a LISTED row. A row outside the realized range
+    // has no card (SIDE_PANEL.md §2f), so the rows around it are realized first (RowsAroundRow: wherever the minimum
+    // scroll leaves the viewport, its rows exist, and the scroll that follows needs no second pass). UpdateLayout
+    // then — a card created by the rebuild or the realize pass that preceded this tick has no size until measured,
+    // and StartBringIntoView on it would silently do nothing — then StartBringIntoView: the Manager board's own
+    // recipe (BringSelectedIntoView). Default BringIntoViewOptions mean the MINIMUM scroll that shows the card, so a
+    // card already fully on screen never moves and a far one stops at the nearest edge. A card that had to be
+    // realized is reached WITHOUT the scroll animation: an animated scroll across hundreds of rows would realize and
+    // drop cards at every intermediate offset on its way. The request walks up to the cards ScrollViewer only (the
+    // panel has no outer scroller) and never touches keyboard focus, so the terminal keeps its typing focus through
+    // every reveal. The debt is consumed BEFORE the XAML calls, so a throwing reveal can't turn into one that
+    // retries on every later rebuild; a session that is NOT listed yet (filtered out, its first update not run)
+    // keeps it owed for the next rebuild.
     // No parameters; returns nothing. Never throws: XAML failures (a teardown race, a layout error) are
     // logged (Rule #18) and swallowed — a lost scroll must never cost the window.
     void TerminalPage::_SidePanelRevealPendingNow()
@@ -1713,10 +1787,21 @@ namespace winrt::TerminalApp::implementation
             _sidePanelRevealPendingId.clear(); // switched off (here or by a broadcast) after the request was made
             return;
         }
+        const auto row = std::find(_sidePanelRowIds.begin(), _sidePanelRowIds.end(), _sidePanelRevealPendingId);
+        if (row == _sidePanelRowIds.end())
+        {
+            return; // not listed (yet) — _SidePanelRebuildCards re-queues; a newer tab selection replaces the debt
+        }
+        const size_t rowIndex = static_cast<size_t>(row - _sidePanelRowIds.begin());
+        const bool realized = rowIndex >= _sidePanelRealizedFirst && rowIndex < _sidePanelRealizedLast;
+        if (!realized && !_SidePanelRunRealizePass(L"reveal", rowIndex))
+        {
+            return; // the pass failed and reset the list (logged); the debt stays owed for the rebuild that follows
+        }
         const auto it = _sidePanelCardViews.find(_sidePanelRevealPendingId);
         if (it == _sidePanelCardViews.end() || !it->second.card)
         {
-            return; // no card for it (yet) — _SidePanelRebuildCards re-queues; a newer tab selection replaces the debt
+            return; // belt: a realized row always has its card — keep the debt for the next rebuild
         }
         const auto card = it->second.card; // a strong ref: layout below can't release it under us
         _sidePanelRevealPendingId.clear();
@@ -1726,7 +1811,16 @@ namespace winrt::TerminalApp::implementation
             {
                 _sidePanelCards.UpdateLayout();
             }
-            card.StartBringIntoView();
+            if (realized)
+            {
+                card.StartBringIntoView();
+            }
+            else
+            {
+                BringIntoViewOptions options{};
+                options.AnimationDesired(false); // a jump: an animated scroll would realize every row on its way
+                card.StartBringIntoView(options);
+            }
         }
         catch (...)
         {
@@ -1930,19 +2024,23 @@ namespace winrt::TerminalApp::implementation
     // archived Snapshot, the Manager-lens tax rule) -> the SCOPE (LOCAL, the default: only sessions hosted
     // in THIS window per _HostedSessionIds; GLOBAL: every window's) -> the search filter (the Sessions
     // grammar) -> the SHARED boardSort order (MakeSortKey/SortKeyLess — the board's own comparator, with one
-    // key per session). Then one AgentSidePanelCardModel per row, and the list is EDITED, never rebuilt:
-    //   - a session that keeps its card gets only the values that changed written (_SidePanelApplyCardModel);
-    //   - a session new to the list gets a card (_SidePanelCreateCardView + a fresh apply);
+    // key per session). Then one AgentSidePanelCardModel per row, stored with the row (_sidePanelRowIds /
+    // _sidePanelRowModels), and the list is EDITED, never rebuilt (_SidePanelSyncRealizedCards). Only the rows
+    // near the viewport have cards (SIDE_PANEL.md §2f, VirtualListWindow.h); the others are two spacers:
+    //   - a realized session that keeps its card gets only the values that changed written (_SidePanelApplyCardModel);
+    //   - a row newly realized gets a card (_SidePanelCreateCardView + a fresh apply);
     //   - the order changes with the fewest removes / inserts / moves (PlanKeyedListOps). A XAML Move is a
     //     plain reorder of the panel's items (no Unloaded/Loaded), so a card that moves keeps its elements,
     //     its pulsing dots and its hover state.
-    // In the steady state (one session changed its state) that is one card's dot, label and border. The old
-    // Clear() + rebuild re-created every card — ~466 in the release's biggest window — up to twice a second.
-    // The reads are lean too: each card's tags come from the per-card cache, re-read only when
-    // SessionTagsEpoch moved (a tag write anywhere in this process) or for a card new to the list, and every
-    // card's color resolves against ONE LoadDirColorIndex snapshot. Also refreshes the count line (which names
-    // the scope; written only when its text changed), every card's timing text (so the ~30s timing pass is
-    // due only after 30 quiet seconds), and the hosted set the periodic LOCAL belt diffs against; and pays an
+    // In the steady state (one session changed its state) that is one card's dot, label and border — or nothing
+    // at all when that session's row is not realized. The old Clear() + rebuild re-created every card — ~466 in
+    // the release's biggest window — up to twice a second; until §2f every listed session had a card (~706 per
+    // GLOBAL window on 2026-10-20, UI_THREAD.md §13).
+    // The reads are lean too: each row's tags come from the per-row cache, re-read only when
+    // SessionTagsEpoch moved (a tag write anywhere in this process) or for a session new to the list, and every
+    // row's color resolves against ONE LoadDirColorIndex snapshot. Also refreshes the count line (which names
+    // the scope; written only when its text changed), every realized card's timing text (so the ~30s timing pass
+    // is due only after 30 quiet seconds), and the hosted set the periodic LOCAL belt diffs against; and pays an
     // owed ⌖ reveal.
     // Tags live in the SessionStore, not the registry, so a tag edit fires no registry trigger: this window's
     // own edits call _SidePanelNoteTagsChanged, and an edit made in another window moves the epoch, which the
@@ -1956,6 +2054,14 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sidePanelBuilt || !_sidePanelCards || !_sessionRegistry)
         {
+            return;
+        }
+        if (_sidePanelRealizing)
+        {
+            // Belt: an update never runs inside a realize pass (both are UI-thread work, and nothing a pass does raises
+            // a registry drain or a user action synchronously). If one ever did, replacing the rows would pull them
+            // out from under the pass's loop — so it is folded into the next periodic tick instead.
+            _sidePanelDirty = true;
             return;
         }
         _sidePanelLastRebuildMs = ::GetTickCount64();
@@ -2035,8 +2141,8 @@ namespace winrt::TerminalApp::implementation
             }
             if (_sidePanelTagsById.size() > rows.size())
             {
-                // Keep only the rendered cards' entries, so the cache can't grow with every session that ever
-                // passed through the list (a card that comes back re-reads its tags once). Node handles move
+                // Keep only the listed rows' entries, so the cache can't grow with every session that ever
+                // passed through the list (a session that comes back re-reads its tags once). Node handles move
                 // each kept entry over without copying its strings.
                 std::unordered_map<std::wstring, std::vector<std::wstring>> kept;
                 kept.reserve(rows.size());
@@ -2052,27 +2158,28 @@ namespace winrt::TerminalApp::implementation
             }
             if (anyTagged && !_sidePanelTagColorsLoaded)
             {
-                // The colors file is read once per epoch, and only when a rendered card is tagged at all — an
+                // The colors file is read once per epoch, and only when a listed row is tagged at all — an
                 // untagged fleet never pays for it.
                 _sidePanelTagColors = ::Agentmaster::LoadAllTagColors();
                 _sidePanelTagColorsLoaded = true;
             }
 
-            // One model per card. The shared inputs are read ONCE per update: the dir-colors snapshot every
-            // card's band color resolves against, the dots' color, and Windows' animation switch.
+            // One model per ROW — realized or not: a scroll realizes a row from its stored model, so every row's must
+            // be current. The shared inputs are read ONCE per update: the dir-colors snapshot every row's band color
+            // resolves against, the dots' color, and Windows' animation switch.
             const auto dirColors = ::Agentmaster::LoadDirColorIndex();
             const uint32_t pendingArgb = SidePanelPackArgb(ParseArgbHexColor(_appSettings.pendingDotsLightColor, Color{ 0xFF, 0xE0, 0xA9, 0x2B }));
             const bool animationsEnabled = AgentAnimationsEnabled();
-            std::vector<std::wstring> order; // the new card order, as session ids — the planner's target
+            std::vector<std::wstring> order; // the new row order, as session ids (the realized range is a window over it)
             std::vector<AgentSidePanelCardModel> models; // parallel to `order`
-            // Parallel to `order` too: each card's lean session row (pointers into `snap`, alive for this whole
-            // update) — the "Sum" off mode arm-builds a NEW card's rich tooltip from it instead of a per-card
-            // registry read.
+            // Parallel to `order` too: each row's lean session (pointers into `snap`, alive for this whole update)
+            // — the "Sum" off mode arm-builds a card newly realized by THIS update from it instead of a per-card
+            // registry read (a card realized later by a scroll reads GetWithoutQueue instead).
             std::vector<const ::Agentmaster::SessionInfo*> sessions;
             order.reserve(rows.size());
             models.reserve(rows.size());
             sessions.reserve(rows.size());
-            // Belt: the planner needs unique ids, and a session listed twice must get ONE card. The registry
+            // Belt: the planner needs unique ids, and a session listed twice must get ONE row. The registry
             // never lists an id twice, so this only guards the guarantee (views into `snap`'s ids, no copies).
             std::unordered_set<std::wstring_view> seen;
             seen.reserve(rows.size());
@@ -2087,82 +2194,19 @@ namespace winrt::TerminalApp::implementation
                 sessions.push_back(row.session);
             }
 
-            // The panel and its mirror must agree before any in-place edit: every index the plan carries is
-            // computed on the mirror. They always do — the list is only ever edited here and by
-            // _SidePanelResetCards — so a mismatch means an earlier edit failed halfway; start from empty.
-            auto children = _sidePanelCards.Children();
-            if (children.Size() != _sidePanelCardOrder.size() || _sidePanelCardViews.size() != _sidePanelCardOrder.size())
+            // Keep the rows: the realized range is a window over them, and a scroll realizes other rows from these
+            // stored models without a new snapshot or a registry read (SIDE_PANEL.md §2f).
+            _sidePanelRowIds = std::move(order);
+            _sidePanelRowModels = std::move(models);
+            // The cards: only the rows near the viewport have one (VirtualListWindow.h), each edited in place — the
+            // realized cards that stay get only their changed values, the newly realized rows get new cards, and the
+            // order changes with the fewest removes / inserts / moves.
+            if (!_SidePanelSyncRealizedCards(/*modelsChanged*/ true, &sessions, kSidePanelNoAnchorRow))
             {
-                ::Agentmaster::AppendStateLog(L"hooks.log",
-                                              L"[sidepanel] card list out of step with its mirror (panel " + std::to_wstring(children.Size()) +
-                                                  L", mirror " + std::to_wstring(_sidePanelCardOrder.size()) + L", cards " +
-                                                  std::to_wstring(_sidePanelCardViews.size()) + L") - rebuilt from empty (window " +
-                                                  ::Agentmaster::ShortId(_windowId) + L")\n");
-                _SidePanelResetCards();
-            }
-
-            // The cards that stay: write only what changed. The new ones: build them now (detached until the
-            // plan's Insert puts them in the list).
-            for (size_t i = 0; i < order.size(); ++i)
-            {
-                const auto it = _sidePanelCardViews.find(order[i]);
-                if (it != _sidePanelCardViews.end())
-                {
-                    _SidePanelApplyCardModel(it->second, std::move(models[i]), order[i], /*fresh*/ false);
-                }
-                else
-                {
-                    const auto created = _sidePanelCardViews.emplace(order[i], _SidePanelCreateCardView(order[i])).first;
-                    _SidePanelApplyCardModel(created->second, std::move(models[i]), order[i], /*fresh*/ true);
-                    if (_sidePanelSummaryHidden)
-                    {
-                        // "Sum" off: a NEW card gets its rich tooltip now (header-only arm-build; the host attaches
-                        // it on the card's Loaded, before any pointer can reach it). Contained inside — a tooltip
-                        // failure never resets the list. The fresh apply above already built the tag strip in this
-                        // mode, so no strip rebuild.
-                        _SidePanelApplyCardTipMode(created->second, order[i], /*rebuildTags*/ false, sessions[i]);
-                    }
-                }
-            }
-
-            // The order: the fewest removes / inserts / moves (KeyedListDiff.h), each made on the panel and on
-            // the mirror in step. A removed card's view is erased right after its RemoveAt — its handlers hold
-            // the page only weakly and reach the card through `sender`, so nothing keeps it alive after that.
-            bool mirrorBroken = false;
-            for (const auto& op : ::Agentmaster::PlanKeyedListOps(_sidePanelCardOrder, order))
-            {
-                switch (op.kind)
-                {
-                case ::Agentmaster::KeyedListOpKind::Remove:
-                    children.RemoveAt(op.from);
-                    if (const auto leaving = _sidePanelCardViews.find(op.key); leaving != _sidePanelCardViews.end())
-                    {
-                        // Detach its rich tooltip BEFORE the view goes: the host's own Unloaded detach can run
-                        // after the host is gone (the event is deferred), and a ToolTip left attached to a dropped
-                        // element is the islands leak class (AgentTipHelpers.h). Never throws.
-                        _SidePanelDropCardToolTip(leaving->second, op.key);
-                    }
-                    _sidePanelCardViews.erase(op.key);
-                    break;
-                case ::Agentmaster::KeyedListOpKind::Insert:
-                    children.InsertAt(op.to, _sidePanelCardViews.at(op.key).card);
-                    break;
-                case ::Agentmaster::KeyedListOpKind::Move:
-                    children.Move(op.from, op.to); // a reorder of the panel's item array — no Unloaded/Loaded
-                    break;
-                }
-                if (!::Agentmaster::ApplyKeyedListOp(_sidePanelCardOrder, op))
-                {
-                    mirrorBroken = true; // an index out of range: the mirror no longer describes the panel
-                    break;
-                }
-            }
-            if (mirrorBroken || _sidePanelCardOrder != order || _sidePanelCardViews.size() != order.size() || children.Size() != order.size())
-            {
-                // A planned edit applied in order can't end anywhere else — this would be a planner or mirror
-                // bug, or a panel that kept its old children because the reset above could not Clear() it (the
-                // mirror then planned from empty while the panel was not). Editing on from a wrong mirror would
-                // only compound it, so start over from empty instead.
+                // A planned edit applied in order can't end anywhere else — this would be a planner or mirror bug, or a
+                // panel that kept its old children because a reset could not Clear() it (the mirror then planned from
+                // empty while the panel was not). Editing on from a wrong mirror would only compound it, so start over
+                // from empty instead.
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] card list edit ended out of step with its plan - rebuilding from empty (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
                 _SidePanelResetCards();
                 _sidePanelDirty = true;
@@ -2171,7 +2215,7 @@ namespace winrt::TerminalApp::implementation
 
             if (_sidePanelCountText)
             {
-                const std::wstring shown = std::to_wstring(order.size());
+                const std::wstring shown = std::to_wstring(_sidePanelRowIds.size());
                 const std::wstring total = std::to_wstring(liveTotal);
                 // The count names the scope, so a short list under LOCAL reads as "this window" rather
                 // than "the fleet shrank" — the cue that the toggle exists when a session seems missing.
@@ -2198,12 +2242,283 @@ namespace winrt::TerminalApp::implementation
         _SidePanelQueueReveal();
     }
 
-    // Drop every card: the panel's children, the id -> card map, the order mirror and the remembered count
-    // text. The recovery path of _SidePanelRebuildCards — when the panel and its mirror disagree, or an update
-    // failed halfway — after which the next update rebuilds the list from empty (the planner then fills it
-    // front to back). The bookmark-tag caches are DATA, not UI, and stay.
+    // Bring the cards between the two spacers in step with the rows (SIDE_PANEL.md §2f). The rows are
+    // _sidePanelRowIds / _sidePanelRowModels (the last list update's); only the rows of ONE range have cards:
+    //   1. Measure: the row stride (a card + its vertical margins) is the MEDIAN of the realized cards' measured
+    //      heights — one taller card (a title whose emoji came from a fallback font with a taller line box) cannot
+    //      move it — and is kept unless it moved by more than layout-rounding noise. Before any card was measured,
+    //      kSidePanelCardDefaultStride.
+    //   2. Plan: around `anchorRow` (a ⌖ reveal of a row without a card: RowsAroundRow), else from the viewport
+    //      (PlanRealizedRows: the current range while it covers the viewport's NEAR rows, otherwise the FAR rows —
+    //      half a viewport of scrolling in hand before the next pass).
+    //   3. Models: a realized card that stays gets the differences of its row's model when `modelsChanged` (a scroll
+    //      pass leaves it alone — it already shows its row's model); a newly realized row gets a new card with its
+    //      model written in full and, with "Sum" off, its rich tooltip armed.
+    //   4. Order: the fewest removes / inserts / moves turn the cards between the spacers into the range's rows
+    //      (PlanKeyedListOps on the mirror; child index = mirror index + 1, the top spacer being child 0, so neither
+    //      spacer ever moves). A removed card's rich tooltip is shut down before its view goes (the islands leak
+    //      class), and the view then goes with it — its elements, its DirectWrite state, its pulsing dots.
+    //   5. Spacers: first * stride above, (count - last) * stride below — the list stays count * stride tall
+    //      whichever rows are realized, so a scroll in flight (DirectManipulation inertia, a thumb drag) never sees its
+    //      extent move.
+    //   6. Verify, and queue one follow-up pass when cards were built: their heights are known only after the next
+    //      layout pass, and the follow-up measures them (a first measurement corrects the default stride).
+    // `modelsChanged`, `sessions`, `anchorRow`: see the declaration in TerminalPage.h. Returns false when the panel
+    // ended out of step with its mirror (the caller resets the list). Throws winrt::hresult_error when XAML refuses an
+    // edit, std::out_of_range / std::bad_alloc on a planner bug / allocation failure — every caller contains it.
+    bool TerminalPage::_SidePanelSyncRealizedCards(bool modelsChanged, const std::vector<const ::Agentmaster::SessionInfo*>* sessions, size_t anchorRow)
+    {
+        if (!_sidePanelBuilt || !_sidePanelCards || !_sidePanelCardsTopSpacer || !_sidePanelCardsBottomSpacer)
+        {
+            return true;
+        }
+        // A spacer resize can move the scroll offset, and the ViewChanged that follows would land here again while
+        // this pass runs: the pass in progress already plans from the final state, so the nested one is dropped.
+        if (_sidePanelRealizing)
+        {
+            return true;
+        }
+        _sidePanelRealizing = true;
+        const auto realizingDone = wil::scope_exit([this]() noexcept { _sidePanelRealizing = false; });
+
+        auto children = _sidePanelCards.Children();
+        // The panel and its mirror must agree before any edit: [top spacer][one card per mirror id][bottom spacer].
+        // Every index the plan carries is computed on the mirror. They always do — the list is only edited here and
+        // by _SidePanelResetCards — so a mismatch means an earlier edit failed halfway: start from empty.
+        if (children.Size() != _sidePanelCardOrder.size() + 2 || _sidePanelCardViews.size() != _sidePanelCardOrder.size())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[sidepanel] card list out of step with its mirror (panel " + std::to_wstring(children.Size()) +
+                                              L", mirror " + std::to_wstring(_sidePanelCardOrder.size()) + L", cards " +
+                                              std::to_wstring(_sidePanelCardViews.size()) + L") - rebuilt from empty (window " +
+                                              ::Agentmaster::ShortId(_windowId) + L")\n");
+            _SidePanelResetCards();
+            children = _sidePanelCards.Children();
+            if (children.Size() != 2)
+            {
+                return false; // the reset could not empty the panel — nothing below may plan from it
+            }
+        }
+
+        // 1. The stride. Each realized card that has been laid out (ActualHeight > 0) is one sample; a card built by
+        //    the previous pass is measured here once the layout pass in between has run.
+        std::vector<double> measured;
+        measured.reserve(_sidePanelCardViews.size());
+        for (const auto& [id, view] : _sidePanelCardViews)
+        {
+            if (view.card)
+            {
+                const double h = view.card.ActualHeight();
+                if (h > 0.0)
+                {
+                    measured.push_back(h + 2.0 * kSidePanelCardMarginY);
+                }
+            }
+        }
+        const bool anyMeasured = !measured.empty();
+        const double previousStride = _sidePanelCardStride > 0.0 ? _sidePanelCardStride : kSidePanelCardDefaultStride;
+        const double measuredStride = ::Agentmaster::MedianRowHeight(std::move(measured), previousStride);
+        const double stride = ::Agentmaster::StrideChanged(measuredStride, previousStride) ? measuredStride : previousStride;
+        if (anyMeasured)
+        {
+            _sidePanelCardStride = stride; // 0 stays 0 until a card was really measured (the default is a guess)
+        }
+
+        // 2. The plan.
+        const size_t count = _sidePanelRowIds.size();
+        if (_sidePanelRowModels.size() != count)
+        {
+            return false; // belt: the rows are written as a parallel pair (one move each), so this never happens
+        }
+        const ::Agentmaster::RowRange current{ _sidePanelRealizedFirst, _sidePanelRealizedLast };
+        double viewTop = 0.0;
+        double viewHeight = 0.0; // 0 = no layout yet: the planner then assumes kVirtualRowsFallbackViewportDip
+        if (_sidePanelCardsScroll)
+        {
+            viewTop = _sidePanelCardsScroll.VerticalOffset();
+            viewHeight = _sidePanelCardsScroll.ViewportHeight();
+        }
+        const ::Agentmaster::RowRange target = (anchorRow < count) ? ::Agentmaster::RowsAroundRow(count, stride, anchorRow, viewHeight) :
+                                                                     ::Agentmaster::PlanRealizedRows(count, stride, viewTop, viewHeight, current);
+        const std::vector<std::wstring> targetIds(_sidePanelRowIds.begin() + static_cast<std::ptrdiff_t>(target.first),
+                                                  _sidePanelRowIds.begin() + static_cast<std::ptrdiff_t>(target.last));
+
+        // 3. The models. The new cards are built detached (the plan's Insert puts them in the list).
+        bool built = false;
+        for (size_t row = target.first; row < target.last; ++row)
+        {
+            const std::wstring& id = _sidePanelRowIds[row];
+            if (const auto it = _sidePanelCardViews.find(id); it != _sidePanelCardViews.end())
+            {
+                if (modelsChanged)
+                {
+                    _SidePanelApplyCardModel(it->second, _sidePanelRowModels[row], id, /*fresh*/ false); // a copy: the row keeps its model
+                }
+                continue;
+            }
+            const auto created = _sidePanelCardViews.emplace(id, _SidePanelCreateCardView(id)).first;
+            _SidePanelApplyCardModel(created->second, _sidePanelRowModels[row], id, /*fresh*/ true);
+            if (_sidePanelSummaryHidden)
+            {
+                // "Sum" off: a NEW card gets its rich tooltip now (a header-only arm-build; the host attaches it on the
+                // card's Loaded, before any pointer can reach it). Contained inside — a tooltip failure never resets
+                // the list. The fresh apply above already built the tag strip in this mode, so no strip rebuild. The
+                // list update hands its lean session row; a scroll has none (null: the arm-build reads GetWithoutQueue).
+                const ::Agentmaster::SessionInfo* lean = (sessions && row < sessions->size()) ? (*sessions)[row] : nullptr;
+                _SidePanelApplyCardTipMode(created->second, id, /*rebuildTags*/ false, lean);
+            }
+            built = true;
+        }
+
+        // 4. The order: the fewest removes / inserts / moves (KeyedListDiff.h), each made on the panel and on the
+        //    mirror in step. A removed card's view is erased right after its RemoveAt — its handlers hold the page
+        //    only weakly and reach the card through `sender`, so nothing keeps it alive after that.
+        for (const auto& op : ::Agentmaster::PlanKeyedListOps(_sidePanelCardOrder, targetIds))
+        {
+            switch (op.kind)
+            {
+            case ::Agentmaster::KeyedListOpKind::Remove:
+                children.RemoveAt(op.from + 1);
+                if (const auto leaving = _sidePanelCardViews.find(op.key); leaving != _sidePanelCardViews.end())
+                {
+                    // Detach its rich tooltip BEFORE the view goes: the host's own Unloaded detach can run after the
+                    // host is gone (the event is deferred), and a ToolTip left attached to a dropped element is the
+                    // islands leak class (AgentTipHelpers.h). Never throws.
+                    _SidePanelDropCardToolTip(leaving->second, op.key);
+                }
+                _sidePanelCardViews.erase(op.key);
+                break;
+            case ::Agentmaster::KeyedListOpKind::Insert:
+                children.InsertAt(op.to + 1, _sidePanelCardViews.at(op.key).card);
+                break;
+            case ::Agentmaster::KeyedListOpKind::Move:
+                children.Move(op.from + 1, op.to + 1); // a reorder of the panel's item array — no Unloaded/Loaded
+                break;
+            }
+            if (!::Agentmaster::ApplyKeyedListOp(_sidePanelCardOrder, op))
+            {
+                return false; // an index out of range: the mirror no longer describes the panel
+            }
+        }
+
+        // 5. The spacers, written only when their height moved (a same-value write still invalidates layout). A
+        //    Height never set reads NaN, which the comparison treats as "moved".
+        const auto spacers = ::Agentmaster::SpacersFor(count, stride, target);
+        const auto setHeight = [](const Border& spacer, double height) {
+            const double shown = spacer.Height();
+            if (!(std::abs(shown - height) <= 0.01))
+            {
+                spacer.Height(height);
+            }
+        };
+        setHeight(_sidePanelCardsTopSpacer, spacers.top);
+        setHeight(_sidePanelCardsBottomSpacer, spacers.bottom);
+        _sidePanelRealizedFirst = target.first;
+        _sidePanelRealizedLast = target.last;
+
+        // 6. Verify: a planned edit applied in order can't end anywhere else, so a difference here is a planner or
+        //    mirror bug, or a panel that kept old children a reset could not Clear().
+        if (_sidePanelCardOrder != targetIds || _sidePanelCardViews.size() != targetIds.size() || children.Size() != targetIds.size() + 2)
+        {
+            return false;
+        }
+        if (built)
+        {
+            _SidePanelQueueRealize(); // measure the new cards after the next layout pass (a first measurement fixes the stride)
+        }
+        return true;
+    }
+
+    // The card list's ScrollViewer moved. The plan is a few multiplications (VirtualListWindow.h), so it runs on every
+    // ViewChanged — DirectManipulation raises one per intermediate offset while a scroll runs — and a pass (XAML
+    // edits) only when the realized rows no longer cover the viewport's NEAR rows: about every half viewport of
+    // scrolling. Handled synchronously (not queued): ViewChanged is raised after the offset changed, never inside a
+    // layout pass, and a queued pass would leave a frame of blank spacer on screen during a fast wheel scroll.
+    // No parameters; returns nothing. Never throws: _SidePanelRunRealizePass contains every failure.
+    void TerminalPage::_SidePanelOnCardsViewChanged()
+    {
+        if (!_sidePanelBuilt || _sidePanelCollapsed || _sidePanelRealizing || !_sidePanelCardsScroll)
+        {
+            return; // collapsed: no viewport to follow (the expand's SizeChanged re-checks); realizing: see the pass
+        }
+        try
+        {
+            const double stride = _sidePanelCardStride > 0.0 ? _sidePanelCardStride : kSidePanelCardDefaultStride;
+            const ::Agentmaster::RowRange current{ _sidePanelRealizedFirst, _sidePanelRealizedLast };
+            const auto target = ::Agentmaster::PlanRealizedRows(_sidePanelRowIds.size(), stride, _sidePanelCardsScroll.VerticalOffset(), _sidePanelCardsScroll.ViewportHeight(), current);
+            if (target == current)
+            {
+                return; // the realized rows still cover the viewport (the common case: no XAML is touched)
+            }
+        }
+        catch (...)
+        {
+            // Reading the offset of a ScrollViewer being torn down: nothing to realize for.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelOnCardsViewChanged");
+            return;
+        }
+        _SidePanelRunRealizePass(L"scroll", kSidePanelNoAnchorRow);
+    }
+
+    // Coalesce a realized-range re-check onto ONE Low-priority tick (see the declaration): LOW so it runs after the
+    // layout pass that sized the ScrollViewer or measured the cards a pass just built — the reveal tick's ordering.
+    // No parameters; returns nothing. Never throws: a dispatcher that is gone (window teardown) is logged and the
+    // coalescer re-armed, so the latch can never stick shut.
+    void TerminalPage::_SidePanelQueueRealize()
+    {
+        if (!_sidePanelBuilt || _sidePanelCollapsed || _sidePanelRealizeQueued)
+        {
+            return;
+        }
+        _sidePanelRealizeQueued = true;
+        try
+        {
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis = get_weak()]() {
+                if (const auto self = weakThis.get())
+                {
+                    self->_sidePanelRealizeQueued = false; // re-arm BEFORE the pass, so no outcome of it can leave the latch shut
+                    if (self->_sidePanelBuilt && !self->_sidePanelCollapsed)
+                    {
+                        self->_SidePanelRunRealizePass(L"measure", kSidePanelNoAnchorRow); // never throws
+                    }
+                }
+            });
+        }
+        catch (...)
+        {
+            _sidePanelRealizeQueued = false;
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelQueueRealize");
+        }
+    }
+
+    // One realize pass with every failure contained (see the declaration): out of step or a throw -> logged, the list
+    // reset and marked dirty, so the next periodic tick (~2.5 s) rebuilds it from empty.
+    bool TerminalPage::_SidePanelRunRealizePass(std::wstring_view context, size_t anchorRow)
+    {
+        try
+        {
+            if (_SidePanelSyncRealizedCards(/*modelsChanged*/ false, nullptr, anchorRow))
+            {
+                return true;
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sidepanel] card list " + std::wstring{ context } + L" pass ended out of step with its plan - rebuilding from empty (window " + ::Agentmaster::ShortId(_windowId) + L")\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRunRealizePass");
+        }
+        _SidePanelResetCards();
+        _sidePanelDirty = true;
+        return false;
+    }
+
+    // Drop every card: the panel's children (the two spacers come back at 0 height), the id -> card map, the order
+    // mirror, the realized range and the remembered count text. The recovery path of the list update and of every
+    // realize pass — when the panel and its mirror disagree, or an edit failed halfway — after which the next update
+    // rebuilds the list from empty (the planner then fills it front to back). The rows, the bookmark-tag caches and
+    // the measured stride are DATA, not UI, and stay.
     // No parameters; returns nothing. Never throws: a panel that refuses Clear() is logged (Rule #18) and left
-    // non-empty, which the next update sees as out of step with the (now empty) mirror — and calls this again.
+    // non-empty, which the next pass sees as out of step with the (now empty) mirror — and calls this again.
     void TerminalPage::_SidePanelResetCards()
     {
         // Every card's rich tooltip is detached first (the "Sum" off mode attaches one per card): a ToolTip left
@@ -2216,6 +2531,8 @@ namespace winrt::TerminalApp::implementation
         // even when the panel below refuses its Clear.
         _sidePanelCardViews.clear();
         _sidePanelCardOrder.clear();
+        _sidePanelRealizedFirst = 0;
+        _sidePanelRealizedLast = 0;
         _sidePanelCountValue.clear(); // the next update writes the count line again
         if (!_sidePanelCards)
         {
@@ -2223,7 +2540,16 @@ namespace winrt::TerminalApp::implementation
         }
         try
         {
-            _sidePanelCards.Children().Clear();
+            auto children = _sidePanelCards.Children();
+            children.Clear();
+            // An empty list is [top spacer][bottom spacer]: the shape every pass expects (child 0 and the last child).
+            if (_sidePanelCardsTopSpacer && _sidePanelCardsBottomSpacer)
+            {
+                _sidePanelCardsTopSpacer.Height(0.0);
+                _sidePanelCardsBottomSpacer.Height(0.0);
+                children.Append(_sidePanelCardsTopSpacer);
+                children.Append(_sidePanelCardsBottomSpacer);
+            }
         }
         catch (...)
         {
@@ -2250,27 +2576,42 @@ namespace winrt::TerminalApp::implementation
     AgentSidePanelCardView TerminalPage::_SidePanelCreateCardView(const std::wstring& id)
     {
         AgentSidePanelCardView v;
-        v.card = Border{};
-        v.card.Background(Fill(0xFF, 0x33, 0x33, 0x33));
-        v.card.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
-        v.card.Margin(ThicknessHelper::FromLengths(4, 2, 4, 2));
-        v.card.BorderThickness(ThicknessHelper::FromUniformLength(1)); // constant width — hover/selection recolor, never reflow
+        // The card is a plain Grid with TWO layers in its one cell: the rounded background, then the content. The
+        // rounded shapes stay CHILDLESS (UI_THREAD.md §10h / §14): XAML gives an element with a non-zero CornerRadius
+        // AND children its own composition node (CFrameworkElement::UpdateRequiresCompNodeForRoundedCorners, so it can
+        // clip the children to the curve), and every frame of the window walks every node — the old card (a rounded
+        // Border holding the body) and its band (a rounded Border holding the title) were 2 nodes per card, 81% of
+        // production's 3,634 on 2026-10-20. A childless rounded Border draws the same shape with no node. Nothing in
+        // the card needs the clip: the band rounds its own top corners, and no content reaches a corner.
+        v.card = Grid{};
+        v.card.Margin(ThicknessHelper::FromLengths(kSidePanelCardMarginX, kSidePanelCardMarginY, kSidePanelCardMarginX, kSidePanelCardMarginY));
+        v.cardBack = Border{};
+        v.cardBack.Background(Fill(0xFF, 0x33, 0x33, 0x33)); // also what makes the whole card hit-testable (the Grid has no background)
+        v.cardBack.CornerRadius(CornerRadiusHelper::FromUniformRadius(kSidePanelCardCornerRadius));
+        v.cardBack.BorderThickness(ThicknessHelper::FromUniformLength(kSidePanelCardBorderPx)); // constant width — hover/selection recolor, never reflow
+        v.card.Children().Append(v.cardBack); // first: drawn behind the content
 
         StackPanel body{};
         body.Orientation(Orientation::Vertical);
+        // Inside the background's border, where the old Border laid out its child — so nothing moves by a pixel.
+        body.Margin(ThicknessHelper::FromUniformLength(kSidePanelCardBorderPx));
 
         // Title band: its color and the title's ink come from the model (the session's resolved color, the
-        // same visual as the board card's band, so same-dir cards cluster by color here too).
+        // same visual as the board card's band, so same-dir cards cluster by color here too). The same two layers
+        // as the card: the band area is a plain Grid, the band a CHILDLESS rounded Border behind the title.
+        v.bandArea = Grid{};
         v.band = Border{};
-        v.band.CornerRadius(CornerRadiusHelper::FromRadii(3, 3, 0, 0));
-        v.band.Padding(ThicknessHelper::FromLengths(6, 2, 6, 2));
+        v.band.CornerRadius(CornerRadiusHelper::FromRadii(kSidePanelBandCornerRadius, kSidePanelBandCornerRadius, 0, 0));
+        v.bandArea.Children().Append(v.band); // first: drawn behind the title
         v.title = TextBlock{};
         v.title.FontSize(12);
         v.title.FontWeight(FontWeights::SemiBold());
         v.title.TextWrapping(TextWrapping::NoWrap);
         v.title.TextTrimming(TextTrimming::CharacterEllipsis);
-        v.band.Child(v.title); // the untagged layout; _SidePanelApplyCardTags wraps the title in [ title * ][ strip ] for a tagged session
-        body.Children().Append(v.band);
+        // The band's padding is the margin of what the band shows (the band itself has no child to pad).
+        v.title.Margin(ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY));
+        v.bandArea.Children().Append(v.title); // the untagged layout; _SidePanelApplyCardTags puts the title in [ title * ][ strip ] for a tagged session
+        body.Children().Append(v.bandArea);
 
         // State line: [ state row Auto ][ timing * ]. The row holds the dot and the label, and the model inserts the
         // codex pill and the draft dots after them; the timing text goes in the star column (added by the model too),
@@ -2305,46 +2646,48 @@ namespace winrt::TerminalApp::implementation
         v.dirLine.Margin(ThicknessHelper::FromLengths(6, 0, 6, 4));
         body.Children().Append(v.dirLine);
 
-        v.card.Child(body);
+        v.card.Children().Append(body); // second: over the background
 
         const auto weakThis = get_weak();
         // Hover ring — guarded by PointerStillWithin so a child-bubbled exit (crossing between the card's
         // hit-testable labels) can't strobe the ring off while the pointer is still inside. The ring takes the
         // color of the state the card SHOWS (its view's model — what its dot shows, with no registry copy per
         // pointer event), and the view remembers the hover so a state change repaints the ring in the new color.
-        // ⚠ The handlers reach the card ONLY through `sender` — capturing the Border itself in a handler
+        // ⚠ The handlers reach the card ONLY through `sender` — capturing the card itself in a handler
         // attached TO it is a self-reference cycle (element -> handler -> element) that would leak every card
         // ever dropped from the list (the board's cards capture weakly for the same reason). A sender that is
-        // not the card registered for `id` (a card already dropped, or replaced by a reset) is ignored.
+        // not the card registered for `id` (a card already dropped — its row scrolled out of the realized range —
+        // or replaced by a reset) is ignored. The ring is drawn by the card's background layer (cardBack), reached
+        // through the view, never captured.
         v.card.PointerEntered([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs&) {
             const auto self = weakThis.get();
-            const auto b = sender.try_as<Border>();
-            if (!self || !b)
+            const auto g = sender.try_as<Grid>();
+            if (!self || !g)
             {
                 return;
             }
             const auto it = self->_sidePanelCardViews.find(id);
-            if (it == self->_sidePanelCardViews.end() || it->second.card != b)
+            if (it == self->_sidePanelCardViews.end() || it->second.card != g)
             {
                 return; // not the live card of this session any more — nothing of ours to paint
             }
             it->second.hovered = true;
-            SidePanelStyleCardBorder(b, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ true);
+            SidePanelStyleCardBorder(it->second.cardBack, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ true);
         });
         v.card.PointerExited([weakThis, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
             const auto self = weakThis.get();
-            const auto b = sender.try_as<Border>();
-            if (!self || !b || PointerStillWithin(sender, e))
+            const auto g = sender.try_as<Grid>();
+            if (!self || !g || PointerStillWithin(sender, e))
             {
                 return; // bubbled from a child — the pointer never actually left the card
             }
             const auto it = self->_sidePanelCardViews.find(id);
-            if (it == self->_sidePanelCardViews.end() || it->second.card != b)
+            if (it == self->_sidePanelCardViews.end() || it->second.card != g)
             {
                 return; // not the live card of this session any more
             }
             it->second.hovered = false;
-            SidePanelStyleCardBorder(b, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ false);
+            SidePanelStyleCardBorder(it->second.cardBack, StateColor(it->second.model.state), id == self->_sidePanelSelectedId, /*hover*/ false);
         });
         v.card.Tapped([weakThis, id](const IInspectable&, const TappedRoutedEventArgs&) {
             if (const auto self = weakThis.get())
@@ -2446,7 +2789,7 @@ namespace winrt::TerminalApp::implementation
             view.stateDot.Fill(SolidColorBrush{ stateColor });
             view.stateText.Text(StateLabel(model.state));
             view.stateText.Foreground(SolidColorBrush{ stateColor });
-            SidePanelStyleCardBorder(view.card, stateColor, id == _sidePanelSelectedId, view.hovered);
+            SidePanelStyleCardBorder(view.cardBack, stateColor, id == _sidePanelSelectedId, view.hovered);
         }
         // The state row's optional parts, always in this order after the dot and the label:
         // [codex pill][pending dots]. An insert index is derived from the parts in front of it. The timing text is the
@@ -2526,26 +2869,33 @@ namespace winrt::TerminalApp::implementation
         view.model = std::move(model);
     }
 
-    // Give a card's band the layout its tags need. Untagged: the band is exactly the title, byte-identical to
-    // a card from before tags existed. Tagged: [ title * ][ tag strip Auto ] — the strip takes the width its
-    // (capped) ribbons need and the title takes the rest, trimming with its ellipsis, so the ribbons stay in
-    // the band's top-right corner and a long title can never push them off the card. A changed tag list, tag
-    // color or title ink REPLACES the strip (a few ribbons — simpler than editing them); the title element is
-    // only re-parented between the band and the grid, never rebuilt.
+    // Give a card's band the layout its tags need. The band area holds the CHILDLESS band (its first child, drawn
+    // behind) and ONE content element over it, which carries the band padding as its margin. Untagged: the content
+    // is the title alone. Tagged: [ title * ][ tag strip Auto ] — the strip takes the width its (capped) ribbons
+    // need and the title takes the rest, trimming with its ellipsis, so the ribbons stay in the band's top-right
+    // corner and a long title can never push them off the card. A changed tag list, tag color or title ink REPLACES
+    // the strip (a few ribbons — simpler than editing them); the title element is only re-parented between the band
+    // area and the grid, never rebuilt, and the band never gets a child (a rounded element with children gets its
+    // own composition node — see _SidePanelCreateCardView).
     // `view`: the card. `model`: the values it must show (tags, their colors, the ink). `id`: the card's session —
     // handed to the strip so, with "Sum" off, its ribbons can suspend THIS card's rich tooltip while hovered.
     // Throws winrt::hresult_error if XAML refuses an edit — _SidePanelRebuildCards resets the list on a throw
     // (the "Sum" mode switch calls it inside _SidePanelApplyCardTipMode's catch).
     void TerminalPage::_SidePanelApplyCardTags(AgentSidePanelCardView& view, const AgentSidePanelCardModel& model, const std::wstring& id)
     {
+        const auto bandPadding = ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY);
         if (model.tags.empty())
         {
             if (view.bandGrid)
             {
-                // Back to the plain band. The title leaves the grid FIRST: a XAML element has one parent, and
-                // handing it to the band while the grid still holds it would throw.
+                // Back to the plain band: the title alone over the band, the padding back on it. The title leaves the
+                // grid FIRST: a XAML element has one parent, and handing it to the band area while the grid still
+                // holds it would throw.
                 SidePanelRemoveChild(view.bandGrid, view.title);
-                view.band.Child(view.title);
+                SidePanelRemoveChild(view.bandArea, view.bandGrid);
+                Grid::SetColumn(view.title, 0);
+                view.title.Margin(bandPadding);
+                view.bandArea.Children().Append(view.title); // after the band: drawn over it
                 view.bandGrid = nullptr;
                 view.tagStrip = nullptr;
             }
@@ -2557,11 +2907,11 @@ namespace winrt::TerminalApp::implementation
         {
             colors.push_back(SidePanelUnpackArgb(argb));
         }
-        // Hang the strip from the band's TOP EDGE: lift it by exactly the band's top padding, so the ribbons
-        // start where the card's colored bar starts — bookmarks clipped to the top of the card rather than
-        // badges floating mid-bar. Read back from the band (not a literal) so a later padding change can't
+        // Hang the strip from the band's TOP EDGE: lift it by exactly the band's top padding (the grid's top margin),
+        // so the ribbons start where the card's colored bar starts — bookmarks clipped to the top of the card rather
+        // than badges floating mid-bar. The same constant the margin is made of, so a later padding change can't
         // silently detach them from the edge.
-        auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, view.band.Padding().Top, view.card, id);
+        auto strip = _SidePanelMakeTagStrip(model.tags, colors, model.darkInk, kSidePanelBandPadY, view.card, id);
         Grid::SetColumn(strip, 1);
         if (!view.bandGrid)
         {
@@ -2572,11 +2922,13 @@ namespace winrt::TerminalApp::implementation
             tagCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
             bandGrid.ColumnDefinitions().Append(titleCol);
             bandGrid.ColumnDefinitions().Append(tagCol);
-            view.band.Child(nullptr); // release the title from the band before the grid takes it (one parent)
+            bandGrid.Margin(bandPadding); // the band padding moves from the title to the grid that now holds it
+            SidePanelRemoveChild(view.bandArea, view.title); // release the title from the band area before the grid takes it (one parent)
+            view.title.Margin(ThicknessHelper::FromUniformLength(0));
             Grid::SetColumn(view.title, 0);
             bandGrid.Children().Append(view.title);
             bandGrid.Children().Append(strip);
-            view.band.Child(bandGrid);
+            view.bandArea.Children().Append(bandGrid); // after the band: drawn over it
             view.bandGrid = bandGrid;
         }
         else
@@ -2623,7 +2975,7 @@ namespace winrt::TerminalApp::implementation
     //            the title's ink so it stays readable on any folder color.
     // `hangPx`: the band's top padding — the strip is lifted by exactly this much, so the ribbons hang
     //           from the band's top edge.
-    // `card`: the card Border whose tooltip must yield over the strip. The handlers hold it WEAKLY: the
+    // `card`: the card (its root Grid) whose tooltip must yield over the strip. The handlers hold it WEAKLY: the
     //         strip lives inside the card, so a strong capture would be the element -> handler -> element
     //         cycle that leaks one card per rebuild (the board's weak-capture rule).
     // `id`: the card's session — whose rich tooltip a ribbon / "+N" entry suspends in the "Sum" off mode
@@ -2637,7 +2989,7 @@ namespace winrt::TerminalApp::implementation
                                                                                     const std::vector<winrt::Windows::UI::Color>& colors,
                                                                                     bool darkInk,
                                                                                     double hangPx,
-                                                                                    const winrt::Windows::UI::Xaml::Controls::Border& card,
+                                                                                    const winrt::Windows::UI::Xaml::UIElement& card,
                                                                                     const std::wstring& id)
     {
         StackPanel strip{};
@@ -3104,11 +3456,11 @@ namespace winrt::TerminalApp::implementation
         // registry copy per selection — and keeps the card's hover ring if the pointer is on it.
         const auto restyle = [this](const std::wstring& sid, bool sel) {
             const auto it = _sidePanelCardViews.find(sid);
-            if (it == _sidePanelCardViews.end() || !it->second.card)
+            if (it == _sidePanelCardViews.end() || !it->second.cardBack)
             {
-                return; // filtered out / not rendered — nothing to paint
+                return; // filtered out / its row not realized — nothing to paint (a card realized later is styled by its fresh apply)
             }
-            SidePanelStyleCardBorder(it->second.card, StateColor(it->second.model.state), sel, it->second.hovered);
+            SidePanelStyleCardBorder(it->second.cardBack, StateColor(it->second.model.state), sel, it->second.hovered);
         };
         if (!prev.empty())
         {
