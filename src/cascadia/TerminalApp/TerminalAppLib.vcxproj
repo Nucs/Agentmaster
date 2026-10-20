@@ -226,6 +226,10 @@
     <!-- Agentmaster (MESSAGING.md section 21.34): a local command's dialog answered from Telegram (/add-dir) - the screen parser,
          the window's press decision, the transcript's result, the card's text and buttons (header-only, pure). -->
     <ClInclude Include="AgentMaster\TuiMenus.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.32.4): the Telegram FILE LINKS - the pure rules (the link, the session key, the
+         linked set, the request parsing; header-only) and the server's interface (no Windows header). -->
+    <ClInclude Include="AgentMaster\MessagingFileLinks.h" />
+    <ClInclude Include="AgentMaster\MessagingFileServer.h" />
     <ClInclude Include="AgentMaster\TelegramApi.h" />
     <ClInclude Include="AgentMaster\Messaging.h" />
     <ClInclude Include="AgentMaster\RemoteLaunch.h" />
@@ -537,6 +541,16 @@
     <!-- Agentmaster (MESSAGING.md section 21.34): the service's menu cards - the watch of a /add-dir a topic queued, the screen
          reads that find its dialog, the card, its buttons and the default pressed after a minute. Plain C++, no PCH. -->
     <ClCompile Include="AgentMaster\Messaging.Menus.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's
+         lifecycle and its authorizer, the rewrite of the mirror's and the history's items, /download. Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Files.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.32.4): the file links' HTTP server (Winsock), the session-key secret in
+         Credential Manager and the LAN addresses. Plain C++, no PCH; it links ws2_32, iphlpapi, bcrypt and advapi32 by #pragma. -->
+    <ClCompile Include="AgentMaster\MessagingFileServer.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\TelegramApi.cpp">

@@ -16,6 +16,10 @@
 // bytes, not the bytes themselves, so the shipped history is a list of SHA-256 digests
 // (ShippedHandoverCommandHashes) instead of every superseded document's full text.
 //
+// A SECOND use (MESSAGING.md §21.32.3, 2026-10-20): Sha256WithInitialState, SHA-256 started from eight secret
+// words instead of the standard ones, makes the Telegram file links' session key (MessagingFileLinks.h). Its doc
+// comment says what that is and is not.
+//
 // NOT a security primitive here: it is used for content IDENTITY (did this file come out of one of
 // our writes, unmodified?), where a 256-bit digest is overwhelming. It is a plain, unoptimized
 // reference implementation -- correctness and portability over speed (the inputs are a few KB, read
@@ -60,11 +64,32 @@ namespace Agentmaster
         }
     }
 
-    // The digest of `len` bytes at `data`. A null/empty buffer hashes the empty message
-    // (e3b0c442...b855), which is what a zero-length read should produce.
-    inline Sha256Digest Sha256(const void* data, size_t len) noexcept
+    // FIPS 180-4 section 5.3.3: the eight standard initial hash words (the first 32 bits of the fractional parts of
+    // the square roots of the first 8 primes). Sha256() starts from these; Sha256WithInitialState() takes others.
+    inline constexpr uint32_t kSha256InitialState[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                                                         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+
+    /// <summary>
+    /// SHA-256 run from CALLER-CHOSEN initial hash words instead of FIPS 180-4's (section 5.3.3): the compression, the
+    /// padding and the length encoding are unchanged, only the eight words the first block starts from differ. With
+    /// <see cref="kSha256InitialState"/> it IS SHA-256 (Sha256() calls it so), which is what the harness pins.
+    /// </summary>
+    /// <remarks>
+    /// Why it exists: MESSAGING.md §21.32.3 — the Telegram file links' session key is "a custom modified SHA-256" (the
+    /// owner's words). The repository is public, so the modification cannot be the secret: the eight words are, kept in
+    /// Credential Manager (MessagingFileLinks.h, FileLinkInitialStateFromSecret). Anyone who knows the words computes the
+    /// same digests; anyone who does not cannot, for any input — as with a keyed hash, but without HMAC's two passes.
+    /// ⚠ Footgun: it is NOT a MAC over attacker-chosen data. Its output is the final internal state, so whoever holds a
+    /// digest can extend the hashed message (length extension). Its one use, a lookup key of known session ids that the
+    /// file server matches against its own list, gains nothing from that; do not reuse it to sign messages.
+    /// </remarks>
+    /// <param name="data">The bytes to hash; null with len 0 hashes the empty message.</param>
+    /// <param name="len">The number of bytes at <paramref name="data"/>.</param>
+    /// <param name="initial">The eight 32-bit words the first block's compression starts from.</param>
+    /// <returns>The 32-byte digest (the final state words, big-endian).</returns>
+    inline Sha256Digest Sha256WithInitialState(const void* data, size_t len, const uint32_t (&initial)[8]) noexcept
     {
-        uint32_t h[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au, 0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
+        uint32_t h[8] = { initial[0], initial[1], initial[2], initial[3], initial[4], initial[5], initial[6], initial[7] };
 
         // One 64-byte block through the compression function (FIPS 180-4 section 6.2.2).
         const auto compress = [&h](const unsigned char* block) noexcept {
@@ -152,12 +177,20 @@ namespace Agentmaster
         return out;
     }
 
-    // The digest as 64 LOWERCASE hex chars -- the form the shipped-version histories store and
-    // compare (a plain std::string == against a std::string_view entry).
-    inline std::string Sha256Hex(const void* data, size_t len)
+    // The digest of `len` bytes at `data`. A null/empty buffer hashes the empty message
+    // (e3b0c442...b855), which is what a zero-length read should produce.
+    inline Sha256Digest Sha256(const void* data, size_t len) noexcept
+    {
+        return Sha256WithInitialState(data, len, kSha256InitialState);
+    }
+
+    /// <summary>A digest as 64 LOWERCASE hex characters (the form every caller stores and compares).</summary>
+    /// <param name="d">The 32-byte digest.</param>
+    /// <returns>Two hex digits per byte, most significant nibble first.</returns>
+    /// <exception cref="std::bad_alloc">The string could not be allocated.</exception>
+    inline std::string Sha256DigestHex(const Sha256Digest& d)
     {
         static constexpr char kHex[] = "0123456789abcdef";
-        const Sha256Digest d = Sha256(data, len);
         std::string out(d.size() * 2, '\0');
         for (size_t i = 0; i < d.size(); ++i)
         {
@@ -165,6 +198,13 @@ namespace Agentmaster
             out[i * 2 + 1] = kHex[d[i] & 0x0Fu];
         }
         return out;
+    }
+
+    // The digest as 64 LOWERCASE hex chars -- the form the shipped-version histories store and
+    // compare (a plain std::string == against a std::string_view entry).
+    inline std::string Sha256Hex(const void* data, size_t len)
+    {
+        return Sha256DigestHex(Sha256(data, len));
     }
 
     inline std::string Sha256Hex(std::string_view bytes)

@@ -193,6 +193,72 @@ namespace
         }
         return anyDigit ? ::Agentmaster::ClampHiddenTerminalReleaseSeconds(v) : 60;
     }
+
+    /// <summary>
+    /// The FILE LINKS port box, read the way the Save reads it: digits only, 1-65535; anything else (an empty box included)
+    /// is nullopt and means "the install's default".
+    /// </summary>
+    /// <param name="text">The box's text.</param>
+    /// <returns>The port, or nullopt.</returns>
+    std::optional<uint16_t> ParseFileLinkPortBox(std::wstring_view text)
+    {
+        const size_t a = text.find_first_not_of(L" \t");
+        if (a == std::wstring_view::npos)
+        {
+            return std::nullopt;
+        }
+        const size_t b = text.find_last_not_of(L" \t");
+        uint32_t port = 0;
+        for (const wchar_t c : text.substr(a, b - a + 1))
+        {
+            if (c < L'0' || c > L'9' || port > 65535)
+            {
+                return std::nullopt;
+            }
+            port = port * 10 + static_cast<uint32_t>(c - L'0');
+        }
+        if (port == 0 || port > 65535)
+        {
+            return std::nullopt;
+        }
+        return static_cast<uint16_t>(port);
+    }
+
+    /// <summary>A URL's host, lowercased ("http://192.168.50.17:32594/x" -> "192.168.50.17"): the dropdown keeps an address
+    /// across a port change by it.</summary>
+    /// <param name="url">The URL.</param>
+    /// <returns>The host ("" when there is none).</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    std::wstring FileLinkUrlHost(std::wstring_view url)
+    {
+        const size_t scheme = url.find(L"://");
+        std::wstring_view rest = scheme == std::wstring_view::npos ? url : url.substr(scheme + 3);
+        rest = rest.substr(0, rest.find_first_of(L":/"));
+        std::wstring host{ rest };
+        for (auto& c : host)
+        {
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+        }
+        return host;
+    }
+
+    /// <summary>A box's text without its first and last whitespace.</summary>
+    /// <param name="s">The text.</param>
+    /// <returns>The trimmed text.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    std::wstring TrimFileLinkBox(std::wstring_view s)
+    {
+        const size_t a = s.find_first_not_of(L" \t\r\n");
+        if (a == std::wstring_view::npos)
+        {
+            return {};
+        }
+        const size_t b = s.find_last_not_of(L" \t\r\n");
+        return std::wstring{ s.substr(a, b - a + 1) };
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -1206,6 +1272,62 @@ namespace winrt::TerminalApp::implementation
         _setMsgRich.Header(winrt::box_value(L"Send Claude's Markdown as rich messages (tables, headings)"));
         AgentSetTip(_setMsgRich, L"On (the default): Claude's replies, remarks and plans go as Telegram rich messages, which show its tables, headings, lists and code blocks as Claude wrote them. Off: the older HTML conversion, which shows a table as plain text \x2014 for a Telegram app too old to show rich messages. A rich message Telegram refuses goes as HTML anyway.");
         panel.Children().Append(_setMsgRich);
+        // §21.32.4: FILE LINKS — Claude's links to files on this PC made openable from the phone. Every box is a plain setting
+        // (nothing secret: the session keys' secret lives in Credential Manager and is made by the service on first use).
+        panel.Children().Append(SettingsSeparator(L"FILE LINKS"));
+        {
+            auto intro = Text(L"Claude links files as file:///K:/\x2026, which a phone cannot open. With file links on, each such link to a file that exists (and does not look like a key or a credentials file) becomes a download link, and /download <path> in a topic links any file of the session, with a \U0001F4E4 Send as file button. On the home network: the links point at this PC. Through cc.sysd.cc: the links work anywhere \x2014 Cloudflare lets through only a link of this exact shape with a session's key, and the tunnel on this PC and the relay on the home cluster bring it here (K:\\source\\proxmox\\cc-sysd).", 11, false, 0.75);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _setMsgFilesMode = ComboBox{};
+        _setMsgFilesMode.Header(winrt::box_value(L"File links"));
+        _setMsgFilesMode.Items().Append(winrt::box_value(L"Off"));
+        _setMsgFilesMode.Items().Append(winrt::box_value(L"On the home network (a LAN address of this PC)"));
+        _setMsgFilesMode.Items().Append(winrt::box_value(L"Through cc.sysd.cc (anywhere)"));
+        AgentSetTip(_setMsgFilesMode, L"Off (the default): links stay as Claude wrote them. On the home network: a small server of this install answers on the port below, and the links point at the address you pick \x2014 they open on the home Wi-Fi (or the sysd VPN). Through cc.sysd.cc: the same server, reached from anywhere through Cloudflare, which refuses every request that is not exactly /station-<station>/<a session's 64-character key>/<path>. Either way a link opens only a file Claude linked in that session's messages (or /download linked), for 30 days after its last mention.");
+        _setMsgFilesMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _RefreshFileLinksPreview(); });
+        panel.Children().Append(_setMsgFilesMode);
+        _setMsgFilesStation = TextBox{};
+        _setMsgFilesStation.Header(winrt::box_value(L"Station (this install's name in the links)"));
+        AgentSetTip(_setMsgFilesStation, L"The name the relay routes to this install: 1\x2013" L"32 of a\x2013z, 0\x2013" L"9 and \x2018-\x2019. The release install is homepc and the dev install homepc-dev by default; the relay (cc-sysd/deploy.sh STATIONS) and Cloudflare's rule (sysd/cloudflare/10-zone.sh SYSD_CC_STATIONS) must know a station before its links work. A new station voids every link posted before.");
+        _setMsgFilesStation.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshFileLinksPreview(); });
+        panel.Children().Append(_setMsgFilesStation);
+        _setMsgFilesPort = TextBox{};
+        _setMsgFilesPort.Header(winrt::box_value(L"Port of this install's file server"));
+        AgentSetTip(_setMsgFilesPort, L"The TCP port the server listens on, for the home network and for the relay: 32594 for the release install and 32595 for the dev install by default (the relay's STATIONS list and the firewall rules of cc-sysd/workstation/agentmaster-firewall.ps1 name these). It answers only private addresses (the home network, the relay, the VPN).");
+        _setMsgFilesPort.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
+            // The dropdown's URLs carry the port: refill it, keeping the picked address.
+            const int32_t sel = _setMsgFilesLanBase ? _setMsgFilesLanBase.SelectedIndex() : -1;
+            _RebuildFileLinkLanChoices(sel >= 0 && static_cast<size_t>(sel) < _msgFilesLanUrls.size() ? _msgFilesLanUrls[static_cast<size_t>(sel)] : std::wstring{});
+            _RefreshFileLinksPreview();
+        });
+        panel.Children().Append(_setMsgFilesPort);
+        _setMsgFilesLanBase = ComboBox{};
+        _setMsgFilesLanBase.Header(winrt::box_value(L"Links point to (home network)"));
+        AgentSetTip(_setMsgFilesLanBase, L"The address of this PC the home-network links use: one of its private IPv4 addresses (physical adapters first), or its name (which the home network's DNS must know). Automatic takes the first address. Used in the home-network mode only.");
+        _setMsgFilesLanBase.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _RefreshFileLinksPreview(); });
+        panel.Children().Append(_setMsgFilesLanBase);
+        _setMsgFilesHostedBase = TextBox{};
+        _setMsgFilesHostedBase.Header(winrt::box_value(L"Hosted address"));
+        _setMsgFilesHostedBase.PlaceholderText(L"https://cc.sysd.cc");
+        AgentSetTip(_setMsgFilesHostedBase, L"The public address the cc.sysd.cc links start with. Leave it empty for https://cc.sysd.cc; another address must route /station-<station>/\x2026 to this install's server the same way. Used in the cc.sysd.cc mode only.");
+        _setMsgFilesHostedBase.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshFileLinksPreview(); });
+        panel.Children().Append(_setMsgFilesHostedBase);
+        _setMsgFilesExclude = TextBox{};
+        _setMsgFilesExclude.Header(winrt::box_value(L"Never link files under these folders (one per line)"));
+        _setMsgFilesExclude.PlaceholderText(L"K:\\private\n# a line starting with # is a note");
+        _setMsgFilesExclude.AcceptsReturn(true);
+        _setMsgFilesExclude.TextWrapping(TextWrapping::Wrap);
+        _setMsgFilesExclude.MinHeight(64);
+        AgentSetTip(_setMsgFilesExclude, L"Folders whose files must never leave this PC although their names look harmless (a repository whose notes hold passwords). Their links stay as Claude wrote them, /download refuses them, and the server refuses them \x2014 also through a link that resolves into one. Keys, tokens, .env files and the like are never linked anyway.");
+        panel.Children().Append(_setMsgFilesExclude);
+        _setMsgFilesPreview = Text(L"", 11, false, 0.75);
+        _setMsgFilesPreview.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setMsgFilesPreview);
+        _setMsgFilesStatus = Text(L"", 11, false, 0.75);
+        _setMsgFilesStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setMsgFilesStatus);
         panel.Children().Append(SettingsSeparator(L"SECRETARY (OPTIONAL)"));
         {
             auto steps = Text(L"Your prompts typed at the PC \x2014 and your turns in a recreated topic's history \x2014 can appear in the topics as YOUR OWN messages, sent on your behalf. Telegram lets a bot connected to your account (Telegram \x2192 Settings \x2192 Chat Automation) send to your chats with OTHER bots, so this takes a SECOND bot: @BotFather \x2192 /newbot \x2192 paste its token below; in @BotFather, in that bot's Bot Settings, turn on Secretary Mode and Bot-to-Bot Communication. Save, then in Telegram \x2192 Settings \x2192 Chat Automation add the second bot, let it reply to messages, and let it reach your chat with the topics bot. Agentmaster checks with one message in the \U0001F50E Search topic; the status above says how it went. Without a second bot, connecting the topics bot itself there is tried the same way.", 11, false, 0.75);
@@ -3068,6 +3190,31 @@ namespace winrt::TerminalApp::implementation
             }
             _setMsgStatus.Text(winrt::hstring{ status });
         }
+        if (_setMsgFilesMode)
+        {
+            // §21.32.4: the FILE LINKS boxes as stored (an empty station or port box shows the install's default as its
+            // placeholder), this PC's LAN addresses read now for the dropdown, and the service's status line.
+            namespace M = ::Agentmaster::Msg;
+            const bool dev = ::Agentmaster::Profiles::IsDevPackage();
+            const M::FileLinkMode mode = M::ParseFileLinkMode(_appSettings.messagingFileLinksMode);
+            _setMsgFilesMode.SelectedIndex(mode == M::FileLinkMode::Lan ? 1 : (mode == M::FileLinkMode::Hosted ? 2 : 0));
+            _setMsgFilesStation.Text(winrt::hstring{ _appSettings.messagingFileLinkStation });
+            _setMsgFilesStation.PlaceholderText(winrt::hstring{ M::DefaultFileLinkStation(dev) + L" (the default)" });
+            _setMsgFilesPort.Text(_appSettings.messagingFileLinkPort == 0 ? winrt::hstring{} : winrt::hstring{ std::to_wstring(_appSettings.messagingFileLinkPort) });
+            _setMsgFilesPort.PlaceholderText(winrt::hstring{ std::to_wstring(M::DefaultFileLinkPort(dev)) + L" (the default)" });
+            _setMsgFilesHostedBase.Text(winrt::hstring{ _appSettings.messagingFileLinkHostedBase });
+            _setMsgFilesExclude.Text(winrt::hstring{ _appSettings.messagingFileLinksExclude });
+            _msgFilesLanAddresses = M::EnumerateFileLinkLanAddresses();
+            _msgFilesHostName = M::FileLinkHostName();
+            _RebuildFileLinkLanChoices(_appSettings.messagingFileLinkLanBase);
+            _RefreshFileLinksPreview();
+            std::wstring status;
+            if (const auto& svc = ::Agentmaster::SharedEngine().messaging)
+            {
+                status = svc->FileLinksStatusText();
+            }
+            _setMsgFilesStatus.Text(winrt::hstring{ status });
+        }
         if (_setTaskbarUnreadBadge)
         {
             _setTaskbarUnreadBadge.IsOn(_appSettings.taskbarUnreadBadge);
@@ -3823,6 +3970,32 @@ namespace winrt::TerminalApp::implementation
             _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
             _appSettings.messagingVerbose = _setMsgVerbose.IsOn(); // §21.11
             _appSettings.messagingRichMessages = _setMsgRich.IsOn();
+        }
+        if (_setMsgFilesMode)
+        {
+            // §21.32.4: the FILE LINKS settings as typed (trimmed); the service normalizes them and falls back to the defaults
+            // for what is not valid, as the preview line said. Applied live by the service's Apply.
+            const int32_t m = _setMsgFilesMode.SelectedIndex();
+            _appSettings.messagingFileLinksMode = m == 1 ? L"lan" : (m == 2 ? L"hosted" : L"off");
+            _appSettings.messagingFileLinkStation = TrimFileLinkBox(std::wstring_view{ _setMsgFilesStation.Text() });
+            _appSettings.messagingFileLinkPort = ParseFileLinkPortBox(std::wstring_view{ _setMsgFilesPort.Text() }).value_or(uint16_t{ 0 });
+            const int32_t li = _setMsgFilesLanBase ? _setMsgFilesLanBase.SelectedIndex() : -1;
+            _appSettings.messagingFileLinkLanBase = li > 0 && static_cast<size_t>(li) < _msgFilesLanUrls.size() ? _msgFilesLanUrls[static_cast<size_t>(li)] : std::wstring{};
+            _appSettings.messagingFileLinkHostedBase = TrimFileLinkBox(std::wstring_view{ _setMsgFilesHostedBase.Text() });
+            // The box hands back its line breaks as CR; settings.json keeps LF lines.
+            std::wstring excluded;
+            for (const wchar_t c : std::wstring_view{ _setMsgFilesExclude.Text() })
+            {
+                if (c == L'\r')
+                {
+                    excluded += L'\n';
+                }
+                else if (c != L'\n' || excluded.empty() || excluded.back() != L'\n')
+                {
+                    excluded += c;
+                }
+            }
+            _appSettings.messagingFileLinksExclude = TrimFileLinkBox(excluded);
         }
         if (_setTaskbarUnreadBadge)
         {
@@ -6013,6 +6186,135 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveAppSettings(disk);
         ::Agentmaster::LogNav(std::wstring{ L"update-nightly -> " } + (on ? L"on (warning accepted)" : L"off"));
         _CheckForUpdates(false);
+    }
+
+    void AgentManagerContent::_RebuildFileLinkLanChoices(const std::wstring& keepUrl)
+    {
+        if (!_setMsgFilesLanBase)
+        {
+            return;
+        }
+        try
+        {
+            const bool dev = ::Agentmaster::Profiles::IsDevPackage();
+            const uint16_t port = ParseFileLinkPortBox(_setMsgFilesPort ? std::wstring_view{ _setMsgFilesPort.Text() } : std::wstring_view{})
+                                      .value_or(::Agentmaster::Msg::DefaultFileLinkPort(dev));
+            const auto choices = ::Agentmaster::Msg::ComposeFileLinkLanChoices(_msgFilesLanAddresses, _msgFilesHostName, port);
+            auto items = _setMsgFilesLanBase.Items();
+            items.Clear();
+            _msgFilesLanUrls.clear();
+            items.Append(winrt::box_value(L"Automatic \x2014 the first address below"));
+            _msgFilesLanUrls.emplace_back();
+            for (const auto& c : choices)
+            {
+                items.Append(winrt::box_value(winrt::hstring{ c.label }));
+                _msgFilesLanUrls.push_back(c.url);
+            }
+            int32_t sel = 0;
+            if (!keepUrl.empty())
+            {
+                // The same ADDRESS, whatever its port (a port change rebuilds the list with the new port in every URL).
+                const std::wstring keepHost = FileLinkUrlHost(keepUrl);
+                for (size_t i = 1; i < _msgFilesLanUrls.size(); ++i)
+                {
+                    if (FileLinkUrlHost(_msgFilesLanUrls[i]) == keepHost)
+                    {
+                        sel = static_cast<int32_t>(i);
+                        break;
+                    }
+                }
+                if (sel == 0)
+                {
+                    // Not an address of this PC now (a Wi-Fi address of another network, a name typed into settings.json): kept,
+                    // and said so, rather than silently replaced by another address.
+                    items.Append(winrt::box_value(winrt::hstring{ keepUrl + L"  \x2014  not an address of this PC now" }));
+                    _msgFilesLanUrls.push_back(keepUrl);
+                    sel = static_cast<int32_t>(_msgFilesLanUrls.size() - 1);
+                }
+            }
+            _setMsgFilesLanBase.SelectedIndex(sel);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the dropdown keeps what it showed (a Save then stores its current pick).
+            ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent::_RebuildFileLinkLanChoices");
+        }
+    }
+
+    void AgentManagerContent::_RefreshFileLinksPreview()
+    {
+        if (!_setMsgFilesPreview || !_setMsgFilesMode)
+        {
+            return;
+        }
+        try
+        {
+            namespace M = ::Agentmaster::Msg;
+            const int32_t modeIdx = _setMsgFilesMode.SelectedIndex();
+            const bool lan = modeIdx == 1;
+            const bool hosted = modeIdx == 2;
+            if (_setMsgFilesLanBase)
+            {
+                _setMsgFilesLanBase.IsEnabled(lan);
+            }
+            if (_setMsgFilesHostedBase)
+            {
+                _setMsgFilesHostedBase.IsEnabled(hosted);
+            }
+            if (!lan && !hosted)
+            {
+                _setMsgFilesPreview.Text(L"Off: no server, no links.");
+                return;
+            }
+            const bool dev = ::Agentmaster::Profiles::IsDevPackage();
+            std::wstring problems;
+            const std::wstring stationText = TrimFileLinkBox(_setMsgFilesStation ? std::wstring_view{ _setMsgFilesStation.Text() } : std::wstring_view{});
+            std::wstring station = M::NormalizeFileLinkStation(stationText);
+            if (!stationText.empty() && station.empty())
+            {
+                problems += L"\x26A0 The station must be 1\x2013" L"32 of a\x2013z, 0\x2013" L"9 and \x2018-\x2019 (not first or last): the default is used.\n";
+            }
+            if (station.empty())
+            {
+                station = M::DefaultFileLinkStation(dev);
+            }
+            const std::wstring portText = TrimFileLinkBox(_setMsgFilesPort ? std::wstring_view{ _setMsgFilesPort.Text() } : std::wstring_view{});
+            if (!portText.empty() && !ParseFileLinkPortBox(portText))
+            {
+                problems += L"\x26A0 The port must be a number from 1 to 65535: the default is used.\n";
+            }
+            std::wstring base;
+            if (lan)
+            {
+                const int32_t sel = _setMsgFilesLanBase ? _setMsgFilesLanBase.SelectedIndex() : -1;
+                base = sel > 0 && static_cast<size_t>(sel) < _msgFilesLanUrls.size() ? _msgFilesLanUrls[static_cast<size_t>(sel)] :
+                                                                                         (_msgFilesLanUrls.size() > 1 ? _msgFilesLanUrls[1] : std::wstring{});
+                if (base.empty())
+                {
+                    problems += L"\x26A0 No LAN address of this PC was found: the links have nowhere to point.\n";
+                }
+            }
+            else
+            {
+                const std::wstring typed = TrimFileLinkBox(_setMsgFilesHostedBase ? std::wstring_view{ _setMsgFilesHostedBase.Text() } : std::wstring_view{});
+                base = M::NormalizeFileLinkBase(typed);
+                if (!typed.empty() && base.empty())
+                {
+                    problems += L"\x26A0 The hosted address must be http:// or https:// and a host, with no space or quote: the default is used.\n";
+                }
+                if (base.empty())
+                {
+                    base = std::wstring{ M::kDefaultFileLinkHostedBase };
+                }
+            }
+            _setMsgFilesPreview.Text(winrt::hstring{ problems + L"A link will look like: " + (base.empty() ? std::wstring{ L"(nowhere)" } : base) +
+                                                     L"/station-" + station + L"/<the session's 64-character key>/K/source/project/notes.md" });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the preview line keeps its last text.
+            ::Agentmaster::AgentLogCaughtException(L"AgentManagerContent::_RefreshFileLinksPreview");
+        }
     }
 
     // MESSAGING.md: the cog's "Check bot" — one getMe round trip with the typed token (else the stored one), on a

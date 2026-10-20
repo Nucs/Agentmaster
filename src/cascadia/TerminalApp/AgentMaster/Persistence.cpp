@@ -952,6 +952,13 @@ namespace Agentmaster
         // §21.11: the topics' default mode (conversation only unless set) and the rich-message switch (on unless set).
         o.Set(L"messagingVerbose", json::Value::MkBool(s.messagingVerbose));
         o.Set(L"messagingRichMessages", json::Value::MkBool(s.messagingRichMessages));
+        // §21.32.4: the file links (their secret is in Credential Manager, never here).
+        o.Set(L"messagingFileLinksMode", json::Value::MkStr(s.messagingFileLinksMode));
+        o.Set(L"messagingFileLinkStation", json::Value::MkStr(s.messagingFileLinkStation));
+        o.Set(L"messagingFileLinkPort", json::Value::MkNum(s.messagingFileLinkPort > 65535 ? 0 : s.messagingFileLinkPort));
+        o.Set(L"messagingFileLinkLanBase", json::Value::MkStr(s.messagingFileLinkLanBase));
+        o.Set(L"messagingFileLinkHostedBase", json::Value::MkStr(s.messagingFileLinkHostedBase));
+        o.Set(L"messagingFileLinksExclude", json::Value::MkStr(s.messagingFileLinksExclude));
         return o;
     }
 
@@ -1270,6 +1277,16 @@ namespace Agentmaster
         s.messagingSearchThinking = v.StrAt(L"messagingSearchThinking", L"high");
         s.messagingVerbose = v.BoolAt(L"messagingVerbose", false); // §21.11: absent => the conversation only
         s.messagingRichMessages = v.BoolAt(L"messagingRichMessages", true); // §21.11: absent => rich messages
+        // §21.32.4: absent => off, the install's default station and port, the first LAN address, https://cc.sysd.cc.
+        s.messagingFileLinksMode = v.StrAt(L"messagingFileLinksMode", L"off");
+        s.messagingFileLinkStation = v.StrAt(L"messagingFileLinkStation");
+        {
+            const uint32_t port = v.U32At(L"messagingFileLinkPort", 0);
+            s.messagingFileLinkPort = port > 65535 ? 0 : port;
+        }
+        s.messagingFileLinkLanBase = v.StrAt(L"messagingFileLinkLanBase");
+        s.messagingFileLinkHostedBase = v.StrAt(L"messagingFileLinkHostedBase");
+        s.messagingFileLinksExclude = v.StrAt(L"messagingFileLinksExclude");
         return s;
     }
 

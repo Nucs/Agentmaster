@@ -12,8 +12,9 @@
 > **Where each part runs** (checked 2026-10-19 17:50 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.6.8.22 (the Release build of ec966a2ca, since the morning of 2026-10-19) holds everything through §21.25
 > except §21.16.8 (the directory's Recent activity) and §21.24's Restart / Resume rule (d0fbc4e31); DEV 0.0.1.32 (the
-> Debug build of af3d40b5e, since 2026-10-20) holds everything through §21.35; §21.32 is research and design only,
-> §22 design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
+> Debug build of af3d40b5e, since 2026-10-20) holds everything through §21.35; §21.32–§21.32.3 are research and design,
+> §21.32.4 (the file links) is implemented but in no build yet — its route home (Cloudflare, the tunnel, the fastrun relay)
+> is LIVE —, §22 design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
 > these two builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
@@ -4803,7 +4804,123 @@ with its dropdown stay.
 **Open (the owner's):** the reading of "the user doesnt need to go through the gateway"; the post-quantum test and the
 fallback if it fails; the Worker for exact hashes (optional); a link's lifetime (a session's hash never expires: prune the
 linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
-production.
+production. (As built: §21.32.4.)
+
+### 21.32.4 File links as built: downloads through `cc.sysd.cc` or the home network (2026-10-20; the Agentmaster half NOT BUILT, the route home LIVE)
+
+> The user (2026-10-20): "Implement and host using fastrun and the tunnel on this machine".
+
+**What the user sees** (once a build holds it and FILE LINKS is on):
+- Every `[name](file:///K:/…)` link in Claude's own text — its replies, remarks and plans (`TopicItemKind::Text` /
+  `Plan`), live and in a topic's history replay alike — to a file that exists, is no folder, looks like no secret and lies
+  in no excluded folder becomes `<base>/station-<station>/<session key>/<encoded path>`. Telegram shows an ordinary link;
+  a tap downloads the file (it is sent as an attachment). Every other link, a link inside code, and a file that fails a
+  check stay as Claude wrote them. The user's own prompts are never touched (the mirror matches them against the queue).
+- `/download <path>` in a session's topic (absolute, a `file:///` URL, or relative to the session's folder — claude's own
+  process folder, else the launch folder) answers with the file's name and size, a ⬇ Download link, the path, and a
+  **📤 Send as file** button: the bot reads the file again (still there, still allowed, at most 50 MB) on a worker thread
+  and uploads it as a document. A bare `/download`, a folder, a secret, an excluded or a missing file is answered with the
+  reason. In the 🔎 Search topic it says that it works in a session's topic.
+- A link lives **30 days after Claude last mentioned the file** (a new mention renews it), at most 4,000 files a session.
+  Telegram's "send by URL" is not used: the Bot API takes a document by URL only as a PDF or ZIP of at most 20 MB, and
+  Telegram's servers would fail the Israel rule anyway (§21.32.3), so the upload goes from the PC.
+
+**The chain:**
+- Hosted: the phone → Cloudflare's edge on `cc.sysd.cc` (rule 1 lets through only `GET`/`HEAD`
+  `/station-<a listed station>/<64 lowercase hex>/<path>` with no query; rule 2: Israel and the post-quantum guard) → the
+  tunnel `sysd-cc` (its connector is the Windows service `SysdCcTunnel` on this workstation, post-quantum QUIC) → the
+  fastrun app `cc-relay` on the home cluster (nginx; the same shape checked again by a regular expression; a station →
+  address map) → the station's server: Agentmaster's own, on `192.168.50.17`.
+- On the home network: the phone goes straight to one of the PC's private addresses (the cog's dropdown).
+- **Deviation from §21.32.3:** the plan put the connector in a container of its own and the tunnel's ingress straight to
+  the PC. The owner said "using fastrun and the tunnel on this machine": the connector is a service on this PC, and the
+  fastrun relay sits between — a new station is one `STATIONS` entry (and one name in `SYSD_CC_STATIONS`), not an ingress
+  line, and a station that is down answers 503 "the station is offline" instead of a tunnel error.
+
+**The session key** (as §21.32.3): SHA-256 whose eight initial words are the 32-byte secret's big-endian words
+(`Sha256.h` `Sha256WithInitialState`), over `lower(station) + ":" + lower(session id)`, as 64 lowercase hex characters
+(`FileLinkSessionHash`). The secret lives in Windows Credential Manager under
+`Agentmaster:messaging:telegram-filelinks:<profile folder leaf>` (one per install, like the bot token), made from the system
+RNG the first time file links run (`LoadOrCreateFileLinkSecret`); it is never in a file or a log. Not built from the plan:
+Generate / Copy buttons (in H1 no second side computes keys). To void every link: delete that credential and restart the
+bot (the station counts too: a new station name voids every link of the old one).
+
+**What the server serves** (`MessagingFileServer.{h,cpp}`, `FileLinkServer`; one per install while the bot runs and file
+links are on — release: station `homepc`, port 32594; dev: `homepc-dev`, 32595):
+- Binds `0.0.0.0:<port>` exclusively; answers loopback and private (RFC 1918) peers only; at most 24 connections (503
+  beyond); a 15 s read and a 60 s write timeout; `GET` and `HEAD` only (405); `/healthz`; one URL shape (anything else 404).
+- The service's authorizer (`_filesAuthorize`): the station is this install's; the key is one of its sessions' (the map is
+  rebuilt from the linked set at every start, so links survive a restart); the path is in that session's linked set and
+  not expired; the name and folder rules still pass (a folder excluded later counts).
+- Then the server opens the file sharing every mode, refuses a handle that is not a disk file (a device), re-checks the
+  FINAL path (a symlink into a secret or an excluded folder, or a path Windows cannot name) and streams it:
+  `Content-Disposition: attachment` (an ASCII name and the exact UTF-8 one), `Range` (206 / 416), `no-store`, `nosniff`,
+  `noindex`, `no-referrer`.
+- One hooks.log line per request: `[file-link] <status> <method> <station> <key8> "<name>" …, session <id8> from <peer>
+  (for <Cf-Connecting-Ip>)`, and a summary every 10 minutes of the links made and kept.
+
+**Never linked:** a name or folder that looks like a secret (`LooksLikeSecretFile`: `.env*`, keys and certificates,
+tokens, credentials files, `.ssh`, `.aws`, `.kube`, `~\.config\sysd`, `.claude.json`, …), the cog's excluded folders, a UNC
+share or relative path, a climb, an escaped separator, a stream name, a reserved device name (`COM1`, `nul.txt`), and a
+segment that ends in a dot or a space (Win32 strips it: `key.pem.` would open `key.pem`).
+
+**The settings** (`AppSettings`, `settings.json`; the cog's Messaging tab ▸ FILE LINKS, applied live by `Apply` — a new
+port moves the server): `messagingFileLinksMode` (`off` | `lan` | `hosted`, default `off`), `messagingFileLinkStation`
+(`""` = the install's default), `messagingFileLinkPort` (0 = the default), `messagingFileLinkLanBase` (`""` = the first
+private address; the dropdown lists the PC's private addresses, physical adapters first, and its name),
+`messagingFileLinkHostedBase` (`""` = `https://cc.sysd.cc`; only `http(s)://` and URL-safe characters are taken), and
+`messagingFileLinksExclude` (one folder per line). The cog previews a link's shape, says what in a box is not valid, and
+shows the service's status line (`FileLinksStatusText`).
+
+**State:** `<profile>\messaging\telegram\filelinks.json` (`{"v":1,"sessions":{"<id>":[["<path>",<ms>],…]}}`), written at
+most every 10 s when it changed, at Stop and at the app's last window; pruned hourly. Read once per process; a damaged file
+starts the set empty (kept on disk until the next save).
+
+**The code:** `MessagingFileLinks.h` (pure rules), `MessagingFileServer.{h,cpp}` (the server, the secret, the addresses),
+`Messaging.Files.cpp` (the service's half: three locks in one order — the lifecycle, the save, the data — the server never
+stopped under the data lock its threads take), the hooks in `Messaging.cpp` (Apply, start, Stop, the app's last window, the
+tick, the mirror, the history) and `Messaging.Inbound.cpp` (`/download`, the `dl:` button), the cog
+(`AgentManagerContent.Settings.cpp`), and `TelegramApi.cpp`: a body's send timeout now grows with its size (30 s, or the
+body at 256 KB/s — 50 MB gets ~205 s).
+
+**The infrastructure** (K:\source\proxmox, LIVE since 2026-10-20; `cc-sysd/README.md`):
+- `sysd/cloudflare/10-zone.sh`: `SYSD_CC=on` (default), `SYSD_CC_STATIONS="homepc homepc-dev"`, `SYSD_CC_PQ_GUARD=on`.
+  Rule 1's expression per station uses `starts_with`, `len`, `substring` and `remove_bytes` (no regular expression on
+  the Free plan); the cache rule includes `cc.sysd.cc`.
+- `sysd/cloudflare/45-cc-tunnel.sh`: the tunnel `sysd-cc`, its ingress (`cc.sysd.cc` with the path regex →
+  `http://192.168.50.152:2104`, everything else 404), the connector token (the secrets folder) and the DNS record.
+- `cc-sysd/relay/` + `cc-sysd/deploy.sh`: the fastrun app `cc-relay` (nginx 1.30.6, user 65532, a read-only root; port
+  2104 on k3s-node-2 and k3s-node-1; `STATIONS=homepc=192.168.50.17:32594,homepc-dev=192.168.50.17:32595`); `--next`
+  deploys a test copy `cc-relay-next` on 2181.
+- `cc-sysd/workstation/install-connector.ps1`: the service `SysdCcTunnel` (cloudflared `--post-quantum`; its token in
+  `C:\ProgramData\SysdCc\private`, readable by SYSTEM and Administrators only).
+- `cc-sysd/workstation/agentmaster-firewall.ps1`: inbound rules for `Agentmaster.exe` of the four layout folders
+  (`Q:\agentmaster-layouts\Release`, `Release-B`, `Debug`, `Debug-B`), TCP 32594-32595 from `192.168.50.0/24` only. A rule
+  per PROGRAM is what keeps this workstation's "allow access?" prompt away (NotifyOnListen); the server's own peer check is
+  the second fence.
+
+**Checked (2026-10-20, with a stand-in station program in Agentmaster's place — the app is not built yet):**
+- Through Cloudflare with OpenSSL 3.5.7: a post-quantum handshake (X25519MLKEM768) → 200 with the file; a classical one →
+  403 (the guard); an uppercase key character, a short key, an unknown station, a query, the root → 403 at the edge; a
+  well-formed wrong key → 404 from the station, which logged the client's real address (`Cf-Connecting-Ip`); the door
+  (`sysd.cc`) unchanged (403 without a certificate); `deploy.sh all --check`: 34 of 34.
+- The relay alone (a container, read-only, user 65532): 200, HEAD, 206; 404 for an unknown station, an uppercase key or
+  another path; 403 for POST; 503 with the station off. Both k3s workers reach the PC's port.
+- The m5 suite, `TestMessagingFiles`: the key against an INDEPENDENT SHA-256's answers (pure Python, checked against
+  hashlib with the standard words), every path rule, the rewrite, the linked set, the server end to end on loopback (whole,
+  HEAD, a range, every refusal, a "secret" final path, the totals, a stop and a restart, a port in use) and the secret on a
+  scratch credential: 9,267 checks, the 3 known TestTaskbarBadge failures only. `/Zs` of 31 TerminalApp translation units
+  with the app's recorded flags, the CLI's `Persistence.cpp` at `/W4 /WX`.
+
+**Open:**
+- **On the phone:** does Android's DownloadManager (the platform TLS) pass the post-quantum guard? A tap on a hosted link;
+  a block shows in Cloudflare's security events. The fallbacks: `sysd.cc` on Telegram's "Don't open in-app" list (Chrome
+  downloads with its own post-quantum TLS), or `SYSD_CC_PQ_GUARD=off` (the download links only; Israel stays).
+- The tunnel's ingress names one relay node (192.168.50.152): while k3s-node-2 is down, hosted links fail (the relay also
+  runs on .151).
+- A layout outside the four folders has no firewall rule (its first listen asks).
+- ⚠ **The build must PURGE:** `SessionModels.h` changed (`AppSettings` gained six fields) and `MessagingService` gained
+  data members.
 
 ### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; in dev since 0.0.1.32, not in production)
 

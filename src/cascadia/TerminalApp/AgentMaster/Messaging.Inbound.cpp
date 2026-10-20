@@ -1518,6 +1518,13 @@ namespace Agentmaster::Msg
             done(changed ? L"ok" : L"no-change");
             return;
         }
+        if (name == L"download")
+        {
+            // §21.32.4: a file's download link (the same delivery as the links in Claude's messages) and a "📤 Send as file"
+            // button that uploads it through Telegram (Messaging.Files.cpp).
+            done(_filesDownloadCommand(sessionId, *s, cmd.args, threadId, msgId));
+            return;
+        }
         if (name == L"sessionid" || name == L"path" || name == L"gitbranch" || name == L"draft")
         {
             std::wstring value;
@@ -2483,6 +2490,13 @@ namespace Agentmaster::Msg
         if (data.rfind(L"tm:", 0) == 0)
         {
             answer(_onMenuTap(data, messageId));
+            return;
+        }
+        // §21.32.4: /download's "📤 Send as file" ("dl:<offer>"): the file is read again and sent as a document; the toast says
+        // what happens, and the tap stays busy until the document is in (the worker carries the tap's holds).
+        if (data.rfind(L"dl:", 0) == 0)
+        {
+            answer(_filesOnTap(data, threadId));
             return;
         }
         // The Search topic's STATELESS buttons (§21.7): "⊘ Clear" and the PICK of an answer's row. They carry no token,
@@ -4959,6 +4973,8 @@ namespace Agentmaster::Msg
             // §21.33: /steer is the one way into a running turn, so the first line names it beside the rule it is the exception to.
             html = L"<b>In a session's topic</b>\nAny text is queued as the session's next prompt (never typed into a running turn \x2014 /steer &lt;text&gt; does that: it sends the words NOW, like Send now at the PC). Claude Code commands (/compact, /model x, your skills) are queued the same way; commands that leave no record are refused.\n"
                    L"/add-dir &lt;path&gt; adds a folder to the workspace: Claude Code's question comes here as buttons, and \x201CYes, for this session\x201D is picked by itself after 60 s.\n"
+                   // §21.32.4: the file links (on in the settings' FILE LINKS section).
+                   L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).

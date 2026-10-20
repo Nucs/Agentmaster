@@ -36,6 +36,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -54,6 +55,8 @@
 
 #include "AskQuestion.h" // §21.30: Claude's question dialogs answered from Telegram (the card's model, its renders, the decision lines)
 #include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
+#include "MessagingFileLinks.h" // §21.32.4: the file links' pure rules (the link, the session key, the linked set)
+#include "MessagingFileServer.h" // §21.32.4: the file links' server, secret and LAN addresses (no Windows header in it)
 #include "MessagingStartNote.h" // the start note's facts, kind, sound and text (§21.18)
 #include "MessagingModels.h"
 #include "MessagingNewThread.h" // §21.17: the new-thread folder picker (lists, text, buttons, callback data)
@@ -260,6 +263,25 @@ namespace Agentmaster::Msg
         /// <returns>The status text.</returns>
         /// <exception cref="std::bad_alloc">If the text cannot be copied.</exception>
         std::wstring StatusText() const;
+
+        /// <summary>
+        /// §21.32.4: one line for the cog's FILE LINKS section — off, serving on a port as a station with the links' base and
+        /// the linked-file counts, or why the server is not running (a port in use, no secret). Any thread.
+        /// </summary>
+        /// <returns>The status text.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be built.</exception>
+        std::wstring FileLinksStatusText() const;
+
+        /// <summary>
+        /// §21.32.4: the Windows Credential Manager target of the install's file-link SECRET (the session keys' eight initial
+        /// words): "Agentmaster:messaging:telegram-filelinks:&lt;profile folder leaf&gt;". Per profile, like the bot token, so the
+        /// release and dev installs never share keys. Deleting the credential makes a new secret at the next start — every
+        /// link the bot ever posted then stops working.
+        /// </summary>
+        /// <param name="profileDir">The profile folder.</param>
+        /// <returns>The target name.</returns>
+        /// <exception cref="std::bad_alloc">If the name cannot be built.</exception>
+        static std::wstring FileLinksCredentialTarget(std::wstring_view profileDir);
 
         /// <summary>
         /// Sets the factory that makes the Search topic's agent on first use. Called once at engine init by
@@ -1698,6 +1720,54 @@ namespace Agentmaster::Msg
         std::wstring _profile;
         ServiceHooks _hooks;
 
+        // ----- §21.32.4: the Telegram FILE LINKS (Messaging.Files.cpp) -----
+        // Three locks, always taken in this order and never the other way round:
+        //   `_filesLifeMtx` serializes the server's start and stop (Apply on the UI thread vs the bot's _start / Stop) and owns
+        //       `_filesBotUp`; it is held while a server stops (up to 5 s), so only the lifecycle takes it — never the status
+        //       line, the tick's quick paths, a connection thread or the mirror;
+        //   `_filesSaveMtx` orders the writes of filelinks.json (a snapshot taken later is never overwritten by an older one);
+        //   `_filesMtx` guards every other _files* member, the server POINTER included (written under both it and
+        //       `_filesLifeMtx`). The server's connection threads take it (the authorizer), so a server is never stopped while
+        //       it is held, and no file or network I/O happens under it.
+        mutable std::mutex _filesMtx;
+        std::mutex _filesLifeMtx;
+        std::mutex _filesSaveMtx;
+        bool _filesBotUp{ false }; // between _filesStart and _filesStop: only then may a server run (guarded by `_filesLifeMtx`)
+        FileLinkMode _filesMode{ FileLinkMode::Off }; // the settings' mode
+        std::wstring _filesStation; // the normalized station ("homepc")
+        uint16_t _filesPort{ 0 }; // the server's port
+        std::wstring _filesLanPick; // the cog's dropdown pick ("" = the first LAN address)
+        std::wstring _filesHostedBase; // the hosted base ("" = https://cc.sysd.cc)
+        std::vector<std::wstring> _filesExcluded; // the excluded folders' keys (ParseFileLinkExcludedFolders)
+        std::vector<FileLinkUrlChoice> _filesLanChoices; // the LAN URLs, read at the server's start (the "lan" mode's fallback base)
+        std::array<uint32_t, 8> _filesIv{}; // the session keys' eight initial words (from the secret)
+        bool _filesSecretReady{ false }; // `_filesIv` holds the install's secret
+        FileLinkStore _filesStore; // the linked set
+        bool _filesStoreLoaded{ false }; // filelinks.json was read in this process
+        bool _filesDirty{ false }; // the linked set changed since the last save
+        int64_t _filesSavedMs{ 0 }; // when it was last saved
+        int64_t _filesPrunedMs{ 0 }; // when expired links were last dropped
+        int64_t _filesStatsLoggedMs{ 0 }; // when the last summary line was logged
+        uint64_t _filesLinksMade{ 0 }; // links made since that line
+        uint64_t _filesLinksKept{ 0 }; // file links kept as Claude wrote them since that line
+        std::map<std::string, std::wstring> _filesHashToSession; // key -> session (the authorizer's lookup)
+        std::map<std::wstring, std::string> _filesSessionHash; // session -> key (computed once per station and secret)
+        std::shared_ptr<FileLinkServer> _filesServer; // the server while it runs (shared so the status line can read its counts)
+        std::wstring _filesServerError; // why the server is not running, for the status line ("" = it runs, or file links are off)
+        int64_t _filesServerTriedMs{ 0 }; // the last start attempt: a failed one is tried again a minute later (a port in use)
+        int64_t _filesLanReadMs{ 0 }; // when `_filesLanChoices` was last read (again every 30 minutes while the "lan" mode serves)
+        std::atomic<int> _filesUploadsInFlight{ 0 }; // "Send as file" reads in progress (at most two at once)
+        /// <summary>A "📤 Send as file" offer of /download: the button carries only its number (callback data is 64 bytes at most).</summary>
+        struct FileUploadOffer
+        {
+            std::wstring sessionId;
+            std::wstring path;
+            int64_t madeMs{ 0 };
+        };
+        std::map<uint64_t, FileUploadOffer> _filesOffers; // offer number -> offer (the newest 200 kept)
+        uint64_t _filesNextOffer{ 1 };
+        bool _filesDevInstall{ false }; // the AgentmasterDev package: the dev defaults (homepc-dev, port 32595)
+
         mutable std::mutex _mtx; // guards everything below not marked atomic; never held across a network call
         std::condition_variable _tickCv;
         std::condition_variable _sendCv;
@@ -2297,6 +2367,104 @@ namespace Agentmaster::Msg
             std::wstring logLine; // one hooks.log line ("" = none)
             std::wstring navLine; // one [nav] line for a decision the user made ("" = none)
         };
+
+        // ===== §21.32.4: the Telegram FILE LINKS (Messaging.Files.cpp) =====================================================
+
+        /// <summary>
+        /// Apply: takes the FILE LINKS settings (mode, station, port, the LAN pick, the hosted base, the excluded folders) and,
+        /// while the bot runs, starts, stops or moves the server to match. Any thread. Never throws (Rule #18 inside).
+        /// </summary>
+        /// <param name="settings">The settings being applied.</param>
+        void _filesApply(const AppSettings& settings) noexcept;
+        /// <summary>
+        /// _start: reads the linked set (filelinks.json) and, with file links on, the install's secret (made on first use) and
+        /// starts the server. Called before the threads start. Never throws: a failure leaves file links off for this run, with
+        /// the reason in the cog's status line and hooks.log.
+        /// </summary>
+        void _filesStart() noexcept;
+        /// <summary>Stop, after the threads are joined: stops the server and saves the linked set. Never throws.</summary>
+        void _filesStop() noexcept;
+        /// <summary>
+        /// The tick: saves the linked set when it changed (at most every 10 s), prunes expired links hourly, and logs one summary
+        /// line of the links made every 10 minutes. Tick thread. Never throws.
+        /// </summary>
+        /// <param name="nowMs">Now (unix ms).</param>
+        void _filesTick(int64_t nowMs) noexcept;
+        /// <summary>
+        /// Rewrites the file links in Claude's own text (Text and Plan items; never the user's prompts, which the mirror matches
+        /// against the queue) before the mirror or the history replay renders them: each file:/// link to an existing, linkable
+        /// file gets its download link, and the file joins the session's linked set. A no-op with file links off. Never throws:
+        /// a failure keeps the items as they were (Claude's original links).
+        /// </summary>
+        /// <param name="sessionId">The items' session.</param>
+        /// <param name="items">The items, rewritten in place.</param>
+        void _filesRewriteItems(const std::wstring& sessionId, std::vector<TopicItem>& items) noexcept;
+        /// <summary>
+        /// The download link of one file for one session, or nothing when it may not be linked (missing, a folder, a secret, an
+        /// excluded folder, not a drive path). Adds the file to the session's linked set (or refreshes its time).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="winPath">The file.</param>
+        /// <param name="base">The links' base ("https://cc.sysd.cc" or a LAN URL).</param>
+        /// <returns>The URL, or nullopt to keep the original link.</returns>
+        /// <exception cref="std::bad_alloc">If the strings or the store cannot grow.</exception>
+        std::optional<std::wstring> _filesLinkFor(const std::wstring& sessionId, const std::wstring& winPath, const std::wstring& base);
+        /// <summary>
+        /// The server's authorizer (a connection thread): 200 for a request whose key is one of this install's session keys and
+        /// whose path that session linked (not expired, still linkable); 404 with the reason otherwise. Never throws.
+        /// </summary>
+        /// <param name="target">The parsed request.</param>
+        /// <returns>The decision.</returns>
+        FileServeDecision _filesAuthorize(const FileLinkTarget& target) noexcept;
+        /// <summary>
+        /// Starts, stops or restarts the server so it matches the settings (on with a mode, on its port) while the bot is up
+        /// (`_filesBotUp`); reads the install's secret first when it is not read yet. A port that cannot be bound, or a secret
+        /// Credential Manager refuses, leaves the server off with the reason in the status line (tried again by the tick a minute
+        /// later). Serialized by `_filesLifeMtx`; a server is stopped OUTSIDE `_filesMtx` (its connection threads take that lock).
+        /// Never throws.
+        /// </summary>
+        void _filesReconcileServer() noexcept;
+        /// <summary>
+        /// /download &lt;path&gt; in a session's topic: the file (absolute, or relative to the session's folder) answered with its
+        /// download link — through the same checks as a rewritten link, the file added to the linked set — and a "📤 Send as
+        /// file" button that uploads it from the PC (at most 50 MB, any type). Poll thread.
+        /// </summary>
+        /// <param name="sessionId">The topic's session.</param>
+        /// <param name="s">Its snapshot (the folder a relative path is resolved in).</param>
+        /// <param name="args">What followed /download.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="replyTo">The /download message (the answer quotes it; 0 = none).</param>
+        /// <returns>The outcome word for the [nav] line ("ok", "refused:...", "usage").</returns>
+        /// <exception cref="std::bad_alloc">If the reply cannot be built.</exception>
+        std::wstring _filesDownloadCommand(const std::wstring& sessionId, const SessionInfo& s, const std::wstring& args, int64_t threadId, int64_t replyTo);
+        /// <summary>
+        /// A "📤 Send as file" tap ("dl:&lt;offer&gt;"): reads the offered file again (still there, still linkable, at most 50 MB)
+        /// and sends it as a document into the topic. Poll thread.
+        /// </summary>
+        /// <param name="data">The callback data.</param>
+        /// <param name="threadId">The topic the button sits in.</param>
+        /// <returns>The tap's toast.</returns>
+        /// <exception cref="std::bad_alloc">If the file or the texts cannot be held.</exception>
+        std::wstring _filesOnTap(const std::wstring& data, int64_t threadId);
+        /// <summary>
+        /// A session's key, computed once per station and secret and mapped back to the session (the authorizer's lookup). The
+        /// caller holds `_filesMtx` and has checked `_filesSecretReady`.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <returns>The 64-hex key.</returns>
+        /// <exception cref="std::bad_alloc">If the maps cannot grow.</exception>
+        std::string _filesHashForLocked(const std::wstring& sessionId);
+        /// <summary>
+        /// Forgets every computed key and computes one for each session of the linked set — after the station or the secret
+        /// changed, and after the set was read or pruned — so the authorizer knows every session that has a live link, also the
+        /// ones no message of this run linked yet. The caller holds `_filesMtx`; a no-op until the secret is read.
+        /// </summary>
+        /// <exception cref="std::bad_alloc">If the maps cannot grow (they are then partial: a link of a session missing from them
+        /// answers 404 until its next link or the next rehash).</exception>
+        void _filesRehashLocked();
+        /// <summary>Writes filelinks.json when the linked set changed (or always, when forced). Never throws.</summary>
+        /// <param name="force">True at Stop: write whatever changed, without the 10 s gap.</param>
+        void _filesSaveStore(bool force) noexcept;
 
         /// <summary>
         /// _start: forgets the last run's cards (their buttons answer "no longer open here") and becomes the question registry's

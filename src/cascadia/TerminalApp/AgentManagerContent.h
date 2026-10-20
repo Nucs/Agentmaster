@@ -15,6 +15,7 @@
 #include "BasicPaneEvents.h"
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchPresetsConfig — the Presets tab's by-value draft
+#include "AgentMaster/MessagingFileLinks.h" // Agentmaster (MESSAGING.md §21.32.4): FileLinkLanAddress — the cog's FILE LINKS dropdown (pure, no Windows header)
 #include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the cog's designated-area tooltip panel (left-outside the card)
 
 #include <winrt/Windows.System.h>
@@ -1340,6 +1341,35 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setMsgSecretaryForget{ nullptr };
         bool _msgForgetSecretaryToken{ false }; // "Forget secretary token" was clicked: Save removes it
         void _CheckTelegramBot(); // the "Check bot" button: getMe with the typed (else stored) token on a worker thread; the result lands in _setMsgStatus
+        // MESSAGING.md §21.32.4: the FILE LINKS section — how Claude's links to files on this PC reach the phone: Off, a LAN
+        // address of this PC (the dropdown lists them), or through cc.sysd.cc (Cloudflare -> the tunnel on this PC -> the fastrun
+        // relay -> this install's server). The station and the port name this install to the relay; the excluded folders are
+        // never linked. A live line previews a link's shape and says what is wrong with a box; the status line is the service's
+        // FileLinksStatusText, read when the cog opens.
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgFilesMode{ nullptr }; // 0 Off, 1 home network, 2 cc.sysd.cc
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesStation{ nullptr }; // "" = the install's default station
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesPort{ nullptr }; // "" = the install's default port
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgFilesLanBase{ nullptr }; // item 0 = automatic; the rest = _msgFilesLanUrls
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesHostedBase{ nullptr }; // "" = https://cc.sysd.cc
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgFilesExclude{ nullptr }; // one folder per line
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgFilesPreview{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgFilesStatus{ nullptr };
+        std::vector<::Agentmaster::Msg::FileLinkLanAddress> _msgFilesLanAddresses; // this PC's private IPv4 addresses, read when the cog opens
+        std::wstring _msgFilesHostName; // this PC's DNS name, read when the cog opens (the dropdown's last choice)
+        std::vector<std::wstring> _msgFilesLanUrls; // parallel to _setMsgFilesLanBase's items: "" = automatic (the first address)
+        /// <summary>
+        /// Refills the "links point to" dropdown with this PC's LAN URLs on the port the box names (else the default), keeping
+        /// the address of <paramref name="keepUrl"/> selected — a port change keeps the same address — or appending it, marked,
+        /// when it is no address of this PC now (an old Wi-Fi address, a name typed into settings.json).
+        /// </summary>
+        /// <param name="keepUrl">The URL to keep selected ("" = automatic).</param>
+        void _RebuildFileLinkLanChoices(const std::wstring& keepUrl);
+        /// <summary>
+        /// The FILE LINKS preview line: what a link will look like with the boxes as they are, and what in them is not valid (a
+        /// station, a port or an address the service would replace with the default). Also enables the dropdown in the home
+        /// network mode only and the hosted address in the cc.sysd.cc mode only.
+        /// </summary>
+        void _RefreshFileLinksPreview();
         // COMMANDS tab (COMMANDS.md §6a): the /handover slash-command family — each command's
         // Enable toggle + Command-name box + a status line reading the LIVE vs CONFIGURED state
         // ("Active as /x" / "becomes /y after restart" / "disabled after restart"). Rename +

@@ -3120,6 +3120,30 @@ namespace Agentmaster
         std::wstring messagingSearchThinking{ L"high" };
         bool messagingVerbose{ false };
         bool messagingRichMessages{ true };
+
+        // Agentmaster (MESSAGING.md §21.32.4 — the Telegram FILE LINKS; the cog's MESSAGING tab, FILE LINKS). Claude's
+        // file:///K:/... links become links a phone downloads: <base>/station-<station>/<session key>/<path>, served by a
+        // small server in this process while the bot runs (MessagingFileServer.h). Telegram only (the owner's rule).
+        //  - messagingFileLinksMode: "off" (the default: no server, links stay as Claude wrote them), "lan" (this PC's own
+        //    server on the LAN: home Wi-Fi and the sysd VPN) or "hosted" (https://cc.sysd.cc: Cloudflare -> the tunnel on
+        //    the workstation -> the fastrun relay -> this server; K:\source\proxmox\cc-sysd). Any other word reads as off.
+        //  - messagingFileLinkStation: this PC's name in the links and the relay's map; "" = the install's default
+        //    ("homepc", the dev install "homepc-dev"). Changing it changes every session's key: earlier links stop working.
+        //  - messagingFileLinkPort: the server's TCP port; 0 = the install's default (32594 release, 32595 dev). The relay's
+        //    station map and the workstation's firewall rules name these two.
+        //  - messagingFileLinkLanBase: the "lan" mode's link base, the cog's dropdown pick of the addresses the server
+        //    listens on ("http://192.168.50.17:32594"); "" = the first LAN address found.
+        //  - messagingFileLinkHostedBase: the "hosted" mode's link base; "" = https://cc.sysd.cc.
+        //  - messagingFileLinksExclude: folders whose files are never linked or served, one per line (a repository whose
+        //    CLAUDE.md holds passwords, say); "" = none. Secret-looking files (keys, tokens, .env, ~/.ssh) never are anyway.
+        // The session key's SECRET is not here: it lives in Windows Credential Manager (MessagingService::
+        // FileLinksCredentialTarget), made on the first start of the server.
+        std::wstring messagingFileLinksMode{ L"off" };
+        std::wstring messagingFileLinkStation{};
+        uint32_t messagingFileLinkPort{ 0 };
+        std::wstring messagingFileLinkLanBase{};
+        std::wstring messagingFileLinkHostedBase{};
+        std::wstring messagingFileLinksExclude{};
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back
