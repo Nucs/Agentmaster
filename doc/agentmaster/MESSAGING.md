@@ -11,9 +11,9 @@
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
 > **Where each part runs** (checked 2026-10-19 17:50 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.6.8.22 (the Release build of ec966a2ca, since the morning of 2026-10-19) holds everything through §21.25
-> except §21.16.8 (the directory's Recent activity) and §21.24's Restart / Resume rule (d0fbc4e31); DEV 0.0.1.31 (the
-> Debug build of ac2add394, since 2026-10-19 17:43) holds everything through §21.31; §21.32 is research only, §22
-> design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
+> except §21.16.8 (the directory's Recent activity) and §21.24's Restart / Resume rule (d0fbc4e31); DEV 0.0.1.32 (the
+> Debug build of af3d40b5e, since 2026-10-20) holds everything through §21.35; §21.32 is research and design only,
+> §22 design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
 > these two builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
@@ -4244,7 +4244,7 @@ Tap an option to answer. A note goes with the option you tap — or alone, as yo
   "🔄 Restart Session gives it the question hook". §21.30's first step needs no hook at all: every answer line (live and in
   a history replay) now carries the NOTES (`📝 …`), and "(notes only)" reads as the note alone.
 
-**Several questions as TABS, ✖️ Cancel, 💬 a reply, the idle timeout, long content (2026-10-19 evening; NOT BUILT yet).**
+**Several questions as TABS, ✖️ Cancel, 💬 a reply, the idle timeout, long content (2026-10-19 evening; in dev since 0.0.1.32, not in production).**
 
 > The user's request (2026-10-19): "This session has multi-tab multi-question, do we support to that degree? we need to
 > and more than that. Scan for other cases based on the tool name on global .claude". The session (`char plan (fork)`,
@@ -4805,7 +4805,7 @@ fallback if it fails; the Worker for exact hashes (optional); a link's lifetime 
 linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
 production.
 
-### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; NOT BUILT yet)
+### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; in dev since 0.0.1.32, not in production)
 
 **The user's request** (2026-10-19): "Add support for /steer which is like send-now".
 
@@ -4873,7 +4873,7 @@ production.
   starts and the words go once it is up; (4) a question card open: the words wait (QueueMenu) and go after the answer; (5) a
   draft typed at the PC is back in the box after the steer (the draft swap).
 
-### 21.34 `/add-dir` from a topic: its dialog as a MENU CARD, the default picked by itself after a minute (2026-10-19; NOT BUILT yet)
+### 21.34 `/add-dir` from a topic: its dialog as a MENU CARD, the default picked by itself after a minute (2026-10-19; in dev since 0.0.1.32, not in production)
 
 **The user's request** (2026-10-19): "Can you support /add-dir from here and also picker for is supporting the menu that comes
 after of in this session or this folder or whatever that asks you. You can see how we deal with agentmaster's AskUserQuestion
@@ -5013,7 +5013,7 @@ lost-send verdict held while a menu is open and judged once it closed.
 5. `/model sonnet` from a topic → 👨‍💻 and no 👎 15 s later (the echo fix), the runner still on.
 6. While a card is open, park the tab (Deactivate) → "⏹ No longer open here — its tab's claude stopped".
 
-### 21.35 The loop saves the state file only when something changed (2026-10-20; NOT BUILT yet)
+### 21.35 The loop saves the state file only when something changed (2026-10-20; in dev since 0.0.1.32, not in production)
 
 **The user's request** (2026-10-20): "Reduce wasted cpu and disk on the Telegram bot's background loop" — fix 1 and part of
 fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
@@ -5083,7 +5083,7 @@ fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
 - Messaging.h: the members `_stateProgressDirty`, `_stateSaveMtx`, `_lastSavedStateBytes`, `_lastPrevCopyMs` and
   `_stateFileReadable`, and `_refreshCard`'s `known`.
 - ⚠ `MessagingService` gained data members: the next build must purge (the build-install skill §5.8;
-  [`CLAUDE.md`](../../CLAUDE.md)'s purge rule).
+  [`CLAUDE.md`](../../CLAUDE.md)'s purge rule) — done: both builds of af3d40b5e (2026-10-20) were purged.
 - ⚠ A new persisted field must decide its kind: progress only when losing its last 10 s is harmless; anything that would
   orphan a message or a topic is structural.
 

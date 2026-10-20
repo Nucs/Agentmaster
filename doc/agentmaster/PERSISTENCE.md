@@ -764,8 +764,8 @@ that left without waking logs `left the wake barrier - <why>`.
   that Error is "busy at the restart", so it is woken.
 - No setting switches it off yet.
 - ⚠ `TerminalPage` gained data members (`_restoreWake`, `_restoreWakeTimer`): the next build must
-  purge (the build-install skill §5.8). Dev 0.0.1.31's Debug build was purged; the next RELEASE build must
-  be purged too, by force: `TerminalPage.h` is not on the purge-trigger list.
+  purge (the build-install skill §5.8). Done: dev 0.0.1.31's Debug build and both builds of af3d40b5e (2026-10-20)
+  were purged by force (`TerminalPage.h` is not on the purge-trigger list).
 
 **Live checks owed after a build:** (1) quit with a turn running in a background tab of window 2 →
 restart → in hooks.log, the `[restore-wake]` steps per window, the wakes only after every window's

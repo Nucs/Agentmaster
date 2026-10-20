@@ -62,7 +62,7 @@
   the user's own answer and the note through a ForceReply prompt, several questions on one card, the previews inline and as
   a picture on demand, "Chat about this" — answering exactly as the PC answers (proven live, §10.4); and S0 (the notes in
   every answer line).
-- **Extended the same evening** (§10.6, NOT BUILT; the user's "This session has multi-tab multi-question, do we support to that
+- **Extended the same evening** (§10.6, in dev since 0.0.1.32, not in production; the user's "This session has multi-tab multi-question, do we support to that
   degree? we need to and more than that. Scan for other cases …"): several questions are TABS with the PC's review, a
   multi-select answer keeps the tick order, ✖️ Cancel (the PC's Esc, confirmed first), 💬 a reply instead of answering
   (Claude Code's `response`), the idle timeout shown as such, long content shortened instead of dropped — checked on every
@@ -860,7 +860,7 @@ The live run of the table above was repeated with the request-first helper (17:1
   and `askprobe.py` (the four of the shipped hook). If `V_r` ever drops the tool, the hook's `allow` is ignored, the dialog
   stays with the PC, and the card ends as "Answered at the PC".
 
-### 10.6 Several questions as tabs, and the rest of the corpus (2026-10-19 evening; NOT BUILT yet)
+### 10.6 Several questions as tabs, and the rest of the corpus (2026-10-19 evening; in dev since 0.0.1.32, not in production)
 
 > The user's request: "This session has multi-tab multi-question, do we support to that degree? we need to and more than
 > that. Scan for other cases based on the tool name on global .claude". The session was NumSharp's `char plan (fork)` in
