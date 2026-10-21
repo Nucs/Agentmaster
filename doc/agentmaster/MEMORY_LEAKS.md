@@ -59,7 +59,7 @@ dump 4 holds 706 / 706 / 706 / 707 / 709 (five more tabs); `AgentManagerContent`
 leak classes fixed on 2026-10-14 did not come back: 797 → 804 live `CScrollViewer`s follow the tab count
 (UI_THREAD.md §12 had 2,920 board ScrollViewers alone).
 
-## 3. The leak: one 144-byte ICU `UText` per URL scan (FIXED in source 2026-10-19; in dev since 0.0.1.31, not in production)
+## 3. The leak: one 144-byte ICU `UText` per URL scan (FIXED in source 2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 - **Evidence:** between the dumps only one population grew steadily: live 144-byte blocks holding a
   closed `UText` (magic `0x345AD82C` = UTEXT_MAGIC, flags 0, providerProperties 6, sizeOfStruct 0x90,

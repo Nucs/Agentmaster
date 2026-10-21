@@ -1160,7 +1160,7 @@ engine through it, and it is the place where a kill switch would go.
   - Send now on a Deactivated tab types nothing: the row returns to the upcoming list, and hooks.log
     has the `[send-verify] … NOT sent: the tab is dormant …` line.
 
-## 18. Local commands — their echo is the delivery evidence, and no verdict while a menu is open (2026-10-19, in dev since 0.0.1.32, not in production)
+## 18. Local commands — their echo is the delivery evidence, and no verdict while a menu is open (2026-10-19, in production since 0.6.8.23 and dev since 0.0.1.32)
 
 Found while building MESSAGING.md §21.34 (`/add-dir` answered from a Telegram topic).
 

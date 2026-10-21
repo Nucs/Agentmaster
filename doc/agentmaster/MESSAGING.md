@@ -9,13 +9,12 @@
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
-> **Where each part runs** (checked 2026-10-19 17:50 against git and the commit each installed `TerminalApp.dll` bakes):
-> PRODUCTION 0.6.8.22 (the Release build of ec966a2ca, since the morning of 2026-10-19) holds everything through §21.25
-> except §21.16.8 (the directory's Recent activity) and §21.24's Restart / Resume rule (d0fbc4e31); DEV 0.0.1.32 (the
-> Debug build of af3d40b5e, since 2026-10-20) holds everything through §21.35; §21.32–§21.32.3 are research and design,
-> §21.32.4 (the file links) is implemented but in no build yet — its route home (Cloudflare, the tunnel, the fastrun relay)
-> is LIVE —, §22 design only. A heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than
-> these two builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> **Where each part runs** (checked 2026-10-21 against git and the commit each installed `TerminalApp.dll` bakes):
+> PRODUCTION 0.6.8.23 (the Release build of af3d40b5e, since 2026-10-20 08:37) holds everything through §21.35 except
+> §21.32.4 (the file links); DEV 0.0.1.33 (the Debug build of d6c85e54f, since 2026-10-21) holds everything through
+> §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); §21.32–§21.32.3 are research and
+> design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A heading or
+> note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -2815,7 +2814,7 @@ updated 5 minutes ago
   thread first in the thread tabs, "Continue last thread ›" under the card, and the `[msg] … put first in the thread list`
   line; whether iOS opens the topic from the title as its source says; a production build and swap need the user's word.
 
-#### 21.16.8 The RECENT ACTIVITY section: the ten newest tabs that are not stationary (2026-10-19; in dev since 0.0.1.31, not in production)
+#### 21.16.8 The RECENT ACTIVITY section: the ten newest tabs that are not stationary (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 - **The user's request** (2026-10-19): "In the telegram pinned message we specify the tabs we have. At the bottom add the top
   10 tab titles in the order of their recent activity and that are not in stationary status." Once the first version was
@@ -3579,7 +3578,7 @@ scheduler's timing test "woken tab: the queue resumes by itself…", which passe
 3. 🔎 Search ▶ Resume of a closed session: "Opened …"; of a session with no transcript on disk: "… as a NEW session …".
 4. 🔎 Search ▶ Resume of a session whose tab is open in a window: "<title> is open already …", and no second tab opens.
 
-### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 in dev since 0.0.1.31, not in production)
+### 21.24 The card's buttons on two pages, and the screen as a picture (2026-10-18; 4d8826851 + bcc546a30 in production 0.6.8.22 and dev 0.0.1.30 since 2026-10-19; d0fbc4e31 in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-18): "The buttons in a topic's bottom pinned status message (with title and status which keeps
 > getting updated), we need to refactor the buttons a bit. — Have a button "<cog>Session" that then changes the buttons of the
@@ -3921,7 +3920,7 @@ session restores under a NEW id (restore-fresh), so a launch restored from the s
 into the wizard; the window step counts a Codex tab like any tab; a thread the user deletes is noticed only at the next edit
 or post.
 
-### 21.26 The card leads with its state, the title under it (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.26 The card leads with its state, the title under it (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19), with a card pasted from the dev bot (its first two lines: "📌 🟧 messaging bot answer
 > questions" / "🟡 Waiting for you since 08:21"): "swap the row of status waiting for you and the title when we send this
@@ -3966,7 +3965,7 @@ Production 0.6.8.22 (`Release-B`, its `TerminalApp.dll` built at 06:41) and dev 
 ec966a2ca, which came before 4621cf9d4 (09:27). `Release` (0.6.8.21) and `Debug-B` (0.0.1.29) are older. The proof was a probe
 of each `TerminalApp.dll` for the wide literal `L"\n📌 "`, which only the state-first code has. It was in none of the four.
 
-### 21.27 A shorter place line (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.27 A shorter place line (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19), quoting a card's place line: "…/source/Agentmaster · agentmaster · claude-opus-5-5 · max ·
 > ctx 427K" — "Change to: /source/Agentmaster · agentmaster · opus-5-5 · max · 427K".
@@ -4004,7 +4003,7 @@ build that carries d0fbc4e31, §21.26 and this change costs one edit per card in
 - Every card's place line reads like the one above: no "…", no "claude-", no "ctx", on the phone and on the desktop app.
 - The work log's tool lines still show "Edit: …/TerminalApp/AgentMaster/Messaging.cpp".
 
-### 21.28 A tapped button stays busy until its work is done (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.28 A tapped button stays busy until its work is done (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19): "In telegram, buttons we click on should look 'active' as long as they are waiting for
 > serverside to react."
@@ -4112,7 +4111,7 @@ for example, answers nothing.
 - 🔄 Restart Session on a session in Error: busy until the card shows the next state, or 9 s with the restart's toast.
 - A directory dot: busy until the topic is first in the thread list.
 
-### 21.29 A rename's change line is its only answer (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.29 A rename's change line is its only answer (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19), after a `/rename` posted two messages, "Renamed to 🟧 Small telegram fixes (the topic
 > follows in a moment)." and then "🟧 Agentmaster changed the title to 🟧 Small telegram fixes": "We dont need the first as
@@ -4175,7 +4174,7 @@ The gaps were rare in practice, but once the reply is gone each would leave a re
 - A rename while a topic's history is replayed (a new topic of a long session, or `/recreate`): the name changes at once,
   and the line comes after the last history message.
 
-### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.30 Claude's questions answered from Telegram — the QUESTION CARD (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual text
 > input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
@@ -4245,7 +4244,7 @@ Tap an option to answer. A note goes with the option you tap — or alone, as yo
   "🔄 Restart Session gives it the question hook". §21.30's first step needs no hook at all: every answer line (live and in
   a history replay) now carries the NOTES (`📝 …`), and "(notes only)" reads as the note alone.
 
-**Several questions as TABS, ✖️ Cancel, 💬 a reply, the idle timeout, long content (2026-10-19 evening; in dev since 0.0.1.32, not in production).**
+**Several questions as TABS, ✖️ Cancel, 💬 a reply, the idle timeout, long content (2026-10-19 evening; in production since 0.6.8.23 and dev since 0.0.1.32).**
 
 > The user's request (2026-10-19): "This session has multi-tab multi-question, do we support to that degree? we need to
 > and more than that. Scan for other cases based on the tool name on global .claude". The session (`char plan (fork)`,
@@ -4393,7 +4392,7 @@ buttons, the three-way "what is this message?" and the transcript's `afkTimeoutM
   (`Get-Process powershell` — no `agentmaster-ask.ps1` left); Esc at the PC: ⏹ closed at the PC.
 - The bot off: no helper waits (a dialog closes no slower than before); a subagent's question: shown at the PC at once.
 
-### 21.31 The main view says when a session's topic leaves as idle (2026-10-19; in dev since 0.0.1.31, not in production)
+### 21.31 The main view says when a session's topic leaves as idle (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19): "When session goes idle, I think (confirm) that the topic gets deleted. can we send a
 > message in the all chat that <title> is idle."
@@ -4806,7 +4805,7 @@ fallback if it fails; the Worker for exact hashes (optional); a link's lifetime 
 linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
 production. (As built: §21.32.4.)
 
-### 21.32.4 File links as built: downloads through `cc.sysd.cc` or the home network (2026-10-20; the Agentmaster half NOT BUILT, the route home LIVE)
+### 21.32.4 File links as built: downloads through `cc.sysd.cc` or the home network (2026-10-20; the Agentmaster half in dev since 0.0.1.33, not in production; the route home LIVE)
 
 > The user (2026-10-20): "Implement and host using fastrun and the tunnel on this machine".
 
@@ -4922,7 +4921,7 @@ body at 256 KB/s — 50 MB gets ~205 s).
 - ⚠ **The build must PURGE:** `SessionModels.h` changed (`AppSettings` gained six fields) and `MessagingService` gained
   data members.
 
-### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; in dev since 0.0.1.32, not in production)
+### 21.33 `/steer`: a message sent NOW, into a running turn too (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.32)
 
 **The user's request** (2026-10-19): "Add support for /steer which is like send-now".
 
@@ -4990,7 +4989,7 @@ body at 256 KB/s — 50 MB gets ~205 s).
   starts and the words go once it is up; (4) a question card open: the words wait (QueueMenu) and go after the answer; (5) a
   draft typed at the PC is back in the box after the steer (the draft swap).
 
-### 21.34 `/add-dir` from a topic: its dialog as a MENU CARD, the default picked by itself after a minute (2026-10-19; in dev since 0.0.1.32, not in production)
+### 21.34 `/add-dir` from a topic: its dialog as a MENU CARD, the default picked by itself after a minute (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.32)
 
 **The user's request** (2026-10-19): "Can you support /add-dir from here and also picker for is supporting the menu that comes
 after of in this session or this folder or whatever that asks you. You can see how we deal with agentmaster's AskUserQuestion
@@ -5130,7 +5129,7 @@ lost-send verdict held while a menu is open and judged once it closed.
 5. `/model sonnet` from a topic → 👨‍💻 and no 👎 15 s later (the echo fix), the runner still on.
 6. While a card is open, park the tab (Deactivate) → "⏹ No longer open here — its tab's claude stopped".
 
-### 21.35 The loop saves the state file only when something changed (2026-10-20; in dev since 0.0.1.32, not in production)
+### 21.35 The loop saves the state file only when something changed (2026-10-20; in production since 0.6.8.23 and dev since 0.0.1.32)
 
 **The user's request** (2026-10-20): "Reduce wasted cpu and disk on the Telegram bot's background loop" — fix 1 and part of
 fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.

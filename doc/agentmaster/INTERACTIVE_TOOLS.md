@@ -1,6 +1,6 @@
 # Interactive tools — AskUserQuestion with previews and notes, answered from Telegram
 
-> **2026-10-19 · BUILT the same day; in dev since 0.0.1.31, not in production** (§10: what was built, where it differs from the design of
+> **2026-10-19 · BUILT the same day; in production since 0.6.8.23 and dev since 0.0.1.31** (§10: what was built, where it differs from the design of
 > §6–§7, and what was checked — the m5 suite, `cl /Zs` with the build's flags, and a LIVE end-to-end run of the shipped hook
 > against Claude Code 2.1.291). The topic's side is [`MESSAGING.md`](MESSAGING.md) §21.30. Read in the Claude Code 2.1.291
 > bundle and **measured on it**: a live ConPTY probe of seven scenarios (§5) and a survey of every transcript on this
@@ -62,7 +62,7 @@
   the user's own answer and the note through a ForceReply prompt, several questions on one card, the previews inline and as
   a picture on demand, "Chat about this" — answering exactly as the PC answers (proven live, §10.4); and S0 (the notes in
   every answer line).
-- **Extended the same evening** (§10.6, in dev since 0.0.1.32, not in production; the user's "This session has multi-tab multi-question, do we support to that
+- **Extended the same evening** (§10.6, in production since 0.6.8.23 and dev since 0.0.1.32; the user's "This session has multi-tab multi-question, do we support to that
   degree? we need to and more than that. Scan for other cases …"): several questions are TABS with the PC's review, a
   multi-select answer keeps the tick order, ✖️ Cancel (the PC's Esc, confirmed first), 💬 a reply instead of answering
   (Claude Code's `response`), the idle timeout shown as such, long content shortened instead of dropped — checked on every
@@ -739,7 +739,7 @@ quoted strings (`tools/interactive-tools-probe/grepbin.py`). Byte offsets in 2.1
 - MESSAGING.md §6.3, §7.4, §7.5, §18 (D9, D16, D30), §19, §21.2, §21.24 (Screen Image); MOD_LINK.md §4.4; HOOKS.md
   (hook invocation, the blocked-on-user belts).
 
-## 10. What was built (2026-10-19; in dev since 0.0.1.31, not in production)
+## 10. What was built (2026-10-19; in production since 0.6.8.23 and dev since 0.0.1.31)
 
 > The user's request (2026-10-19): "Kindly close the gap, enabling telegram picking a choice, including the user manual
 > text input. Use telegram to the best of its ability to produce a managed message that will cover this interaction and
@@ -860,7 +860,7 @@ The live run of the table above was repeated with the request-first helper (17:1
   and `askprobe.py` (the four of the shipped hook). If `V_r` ever drops the tool, the hook's `allow` is ignored, the dialog
   stays with the PC, and the card ends as "Answered at the PC".
 
-### 10.6 Several questions as tabs, and the rest of the corpus (2026-10-19 evening; in dev since 0.0.1.32, not in production)
+### 10.6 Several questions as tabs, and the rest of the corpus (2026-10-19 evening; in production since 0.6.8.23 and dev since 0.0.1.32)
 
 > The user's request: "This session has multi-tab multi-question, do we support to that degree? we need to and more than
 > that. Scan for other cases based on the tool name on global .claude". The session was NumSharp's `char plan (fork)` in
