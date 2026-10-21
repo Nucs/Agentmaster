@@ -275,6 +275,22 @@ try {
     Assert (Test-Path (Join-Path $legacyInstall 'other-app.exe')) 'upgrade (old install, no manifest): an unknown .exe of the user stays'
     Assert (Test-Path (Join-Path $legacyInstall '.am-manifest')) 'upgrade: the new manifest arrives with the layout'
 
+    # ---- the download mark: an install's own files lose it, a user's own file keeps it ----------------------
+    # A browser marks a download (the Zone.Identifier stream) and Explorer's zip extraction copies the mark onto
+    # every extracted file; Copy-Item carries it into the install (60 of 63 installed files in a test desktop).
+    $marked = Join-Path $root 'release-marked'
+    New-TestLayout -Dir $marked -Version '9.9.9.1'
+    $zone = "[ZoneTransfer]`r`nZoneId=3`r`n"
+    foreach ($f in 'Agentmaster.exe', 'TerminalApp.dll', 'Images\icon.png') { Set-Content -LiteralPath (Join-Path $marked $f) -Stream Zone.Identifier -Value $zone }
+    $markDst = Join-Path $root 'install-marks'
+    Write-TestFile (Join-Path $markDst 'my-download.zip') 'mine'
+    Set-Content -LiteralPath (Join-Path $markDst 'my-download.zip') -Stream Zone.Identifier -Value $zone
+    Assert ($null -ne (Get-Item -LiteralPath (Join-Path $marked 'Agentmaster.exe') -Stream Zone.Identifier -ErrorAction SilentlyContinue)) 'download mark: the test layout carries the mark (alternate streams work in the scratch folder)'
+    Install-AmLayout -SourceDir $marked -DestDir $markDst
+    $stillMarked = @('Agentmaster.exe', 'TerminalApp.dll', 'Images\icon.png' | Where-Object { Get-Item -LiteralPath (Join-Path $markDst $_) -Stream Zone.Identifier -ErrorAction SilentlyContinue })
+    Assert ($stillMarked.Count -eq 0) "download mark: every installed file loses it (still marked: $($stillMarked -join ', '))"
+    Assert ($null -ne (Get-Item -LiteralPath (Join-Path $markDst 'my-download.zip') -Stream Zone.Identifier -ErrorAction SilentlyContinue)) "download mark: a user's own file in the install folder keeps it"
+
     # ---- the per-user install: shape, registration, profile, kept-portable ----------------------------------
     $env:USERPROFILE = Join-Path $root 'home'
     New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null

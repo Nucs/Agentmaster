@@ -680,13 +680,18 @@ function Remove-AmEntries {
     Removes what the OLD install shipped (its manifest, else the legacy list) and every name the NEW layout
     ships, then copies the layout. The source's own profile data, pointer and decision files never travel
     (the destination keeps its own); preserved user state in the destination is never touched; anything
-    else a user keeps in the folder stays.
+    else a user keeps in the folder stays. Every copied file loses the "downloaded from the Internet" mark
+    (the Zone.Identifier stream a browser and Explorer's zip extraction attach, which Copy-Item carries):
+    an installed program's files carry none, and a marked helper started through the shell (elevate-shim.exe)
+    would meet a SmartScreen prompt of its own (measured in a test desktop on 2026-10-21: 60 of 63 installed
+    files kept the mark). The user's own files in the folder keep theirs.
 .PARAMETER SourceDir
     The extracted layout (the folder holding Agentmaster.exe).
 .PARAMETER DestDir
     The install folder (created when missing).
 .NOTES
-    Throws when the copy fails or the result holds no Agentmaster.exe.
+    Throws when the copy fails or the result holds no Agentmaster.exe. Clearing a mark is best effort and
+    never fails the install.
 #>
 function Install-AmLayout {
     param([string]$SourceDir, [string]$DestDir)
@@ -696,7 +701,11 @@ function Install-AmLayout {
     $null = Remove-AmEntries -Dir $DestDir -Names (@($old) + @($new) | Select-Object -Unique)
     foreach ($entry in @(Get-ChildItem -LiteralPath $SourceDir -Force)) {
         if ($script:AmPreservedNames -contains $entry.Name -or $entry.Name -like '*.tmp') { continue }
-        Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path $DestDir $entry.Name) -Recurse -Force -ErrorAction Stop
+        $target = Join-Path $DestDir $entry.Name
+        Copy-Item -LiteralPath $entry.FullName -Destination $target -Recurse -Force -ErrorAction Stop
+        # Only what this copy laid down: the target itself when it is a file, its whole tree when a folder.
+        $copied = if (Test-Path -LiteralPath $target -PathType Container) { @(Get-ChildItem -LiteralPath $target -Recurse -File -Force -ErrorAction SilentlyContinue) } else { @(Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue) }
+        $copied | Where-Object { $_ } | Unblock-File -ErrorAction SilentlyContinue
     }
     if (-not (Test-Path -LiteralPath (Join-Path $DestDir 'Agentmaster.exe'))) {
         throw "The installed folder holds no Agentmaster.exe: $DestDir"

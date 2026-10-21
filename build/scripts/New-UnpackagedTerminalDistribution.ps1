@@ -39,6 +39,13 @@ $filesToCopyFromXaml = @("Microsoft.UI.Xaml.dll", "Microsoft.UI.Xaml") # We don'
 
 $ErrorActionPreference = 'Stop'
 
+# Agentmaster: Windows' own tar (bsdtar, which reads and writes zip containers), never whichever tar.exe comes
+# first on PATH. From a Git Bash shell that is Git's GNU tar, which cannot open an .msix (a zip): the manifest
+# extraction below then fails with "AppxManifest.xml does not exist" and no zip is made (seen 2026-10-21).
+# Windows before 1803 has no tar of its own; there the PATH one is the only choice.
+$tarExe = Join-Path $env:SystemRoot 'System32\tar.exe'
+If (-not (Test-Path -LiteralPath $tarExe)) { $tarExe = 'tar.exe' }
+
 If ($null -Eq (Get-Item $MakeAppxPath -EA:SilentlyContinue)) {
     Write-Error "Could not find MakeAppx.exe at `"$MakeAppxPath`".`nMake sure that -MakeAppxPath points to a valid SDK."
     Exit 1
@@ -55,7 +62,7 @@ $XamlAppX = Get-Item $XamlAppX | Select-Object -Expand FullName
 
 If ($TerminalAppX) {
 	$appxManifestPath = Join-Path $tempDir AppxManifest.xml
-	& tar.exe -x -f "$TerminalAppX" -C $tempDir AppxManifest.xml
+	& $tarExe -x -f "$TerminalAppX" -C $tempDir AppxManifest.xml
 } ElseIf($TerminalLayout) {
 	$appxManifestPath = Join-Path $TerminalLayout AppxManifest.xml
 }
@@ -157,7 +164,7 @@ If ($PSCmdlet.ParameterSetName -Eq "AppX") {
 	# We only produce a ZIP when we're combining two AppX directories.
 	New-Item -ItemType Directory -Path $Destination -ErrorAction:SilentlyContinue | Out-Null
 	$outputZip = (Join-Path $Destination ("{0}.zip" -f ($distributionName)))
-	& tar -c --format=zip -f $outputZip -C $tempDir $terminalDir
+	& $tarExe -c --format=zip -f $outputZip -C $tempDir $terminalDir
 	Remove-Item -Recurse -Force $tempDir -EA:SilentlyContinue
 	Get-Item $outputZip
 } ElseIf ($PSCmdlet.ParameterSetName -Eq "Layout") {

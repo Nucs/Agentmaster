@@ -4692,6 +4692,51 @@ void TestPortableInstall()
         CHECK(PI::IsLegacyShippedLeaf(L"MICROSOFT.TERMINAL.UI.DLL") && PI::IsLegacyShippedLeaf(L"agentmaster-cli.exe") && !PI::IsLegacyShippedLeaf(L"Microsoft.Terminal.dll") &&
                   !PI::IsLegacyShippedLeaf(L"other.dll"),
               "legacy names: case-insensitive, the pattern needs a middle part, nothing broad");
+
+        // The download mark: the Zone.Identifier stream a browser puts on a downloaded zip and Explorer's
+        // zip extraction copies onto every extracted file, which CopyFileW carries (60 of 63 installed files
+        // kept it in a Windows 11 test desktop on 2026-10-21). An install's own files lose it - CopyTree for
+        // a copy, DropDownloadMarksOfShipped for "Install here" - and a user's own file keeps it. The stream
+        // is written and probed through Win32 so the `file:stream` path is never reinterpreted.
+        const auto writeMark = [](const std::wstring& file) {
+            const HANDLE h = ::CreateFileW((file + L":Zone.Identifier").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                const char zone[] = "[ZoneTransfer]\r\nZoneId=3\r\n";
+                DWORD written = 0;
+                ::WriteFile(h, zone, static_cast<DWORD>(sizeof(zone) - 1), &written, nullptr);
+                ::CloseHandle(h);
+            }
+        };
+        const auto hasMark = [](const std::wstring& file) {
+            const HANDLE h = ::CreateFileW((file + L":Zone.Identifier").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+            ::CloseHandle(h);
+            return true;
+        };
+        const std::wstring msrc = exeDir + L"\\src-marked";
+        const std::wstring mdst = exeDir + L"\\dst-marked";
+        fs::create_directories(fs::path{ msrc } / L"Images");
+        touch(msrc + L"\\Agentmaster.exe", "exe");
+        touch(msrc + L"\\Images\\icon.png", "png");
+        touch(msrc + L"\\.am-manifest", "Agentmaster.exe\nImages/\n.am-manifest\n");
+        writeMark(msrc + L"\\Agentmaster.exe");
+        writeMark(msrc + L"\\Images\\icon.png");
+        CHECK(hasMark(msrc + L"\\Agentmaster.exe") && hasMark(msrc + L"\\Images\\icon.png"), "download mark: the test layout carries it (alternate streams work here)");
+        uint64_t copiedBytes = 0;
+        std::wstring copyErr;
+        CHECK(PI::detail::CopyTree(fs::path{ msrc }, fs::path{ mdst }, [](const std::wstring&) {}, copiedBytes, &copyErr), "download mark: the copy itself succeeds");
+        CHECK(fs::exists(fs::path{ mdst } / L"Agentmaster.exe") && !hasMark(mdst + L"\\Agentmaster.exe") && !hasMark(mdst + L"\\Images\\icon.png"),
+              "download mark: every copied file loses it (CopyTree), a nested one included");
+        CHECK(hasMark(msrc + L"\\Agentmaster.exe"), "download mark: the source keeps its own (only the install is cleared)");
+        touch(msrc + L"\\my-download.zip", "mine");
+        writeMark(msrc + L"\\my-download.zip");
+        PI::detail::DropDownloadMarksOfShipped(fs::path{ msrc });
+        CHECK(!hasMark(msrc + L"\\Agentmaster.exe") && !hasMark(msrc + L"\\Images\\icon.png"), "download mark (Install here): the shipped files lose it");
+        CHECK(hasMark(msrc + L"\\my-download.zip"), "download mark (Install here): a user's own file in the folder keeps it");
     }
     CHECK(PI::ScriptArg(L"C:\\a b\\") == L"\"C:\\a b\"", "script arg: quoted, a trailing backslash dropped (it would escape the quote)");
     CHECK(PI::ScriptArg(L"x\"y") == L"\"xy\"", "script arg: an embedded quote is dropped");

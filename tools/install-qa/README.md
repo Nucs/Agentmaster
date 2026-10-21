@@ -11,6 +11,8 @@ uninstalls for real.
 | `amprobe.cpp` + `amprobe.rc` | A GUI exe NAMED `Agentmaster.exe` that is the app's startup prelude and nothing else — `HandleUninstallFlagAtStartup` → `EnsureInstallDecidedAtStartup` → `EnsureProfileResolvedAtStartup` → `RefreshInstalledRegistration` from `PortableInstall.h` / `ProfileBootstrap.h`, with the repository's real `am-update.ps1` embedded as `AM_UPDATE_PS1` — that logs one line per step to `C:\amqa\probe.log` (`START` with the account, elevation, session user and account plan; the install step's outcome; `RESULT` with the decision, machine-copy / installed flags and the resolved profile). |
 | `build.cmd` | Builds it (`/W4`, static CRT, embedded manifest) into `Q:\tmp\amprobe` (or the folder given). Not part of the product build. |
 | `stage.py` | Stages fake portable unzips of the probe (`probe-<ver>` with `.portable`, `.am-version`, `.am-manifest`), a release-shaped zip of the newest one, and the scripts, into a desktop's persist folder (`Z:\amqa` in the guest). |
+| `amqa-guest.ps1` | Guest-side helpers for the REAL app (dot-source it in the guest): `Get-AmQaState` prints every install, Apps & Features entry, PATH entry, verb, shortcut, profile (+ its last `[install]` lines) and running `Agentmaster.exe` with its account and real token elevation; `New-AmQaCopy <version> <name>` makes a fresh stamped copy of the build; `Reset-AmQa` removes every install, registration and profile between scenarios. |
+| `qm.py` | Hardware-level keys and screen of the desktop through QEMU's monitor (`key`, `type`, `shot`) — the only way to see and answer a UAC consent or credential prompt, which sits on the secure desktop where the desktop's own agent (SendInput, its screenshots) cannot reach. |
 
 ## Run it
 
@@ -72,3 +74,39 @@ agent's own command line.
 
 **Cleanup:** move the evidence out of the persist folder, remove `amqa` from it, and shut the guest down
 (`shutdown /s`) — or delete / reset the desktop; a reset wipes the accounts and every install.
+
+## The real app (a Release build), with Windows' own UAC prompts
+
+The probe covers the startup prelude; the installed app itself (its window, the ⚙ About tab's Uninstall,
+the in-app update) needs a real build. Done this way on 2026-10-21 (PROFILES.md §2c, "The real app"):
+
+1. **Build** the release identity into a QA folder (the build mutex; on a loaded PC a commit guard and
+   `-MaxCpu 1 -ClMpCount 2`): `tools\Build-Agentmaster.ps1 -NoRestore -Configuration Release -ReleaseIdentity -LayoutDir Q:\agentmaster-layouts\QA`.
+   The build also writes the package's `.msix` to `src\cascadia\CascadiaPackage\AppPackages\CascadiaPackage_0.0.1.0_x64_Test\`.
+2. **Zip** it like release.yml: `build\scripts\New-UnpackagedTerminalDistribution.ps1 -TerminalAppX <that .msix> -XamlAppX <its Dependencies\x64\Microsoft.UI.Xaml.2.8.appx> -Destination <dir> -PortableMode:$true`
+   (the `-TerminalLayout` mode makes no zip: it leaves an assembled folder in `%TEMP%`).
+3. **Stage** the unzipped build as `amqa\build`, the zip, `amqa-guest.ps1` and a password file `amqa\.pw`
+   in the persist folder; in the guest copy them to `C:\amqa`, move `.pw` off the share, create `qastd` /
+   `qaadmin` with it, and turn UAC on (`EnableLUA 1` + a reboot: the golden image keeps the prompt settings
+   at Windows' defaults with LUA off). A 4 GB desktop is enough.
+4. **Run** each scenario on a FRESH copy (`New-AmQaCopy '0.8.0.0' 's1'`; stamp other versions for
+   upgrades / downgrades / the in-app update), start it the way a user would (the desktop's `launch` of
+   `explorer.exe <exe>` = a double-click), read the outcome with `Get-AmQaState`, `Reset-AmQa` between.
+5. **Answer UAC with `qm.py`:** `python -I qm.py shot s.png` shows the secure desktop; `key esc` = No;
+   `key shift-tab ret` = Yes (No has the focus); `type @<password file>` + `key ret` for a credential prompt.
+   A window that runs elevated cannot take the (unelevated) agent's input either — press its keys through
+   `qm.py` too.
+6. **A standard signed-in user:** first give `Docker` write access to `C:\ProgramData\claude-desktop` (the
+   desktop's agent writes there) and to `C:\amqa`, then remove `Docker` from Administrators and reboot; the
+   agent then runs as a standard user. Changing a machine policy afterwards needs `qaadmin` through a
+   credential prompt — or, once "deny elevation requests" is set, a reset.
+7. **A downloaded zip (the Mark of the Web):** `[IO.Compression.ZipFile]::CreateFromDirectory` (not
+   `Compress-Archive`: the share marks the dot files hidden and it skips them), a `Zone.Identifier` stream
+   on the zip (`ZoneId=3`), and the shell's own extraction (`Shell.Application` `CopyHere`, what Explorer's
+   *Extract All* does — it copies the mark onto every file). Launching it brings up SmartScreen.
+
+**More traps met:** the agent's `run_command` waits for every process in its job — start anything that
+waits on a UAC prompt with the agent's `launch` tool (or `Start-Process -Credential`, which leaves the
+job), or the call hangs and its timeout kills the request; `docker cp` cannot read the monitor's tmpfs
+(`qm.py` streams the screendump through `docker exec cat`); a PowerShell started from Git Bash finds Git's
+`tar.exe` first (the packaging script now calls Windows' own).
