@@ -290,8 +290,36 @@ namespace Agentmaster
     // so the pwsh prompt the tab keeps after claude exits (-NoExit) holds no key — a plain `claude` typed
     // there would otherwise send the provider's key to Anthropic and fail with 401. A name that is not
     // [A-Za-z0-9_] is ignored (it is always our own constant; the guard keeps the script injection-free).
-    // Empty => byte-identical to the pre-parameter command line.
+    // Empty => no key carrier in the script.
+    // The whole script then goes through WrapPwshScriptInConsoleGuard (below), so the prompt -NoExit
+    // leaves is usable even when the agent dies without undoing its fullscreen terminal modes.
+    // Params: pwshLauncher = the pwsh/powershell full path (empty => `pwsh.exe`); innerCommandline = the
+    // agent's own command line, invoked verbatim; authTokenEnv = the key carrier's variable NAME (or empty).
+    // Returns the command line for the ConPTY (its length is what kHandoverPromptEscapedBudget protects).
+    // Throws only std::bad_alloc.
     std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline, std::wstring_view authTokenEnv = {});
+
+    // Agentmaster (the console guard, 2026-10-21). Wrap the pwsh script that runs a TUI agent so the
+    // console comes back the way it was when the agent exits — however it exits. The incident it fixes:
+    // dev tab 2b655223's claude (fullscreen renderer, CLAUDE_CODE_NO_FLICKER=1) was killed at 18:56:55
+    // (no SessionEnd, no exit-time transcript write; C: ran out of space that second). The alternate
+    // screen, any-event mouse tracking + SGR encoding, focus reports, kitty keyboard flags and the raw VT
+    // input mode all stayed on, so the -NoExit prompt typed `[555;54;31M` on every mouse move and Ctrl+C
+    // arrived as the text `[99;5u`. A clean exit had always hidden the gap: claude undoes its own modes.
+    // The guard (a single line of PowerShell, reproduced and verified in a private ConPTY with a stand-in
+    // that dies the same way, on PowerShell 7.5.8 and Windows PowerShell 5.1):
+    //   &{ save CONIN$/CONOUT$ modes (reflection on Microsoft.PowerShell.ConsoleControl);
+    //      try { <runScript> } finally { VT reset; restore the saved modes; a note on a non-zero exit } }
+    // Everything after the agent is a no-op after a clean exit, so it runs unconditionally; the reset
+    // reaches Agentmaster's terminal through ConPTY's passthrough. The saved modes are restored only when
+    // the reflection worked (a later PowerShell that renames the internal degrades to the reset alone).
+    // Cost: ~840 script chars, ~2,250 more command-line chars once base64'd — budgeted in
+    // kHandoverPromptEscapedBudget. Params: runScript = the statements that run the agent (`& <inner>`,
+    // or the key-carrier form), inserted verbatim; any `$` in it resolves inside the guard's &{} scope,
+    // where $c $e $f $g $h $m $s are the guard's own (the launch never puts an unescaped `$` there: the
+    // prompt is PsDoubleQuote'd and a `$` in a path would already misexpand without the guard).
+    // Returns the guarded script. Pure + unit-tested (tests_spawn_sched.cpp). Throws only std::bad_alloc.
+    std::wstring WrapPwshScriptInConsoleGuard(std::wstring_view runScript);
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -319,13 +347,19 @@ namespace Agentmaster
     // stdin as a bracketed PASTE (BuildPromptSubmission via the queue/injector machinery — a
     // streamed pipe with no size ceiling). Why the commandline caps: the prompt crosses TWO
     // CreateProcessW hops, each hard-capped at 32,767 chars — and the BINDING one is the outer
-    // pwsh `-EncodedCommand <base64(UTF-16LE("& <inner>"))>` wrap: base64 costs 4·ceil(2·I/3) ≈
-    // 2.67·I chars for an inner commandline of I wchars, so I ≤ ~12,200; minus the inner's
-    // non-prompt overhead (claude full path + --settings full path + flags + the session guid,
-    // ~300-700 depending on profile paths) that leaves ~11,500 escaped chars for the quoted
-    // prompt — the constant, with margin. Escaped chars ≈ raw chars + one per ` " $ (PsDoubleQuote
-    // doubles exactly those three), which is why the tier check is escape-aware, not raw-length.
-    inline constexpr size_t kHandoverPromptEscapedBudget = 11'500;
+    // pwsh `-EncodedCommand <base64(UTF-16LE(script))>` wrap: base64 costs 4·ceil(2·S/3) ≈ 2.67·S
+    // chars for a script of S wchars, so with ~150 chars of pwsh path + flags S ≤ ~12,200. The script
+    // is the console guard (~840, WrapPwshScriptInConsoleGuard) + the PRESETS key carrier when a preset
+    // launches (~180) + `& ` + the inner commandline: claude full path + --settings full path + flags
+    // + the session guid + --model + a preset's extra args (~300-700 depending on profile paths) + the
+    // quoted prompt. That leaves ~10,500 escaped chars for the prompt; the constant keeps ~500 of
+    // margin. (It was 11,500 until 2026-10-21, sized before the key carrier and the guard existed: with
+    // both, a budget-sized prompt no longer fits.) Escaped chars ≈ raw chars
+    // + one per ` " $ (PsDoubleQuote doubles exactly those three), which is why the tier check is
+    // escape-aware, not raw-length. A document over the budget is NOT lost: it takes the paste tier.
+    // tests_spawn_sched.cpp builds the worst case (long paths, a preset, a budget-sized prompt) and
+    // checks it against CreateProcessW's 32,767.
+    inline constexpr size_t kHandoverPromptEscapedBudget = 10'000;
 
     // PURE: `text`'s POST-PsDoubleQuote-escape character cost (the tier check's input — the
     // PsDoubleQuote cost model: ` " $ cost 2, everything else 1). Unit-tested against the REAL

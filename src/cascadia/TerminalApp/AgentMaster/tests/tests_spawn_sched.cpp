@@ -29,6 +29,7 @@
 #include <sddl.h> // ConvertStringSecurityDescriptorToSecurityDescriptorW - TestPortableInstall's real unwritable folder
 #include <fstream> // TestHookInvocation reads the materialized settings file back
 #include <iterator> // std::istreambuf_iterator (the same read)
+#include <algorithm> // std::all_of - the console guard's printable-ASCII check (TestSpawnBuilders)
 
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
@@ -713,7 +714,8 @@ void TestSpawnBuilders()
     // command line so the ConPTY root is an interactive pwsh that -NoExit's to a live prompt at the cwd
     // when the agent quits, instead of the connection dying into a dead "press Enter to restart" pane.
     // -EncodedCommand carries the script as base64 UTF-16LE, side-stepping ALL nested-quote escaping —
-    // so we decode the payload here and assert it is exactly the call-operator (&) invocation of inner.
+    // so we decode the payload here and assert it is exactly the call-operator (&) invocation of inner,
+    // inside the console guard (WrapPwshScriptInConsoleGuard — the 2026-10-21 killed-claude tab).
     {
         const std::wstring inner = L"\"C:\\bin\\claude.exe\" --resume abc-123 --settings \"C:/x/s.json\"";
         const auto hosted = BuildPwshHostedCommandline(L"C:\\Program Files\\PowerShell\\7\\pwsh.exe", inner);
@@ -759,25 +761,87 @@ void TestSpawnBuilders()
         };
         const auto enc = hosted.substr(hosted.rfind(L' ') + 1);
         CHECK(!enc.empty(), "pwsh host: non-empty -EncodedCommand payload");
-        CHECK(b64decodeToWide(enc) == L"& " + inner, "pwsh host: payload decodes to '& <inner>' (UTF-16LE, & call operator)");
+        CHECK(b64decodeToWide(enc) == WrapPwshScriptInConsoleGuard(L"& " + inner), "pwsh host: payload decodes to the console-guarded '& <inner>' (UTF-16LE, & call operator)");
         // Empty launcher => the bare `pwsh.exe` token (the not-found fallback).
         const auto hostedBare = BuildPwshHostedCommandline(L"", inner);
         CHECK(hostedBare.rfind(L"\"pwsh.exe\" -NoLogo -NoExit -EncodedCommand ", 0) == 0, "pwsh host: empty launcher -> quoted bare pwsh.exe token");
         // A bare inner token (codex fresh, or claude's empty-launcher fallback) is still invoked via &.
         const auto hostedCodex = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", L"codex resume 019ec0c7");
-        CHECK(b64decodeToWide(hostedCodex.substr(hostedCodex.rfind(L' ') + 1)) == L"& codex resume 019ec0c7", "pwsh host: bare inner token invoked via &");
+        CHECK(b64decodeToWide(hostedCodex.substr(hostedCodex.rfind(L' ') + 1)) == WrapPwshScriptInConsoleGuard(L"& codex resume 019ec0c7"), "pwsh host: bare inner token invoked via & (codex gets the console guard too)");
         // PRESETS (HARNESSES.md §6.3): a preset's key arrives in a carrier variable and lives in
         // ANTHROPIC_AUTH_TOKEN for the claude call ONLY — the carrier is removed before claude starts and the
         // token in `finally`, so the pwsh prompt -NoExit leaves in the tab never holds a key.
         const auto hostedKey = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", inner, L"AM_PRESET_TOKEN");
         CHECK(b64decodeToWide(hostedKey.substr(hostedKey.rfind(L' ') + 1)) ==
-                  L"$env:ANTHROPIC_AUTH_TOKEN = $env:AM_PRESET_TOKEN; Remove-Item Env:AM_PRESET_TOKEN -ErrorAction Ignore; try { & " + inner +
-                      L" } finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }",
-              "pwsh host: a key carrier becomes ANTHROPIC_AUTH_TOKEN for the claude call only (carrier removed first, token removed in finally)");
+                  WrapPwshScriptInConsoleGuard(L"$env:ANTHROPIC_AUTH_TOKEN = $env:AM_PRESET_TOKEN; Remove-Item Env:AM_PRESET_TOKEN -ErrorAction Ignore; try { & " + inner +
+                                               L" } finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }"),
+              "pwsh host: a key carrier becomes ANTHROPIC_AUTH_TOKEN for the claude call only (carrier removed first, token removed in finally), all inside the console guard");
         // The carrier NAME is spliced into the script, so anything outside [A-Za-z0-9_] is refused outright.
         const auto hostedBadName = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", inner, L"X; Remove-Item C:\\");
-        CHECK(b64decodeToWide(hostedBadName.substr(hostedBadName.rfind(L' ') + 1)) == L"& " + inner,
+        CHECK(b64decodeToWide(hostedBadName.substr(hostedBadName.rfind(L' ') + 1)) == WrapPwshScriptInConsoleGuard(L"& " + inner),
               "pwsh host: a carrier name outside [A-Za-z0-9_] is refused (no script injection)");
+
+        // WrapPwshScriptInConsoleGuard — the shape the ConPTY runs (verified end to end on 2026-10-21 in a private
+        // ConPTY: a real claude 2.1.291 killed under the guard left a clean prompt and console input mode 0x1F7; the
+        // unguarded host left 0x208 and echoed every mouse move). The checks pin what makes it work, so an edit that
+        // breaks one fails here rather than in a tab: the run inside try/finally, the save BEFORE the run and the
+        // restore + reset AFTER it, the pop -> leave -> pop order for the kitty stacks, the DECRST list, DECSTR.
+        {
+            const std::wstring run = L"& \"C:\\bin\\claude.exe\" --resume abc-123";
+            const auto guarded = WrapPwshScriptInConsoleGuard(run);
+            const auto atRun = guarded.find(L"try{" + run + L"}finally{");
+            CHECK(atRun != std::wstring::npos, "console guard: the run sits verbatim inside try{...}finally{");
+            CHECK(guarded.find(run, atRun + 4 + run.size()) == std::wstring::npos, "console guard: the run appears exactly once");
+            CHECK(guarded.rfind(L"&{", 0) == 0 && guarded.size() >= 2 && guarded.compare(guarded.size() - 2, 2, L"}}") == 0,
+                  "console guard: one &{...} scope, so its variables never stay in the -NoExit session");
+            const auto atSave = guarded.find(L"GetConioDeviceHandle");
+            const auto atSaveOut = guarded.find(L"GetActiveScreenBufferHandle");
+            CHECK(atSave != std::wstring::npos && atSave < atRun && atSaveOut != std::wstring::npos && atSaveOut < atRun,
+                  "console guard: the input AND output modes are saved before the agent runs");
+            CHECK(guarded.find(L"[Microsoft.PowerShell.ConsoleShell].Assembly.GetType('Microsoft.PowerShell.ConsoleControl')") < atRun,
+                  "console guard: the save goes through PowerShell's own ConsoleControl (no Add-Type compile)");
+            const auto atRestoreIn = guarded.find(L"$s.Invoke($null,@($h[0],$m[0]))");
+            const auto atRestoreOut = guarded.find(L"$s.Invoke($null,@($h[1],$m[1]))");
+            CHECK(atRestoreIn != std::wstring::npos && atRestoreIn > atRun && atRestoreOut != std::wstring::npos && atRestoreOut > atRun,
+                  "console guard: both saved modes are restored after the agent");
+            CHECK(guarded.find(L"$args") == std::wstring::npos,
+                  "console guard: no helper scriptblock ($args wraps values in PSObject and MethodBase.Invoke refuses them - measured)");
+            const auto atReset = guarded.find(L"$e[<99u$e[?1049l$e[<99u");
+            CHECK(atReset != std::wstring::npos && atReset > atRun, "console guard: kitty pop -> leave the alternate screen -> pop again, after the agent");
+            CHECK(atReset != std::wstring::npos && atReset < atRestoreIn,
+                  "console guard: the VT reset is written BEFORE the modes are restored (while VT processing is surely on)");
+            CHECK(guarded.find(L"$e[?1000;1002;1003;1004;1005;1006;1007;1015;1016;2004;2026;2031l") != std::wstring::npos,
+                  "console guard: every mouse / focus / paste / sync / theme mode is reset");
+            CHECK(guarded.find(L"$e[!p") != std::wstring::npos, "console guard: DECSTR (cursor shown, SGR, margins, keypad and cursor keys)");
+            CHECK(guarded.find(L"$e]9;4;0$e\\") != std::wstring::npos, "console guard: the tab's taskbar-progress state is cleared");
+            CHECK(guarded.find(L"$e=[char]27") != std::wstring::npos && guarded.find(L"$e=[char]27") > atRun, "console guard: ESC comes from [char]27 (the payload stays printable ASCII)");
+            CHECK(guarded.find(L"if($LASTEXITCODE){") != std::wstring::npos && guarded.find(L"Restart session") != std::wstring::npos,
+                  "console guard: a non-zero exit prints the one-line note naming Restart session");
+            CHECK(std::all_of(guarded.begin(), guarded.end(), [](wchar_t c) { return c >= 0x20 && c < 0x7F; }),
+                  "console guard: printable ASCII only");
+            const auto overhead = WrapPwshScriptInConsoleGuard(L"").size();
+            CHECK(overhead > 0 && overhead < 1000, "console guard: under 1,000 chars of script (kHandoverPromptEscapedBudget assumes ~840)");
+        }
+
+        // The handover commandline tier's ceiling (kHandoverPromptEscapedBudget). The worst realistic launch — a
+        // preset (the key carrier), long paths, --model, a preset's extra args, and a prompt of exactly the budget
+        // — must stay under CreateProcessW's 32,767 chars (the terminating NUL included). 11,500, the budget
+        // before the guard, does not fit any more, which is why it dropped to 10,000.
+        {
+            const std::wstring user(24, L'u');
+            const std::wstring pwshPath = L"C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe";
+            const std::wstring claudePath = L"C:\\Users\\" + user + L"\\AppData\\Local\\Programs\\claude-code\\bin\\claude.exe";
+            const std::wstring settingsPath = L"C:/Users/" + user + L"/.agentmaster-dev/launch-settings/openrouter-kimi-k3-0123456789abcdef0123456789abcdef.json";
+            const std::wstring extraArgs = L"--effort max --append-system-prompt \"Answer in English. Keep replies short and cite the files you change.\"";
+            const std::wstring prompt(kHandoverPromptEscapedBudget, L'a');
+            CHECK(PsEscapedCost(prompt) == kHandoverPromptEscapedBudget, "worst case: the prompt is exactly the budget");
+            const auto innerWorst = BuildClaudeCommandline(settingsPath, NewSessionId(), false, true, L"", claudePath, L"claude-opus-5-5[1m]", prompt, extraArgs);
+            const auto hostedWorst = BuildPwshHostedCommandline(pwshPath, innerWorst, L"AM_PRESET_TOKEN");
+            CHECK(hostedWorst.size() < 32'767, "worst case: a budget-sized handover prompt + a preset + long paths fits CreateProcessW's 32,767");
+            const std::wstring promptOld(11'500, L'a');
+            const auto hostedOld = BuildPwshHostedCommandline(pwshPath, BuildClaudeCommandline(settingsPath, NewSessionId(), false, true, L"", claudePath, L"claude-opus-5-5[1m]", promptOld, extraArgs), L"AM_PRESET_TOKEN");
+            CHECK(hostedOld.size() >= 32'767, "worst case: the old 11,500 budget no longer fits with the guard (why the budget moved)");
+        }
     }
 }
 
