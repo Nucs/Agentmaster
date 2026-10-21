@@ -1148,6 +1148,13 @@ namespace Agentmaster::PortableInstall
             return args ? std::wstring{ args } : std::wstring{};
         }
 
+        // Start an app copy directly (same account, same rights as this process) and hand it the right
+        // to come to the front. Used for a launcher stub's hand-off and for starting a copy right after
+        // an install; a copy that must NOT inherit this process's rights goes through StartAsSessionUser.
+        //   exe     — the app exe; its folder becomes the working directory.
+        //   tail    — the commandline after the exe (verbatim; may be empty).
+        //   returns — true when the process was created (it may still fail on its own afterwards).
+        //   throws  — std::bad_alloc only.
         inline bool LaunchApp(const std::wstring& exe, const std::wstring& tail)
         {
             std::wstring cmd = Quoted(exe);
@@ -1167,22 +1174,64 @@ namespace Agentmaster::PortableInstall
             {
                 return false;
             }
+            // Hand the started copy our right to the foreground: this process exits right after, and by the
+            // time the copy's window exists the window the user had before (the Explorer window they
+            // double-clicked in) has taken the foreground back — the installed app then opened BEHIND it,
+            // only its taskbar button flashing (a test desktop, 2026-10-21, three times out of three). The
+            // call succeeds while this process still holds the user's last input (the click on our
+            // question); otherwise it changes nothing.
+            ::AllowSetForegroundWindow(pi.dwProcessId);
             ::CloseHandle(pi.hThread);
             ::CloseHandle(pi.hProcess);
             return true;
         }
 
+        // Make `hwnd` the foreground window even when Windows' foreground lock refuses this process.
+        // SetForegroundWindow is refused to a process that did not get the user's last input — and
+        // that is every first-launch question started by SmartScreen's "Run anyway", by the hand-over
+        // to the signed-in user (a scheduled task starts it) or by a launch whose parent already lost
+        // the foreground: in a Windows 11 25H2 test desktop on 2026-10-21 each of those questions came
+        // up INACTIVE (grey title, Enter typed into the window behind it), one click away but easy to
+        // miss. Joining the foreground window's input queue for the call is the long-standing way past
+        // that lock for a window the user is waiting for; the queues are detached again at once. Only
+        // for the app's own first-launch and install dialogs — never for a window the user did not ask for.
+        //   hwnd    — the window to bring forward.
+        //   returns — nothing; a refusal leaves the window where it is (on top of the z-order, inactive).
+        //   throws  — nothing.
+        inline void ForceForeground(HWND hwnd) noexcept
+        {
+            const HWND fg = ::GetForegroundWindow();
+            const DWORD fgThread = fg ? ::GetWindowThreadProcessId(fg, nullptr) : 0;
+            const DWORD self = ::GetCurrentThreadId();
+            // Attaching to our own thread (or to none) is meaningless; AttachThreadInput also refuses a
+            // thread of another desktop or of a higher integrity level, which simply leaves `attached` false.
+            const bool attached = fgThread != 0 && fgThread != self && ::AttachThreadInput(self, fgThread, TRUE);
+            ::SetForegroundWindow(hwnd);
+            ::BringWindowToTop(hwnd);
+            if (attached)
+            {
+                ::AttachThreadInput(self, fgThread, FALSE);
+            }
+        }
+
         // TaskDialog callback that FOREGROUNDS the dialog on creation: the prelude has no window
         // yet, so nothing of ours can be in front, but Explorer keeps focus after a double-click and
         // an un-foregrounded first-launch question was measured to sit unnoticed for minutes (the
-        // MessageBox reopen prompt had the same fix: MB_SETFOREGROUND|MB_TOPMOST).
+        // MessageBox reopen prompt had the same fix: MB_SETFOREGROUND|MB_TOPMOST). When the plain
+        // request is refused (the foreground lock — see ForceForeground) it is forced.
+        //   hwnd / msg — the TaskDialog callback's window and notification; only TDN_CREATED acts.
+        //   returns    — S_OK (the dialog's default handling continues).
+        //   throws     — nothing.
         inline HRESULT CALLBACK ForegroundOnCreate(HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR)
         {
             if (msg == TDN_CREATED)
             {
                 ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 ::SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                ::SetForegroundWindow(hwnd);
+                if (!::SetForegroundWindow(hwnd) || ::GetForegroundWindow() != hwnd)
+                {
+                    ForceForeground(hwnd);
+                }
             }
             return S_OK;
         }
@@ -1752,6 +1801,7 @@ namespace Agentmaster::PortableInstall
     // administrator rights — through the install core's -RunAsMainUser (a one-shot scheduled task for
     // that user, interactive, limited rights). The de-escalation every install path needs once it ran
     // elevated or under another account: the app must never keep rights it was not meant to run with.
+    // The started copy may come to the front (see the AllowSetForegroundWindow note below).
     //   exe     — the app exe to start.
     //   tail    — its commandline tail (verbatim; may be empty).
     //   returns — true when the script reported that the start was handed to the user's session.
@@ -1760,6 +1810,12 @@ namespace Agentmaster::PortableInstall
     {
         try
         {
+            // The Task Scheduler starts the copy, so it never inherits a right to the foreground: the
+            // restarted question / app came up inactive behind the previous window (a test desktop,
+            // 2026-10-21). Its process id is unknown until the task runs, so this process — which just
+            // took the user's click — lets ANY process take the foreground once; Windows withdraws the
+            // grant at the user's next input. A process without that right changes nothing by calling.
+            ::AllowSetForegroundWindow(ASFW_ANY);
             std::wstring args = L"-RunAsMainUser -Exe " + ScriptArg(exe);
             if (!tail.empty())
             {
@@ -1800,8 +1856,69 @@ namespace Agentmaster::PortableInstall
 
     namespace detail
     {
+        // Remove the "downloaded from the Internet" mark from one INSTALLED file: the Zone.Identifier
+        // stream a browser attaches to a downloaded zip and Explorer's zip extraction copies onto every
+        // extracted file, and which CopyFileW carries along. Measured in a Windows 11 25H2 test desktop on
+        // 2026-10-21: 60 of the 63 installed files kept it (SmartScreen's "Run anyway" clears only the
+        // one exe the user ran). An installed program's files carry no such mark, and a marked helper
+        // started through the shell — elevate-shim.exe for an elevated tab — would meet a SmartScreen
+        // prompt of its own. SmartScreen already judged the copy the user chose to run and install.
+        //   file    — the installed file's full path.
+        //   returns — nothing; a file without the mark (or one that refuses) is left as it is.
+        //   throws  — std::bad_alloc only.
+        inline void DropDownloadMark(const std::wstring& file)
+        {
+            ::DeleteFileW((file + L":Zone.Identifier").c_str());
+        }
+
+        // The in-place twin of CopyTree's mark removal: "Install here" registers the unzip itself, so the
+        // folder's SHIPPED entries (its manifest's names, else the legacy list — IsLegacyShippedLeaf) lose
+        // the download mark; a file of the user's own kept in that folder keeps whatever it carries.
+        //   dir     — the install folder (the unzip).
+        //   returns — nothing (best effort, per file).
+        //   throws  — std::bad_alloc only (filesystem errors end that entry's walk).
+        inline void DropDownloadMarksOfShipped(const std::filesystem::path& dir)
+        {
+            const std::vector<std::wstring> shipped = ReadManifestNamesIn(dir.wstring());
+            const auto isShipped = [&](const std::wstring& leaf) {
+                if (shipped.empty())
+                {
+                    return IsLegacyShippedLeaf(leaf);
+                }
+                const auto key = Profiles::detail::NormPathKey(leaf);
+                return std::any_of(shipped.begin(), shipped.end(), [&](const std::wstring& n) { return Profiles::detail::NormPathKey(n) == key; });
+            };
+            std::error_code ec;
+            for (const auto& top : std::filesystem::directory_iterator{ dir, ec })
+            {
+                if (!isShipped(top.path().filename().wstring()))
+                {
+                    continue;
+                }
+                if (!top.is_directory(ec))
+                {
+                    DropDownloadMark(top.path().wstring());
+                    continue;
+                }
+                std::error_code walk;
+                for (auto it = std::filesystem::recursive_directory_iterator{ top.path(), walk }; !walk && it != std::filesystem::recursive_directory_iterator{}; it.increment(walk))
+                {
+                    if (it->is_regular_file(walk))
+                    {
+                        DropDownloadMark(it->path().wstring());
+                    }
+                }
+            }
+        }
+
         // Copy `src` into `dst` (recursive; top-level entries filtered by IsCopyExcludedLeaf; files
-        // overwritten). Returns bytes copied; throws std::runtime_error-free — errors land in *err.
+        // overwritten), each copied file without the download mark (DropDownloadMark).
+        //   src / dst — the layout and the install folder.
+        //   status    — progress text ("Copying files… N MB") every 25 files.
+        //   bytes     — incremented by the bytes copied (for the Apps & Features size).
+        //   err       — receives the user-facing reason on a failure (may be null).
+        //   returns   — true when every file was copied.
+        //   throws    — std::bad_alloc only (filesystem errors land in *err).
         inline bool CopyTree(const std::filesystem::path& src, const std::filesystem::path& dst, const std::function<void(const std::wstring&)>& status, uint64_t& bytes, std::wstring* err)
         {
             std::error_code ec;
@@ -1842,6 +1959,7 @@ namespace Agentmaster::PortableInstall
                             }
                             return false;
                         }
+                        DropDownloadMark(target.wstring());
                         bytes += it->file_size(ec);
                         if ((++files % 25) == 0)
                         {
@@ -1859,6 +1977,7 @@ namespace Agentmaster::PortableInstall
                     }
                     return false;
                 }
+                DropDownloadMark(target.wstring());
                 bytes += top.file_size(ec);
                 if ((++files % 25) == 0)
                 {
@@ -2013,7 +2132,8 @@ namespace Agentmaster::PortableInstall
             }
             else
             {
-                // In place: size the folder for Apps & Features.
+                // In place: size the folder for Apps & Features, and clear the download mark of what the
+                // release shipped there (the copy branch clears it file by file in CopyTree).
                 std::error_code ec;
                 for (auto it = std::filesystem::recursive_directory_iterator{ src, ec }; !ec && it != std::filesystem::recursive_directory_iterator{}; it.increment(ec))
                 {
@@ -2022,6 +2142,7 @@ namespace Agentmaster::PortableInstall
                         bytes += it->file_size(ec);
                     }
                 }
+                detail::DropDownloadMarksOfShipped(src);
             }
 
             const std::wstring exe = AppExeIn(o.destDir);
@@ -2594,8 +2715,16 @@ namespace Agentmaster::PortableInstall
                     {
                         if (!run.cancelled)
                         {
-                            ShowError(nullptr, L"The install for all users could not be started. " + ScriptStartFailureText(run, true) +
-                                                   L"\n\nAsk an administrator to install it for all users, or install Agentmaster just for you: that needs no administrator rights.");
+                            // Name what the user chose: updating the existing all-users install reads as an
+                            // update (the question offered "Update the Agentmaster installed for all users"),
+                            // a first install as an install (a test desktop's wording check, 2026-10-21).
+                            const bool update = ex.machineHasExe && Profiles::detail::SamePath(pick.dir, ex.machineDir);
+                            ShowError(nullptr,
+                                      (update ? L"The update of Agentmaster for all users could not be started. " : L"The install for all users could not be started. ") +
+                                          ScriptStartFailureText(run, true) +
+                                          (update ? L"\n\nAsk an administrator to update it for all users, or install Agentmaster just for you: that needs no administrator rights." :
+                                                    L"\n\nAsk an administrator to install it for all users, or install Agentmaster just for you: that needs no administrator rights."),
+                                      update ? L"The update did not complete" : L"The install did not complete");
                         }
                         continue; // a declined UAC prompt simply returns to the question
                     }

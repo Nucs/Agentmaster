@@ -362,19 +362,66 @@ v0.7.10 release.
   elsewhere": an elevated instance's mutex is not openable by an unelevated one, which used to read as
   "free".
 
+**The real app (the same evening).** A Release build of these sources, made into the portable zip by
+`New-UnpackagedTerminalDistribution.ps1`, in a CLEAN Windows 11 25H2 test desktop (4 GB) with UAC at
+Windows' own defaults: administrators get the consent prompt and standard users the credential prompt,
+both on the secure desktop. Nothing inside the guest can reach that desktop, so the prompts were seen and
+answered through QEMU's monitor (`tools\install-qa\qm.py`; the kit's README has the procedure).
+
+| Who / what | Result |
+|---|---|
+| a fresh unzip from Explorer, *Install just for you* (Enter: the default) | the copy in `%USERPROFILE%\.agentmaster\bin` with Apps & Features, PATH, verbs and shortcuts; the installed app starts unelevated on the Default profile |
+| the installed copy's ⚙ → About → *Uninstall Agentmaster…* | the confirm names what goes; everything removed but the data; the app closes |
+| *Install for all users* from an unelevated copy, UAC *No* | "cancelled at the UAC prompt": back to the question, nothing installed |
+| the same, UAC *Yes* | Program Files, HKLM, machine PATH, verbs, common shortcuts; only the script ran elevated; the copy runs unelevated |
+| the all-users copy's ⚙ Uninstall, UAC *No* / *Yes* | nothing removed, the app stays open / everything removed, every user's data kept |
+| a v0.8.1 unzip over a per-user v0.8.0; a v0.8.0 unzip over v0.8.1 | *Update the installed Agentmaster (recommended)*, a user's own file beside it kept / *Use the installed Agentmaster*, never a downgrade |
+| ⚙ → *Check for updates* on a copy stamped 0.7.9, pre-releases on | the real v0.7.10-prerelease offered → *Update now* → its zip swapped in (files only the newer build had removed), the registration re-stamped, relaunched in ~12 s |
+| the signed-in administrator, ELEVATED | the *running with administrator rights* note; the installed copy runs unelevated |
+| another administrator, elevated (its own consent) in the user's session | *Set it up for <user>* recommended → the copy restarts as the user, who gets their own question |
+| a standard other account in the user's session | the explanation and its own options; nothing written |
+| a STANDARD signed-in user: *Install just for you* / *Install for all users* with an administrator's password | no prompt / the all-users install, the copy running as the user |
+| a standard signed-in user: *Run as administrator* with an administrator's password | the app runs as that administrator → *Set it up for <user>* → it restarts as the signed-in user |
+| a standard user under "Automatically deny elevation requests": ⚙ Uninstall of the all-users copy / its update | "Agentmaster was not uninstalled … Windows does not let this account run programs as administrator (a setting of this PC)" / "The update of Agentmaster for all users could not be started …"; back to the question |
+| a browser-marked zip extracted by Explorer | SmartScreen's "Windows protected your PC" → *More info* → *Run anyway*; the installed copy asks nothing more |
+
+**Fixed during that QA** (re-checked in a reset desktop with a rebuilt zip):
+
+- **The foreground.** After *Install just for you* the installed app opened BEHIND the window the user had
+  before, only its taskbar button flashing (three times out of three); the question restarted by the
+  hand-over, and the one started by SmartScreen's *Run anyway*, came up inactive (Enter went to the window
+  behind). `LaunchApp` now hands the started copy the foreground (`AllowSetForegroundWindow`), the
+  hand-over grants it before its task runs (`ASFW_ANY`), and the question forces itself forward when
+  Windows refuses (`ForceForeground`). Re-checked: all three in front.
+- **The download mark.** The installed files kept the browser's mark (60 of 63; SmartScreen clears only the
+  exe the user ran), so a helper started through the shell (`elevate-shim.exe`) could meet its own
+  SmartScreen prompt. The C++ install and the scripts' `Install-AmLayout` now remove it from what they
+  install, and *Install here* from the shipped entries; a user's own file keeps it. Re-checked: 0 of 63.
+- **Wording.** A refused all-users *update* read "install"; the packaging script used whichever `tar.exe`
+  came first on PATH (Git's cannot read an `.msix`, so no zip was made).
+
+**Observed, outside the code:** the consent prompt for the all-users steps names *Windows PowerShell*
+(verified publisher: Microsoft Windows), because the install script runs there; *Run as administrator*
+on the unsigned exe shows "unknown publisher"; SmartScreen asks once per download; Smart App Control was in
+evaluation mode on this image, and on a PC where it is ON an unsigned exe does not start at all. Only the
+last three change with a code-signing certificate from a trusted authority (the MSIX's self-signed one
+does not).
+
 **Automated coverage:** the m5 suite (`TestPortableInstall`, `TestProfileBootstrap`: the decision and
 pointer files, the startup plan, the account plan, the prompt default, the manifest and legacy names on a
-real scratch tree, the machine-copy rules with a real deny ACL, the uninstall target, the start-failure
-text, the mutex verdict) and `tools\tests\Test-AgentmasterInstaller.ps1` (plain PowerShell, 5.1 and 7:
-the shared core's identity across both scripts, the manifest, the version text, the decision and pointer
-files, the write probe with a real deny ACL, per-user and all-users installs and uninstalls into a
-scratch registry key and scratch folders, the Win32 error reading, the identity, a phase script that runs
-and reports back; `-IncludeScheduledTask` adds a real one-shot task — run it on a test desktop).
+real scratch tree, the download mark removed from copied and in-place files but not from a user's own,
+the machine-copy rules with a real deny ACL, the uninstall target, the start-failure text, the mutex
+verdict) and `tools\tests\Test-AgentmasterInstaller.ps1` (plain PowerShell, 5.1 and 7: the shared core's
+identity across both scripts, the manifest, the version text, the decision and pointer files, the write
+probe with a real deny ACL, per-user and all-users installs and uninstalls into a scratch registry key and
+scratch folders, the download mark on an installed layout, the Win32 error reading, the identity, a phase
+script that runs and reports back; `-IncludeScheduledTask` adds a real one-shot task — run it on a test
+desktop).
 
 **Not covered:** the app's own package update (`am-update.ps1` default mode) and its *switch to the
-per-user install* answer end to end; the cog's Uninstall button (the same functions as
-`--uninstall-portable`, but its dialog only in the real app); the real app built from these sources (the
-QA ran the startup prelude in a probe exe). Known limits: script-made shortcuts carry no AUMID (the
+per-user install* answer end to end (it needs an MSIX of these sources signed with a certificate the test
+desktop trusts); whether the app relaunched by the in-app update comes to the front (the relaunch goes
+through the update script, not `LaunchApp`). Known limits: script-made shortcuts carry no AUMID (the
 script cannot compute the app's per-path formula; the app's own install stamps it); a shared unzip used
 by several accounts is a stub for all of them once one decides (the decision is per folder); HKLM
 detection reads the 64-bit view of `Uninstall\Agentmaster` only.
