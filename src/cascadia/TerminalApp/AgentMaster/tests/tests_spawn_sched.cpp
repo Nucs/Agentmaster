@@ -4058,6 +4058,43 @@ void TestUpdaterVersionLogic()
         std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
     }
 
+    // 2026-10-21: the marker am-update.ps1 leaves before it starts the INSTALLED version again after an update
+    // it did not finish (Restart-PreviousApp). The app it starts reads it once and stays quiet that run - the
+    // test desktop showed the restarted app offering the same update again right after a cancel.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-restarted-marker-" + std::to_wstring(::GetCurrentProcessId());
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        const std::wstring marker = dir + L"\\" + U::kRestartedMarkerLeaf;
+        const long long now = 1'800'000'000'000LL;
+        const auto write = [&](const char* text) {
+            std::ofstream f{ std::filesystem::path{ marker }, std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+        const auto exists = [&]() { return ::GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES; };
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty(), "restart marker: none -> nothing to skip");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(L"", now).empty(), "restart marker: no profile folder -> nothing");
+        write("v0.7.10-prerelease\n1799999990000\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now) == L"v0.7.10-prerelease", "restart marker: fresh -> its tag (the run then behaves as 'Remind me next restart')");
+        CHECK(!exists(), "restart marker: consumed (deleted) at once");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty(), "restart marker: one-shot - a second start asks as usual");
+        write("\xEF\xBB\xBFv0.8.0\r\n1799999990000\r\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now) == L"v0.8.0", "restart marker: a BOM and CRLF line ends are tolerated");
+        write("v0.8.0\n1799000000000\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty() && !exists(), "restart marker: older than 10 minutes -> ignored, and deleted");
+        write("v0.8.0\n1800000120000\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty() && !exists(), "restart marker: written more than a minute in the future -> ignored, and deleted");
+        write("v0.8.0\nnot a time\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty() && !exists(), "restart marker: garbage -> ignored, and deleted");
+        write("\n1799999990000\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty(), "restart marker: no tag -> ignored");
+        write("v0.8.0\n1234567890123456789\n");
+        CHECK(U::ConsumeRestartedAfterUpdateMarker(dir, now).empty(), "restart marker: a 19-digit time is refused before it could overflow");
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
     // Full-fidelity envelope: an updater RMW must not disturb ANY other cog setting (the broad
     // "an update choice can never break your settings" guarantee, past the model-only check above).
     {
@@ -4801,6 +4838,146 @@ void TestPortableInstall()
         PI::detail::DropDownloadMarksOfShipped(fs::path{ msrc });
         CHECK(!hasMark(msrc + L"\\Agentmaster.exe") && !hasMark(msrc + L"\\Images\\icon.png"), "download mark (Install here): the shipped files lose it");
         CHECK(hasMark(msrc + L"\\my-download.zip"), "download mark (Install here): a user's own file in the folder keeps it");
+    }
+    {
+        // 2026-10-21: an upgrade moves the previous version ASIDE before the copy and puts it back when the copy
+        // fails - before, it deleted the old files first, and a copy that failed half way left an install with
+        // neither version. A source file held open with no sharing makes CopyTree fail on it (CopyFileW cannot
+        // read it); a destination file held open without delete sharing makes the set-aside's move fail.
+        namespace fs = std::filesystem;
+        const auto touch = [](const std::wstring& p, const char* text) {
+            fs::create_directories(fs::path{ p }.parent_path());
+            std::ofstream f{ fs::path{ p }, std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+        const auto readAll = [](const std::wstring& p) {
+            std::ifstream f{ fs::path{ p }, std::ios::binary };
+            return std::string{ std::istreambuf_iterator<char>{ f }, std::istreambuf_iterator<char>{} };
+        };
+        const auto holdOpen = [](const std::wstring& p, DWORD share) {
+            return ::CreateFileW(p.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        };
+        const auto asideCount = [](const std::wstring& dir) {
+            size_t n = 0;
+            std::error_code ec;
+            for (const auto& e : fs::directory_iterator{ fs::path{ dir }, ec })
+            {
+                n += PI::IsSetAsideLeaf(e.path().filename().wstring()) ? 1 : 0;
+            }
+            return n;
+        };
+        CHECK(PI::IsSetAsideLeaf(L".am-previous-1234-5678") && PI::IsSetAsideLeaf(L".AM-PREVIOUS-0badc0de") && !PI::IsSetAsideLeaf(L".am-previous-") && !PI::IsSetAsideLeaf(L"am-previous-1"),
+              "set-aside name: the prefix + something, any case (the PowerShell core's names match too)");
+        CHECK(PI::IsCopyExcludedLeaf(L".am-previous-1") && !PI::IsPreservedLeaf(L".am-previous-1"), "set-aside name: never copied along, never preserved (an upgrade or uninstall removes it)");
+
+        const std::wstring src = exeDir + L"\\aside-src";
+        const std::wstring dst = exeDir + L"\\aside-dst";
+        touch(src + L"\\Agentmaster.exe", "new exe");
+        touch(src + L"\\Images\\icon.png", "new png");
+        touch(src + L"\\new-only.dll", "new");
+        touch(src + L"\\zz-locked.dll", "new");
+        touch(src + L"\\.am-version", "9.9.9.0");
+        touch(src + L"\\.am-manifest", "Agentmaster.exe\nImages/\nnew-only.dll\nzz-locked.dll\n.am-version\n.am-manifest\n");
+        touch(dst + L"\\Agentmaster.exe", "old exe");
+        touch(dst + L"\\Images\\icon.png", "old png");
+        touch(dst + L"\\old-only.dll", "old");
+        touch(dst + L"\\.am-version", "1.0.0.0");
+        touch(dst + L"\\.am-manifest", "Agentmaster.exe\nImages/\nold-only.dll\n.am-version\n.am-manifest\n");
+        touch(dst + L"\\my-notes.txt", "mine");
+        touch(dst + L"\\profile\\sessions.json", "{}");
+        touch(dst + L"\\install.path", "installed\n");
+        touch(dst + L"\\.am-previous-0badc0de\\stale.dll", "left by an interrupted upgrade");
+
+        // The copy fails on its last entry: everything goes back as it was.
+        PI::detail::SetAside aside;
+        std::wstring asideErr;
+        CHECK(PI::detail::SetAsideShippedEntries(fs::path{ src }, fs::path{ dst }, aside, &asideErr), "set aside: the previous version is moved aside");
+        CHECK(!fs::exists(fs::path{ dst } / L"Agentmaster.exe") && !fs::exists(fs::path{ dst } / L"old-only.dll") && !fs::exists(fs::path{ dst } / L".am-version"),
+              "set aside: what the upgrade replaces left the install folder");
+        CHECK(fs::exists(fs::path{ dst } / L"my-notes.txt") && fs::exists(fs::path{ dst } / L"profile" / L"sessions.json") && fs::exists(fs::path{ dst } / L"install.path"),
+              "set aside: a user's file, profile\\ and install.path stay in place");
+        CHECK(asideCount(dst) == 1 && !fs::exists(fs::path{ dst } / L".am-previous-0badc0de"), "set aside: one set-aside folder, the stale one of an earlier run gone");
+        const HANDLE locked = holdOpen(src + L"\\zz-locked.dll", 0);
+        CHECK(locked != INVALID_HANDLE_VALUE, "restore: the test holds a source file open with no sharing");
+        uint64_t bytes = 0;
+        std::wstring copyErr;
+        const bool copied = PI::detail::CopyTree(fs::path{ src }, fs::path{ dst }, [](const std::wstring&) {}, bytes, &copyErr);
+        if (locked != INVALID_HANDLE_VALUE)
+        {
+            ::CloseHandle(locked);
+        }
+        CHECK(!copied && !copyErr.empty(), "restore: the copy fails on the held file");
+        CHECK(PI::detail::RestoreSetAside(fs::path{ src }, fs::path{ dst }, aside), "restore: the previous version is put back completely");
+        CHECK(readAll(dst + L"\\Agentmaster.exe") == "old exe" && readAll(dst + L"\\Images\\icon.png") == "old png" && fs::exists(fs::path{ dst } / L"old-only.dll"),
+              "restore: the previous exe, its folder and a file only it had are back");
+        CHECK(!fs::exists(fs::path{ dst } / L"new-only.dll") && readAll(dst + L"\\.am-version") == "1.0.0.0", "restore: nothing of the failed copy stays; the previous stamp is back");
+        CHECK(fs::exists(fs::path{ dst } / L"my-notes.txt") && asideCount(dst) == 0 && aside.dir.empty(), "restore: the user's file stays; no set-aside folder is left");
+
+        // A destination entry that cannot be moved (held open without delete sharing): the upgrade stops before
+        // anything was replaced, and the entries already moved come back.
+        const HANDLE pinned = holdOpen(dst + L"\\old-only.dll", FILE_SHARE_READ);
+        PI::detail::SetAside refused;
+        std::wstring refusedErr;
+        const bool movedAll = PI::detail::SetAsideShippedEntries(fs::path{ src }, fs::path{ dst }, refused, &refusedErr);
+        if (pinned != INVALID_HANDLE_VALUE)
+        {
+            ::CloseHandle(pinned);
+        }
+        CHECK(!movedAll && refusedErr.find(L"old-only.dll") != std::wstring::npos, "set aside: an entry in use stops the upgrade and is named");
+        CHECK(readAll(dst + L"\\Agentmaster.exe") == "old exe" && fs::exists(fs::path{ dst } / L".am-version") && fs::exists(fs::path{ dst } / L"Images") && asideCount(dst) == 0,
+              "set aside: ...with every entry moved before it back in place and no set-aside folder left");
+
+        // The same upgrade once nothing is held: laid in, and the set-aside folder dropped.
+        PI::detail::SetAside ok;
+        CHECK(PI::detail::SetAsideShippedEntries(fs::path{ src }, fs::path{ dst }, ok, nullptr), "upgrade: set aside");
+        bytes = 0;
+        CHECK(PI::detail::CopyTree(fs::path{ src }, fs::path{ dst }, [](const std::wstring&) {}, bytes, nullptr), "upgrade: copied");
+        PI::detail::DropSetAside(ok);
+        CHECK(readAll(dst + L"\\Agentmaster.exe") == "new exe" && fs::exists(fs::path{ dst } / L"new-only.dll") && !fs::exists(fs::path{ dst } / L"old-only.dll"),
+              "upgrade: the new version, without the file only the old one shipped");
+        CHECK(asideCount(dst) == 0 && fs::exists(fs::path{ dst } / L"my-notes.txt"), "upgrade: no set-aside folder left; the user's file stays");
+    }
+    {
+        // 2026-10-21: the copy Install-Agentmaster.ps1 v0.7.10 and older made (%LOCALAPPDATA%\Programs\Agentmaster,
+        // no registry entry) is offered in the install question like a registered per-user install.
+        const PI::InstallDecision none{};
+        const PI::InstallDecision kept{ PI::Decision::Portable, {} };
+        const PI::InstallDecision stub{ PI::Decision::InstalledTo, L"C:\\Users\\x\\.agentmaster\\bin" };
+        const PI::InstallDecision machine{ PI::Decision::Machine, {} };
+        const std::wstring legacy = L"C:\\Users\\x\\AppData\\Local\\Programs\\Agentmaster";
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, none, false, L"D:\\Downloads\\agentmaster-0.8.0") == legacy, "old script copy: never decided -> offered");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, kept, false, L"D:\\x") == legacy, "old script copy: kept portable -> offered (an update keeps it portable)");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, stub, true, L"D:\\x") == L"C:\\Users\\x\\.agentmaster\\bin", "old script copy: a launcher stub -> the install it names");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, stub, false, L"D:\\x") == legacy, "old script copy: a stub whose install vanished -> the folder itself (it re-asks like a pristine copy)");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, none, false, L"c:\\users\\X\\appdata\\local\\programs\\agentmaster\\").empty(), "old script copy: never offered to itself (it would become a stub for itself)");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, stub, true, L"C:\\Users\\x\\.agentmaster\\bin").empty(), "old script copy: ...nor the install it names to that install");
+        CHECK(PI::LegacyScriptOfferDir(legacy, false, none, false, L"D:\\x").empty() && PI::LegacyScriptOfferDir(L"", true, none, false, L"D:\\x").empty(), "old script copy: no exe there / no folder -> nothing");
+        CHECK(PI::LegacyScriptOfferDir(legacy, true, machine, false, L"D:\\x").empty(), "old script copy: an all-users decision there is nothing a per-user script made");
+
+        // On a scratch %LOCALAPPDATA% - only when this PC has no registered per-user install, which DetectExistingInstalls
+        // reports first.
+        if (PI::detail::RegReadString(HKEY_CURRENT_USER, PI::kUninstallKey, L"InstallLocation").empty())
+        {
+            const std::wstring savedLocal = P::detail::GetEnvVar(L"LOCALAPPDATA");
+            const std::wstring fakeLocal = exeDir + L"\\localappdata";
+            const std::wstring oldCopy = fakeLocal + L"\\Programs\\Agentmaster";
+            std::filesystem::create_directories(std::filesystem::path{ oldCopy });
+            {
+                std::ofstream e{ std::filesystem::path{ oldCopy } / L"Agentmaster.exe", std::ios::binary };
+                e << "exe";
+                std::ofstream v{ std::filesystem::path{ oldCopy } / L".am-version", std::ios::binary };
+                v << "0.7.10\r\n";
+            }
+            ::SetEnvironmentVariableW(L"LOCALAPPDATA", fakeLocal.c_str());
+            CHECK(PI::LegacyScriptInstallDir() == oldCopy, "old script copy: %LOCALAPPDATA%\\Programs\\Agentmaster");
+            const auto found = PI::DetectExistingInstalls(exeDir + L"\\some-new-unzip");
+            CHECK(found.userDir == oldCopy && found.userFromLegacyScript && !found.userKeptPortable, "detect: the old script's copy is found when the registry names no per-user install");
+            CHECK(found.userVersion.major == 0 && found.userVersion.minor == 7 && found.userVersion.patch == 10, "detect: ...with its version stamp");
+            CHECK(PI::DetectExistingInstalls(oldCopy).userDir.empty(), "detect: the old script's copy running itself sees no install to update or use");
+            PI::SaveInstallDecisionIn(oldCopy, { PI::Decision::Portable, {} });
+            CHECK(PI::DetectExistingInstalls(exeDir).userKeptPortable, "detect: a copy kept portable is flagged so (its update keeps it portable)");
+            ::SetEnvironmentVariableW(L"LOCALAPPDATA", savedLocal.empty() ? nullptr : savedLocal.c_str());
+        }
     }
     CHECK(PI::ScriptArg(L"C:\\a b\\") == L"\"C:\\a b\"", "script arg: quoted, a trailing backslash dropped (it would escape the quote)");
     CHECK(PI::ScriptArg(L"x\"y") == L"\"xy\"", "script arg: an embedded quote is dropped");

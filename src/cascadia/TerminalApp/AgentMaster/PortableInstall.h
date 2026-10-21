@@ -51,6 +51,14 @@
 //     "Update the installed copy (vX → vY)" (an in-place upgrade preserving its state) or, when
 //     it is already the same/newer version, "Use the installed copy" (this unzip then just hands
 //     off to it and becomes a launcher stub).
+//   * the copy Install-Agentmaster.ps1 v0.7.10 and older made (%LOCALAPPDATA%\Programs\Agentmaster,
+//     LegacyScriptInstallDir: no registry entry) — offered the same way when no HKCU install exists; an
+//     update registers it in place (a folder the user kept portable only gets its files) and retires the
+//     script's "Agentmaster (Portable)" Start-menu entry.
+//
+// AN UPGRADE NEVER LEAVES A BROKEN INSTALL: the previous version is moved aside inside the install
+// folder (kSetAsideLeafPrefix) before the new one is copied in, and put back when the copy fails
+// (detail::SetAsideShippedEntries / RestoreSetAside; the PowerShell core's Install-AmLayout, the same).
 //
 // THE DECISION FILE `<exedir>\install.path` (plain UTF-8, `#` comments, first value line wins —
 // the profile.path idiom):
@@ -147,6 +155,19 @@ namespace Agentmaster::PortableInstall
     inline constexpr const wchar_t* kShortcutLeaf = L"Agentmaster.lnk";
     inline constexpr const wchar_t* kShortcutDescription = L"Agentmaster \x2014 manage your Claude Code sessions";
     inline constexpr const wchar_t* kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Agentmaster";
+    // The ALL-USERS install's Apps & Features key (HKLM), written by the PowerShell core. Its own NAME, not
+    // kUninstallKey's: Windows lists an Uninstall key name once, and when the all-users entry shared the
+    // per-user one's name, Settings -> Installed apps hid the user's own copy (a test desktop, 2026-10-21).
+    // A copy registered before then still sits under kUninstallKey in HKLM, which is read second.
+    inline constexpr const wchar_t* kMachineUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AgentmasterAllUsers";
+    // The Start-menu entry Install-Agentmaster.ps1 v0.7.10 and older made for its portable copy in
+    // %LOCALAPPDATA%\Programs\Agentmaster (LegacyScriptInstallDir); a per-user install it led to replaces it
+    // with kShortcutLeaf (detail::RetireLegacyScriptShortcut). The PowerShell core retires it by the same rule.
+    inline constexpr const wchar_t* kLegacyScriptShortcutLeaf = L"Agentmaster (Portable).lnk";
+    // The folder an upgrade moves the previous version into while it copies the new one in, inside the install
+    // folder (the same volume: every move is a rename): this prefix + a number. The PowerShell core's
+    // $script:AmSetAsidePrefix is the same name, so either installer cleans up what the other left.
+    inline constexpr std::wstring_view kSetAsideLeafPrefix{ L".am-previous-" };
     inline constexpr const wchar_t* kContextVerb = L"Agentmaster";
     inline constexpr const wchar_t* kContextLabel = L"Open in Agentmaster";
     inline constexpr const wchar_t* kEnvironmentKey = L"Environment";
@@ -361,6 +382,40 @@ namespace Agentmaster::PortableInstall
         return saved.empty() ? Profiles::DefaultReleaseProfileDir() : saved;
     }
 
+    // The folder Install-Agentmaster.ps1 v0.7.10 and older put its portable copy into:
+    // %LOCALAPPDATA%\Programs\Agentmaster, with a Start-menu entry "Agentmaster (Portable)" but no Apps & Features
+    // entry and no install.path — so the registry never tells DetectExistingInstalls about it (the PowerShell
+    // core's Find-AmUserInstallDir looks there too).
+    //   returns — the folder, or "" when %LOCALAPPDATA% is not set.
+    //   throws  — std::bad_alloc only.
+    inline std::wstring LegacyScriptInstallDir()
+    {
+        const std::wstring local = Profiles::detail::GetEnvVar(L"LOCALAPPDATA");
+        return local.empty() ? std::wstring{} : local + L"\\Programs\\Agentmaster";
+    }
+
+    // PURE: which copy the old script's folder stands for in the install question (DetectExistingInstalls):
+    // the folder itself (never decided, kept portable, or registered in place), or — when the app's first
+    // launch made it a launcher stub — the install that stub names. Never the folder THIS process runs from:
+    // a copy offered to "update" or "use" itself would become a launcher stub for itself.
+    //   legacyDir      — LegacyScriptInstallDir().
+    //   legacyHoldsExe — that folder holds the app exe.
+    //   decision       — its install.path.
+    //   targetHoldsExe — decision is a launcher stub whose install still holds the app exe.
+    //   exeDir         — the folder this process runs from.
+    //   returns        — the folder to offer, or "" for none.
+    //   throws         — std::bad_alloc only.
+    inline std::wstring LegacyScriptOfferDir(const std::wstring& legacyDir, bool legacyHoldsExe, const InstallDecision& decision, bool targetHoldsExe, const std::wstring& exeDir)
+    {
+        if (legacyDir.empty() || !legacyHoldsExe || decision.kind == Decision::Machine)
+        {
+            return {}; // nothing there, or something no per-user script ever made (an all-users decision in LocalAppData)
+        }
+        // A stub whose install vanished re-asks like a copy that never decided (DecideStartup): offer the folder itself.
+        const std::wstring offer = decision.kind == Decision::InstalledTo && targetHoldsExe ? decision.dir : legacyDir;
+        return Profiles::detail::SamePath(offer, exeDir) ? std::wstring{} : offer;
+    }
+
     // PURE: true when `name` is a plain top-level entry name a manifest may list — never a path
     // (no separator, no drive colon, no stream colon), never `.` / `..`, never empty or a wildcard,
     // never ending in a dot or a space (Windows strips those from a path's last segment, so `profile.`
@@ -551,13 +606,25 @@ namespace Agentmaster::PortableInstall
                k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0;
     }
 
+    // PURE: true when `leaf` is an upgrade's set-aside folder (kSetAsideLeafPrefix + anything) — Agentmaster's
+    // own, never a user's: an upgrade or an uninstall deletes one that an earlier, interrupted run left, and a
+    // copy never carries one along. Case-insensitive.
+    //   leaf    — a top-level entry name.
+    //   returns — whether it names a set-aside folder.
+    //   throws  — std::bad_alloc only.
+    inline bool IsSetAsideLeaf(std::wstring_view leaf)
+    {
+        const auto k = Profiles::detail::NormPathKey(leaf);
+        return k.size() > kSetAsideLeafPrefix.size() && k.compare(0, kSetAsideLeafPrefix.size(), kSetAsideLeafPrefix) == 0;
+    }
+
     // Entries a COPY-install never carries from the source: the source's own profile data (it is
     // MIGRATED into the destination's profile instead), its pointer/decision files (the
-    // destination gets its own), and temp leftovers.
+    // destination gets its own), and temp leftovers (an interrupted upgrade's set-aside folder included).
     inline bool IsCopyExcludedLeaf(std::wstring_view leaf)
     {
         const auto k = Profiles::detail::NormPathKey(leaf);
-        if (k == L"profile" || k == L"profile.path" || k == L"install.path")
+        if (k == L"profile" || k == L"profile.path" || k == L"install.path" || IsSetAsideLeaf(k))
         {
             return true;
         }
@@ -1413,9 +1480,12 @@ namespace Agentmaster::PortableInstall
         std::wstring packagePath;
         Updater::Version packageVersion;
         bool packageRunning{ false };
-        // A previous USER install of ours (HKCU Apps & Features entry with a live app exe).
+        // A previous USER install of ours (HKCU Apps & Features entry with a live app exe) — or, when there is
+        // none, the copy the old install script put in LegacyScriptInstallDir (userFromLegacyScript).
         std::wstring userDir;
         Updater::Version userVersion;
+        bool userFromLegacyScript{ false }; // userDir came from the old script's folder, not the registry
+        bool userKeptPortable{ false }; // userDir's install.path = portable: an update keeps it portable (files only)
         // A MACHINE-wide entry (HKLM — the all-users install; read-only for a normal user).
         std::wstring machineDir;
         std::wstring machineVersionText;
@@ -1457,7 +1527,12 @@ namespace Agentmaster::PortableInstall
         }
     }
 
-    inline ExistingInstalls DetectExistingInstalls()
+    // The installs already on this PC, for the install question.
+    //   exeDir  — the folder this process runs from: the old script's folder is never offered to itself
+    //             (LegacyScriptOfferDir). "" skips nothing.
+    //   returns — what was found; a probe that fails leaves its part empty.
+    //   throws  — nothing.
+    inline ExistingInstalls DetectExistingInstalls(const std::wstring& exeDir = {})
     {
         ExistingInstalls ex;
         try
@@ -1497,12 +1572,36 @@ namespace Agentmaster::PortableInstall
                     ex.userVersion = Updater::ParseVersion(detail::RegReadString(HKEY_CURRENT_USER, kUninstallKey, L"DisplayVersion"));
                 }
             }
+            // ---- else the copy the old install script made (no registry entry; v0.7.10 and older) ----
+            // Without this a new zip offered a SECOND per-user install while the script's copy, and its
+            // "Agentmaster (Portable)" Start-menu entry, stayed behind.
+            if (ex.userDir.empty())
+            {
+                const std::wstring legacy = LegacyScriptInstallDir();
+                const InstallDecision d = ReadInstallDecisionIn(legacy);
+                const bool targetHoldsExe = d.kind == Decision::InstalledTo && DirHoldsAppExe(d.dir);
+                const std::wstring offer = LegacyScriptOfferDir(legacy, DirHoldsAppExe(legacy), d, targetHoldsExe, exeDir);
+                if (!offer.empty())
+                {
+                    ex.userDir = offer;
+                    ex.userVersion = VersionStampIn(offer);
+                    ex.userFromLegacyScript = true;
+                    ex.userKeptPortable = ReadInstallDecisionIn(offer).kind == Decision::Portable;
+                }
+            }
             // ---- a machine-wide entry (the all-users install; read-only for a normal user) ----
-            const std::wstring mloc = detail::RegReadString(HKEY_LOCAL_MACHINE, kUninstallKey, L"InstallLocation");
+            // Its own key first (kMachineUninstallKey), else where a copy registered before 2026-10-21 has it.
+            const wchar_t* machineKey = kMachineUninstallKey;
+            std::wstring mloc = detail::RegReadString(HKEY_LOCAL_MACHINE, machineKey, L"InstallLocation");
+            if (mloc.empty())
+            {
+                machineKey = kUninstallKey;
+                mloc = detail::RegReadString(HKEY_LOCAL_MACHINE, machineKey, L"InstallLocation");
+            }
             if (!mloc.empty())
             {
                 ex.machineDir = mloc;
-                ex.machineVersionText = detail::RegReadString(HKEY_LOCAL_MACHINE, kUninstallKey, L"DisplayVersion");
+                ex.machineVersionText = detail::RegReadString(HKEY_LOCAL_MACHINE, machineKey, L"DisplayVersion");
                 ex.machineHasExe = DirHoldsAppExe(mloc);
                 ex.machineVersion = VersionStampIn(mloc);
                 if (ex.machineVersion.major == 0 && ex.machineVersion.minor == 0 && ex.machineVersion.patch == 0)
@@ -1987,18 +2086,21 @@ namespace Agentmaster::PortableInstall
             return true;
         }
 
-        // An UPGRADE of an existing install at dst: remove only what WE SHIP — a top-level entry the
-        // NEW source layout also has, or one the OLD install's manifest lists (a file a newer version
-        // no longer ships must not linger) — and never the preserved user state. An old install WITHOUT
-        // a manifest (a zip built before 2026-10-21) is read through the legacy list instead
-        // (IsLegacyShippedLeaf), exactly as the PowerShell core's Get-AmShippedNames reads it: until
-        // then this upgrade left a pre-manifest release's binaries behind (seen in a test desktop on
-        // 2026-10-21, v0.7.10 -> a new layout). A folder the user shares with other files keeps them.
-        //   src — the new layout (the running unzip).
-        //   dst — the existing install.
-        //   throws — std::bad_alloc only (filesystem errors are absorbed per entry).
-        inline void RemoveShippedEntries(const std::filesystem::path& src, const std::filesystem::path& dst)
+        // The entries of an existing install at dst that an UPGRADE replaces — only what WE SHIP: a
+        // top-level entry the NEW source layout also has, or one the OLD install's manifest lists (a file a
+        // newer version no longer ships must not linger), and the old version stamp — never the preserved
+        // user state, never a set-aside folder (RemoveStaleSetAsides deals with those). An old install
+        // WITHOUT a manifest (a zip built before 2026-10-21) is read through the legacy list instead
+        // (IsLegacyShippedLeaf), exactly as the PowerShell core's Get-AmShippedNames reads it: until then
+        // this upgrade left a pre-manifest release's binaries behind (seen in a test desktop on 2026-10-21,
+        // v0.7.10 -> a new layout). A folder the user shares with other files keeps them.
+        //   src     — the new layout (the running unzip).
+        //   dst     — the existing install.
+        //   returns — the entries' full paths, in directory order.
+        //   throws  — std::bad_alloc only (filesystem errors end the listing).
+        inline std::vector<std::filesystem::path> ShippedEntriesToReplace(const std::filesystem::path& src, const std::filesystem::path& dst)
         {
+            std::vector<std::filesystem::path> entries;
             const std::vector<std::wstring> oldShipped = ReadManifestNamesIn(dst.wstring());
             const auto listedInOld = [&](const std::wstring& leaf) {
                 if (oldShipped.empty())
@@ -2012,15 +2114,228 @@ namespace Agentmaster::PortableInstall
             for (const auto& entry : std::filesystem::directory_iterator{ dst, ec })
             {
                 const std::wstring leaf = entry.path().filename().wstring();
-                if (IsPreservedLeaf(leaf))
+                if (IsPreservedLeaf(leaf) || IsSetAsideLeaf(leaf))
                 {
                     continue;
                 }
-                if (Profiles::detail::NormPathKey(leaf) == L".am-version" || std::filesystem::exists(src / leaf, ec) || listedInOld(leaf))
+                std::error_code probe;
+                if (Profiles::detail::NormPathKey(leaf) == L".am-version" || std::filesystem::exists(src / leaf, probe) || listedInOld(leaf))
                 {
-                    std::filesystem::remove_all(entry.path(), ec);
+                    entries.push_back(entry.path());
                 }
             }
+            return entries;
+        }
+
+        // Delete the set-aside folders (IsSetAsideLeaf) an earlier, interrupted upgrade left in dst — by this
+        // installer or by the PowerShell core, which uses the same prefix. They hold only Agentmaster's own files.
+        //   dst    — the install folder.
+        //   throws — std::bad_alloc only (a folder that cannot be deleted yet stays for the next run).
+        inline void RemoveStaleSetAsides(const std::filesystem::path& dst)
+        {
+            std::vector<std::filesystem::path> stale;
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator{ dst, ec })
+            {
+                if (IsSetAsideLeaf(entry.path().filename().wstring()))
+                {
+                    stale.push_back(entry.path());
+                }
+            }
+            for (const auto& p : stale)
+            {
+                std::error_code rm;
+                std::filesystem::remove_all(p, rm);
+            }
+        }
+
+        // An UPGRADE of an existing install at dst, the plain way: delete what it replaces
+        // (ShippedEntriesToReplace) and a stale set-aside folder. PerformInstall moves the previous version
+        // aside instead (SetAsideShippedEntries), so a failed copy can put it back; this stays the rule's
+        // reference and the harness's check of it.
+        //   src — the new layout (the running unzip).
+        //   dst — the existing install.
+        //   throws — std::bad_alloc only (filesystem errors are absorbed per entry).
+        inline void RemoveShippedEntries(const std::filesystem::path& src, const std::filesystem::path& dst)
+        {
+            RemoveStaleSetAsides(dst);
+            for (const auto& p : ShippedEntriesToReplace(src, dst))
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(p, ec);
+            }
+        }
+
+        // The previous version of an install, moved aside by SetAsideShippedEntries while the new one is copied in.
+        struct SetAside
+        {
+            std::filesystem::path dir; // <dst>\.am-previous-<n>; empty when nothing was moved, or once it was removed
+            std::vector<std::wstring> moved; // the top-level names now inside dir
+        };
+
+        // Undo SetAsideShippedEntries: move every set-aside entry back into dst, then delete the set-aside
+        // folder when all came back. Nothing in dst is removed first — for after a COPY, RestoreSetAside.
+        //   dst     — the install folder.
+        //   aside   — what was moved; `dir` is cleared once the folder is gone.
+        //   returns — true when every entry is back.
+        //   throws  — std::bad_alloc only.
+        inline bool PutBackSetAside(const std::filesystem::path& dst, SetAside& aside)
+        {
+            bool all = true;
+            for (const auto& leaf : aside.moved)
+            {
+                if (!::MoveFileExW((aside.dir / leaf).c_str(), (dst / leaf).c_str(), 0))
+                {
+                    all = false; // the entry stays in the set-aside folder, which is then kept
+                }
+            }
+            if (all && !aside.dir.empty())
+            {
+                std::error_code rm;
+                std::filesystem::remove_all(aside.dir, rm);
+                aside.dir.clear();
+                aside.moved.clear();
+            }
+            return all;
+        }
+
+        // Move what an upgrade replaces (ShippedEntriesToReplace) into a new set-aside folder inside dst, one
+        // rename each: the same volume, and a running image can be renamed (unlike deleted). When one move
+        // fails, the entries already moved go back (PutBackSetAside) and the upgrade stops before anything was
+        // replaced. Until 2026-10-21 the previous version was deleted before the copy, and a copy that failed
+        // half way left an install holding neither version.
+        //   src / dst — the new layout and the existing install.
+        //   aside     — receives the set-aside folder and the moved names.
+        //   err       — receives the user-facing reason on a failure (may be null).
+        //   returns   — true when everything was moved (or there was nothing to move).
+        //   throws    — std::bad_alloc only.
+        inline bool SetAsideShippedEntries(const std::filesystem::path& src, const std::filesystem::path& dst, SetAside& aside, std::wstring* err)
+        {
+            RemoveStaleSetAsides(dst);
+            const std::vector<std::filesystem::path> entries = ShippedEntriesToReplace(src, dst);
+            if (entries.empty())
+            {
+                return true;
+            }
+            const std::wstring stem = std::wstring{ kSetAsideLeafPrefix } + std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(::GetTickCount64());
+            std::error_code ec;
+            for (unsigned attempt = 0; attempt < 50 && aside.dir.empty(); ++attempt)
+            {
+                const auto candidate = dst / (attempt == 0 ? stem : stem + L"-" + std::to_wstring(attempt));
+                if (std::filesystem::create_directory(candidate, ec))
+                {
+                    aside.dir = candidate;
+                }
+            }
+            if (aside.dir.empty())
+            {
+                if (err)
+                {
+                    *err = L"no folder could be created in " + dst.wstring();
+                }
+                return false;
+            }
+            for (const auto& p : entries)
+            {
+                const std::wstring leaf = p.filename().wstring();
+                if (!::MoveFileExW(p.c_str(), (aside.dir / leaf).c_str(), 0))
+                {
+                    const DWORD code = ::GetLastError();
+                    PutBackSetAside(dst, aside);
+                    if (err)
+                    {
+                        *err = L"its " + leaf + L" could not be moved (Windows error " + std::to_wstring(code) + L"; something may be using it). Nothing was changed.";
+                    }
+                    return false;
+                }
+                aside.moved.push_back(leaf);
+            }
+            return true;
+        }
+
+        // Undo an upgrade whose COPY failed: remove what the copy may have laid down — every top-level entry of
+        // the new layout a copy carries (CopyTree's rule); each one that existed before was moved aside first,
+        // since ShippedEntriesToReplace takes every name the new layout has — then put the set-aside entries back.
+        //   src     — the new layout.
+        //   dst     — the install folder.
+        //   aside   — what SetAsideShippedEntries moved.
+        //   returns — true when the previous version is complete again (the set-aside folder is then gone);
+        //             false keeps the set-aside folder with what could not be moved back.
+        //   throws  — std::bad_alloc only.
+        inline bool RestoreSetAside(const std::filesystem::path& src, const std::filesystem::path& dst, SetAside& aside)
+        {
+            std::error_code ec;
+            for (const auto& top : std::filesystem::directory_iterator{ src, ec })
+            {
+                const std::wstring leaf = top.path().filename().wstring();
+                if (IsCopyExcludedLeaf(leaf) || IsPreservedLeaf(leaf))
+                {
+                    continue; // never laid down by the copy, and never touched in dst
+                }
+                std::error_code rm;
+                std::filesystem::remove_all(dst / leaf, rm);
+            }
+            return PutBackSetAside(dst, aside);
+        }
+
+        // After a successful upgrade: delete the previous version's set-aside folder (best effort — one that
+        // cannot be deleted yet goes at the next upgrade or uninstall).
+        //   aside  — what SetAsideShippedEntries moved; cleared.
+        //   throws — nothing.
+        inline void DropSetAside(SetAside& aside) noexcept
+        {
+            if (!aside.dir.empty())
+            {
+                std::error_code rm;
+                std::filesystem::remove_all(aside.dir, rm);
+            }
+            aside.dir.clear();
+            aside.moved.clear();
+        }
+
+        // Retire the Start-menu entry the old install script made (kLegacyScriptShortcutLeaf) once the per-user
+        // install it leads to is registered under kShortcutLeaf: only when it points into installDir, or into a
+        // launcher stub whose install.path names installDir — a shortcut to any other copy stays (the PowerShell
+        // core's Remove-AmLegacyScriptShortcut, the same rule).
+        //   installDir — the registered per-user install.
+        //   returns    — true when the shortcut was removed.
+        //   throws     — std::bad_alloc only.
+        inline bool RetireLegacyScriptShortcut(const std::wstring& installDir)
+        {
+            if (installDir.empty())
+            {
+                return false;
+            }
+            ComScope com;
+            const std::wstring programs = ShellFolder(CSIDL_PROGRAMS);
+            if (programs.empty())
+            {
+                return false;
+            }
+            const std::wstring lnk = programs + L"\\" + kLegacyScriptShortcutLeaf;
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::path{ lnk }, ec))
+            {
+                return false;
+            }
+            const std::wstring target = ShortcutTarget(lnk);
+            if (target.empty())
+            {
+                return false; // unreadable: left alone
+            }
+            const std::wstring targetDir = std::filesystem::path{ target }.parent_path().wstring();
+            bool retire = IsSameOrBelow(targetDir, installDir);
+            if (!retire)
+            {
+                const InstallDecision stub = ReadInstallDecisionIn(targetDir);
+                retire = stub.kind == Decision::InstalledTo && Profiles::detail::SamePath(stub.dir, installDir);
+            }
+            if (!retire || !::DeleteFileW(lnk.c_str()))
+            {
+                return false;
+            }
+            LogInstall(L"retired the old install script's Start-menu entry " + lnk);
+            return true;
         }
 
         // The deepest folder of `path` that exists ("" when none does — an unknown drive): where a write
@@ -2094,6 +2409,10 @@ namespace Agentmaster::PortableInstall
             const std::filesystem::path dst{ o.destDir };
             const Updater::Version ours = VersionStampIn(o.sourceDir);
             uint64_t bytes = 0;
+            // A destination the user kept portable on purpose (the old install script's copy, for one) is
+            // updated, never turned into an install: its files only — no install.path change, no profile
+            // pointer, no registration (the PowerShell core's Install-AmUserCopy, the same rule).
+            const bool keptPortable = !inPlace && ReadInstallDecisionIn(o.destDir).kind == Decision::Portable;
 
             if (!inPlace)
             {
@@ -2106,6 +2425,7 @@ namespace Agentmaster::PortableInstall
                     return out;
                 }
                 const bool existing = DirHoldsAppExe(o.destDir);
+                detail::SetAside aside;
                 if (existing)
                 {
                     const Updater::Version theirs = VersionStampIn(o.destDir);
@@ -2119,16 +2439,39 @@ namespace Agentmaster::PortableInstall
                         out.error = L"Agentmaster is running from " + o.destDir + L". Close it, then try again.";
                         return out;
                     }
-                    status(L"Removing the previous version\x2026");
-                    detail::RemoveShippedEntries(src, dst);
+                    // Moved aside, not deleted: a copy that fails half way puts the previous version back.
+                    status(L"Setting the previous version aside\x2026");
+                    std::wstring asideErr;
+                    if (!detail::SetAsideShippedEntries(src, dst, aside, &asideErr))
+                    {
+                        out.error = L"The Agentmaster in " + o.destDir + L" could not be updated: " + asideErr;
+                        return out;
+                    }
                 }
                 status(L"Copying files\x2026");
                 std::wstring err;
-                if (!detail::CopyTree(src, dst, status, bytes, &err))
+                bool copied = false;
+                try
+                {
+                    copied = detail::CopyTree(src, dst, status, bytes, &err);
+                }
+                catch (...)
+                {
+                    copied = false; // only bad_alloc: handled like a failed copy, so the previous version goes back
+                }
+                if (!copied)
                 {
                     out.error = err.empty() ? L"Copying the files failed." : err;
+                    if (existing)
+                    {
+                        status(L"Putting the previous version back\x2026");
+                        out.error += detail::RestoreSetAside(src, dst, aside) ?
+                                         L"\n\nThe installed Agentmaster was put back as it was." :
+                                         L"\n\nThe previous version could not be put back completely; what remains of it is in " + aside.dir.wstring() + L".";
+                    }
                     return out;
                 }
+                detail::DropSetAside(aside);
             }
             else
             {
@@ -2152,32 +2495,50 @@ namespace Agentmaster::PortableInstall
                 return out;
             }
 
-            // The installed copy's state: it is an INSTALL -> the Default profile, silently (its
-            // pointer), and whatever a "later" run left in <source>\profile is migrated in.
-            status(L"Setting up the profile\x2026");
-            if (!o.profileDir.empty())
+            if (keptPortable)
             {
-                Profiles::detail::EnsureDirExists(o.profileDir);
-                const std::wstring sourceProfile = Profiles::PortableDefaultProfileDirIn(o.sourceDir);
-                if (Profiles::ProfileDirHasData(sourceProfile))
-                {
-                    Profiles::MigrateProfileData(sourceProfile, o.profileDir);
-                }
-                if (Profiles::ReadLocalProfilePointerIn(o.destDir).empty())
-                {
-                    Profiles::SaveLocalProfilePointerIn(o.destDir, o.profileDir);
-                }
+                out.notes.push_back(o.destDir + L" was kept portable by choice: only its files were updated");
             }
-            SaveInstallDecisionIn(o.destDir, { Decision::Installed, {} });
+            else
+            {
+                // The installed copy's state: it is an INSTALL -> the Default profile, silently (its
+                // pointer), and whatever a "later" run left in <source>\profile is migrated in.
+                status(L"Setting up the profile\x2026");
+                if (!o.profileDir.empty())
+                {
+                    Profiles::detail::EnsureDirExists(o.profileDir);
+                    const std::wstring sourceProfile = Profiles::PortableDefaultProfileDirIn(o.sourceDir);
+                    if (Profiles::ProfileDirHasData(sourceProfile))
+                    {
+                        Profiles::MigrateProfileData(sourceProfile, o.profileDir);
+                    }
+                    if (Profiles::ReadLocalProfilePointerIn(o.destDir).empty())
+                    {
+                        // A destination that never chose a profile (the old install script's folder, run with "Ask
+                        // me later") kept its data in <dest>\profile: it comes along too (never over a file the
+                        // profile already holds), and <dest>\profile itself stays where it is.
+                        const std::wstring destProfile = Profiles::PortableDefaultProfileDirIn(o.destDir);
+                        if (!inPlace && Profiles::ProfileDirHasData(destProfile))
+                        {
+                            Profiles::MigrateProfileData(destProfile, o.profileDir);
+                        }
+                        Profiles::SaveLocalProfilePointerIn(o.destDir, o.profileDir);
+                    }
+                }
+                SaveInstallDecisionIn(o.destDir, { Decision::Installed, {} });
 
-            status(L"Creating shortcuts and the right-click menu\x2026");
-            RegistrationOptions r;
-            r.installDir = o.destDir;
-            r.exe = exe;
-            r.aumid = o.aumid;
-            r.versionText = FormatVersion(VersionStampIn(o.destDir));
-            r.estimatedSizeKb = static_cast<DWORD>(std::min<uint64_t>(bytes / 1024, 0xFFFFFFFFull));
-            RegisterInstall(r, &out.notes);
+                status(L"Creating shortcuts and the right-click menu\x2026");
+                RegistrationOptions r;
+                r.installDir = o.destDir;
+                r.exe = exe;
+                r.aumid = o.aumid;
+                r.versionText = FormatVersion(VersionStampIn(o.destDir));
+                r.estimatedSizeKb = static_cast<DWORD>(std::min<uint64_t>(bytes / 1024, 0xFFFFFFFFull));
+                RegisterInstall(r, &out.notes);
+                // The old install script's "Agentmaster (Portable)" entry led here (directly, or through a
+                // launcher stub): the standard entry just written replaces it.
+                detail::RetireLegacyScriptShortcut(o.destDir);
+            }
 
             if (o.takeOverPackage && !o.packageFullName.empty())
             {
@@ -2376,14 +2737,19 @@ namespace Agentmaster::PortableInstall
         {
             firstDir = ex.userDir;
             const std::wstring theirs = FormatVersion(ex.userVersion);
+            // The old install script's copy has no registration yet: what an update does to it is spelled out.
+            const std::wstring updateNote = !ex.userFromLegacyScript ? std::wstring{ L"keeps its settings and shortcuts" } :
+                                            ex.userKeptPortable      ? std::wstring{ L"the copy the install script made, kept portable: only its files are updated" } :
+                                                                       std::wstring{ L"the copy the install script made; keeps its data and gets the shortcuts and Apps & Features entry" };
             if (Updater::CompareVersion(ours, ex.userVersion) > 0)
             {
-                firstLabel = L"Update the installed Agentmaster (v" + theirs + L" \x2192 v" + oursText + L")" + recommended + L"\n" + ex.userDir + L"  \x2014  keeps its settings and shortcuts";
+                firstLabel = L"Update the installed Agentmaster (v" + theirs + L" \x2192 v" + oursText + L")" + recommended + L"\n" + ex.userDir + L"  \x2014  " + updateNote;
             }
             else
             {
                 firstChoice = Choice::UseExisting;
-                firstLabel = L"Use the installed Agentmaster (v" + theirs + L")" + recommended + L"\n" + ex.userDir + L"  \x2014  already this version or newer; this copy just launches it";
+                firstLabel = L"Use the installed Agentmaster (v" + theirs + L")" + recommended + L"\n" + ex.userDir + L"  \x2014  " +
+                             (ex.userFromLegacyScript ? L"the copy the install script made, " : L"") + L"already this version or newer; this copy just launches it";
             }
         }
         else
@@ -2651,7 +3017,7 @@ namespace Agentmaster::PortableInstall
                 break;
             }
 
-            const ExistingInstalls ex = DetectExistingInstalls();
+            const ExistingInstalls ex = DetectExistingInstalls(exeDir);
             const Updater::Version ours = VersionStampIn(exeDir);
             const std::wstring tail = detail::CommandLineTail();
             // How an installed (or adopted) copy is started from here: WITHOUT administrator rights when
@@ -2934,7 +3300,11 @@ namespace Agentmaster::PortableInstall
             }
             const std::wstring dir = temp + L"\\Agentmaster-update";
             Profiles::detail::EnsureDirExists(dir);
-            std::wstring cmd = L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
+            // The file is UTF-8 (WriteFileUtf8, no BOM), and cmd.exe decodes a batch file in the console's code
+            // page: `chcp 65001` first, so a non-ASCII install path (a user name with Hebrew letters or an
+            // umlaut) reaches PowerShell intact — cmd reads each later line again in the new code page.
+            std::wstring cmd = Updater::kCmdUtf8Prologue;
+            cmd += L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
             cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\" -UninstallPortable";
             cmd += L" -PortableDir " + Updater::CmdArg(installDir);
             cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());

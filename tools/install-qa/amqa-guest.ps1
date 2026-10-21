@@ -59,10 +59,11 @@ function Get-AmQaState {
     .SYNOPSIS
     Print every Agentmaster install, registration, shortcut, PATH entry, verb, profile and process.
     .DESCRIPTION
-    Read-only. Covers the per-user installs of each QA account, the all-users install, HKCU (each
-    loaded user hive) and HKLM entries, the user and machine PATH, the right-click verbs, the
-    shortcuts on both desktops and both Start menus, each account's profile + its last [install]
-    lines, and the running Agentmaster.exe processes with their account and token elevation.
+    Read-only. Covers the per-user installs of each QA account (the old script's copy in
+    %LOCALAPPDATA%\Programs\Agentmaster too), the all-users install, the MSIX packages, HKCU (each
+    loaded user hive) and HKLM entries with their display names, the user and machine PATH, the
+    right-click verbs, the shortcuts on both desktops and both Start menus, each account's profile + its
+    last [install] lines, and the running Agentmaster.exe processes with their account and token elevation.
     .OUTPUTS
     Text lines (one fact per line).
     #>
@@ -71,17 +72,29 @@ function Get-AmQaState {
         $d = "C:\Users\$a\.agentmaster\bin"
         $f = Get-AmQaInstallFacts $d
         if ($f) { "  per-user ${a}: $d  $f" }
+        # Where Install-Agentmaster.ps1 v0.7.10 and older put its portable copy (no registry entry of its own).
+        $old = "C:\Users\$a\AppData\Local\Programs\Agentmaster"
+        $of = Get-AmQaInstallFacts $old
+        if ($of) { "  old script copy ${a}: $old  $of" }
     }
     $m = Get-AmQaInstallFacts 'C:\Program Files\Agentmaster'
     if ($m) { "  all-users: C:\Program Files\Agentmaster  $m" }
+    # The MSIX packages, every user's (the agent runs elevated).
+    Get-AppxPackage -AllUsers -Name 'Agentmaster*' -ErrorAction SilentlyContinue | ForEach-Object {
+        $users = ($_.PackageUserInformation | ForEach-Object { "$($_.UserSecurityId.Username)=$($_.InstallState)" }) -join ','
+        "  package: $($_.PackageFullName) at $($_.InstallLocation) users=[$users]"
+    }
     "== uninstall entries"
-    $hk = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster'
-    if (Test-Path $hk) { $e = Get-ItemProperty $hk; "  HKLM: ver={0} loc={1} uninstall={2}" -f $e.DisplayVersion, $e.InstallLocation, $e.UninstallString }
+    # The all-users entry's own key (AgentmasterAllUsers since 2026-10-21) and the name it had before.
+    foreach ($leaf in 'AgentmasterAllUsers', 'Agentmaster') {
+        $hk = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$leaf"
+        if (Test-Path $hk) { $e = Get-ItemProperty $hk; "  HKLM {0}: name='{1}' ver={2} loc={3} uninstall={4}" -f $leaf, $e.DisplayName, $e.DisplayVersion, $e.InstallLocation, $e.UninstallString }
+    }
     foreach ($a in $AmQaAccounts) {
         $sid = try { (New-Object System.Security.Principal.NTAccount($a)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
         if (-not $sid) { continue }
         $uk = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster"
-        if (Test-Path $uk) { $e = Get-ItemProperty $uk; "  HKCU ${a}: ver={0} loc={1}" -f $e.DisplayVersion, $e.InstallLocation }
+        if (Test-Path $uk) { $e = Get-ItemProperty $uk; "  HKCU ${a}: name='{0}' ver={1} loc={2}" -f $e.DisplayName, $e.DisplayVersion, $e.InstallLocation }
         $env = "Registry::HKEY_USERS\$sid\Environment"
         if (Test-Path $env) {
             $p = (Get-ItemProperty $env -ErrorAction SilentlyContinue).Path
@@ -135,18 +148,23 @@ function Reset-AmQa {
     .SYNOPSIS
     Remove every Agentmaster install, registration, shortcut, PATH entry, profile and process.
     .DESCRIPTION
-    For a disposable test desktop only: ends Agentmaster.exe / its am-update powershell, deletes
-    the per-user installs and profiles of the QA accounts, the all-users install, the HKLM / each
-    loaded HKCU uninstall entry, the right-click verbs, the PATH entries and the shortcuts. The QA
-    copies under C:\amqa stay (each scenario still starts from a FRESH copy of them).
+    For a disposable test desktop only: ends Agentmaster.exe / its am-update powershell, removes the
+    MSIX packages (every user's), deletes the per-user installs, the old script's copies
+    (%LOCALAPPDATA%\Programs\Agentmaster) and the profiles of the QA accounts, the all-users install,
+    the HKLM / each loaded HKCU uninstall entry, the right-click verbs, the PATH entries and the
+    shortcuts. The QA copies under C:\amqa stay (each scenario still starts from a FRESH copy of them).
     .OUTPUTS
     One line per removed item.
     #>
     Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "ended pid $($_.ProcessId)" }
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'am-update' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "ended updater pid $($_.ProcessId)" }
     Start-Sleep -Milliseconds 800
+    # The MSIX packages, for every user (the agent runs elevated). Their profile data is removed below.
+    Get-AppxPackage -AllUsers -Name 'Agentmaster*' -ErrorAction SilentlyContinue | ForEach-Object {
+        try { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction Stop; "removed package $($_.PackageFullName)" } catch { "package $($_.PackageFullName) NOT removed: $($_.Exception.Message)" }
+    }
     foreach ($a in $AmQaAccounts) {
-        foreach ($d in "C:\Users\$a\.agentmaster", "C:\Users\$a\.agentmaster-dev") {
+        foreach ($d in "C:\Users\$a\.agentmaster", "C:\Users\$a\.agentmaster-dev", "C:\Users\$a\AppData\Local\Programs\Agentmaster") {
             if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue; "removed $d" }
         }
         $map = "C:\Users\$a\.agentmaster.profiles"
@@ -168,7 +186,7 @@ function Reset-AmQa {
         }
     }
     if (Test-Path 'C:\Program Files\Agentmaster') { Remove-Item 'C:\Program Files\Agentmaster' -Recurse -Force -ErrorAction SilentlyContinue; 'removed C:\Program Files\Agentmaster' }
-    foreach ($k in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'HKLM:\Software\Classes\Directory\shell\Agentmaster', 'HKLM:\Software\Classes\Directory\Background\shell\Agentmaster', 'HKLM:\Software\Classes\Drive\shell\Agentmaster') {
+    foreach ($k in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentmasterAllUsers', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'HKLM:\Software\Classes\Directory\shell\Agentmaster', 'HKLM:\Software\Classes\Directory\Background\shell\Agentmaster', 'HKLM:\Software\Classes\Drive\shell\Agentmaster') {
         if (Test-Path $k) { Remove-Item $k -Recurse -Force; "removed $k" }
     }
     $mp = [Environment]::GetEnvironmentVariable('Path', 'Machine')
