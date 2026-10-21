@@ -3808,6 +3808,64 @@ send - nothing is submitted until the user presses Enter in that tab.
         return host;
     }
 
+    std::wstring WrapPwshScriptInConsoleGuard(std::wstring_view runScript)
+    {
+        // BEFORE the agent: save the console's input and output modes through PowerShell's own console
+        // helper. Microsoft.PowerShell.ConsoleControl is internal, but PowerShell 7.x and Windows
+        // PowerShell 5.1 both carry GetConioDeviceHandle (CONIN$), GetActiveScreenBufferHandle (CONOUT$),
+        // GetMode and SetMode with the same signatures (checked 2026-10-21 on 7.5.8 and 5.1.26100), so
+        // reflection reaches them with no Add-Type compile and no measurable startup cost. The methods are
+        // called directly, never through a helper scriptblock: a value that passes through $args arrives
+        // wrapped in a PSObject, and MethodBase.Invoke refuses it ("cannot be converted to type
+        // SafeFileHandle" — measured). Any failure (a renamed internal, Constrained Language Mode) leaves
+        // $m empty: the restore is skipped and the VT reset below still runs. Everything lives in the &{}
+        // scope, so none of these names stays behind in the -NoExit session.
+        static constexpr std::wstring_view kPrefix =
+            L"&{$m=$null;try{"
+            L"$c=[Microsoft.PowerShell.ConsoleShell].Assembly.GetType('Microsoft.PowerShell.ConsoleControl');"
+            L"$f=[Reflection.BindingFlags]'NonPublic,Static';"
+            L"$g=$c.GetMethod('GetMode',$f);$s=$c.GetMethod('SetMode',$f);"
+            L"$h=$c.GetMethod('GetConioDeviceHandle',$f).Invoke($null,$null),$c.GetMethod('GetActiveScreenBufferHandle',$f).Invoke($null,$null);"
+            L"$m=$g.Invoke($null,@($h[0])),$g.Invoke($null,@($h[1]))"
+            L"}catch{$m=$null};try{";
+        // AFTER the agent, however it ended (finally: a clean exit, a crash, a kill, a Ctrl+C):
+        //  1. The VT reset, written FIRST, while the agent's VT-processing output mode is still in place
+        //     (Windows PowerShell's own mode may lack it, which would print the sequences as text).
+        //     ConPTY interprets each sequence for its own state AND passes it through to Agentmaster's
+        //     terminal, so both ends drop the agent's modes:
+        //       CSI < 99 u  pop every kitty keyboard flag (the stacks hold at most 8) on the alternate
+        //                   screen, then ?1049l leaves it, then pop again on the main screen (a push made
+        //                   before the agent entered the alternate screen lives on the main stack);
+        //       DECRST      mouse tracking 1000/1002/1003, encodings 1005/1006/1015/1016, focus reports
+        //                   1004, alternate scroll 1007, bracketed paste 2004, synchronized output 2026,
+        //                   theme-change reports 2031 (claude 2.1.291 turns 1000/1002/1003/1004/1006/2004/
+        //                   2031 on — read off its output in a private ConPTY; this terminal ignores 2031
+        //                   today, so that one only guards a future upstream merge). ConPTY answers a
+        //                   reset of 1004 by re-requesting focus reports for itself, as it must; it no
+        //                   longer forwards them to the shell;
+        //       DECSTR      cursor shown, SGR, margins (without homing the cursor), autowrap, keypad and
+        //                   cursor-key modes, character sets;
+        //       OSC 8 / 9;4 close a dangling hyperlink, clear the tab's taskbar-progress state.
+        //     Every one of them is a no-op after a clean exit (the agent already undid its modes), so the
+        //     reset runs unconditionally: nothing tells a crash from a clean exit reliably.
+        //  2. The saved console modes, restored. A killed agent leaves the input mode raw (VT input on;
+        //     processed, line and echo input off — 0x208 measured): PSReadLine then decodes every mouse
+        //     report and focus event as typed text (`[555;54;31M`: Alt+3 read as a repeat count, the
+        //     2026-10-21 report), and every program started from that prompt inherits the raw mode.
+        //  3. A one-line note when the agent exited non-zero, naming the way back (the tab menu's
+        //     Restart session resumes the same conversation). A clean exit (0) prints nothing.
+        static constexpr std::wstring_view kSuffix =
+            L"}finally{$e=[char]27;"
+            L"try{[Console]::Write(\"$e[<99u$e[?1049l$e[<99u$e[?1000;1002;1003;1004;1005;1006;1007;1015;1016;2004;2026;2031l$e[!p$e]8;;$e\\$e]9;4;0$e\\\")}catch{};"
+            L"if($m){try{$s.Invoke($null,@($h[0],$m[0]));$s.Invoke($null,@($h[1],$m[1]))}catch{}};"
+            L"if($LASTEXITCODE){[Console]::WriteLine(\"[Agentmaster] The agent exited with code $LASTEXITCODE. To start it again, right-click this tab and choose Restart session.\")}"
+            L"}}";
+        std::wstring out;
+        out.reserve(kPrefix.size() + runScript.size() + kSuffix.size());
+        out.append(kPrefix).append(runScript).append(kSuffix);
+        return out;
+    }
+
     std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline, std::wstring_view authTokenEnv)
     {
         // The pwsh script: invoke the inner command line via the call operator (&) so a QUOTED exe
@@ -3830,6 +3888,10 @@ send - nothing is submitted until the user presses Enter in that tab.
             script = L"$env:ANTHROPIC_AUTH_TOKEN = $env:" + name + L"; Remove-Item Env:" + name +
                      L" -ErrorAction Ignore; try { " + script + L" } finally { Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction Ignore }";
         }
+        // The console guard goes around everything (the key carrier included): an agent that dies without
+        // undoing its fullscreen modes must not leave the -NoExit prompt reading mouse reports as text
+        // (the 2026-10-21 report: a killed claude's tab spammed `[555;54;31M` on every mouse move).
+        script = WrapPwshScriptInConsoleGuard(script);
         // -EncodedCommand wants base64 of the command's UTF-16LE bytes. On Windows wchar_t IS UTF-16LE,
         // so the wstring's raw bytes are exactly that (no BOM).
         const std::string b64 = Base64Encode(reinterpret_cast<const unsigned char*>(script.data()), script.size() * sizeof(wchar_t));

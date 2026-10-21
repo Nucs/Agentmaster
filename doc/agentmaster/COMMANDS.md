@@ -252,7 +252,8 @@ them).
      stray C0 controls except `\n`/`\t` dropped — which also makes the paste framing below
      injection-proof, since ESC can never survive into the content — outer whitespace trimmed),
      then tiers on ITS OWN `PsEscapedCost` (the PsDoubleQuote cost model — ` `` ` `"` `$` cost
-     2) against `kHandoverPromptEscapedBudget` (11,500 — the size math in step 5):
+     2) against `kHandoverPromptEscapedBudget` (10,000 since 2026-10-21, 11,500 before — the size
+     math in step 5):
        - **fits** → that successor's launch commandline positional prompt (the zero-race channel);
        - **over budget** → that file rides the **ConPTY stdin instead — a streamed pipe with NO
          CreateProcessW ceiling**: parked as a Pending prompt at the FRONT of ITS successor's
@@ -288,10 +289,16 @@ them).
    args (a claude launch is never the `cmd /c` batch form: native-exe-only policy), and a PS
    double-quoted string legally spans newlines. **The size ceiling that forces the budget:** the
    prompt crosses TWO CreateProcessW hops capped at 32,767 chars each, and the binding one is the
-   outer `-EncodedCommand` wrap — base64(UTF-16LE) costs ≈2.67× the inner commandline, so the
-   inner must stay ≤ ~12,200 chars; minus launch overhead that leaves ~11,500 POST-escape chars
-   for the prompt (the constant, with margin; ` `` ` `"` `$` each cost 2 — why the budget is
-   escape-aware, not raw-length). FRESH launches only — `_LaunchClaudeSession` structurally
+   outer `-EncodedCommand` wrap — base64(UTF-16LE) costs ≈2.67× the pwsh script, so the script
+   must stay ≤ ~12,200 chars. The script is more than the inner commandline: the console guard
+   (~840 chars, `WrapPwshScriptInConsoleGuard` — it puts the console back after the agent exits,
+   ClaudeSpawn.h) and, for a preset launch, the key carrier (~180) go around it. Minus those and
+   the inner's own overhead (paths, flags, `--model`, a preset's extra args: ~300-700) that leaves
+   ~10,500 POST-escape chars for the prompt; the constant is 10,000, with margin (` `` ` `"` `$`
+   each cost 2 — why the budget is escape-aware, not raw-length). It was 11,500 until 2026-10-21,
+   sized before the carrier and the guard; with both, a budget-sized prompt no longer fit.
+   `tests_spawn_sched.cpp` builds the worst case and checks it against 32,767. A document over the
+   budget loses nothing: it takes the paste tier. FRESH launches only — `_LaunchClaudeSession` structurally
    drops the prompt on any restore/resume (its turn already ran and lives in the transcript).
 6. Nav trail: `[nav] handover-begin <sid8> md=…` ↔ `[nav] handover-done new=<sid8'> from=<sid8>`
    (the fork-managed begin/end convention — an unpaired begin means a crash mid-action).
