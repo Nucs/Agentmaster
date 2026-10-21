@@ -26,6 +26,7 @@
 #include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
 #include "../StartupGuard.h" // the startup-deadlock fix - known-folder pre-warm + startup-hang watchdog (TestStartupGuard)
 
+#include <sddl.h> // ConvertStringSecurityDescriptorToSecurityDescriptorW - TestPortableInstall's real unwritable folder
 #include <fstream> // TestHookInvocation reads the materialized settings file back
 #include <iterator> // std::istreambuf_iterator (the same read)
 
@@ -1124,6 +1125,45 @@ void TestProfileBootstrap()
 
         std::error_code ec2;
         fs::remove_all(fakeExe, ec2);
+    }
+
+    // 2026-10-21: the install.path keyword twin (ProfileBootstrap cannot include PortableInstall.h) and
+    // the profile mutex's verdict (an ELEVATED instance's mutex reads ACCESS DENIED to a normal one).
+    {
+        namespace fs = std::filesystem;
+        wchar_t tmp3[MAX_PATH];
+        ::GetTempPathW(MAX_PATH, tmp3);
+        const std::wstring d = std::wstring{ tmp3 } + L"am-keyword-" + NewSessionId();
+        fs::create_directories(fs::path{ d });
+        const auto write = [&](const char* text) {
+            std::ofstream f{ fs::path{ d } / L"install.path", std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+        CHECK(P::InstallFileKeywordIn(d).empty(), "keyword: no install.path -> none");
+        write("# c\r\n  INSTALLED \r\n");
+        CHECK(P::InstallFileKeywordIn(d) == L"installed", "keyword: installed (case/whitespace/CRLF tolerant)");
+        write("here\n");
+        CHECK(P::InstallFileKeywordIn(d) == L"installed", "keyword: the older 'here' spelling");
+        write("machine\n");
+        CHECK(P::InstallFileKeywordIn(d) == L"machine", "keyword: machine");
+        write("portable\n");
+        CHECK(P::InstallFileKeywordIn(d) == L"portable", "keyword: portable");
+        write("C:\\Users\\x\\.agentmaster\\bin\n");
+        CHECK(P::InstallFileKeywordIn(d).empty(), "keyword: a launcher stub's folder -> none");
+        write("garbage\n");
+        CHECK(P::InstallFileKeywordIn(d).empty(), "keyword: garbage -> none");
+        CHECK(P::InstallFileKeywordIn(L"").empty(), "keyword: no dir -> none");
+        CHECK(!P::IsMachineCopyIn(d), "machine copy: no .portable marker -> never");
+        CHECK(P::detail::IsDirWritableByUs(d) && !P::detail::IsDirWritableByUs(d + L"\\missing") && !P::detail::IsDirWritableByUs(L""), "write probe: a scratch dir yes; a missing dir / no dir no");
+        std::error_code ec3;
+        fs::remove_all(fs::path{ d }, ec3);
+    }
+    {
+        using S = P::detail::ProfileMutexState;
+        CHECK(P::detail::ProfileMutexVerdict(true, ERROR_SUCCESS) == S::Acquired, "mutex: a new mutex -> acquired");
+        CHECK(P::detail::ProfileMutexVerdict(true, ERROR_ALREADY_EXISTS) == S::HeldElsewhere, "mutex: it existed -> held by another instance");
+        CHECK(P::detail::ProfileMutexVerdict(false, ERROR_ACCESS_DENIED) == S::HeldElsewhere, "mutex: access denied -> held by an ELEVATED instance (before 2026-10-21 this was ignored)");
+        CHECK(P::detail::ProfileMutexVerdict(false, ERROR_INVALID_NAME) == S::Unknown, "mutex: any other failure -> unknown (never block startup)");
     }
 
     // PersistedDebugModeEnabled reads the ENGINE ENVELOPE — {version, settings:{debugMode}} — the
@@ -4488,6 +4528,240 @@ void TestPortableInstall()
         PI::SaveInstallDecisionIn(exeDir, { PI::Decision::Installed, {} });
         CHECK(PI::IsInstalledPortableIn(exeDir), "installed-portable: marker + installed decision");
         CHECK(!PI::IsInstalledPortableIn(L""), "installed-portable: no dir -> false");
+    }
+
+    // ---- 2026-10-21: the all-users install, the machine-copy rule, accounts and rights, the manifest ----
+    CHECK(PI::DecodeInstallDecision(L"machine").kind == PI::Decision::Machine, "decode: machine");
+    CHECK(PI::DecodeInstallDecision(L"# x\r\n  MACHINE \r\n").kind == PI::Decision::Machine, "decode: machine is case/whitespace/CRLF tolerant");
+    CHECK(PI::EncodeInstallDecision({ PI::Decision::Machine, {} }) == L"machine", "encode: machine");
+    CHECK(PI::DecodeInstallDecision(PI::EncodeInstallDecision({ PI::Decision::Machine, {} })).kind == PI::Decision::Machine, "encode/decode: machine round-trip");
+    {
+        PI::StartupFacts f;
+        f.portableMarker = true;
+        f.allowUi = true;
+        f.decision = { PI::Decision::Machine, {} };
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: the all-users install never asks");
+        f.decision = {};
+        f.machineCopy = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: a pristine copy in a folder this process cannot write never asks (it could not remember an answer)");
+        f.allowUi = false;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: ...nor without UI (no deferred profile either: it is a machine copy)");
+        f.machineCopy = false;
+        f.allowUi = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Prompt, "plan: a writable pristine copy still asks");
+        f.decision = { PI::Decision::InstalledTo, L"D:\\x" };
+        f.installedTargetExists = true;
+        f.machineCopy = true;
+        CHECK(PI::DecideStartup(f) == PI::StartupPlan::Handoff, "plan: a launcher stub hands off, also from a read-only folder");
+    }
+    {
+        PI::InstallIdentity id;
+        id.sessionId = 0;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::NoSessionUser, "account: session 0 (a service) -> never prompt");
+        id.sessionId = 1;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::AsIs, "account: the session user unknown -> as is (fail open)");
+        id.elevated = true;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::AsIsElevated, "account: unknown + elevated -> as is, the copy then starts without the rights");
+        id.sessionUserKnown = true;
+        id.isSessionUser = true;
+        id.elevated = false;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::AsIs, "account: the signed-in user -> as is");
+        id.elevated = true;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::AsIsElevated, "account: the signed-in user elevated -> install, then start without the rights");
+        id.isSessionUser = false;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::OtherAccountRelaunch, "account: another, elevated account (UAC credentials) -> start this copy as the signed-in user");
+        id.elevated = false;
+        id.system = true;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::OtherAccountRelaunch, "account: SYSTEM in a user session -> start it as the signed-in user");
+        id.system = false;
+        CHECK(PI::DecideAccountPlan(id) == PI::AccountPlan::OtherAccountExplain, "account: another, unelevated account -> explain (it cannot act for the user)");
+    }
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::OtherAccountRelaunch, true, true) == PI::PromptDefault::ForSessionUser, "prompt default: the account fix comes first");
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::AsIs, false, true) == PI::PromptDefault::UseMachine, "prompt default: no per-user install -> a current all-users install is used (no rights, no second copy)");
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::AsIs, true, true) == PI::PromptDefault::PerUser, "prompt default: the user's OWN per-user install beats a current all-users one (test desktop, 2026-10-21)");
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::AsIsElevated, true, false) == PI::PromptDefault::PerUser, "prompt default: an older per-user install is updated, not bypassed");
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::AsIsElevated, false, false) == PI::PromptDefault::PerUser, "prompt default: otherwise the NON-ADMIN per-user install");
+    CHECK(PI::DecidePromptDefault(PI::AccountPlan::OtherAccountExplain, false, false) == PI::PromptDefault::PerUser, "prompt default: an account that cannot relaunch still defaults to the per-user install");
+
+    // Why an elevated / hidden script did not start - the truth, not "PowerShell is missing" (test desktop,
+    // 2026-10-21: a standard user on a PC that denies elevation got ERROR_ACCESS_DISABLED_BY_POLICY).
+    {
+        PI::ScriptRun refused;
+        refused.error = ERROR_ACCESS_DISABLED_BY_POLICY;
+        CHECK(PI::ScriptStartFailureText(refused, true).find(L"does not let this account run programs as administrator") != std::wstring::npos,
+              "start failure: elevation refused by the PC's policy (1260) is named as such");
+        PI::ScriptRun denied;
+        denied.error = ERROR_ACCESS_DENIED;
+        CHECK(PI::ScriptStartFailureText(denied, true).find(L"as administrator") != std::wstring::npos, "start failure: an access-denied elevation reads the same");
+        CHECK(PI::ScriptStartFailureText(denied, false).find(L"Windows error 5") != std::wstring::npos, "start failure: access denied WITHOUT elevation is not blamed on rights");
+        PI::ScriptRun missing;
+        missing.error = ERROR_FILE_NOT_FOUND;
+        CHECK(PI::ScriptStartFailureText(missing, true).find(L"powershell.exe") != std::wstring::npos, "start failure: a missing PowerShell is named");
+        CHECK(PI::ScriptStartFailureText(PI::ScriptRun{}, true).find(L"temporary folder") != std::wstring::npos, "start failure: never reached ShellExecuteEx -> the script could not be prepared");
+        PI::ScriptRun other;
+        other.error = 1234;
+        CHECK(PI::ScriptStartFailureText(other, true).find(L"Windows error 1234") != std::wstring::npos, "start failure: any other code is shown as is");
+    }
+    {
+        using T = PI::UninstallTarget;
+        const PI::InstallDecision none{};
+        const PI::InstallDecision inst{ PI::Decision::Installed, {} };
+        const PI::InstallDecision mach{ PI::Decision::Machine, {} };
+        const PI::InstallDecision port{ PI::Decision::Portable, {} };
+        const PI::InstallDecision stub{ PI::Decision::InstalledTo, L"D:\\x" };
+        CHECK(PI::DecideUninstallTarget(false, inst, false) == T::NotInstalled, "uninstall: no marker (a package, a build folder) -> nothing here");
+        CHECK(PI::DecideUninstallTarget(true, inst, false) == T::UserInstall, "uninstall: installed -> the per-user uninstall");
+        CHECK(PI::DecideUninstallTarget(true, inst, true) == T::UserInstall, "uninstall: installed wins over a folder turned read-only");
+        CHECK(PI::DecideUninstallTarget(true, mach, false) == T::MachineInstall, "uninstall: machine -> the elevated all-users uninstall");
+        CHECK(PI::DecideUninstallTarget(true, none, true) == T::MachineInstall, "uninstall: an unwritable portable folder -> the elevated uninstall");
+        CHECK(PI::DecideUninstallTarget(true, none, false) == T::NotInstalled, "uninstall: a pristine portable -> nothing registered (before 2026-10-21 the flag deleted its binaries)");
+        CHECK(PI::DecideUninstallTarget(true, port, false) == T::NotInstalled, "uninstall: kept portable -> nothing registered");
+        CHECK(PI::DecideUninstallTarget(true, stub, false) == T::NotInstalled, "uninstall: a launcher stub -> nothing registered here");
+    }
+    CHECK(PI::IsSafeManifestName(L"Agentmaster.exe") && PI::IsSafeManifestName(L".am-version") && PI::IsSafeManifestName(L"Microsoft.UI.Xaml"), "manifest name: plain names are safe");
+    CHECK(!PI::IsSafeManifestName(L"") && !PI::IsSafeManifestName(L".") && !PI::IsSafeManifestName(L".."), "manifest name: empty / . / .. refused");
+    CHECK(!PI::IsSafeManifestName(L"a\\b") && !PI::IsSafeManifestName(L"a/b") && !PI::IsSafeManifestName(L"C:x") && !PI::IsSafeManifestName(L"x:stream") && !PI::IsSafeManifestName(L"*.dll"),
+          "manifest name: separators, drive / stream colons and wildcards are refused");
+    CHECK(!PI::IsSafeManifestName(L"profile.") && !PI::IsSafeManifestName(L"settings ") && !PI::IsSafeManifestName(L"x..."),
+          "manifest name: a trailing dot or space is refused (Windows would strip it: 'profile.' names the PRESERVED profile folder)");
+    CHECK(!PI::IsSafeManifestName(L"NUL") && !PI::IsSafeManifestName(L"con.txt") && !PI::IsSafeManifestName(L"Com7") && !PI::IsSafeManifestName(L"lpt1.dll"),
+          "manifest name: DOS device names (any case, with or without an extension) are refused");
+    CHECK(PI::IsSafeManifestName(L"console.dll") && PI::IsSafeManifestName(L"com10") && PI::IsSafeManifestName(L"nullable.txt") && PI::IsSafeManifestName(L".portable"),
+          "manifest name: names that only START like a device stay allowed");
+    {
+        const auto names = PI::ParseManifestNames(L"# header\r\nAgentmaster.exe\r\n\r\nImages/\r\n  TerminalApp.dll  \r\n..\r\nsub\\dir\r\nagentmaster.EXE\r\n");
+        CHECK(names.size() == 3, "manifest parse: three names (comments, blanks, unsafe and case-duplicates skipped)");
+        CHECK(names.size() == 3 && names[0] == L"Agentmaster.exe" && names[1] == L"Images" && names[2] == L"TerminalApp.dll", "manifest parse: file order kept, a folder's trailing slash dropped, trimmed");
+        CHECK(PI::ParseManifestNames(L"").empty() && PI::ParseManifestNames(L"# only\n").empty(), "manifest parse: empty / comment-only -> no names");
+    }
+    {
+        // The upgrade's removal rule on a real scratch tree: what the new layout ships and what the OLD
+        // manifest lists go; the preserved user state and a user's own file stay.
+        namespace fs = std::filesystem;
+        const std::wstring src = exeDir + L"\\src-layout";
+        const std::wstring dst = exeDir + L"\\dst-install";
+        fs::create_directories(fs::path{ src });
+        fs::create_directories(fs::path{ dst } / L"profile");
+        fs::create_directories(fs::path{ dst } / L"settings");
+        fs::create_directories(fs::path{ dst } / L"Images");
+        const auto touch = [](const std::wstring& p, const char* text) {
+            std::ofstream f{ fs::path{ p }, std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+        touch(src + L"\\Agentmaster.exe", "new");
+        touch(src + L"\\new.dll", "new");
+        touch(src + L"\\.am-manifest", "Agentmaster.exe\nnew.dll\n.am-manifest\n");
+        touch(dst + L"\\Agentmaster.exe", "old");
+        touch(dst + L"\\old.dll", "old");
+        touch(dst + L"\\user-notes.txt", "mine");
+        touch(dst + L"\\install.path", "installed\n");
+        touch(dst + L"\\profile.path", "C:\\x\n");
+        touch(dst + L"\\.am-version", "0.1.0.0");
+        touch(dst + L"\\.am-manifest", "# old\nAgentmaster.exe\nold.dll\nImages/\n");
+        touch(dst + L"\\profile\\sessions.json", "{}");
+        CHECK(PI::ReadManifestNamesIn(dst).size() == 3, "manifest file: the install's own list is read");
+        CHECK(PI::ReadManifestNamesIn(exeDir + L"\\missing").empty(), "manifest file: no manifest -> no names");
+        PI::detail::RemoveShippedEntries(fs::path{ src }, fs::path{ dst });
+        CHECK(!fs::exists(fs::path{ dst } / L"Agentmaster.exe"), "upgrade: a name the new layout ships is replaced");
+        CHECK(!fs::exists(fs::path{ dst } / L"old.dll"), "upgrade: a name only the OLD manifest lists goes too (no stale files)");
+        CHECK(!fs::exists(fs::path{ dst } / L"Images"), "upgrade: an old manifest's folder goes");
+        CHECK(!fs::exists(fs::path{ dst } / L".am-version"), "upgrade: the old stamp is replaced");
+        CHECK(fs::exists(fs::path{ dst } / L"user-notes.txt"), "upgrade: a user's own file in the folder is NEVER removed");
+        CHECK(fs::exists(fs::path{ dst } / L"profile" / L"sessions.json") && fs::exists(fs::path{ dst } / L"settings"), "upgrade: profile\\ and settings\\ are preserved");
+        CHECK(fs::exists(fs::path{ dst } / L"install.path") && fs::exists(fs::path{ dst } / L"profile.path"), "upgrade: install.path and profile.path are preserved");
+
+        // An OLD install WITHOUT a manifest (a pre-2026-10-21 zip, e.g. v0.7.10): its binaries are read
+        // through the legacy list (the PowerShell core's), so none lingers next to the new layout - the
+        // test desktop showed v0.7.10's TerminalApp.dll / OpenConsole.exe / Microsoft.Terminal.*.dll left
+        // behind before this rule. A user's own files, another .exe included, stay.
+        const std::wstring old = exeDir + L"\\dst-legacy";
+        fs::create_directories(fs::path{ old } / L"Images");
+        fs::create_directories(fs::path{ old } / L"profile");
+        for (const wchar_t* n : { L"Agentmaster.exe", L"TerminalApp.dll", L"OpenConsole.exe", L"Microsoft.Terminal.Control.dll", L"resources.pri", L".portable", L"my-tool.exe", L"notes.txt" })
+        {
+            touch(old + L"\\" + n, "x");
+        }
+        CHECK(PI::ReadManifestNamesIn(old).empty(), "legacy upgrade: the old install has no manifest");
+        PI::detail::RemoveShippedEntries(fs::path{ src }, fs::path{ old });
+        CHECK(!fs::exists(fs::path{ old } / L"TerminalApp.dll") && !fs::exists(fs::path{ old } / L"OpenConsole.exe") && !fs::exists(fs::path{ old } / L"resources.pri"),
+              "legacy upgrade: the binaries a pre-manifest release shipped go");
+        CHECK(!fs::exists(fs::path{ old } / L"Microsoft.Terminal.Control.dll"), "legacy upgrade: Microsoft.Terminal.*.dll goes (the one pattern)");
+        CHECK(!fs::exists(fs::path{ old } / L"Images") && !fs::exists(fs::path{ old } / L".portable"), "legacy upgrade: its folders and markers go");
+        CHECK(fs::exists(fs::path{ old } / L"my-tool.exe") && fs::exists(fs::path{ old } / L"notes.txt"), "legacy upgrade: a user's own files stay - not even another .exe is taken");
+        CHECK(fs::exists(fs::path{ old } / L"profile"), "legacy upgrade: profile\\ stays");
+        CHECK(PI::IsLegacyShippedLeaf(L"MICROSOFT.TERMINAL.UI.DLL") && PI::IsLegacyShippedLeaf(L"agentmaster-cli.exe") && !PI::IsLegacyShippedLeaf(L"Microsoft.Terminal.dll") &&
+                  !PI::IsLegacyShippedLeaf(L"other.dll"),
+              "legacy names: case-insensitive, the pattern needs a middle part, nothing broad");
+    }
+    CHECK(PI::ScriptArg(L"C:\\a b\\") == L"\"C:\\a b\"", "script arg: quoted, a trailing backslash dropped (it would escape the quote)");
+    CHECK(PI::ScriptArg(L"x\"y") == L"\"xy\"", "script arg: an embedded quote is dropped");
+    CHECK(PI::EncodeExeArgs(L"").empty() && PI::EncodeExeArgs(L"A") == L"QQA=", "exe args: empty stays empty, else base64 of UTF-16LE");
+    {
+        const auto m = PI::DefaultMachineInstallDir();
+        CHECK(m.size() > 12 && m.compare(m.size() - 12, 12, L"\\Agentmaster") == 0, "machine dir: <Program Files>\\Agentmaster");
+        const auto saved = P::SavedChoiceFor(U::kReleaseFamily);
+        CHECK(PI::UserInstallProfileDir() == (saved.empty() ? P::DefaultReleaseProfileDir() : saved), "user install profile: the package's own choice, else the Default profile");
+    }
+    {
+        // The live identity of the harness itself: it runs as the user signed in to this session.
+        const auto id = PI::DetectInstallIdentity();
+        CHECK(!id.runningUser.empty(), "identity: the running account is read");
+        CHECK(id.sessionId != 0, "identity: the harness runs in a user session");
+        CHECK(id.isSessionUser, "identity: the harness runs as the signed-in user");
+        CHECK(PI::DecideAccountPlan(id) == (id.elevated ? PI::AccountPlan::AsIsElevated : PI::AccountPlan::AsIs), "identity: so its plan is as-is");
+    }
+    {
+        // exeDir holds .portable + install.path = installed (above): a per-user install is never a machine copy.
+        CHECK(!PI::GatherStartupFacts(exeDir, true).machineCopy, "facts: a per-user install is never a machine copy");
+        PI::SaveInstallDecisionIn(exeDir, { PI::Decision::Machine, {} });
+        CHECK(PI::GatherStartupFacts(exeDir, true).machineCopy, "facts: install.path = machine -> a machine copy");
+        CHECK(PI::DecideUninstallTarget(true, PI::ReadInstallDecisionIn(exeDir), P::IsMachineCopyIn(exeDir)) == PI::UninstallTarget::MachineInstall,
+              "uninstall: the all-users folder routes to the elevated uninstall");
+    }
+    {
+        // A REAL unwritable folder: deny "create files / folders" on it to everyone (what Program Files does
+        // to a standard user), keep full control inheritable so the cleanup can delete it again.
+        namespace fs = std::filesystem;
+        const std::wstring ro = exeDir + L"\\read-only-copy";
+        fs::create_directories(fs::path{ ro });
+        {
+            std::ofstream m{ fs::path{ ro } / L".portable", std::ios::binary };
+        }
+        const auto setDacl = [](const std::wstring& path, const wchar_t* sddl) -> bool {
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr))
+            {
+                return false;
+            }
+            const BOOL ok = ::SetFileSecurityW(path.c_str(), DACL_SECURITY_INFORMATION, sd);
+            ::LocalFree(sd);
+            return ok != FALSE;
+        };
+        CHECK(setDacl(ro, L"D:P(D;;0x6;;;WD)(A;OICI;FA;;;WD)"), "read-only folder: the deny ACL is set");
+        CHECK(!P::detail::IsDirWritableByUs(ro), "write probe: a folder that denies creating files reads not writable");
+        CHECK(P::IsMachineCopyIn(ro), "machine copy: an unwritable portable folder is a machine copy");
+        {
+            const auto f = PI::GatherStartupFacts(ro, true);
+            CHECK(f.machineCopy && PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: an unwritable pristine copy never prompts");
+        }
+        CHECK(PI::DecideUninstallTarget(true, PI::ReadInstallDecisionIn(ro), P::IsMachineCopyIn(ro)) == PI::UninstallTarget::MachineInstall,
+              "uninstall: an unwritable portable folder routes to the elevated uninstall");
+        // Profile routing for a machine copy: the home map, never a pointer next to the exe. USERPROFILE is
+        // redirected to a scratch folder so the real ~/.agentmaster.profiles is never touched.
+        const std::wstring savedHome = P::detail::GetEnvVar(L"USERPROFILE");
+        const std::wstring fakeHome = exeDir + L"\\home";
+        fs::create_directories(fs::path{ fakeHome });
+        ::SetEnvironmentVariableW(L"USERPROFILE", fakeHome.c_str());
+        // The stored profile is a scratch path too: should persisting a choice ever create its folder, a
+        // literal like D:\data\am would create it on the developer's real drive.
+        const std::wstring chosen = fakeHome + L"\\data\\am";
+        CHECK(P::PersistProfileChoiceIn(ro, chosen), "persist routing: a machine copy stores its choice");
+        CHECK(!P::LocalProfilePointerExistsIn(ro), "persist routing: ...never as a pointer next to its exe");
+        CHECK(P::ReadChoiceFile(P::ChoiceFilePath())[L"Unpackaged"] == chosen, "persist routing: ...but in the user's own home map");
+        CHECK(P::SavedChoiceFor(L"Unpackaged") == chosen && P::SavedChoiceFor(L"Agentmaster_56k4f06dsfp9r").empty(), "saved choice of a key: read by key, '' when absent");
+        ::SetEnvironmentVariableW(L"USERPROFILE", savedHome.empty() ? nullptr : savedHome.c_str());
+        CHECK(setDacl(ro, L"D:P(A;OICI;FA;;;WD)"), "read-only folder: the deny ACL is lifted again");
+        CHECK(P::detail::IsDirWritableByUs(ro) && !P::IsMachineCopyIn(ro), "write probe: the same folder writable again -> not a machine copy");
     }
 
     std::error_code ec;

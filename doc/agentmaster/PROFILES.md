@@ -15,7 +15,10 @@ Status: **shipped & live-verified.** The identity split + per-install profiles a
 releases (v0.2.0+); an installed first launch **auto-selects** the per-identity default silently —
 the Default / Development / Browse… picker is shown by a **portable first launch** (§2a) and the
 cog (§2). Engine harness 900+ incl. the profile checks; side-by-side release + dev installs run
-cleanly.
+cleanly. **2026-10-21 (NOT BUILT yet):** the install question prefers the per-user install, offers
+installing for all users and handing the copy to the signed-in user, never leaves the app running with
+rights it was installed with, and says why an elevation failed; installs and uninstalls touch only what
+a release ships (`.am-manifest`); the scenario matrix and its test-desktop evidence are §2c.
 
 ---
 
@@ -30,7 +33,7 @@ cleanly.
 | 5 | **`bridge.json` discovery** | The generated PowerShell forwarder hardcoded `$env:USERPROFILE\.agentmaster\bridge.json` — a no-env hook from one instance's session could route to the OTHER instance's pipe. | `BuildForwarderScript(stateDir)` bakes the **per-profile** `<profile>\bridge.json` path in (PS-single-quoted; unit-tested). The shim already embedded the per-profile `--settings` path. |
 | 6 | **Terminal's own settings.json / state.json** | Per-package `LocalState` — isolated, but OUTSIDE the profile (violates "everything in the profile"). | `GetBaseSettingsPath()` honors **`AGENTMASTER_PROFILE`** → `<profile>\terminal\` (exported by the bootstrap before any settings load). Headless hosts (tests/tools) that never ran the bootstrap keep stock paths. |
 | 7 | **The "portable" zip** | Built WITHOUT the `.portable` marker — it shared the global unpackaged WT settings dir, and its Agentmaster state went to `~/.agentmaster`. Then (first cut): the marker hard-wired the profile to `<unzip>\profile` — self-contained, but the user never got to say "use my Default (installed) data", and the cog's Change… was a DEAD write (resolution never read the home map for portables). | `release.yml` passes `-PortableMode:$true` (the `.portable` marker). **First launch PROMPTS** — Portable (`<unzip>\profile`, the default) / Default / Development / Browse… — and the answer persists in the exe-side **`profile.path` pointer** (§2a): relative when the profile lives inside the unzip (movable), absolute otherwise. Terminal's own settings ride the CHOSEN profile (`<profile>\terminal\`, seam #6 — the redirect now outranks upstream portable mode's `<unzip>\settings`, which is seeded in on first choice). |
-| 8 | **Same profile, two instances** (user points both installs at one folder via Browse…) | n/a (new failure mode the picker introduces) | A kernel **profile mutex** (`Local\Agentmaster.profile.<fnv1a64(dir)>`, auto-released on process death — can't go stale): the second instance gets a warn-and-confirm before touching anything. |
+| 8 | **Same profile, two instances** (user points both installs at one folder via Browse…) | n/a (new failure mode the picker introduces) | A kernel **profile mutex** (`Local\Agentmaster.profile.<fnv1a64(dir)>`, auto-released on process death — can't go stale): the second instance gets a warn-and-confirm before touching anything. An `ERROR_ACCESS_DENIED` from `CreateMutex` counts as held (`ProfileMutexVerdict`, 2026-10-21): an ELEVATED instance's mutex cannot be opened by an unelevated one, which used to read as "free". |
 
 **Known shared seam (deliberate, documented):** the defterm/handoff CLSIDs
 (`{1F9F2BF5-…}` / `{051F34EE-…}`) and the shell-extension CLSID (`{52065414-…}`) are upstream's
@@ -118,9 +121,11 @@ instead of hard-coding `<unzip>\profile`:
   also fixed the old dead-write: a portable's cog change used to land in the home map, which
   portable resolution never read. A refused pointer write (read-only exe dir) is surfaced with the
   store path instead of silently pretending the change took.
-- An **installed** (user/machine) copy is unchanged: first launch auto-selects Default
-  (release) / Development (dev) with no prompt; only a manually planted `profile.path` next to its
-  exe would steer it (resolution step 2).
+- An **installed** copy is unchanged: first launch auto-selects Default (release) / Development (dev)
+  with no prompt; only a manually planted `profile.path` next to its exe would steer it (resolution
+  step 2). A **machine copy** (§2b: `install.path` = `machine`, or a portable folder this account cannot
+  write) skips the portable steps entirely — no question, no pointer written next to the exe — and
+  resolves each user's profile from their own home map or the per-identity default.
 - **The in-app updater covers portables** (Updater.h): a portable copy is an updater channel and
   **self-updates IN PLACE** — its version reads from the exe-side `.am-version` stamp the zip
   ships, "Update now" downloads the release's arch-matched portable zip and `am-update.ps1
@@ -134,81 +139,245 @@ Before the §2a profile question — before ANY file is written — a pristine p
 **"Where should Agentmaster live?"** (`AgentMaster/PortableInstall.h`, `EnsureInstallDecidedAtStartup`,
 run from the EXE prelude right after the single-instance handoff and BEFORE
 `EnsureProfileResolvedAtStartup`). *Pristine* = the `.portable` marker with neither an `install.path`
-nor a `profile.path` beside the exe (a portable that already chose a profile before this question
-existed is never nagged; an explicit `AGENTMASTER_PROFILE` skips it; a `-Embedding` activation never
-prompts — it runs self-contained and persists nothing). The command links, the first defaulted:
+nor a `profile.path` beside the exe, in a folder this account can write (a folder it cannot write is a
+*machine copy*, below). An explicit `AGENTMASTER_PROFILE` skips it; a `-Embedding` activation and a
+process in session 0 (a service, SYSTEM) never prompt — they run self-contained and persist nothing.
 
-- **Install to your user folder** — `%USERPROFILE%\.agentmaster\bin` (the Default profile's `bin`
-  sibling). The option ADAPTS to a previous user install of ours (the HKCU Apps & Features entry with a
-  live app exe): **Update the installed Agentmaster (vX → vY)** upgrades it in place (its `settings\`
-  + `profile\` + `profile.path` + `install.path` preserved; only entries the zip SHIPS are replaced, so
-  a folder shared with other files keeps them; refused while something runs from it), or — when it is
-  already the same/newer version — **Use the installed Agentmaster**: this unzip records
-  `install.path` = that dir and hands the launch off to it. It is then a **launcher stub**: every later
-  launch of the unzip forwards its commandline to the install (a vanished install re-asks).
+**The options** (command links; the pre-selected one reads *(recommended)*):
+
+- **Install just for you** — `%USERPROFILE%\.agentmaster\bin` (the Default profile's `bin` sibling),
+  no administrator rights. It ADAPTS to a per-user install of ours (the HKCU Apps & Features entry with
+  a live app exe): **Update the installed Agentmaster (vX → vY)** upgrades it in place, or — when it is
+  already the same or a newer version — **Use the installed Agentmaster (vX)**: this unzip records
+  `install.path` = that dir and becomes a **launcher stub** that forwards every later launch to it (a
+  vanished install re-asks). When another account runs the copy, the label names the account it would
+  install for (*Install for DOMAIN\user*).
+- **Install for all users of this PC** — `%ProgramW6432%\Agentmaster`, needs administrator rights (a UAC
+  prompt; only the install itself runs elevated). It ADAPTS to an all-users install of ours (the HKLM
+  entry with a live exe): **Update the Agentmaster installed for all users (vX → vY)**, or **Use the
+  Agentmaster installed for all users (vX)** — same or newer: no rights needed, this unzip becomes a stub.
+- **Set it up for DOMAIN\signed-in-user** — only when ANOTHER account runs this copy with the rights to
+  act for the user signed in to Windows (an administrator's UAC credentials, *Run as different user* with
+  an elevated administrator, SYSTEM in a user's session): starts this same copy again as the signed-in
+  user, without administrator rights; they then see this question in their own account. Nothing is
+  installed for the running account (only its install trace lands in its own profile folder).
 - **Install to a folder you pick…** — Browse; a non-empty folder that isn't already ours gets an
-  `\Agentmaster` subfolder (the usual installer manners). A destination inside the running unzip, or
-  containing it, is refused.
-- **Install here** — the folder holding the RUNNING binary (`ExeDirPath`, never the cwd): no copy,
-  just the registration below.
-- **Keep it portable, run from here** — no shortcuts, no registry; writes `install.path` = `portable`
-  so it never asks again, then the classic §2a profile picker follows.
+  `\Agentmaster` subfolder. A destination inside the running unzip, or containing it, is refused, and so
+  is one this account cannot write (Program Files without rights): the message points to *Install for
+  all users*.
+- **Install here** — the folder holding the RUNNING binary (`ExeDirPath`, never the cwd): no copy, just
+  the registration.
+- **Keep it portable, run from here** — no shortcuts, no registry; writes `install.path` = `portable` so
+  it never asks again, then the classic §2a profile picker follows.
 - **Ask me later** (also Cancel / X / Esc) — writes NOTHING: this launch runs on the self-contained
   `<exedir>\profile` WITHOUT persisting a profile choice (the §2a picker is deferred too —
-  `EnsureProfileResolvedAtStartup(allowUi, deferPortablePicker)` — one "later" defers every
-  first-launch question instead of trading one dialog for another), and the next launch asks again.
+  `EnsureProfileResolvedAtStartup(allowUi, deferPortablePicker)`), and the next launch asks again.
 
-**What an install is** — MSI-like, per-user, with no MSI, package, certificate or admin: the binaries
+**The pre-selected option** (`DecidePromptDefault`; the user's rule of 2026-10-21: prefer the per-user
+install, which needs no administrator rights): *Set it up for the signed-in user* when another account
+can hand the copy over; otherwise the per-user option whenever this user already has a per-user install
+(use it or update it — no second copy either); otherwise *Use the Agentmaster installed for all users*
+when one exists that is this version or newer; otherwise *Install just for you*.
+
+**Who runs it** (`DetectInstallIdentity` → `DecideAccountPlan`): the token's user and elevation, and
+the user signed in to the process's Windows session (`WTSQuerySessionInformation`, then
+`LookupAccountName` + `EqualSid`; a name compare when the lookup fails). The plans: **AsIs** (the
+signed-in user, unelevated), **AsIsElevated** (the signed-in user, elevated: *Run as administrator*, or
+any administrator on a PC with UAC turned off), **OtherAccountRelaunch** (another account that is
+elevated or SYSTEM), **OtherAccountExplain** (another account without those rights — a standard user,
+or an administrator's filtered token: the question explains how to set it up for the signed-in user),
+**NoSessionUser** (session 0: never prompt). Every probe fails OPEN — an unreadable session user reads
+as "this user", so a lookup hiccup never redirects an install.
+
+**Rights only where they are needed, and dropped right after:**
+
+- *Install for all users* runs the embedded `am-update.ps1 -InstallMachine` ELEVATED
+  (`RunEmbeddedScript(..., elevate = true)`, the "runas" verb); this process waits UNelevated and then
+  starts the installed copy itself.
+- When this process is the signed-in user running ELEVATED, the copy it installed or adopted is started
+  WITHOUT administrator rights: `StartAsSessionUser` → `am-update.ps1 -RunAsMainUser` → a one-shot
+  scheduled task for the signed-in user (interactive logon, limited rights) that starts it through
+  Explorer (no arguments) or a hidden PowerShell (with arguments); the task is deleted once that launcher
+  has finished. The app must never keep rights it was not meant to run with: every `claude.exe` it starts
+  would run elevated. (On a PC with UAC turned off there is no unelevated token to drop to; the hop runs
+  and changes nothing.)
+- A step that could not get its rights says why (`ScriptStartFailureText`): a declined UAC prompt simply
+  returns to the question; a refusal by the PC's policy (`ERROR_ACCESS_DISABLED_BY_POLICY`, 1260 — a
+  standard user under *Automatically deny elevation requests*) reads "Windows does not let this account
+  run programs as administrator (a setting of this PC)" plus what to do; a missing PowerShell or another
+  Windows error is named as such.
+
+**What an install is.** *Per user* — MSI-like with no MSI, package, certificate or admin: the binaries
 copied (or registered in place); a **desktop** shortcut; a **Start-menu** shortcut (Start search finds
 it — the `.lnk` carries the unpackaged AUMID the installed copy runs under, `unpackagedAumidForImagePath`
-in `WindowEmperor.cpp` == the app's own formula, which is what routes an unpackaged app's toasts); an
-**"Open in Agentmaster"** right-click verb on folders, folder backgrounds and drives
-(`HKCU\Software\Classes\{Directory | Directory\Background | Drive}\shell\Agentmaster`, command
-`"<exe>" -d "%1|%V"` — the classic registry form of what the MSIX shell extension provides;
-Windows 11 lists it under *Show more options*); an **Apps & Features** entry
-(`HKCU\...\Uninstall\Agentmaster` — DisplayVersion from `.am-version`, InstallLocation, DisplayIcon,
-`UninstallString` = `"<exe>" --uninstall-portable`, NoModify/NoRepair, EstimatedSize); and the install
-dir on the **user PATH** (`agentmaster-cli.exe` reachable from any shell; `WM_SETTINGCHANGE`
-broadcast). The work runs on a worker under a marquee TaskDialog (*Installing Agentmaster…*, no
-cancel), then the INSTALLED copy is launched and the installing process exits like the updater
-handoff (an in-place install just carries on); any failure is shown and the question returns.
+in `WindowEmperor.cpp`, which routes an unpackaged app's toasts); an **"Open in Agentmaster"** verb on
+folders, folder backgrounds and drives (`HKCU\Software\Classes\{Directory | Directory\Background |
+Drive}\shell\Agentmaster`, `"<exe>" -d "%1|%V"`; Windows 11 lists it under *Show more options*); an
+**Apps & Features** entry (`HKCU\...\Uninstall\Agentmaster` — DisplayVersion `major.minor.patch[.build]`,
+InstallLocation, DisplayIcon, `UninstallString` = `"<exe>" --uninstall-portable`, NoModify/NoRepair,
+EstimatedSize); and the folder on the **user PATH** (`WM_SETTINGCHANGE` broadcast). `install.path` =
+`installed`, `profile.path` = the Default profile (absolute). The work runs under a marquee TaskDialog;
+then the INSTALLED copy is launched and the installing process exits (an in-place install carries on).
+*For all users* — the same pieces machine-wide, written by the shared PowerShell core
+(`Install-AmMachineCopy`): the all-users desktop and Start menu, `HKLM\Software\Classes` verbs,
+`HKLM\...\Uninstall\Agentmaster`, the machine PATH; `install.path` = `machine` and NO `profile.path`
+(each user resolves their own profile). It refuses a release whose zip has no `.am-manifest` (built
+before 2026-10-21): that app would not know what `install.path = machine` means.
 
-**The installed copy's state:** it is an installed copy, so it uses the per-identity **Default**
-profile (`~/.agentmaster`) silently — the installer writes its `profile.path` (absolute) — and
-migrates whatever a "later" run accumulated in `<unzip>\profile` into it (`MigrateProfileData`,
-copy-if-absent; `bin/` is now excluded from every profile migration, since the default install dir
-sits INSIDE the Default profile). It keeps its `.portable` marker: it still self-updates in place
-(the zip swap in `am-update.ps1 -Portable` / `Install-Agentmaster.ps1` preserves `install.path` beside
-`profile.path`), and `RefreshInstalledRegistration` (every launch, registry reads only) re-stamps the
-Apps & Features version + the verbs' command paths after such an update.
+**Machine copies** (`Profiles::IsMachineCopyIn`): a portable folder whose `install.path` says `machine`,
+or one THIS account cannot write (a write probe — the all-users install as a standard user sees it, a
+copy an administrator unpacked into Program Files). It runs like an installed program: no question,
+never a pointer or a profile written next to the exe; each user's profile resolves from their own home
+map (the `Unpackaged` slot) or the per-identity default (`~/.agentmaster`), and the cog's profile change
+is stored in that home map. A portable copy in a folder the user CAN write but never decided about stays
+an ordinary portable.
+
+**The installed copy's state** (per user): the Default profile (`~/.agentmaster`) — or, when the MSIX
+release package already chose a profile (the home map's `Agentmaster_56k4f06dsfp9r` entry), that one,
+so a switch from the package keeps every session (`UserInstallProfileDir`). Whatever a "later" run
+accumulated in `<unzip>\profile` is migrated in (`MigrateProfileData`, copy-if-absent; `bin/` excluded,
+since the default install dir sits INSIDE the Default profile). It keeps its `.portable` marker and
+self-updates in place; `RefreshInstalledRegistration` (every launch, registry reads only) re-stamps the
+Apps & Features version and the verbs' command paths after such an update. An all-users copy updates in
+place too: the in-app update runs only its file swap elevated (`am-update.ps1 -Portable` →
+`Invoke-AmElevatedPhase` when the folder is not writable) and relaunches the app unelevated; the
+elevated swap re-stamps the HKLM entry.
+
+**The manifest `<exedir>\.am-manifest`** (written by `New-UnpackagedTerminalDistribution.ps1
+-PortableMode` since 2026-10-21): the top-level names the build ships, one per line. An upgrade — the
+C++ `PerformInstall` and the PowerShell core's `Install-AmLayout` alike — replaces ONLY shipped names:
+the new layout's, and those the OLD install's manifest lists (a file a newer version stopped shipping
+goes). An old install without a manifest is read through the **legacy list** — the names releases
+shipped before it (`kLegacyShippedNames` / `IsLegacyShippedLeaf` in C++, `$script:AmLegacyShippedNames`
++ `Microsoft.Terminal.*.dll` in the core; keep the two in step). An uninstall removes only shipped names
+too. A user's own files in the folder, another `.exe` included, and `settings\`, `profile\`,
+`profile.path` always stay; `install.path` stays on an upgrade and goes on an uninstall. A manifest line
+is accepted only as a plain name (no separator, drive or stream colon, wildcard, `.` or `..`), so a
+corrupt or planted manifest cannot name anything outside the folder.
 
 **Existing installs — never overridden, taken over where we can:**
 
 - the installed **package** (the MSIX release family `Agentmaster_56k4f06dsfp9r`, incl. an
-  admin-trusted one — `GetPackagesByPackageFamily`): its files are untouchable and untouched; the
-  install adopts its DATA (the same Default profile), and a verification checkbox — checked by default
-  unless the package is RUNNING (its windows would be closed; `packageRunning` = a process image under
-  the package path) — removes it afterwards (hidden Windows PowerShell, `Remove-AppxPackage`, per-user,
-  no admin; the GUI under the package path is stopped first and its ConPTY hosts DRAINED, never
+  admin-trusted one — `GetPackagesByPackageFamily`): its files are untouchable and untouched; a per-user
+  install adopts its DATA (the profile it chose), and a verification checkbox — checked by default unless
+  the package is RUNNING — removes it afterwards (hidden Windows PowerShell, `Remove-AppxPackage`,
+  per-user, no admin; the GUI under the package path is stopped first and its ConPTY hosts DRAINED, never
   killed). A failed removal is a note; the install still succeeds.
-- a **machine-wide** entry (`HKLM\...\Uninstall\Agentmaster`, administrator-managed): left alone,
-  called out in the prompt — this copy installs for the current user only.
-- a previous **user install** of ours: the adaptive first option above (update / use).
+- an **all-users** install of ours (`HKLM\...\Uninstall\Agentmaster` with a live exe): offered for use
+  (current) or update (older) — see the options.
+- a previous **per-user** install of ours: the adaptive first option.
 
-**The decision file `<exedir>\install.path`** (plain UTF-8, `#` comments, first value line wins —
-the `profile.path` idiom): `installed` (this folder IS the install — in place, or an install's
-destination) · `portable` (stay portable, never ask) · `<absolute dir>` (installed elsewhere — a
-launcher stub). A relative/garbage value reads as none (re-asks). Both installer swaps preserve it.
+**The decision file `<exedir>\install.path`** (plain UTF-8, `#` comments, first value line wins — the
+`profile.path` idiom): `installed` (this folder IS the per-user install; the older spelling `here` reads
+the same) · `machine` (this folder is the install for all users) · `portable` (stay portable, never ask)
+· `<absolute dir>` (installed elsewhere — a launcher stub). A relative/garbage value reads as none
+(re-asks). Every installer swap preserves it.
 
 **Uninstall:** `Agentmaster.exe --uninstall-portable` (the Apps & Features entry; the cog's About →
-*Uninstall Agentmaster…* routes an installed portable there too) is handled in the prelude BEFORE the
-single-instance handoff (a running instance would otherwise receive the flag as a commandline): a
-confirm, then the embedded `am-update.ps1` is materialized into `%TEMP%\Agentmaster-update` and run
-detached with `-UninstallPortable -PortableDir <dir> -WaitPid <pid>` — the shortcuts (only those
-pointing INTO the folder), the three verbs, the Apps & Features entry (only when its InstallLocation
-IS the folder), the PATH entry and the binaries go; `settings\` + `profile\` + `profile.path` and the
-profile folder itself are kept. The whole flow logs `[install]` lines into the Default profile's
-`hooks.log` (only after a decision that writes anyway — a pristine "later" creates nothing).
+*Uninstall Agentmaster…* routes the same way) is handled in the prelude BEFORE the single-instance
+handoff and acts on what the folder IS (`DecideUninstallTarget`): a per-user install → confirm, then the
+embedded `am-update.ps1 -UninstallPortable -PortableDir <dir> -WaitPid <pid>` runs detached from
+`%TEMP%\Agentmaster-update`; an all-users install (or an unwritable portable folder) → confirm, then
+`-UninstallMachine` runs ELEVATED (`LaunchMachineUninstaller`; a declined prompt changes nothing quietly,
+a refused one says why); anything else (the package, a plain or kept portable, a launcher stub, a build
+folder) → an information dialog, nothing removed (before 2026-10-21 the flag ran the portable
+uninstaller on WHATEVER folder the exe sat in). The uninstallers remove the shortcuts that point INTO
+the folder, the three verbs that point into it, the Apps & Features entry whose InstallLocation IS the
+folder, the PATH entry and the shipped files; every profile folder is kept. The whole flow logs
+`[install]` lines into the running account's Default profile `hooks.log` (only after a decision that
+writes anyway — a pristine "later" creates nothing).
+
+**The scripts.** `tools\Install-Agentmaster.ps1` (the downloadable installer) asks **"Where should
+Agentmaster be installed?"** — `[1] Just for you` (no administrator rights; the default on a fresh PC),
+`[2] For all users of this PC` (administrator rights: only that step elevates), `[3] As the app package
+(MSIX; administrator approval once per release, for its certificate)`, `[C] Cancel` — or takes
+`-Scope User|Machine|Package` (`-Portable` = User, `-Elevate` = Package). With something already
+installed the default is to upgrade THAT. It finds the user signed in to Windows (`Get-AmIdentity`: the
+owner of `explorer.exe` in its session, else the console user): run by SYSTEM or by another
+administrator it installs for the signed-in user — the per-user part runs as them in their session
+(`Invoke-AmPhaseAsUser`, a one-shot task, its transcript printed back) — and starts the app as them;
+run by another account without those rights it stops before downloading anything and says how
+(`-ForCurrentAccount` installs for the running account instead). A console whose input is redirected
+(CI, an agent, `< NUL`) cannot answer: the run says which default it took. ⚠ A HIDDEN console is still
+a console: an unattended run in a hidden window (a scheduled task, a deployment tool) must pass
+`-NonInteractive`, or a question it reaches (the MSIX certificate one) waits for a key nobody can press
+(seen in the test desktop). `-Uninstall -Scope …` removes. `src\cascadia\TerminalApp\AgentMaster\am-update.ps1` (embedded in the app exe, run by the app)
+carries the modes: the package update (with **switch to the per-user install** as the answer when an
+administrator is not at hand for the release's certificate), `-Portable` (the in-place update),
+`-UninstallPortable`, `-UninstallMachine`, `-InstallMachine`, `-RunAsMainUser`. Both scripts carry ONE
+**shared install core**, byte-identical between the `AGENTMASTER SHARED INSTALL CORE` markers
+(`tools\tests\Test-AgentmasterInstaller.ps1` checks it, and that every core function is exported to the
+phase scripts). Both stay pure ASCII: the app writes `am-update.ps1` without a BOM, and Windows
+PowerShell 5.1 reads a BOM-less script in the ANSI code page.
+
+### §2c Rights and accounts over time — the scenario matrix
+
+Checked on 2026-10-21 (the sources of that day's install commit; NOT BUILT into the app yet) in a disposable Windows 11 25H2 test
+desktop with three accounts — the signed-in administrator, a second administrator and a standard user —
+first with UAC off (every administrator token unsplit), then with UAC on (administrators elevate without a
+prompt, standard users' elevation is refused by policy, so the refusal path runs). The C++ flow ran
+through a probe exe (`tools\install-qa\`, whose README has the whole procedure to repeat it) that IS the
+app's startup prelude (`HandleUninstallFlagAtStartup` →
+`EnsureInstallDecidedAtStartup` → `EnsureProfileResolvedAtStartup` → `RefreshInstalledRegistration`, the
+real `am-update.ps1` embedded) and logged each step; the PowerShell installer ran against the real
+v0.7.10 release.
+
+| Who starts it | What | Result |
+|---|---|---|
+| the signed-in user, unelevated | a fresh unzip | the question; *Install just for you* recommended; the installed copy starts directly (unelevated) |
+| the signed-in user, ELEVATED (*Run as administrator*, or UAC off) | a fresh unzip | the same question plus *running with administrator rights*; the installed / adopted copy is started through the task and runs **unelevated** (measured: `elevated=0`, ~6 s) |
+| the signed-in user, unelevated | *Install for all users* | one elevation for the install script only; the copy starts unelevated |
+| the signed-in user | a newer unzip / an older one | *Update the installed Agentmaster (v0.8.1 → v0.8.2)* / *Use the installed Agentmaster (v0.8.3)* — never a downgrade; the unzip becomes a stub |
+| the signed-in user | per-user AND all-users installs both current | the per-user one recommended (fixed during the QA: the all-users one was) |
+| another administrator, elevated (UAC credentials, *Run as different user*) | a fresh unzip | *Set it up for <signed-in user>* recommended; the copy restarts as the signed-in user (~13 s), who gets their own question |
+| another account without rights (standard, or an administrator's filtered token) | a fresh unzip | the warning with how to set it up for the signed-in user; its own per-user install offered by name; a current all-users install recommended when it has none |
+| a standard user | the all-users install | no question; its own profile (`C:\Users\<them>\.agentmaster`); the folder untouched |
+| a standard user, elevation refused by policy | *Update for all users* / uninstall the all-users install / the in-app update of it | "Windows does not let this account run programs as administrator (a setting of this PC)" + what to do; the question returns / nothing removed / the version stays (fixed during the QA: it read "PowerShell or the script is missing" / "declined") |
+| SYSTEM in session 0 | a fresh unzip | no question; nothing persisted |
+| the signed-in user | the in-app update of the all-users install | only the file swap elevated; HKLM re-stamped; the app relaunched unelevated |
+| anyone | the upgrade of a pre-manifest install (the real v0.7.10, 28 entries) | the old binaries removed through the legacy list, the user's files kept (fixed during the QA: the C++ upgrade left them) |
+| `Install-Agentmaster.ps1`, the signed-in user | interactive | the question above; `[2]` with v0.7.10 refused cleanly (no manifest) |
+| `Install-Agentmaster.ps1`, SYSTEM | `-Scope User -Launch` | installed for the signed-in user through a phase in their session; the app runs as them |
+| `Install-Agentmaster.ps1`, another administrator | `-Scope User -Force -Launch` | installed for the signed-in user; their running app closed (GUI only), replaced, relaunched as them; nothing for the administrator |
+| `Install-Agentmaster.ps1`, a standard other account | `-Scope User` | refused before downloading (fixed during the QA: it downloaded first and its first line claimed it would install for the signed-in user); `-ForCurrentAccount` installed for itself without rights |
+| `Install-Agentmaster.ps1` | `-Uninstall -Scope User` (a pre-manifest install) | everything but `profile.path` removed through the legacy list |
+| `Install-Agentmaster.ps1`, the signed-in user, unelevated | `-Scope Package -NonInteractive` (the real v0.7.10 bundle) | the release's certificate trusted through one elevation (that step only), the package added for the user |
+| `Install-Agentmaster.ps1`, a standard user, elevation refused by policy | `-Scope Package -ForCurrentAccount` | "Windows does not let this account run programs as administrator …, and the MSIX package needs each release's signing certificate trusted for the whole PC. Install just for you instead" — before the 20 MB bundle is downloaded (fixed during the QA: it downloaded first, and so did the app's package update) |
+
+**Over time:**
+
+- **A per-user install never needs rights** — not to install, update or uninstall. It is the default
+  everywhere, and the escape hatch everywhere else: the MSIX update offers switching to it when an
+  administrator is not at hand for a release's certificate (every release has its own; that is fixed
+  only by signing with one stable certificate — the `SIGNING_PFX_*` secrets, the owner's decision).
+- **An all-users install needs an administrator for every update and its uninstall** — also when the
+  person who installed it later lost those rights. A standard user is told so and can install just for
+  themselves next to it (Start then shows both; the prompt names both).
+- **A signed-in administrator who runs things elevated** (by habit, or on a PC with UAC off) never hands
+  those rights to the app it installs: the copy is started through the unelevated hop.
+- **Another account at the keyboard** (an administrator typing UAC credentials for a standard user,
+  remote support, a deployment agent as SYSTEM) never installs for the wrong person: the installer and
+  the first launch install for the signed-in user, or say how.
+- **The profile mutex** (`Local\Agentmaster.profile.<hash>`) treats `ERROR_ACCESS_DENIED` as "held
+  elsewhere": an elevated instance's mutex is not openable by an unelevated one, which used to read as
+  "free".
+
+**Automated coverage:** the m5 suite (`TestPortableInstall`, `TestProfileBootstrap`: the decision and
+pointer files, the startup plan, the account plan, the prompt default, the manifest and legacy names on a
+real scratch tree, the machine-copy rules with a real deny ACL, the uninstall target, the start-failure
+text, the mutex verdict) and `tools\tests\Test-AgentmasterInstaller.ps1` (plain PowerShell, 5.1 and 7:
+the shared core's identity across both scripts, the manifest, the version text, the decision and pointer
+files, the write probe with a real deny ACL, per-user and all-users installs and uninstalls into a
+scratch registry key and scratch folders, the Win32 error reading, the identity, a phase script that runs
+and reports back; `-IncludeScheduledTask` adds a real one-shot task — run it on a test desktop).
+
+**Not covered:** the app's own package update (`am-update.ps1` default mode) and its *switch to the
+per-user install* answer end to end; the cog's Uninstall button (the same functions as
+`--uninstall-portable`, but its dialog only in the real app); the real app built from these sources (the
+QA ran the startup prelude in a probe exe). Known limits: script-made shortcuts carry no AUMID (the
+script cannot compute the app's per-path formula; the app's own install stamps it); a shared unzip used
+by several accounts is a stub for all of them once one decides (the decision is per folder); HKLM
+detection reads the 64-bit view of `Uninstall\Agentmaster` only.
 
 ### First launch — installed auto-selects by identity (no prompt); portable asks
 

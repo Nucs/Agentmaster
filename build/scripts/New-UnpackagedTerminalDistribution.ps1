@@ -143,6 +143,14 @@ If ($PortableMode) {
 	# portable copy's CURRENT version (Updater.h CurrentInstallVersion -> <exedir>\.am-version) and
 	# the in-place zip update rewrites it. ASCII so the C++ UTF-8 reader takes it verbatim.
 	$version | Out-File (Join-Path $terminalAppPath ".am-version") -Encoding ascii
+	# Agentmaster: ship the MANIFEST - the top-level names this distribution ships. The updaters and
+	# uninstallers (am-update.ps1, Install-Agentmaster.ps1, PortableInstall.h) replace and remove ONLY
+	# these names, so the files a user keeps in the same folder survive an update or an uninstall; its
+	# presence also tells the installers that this build knows the all-users install (install.path =
+	# machine). Written last, so it lists the marker and the stamp too; ASCII, one name per line.
+	$manifestLines = @("# Agentmaster portable distribution manifest - the top-level names this build ships.", ".am-manifest")
+	$manifestLines += Get-ChildItem -LiteralPath $terminalAppPath -Force | ForEach-Object { $_.Name } | Where-Object { $_ -ne ".am-manifest" } | Sort-Object
+	$manifestLines | Out-File (Join-Path $terminalAppPath ".am-manifest") -Encoding ascii
 }
 
 If ($PSCmdlet.ParameterSetName -Eq "AppX") {

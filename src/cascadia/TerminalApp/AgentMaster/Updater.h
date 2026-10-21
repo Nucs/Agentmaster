@@ -1472,6 +1472,19 @@ namespace Agentmaster::Updater
             content += InstallableForThisInstall(info) ?
                            L"Choose \x201CUpdate now\x201D and Agentmaster will close and reopen automatically once the new version is installed, or pick when to be reminded." :
                            L"Choose \x201CUpdate now\x201D to open the download page, or pick when to be reminded.";
+            if (IsPortableUpdateTarget() && Profiles::IsMachineCopy())
+            {
+                // An all-users install (or a folder this account cannot write): the update must replace
+                // files only an administrator may change, so say so BEFORE the UAC prompt appears.
+                content += L"\n\nAgentmaster is installed for all users of this PC: updating it needs administrator approval (a Windows prompt appears).";
+            }
+            else if (!IsPortableUpdateTarget() && InstallableForThisInstall(info))
+            {
+                // The MSIX package: every release is signed with its own certificate, which must be
+                // trusted machine-wide once per release — the one step of a package update that needs
+                // administrator approval (am-update.ps1 offers the no-admin per-user install instead).
+                content += L"\n\nA package update may ask for administrator approval once, to trust the new release's signing certificate.";
+            }
             // "What's new" OPENS this release's GitHub page (the changelog fixated on the specific
             // release), rather than dumping notes inline — a TaskDialog hyperlink (TDF_ENABLE_HYPERLINKS)
             // that UpdatePromptCallback ShellExecutes on click. The URL has no chars that need escaping
@@ -1595,8 +1608,12 @@ namespace Agentmaster::Updater
     // stateDir and launch the .cmd DETACHED (it survives this process exiting). The .cmd invokes the
     // .ps1 with the resolved values as parameters. A PORTABLE target runs the script's -Portable
     // mode instead (zip download + in-place binary swap of <exedir>, preserving settings\ +
-    // profile\ + profile.path, then relaunch). Returns true if launched — the caller MUST then
-    // exit / quit the app so the package/exe isn't in use while it upgrades + relaunches.
+    // profile\ + profile.path, then relaunch). Rights are the SCRIPT's business: a portable folder
+    // this account cannot write (the all-users install) gets only its file swap elevated (one UAC
+    // prompt) while the relaunch stays unelevated, and a package update whose new certificate needs an
+    // administrator can switch to the per-user install instead (-ZipUrl rides along for that).
+    // Returns true if launched — the caller MUST then exit / quit the app so the package/exe isn't in
+    // use while it upgrades + relaunches.
     inline bool LaunchInstaller(const std::wstring& stateDir, const UpdateInfo& info)
     {
         try
@@ -1652,6 +1669,17 @@ namespace Agentmaster::Updater
                     cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
                 }
                 cmd += L" -Family " + CmdArg(kReleaseFamily);
+                // The release's portable zip rides along (when it has one for this arch): a package update
+                // whose new signing certificate cannot be trusted (no administrator at hand) can then switch
+                // to the per-user install — no administrator rights, the same data — instead of failing.
+                if (!info.zipUrl.empty() && IsTrustedAssetUrl(info.zipUrl))
+                {
+                    cmd += L" -ZipUrl " + CmdArg(info.zipUrl);
+                    if (!info.zipSha256.empty())
+                    {
+                        cmd += L" -ZipSha256 " + CmdArg(info.zipSha256);
+                    }
+                }
             }
             cmd += L" -Version " + CmdArg(DisplayVersion(info));
             cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());

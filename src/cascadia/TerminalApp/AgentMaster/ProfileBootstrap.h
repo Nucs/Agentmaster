@@ -35,7 +35,10 @@
 //                                        resolution never asks (Rule #15) and lands here. A
 //                                        portable NEVER consults the home map below (steps 4–5) —
 //                                        self-containment, and the shared "Unpackaged" slot would
-//                                        cross-contaminate unzips and legacy tools.
+//                                        cross-contaminate unzips and legacy tools. EXCEPT a MACHINE
+//                                        COPY (IsMachineCopyIn: the all-users install, or a portable
+//                                        folder this process cannot write): it skips this step and
+//                                        resolves like an installed program (steps 4–5).
 //   4. the saved per-install choice    — %USERPROFILE%\.agentmaster.profiles, a tiny text map
 //                                        keyed by package family name (or "Unpackaged"). Lives
 //                                        OUTSIDE any profile (chicken-and-egg) and OUTSIDE the
@@ -605,6 +608,149 @@ namespace Agentmaster::Profiles
         return PortableDefaultProfileDirIn(detail::ExeDirPath());
     }
 
+    namespace detail
+    {
+        // True when THIS process can create a file in `dir` — the probe behind the MACHINE-COPY rule
+        // (IsMachineCopyIn below). A portable folder that the user cannot write to (Program Files, a
+        // read-only share, a mounted ISO) can never hold its own profile, decision or pointer file, so
+        // it must run like an installed program instead of asking questions whose answers it can never
+        // remember (it would ask again on every launch, and its `<exedir>\profile` could never be
+        // created). The probe creates a hidden, DELETE-ON-CLOSE file and closes it at once, so it
+        // leaves nothing behind, not even after a crash (the handle's close at process exit deletes it).
+        //   dir     — the folder to probe; "" reads as not writable.
+        //   returns — true when the create succeeded; false on ANY failure: access denied, a missing
+        //             folder, a full or write-protected volume, an antivirus block. A false negative only
+        //             means the copy runs as a machine copy (the safe direction: nothing is lost, the
+        //             data goes to the user's Default profile).
+        //   throws  — std::bad_alloc only (the probe path is built in a std::wstring).
+        inline bool IsDirWritableByUs(const std::wstring& dir)
+        {
+            if (dir.empty())
+            {
+                return false;
+            }
+            // The pid + tick make the name unique per probe, so CREATE_NEW can never collide with a
+            // concurrent probe of another instance (two unzips launched at once).
+            const std::wstring probe = dir + L"\\.am-write-probe-" + std::to_wstring(::GetCurrentProcessId()) + L"-" +
+                                       std::to_wstring(::GetTickCount64()) + L".tmp";
+            const HANDLE h = ::CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                           FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+            ::CloseHandle(h); // FILE_FLAG_DELETE_ON_CLOSE removes the probe right here
+            return true;
+        }
+    }
+
+    // The KEYWORD of `<exedir>\install.path` (PortableInstall.h's decision file), lower-cased:
+    // "installed" (a per-user install; "here" is its older spelling), "machine" (installed for all
+    // users), "portable" (kept portable) — or "" when the file is absent, holds only comments, or names
+    // a folder (a launcher stub). ProfileBootstrap needs only this much of the file and cannot include
+    // PortableInstall.h (that header includes this one), so this is a deliberately minimal twin of
+    // PortableInstall::DecodeInstallDecision: keep the keyword spellings of the two in step.
+    //   exeDir  — the folder holding the app exe; "" reads as no file.
+    //   returns — the keyword, or "" (see above). The first non-empty, non-`#` line decides, like the
+    //             full decoder.
+    //   throws  — std::bad_alloc only (the file text and the line are held in std::wstring).
+    inline std::wstring InstallFileKeywordIn(const std::wstring& exeDir)
+    {
+        if (exeDir.empty())
+        {
+            return {};
+        }
+        const std::wstring text = detail::ReadUtf8File(exeDir + L"\\install.path");
+        size_t pos = 0;
+        while (pos <= text.size())
+        {
+            size_t nl = text.find(L'\n', pos);
+            if (nl == std::wstring::npos)
+            {
+                nl = text.size();
+            }
+            std::wstring line = text.substr(pos, nl - pos);
+            pos = nl + 1;
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ' || line.back() == L'\t'))
+            {
+                line.pop_back();
+            }
+            size_t b = 0;
+            while (b < line.size() && (line[b] == L' ' || line[b] == L'\t'))
+            {
+                ++b;
+            }
+            line.erase(0, b);
+            if (line.empty() || line.front() == L'#')
+            {
+                continue;
+            }
+            for (auto& c : line)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            if (line == L"here")
+            {
+                return L"installed"; // the older spelling of the same decision
+            }
+            if (line == L"installed" || line == L"machine" || line == L"portable")
+            {
+                return line;
+            }
+            return {}; // a folder (a launcher stub) or garbage: no keyword
+        }
+        return {};
+    }
+
+    // A MACHINE COPY: a portable folder (the `.portable` marker) that runs like an installed program for
+    // every user who starts it. Two ways to be one:
+    //   * the ALL-USERS install: `install.path` says `machine` (written by the elevated installer — the
+    //     embedded am-update.ps1 `-InstallMachine`, or Install-Agentmaster.ps1 `-Scope Machine` — into a
+    //     folder such as Program Files that ordinary users can only read);
+    //   * any OTHER portable folder this process cannot write to (an administrator copied an unzip into a
+    //     protected folder; a read-only share or medium), unless it is a per-user install
+    //     (`installed`), which keeps its own profile pointer even if its folder later turns read-only.
+    // A machine copy never shows the first-launch questions, never writes next to its exe, and resolves
+    // the profile like a non-portable install (the home map's slot, then the Default profile — each
+    // user's data in that user's own home). Its updates need administrator rights (the updater elevates
+    // only the file swap; am-update.ps1 -Portable).
+    //   exeDir  — the folder holding the app exe.
+    //   returns — true for a machine copy (see above); false for a non-portable folder, a writable
+    //             portable folder that is not `machine`, and a per-user install.
+    //   throws  — std::bad_alloc only (the keyword read and the write probe allocate).
+    inline bool IsMachineCopyIn(const std::wstring& exeDir)
+    {
+        if (!IsPortableInstallIn(exeDir))
+        {
+            return false;
+        }
+        const std::wstring keyword = InstallFileKeywordIn(exeDir);
+        if (keyword == L"machine")
+        {
+            return true;
+        }
+        if (keyword == L"installed")
+        {
+            return false;
+        }
+        return !detail::IsDirWritableByUs(exeDir);
+    }
+
+    // IsMachineCopyIn for the RUNNING exe's folder, evaluated ONCE per module: the write probe creates a
+    // file, and the answer cannot change during a run anyway (a folder's rights do not change under a
+    // running app in any way this code must follow — a restart re-evaluates). Every caller that asks
+    // about THIS install (resolution, the cog's Change…, the picker, the prelude) uses this one.
+    //   returns — the cached IsMachineCopyIn(ExeDirPath()).
+    //   throws  — std::bad_alloc only, on the first call.
+    inline bool IsMachineCopy()
+    {
+        static const bool machine = IsMachineCopyIn(detail::ExeDirPath());
+        return machine;
+    }
+
     // <exedir>\profile.path — the EXE-SIDE PROFILE POINTER: one value line naming the profile
     // folder this exe location uses. A PORTABLE copy's first-launch picker writes it (the
     // per-unzip memory the shared home map cannot provide); an installed copy honors a manually
@@ -867,6 +1013,21 @@ namespace Agentmaster::Profiles
         return it == entries.end() ? std::wstring{} : it->second;
     }
 
+    // The saved choice of ANOTHER install, by its key — used when one install takes over from
+    // another and must keep using the SAME data: a per-user install of a portable zip that replaces the
+    // MSIX release package adopts the folder THAT package's cog chose (`Agentmaster_56k4f06dsfp9r=` in
+    // the home map), not blindly the Default profile, so a user who had moved their profile to another
+    // drive keeps finding their sessions after the switch.
+    //   key     — the home-map key: a package family name, or "Unpackaged".
+    //   returns — the saved folder, or "" when that install never saved one (it then used its default).
+    //   throws  — std::bad_alloc only (the map is read into a std::map of std::wstring).
+    inline std::wstring SavedChoiceFor(const std::wstring& key)
+    {
+        const auto entries = ReadChoiceFile(ChoiceFilePath());
+        const auto it = entries.find(key);
+        return it == entries.end() ? std::wstring{} : it->second;
+    }
+
     // Persist the choice for THIS install (read-modify-write keeps the other installs' slots).
     inline bool SaveChoice(const std::wstring& profileDir)
     {
@@ -884,10 +1045,16 @@ namespace Agentmaster::Profiles
     // whose exe dir refuses the write — its resolution never consults the home map, so a map
     // write would be a DEAD choice; same for a pointer-steered install whose pointer can't be
     // rewritten, since the stale pointer would keep outranking the map). The caller should say
-    // so instead of pretending the change took.
+    // so instead of pretending the change took. A MACHINE COPY (IsMachineCopyIn) writes the home map like
+    // an installed program: its folder is shared by every user and usually not writable, and its
+    // resolution reads the home map (it skips the portable steps).
+    //   exeDir     — the folder holding the app exe (the pointer's home).
+    //   profileDir — the chosen profile folder.
+    //   returns    — true when the choice was stored where this install's resolution reads it back.
+    //   throws     — std::bad_alloc only.
     inline bool PersistProfileChoiceIn(const std::wstring& exeDir, const std::wstring& profileDir)
     {
-        if (IsPortableInstallIn(exeDir) || LocalProfilePointerExistsIn(exeDir))
+        if ((IsPortableInstallIn(exeDir) && !IsMachineCopyIn(exeDir)) || LocalProfilePointerExistsIn(exeDir))
         {
             return SaveLocalProfilePointerIn(exeDir, profileDir);
         }
@@ -899,11 +1066,14 @@ namespace Agentmaster::Profiles
         return PersistProfileChoiceIn(detail::ExeDirPath(), profileDir);
     }
 
-    // WHERE PersistProfileChoice will write for this install — for error messages + display.
+    // WHERE PersistProfileChoice will write for this install — for error messages + display. It follows
+    // PersistProfileChoiceIn's routing exactly (a machine copy names the home map).
+    //   returns — the pointer file next to the exe, or the home map file.
+    //   throws  — std::bad_alloc only.
     inline std::wstring ProfileChoiceStorePath()
     {
         const auto exeDir = detail::ExeDirPath();
-        if (IsPortableInstallIn(exeDir) || LocalProfilePointerExistsIn(exeDir))
+        if ((IsPortableInstallIn(exeDir) && !IsMachineCopy()) || LocalProfilePointerExistsIn(exeDir))
         {
             return LocalProfilePointerPathIn(exeDir);
         }
@@ -924,13 +1094,16 @@ namespace Agentmaster::Profiles
         {
             return pinned; // the exe-side pointer: a portable's remembered choice (honored for installed copies too)
         }
-        if (IsPortableInstallIn(exeDir))
+        if (IsPortableInstallIn(exeDir) && !IsMachineCopyIn(exeDir))
         {
             // Portable with nothing chosen yet: the classic self-contained default. The EXE
             // prelude prompts here (EnsureProfileResolvedAtStartup); library/headless resolution
             // never does (Rule #15). NEVER fall through to the home map: its one "Unpackaged"
             // slot is shared by every unzip AND legacy unpackaged tools — reading it would
             // cross-contaminate copies that must stay self-contained.
+            // A MACHINE COPY (the all-users install, or a portable folder this process cannot
+            // write) is the exception: `<exedir>\profile` would be shared by every user or could
+            // not even be created, so it resolves like an installed program (steps 4-5 below).
             return PortableDefaultProfileDirIn(exeDir);
         }
         if (auto saved = ReadSavedChoice(); !saved.empty())
@@ -1169,7 +1342,11 @@ namespace Agentmaster::Profiles
         const bool dev = IsDevPackage();
         const bool packaged = !PackageFamilyName().empty();
         const std::wstring portableDir = PortableDefaultProfileDir();
-        const bool offerPortable = IsPortableInstall() && !portableDir.empty();
+        // A machine copy (installed for all users, or a folder this process cannot write) gets no
+        // "Portable profile" option: `<exedir>\profile` would be shared by every user of the PC, or could
+        // not even be created.
+        const bool machineCopy = IsMachineCopy();
+        const bool offerPortable = IsPortableInstall() && !machineCopy && !portableDir.empty();
 
         bool offerMigrate = false;
         try
@@ -1188,6 +1365,7 @@ namespace Agentmaster::Profiles
             L"layouts, settings and hooks. Each installation remembers its own choice, so the "
             L"release and development installs never touch each other's data.\n\nAsking: ";
         content += offerPortable ? L"a PORTABLE copy \x2014 its choice is remembered next to the exe (profile.path; kept relative when the profile lives inside this folder, so the unzip stays movable)." :
+                   machineCopy   ? L"a copy installed for ALL USERS of this PC \x2014 each user's choice is remembered in their own home folder." :
                    !packaged     ? L"a portable/unpackaged copy." :
                    dev           ? L"the DEVELOPMENT install (AgentmasterDev)." :
                                    L"the RELEASE install (Agentmaster).";
@@ -1281,9 +1459,42 @@ namespace Agentmaster::Profiles
 
     namespace detail
     {
+        // How one CreateMutexW call on the profile mutex reads (ProfileMutexVerdict).
+        enum class ProfileMutexState
+        {
+            Acquired, // we created it: this process owns the profile
+            HeldElsewhere, // another live instance holds it (same rights, or ELEVATED — see below)
+            Unknown, // the call failed for another reason: never block startup on it
+        };
+
+        // PURE: the verdict for one CreateMutexW outcome.
+        //   gotHandle — CreateMutexW returned a handle.
+        //   lastError — GetLastError() right after the call.
+        //   returns   — Acquired when we got a NEW mutex; HeldElsewhere when it already existed
+        //               (ERROR_ALREADY_EXISTS — an instance with the same rights holds it) or exists but
+        //               cannot be opened by us (ERROR_ACCESS_DENIED — it was created by a process whose
+        //               token grants us no access: an ELEVATED instance of the same user, whose default
+        //               DACL names Administrators + SYSTEM rather than the filtered user token, or another
+        //               account's); Unknown for any other failure.
+        //   throws    — nothing.
+        // Before 2026-10-21 ERROR_ACCESS_DENIED read as "can't tell -> don't block": an elevated instance
+        // started first, then a normal one, and the two engines ran on ONE profile without a warning.
+        inline ProfileMutexState ProfileMutexVerdict(bool gotHandle, DWORD lastError) noexcept
+        {
+            if (gotHandle)
+            {
+                return lastError == ERROR_ALREADY_EXISTS ? ProfileMutexState::HeldElsewhere : ProfileMutexState::Acquired;
+            }
+            return lastError == ERROR_ACCESS_DENIED ? ProfileMutexState::HeldElsewhere : ProfileMutexState::Unknown;
+        }
+
         // One live instance per profile: a kernel mutex named after the normalized dir. The
         // handle is deliberately leaked (process lifetime); the OS releases it on ANY exit, so
-        // it can never go stale. Returns false when another process already holds the profile.
+        // it can never go stale.
+        //   profileDir — the resolved profile folder (normalized for the name).
+        //   returns    — false when another live process already holds the profile (ProfileMutexVerdict
+        //                says HeldElsewhere); true when we hold it, or when it cannot be told.
+        //   throws     — std::bad_alloc only (the name's normalization allocates).
         inline bool AcquireProfileMutex(const std::wstring& profileDir)
         {
             static HANDLE held = nullptr;
@@ -1294,18 +1505,25 @@ namespace Agentmaster::Profiles
             wchar_t name[64];
             ::swprintf_s(name, L"Local\\Agentmaster.profile.%016llx",
                          static_cast<unsigned long long>(Fnv1a64(NormPathKey(profileDir))));
+            // Clear the slot first: a NEW mutex is not documented to reset the last error, and a stale
+            // ERROR_ALREADY_EXISTS from an earlier call must not read as "held elsewhere".
+            ::SetLastError(ERROR_SUCCESS);
             const HANDLE h = ::CreateMutexW(nullptr, TRUE, name);
-            if (!h)
+            const DWORD lastError = ::GetLastError(); // read at once: CloseHandle below may overwrite it
+            switch (ProfileMutexVerdict(h != nullptr, lastError))
             {
+            case ProfileMutexState::Acquired:
+                held = h;
+                return true;
+            case ProfileMutexState::HeldElsewhere:
+                if (h)
+                {
+                    ::CloseHandle(h);
+                }
+                return false;
+            default:
                 return true; // can't tell -> don't block startup
             }
-            if (::GetLastError() == ERROR_ALREADY_EXISTS)
-            {
-                ::CloseHandle(h);
-                return false;
-            }
-            held = h;
-            return true;
         }
     }
 
@@ -1325,8 +1543,15 @@ namespace Agentmaster::Profiles
     // for THIS launch only: the copy runs on the self-contained <exedir>\profile without
     // persisting a choice (exactly the Cancel path), so one "later" defers every first-launch
     // question at once instead of trading one dialog for another; the in-use warning still shows.
-    // Returns false ONLY when the profile is held by another live instance and the user chose not
-    // to continue — caller exits.
+    // A MACHINE COPY (IsMachineCopy: the all-users install, or a portable folder this process cannot
+    // write) takes the INSTALLED path — saved choice, else the Default profile, silently — because
+    // nothing can be stored next to its exe and its folder is shared by every user of the PC.
+    //   allowUi             — false for a `-Embedding` activation: no dialog may block it.
+    //   deferPortablePicker — the install question's "Ask me later": skip the portable picker once.
+    //   returns — false ONLY when the profile is held by another live instance (an elevated one
+    //             included — detail::ProfileMutexVerdict) and the user chose not to continue: the
+    //             caller exits; true otherwise (AGENTMASTER_PROFILE is then exported).
+    //   throws  — std::bad_alloc only.
     inline bool EnsureProfileResolvedAtStartup(bool allowUi, bool deferPortablePicker = false)
     {
         std::wstring dir = detail::GetEnvVar(L"AGENTMASTER_PROFILE");
@@ -1334,7 +1559,10 @@ namespace Agentmaster::Profiles
         {
             const auto exeDir = detail::ExeDirPath();
             dir = ReadLocalProfilePointerIn(exeDir); // a portable's remembered choice (installed copies honor a planted one too)
-            if (IsPortableInstallIn(exeDir))
+            // A MACHINE COPY (all-users install / unwritable folder) skips the portable branch: no
+            // picker (nothing could be remembered next to its exe) and no self-contained profile —
+            // it falls through to the installed path below (saved choice, else the Default profile).
+            if (IsPortableInstallIn(exeDir) && !IsMachineCopy())
             {
                 if (dir.empty() && allowUi && !deferPortablePicker)
                 {
@@ -1412,7 +1640,8 @@ namespace Agentmaster::Profiles
             }
             const std::wstring warn =
                 L"The profile\n\n    " + dir +
-                L"\n\nis already in use by another running Agentmaster instance. Running two instances "
+                L"\n\nis already in use by another running Agentmaster instance (it may be one started with "
+                L"administrator rights, which runs separately from a normal one). Running two instances "
                 L"on one profile can corrupt its data (sessions, window records, settings).\n\nContinue anyway?";
             if (::MessageBoxW(nullptr, warn.c_str(), L"Agentmaster \x2014 profile in use", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
             {

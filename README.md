@@ -62,15 +62,19 @@ In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmast
 
 ## ⬇️ Install
 
-**One line, no download** — paste into PowerShell (admin **not** required). It grabs the latest release, verifies the signature, and trusts the signing cert — silently when run as admin; otherwise it asks: **Administrator install** (one UAC prompt, machine-level trust — preferred), **User install** (no admin at all: the cert-free portable build), or **Cancel**:
+**One line, no download** — paste into PowerShell (administrator rights **not** needed). It grabs the latest release, verifies its checksum, and asks where Agentmaster should live:
+
+- **[1] Just for you** — the default: no administrator rights, now or for any update. Desktop icon, Start menu, an "Open in Agentmaster" folder right-click entry, Apps & Features and `PATH`, in `~/.agentmaster\bin`.
+- **[2] For all users of this PC** — one administrator approval (only that step is elevated); every user keeps their own data; updating it needs an administrator again.
+- **[3] As the app package (MSIX)** — an administrator trusts each release's signing certificate once (every release has its own).
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Elevate` (skip the question, straight to UAC) · `-Launch` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Force` · `-Uninstall`.
+Flags: `-Scope User|Machine|Package` (skip the question) · `-Version <x.y.z>` · `-Prerelease` · `-Nightly` (also consider unstable nightly builds) · `-Launch` · `-Force` · `-Uninstall` (with `-Scope`) · `-ForCurrentAccount`. Run by an administrator from another account, or as SYSTEM, it installs for the user **signed in to Windows** and starts Agentmaster as them, without administrator rights; `-ForCurrentAccount` installs for the running account instead. Unattended (a scheduled task, a deployment tool): add PowerShell's own `-NonInteractive`.
 
-Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — no cert; its first launch offers a per-user install — desktop icon, Start menu, folder right-click menu, Apps & Features — into `~/.agentmaster\bin`, or keeps it fully self-contained) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
+Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `Agentmaster.exe` — its first launch asks the same question: **just for you** (recommended), **for all users**, **set it up for the signed-in user** when another account runs it, a folder you pick, here, keep it portable, or later) or the self-signed **`.msixbundle`** (trust that release's `Agentmaster.cer`, then `Add-AppxPackage`).
 
 First launch silently picks a per-install **profile folder** (`~/.agentmaster`) holding everything it persists. **Requires** Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` on `PATH` (Codex optional).
 
