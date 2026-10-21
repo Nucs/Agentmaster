@@ -2701,24 +2701,44 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
         _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
             const bool portableInstall = !::Agentmaster::Updater::IsPackaged() && ::Agentmaster::PortableInstall::IsInstalledPortable();
+            // The all-users install (or a portable folder this account cannot write): its uninstall needs
+            // administrator rights, so the elevated uninstaller runs it (a UAC prompt) and every user's
+            // own profile data stays (PortableInstall.h LaunchMachineUninstaller).
+            const bool machineInstall = !::Agentmaster::Updater::IsPackaged() && !portableInstall && ::Agentmaster::PortableInstall::IsMachineInstall();
             _Confirm(L"Uninstall Agentmaster?",
+                     machineInstall ?
+                         L"This removes Agentmaster for ALL users of this PC: its files, the shortcuts, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry. It needs administrator rights (a Windows prompt appears). Every user's own data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling." :
                      portableInstall ?
                          L"This removes the installed Agentmaster files, its desktop and Start-menu shortcuts, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling." :
                          L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
                      L"Uninstall",
-                     [this, portableInstall]() {
-                         // Guarded: quits ONLY when the uninstaller actually launched (both launchers are
-                         // no-throw and false on any failure) — never close the app with nothing
-                         // uninstalling, and never let a resolution hiccup crash the confirm callback.
+                     [this, portableInstall, machineInstall]() {
+                         // Guarded: quits ONLY when the uninstaller actually launched (every launcher is
+                         // no-throw and false on any failure, a declined UAC prompt included) — never close
+                         // the app with nothing uninstalling, and never let a resolution hiccup crash the
+                         // confirm callback.
                          try
                          {
                              const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
-                             const bool launched = portableInstall ?
-                                                       ::Agentmaster::PortableInstall::LaunchPortableUninstaller(::Agentmaster::Profiles::detail::ExeDirPath()) :
-                                                       ::Agentmaster::Updater::LaunchUninstaller(stateDir);
+                             ::Agentmaster::PortableInstall::ScriptRun machineRun;
+                             const bool launched = machineInstall  ? ::Agentmaster::PortableInstall::LaunchMachineUninstaller(::Agentmaster::Profiles::detail::ExeDirPath(), &machineRun) :
+                                                   portableInstall ? ::Agentmaster::PortableInstall::LaunchPortableUninstaller(::Agentmaster::Profiles::detail::ExeDirPath()) :
+                                                                     ::Agentmaster::Updater::LaunchUninstaller(stateDir);
                              if (launched && _quitForUpdateHandler)
                              {
                                  _quitForUpdateHandler();
+                             }
+                             else if (machineInstall && !launched && !machineRun.cancelled)
+                             {
+                                 // Refused rights (a standard user on a PC that denies elevation) or a missing
+                                 // PowerShell: say why instead of a click that seems to do nothing. A Win32
+                                 // TaskDialog on its own thread - this runs inside a ContentDialog's button
+                                 // handler, and XAML allows only one ContentDialog open at a time.
+                                 std::wstring text = L"The uninstaller did not start. " + ::Agentmaster::PortableInstall::ScriptStartFailureText(machineRun, true) +
+                                                     L"\n\nAsk an administrator to remove Agentmaster for all users.";
+                                 std::thread([text = std::move(text)]() noexcept {
+                                     ::TaskDialog(nullptr, nullptr, L"Agentmaster", L"Agentmaster was not uninstalled", text.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
+                                 }).detach();
                              }
                          }
                          catch (...)
@@ -3674,9 +3694,11 @@ namespace winrt::TerminalApp::implementation
         {
             // Uninstall removes the CURRENT package family (release OR dev), so it's offered for any
             // packaged install — independent of the release-only updater channel — AND for an INSTALLED
-            // PORTABLE copy (PortableInstall.h: registered shortcuts / menu / Apps & Features to remove).
-            // A plain unpackaged / stay-portable run has nothing registered to remove, so hide it there.
-            const bool uninstallable = ::Agentmaster::Updater::IsPackaged() || ::Agentmaster::PortableInstall::IsInstalledPortable();
+            // PORTABLE copy (PortableInstall.h: registered shortcuts / menu / Apps & Features to remove),
+            // per-user or for all users (the latter elevates). A plain unpackaged / stay-portable run has
+            // nothing registered to remove, so hide it there.
+            const bool uninstallable = ::Agentmaster::Updater::IsPackaged() || ::Agentmaster::PortableInstall::IsInstalledPortable() ||
+                                       ::Agentmaster::PortableInstall::IsMachineInstall();
             _setUninstallBtn.Visibility(uninstallable ? Visibility::Visible : Visibility::Collapsed);
         }
         if (_setCurrentChangelog)

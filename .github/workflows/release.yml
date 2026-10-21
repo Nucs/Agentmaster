@@ -22,9 +22,12 @@
 #   - Agentmaster_<ver>.msixbundle   (x64+arm64; SELF-SIGNED — see the .cer caveat below)
 #   - Agentmaster.cer                (public cert; import to Trusted People to install the bundle)
 #   - Agentmaster_<ver>_x64.zip      (TRUE portable: one agentmaster-<ver> folder shipping the
-#     .portable marker + an .am-version stamp — first launch ASKS which profile to use (default:
-#     the self-contained <unzip>\profile; remembered in <unzip>\profile.path), the in-app updater
-#     self-updates it IN PLACE via this very zip asset; unzip & run, no install/cert needed)
+#     .portable marker, an .am-version stamp and the .am-manifest (the top-level names this build
+#     ships: updates and uninstalls remove ONLY these, so a user's own files in the folder stay; a
+#     zip without it cannot be installed for all users) — first launch asks where Agentmaster
+#     should live (just for you / for all users / here / keep it portable / later; PROFILES.md
+#     §2b), the in-app updater self-updates it IN PLACE via this very zip asset; unzip & run, no
+#     install/cert needed)
 #   - Agentmaster_<ver>_arm64.zip    (portable)
 #
 # Heads-up (things a runner may need that this box has natively):
@@ -385,30 +388,30 @@ jobs:
             A fork of Windows Terminal that manages multiple Claude Code sessions.
 
             ### Install
-            Paste into PowerShell — installs **v${{ needs.prep.outputs.rawver }}** (admin not required: as admin it trusts the signing cert silently; otherwise it asks — elevate once (UAC), a no-admin per-user portable install, or cancel):
+            Paste into PowerShell — installs **v${{ needs.prep.outputs.rawver }}** (administrator rights not needed). It asks where Agentmaster should live: **[1] Just for you** (the default — no administrator rights, now or for any update), **[2] For all users of this PC** (one administrator approval, only for that step), or **[3] As the app package** (MSIX — an administrator trusts this release's certificate once):
             ```powershell
             & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }}
             ```
-            Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
+            Add `-Scope User` (or `Machine` / `Package`) to skip the question, and/or `-Launch` to start it right after:
             ```powershell
-            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }} -Portable -Launch
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.rawver }} -Scope User -Launch
             ```
+            Run by an administrator from another account, or as SYSTEM, it installs for the user signed in to Windows and starts Agentmaster as them (`-ForCurrentAccount` installs for the running account instead). Unattended runs: add PowerShell's `-NonInteractive`.
 
-            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `Agentmaster.exe` inside the `agentmaster-${{ needs.prep.outputs.ver4 }}` folder (a `WindowsTerminal.exe` compat shim next to it works too). First launch asks where Agentmaster should live: **Enter installs it to your user folder** (`%USERPROFILE%\.agentmaster\bin` — a desktop icon, a Start-menu entry, an "Open in Agentmaster" folder right-click entry and an Apps & Features entry with Uninstall; no admin, no package), or pick a folder, install it right there, keep it portable (self-contained), or decide later. Either way it self-updates in place from then on.
+            **Portable zip (recommended, no certificate):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `Agentmaster.exe` inside the `agentmaster-${{ needs.prep.outputs.ver4 }}` folder (a `WindowsTerminal.exe` compat shim next to it works too). First launch asks where Agentmaster should live: **Enter installs it just for you** (`%USERPROFILE%\.agentmaster\bin` — a desktop icon, a Start-menu entry, an "Open in Agentmaster" folder right-click entry and an Apps & Features entry with Uninstall; no administrator rights, no package), or **for all users of this PC** (one administrator approval), or — when another account runs it — **sets it up for the user signed in to Windows**; or pick a folder, install it right there, keep it portable (self-contained), or decide later. Either way it self-updates in place from then on.
 
             **MSIX bundle (self-signed):**
             1. Download `Agentmaster.cer` + `Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`.
-            2. Trust the cert once (admin PowerShell):
+            2. Trust this release's certificate (admin PowerShell; every release has its own):
                `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
             3. `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle` (or double-click it).
 
             Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
 
             ### Profiles & coexistence with a dev build
-            On **first launch** Agentmaster asks which **profile folder** to use — Production
-            (`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or
-            **Browse…** for any folder. A profile holds *everything* the app persists (sessions,
-            Flight Plans, window layouts, settings — including Terminal's own settings). Each
-            install remembers its own choice (change it later: Manager tab → ⚙ → Profile), so
-            this release coexists with a locally-built **Agentmaster Dev** (`AgentmasterDev`
-            package, `agentmasterdev` alias) without sharing or clobbering any state.
+            Agentmaster keeps *everything* it persists (sessions, prompt queues, window layouts,
+            settings — including Terminal's own settings) in one **profile folder**, picked
+            automatically on first launch: `%USERPROFILE%\.agentmaster` (a portable copy asks). Change
+            it later from the Agent Manager page (the Home button) → ⚙ → Profile. This release
+            coexists with a locally built **Agentmaster Dev** (`AgentmasterDev` package,
+            `agentmasterdev` alias, `%USERPROFILE%\.agentmaster-dev`) without sharing any state.

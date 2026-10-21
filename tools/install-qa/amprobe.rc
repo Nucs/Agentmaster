@@ -1,0 +1,4 @@
+// Agentmaster install QA probe: the repository's real in-app installer payload, under the resource name and type
+// the app uses (WindowsTerminal.rc: "AM_UPDATE_PS1 RCDATA ..."; Updater.h reads it with FindResourceW). The path is
+// relative to this folder: build.cmd runs rc from here.
+AM_UPDATE_PS1 RCDATA "..\\..\\src\\cascadia\\TerminalApp\\AgentMaster\\am-update.ps1"
