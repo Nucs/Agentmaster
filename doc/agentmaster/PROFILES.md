@@ -15,7 +15,7 @@ Status: **shipped & live-verified.** The identity split + per-install profiles a
 releases (v0.2.0+); an installed first launch **auto-selects** the per-identity default silently —
 the Default / Development / Browse… picker is shown by a **portable first launch** (§2a) and the
 cog (§2). Engine harness 900+ incl. the profile checks; side-by-side release + dev installs run
-cleanly. **2026-10-21 (NOT BUILT yet):** the install question prefers the per-user install, offers
+cleanly. **2026-10-21 (in the dev 0.0.1.33 build, where a packaged install never runs it; in no release):** the install question prefers the per-user install, offers
 installing for all users and handing the copy to the signed-in user, never leaves the app running with
 rights it was installed with, and says why an elevation failed; installs and uninstalls touch only what
 a release ships (`.am-manifest`); the scenario matrix and its test-desktop evidence are §2c.
@@ -312,7 +312,7 @@ PowerShell 5.1 reads a BOM-less script in the ANSI code page.
 
 ### §2c Rights and accounts over time — the scenario matrix
 
-Checked on 2026-10-21 (the sources of that day's install commit; NOT BUILT into the app yet) in a disposable Windows 11 25H2 test
+Checked on 2026-10-21 (the sources of that day's install commit; in the dev 0.0.1.33 build, where a packaged install never runs it, and in no release) in a disposable Windows 11 25H2 test
 desktop with three accounts — the signed-in administrator, a second administrator and a standard user —
 first with UAC off (every administrator token unsplit), then with UAC on (administrators elevate without a
 prompt, standard users' elevation is refused by policy, so the refusal path runs). The C++ flow ran

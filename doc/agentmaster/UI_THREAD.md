@@ -1161,7 +1161,7 @@ parents at +0x38):
   ~706 cards in the 556-tab window and ~706 in the 96-tab window (window records: `sidePanelGlobal: true`).
   The other two windows add 47 + 7. The list is a `StackPanel`, so every card is loaded, on screen or not
   (§8 item 2 / §10a #6, never done). Every frame, triggered by anything in any window, walks all of them.
-  Both the nodes and the off-screen cards are fixed in code since 2026-10-20, in dev since 0.0.1.32, not in production (§14).
+  Both the nodes and the off-screen cards are fixed in code since 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32 (§14).
 - **The same cards hold memory:** `xamltree.py text` finds 13,488 measured TextBlocks in list cards (77% of
   all measured TextBlocks; the count includes the 47 board cards), **~224 MB** of DirectWrite state at
   ~17 KB each (MEMORY_LEAKS.md §4.1).
@@ -1182,7 +1182,7 @@ parents at +0x38):
 - **Its CPU** (busy samples of the thread): `_followTranscript` ~20%, `_saveStateIfDirty` ~15%, `_syncTopics`
   ~12% (a `SnapshotLiveForCards` each tick), `_refreshCard` ~10%; the rest is mostly the copies and their
   allocations.
-- **Fixed in code on 2026-10-20, in dev since 0.0.1.32, not in production** ([`MESSAGING.md`](MESSAGING.md) §21.35):
+- **Fixed in code on 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** ([`MESSAGING.md`](MESSAGING.md) §21.35):
   - The write-back marks the state dirty only for a field that changed, and as PROGRESS. Progress is saved at most
     every 10 s; a structural change still within 2 s.
   - A save whose bytes equal the file's writes nothing, and the backup is copied at most once a minute.
@@ -1216,11 +1216,11 @@ parents at +0x38):
 
 | # | Fix | Win (measured basis) | Ease |
 |---|---|---|---|
-| 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute. **Done in code 2026-10-20, in dev since 0.0.1.32, not in production** (MESSAGING.md §21.35): a byte compare, `.prev` once a minute, progress saved every 10 s, a flush when the app's last window closes | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
+| 1 | Bot: set `_stateDirty` only when a field copied back changed; skip a save whose bytes equal the last write (a hash); keep `.prev` by renaming the old file or once a minute. **Done in code 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** (MESSAGING.md §21.35): a byte compare, `.prev` once a minute, progress saved every 10 s, a flush when the app's last window closes | ~24 GB/day of forced writes, ~8 ms/s | Very easy (Messaging.cpp) |
 | 2 | Zero build: switch the 96-tab window's side panel to LOCAL (706 → 96 cards); collapse a side panel that is not needed. Not needed any more once §14 is built (a GLOBAL list then holds only the cards near its viewport) | LOCAL there: ~1,220 of 3,634 nodes (a third of the walk, ~80 ms/s) and ~5,600 measured TextBlocks (~95 MB). Collapsing hides the list and stops its updates; whether XAML also drops the collapsed cards' nodes from its walk is not measured | The user's toggle, reversible |
-| 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h). **Done in code 2026-10-20, in dev since 0.0.1.32, not in production** (§14) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
-| 4 | Virtualize the side panel's list (§10a #6). **Done in code 2026-10-20, in dev since 0.0.1.32, not in production** (§14) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
-| 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed. **Part done in code 2026-10-20, in dev since 0.0.1.32, not in production** (MESSAGING.md §21.35): one `Get` per topic instead of two, and a transcript opened only when it grew (a stat first); the rest is open | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
+| 3 | Card and title band: the rounded corners on a childless background element behind the content (§10h). **Done in code 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** (§14) | ~2,929 nodes, 80% of the walk: ~200 ms/s at today's frame rate | Easy to medium (check the look) |
+| 4 | Virtualize the side panel's list (§10a #6). **Done in code 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** (§14) | Only on-screen cards exist: their nodes and ~224 MB of DirectWrite state, minus the visible cards | Hard |
+| 5 | Bot: no full `Get` per topic (the tick's own `SnapshotLiveForCards` map), follow a transcript only when the watcher's sequence moved, refresh a card only when its inputs changed. **Part done in code 2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32** (MESSAGING.md §21.35): one `Get` per topic instead of two, and a transcript opened only when it grew (a stat first); the rest is open | most of the bot's ~55 ms/s, and ~300 transcript opens a second | Medium |
 | 6 | Observer: a longer full-survey interval while the roster and the correlated pids did not change (§10a #5, a product decision); cache `ResolveCodexSessionIn` | ~25–40 ms/s | Easy code, product decision |
 | 7 | Scanner: keep each session's resolved path and keys; visit only sessions whose watcher sequence moved | ~20–30 ms/s | Medium |
 | 8 | UI lanes: `_ObserverProbeImpl` by map lookups, not comparisons over every tab; a lean read in `_ScanPendingInputImpl` | ~25 ms/s | Easy to medium |
@@ -1244,7 +1244,7 @@ python -I tools/cpuhunt/wakes.py <pid> <frameTid>              # animation (stea
 python -I tools/leakhunt/xamltree.py <dump> <census.tsv> <blocks.tsv> nodes   # needs a snapdump + census + segheap walk
 ```
 
-## 14. The side panel's cards: childless rounded shapes and a virtualized list (2026-10-20, in dev since 0.0.1.32, not in production)
+## 14. The side panel's cards: childless rounded shapes and a virtualized list (2026-10-20, in production since 0.6.8.23 and dev since 0.0.1.32)
 
 The user's request, quoting §13g rows 3 and 4 ("draw each card's rounded corners on a background element instead of
 the card itself (about 80% of the redraw cost), then load only the cards on screen"): "Kindly fix". Both are in

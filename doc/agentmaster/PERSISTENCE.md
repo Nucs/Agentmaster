@@ -631,7 +631,7 @@ it runs after the async shells exist), or a synchronous select when there are no
 + session re-home + shell replay + focused-tab restore). The single remaining refinement is the
 approximate Claude-vs-`Other` tab interleave noted above (cosmetic).
 
-## 14. The restore wake: the tabs that were busy when Agentmaster went down (2026-10-19, in dev since 0.0.1.31, not in production)
+## 14. The restore wake: the tabs that were busy when Agentmaster went down (2026-10-19, in production since 0.6.8.23 and dev since 0.0.1.31)
 
 **The gap (the user's report, 2026-10-19).** `_RestoreWindowTabs` re-homes every tab of a reopened
 window DORMANT: a tab's terminal starts its claude only on the tab's first layout, so after a
