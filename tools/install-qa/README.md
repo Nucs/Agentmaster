@@ -13,6 +13,7 @@ uninstalls for real.
 | `stage.py` | Stages fake portable unzips of the probe (`probe-<ver>` with `.portable`, `.am-version`, `.am-manifest`), a release-shaped zip of the newest one, and the scripts, into a desktop's persist folder (`Z:\amqa` in the guest). |
 | `amqa-guest.ps1` | Guest-side helpers for the REAL app (dot-source it in the guest): `Get-AmQaState` prints every install, Apps & Features entry, PATH entry, verb, shortcut, profile (+ its last `[install]` lines) and running `Agentmaster.exe` with its account and real token elevation; `New-AmQaCopy <version> <name>` makes a fresh stamped copy of the build; `Reset-AmQa` removes every install, registration and profile between scenarios. |
 | `qm.py` | Hardware-level keys and screen of the desktop through QEMU's monitor (`key`, `type`, `shot`) — the only way to see and answer a UAC consent or credential prompt, which sits on the secure desktop where the desktop's own agent (SendInput, its screenshots) cannot reach. |
+| `mkmsix.ps1` | PowerShell 7, on the development PC: re-packs a build's unsigned `.msix` at a chosen (older) version and signs it with a throwaway `CN=Agentmaster` certificate made in memory; leaves the signed `.msix` and the public `qa-signing.cer`. The test desktop trusts the `.cer` and installs the package, so the app's own PACKAGE update can run there. |
 
 ## Run it
 
@@ -59,7 +60,9 @@ The agent comes back elevated (its task runs with highest privileges). ⚠ After
 agent no longer sees the `Z:` mapping: use `\\host.lan\Data`.
 
 **Read the results:** `C:\amqa\probe.log`, each account's `%USERPROFILE%\.agentmaster\hooks.log`
-(`[install]` lines), the registry (`HKCU` / `HKLM ...\Uninstall\Agentmaster`, `Software\Classes\...\shell\Agentmaster`,
+(`[install]` lines), the registry (`HKCU ...\Uninstall\Agentmaster`, `HKLM ...\Uninstall\AgentmasterAllUsers` —
+`HKLM ...\Uninstall\Agentmaster` for an all-users install registered before the evening of 2026-10-21 —,
+`Software\Classes\...\shell\Agentmaster`,
 the user / machine `Path`), the shortcuts, and the folders. The PowerShell installer
 (`C:\amqa\repo\tools\Install-Agentmaster.ps1`) runs against the real releases (`-Prerelease` while all of
 them are pre-releases); its suite (`C:\amqa\repo\tools\tests\Test-AgentmasterInstaller.ps1
@@ -110,3 +113,42 @@ waits on a UAC prompt with the agent's `launch` tool (or `Start-Process -Credent
 job), or the call hangs and its timeout kills the request; `docker cp` cannot read the monitor's tmpfs
 (`qm.py` streams the screendump through `docker exec cat`); a PowerShell started from Git Bash finds Git's
 `tar.exe` first (the packaging script now calls Windows' own).
+
+## The package update, two users on one copy, a demotion
+
+Done this way later the same night (PROFILES.md §2c, "The paths that were still open"); the same desktop
+setup as above. Each run used a fresh copy stamped OLDER than the newest published release
+(`New-AmQaCopy '0.7.0.0' <name>`): ⚙ → About → *Allow updating to pre-release versions* + *Check for
+updates* then offers that release, and *Update now* downloads it from GitHub. (A local file cannot stand in
+for the release: Windows PowerShell 5.1's `Invoke-WebRequest` refuses `file://`.)
+
+1. **Zip and package.** From Git Bash, quote the switch: `'-PortableMode:$true'`. Unquoted, bash expands
+   `$true` to nothing, the switch is off, and the zip has no `.portable`, `.am-manifest` or `.am-version`.
+   Then `pwsh -File tools\install-qa\mkmsix.ps1 -Msix <the build's .msix> -OutDir <dir> -Version 0.7.0.0`
+   and stage the `.msix`, `qa-signing.cer` and the build's `Dependencies\x64\Microsoft.UI.Xaml.2.8.appx`.
+   After copying from `Z:`, clear the Hidden attribute the share puts on the dot files.
+2. **The MSIX package:** `Import-Certificate -FilePath qa-signing.cer -CertStoreLocation
+   Cert:\LocalMachine\TrustedPeople`, `Add-AppxPackage -Path <msix> -DependencyPath <Microsoft.UI.Xaml.2.8.appx>`,
+   start it with `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App`. Its update reaches the certificate
+   question (the release's own certificate is not trusted); `Reset-AmQa` removes the package again (remove
+   the `CN=Agentmaster` certificate from `TrustedPeople` by hand).
+3. **The copy the old install script made** (v0.7.10 and older): extract the published portable zip into
+   `%LOCALAPPDATA%\Programs\Agentmaster`, write `.am-version`, and create `Agentmaster (Portable).lnk` in the
+   user's Start-menu Programs folder pointing at its `Agentmaster.exe`. No registry entry: that script made
+   none.
+4. **Two users on the all-users copy:** install it for all users, then start it as the second account in the
+   signed-in user's session: `Start-Process 'C:\Program Files\Agentmaster\Agentmaster.exe' -Credential …
+   -LoadUserProfile` with all three standard streams redirected (the input file must exist, or
+   `Start-Process` fails). That instance keeps the folder busy, so the first user's update cannot swap it.
+5. **A demotion:** give `Docker` Modify on `C:\ProgramData\claude-desktop` and `C:\amqa` (`icacls … /T`),
+   `Remove-LocalGroupMember -Group Administrators -Member Docker`, `shutdown /r`. The agent comes back as a
+   standard user (its task's "highest privileges" gives a standard user its normal token); `whoami /groups`
+   shows no Administrators and a Medium mandatory level. `Get-AmQaState` then cannot read other users'
+   folders or every package (`Access is denied` on stderr: expected). A `reset_desktop` makes `Docker` an
+   administrator again.
+
+**Traps met:** an UNELEVATED process query lists other users' processes with their paths and owners, so
+"is my app running from this folder" needs an owner filter; Settings → Installed apps lists an Uninstall
+key NAME once, so two installs need two key names; a screenshot taken right after a click can still show
+the previous frame (take another before deciding the click did nothing — though twice a first click on ⚙
+or *Check for updates* really did nothing).

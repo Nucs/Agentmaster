@@ -220,9 +220,20 @@ EstimatedSize); and the folder on the **user PATH** (`WM_SETTINGCHANGE` broadcas
 then the INSTALLED copy is launched and the installing process exits (an in-place install carries on).
 *For all users* — the same pieces machine-wide, written by the shared PowerShell core
 (`Install-AmMachineCopy`): the all-users desktop and Start menu, `HKLM\Software\Classes` verbs,
-`HKLM\...\Uninstall\Agentmaster`, the machine PATH; `install.path` = `machine` and NO `profile.path`
+`HKLM\...\Uninstall\AgentmasterAllUsers`, the machine PATH; `install.path` = `machine` and NO `profile.path`
 (each user resolves their own profile). It refuses a release whose zip has no `.am-manifest` (built
-before 2026-10-21): that app would not know what `install.path = machine` means.
+before 2026-10-21): that app would not know what `install.path = machine` means. Its shortcuts and its
+Apps & Features entry are named **Agentmaster (all users)**, a per-user install's **Agentmaster**
+(`Get-AmRegistrationName`), and its Apps & Features entry has its own key NAME (`AgentmasterAllUsers`,
+`kMachineUninstallKey`; both since the evening of 2026-10-21). Before, both installs said *Agentmaster* in
+Start, on the desktop and in Apps & Features — and both entries were `...\Uninstall\Agentmaster`: Windows
+lists an Uninstall key name ONCE, so Settings → Installed apps showed only the all-users entry and the
+per-user copy could not be uninstalled there (measured in the test desktop: "1 app found"; with the HKLM
+key renamed, both listed). An all-users copy registered under the old names gets the new ones at its next
+update (the old `Agentmaster.lnk` and the old-name entry are replaced only when they point into the
+folder; detection reads the new key, then the old). Where both installs exist, Windows puts the machine
+PATH BEFORE the user PATH, so `agentmaster-cli` in a new shell is the all-users copy's; the "Open in
+Agentmaster" verbs are the per-user copy's (`HKCU\Software\Classes` outranks `HKLM\Software\Classes`).
 
 **Machine copies** (`Profiles::IsMachineCopyIn`): a portable folder whose `install.path` says `machine`,
 or one THIS account cannot write (a write probe — the all-users install as a standard user sees it, a
@@ -241,7 +252,28 @@ self-updates in place; `RefreshInstalledRegistration` (every launch, registry re
 Apps & Features version and the verbs' command paths after such an update. An all-users copy updates in
 place too: the in-app update runs only its file swap elevated (`am-update.ps1 -Portable` →
 `Invoke-AmElevatedPhase` when the folder is not writable) and relaunches the app unelevated; the
-elevated swap re-stamps the HKLM entry.
+elevated swap re-stamps the HKLM entry. When that swap does not happen — the approval declined (1223),
+refused by the PC's policy (1260), or the swap failed (another user still runs Agentmaster from the
+folder) — the updater asks (`Read-MachineUpdateChoice`): **[A]** ask for approval again (not after a
+policy refusal: it cannot help), **[U]** install the new version **just for this user** instead (the
+default: no rights, now or later; `profile.path` → the profile the app ran on, which the app passes as
+`-ProfileDir`, so every session stays; the all-users copy stays for the other users), **[C]** cancel.
+Before the evening of 2026-10-21 it ended there, with the app closed.
+
+**An update never leaves the user without the app.** The app quits to let `am-update.ps1` run; when the
+update fails, is cancelled, or keeps the installed version, the script starts the INSTALLED version
+again (`Restart-PreviousApp`: after waiting for the closing app, and not when THIS account's Agentmaster
+already runs from there again — another user's instance of an all-users copy is visible to the check, path
+and owner both, and counting it kept the user's app from coming back in the test desktop) — after a
+failure, 30 s later or at a key press, so the window says why first. Right before that start it leaves a
+one-shot marker in the profile (`am-update-restarted.txt`: the tag and the write time), which the started
+app reads and deletes (`ConsumeRestartedAfterUpdateMarker`, fresh for 10 minutes): that run behaves as
+*Remind me next restart* — no startup or hourly prompt, the cog's check stays live — instead of offering
+the same update again at once (seen in the test desktop right after a cancel). A swap that fails half way
+first puts the previous version back (next paragraph). The generated `am-update.cmd`
+(and both uninstall launchers) start with `chcp 65001`: they are UTF-8, and cmd.exe decodes a batch file
+in the console's code page, so a non-ASCII profile or install path — a Windows user name in Hebrew —
+reached PowerShell garbled before (measured on a CP 437 console: `╫É╫£╫Ö` for three Hebrew letters).
 
 **The manifest `<exedir>\.am-manifest`** (written by `New-UnpackagedTerminalDistribution.ps1
 -PortableMode` since 2026-10-21): the top-level names the build ships, one per line. An upgrade — the
@@ -253,7 +285,14 @@ shipped before it (`kLegacyShippedNames` / `IsLegacyShippedLeaf` in C++, `$scrip
 too. A user's own files in the folder, another `.exe` included, and `settings\`, `profile\`,
 `profile.path` always stay; `install.path` stays on an upgrade and goes on an uninstall. A manifest line
 is accepted only as a plain name (no separator, drive or stream colon, wildcard, `.` or `..`), so a
-corrupt or planted manifest cannot name anything outside the folder.
+corrupt or planted manifest cannot name anything outside the folder. An upgrade MOVES what it replaces
+into a set-aside folder inside the install folder (`.am-previous-…`: the same volume, a rename each, and a
+running image can be renamed) before it copies the new layout, and puts it back when the copy fails
+(`detail::SetAsideShippedEntries` / `RestoreSetAside` in C++, `Install-AmLayout` / `Restore-AmSetAside` in
+the core); a destination entry that cannot be moved stops the upgrade before anything changed. Before the
+evening of 2026-10-21 the old files were deleted first, and a copy that failed half way left a folder
+holding neither version. A set-aside folder an interrupted run left is deleted by the next upgrade or
+uninstall (either installer: the prefix is shared).
 
 **Existing installs — never overridden, taken over where we can:**
 
@@ -263,9 +302,21 @@ corrupt or planted manifest cannot name anything outside the folder.
   the package is RUNNING — removes it afterwards (hidden Windows PowerShell, `Remove-AppxPackage`,
   per-user, no admin; the GUI under the package path is stopped first and its ConPTY hosts DRAINED, never
   killed). A failed removal is a note; the install still succeeds.
-- an **all-users** install of ours (`HKLM\...\Uninstall\Agentmaster` with a live exe): offered for use
+- an **all-users** install of ours (`HKLM\...\Uninstall\AgentmasterAllUsers` — or, registered before the
+  evening of 2026-10-21, `...\Uninstall\Agentmaster` — with a live exe): offered for use
   (current) or update (older) — see the options.
 - a previous **per-user** install of ours: the adaptive first option.
+- the copy **`Install-Agentmaster.ps1` v0.7.10 and older** made — `%LOCALAPPDATA%\Programs\Agentmaster`
+  with a Start-menu entry *Agentmaster (Portable)* and no registry entry (`LegacyScriptInstallDir`; since
+  the evening of 2026-10-21): when no HKCU install exists it is the adaptive first option too (*the copy the
+  install script made*), or — when the app's first launch made that folder a launcher stub — the install
+  the stub names; never offered to itself (`LegacyScriptOfferDir`). Its update registers it in place (a
+  folder kept portable gets only its files), copies the data a never-decided copy kept in
+  `<folder>\profile` into the profile (copy-if-absent), and retires *Agentmaster (Portable)* — only when it
+  leads into the install, directly or through a stub (`RetireLegacyScriptShortcut`; the core's
+  `Remove-AmLegacyScriptShortcut`, which until then removed it whatever it pointed at, also after an update
+  that kept the folder portable and left it no Start-menu entry). Before, a new zip offered a second
+  per-user install and the script's copy stayed behind.
 
 **The decision file `<exedir>\install.path`** (plain UTF-8, `#` comments, first value line wins — the
 `profile.path` idiom): `installed` (this folder IS the per-user install; the older spelling `here` reads
@@ -346,13 +397,21 @@ v0.7.10 release.
 
 **Over time:**
 
-- **A per-user install never needs rights** — not to install, update or uninstall. It is the default
-  everywhere, and the escape hatch everywhere else: the MSIX update offers switching to it when an
-  administrator is not at hand for a release's certificate (every release has its own; that is fixed
-  only by signing with one stable certificate — the `SIGNING_PFX_*` secrets, the owner's decision).
+- **A per-user install never needs rights** — not to install, update or uninstall, also when an
+  administrator made it with administrator rights and later lost them (checked: B1 below; its files are
+  owned by Administrators, but the user's full control comes from the profile folder's inherited
+  permissions). It is the default everywhere, and the escape hatch everywhere else: the MSIX update offers
+  switching to it when an administrator is not at hand for a release's certificate (every release has its
+  own; that is fixed only by signing with one stable certificate — the `SIGNING_PFX_*` secrets, the owner's
+  decision), and the all-users update offers it when its approval is declined or refused.
 - **An all-users install needs an administrator for every update and its uninstall** — also when the
   person who installed it later lost those rights. A standard user is told so and can install just for
-  themselves next to it (Start then shows both; the prompt names both).
+  themselves next to it: the in-app update offers exactly that when the approval is declined or refused
+  (*[U] Install … just for you instead*, the same data), and Start, the desktop and Apps & Features then show
+  *Agentmaster* (theirs, updated without rights) beside *Agentmaster (all users)* (the shared one). No
+  account without administrator rights can change, update or take over the all-users copy itself: Program
+  Files and HKLM are Windows-protected; it stays for the other users until an administrator updates or
+  removes it.
 - **A signed-in administrator who runs things elevated** (by habit, or on a PC with UAC off) never hands
   those rights to the app it installs: the copy is started through the unelevated hop.
 - **Another account at the keyboard** (an administrator typing UAC credentials for a standard user,
@@ -407,6 +466,43 @@ evaluation mode on this image, and on a PC where it is ON an unsigned exe does n
 last three change with a code-signing certificate from a trusted authority (the MSIX's self-signed one
 does not).
 
+**The paths that were still open (later that night).** The user's questions: can a user who installed as
+an administrator and later lost those rights always update; how do an all-users and a per-user install
+live side by side; can a user without rights take the all-users install over. A rebuilt Release zip of the
+evening's fixes (the all-users names, the restorable swap, the updater's fallback and restart, the old
+script's copy), the same kind of test desktop with UAC at Windows' defaults, and an MSIX of the same sources
+signed with a throwaway certificate the desktop trusts (`tools\install-qa\mkmsix.ps1`). Each run used a
+fresh copy stamped OLDER than the published v0.7.10-prerelease (`New-AmQaCopy`), so the app's own update
+found that release on GitHub and installed it.
+
+| Who / what | Result |
+|---|---|
+| A1: the copy `Install-Agentmaster.ps1` v0.7.10 makes (`%LOCALAPPDATA%\Programs\Agentmaster`, *Agentmaster (Portable)* in Start, no Apps & Features entry), then a newer zip from Explorer | *Update the installed Agentmaster … the copy the install script made* recommended → updated and registered in that folder (Apps & Features, PATH, verbs, *Agentmaster* in Start), *Agentmaster (Portable)* removed; the app in front |
+| A2: *Install for all users*, UAC *Yes* | the Apps & Features key `AgentmasterAllUsers`, named *Agentmaster (all users)*, and so are its shortcuts |
+| A3: two users on that copy (a standard user's Agentmaster running from Program Files, started with `Start-Process -Credential`): the administrator's in-app update, UAC *Yes* | the swap refused while the other user runs the copy → *[A] Ask for administrator approval again (for example once the other users have closed Agentmaster)*, [U], [C] → [C]: the installed version starts again and offers no update |
+| the same, UAC *No* | the choice without that hint → Enter ([U], the default): the release installed just for this user on the same profile, started in front; Start search and Settings → Installed apps list *Agentmaster* and *Agentmaster (all users)*; the other user's instance untouched |
+| A4: the MSIX package of these sources, ⚙ → *Check for updates* → *Update now* | the certificate question [A] / [U] / [C] → [C]: the package starts again with no update prompt (hooks.log: "skipped: the update script started this version again after an update to v0.7.10-prerelease that did not complete") → [U]: the release installed just for the user on the profile the package used, the package removed, the app unelevated |
+| A5: an old copy started ELEVATED, *Install just for you* | the *running with administrator rights* note; installed (its files owned by Administrators, the user's full control inherited) and started as the signed-in user, unelevated |
+| B1: that user removed from Administrators and signed in again (a standard user, medium integrity), ⚙ → *Check for updates* → *Update now* | no prompt of any kind; v0.7.0 → v0.7.10 in ~12 s, Apps & Features re-stamped, no set-aside folder left; the updated app in front, unelevated |
+
+**Fixed during that pass** (each re-checked with a rebuilt zip):
+
+- **No restart after a cancel while another user ran the all-users copy.** `Restart-PreviousApp` skips the
+  start when Agentmaster already runs from the folder, and an UNELEVATED process query also sees other
+  users' processes, path and owner both (measured: a limited-rights query by the administrator listed the
+  standard user's `C:\Program Files\Agentmaster\Agentmaster.exe` with that user's SID). The check now counts
+  only this account's processes (`Test-AmAppRunningUnder`, by owner SID).
+- **Settings → Installed apps listed one Agentmaster.** With both installs, the shared key name `Agentmaster`
+  was listed once ("1 app found"), so the per-user copy could not be uninstalled there; the all-users key is
+  `AgentmasterAllUsers` now (§2b).
+- **The same update offered again at once.** The version started again after a cancel ran its startup check
+  and offered the same release right away; the restart marker makes that run behave as *Remind me next
+  restart* (§2b).
+
+Found beside it, on the development PC: the generated `.cmd` files' missing `chcp 65001` (§2b; a UTF-8 path
+reached PowerShell garbled on a CP 437 console). Observed and not investigated: twice in A4, a first click on
+⚙ or *Check for updates* did nothing and a second one worked (not seen in A5 or B1).
+
 **Automated coverage:** the m5 suite (`TestPortableInstall`, `TestProfileBootstrap`: the decision and
 pointer files, the startup plan, the account plan, the prompt default, the manifest and legacy names on a
 real scratch tree, the download mark removed from copied and in-place files but not from a user's own,
@@ -418,13 +514,15 @@ scratch folders, the download mark on an installed layout, the Win32 error readi
 script that runs and reports back; `-IncludeScheduledTask` adds a real one-shot task — run it on a test
 desktop).
 
-**Not covered:** the app's own package update (`am-update.ps1` default mode) and its *switch to the
-per-user install* answer end to end (it needs an MSIX of these sources signed with a certificate the test
-desktop trusts); whether the app relaunched by the in-app update comes to the front (the relaunch goes
-through the update script, not `LaunchApp`). Known limits: script-made shortcuts carry no AUMID (the
-script cannot compute the app's per-path formula; the app's own install stamps it); a shared unzip used
-by several accounts is a stub for all of them once one decides (the decision is per folder); HKLM
-detection reads the 64-bit view of `Uninstall\Agentmaster` only.
+**Not covered:** *[A]* in either question (the all-users update's after a decline or a refused swap, and
+the package update's certificate question); a swap that fails half way in a real desktop (the put-back is
+covered by the automated tests, where a locked file makes the move or the copy fail); an account whose name
+is not ASCII (the `chcp` fix was measured on the development PC only). The package update and its switch to
+the per-user install, and whether the app the in-app update starts comes to the front (after B1's update
+and A3's [U] it did), were checked in the pass above. Known limits: script-made shortcuts carry no AUMID (the script cannot
+compute the app's per-path formula; the app's own install stamps it); a shared unzip used by several
+accounts is a stub for all of them once one decides (the decision is per folder); HKLM detection reads the
+64-bit view only (`Uninstall\AgentmasterAllUsers`, then `Uninstall\Agentmaster`).
 
 ### First launch — installed auto-selects by identity (no prompt); portable asks
 

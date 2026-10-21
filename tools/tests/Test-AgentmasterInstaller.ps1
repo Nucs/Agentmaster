@@ -18,8 +18,12 @@
     What it pins: the SHARED INSTALL CORE is byte-identical in both files and lists every one of its
     functions for the phase export; both files are pure ASCII and parse; the manifest rules; the upgrade
     and uninstall remove ONLY what Agentmaster ships (a user's file, settings\, profile\, profile.path stay);
+    an upgrade whose copy fails puts the previous version back (a source file held open forces the failure);
     the decision / pointer files; the write probe (a real deny ACL); the user and machine installs and their
-    registration, written and removed; a phase script runs and reports back.
+    registration, written and removed - the all-users one named "Agentmaster (all users)"; the profile a
+    per-user install uses and the data it copies in; when the old script's "Agentmaster (Portable)" shortcut
+    is retired; the in-app updater's choices when the all-users copy cannot be updated; a phase script runs
+    and reports back.
 
     -IncludeScheduledTask also runs Invoke-AmAsUser for the CURRENT user (a real, one-shot scheduled task,
     deleted at once) - meant for a disposable test desktop, not a workstation.
@@ -170,14 +174,16 @@ try {
         [hashtable] the Targets shape Register-AmInstall / Unregister-AmInstall accept.
     #>
     function New-TestTargets {
-        param([string]$Name)
+        param([string]$Name, [switch]$Machine)
+        # The all-users shape names its entry AgentmasterAllUsers and remembers the old name (Get-AmRegistrationTargets).
         @{
-            UninstallKey = "$regRoot\$Name\Uninstall\Agentmaster"
-            ClassesRoot  = "$regRoot\$Name\Classes"
-            EnvKey       = "$regRoot\$Name\Environment"
-            StartMenu    = Join-Path $root "$Name-startmenu"
-            Desktop      = Join-Path $root "$Name-desktop"
-            Broadcast    = $false
+            UninstallKey       = if ($Machine) { "$regRoot\$Name\Uninstall\AgentmasterAllUsers" } else { "$regRoot\$Name\Uninstall\Agentmaster" }
+            LegacyUninstallKey = if ($Machine) { "$regRoot\$Name\Uninstall\Agentmaster" } else { '' }
+            ClassesRoot        = "$regRoot\$Name\Classes"
+            EnvKey             = "$regRoot\$Name\Environment"
+            StartMenu          = Join-Path $root "$Name-startmenu"
+            Desktop            = Join-Path $root "$Name-desktop"
+            Broadcast          = $false
         }
     }
 
@@ -291,6 +297,51 @@ try {
     Assert ($stillMarked.Count -eq 0) "download mark: every installed file loses it (still marked: $($stillMarked -join ', '))"
     Assert ($null -ne (Get-Item -LiteralPath (Join-Path $markDst 'my-download.zip') -Stream Zone.Identifier -ErrorAction SilentlyContinue)) "download mark: a user's own file in the install folder keeps it"
 
+    # ---- a failed upgrade puts the previous version back (2026-10-21) ----------------------------------------
+    # Before, the old files were deleted before the copy, and a copy that failed half way left a folder with
+    # neither version: the in-app update then had nothing to start. A source file held open with no sharing
+    # makes the copy fail on its LAST entry (Get-ChildItem lists alphabetically), after every other entry of
+    # the new layout was laid down.
+    $failSrc = Join-Path $root 'release-fails'
+    New-TestLayout -Dir $failSrc -Version '9.9.9.2' -Extra @('new-only.dll', 'zz-locked.dll')
+    $failDst = Join-Path $root 'install-restore'
+    New-TestLayout -Dir $failDst -Version '1.0.0.0' -Extra @('old-only.dll')
+    [IO.File]::WriteAllText((Join-Path $failDst 'Agentmaster.exe'), 'old exe')
+    Write-TestFile (Join-Path $failDst 'my-notes.txt') 'mine'
+    Write-TestFile (Join-Path $failDst 'profile\sessions.json') '{}'
+    Write-TestFile (Join-Path $failDst '.am-previous-0badc0de\stale.dll') 'left by an interrupted upgrade'
+    $lock = [IO.File]::Open((Join-Path $failSrc 'zz-locked.dll'), 'Open', 'Read', 'None')
+    $threw = $false
+    try { Install-AmLayout -SourceDir $failSrc -DestDir $failDst } catch { $threw = $true } finally { $lock.Dispose() }
+    Assert $threw 'restore: a copy that fails half way throws (the caller starts the previous version again)'
+    Assert (([IO.File]::ReadAllText((Join-Path $failDst 'Agentmaster.exe'))) -eq 'old exe') 'restore: the previous exe is back'
+    Assert ((Test-Path (Join-Path $failDst 'old-only.dll')) -and (Test-Path (Join-Path $failDst 'Images\icon.png'))) 'restore: a file and a folder only the old version had are back'
+    Assert (-not (Test-Path (Join-Path $failDst 'new-only.dll'))) 'restore: what the failed copy laid down is gone'
+    Assert ((Get-AmInstalledVersion -Dir $failDst) -eq [version]'1.0.0.0') 'restore: the previous version stamp is back'
+    Assert ((Test-Path (Join-Path $failDst 'my-notes.txt')) -and (Test-Path (Join-Path $failDst 'profile\sessions.json'))) "restore: a user's own file and profile\ never moved"
+    Assert (@(Get-ChildItem -LiteralPath $failDst -Directory -Force -Filter '.am-previous-*').Count -eq 0) 'restore: no set-aside folder is left (the stale one of an earlier run included)'
+    Install-AmLayout -SourceDir $failSrc -DestDir $failDst
+    Assert (([IO.File]::ReadAllText((Join-Path $failDst 'Agentmaster.exe'))) -eq 'exe' -and (Test-Path (Join-Path $failDst 'new-only.dll')) -and -not (Test-Path (Join-Path $failDst 'old-only.dll'))) 'restore: the same upgrade succeeds once the file is free'
+    Assert (@(Get-ChildItem -LiteralPath $failDst -Directory -Force -Filter '.am-previous-*').Count -eq 0) 'restore: a successful upgrade leaves no set-aside folder'
+
+    # ---- copying a profile's data: copy-if-absent, the app's MigrateProfileData exclusions --------------------
+    $pFrom = Join-Path $root 'profile-from'
+    $pTo = Join-Path $root 'profile-to'
+    Write-TestFile (Join-Path $pFrom 'sessions.json') 'from'
+    Write-TestFile (Join-Path $pFrom 'windows\w1.json') 'w1'
+    Write-TestFile (Join-Path $pFrom 'settings.json') 'from settings'
+    Write-TestFile (Join-Path $pFrom 'locks\build-launch') 'x'
+    Write-TestFile (Join-Path $pFrom 'shim\claude.cmd') 'x'
+    Write-TestFile (Join-Path $pFrom 'bin\Agentmaster.exe') 'x'
+    Write-TestFile (Join-Path $pFrom 'bridge.json') 'x'
+    Write-TestFile (Join-Path $pFrom 'state.tmp') 'x'
+    Write-TestFile (Join-Path $pTo 'settings.json') 'already there'
+    $nCopied = Copy-AmProfileData -From $pFrom -To $pTo
+    Assert ($nCopied -eq 2 -and (Test-Path (Join-Path $pTo 'sessions.json')) -and (Test-Path (Join-Path $pTo 'windows\w1.json'))) "profile copy: the data arrives, a nested file included (copied $nCopied)"
+    Assert (([IO.File]::ReadAllText((Join-Path $pTo 'settings.json'))) -eq 'already there') 'profile copy: a file the target holds is never overwritten'
+    Assert (-not (Test-Path (Join-Path $pTo 'locks')) -and -not (Test-Path (Join-Path $pTo 'shim')) -and -not (Test-Path (Join-Path $pTo 'bin')) -and -not (Test-Path (Join-Path $pTo 'bridge.json')) -and -not (Test-Path (Join-Path $pTo 'state.tmp'))) 'profile copy: locks\, shim\, bin\, bridge.json and *.tmp stay behind'
+    Assert ((Copy-AmProfileData -From $pFrom -To $pFrom) -eq 0 -and (Copy-AmProfileData -From (Join-Path $root 'nowhere') -To $pTo) -eq 0) 'profile copy: onto itself, or from nothing, copies nothing'
+
     # ---- the per-user install: shape, registration, profile, kept-portable ----------------------------------
     $env:USERPROFILE = Join-Path $root 'home'
     New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
@@ -303,7 +354,8 @@ try {
     Assert ((Get-AmUserProfileDir) -eq $mappedProfile) "user profile: the MSIX package's own choice is adopted (the same data after a switch)"
     $tu = New-TestTargets 'user'
     $userDir = Join-Path $root 'user-install'
-    Install-AmUserCopy -LayoutDir $src -DestDir $userDir -Version '9.9.9.0' -Targets $tu
+    $registeredNow = Install-AmUserCopy -LayoutDir $src -DestDir $userDir -Version '9.9.9.0' -Targets $tu
+    Assert ($registeredNow -eq $true) 'user install: reports that the folder is a registered install'
     Assert ((Get-AmInstallDecision -Dir $userDir) -eq 'installed') 'user install: install.path = installed (the app then never re-asks)'
     Assert (([IO.File]::ReadAllText((Join-Path $userDir 'profile.path'))).Contains($mappedProfile)) 'user install: profile.path -> the adopted profile'
     Assert (Test-Path -LiteralPath $mappedProfile) 'user install: the adopted profile folder exists'
@@ -323,21 +375,73 @@ try {
     New-TestLayout -Dir $kept -Version '1.0.0.0'
     Set-AmInstallDecision -Dir $kept -Value 'portable'
     $tk = New-TestTargets 'kept'
-    Install-AmUserCopy -LayoutDir $src -DestDir $kept -Version '9.9.9.0' -Targets $tk
+    $keptRegistered = Install-AmUserCopy -LayoutDir $src -DestDir $kept -Version '9.9.9.0' -Targets $tk
     Assert ((Get-AmInstallDecision -Dir $kept) -eq 'portable' -and -not (Test-Path -LiteralPath $tk.UninstallKey)) 'user install: a folder kept portable by choice only gets its files updated'
+    Assert ($keptRegistered -eq $false) 'user install: ...and reports it was not registered (its old Start-menu entry is then kept)'
+
+    # The profile a switch keeps (-ProfileDir: the in-app updater passes the profile the app used), and the data a
+    # folder that never chose a profile kept in <folder>\profile (the old script's folder, run with "Ask me later").
+    $switchProfile = Join-Path $root 'data\the-app-profile'
+    $oldScriptDir = Join-Path $root 'old-script-copy'
+    New-TestLayout -Dir $oldScriptDir -Version '0.7.10.0' -NoManifest
+    Write-TestFile (Join-Path $oldScriptDir 'profile\sessions.json') 'from the old folder'
+    $ts = New-TestTargets 'switch'
+    $null = Install-AmUserCopy -LayoutDir $src -DestDir $oldScriptDir -Version '9.9.9.0' -Targets $ts -ProfileDir $switchProfile
+    Assert (([IO.File]::ReadAllText((Join-Path $oldScriptDir 'profile.path'))).Contains($switchProfile)) 'user install: -ProfileDir is the profile the installed copy uses'
+    Assert ((Test-Path (Join-Path $switchProfile 'sessions.json')) -and (Test-Path (Join-Path $oldScriptDir 'profile\sessions.json'))) "user install: a folder's own profile data is copied into that profile (and stays where it was)"
+    Assert ((Get-AmInstallDecision -Dir $oldScriptDir) -eq 'installed') 'user install: the old script''s folder becomes a registered install'
+
+    # The old script's Start-menu entry "Agentmaster (Portable)": retired only when it leads to the install.
+    $progs = Join-Path $root 'legacy-programs'
+    New-Item -ItemType Directory -Force -Path $progs | Out-Null
+    $wsh = New-Object -ComObject WScript.Shell
+    $legacyLnk = Join-Path $progs 'Agentmaster (Portable).lnk'
+    $mk = { param($target) $s = $wsh.CreateShortcut($legacyLnk); $s.TargetPath = $target; $s.Save() }
+    & $mk (Join-Path $oldScriptDir 'Agentmaster.exe')
+    Assert (Remove-AmLegacyScriptShortcut -InstallDir $oldScriptDir -ProgramsDir $progs) 'old shortcut: retired when it points into the registered install'
+    Assert (-not (Test-Path -LiteralPath $legacyLnk)) 'old shortcut: ...and it is gone'
+    $stubDir = Join-Path $root 'old-script-stub'
+    Write-TestFile (Join-Path $stubDir 'Agentmaster.exe') 'stub'
+    Set-AmInstallDecision -Dir $stubDir -Value $oldScriptDir
+    & $mk (Join-Path $stubDir 'Agentmaster.exe')
+    Assert (Remove-AmLegacyScriptShortcut -InstallDir $oldScriptDir -ProgramsDir $progs) 'old shortcut: retired when it points into a launcher stub that names the install'
+    & $mk (Join-Path $root 'some-other-copy\Agentmaster.exe')
+    Assert (-not (Remove-AmLegacyScriptShortcut -InstallDir $oldScriptDir -ProgramsDir $progs) -and (Test-Path -LiteralPath $legacyLnk)) 'old shortcut: kept when it leads to another copy (before, it was removed whatever it pointed at)'
+    Assert (-not (Remove-AmLegacyScriptShortcut -InstallDir $oldScriptDir -ProgramsDir (Join-Path $root 'no-programs'))) 'old shortcut: none there -> nothing to retire'
 
     # ---- the machine install: refuses an old layout, writes machine, no pointer -----------------------------
-    $tm = New-TestTargets 'machine'
+    $tm = New-TestTargets 'machine' -Machine
+    $real = Get-AmRegistrationTargets -Scope Machine
+    Assert ($real.UninstallKey -like '*\Uninstall\AgentmasterAllUsers' -and $real.LegacyUninstallKey -like '*\Uninstall\Agentmaster' -and (Get-AmRegistrationTargets -Scope User).UninstallKey -like 'HKCU:*\Uninstall\Agentmaster') 'targets: the all-users entry has its own key name (a shared one hid the per-user entry in Settings)'
     $oldLayout = Join-Path $root 'release-old'
     New-TestLayout -Dir $oldLayout -Version '0.7.9.0' -NoManifest
     $threw = $false
     try { Install-AmMachineCopy -LayoutDir $oldLayout -DestDir (Join-Path $root 'machine-old') -Version '0.7.9.0' -Targets $tm } catch { $threw = $true }
     Assert $threw 'machine install: a release without a manifest is refused (its app would not know install.path = machine)'
     $machineDir = Join-Path $root 'machine-install'
+    # An all-users copy registered by the first build with all-users installs named its shortcut Agentmaster.lnk:
+    # the renamed one replaces it when it points into the folder; one leading elsewhere is not touched.
+    $wshm = New-Object -ComObject WScript.Shell
+    New-Item -ItemType Directory -Force -Path $tm.StartMenu, $tm.Desktop | Out-Null
+    $olderStart = $wshm.CreateShortcut((Join-Path $tm.StartMenu 'Agentmaster.lnk'))
+    $olderStart.TargetPath = Join-Path $machineDir 'Agentmaster.exe'
+    $olderStart.Save()
+    $foreignDesk = $wshm.CreateShortcut((Join-Path $tm.Desktop 'Agentmaster.lnk'))
+    $foreignDesk.TargetPath = Join-Path $root 'a-users-own-copy\Agentmaster.exe'
+    $foreignDesk.Save()
+    # ...and its Apps & Features entry under the old key name, which the renamed key replaces.
+    New-Item -Path $tm.LegacyUninstallKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $tm.LegacyUninstallKey -Name 'InstallLocation' -Value $machineDir -PropertyType String -Force | Out-Null
     Install-AmMachineCopy -LayoutDir $src -DestDir $machineDir -Version '9.9.9.0' -Targets $tm
+    Assert (-not (Test-Path -LiteralPath $tm.LegacyUninstallKey)) 'machine install: an entry under the old key name that describes this folder is replaced by the renamed one'
     Assert ((Get-AmInstallDecision -Dir $machineDir) -eq 'machine') 'machine install: install.path = machine'
     Assert (-not (Test-Path (Join-Path $machineDir 'profile.path'))) 'machine install: no profile.path (each user resolves their own)'
     Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).InstallLocation -eq $machineDir) 'machine install: registered'
+    Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).DisplayName -eq 'Agentmaster (all users)') 'machine install: Apps & Features reads "Agentmaster (all users)" (a user''s own copy reads "Agentmaster")'
+    Assert ((Test-Path (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk')) -and (Test-Path (Join-Path $tm.Desktop 'Agentmaster (all users).lnk'))) 'machine install: its shortcuts are named "Agentmaster (all users)"'
+    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster.lnk'))) 'machine install: an older Agentmaster.lnk pointing into the folder is replaced by the renamed one'
+    Assert (Test-Path (Join-Path $tm.Desktop 'Agentmaster.lnk')) 'machine install: an Agentmaster.lnk leading elsewhere stays'
+    Assert ((Get-AmRegistrationName -Scope User) -eq 'Agentmaster' -and (Get-AmRegistrationName -Scope Machine) -eq 'Agentmaster (all users)') 'registration name: per scope'
 
     # ---- uninstall: only what is ours, and only registrations pointing into the folder ----------------------
     $other = Join-Path $root 'some-other-install'
@@ -354,8 +458,56 @@ try {
     Assert (-not (Test-Path -LiteralPath "$($tu.ClassesRoot)\Directory\shell\Agentmaster")) 'uninstall: its verbs go'
     Assert (Test-Path -LiteralPath "$($tu.ClassesRoot)\Drive\shell\Agentmaster") 'uninstall: a verb that points at ANOTHER install stays'
     Assert (((Get-Item -LiteralPath $tu.EnvKey).GetValue('Path', '', 'DoNotExpandEnvironmentNames')) -eq '') 'uninstall: its PATH entry goes'
+    Write-TestFile (Join-Path $machineDir '.am-previous-12345678\TerminalApp.dll') 'left by an interrupted upgrade'
+    # An old-name entry describing ANOTHER folder is not this copy's to remove.
+    New-Item -Path $tm.LegacyUninstallKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $tm.LegacyUninstallKey -Name 'InstallLocation' -Value (Join-Path $root 'another-all-users-copy') -PropertyType String -Force | Out-Null
     $null = Uninstall-AmCopy -Scope Machine -Dir $machineDir -Targets $tm
-    Assert (-not (Test-Path -LiteralPath $machineDir)) 'uninstall: a folder left empty is removed'
+    Assert (-not (Test-Path -LiteralPath $tm.UninstallKey) -and (Test-Path -LiteralPath $tm.LegacyUninstallKey)) 'uninstall (all users): its entry goes; an old-name entry of another folder stays'
+    Assert (-not (Test-Path -LiteralPath $machineDir)) 'uninstall: a folder left empty is removed (a set-aside folder of an interrupted upgrade is ours too)'
+    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk')) -and -not (Test-Path (Join-Path $tm.Desktop 'Agentmaster (all users).lnk'))) 'uninstall: the all-users shortcuts go'
+    Assert (Test-Path (Join-Path $tm.Desktop 'Agentmaster.lnk')) 'uninstall: a shortcut leading to another copy stays'
+
+    # ---- the in-app updater's question when the all-users copy cannot be updated (am-update.ps1) -----------
+    $declined = Get-MachineUpdateChoices -Code 1223
+    Assert ($declined.Answers['a'] -eq 'admin' -and $declined.Answers['u'] -eq 'user' -and $declined.Answers['c'] -eq 'cancel') 'update choice (declined): ask again, just for you, cancel'
+    Assert ($declined.Default -eq 'user') 'update choice: the default is the per-user install (no administrator rights, the same data)'
+    $refused = Get-MachineUpdateChoices -Code 1260
+    Assert (-not $refused.Answers.ContainsKey('a') -and $refused.Answers['u'] -eq 'user') 'update choice (refused by policy): asking again is not offered (it cannot help)'
+    Assert ($refused.Reason -match 'does not let this account') 'update choice (refused by policy): the reason says so'
+    $failed = Get-MachineUpdateChoices -Code 1
+    Assert ($failed.Answers['a'] -eq 'admin' -and ($failed.Lines -join ' ') -match 'other users') 'update choice (the swap failed): asking again names the usual cause (other users still run it)'
+    Assert (($failed.Lines -join ' ') -match 'starts again') 'update choice: cancel says the installed version starts again'
+    Assert ($script:AmIsUpdateRun -eq $true -and $script:AmAppStarted -eq $false) 'updater run state: an update run that has started nothing yet'
+    # Restart-PreviousApp's "already running again" check counts THIS account's processes only (another user's
+    # instance of an all-users copy is visible to it, and counting it kept the user's app from starting again -
+    # found in the test desktop, where that half is checked). A copy of ping.exe named Agentmaster.exe, run from
+    # a scratch folder for a few seconds, is this account's.
+    $fakeDir = Join-Path $root 'running-copy'
+    New-Item -ItemType Directory -Force -Path $fakeDir | Out-Null
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\PING.EXE" -Destination (Join-Path $fakeDir 'Agentmaster.exe')
+    $fake = Start-Process -FilePath (Join-Path $fakeDir 'Agentmaster.exe') -ArgumentList '-n', '30', '127.0.0.1' -WindowStyle Hidden -PassThru
+    try {
+        Start-Sleep -Milliseconds 800
+        Assert (Test-AmAppRunningUnder -Dir $fakeDir) 'running check: this account''s Agentmaster.exe from the folder counts'
+        Assert (-not (Test-AmAppRunningUnder -Dir $fakeDir -ExceptPid $fake.Id)) 'running check: the excepted pid (the closing app) does not'
+        Assert (-not (Test-AmAppRunningUnder -Dir (Join-Path $root 'nothing-runs-here'))) 'running check: another folder -> not running'
+    } finally {
+        Stop-Process -Id $fake.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $fake.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
+    # The marker the restarted app reads so it does not offer the same update again at once (Updater.h
+    # ConsumeRestartedAfterUpdateMarker): two lines, the tag and the UTC write time in Unix milliseconds.
+    $markerDir = Join-Path $root 'profile-for-marker'
+    New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+    $before = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Write-RestartedMarker -Dir $markerDir
+    $markerLines = @([IO.File]::ReadAllText((Join-Path $markerDir 'am-update-restarted.txt')) -split "`n" | Where-Object { $_ })
+    Assert ($markerLines.Count -eq 2 -and $markerLines[0] -eq 'unknown' -and [long]$markerLines[1] -ge $before -and [long]$markerLines[1] -le $before + 60000) 'restart marker: the tag (unknown without -Version) and the write time'
+    Assert (@([IO.File]::ReadAllBytes((Join-Path $markerDir 'am-update-restarted.txt')))[0] -ne 0xEF) 'restart marker: no BOM (the app reads plain UTF-8; it strips a BOM too)'
+    Write-RestartedMarker -Dir ''
+    Write-RestartedMarker -Dir (Join-Path $root 'no-such-profile')
+    Assert (-not (Test-Path (Join-Path $root 'no-such-profile'))) 'restart marker: no profile folder -> nothing written, nothing created'
 
     # ---- the identity and the phase machinery ---------------------------------------------------------------
     $env:USERPROFILE = $savedUserProfile

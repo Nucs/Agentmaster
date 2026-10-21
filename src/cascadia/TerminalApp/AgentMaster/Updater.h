@@ -61,6 +61,7 @@
 #include <shellapi.h>
 #include <appmodel.h>
 
+#include <algorithm> // std::all_of (ConsumeRestartedAfterUpdateMarker)
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -1415,6 +1416,72 @@ namespace Agentmaster::Updater
         return !tag.empty() && DeclinedThisRunTag() == tag;
     }
 
+    // ==================== started again after an update that did not complete ====================
+
+    // The one-shot marker am-update.ps1 (Restart-PreviousApp) writes into the profile right before it starts
+    // the INSTALLED version again after an update it did not finish — cancelled, approval declined or refused,
+    // or failed: two lines, the release tag and the UTC write time in Unix milliseconds. The app it starts
+    // reads and deletes it at once (RunStartupUpdateCheck), and that run then behaves as "Remind me next
+    // restart". An app older than the marker ignores it; a newer one deletes a stale one.
+    inline constexpr const wchar_t* kRestartedMarkerLeaf = L"am-update-restarted.txt";
+    // How old a marker may be and still count: the script writes it a moment before it starts the app; an
+    // older one is left over from a run whose start failed, and must not silence a later, unrelated launch.
+    inline constexpr long long kRestartedMarkerFreshMs = 10LL * 60 * 1000;
+
+    // Read and DELETE the restarted-after-update marker in stateDir.
+    //   stateDir — the profile folder (the updater's state dir).
+    //   nowMs    — the current UTC time in Unix milliseconds (a parameter, so a test controls the clock).
+    //   returns  — the release tag when the marker exists, parses, and is fresh (written within
+    //              kRestartedMarkerFreshMs, and not in the future by more than a minute); "" otherwise. Any
+    //              marker found is deleted, fresh or not, so it acts at most once.
+    //   throws   — std::bad_alloc only.
+    inline std::wstring ConsumeRestartedAfterUpdateMarker(const std::wstring& stateDir, long long nowMs)
+    {
+        if (stateDir.empty())
+        {
+            return {};
+        }
+        const std::wstring path = stateDir + L"\\" + kRestartedMarkerLeaf;
+        if (::GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            return {};
+        }
+        const std::wstring text = Profiles::detail::ReadUtf8File(path);
+        ::DeleteFileW(path.c_str()); // one-shot, whatever it held
+        // Line 1: the tag; line 2: the write time. Trailing spaces / CRs are dropped from each.
+        std::wstring tag, when;
+        {
+            size_t pos = 0;
+            int line = 0;
+            while (pos <= text.size() && line < 2)
+            {
+                size_t nl = text.find(L'\n', pos);
+                if (nl == std::wstring::npos)
+                {
+                    nl = text.size();
+                }
+                std::wstring value = text.substr(pos, nl - pos);
+                while (!value.empty() && (value.back() == L'\r' || value.back() == L' ' || value.back() == L'\t'))
+                {
+                    value.pop_back();
+                }
+                (line == 0 ? tag : when) = value;
+                ++line;
+                pos = nl + 1;
+            }
+        }
+        if (tag.empty() || when.empty() || when.size() > 18 || !std::all_of(when.begin(), when.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }))
+        {
+            return {};
+        }
+        const long long writtenMs = std::stoll(when); // ≤ 18 digits: always in range
+        if (writtenMs > nowMs + 60LL * 1000 || nowMs - writtenMs > kRestartedMarkerFreshMs)
+        {
+            return {};
+        }
+        return tag;
+    }
+
     // ============================ the prompt ============================
 
     enum class Decision
@@ -1475,8 +1542,10 @@ namespace Agentmaster::Updater
             if (IsPortableUpdateTarget() && Profiles::IsMachineCopy())
             {
                 // An all-users install (or a folder this account cannot write): the update must replace
-                // files only an administrator may change, so say so BEFORE the UAC prompt appears.
-                content += L"\n\nAgentmaster is installed for all users of this PC: updating it needs administrator approval (a Windows prompt appears).";
+                // files only an administrator may change, so say so BEFORE the UAC prompt appears — and that
+                // a user without an administrator at hand is not stuck (am-update.ps1 offers the per-user install).
+                content += L"\n\nAgentmaster is installed for all users of this PC: updating it needs administrator approval (a Windows prompt appears). "
+                           L"Without it, the update can install the new version just for you instead: no administrator rights, and your sessions and settings are kept.";
             }
             else if (!IsPortableUpdateTarget() && InstallableForThisInstall(info))
             {
@@ -1582,6 +1651,16 @@ namespace Agentmaster::Updater
         return detail::LoadResourceTextUtf8(L"AM_UPDATE_PS1");
     }
 
+    // The first line of every generated .cmd launcher (am-update.cmd, am-uninstall.cmd,
+    // am-uninstall-portable.cmd). They are written as UTF-8 without a BOM (WriteFileUtf8), and cmd.exe decodes
+    // a batch file in the CONSOLE'S code page (437, 862, ... — the OEM one of a new console window), so a
+    // non-ASCII path in a later line — a profile or install folder under a Windows user name with Hebrew
+    // letters or an umlaut — reached PowerShell garbled and the update or uninstall failed on a folder that
+    // "does not exist" (found in a code review on 2026-10-21). cmd reads a batch file again line by line, so
+    // switching the console to UTF-8 (65001) first makes every later line decode right. ASCII on purpose:
+    // it is read before the switch.
+    inline constexpr const wchar_t* kCmdUtf8Prologue = L"@chcp 65001 >nul\r\n";
+
     // Quote a value for a generated .cmd line: wrap in double-quotes and double any % (cmd's escape
     // metacharacter). Our values (URLs / a version / a 64-hex digest / a PFN) never contain a quote.
     inline std::wstring CmdArg(std::wstring_view v)
@@ -1611,7 +1690,10 @@ namespace Agentmaster::Updater
     // profile\ + profile.path, then relaunch). Rights are the SCRIPT's business: a portable folder
     // this account cannot write (the all-users install) gets only its file swap elevated (one UAC
     // prompt) while the relaunch stays unelevated, and a package update whose new certificate needs an
-    // administrator can switch to the per-user install instead (-ZipUrl rides along for that).
+    // administrator can switch to the per-user install instead (-ZipUrl rides along for that); so can an
+    // all-users copy whose approval is declined or refused (-ProfileDir, this app's profile, makes the
+    // per-user copy use the same data). The script starts the INSTALLED version again after an update that
+    // failed or was cancelled, so quitting for it never leaves the user without the app.
     // Returns true if launched — the caller MUST then exit / quit the app so the package/exe isn't in
     // use while it upgrades + relaunches.
     inline bool LaunchInstaller(const std::wstring& stateDir, const UpdateInfo& info)
@@ -1648,7 +1730,8 @@ namespace Agentmaster::Updater
                 return false; // the AM_UPDATE_PS1 resource is missing (only possible in a broken build)
             }
 
-            std::wstring cmd = L"@echo off\r\ntitle Agentmaster Update\r\n";
+            std::wstring cmd = kCmdUtf8Prologue; // a non-ASCII path below must reach PowerShell intact
+            cmd += L"@echo off\r\ntitle Agentmaster Update\r\n";
             cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\"";
             if (portable)
             {
@@ -1683,6 +1766,18 @@ namespace Agentmaster::Updater
             }
             cmd += L" -Version " + CmdArg(DisplayVersion(info));
             cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
+            // The profile this app runs on: a switch to the per-user install (from the package, or instead of
+            // an all-users copy that cannot be updated) points the new copy at exactly this data. No trailing
+            // backslash: inside quotes `\"` would escape the closing quote for PowerShell's command line.
+            std::wstring profileArg = stateDir;
+            while (!profileArg.empty() && (profileArg.back() == L'\\' || profileArg.back() == L'/'))
+            {
+                profileArg.pop_back();
+            }
+            if (!profileArg.empty())
+            {
+                cmd += L" -ProfileDir " + CmdArg(profileArg);
+            }
             cmd += L"\r\n";
 
             const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
@@ -1741,7 +1836,8 @@ namespace Agentmaster::Updater
                 return false;
             }
 
-            std::wstring cmd = L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
+            std::wstring cmd = kCmdUtf8Prologue; // the same rule as am-update.cmd (LaunchInstaller)
+            cmd += L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
             cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\" -Uninstall";
             cmd += L" -Family " + CmdArg(family);
             cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
@@ -2028,6 +2124,31 @@ namespace Agentmaster::Updater
         // (the installer's relaunch and any child-spawned instance carry the parent's env; without
         // this, a decline could outlive its process and silently kill the new run's checks too).
         MarkDeclinedThisRun(L"");
+        // ...except the launch the update script itself makes after an update it did not finish (cancelled,
+        // declined, failed): the user just chose to keep this version, so this run behaves as "Remind me next
+        // restart" (the startup + hourly checks stay quiet; the cog's check stays live). Measured in the test
+        // desktop on 2026-10-21: without it the restarted app offered the same update again at once.
+        try
+        {
+            const std::wstring stateDir = Profiles::ResolveProfileDir();
+            if (const std::wstring tag = ConsumeRestartedAfterUpdateMarker(stateDir, NowUnixMs()); !tag.empty())
+            {
+                MarkDeclinedThisRun(tag);
+                LogUpdate(stateDir, L"check (startup) skipped: the update script started this version again after an update to " + tag +
+                                        L" that did not complete (the startup + hourly checks stay quiet this run; the cog's check stays live)");
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                LogUpdate(Profiles::ResolveProfileDir(), L"restarted-after-update marker handling CRASHED (exception \x2014 the startup check runs as usual)");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+        }
         return RunUpdateCheckAndPrompt(owner, L"startup");
     }
 
