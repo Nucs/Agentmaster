@@ -432,7 +432,7 @@ hot swap, direct reach of the registry, scheduler and sinks. It costs, with the 
 
 **Reading on the phone counts.** Any action in a topic (a message, a button, a command) marks the session
 read on the PC — its flash ring and unread count clear — so the 60-minute Waiting → Idle decay works for a
-session handled only from the phone. (Merely viewing a topic cannot be seen: bots get no read receipts.)
+session handled only from the phone. (Merely viewing a topic cannot be seen: bots get no read receipts — confirmed 2026-10-22, §21.36.)
 
 ### 5.3 Pin: never idle (a new engine feature)
 
@@ -1141,7 +1141,7 @@ tunnel (one path per connection); the provider's signature check is part of its 
 | P0-12 | Does `editForumTopic` (a rename) post a visible message, and does it notify? | a test bot |
 | P0-13 | Can the user rename or delete a topic in a bot's chat, and what does the bot receive? | a test bot |
 | P0-14 | 100+ topics: the list, search, unread counts, any limit | a test bot |
-| P0-15 | The real pacing: messages and edits per second across topics before a 429; do drafts count? | a test bot |
+| P0-15 | The real pacing: messages and edits per second across topics before a 429; do drafts count? *(Drafts, by Telegram's docs: no, they have the typing actions' own limit, 20 per 5 s and 40 per 30 s per peer — §21.36; still to measure.)* | a test bot |
 | P0-16 | Can the user pin 🔎 Search at the top? Do links to a private-chat topic work? | each client |
 | P0-17 | `setMessageReaction` on the user's messages in a private-chat topic | a test bot |
 | P0-18 | Drafts in a topic: notifications, a 10–20 s refresh for an hour, the stop update | a test bot |
@@ -5220,6 +5220,58 @@ fix 5 of [`UI_THREAD.md`](UI_THREAD.md) §13g.
 4. Quit the app normally while a session works, start it again: no line of that session is posted twice. hooks.log has no
    `[msg] state.json was not flushed` line.
 5. The bot's thread in `stacksnap top`: below its 55–57 ms/s.
+
+### 21.36 Live state in a topic: the bot cannot see which topic the user looks at, and a draft has its own budget (2026-10-22; RESEARCH ONLY, nothing built)
+
+**The user's question** (2026-10-22): "Can telegram bot know if user is looking actively at a topic? as we want live stats to
+shown above the status message that shows currently active bash or 'thinking', essentialy live state. but we cant do that for
+20 topics. Also that message is fully silent. Confirm to me please if we can know that or not"
+
+**The answer: no.** Nothing tells a bot that the user has the chat or a topic open, has read a message, or is online:
+
+- **The Bot API** (10.3 of 2026-08-24, still the newest on 2026-10-22; the changelog re-read from 9.3 to 10.3): every one of the
+  28 fields of `Update` is something the user DID (a message, a button tap, a reaction, an inline query, a poll answer, a block)
+  or a change of a chat, a payment or a bot. None is a read, a view, a presence or a typing signal, and no method returns one.
+  The nearest is 10.3's `stopped_message_generation`: the user tapped Stop on a draft, which is a tap again.
+- **MTProto** (the bot token over the raw protocol): read receipts exist there (`updateReadHistoryOutbox`,
+  `messages.getOutboxReadDate`), for USER accounts. TDLib, Telegram's own library and the base of the Bot API server, drops them
+  for a bot: both overloads of `MessagesManager::read_history_outbox` start with `if (td_->auth_manager_->is_bot()) { return; }`
+  (tdlib/td master, read 2026-10-22). Even a user account learns only "read up to message N", and only when a NEW message gets
+  read: an edit, which is what a live line does, changes no read state.
+- **What the bot does learn:** the topic of every action the user takes in it (the `message_thread_id` of a message, of a tapped
+  button's message, of a command). That is the only "the user is here now" signal, and it stops the moment the user only watches.
+
+The message being silent does not change this: the limit is the chat's call budget, and edits never notify anyway (§6.5).
+
+**What the budgets allow** (every topic of the private chat is the same chat):
+
+| Way | Budget | Live state in 20 Running topics |
+|---|---|---|
+| An edited message (the card, or a line above it) | The chat's message budget, edits included: ~18 calls a minute held (§21.9); 47 card edits a minute earned a 429 with a 21-minute `retry_after` (§21.4) | No. One topic edited every 5 s already takes 12 of the 18 |
+| A live draft (`sendMessageDraft` / `sendRichMessageDraft`) | Its own limit, the typing actions': "Max 20 calls in 5 seconds", "Max 40 calls in 30 seconds", "per peer"; "The same ratelimits apply to the bot API counterparts of messages.setTyping, like sendMessageDraft, sendChatAction" ([AI features for bots](https://core.telegram.org/api/bots/ai)) | Yes. A draft lives 30 s, so one refresh every ~25 s in each of 20 topics costs ~24 of the 40 calls per 30 s, and the other ~16 can refresh the topic of the user's last action about every 2 s |
+
+**What a draft is** (the same page): a typing action (`sendMessageTextDraftAction` through `messages.setTyping`) that the clients
+draw as a normal message, "always pinned to the bottom of the chat". It goes when `message_typing_draft_ttl` passes (the Bot API's
+"ephemeral 30-second preview") or when a regular message arrives in that chat and topic. A draft is keyed by its id, the chat and
+the topic, so each topic can carry its own. For the live state this means:
+
+- it is silent by nature (a typing action, never a notification) and leaves nothing behind: an app that dies leaves no stale
+  "running Bash" line;
+- it shows UNDER the sticky card, never above it, and every post in the topic (the card's re-post too) removes it until the next
+  refresh;
+- `sendChatAction` ("typing…", §6.2) spends the same limit, so drop it where a draft carries the state;
+- 10.3's `can_stop` puts a Stop button on it, and the tap arrives as `stopped_message_generation` (an Esc for that session, if
+  wanted).
+
+My reading, not Telegram's words: "per peer" is the whole private chat, so all its topics share the 40 calls per 30 s. P0-15 and
+P0-18 (a test bot) still have to measure that, the 30-second refresh, and how each client draws a draft in a topic the user is
+not in.
+
+**The design this allows** (not built; the user's decision): each Running session's topic carries a live draft with its current
+step ("⚙ Bash: npm test · 1m 12s", "💭 thinking…"), refreshed every ~20–25 s, and the topic of the user's last action in the
+last ~5 minutes is refreshed about every 2 s; the turn's final message removes the draft. The card keeps its slow edits (§21.4).
+If the line must sit ABOVE the card, it can only be an edited message: one topic at a time (the one the user last acted in),
+every 5–10 s.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
