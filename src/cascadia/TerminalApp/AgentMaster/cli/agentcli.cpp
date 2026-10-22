@@ -39,6 +39,7 @@
 #include "../ClaudeSpawn.h"
 #include "../Json.h"
 #include "../Persistence.h"
+#include "../InstallHandoff.h" // the all-users copy's CLI hands every call to the user's own install (wmain's first step)
 #include "../ProfileBootstrap.h" // Profiles::detail::WideToUtf8 / Utf8ToWide (the session database's pipe speaks UTF-8)
 #include "../SessionDbClient.h" // SESSIONS_DB.md §8.3 — search / sql / sessdb talk to the session database service
 #include "../SessionDbProtocol.h"
@@ -1779,6 +1780,14 @@ namespace
 
 int wmain(int argc, wchar_t** argv)
 {
+    // FIRST, before anything is printed: this CLI may be the all-users install's (Windows puts the machine PATH before
+    // the user's own, so `agentmaster-cli` in any terminal finds the shared copy first). A user who has an install of
+    // their own gets THAT copy's CLI, on this console, with its exit code (InstallHandoff.h).
+    if (int forwardedExit = 0; ::Agentmaster::InstallHandoff::ForwardCliToUserInstall(forwardedExit))
+    {
+        return forwardedExit;
+    }
+
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     // Emit UTF-8; make a real console interpret our bytes correctly (no effect when piped).

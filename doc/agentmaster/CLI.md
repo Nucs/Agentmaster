@@ -258,6 +258,18 @@ The flags exist only to cross-target another install on purpose.
 token), so `agentmaster --instance dev show …` dispatches too. Anything else (`-w`, `-s`, `nt`,
 `-Embedding`, bare) forwards to the GUI unchanged.
 
+**The all-users copy hands every call to the user's own install** (2026-10-22, NOT BUILT; PROFILES.md §2b
+*A user's own install wins*). Windows puts the machine PATH before the user's, so on a PC with an install
+for all users (Program Files) AND the user's own per-user install, a typed `agentmaster-cli` finds the
+shared copy first, and a user without administrator rights cannot change that. Its first step, before it
+reads anything (`InstallHandoff::ForwardCliToUserInstall` in `wmain`), runs the user's own copy's
+`agentmaster-cli.exe` instead: the same arguments, the same console (the caller's startup info and
+inherited standard handles, so `--json > out.json` and a pipe keep working), and its exit code passed
+on. Only a shared copy forwards (`Profiles::IsMachineCopyIn`), and never to itself or to another shared
+copy (the user's HKCU Apps & Features entry names the target); `AGENTMASTER_NO_HANDOFF=1` makes the
+shared copy answer itself. When the user's copy cannot be started, this copy answers (a running CLI
+beats none).
+
 ## 8. Build & packaging
 
 - **`agentmaster-cli.exe`** — a new console-subsystem project (mirrors `wt.vcxproj`'s onecore shape)

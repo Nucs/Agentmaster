@@ -22,8 +22,21 @@
 // a packaged install, migrated to HKCU\Software\Classes), an APPS & FEATURES entry (with a working
 // Uninstall), and the install dir on the USER PATH (agentmaster-cli.exe reachable from any shell).
 // No administrator rights, no package registration, no certificate. The ALL-USERS install is the same
-// shape one level up (HKLM, the common Start menu + public desktop, the machine PATH), done by the
-// shared PowerShell install core that tools\Install-Agentmaster.ps1 uses too.
+// shape one level up (HKLM verbs and Apps & Features entry, the machine PATH), done by the shared
+// PowerShell install core that tools\Install-Agentmaster.ps1 uses too — except its ICONS: since
+// 2026-10-22 every user gets icons of their own instead of shared ones (Windows' Active Setup runs
+// `Agentmaster.exe --register-user` once per user at their next sign-in, and the shared copy's own
+// start does the same; EnsureMachineCopyUserSetup), because a user without administrator rights can
+// neither remove nor re-point a shared icon (measured; PROFILES.md §2c).
+//
+// A USER'S OWN INSTALL WINS FOR THAT USER: next to an all-users install, a user's per-user install (for
+// example the one the all-users update's "install just for you" makes) writes the same icon names in
+// their own folders (so it replaces the shared copy's icons), moves their taskbar pins of the shared
+// copy to itself at its start (RepointSharedCopyTaskbarPins), already wins the right-click entry (HKCU
+// outranks HKLM), and the shared copy hands every launch to it — the machine PATH in a terminal, a
+// Start pin, a double-click in Program Files (InstallHandoff.h; StartupPlan::HandoffToUserCopy). A user
+// whose own copy was deleted by hand gets its leftovers cleaned up by the shared copy
+// (MachineCopyUserUpkeep).
 //
 // ACCOUNTS AND RIGHTS: an install sets Agentmaster up for the account that RUNS it (its HKCU, its
 // Start menu, its profile folder). So the prompt first compares the process's account with the user
@@ -118,6 +131,7 @@
 #include <wtsapi32.h> // WTSQuerySessionInformationW — who is signed in to this session (DetectInstallIdentity)
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -130,6 +144,7 @@
 #include <thread>
 #include <vector>
 
+#include "InstallHandoff.h" // the all-users copy hands a launch to the user's own install (one rule with the CLI)
 #include "ProfileBootstrap.h"
 #include "Updater.h" // Version parse/compare, the embedded am-update.ps1, WriteFileUtf8, CmdArg
 
@@ -154,7 +169,9 @@ namespace Agentmaster::PortableInstall
     inline constexpr const wchar_t* kPublisher = L"Agentmaster";
     inline constexpr const wchar_t* kShortcutLeaf = L"Agentmaster.lnk";
     inline constexpr const wchar_t* kShortcutDescription = L"Agentmaster \x2014 manage your Claude Code sessions";
-    inline constexpr const wchar_t* kUninstallKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Agentmaster";
+    // The per-user install's Apps & Features key (HKCU; InstallHandoff.h owns the one definition, which the
+    // all-users copy's hand-off reads too).
+    inline constexpr const wchar_t* kUninstallKey = InstallHandoff::kUserUninstallKey;
     // The ALL-USERS install's Apps & Features key (HKLM), written by the PowerShell core. Its own NAME, not
     // kUninstallKey's: Windows lists an Uninstall key name once, and when the all-users entry shared the
     // per-user one's name, Settings -> Installed apps hid the user's own copy (a test desktop, 2026-10-21).
@@ -171,6 +188,23 @@ namespace Agentmaster::PortableInstall
     inline constexpr const wchar_t* kContextVerb = L"Agentmaster";
     inline constexpr const wchar_t* kContextLabel = L"Open in Agentmaster";
     inline constexpr const wchar_t* kEnvironmentKey = L"Environment";
+    // `Agentmaster.exe --register-user`: the command Windows' Active Setup runs ONCE for each user at their next
+    // sign-in after an install for all users (kActiveSetupKey's StubPath, which the PowerShell core's
+    // Register-AmInstall writes). It gives that user their OWN "Agentmaster" desktop and Start-menu icons for the
+    // shared copy (EnsureMachineCopyUserSetup) and never starts the app. Since 2026-10-22 an all-users install puts
+    // no icon in the shared Start menu or on the shared (Public) desktop: a user without administrator rights can
+    // delete, rename or re-point neither, and a user who installed a copy of their own then saw both (measured as a
+    // standard user in a test desktop; PROFILES.md §2c). Icons of their own they control, and their own install
+    // simply replaces them (the same file names).
+    inline constexpr const wchar_t* kRegisterUserFlag = L"register-user";
+    // The all-users install's Active Setup component: in HKLM the command (StubPath) and its Version; in HKCU the
+    // Version a user already got. One fixed id for Agentmaster — the PowerShell core's $script:AmActiveSetupId.
+    inline constexpr const wchar_t* kActiveSetupKey = L"Software\\Microsoft\\Active Setup\\Installed Components\\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}";
+    // The user's taskbar pins, under %APPDATA%: one .lnk per pinned app. A pin is the user's own file, so their own
+    // install may re-point the pins of the shared copy at itself (RepointPinsIn) — Windows lets no app change a
+    // Start pin, but a re-pointed taskbar pin is followed (measured: the click opened the new target, whose window
+    // then grouped under the pin, also when started some other way).
+    inline constexpr const wchar_t* kTaskbarPinsSubdir = L"Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
 
     // Sizes / timing
     inline constexpr DWORD kPackageRemoveTimeoutMs = 120000; // Remove-AppxPackage of a big package can take a while
@@ -775,6 +809,84 @@ namespace Agentmaster::PortableInstall
         return a == b || (a.size() > b.size() + 1 && a.compare(0, b.size(), b) == 0 && a[b.size()] == L'\\');
     }
 
+    // PURE: an Active Setup version — up to four comma-separated numbers ("1,2026,1022,1530"), the format Windows
+    // compares before it runs a component's StubPath — as four numbers. A missing part reads 0; a part that is not
+    // a number reads 0 too, and so does one past 4 294 967 295 (it saturates), so a damaged value never throws.
+    //   text    — the version text (a registry value).
+    //   returns — the four parts, most significant first.
+    //   throws  — nothing.
+    inline std::array<uint32_t, 4> ParseActiveSetupVersion(std::wstring_view text) noexcept
+    {
+        std::array<uint32_t, 4> parts{};
+        size_t part = 0;
+        uint64_t value = 0;
+        bool digits = true;
+        for (size_t i = 0; i <= text.size() && part < parts.size(); ++i)
+        {
+            const wchar_t c = i < text.size() ? text[i] : L',';
+            if (c == L',')
+            {
+                parts[part++] = digits ? static_cast<uint32_t>(value) : 0u;
+                value = 0;
+                digits = true;
+            }
+            else if (c >= L'0' && c <= L'9')
+            {
+                value = std::min<uint64_t>(value * 10 + static_cast<uint64_t>(c - L'0'), 0xFFFFFFFFull);
+            }
+            else if (c != L' ')
+            {
+                digits = false; // "1.2" or "x": that part reads 0
+            }
+        }
+        return parts;
+    }
+
+    // PURE: whether a user already got the all-users install's per-user part — Windows' own rule: the user's version
+    // (HKCU) is at least the install's (HKLM). With no version in HKLM there is nothing to do (an all-users install
+    // registered before 2026-10-22 had shared icons and no Active Setup component); with none in HKCU it is not done.
+    //   userVersion    — the HKCU Version ("" when the user never got it).
+    //   machineVersion — the HKLM Version ("" when the install has no Active Setup component).
+    //   returns        — true when nothing is left to do for this user.
+    //   throws         — nothing.
+    inline bool ActiveSetupDone(std::wstring_view userVersion, std::wstring_view machineVersion) noexcept
+    {
+        if (machineVersion.empty())
+        {
+            return true;
+        }
+        if (userVersion.empty())
+        {
+            return false;
+        }
+        return ParseActiveSetupVersion(userVersion) >= ParseActiveSetupVersion(machineVersion);
+    }
+
+    // PURE: the program a StubPath / command line starts — its first token, quoted or not ("" for an empty text).
+    // Used to check that the Active Setup component names THIS copy before acting on it.
+    //   command — the command text (`"C:\Program Files\Agentmaster\Agentmaster.exe" --register-user`).
+    //   returns — the program path, without its quotes.
+    //   throws  — std::bad_alloc only.
+    inline std::wstring CommandProgram(std::wstring_view command)
+    {
+        size_t i = 0;
+        while (i < command.size() && (command[i] == L' ' || command[i] == L'\t'))
+        {
+            ++i;
+        }
+        if (i < command.size() && command[i] == L'"')
+        {
+            const size_t close = command.find(L'"', i + 1);
+            return std::wstring{ command.substr(i + 1, close == std::wstring_view::npos ? std::wstring_view::npos : close - i - 1) };
+        }
+        size_t end = i;
+        while (end < command.size() && command[end] != L' ' && command[end] != L'\t')
+        {
+            ++end;
+        }
+        return std::wstring{ command.substr(i, end - i) };
+    }
+
     // ============================ startup decision (pure) ============================
 
     struct StartupFacts
@@ -786,6 +898,9 @@ namespace Agentmaster::PortableInstall
         bool installedTargetExists{ false }; // InstalledTo: <dir>\Agentmaster.exe still there
         bool machineCopy{ false }; // Profiles::IsMachineCopyIn — the all-users install, or a folder this process cannot write
         bool allowUi{ false };
+        // The shared copy's hand-off (InstallHandoff.h): this user's own install, and whether this launch goes there.
+        std::wstring userCopyDir; // InstallHandoff::UserCopyFor — "" when there is none to hand to
+        bool handoffToUserCopy{ false }; // InstallHandoff::ShouldHandOff for this launch
     };
 
     enum class StartupPlan
@@ -793,17 +908,24 @@ namespace Agentmaster::PortableInstall
         Continue, // nothing to do here — the normal prelude follows (incl. the §2a profile picker)
         ContinueDeferProfile, // pristine + no UI (or "later"): run self-contained, persist nothing, ask next time
         Handoff, // a launcher stub: start the installed copy, exit
+        HandoffToUserCopy, // the all-users copy, started by a user with an install of their own: start that one, exit
         Prompt, // pristine + UI: ask
     };
 
     // PURE: the prelude's plan for this launch.
     //   f       — the gathered facts (GatherStartupFacts).
-    //   returns — Continue for a non-portable / overridden / decided / machine copy; Handoff for a
-    //             launcher stub whose install exists; Prompt for a pristine copy with UI;
-    //             ContinueDeferProfile for a pristine copy without UI.
+    //   returns — HandoffToUserCopy for the shared copy of a user who has their own install (checked FIRST: a launch
+    //             from an Agentmaster tab carries AGENTMASTER_PROFILE, and the machine PATH puts the shared copy first
+    //             in that tab too); Continue for a non-portable / overridden / decided / machine copy; Handoff for a
+    //             launcher stub whose install exists; Prompt for a pristine copy with UI; ContinueDeferProfile for a
+    //             pristine copy without UI.
     //   throws  — nothing.
     inline StartupPlan DecideStartup(const StartupFacts& f)
     {
+        if (f.handoffToUserCopy)
+        {
+            return StartupPlan::HandoffToUserCopy;
+        }
         if (!f.portableMarker || f.envProfileSet)
         {
             return StartupPlan::Continue;
@@ -843,7 +965,12 @@ namespace Agentmaster::PortableInstall
     // an installed copy uses, so the trace sits beside its own logs. Same one-append-per-line
     // recipe as Updater::LogUpdate (which this module cannot reuse: its tag is [update]). Written
     // ONLY after a decision that writes anyway — a pristine "later" never creates the folder.
-    inline void LogInstall(const std::wstring& msg)
+    //   msg                 — the line, without its time stamp and tag.
+    //   createProfileFolder — false: write only when the Default profile folder already exists. The all-users
+    //                         install's per-user step (`--register-user`, run by Windows at every user's next
+    //                         sign-in) passes false, so a user who never opens Agentmaster gets no .agentmaster folder.
+    //   throws              — nothing.
+    inline void LogInstall(const std::wstring& msg, bool createProfileFolder = true)
     {
         try
         {
@@ -851,6 +978,14 @@ namespace Agentmaster::PortableInstall
             if (dir.empty())
             {
                 return;
+            }
+            if (!createProfileFolder)
+            {
+                std::error_code ec;
+                if (!std::filesystem::is_directory(std::filesystem::path{ dir }, ec))
+                {
+                    return;
+                }
             }
             Profiles::detail::EnsureDirExists(dir);
             const std::wstring path = dir + L"\\hooks.log";
@@ -1186,6 +1321,124 @@ namespace Agentmaster::PortableInstall
             }
             link->Release();
             return target;
+        }
+
+        // Stamp `aumid` as the AppUserModelID of an open shell link (the property store's
+        // PKEY_AppUserModel_ID). The taskbar groups a pin and the windows of the app it starts by this id, so a
+        // pin re-pointed at another copy must carry that copy's id, or its window opens as a second button.
+        //   link    — the link, loaded or new; the caller saves it.
+        //   aumid   — the id; "" changes nothing.
+        //   returns — true when the property was set (or nothing was asked).
+        //   throws  — nothing.
+        inline bool SetLinkAppUserModelId(IShellLinkW* link, const std::wstring& aumid) noexcept
+        {
+            if (aumid.empty())
+            {
+                return true;
+            }
+            IPropertyStore* store = nullptr;
+            if (FAILED(link->QueryInterface(IID_PPV_ARGS(&store))) || !store)
+            {
+                return false;
+            }
+            bool ok = false;
+            PROPVARIANT pv{};
+            pv.vt = VT_LPWSTR;
+            const size_t bytes = (aumid.size() + 1) * sizeof(wchar_t);
+            pv.pwszVal = static_cast<PWSTR>(::CoTaskMemAlloc(bytes));
+            if (pv.pwszVal)
+            {
+                ::memcpy(pv.pwszVal, aumid.c_str(), bytes);
+                ok = SUCCEEDED(store->SetValue(PkeyAppUserModelId(), pv)) && SUCCEEDED(store->Commit());
+                ::CoTaskMemFree(pv.pwszVal);
+            }
+            store->Release();
+            return ok;
+        }
+
+        // Re-point an EXISTING .lnk at `exe`, IN PLACE: the file stays — for a taskbar pin that is what keeps it in
+        // the taskbar's own list — and only its target, working folder, icon and AppUserModelID change. A new link
+        // written over it would carry none of its other data either way, but a pin deleted and created again can
+        // drop out of the taskbar, so this is the one way to move a pin. Caller holds COM.
+        //   lnkPath — the shortcut to change.
+        //   exe     — the new target.
+        //   workDir — its working folder.
+        //   aumid   — the AppUserModelID to stamp ("" leaves the shortcut's own as it is).
+        //   returns — true when the link was loaded and saved.
+        //   throws  — nothing.
+        inline bool RepointShortcut(const std::wstring& lnkPath, const std::wstring& exe, const std::wstring& workDir, const std::wstring& aumid) noexcept
+        {
+            IShellLinkW* link = nullptr;
+            if (FAILED(::CoCreateInstance(__uuidof(ShellLink), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) || !link)
+            {
+                return false;
+            }
+            bool ok = false;
+            IPersistFile* file = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && file)
+            {
+                if (SUCCEEDED(file->Load(lnkPath.c_str(), STGM_READWRITE)))
+                {
+                    link->SetPath(exe.c_str());
+                    link->SetWorkingDirectory(workDir.c_str());
+                    link->SetIconLocation(exe.c_str(), 0);
+                    SetLinkAppUserModelId(link, aumid);
+                    ok = SUCCEEDED(file->Save(nullptr, TRUE)); // nullptr: back into the file it was loaded from
+                }
+                file->Release();
+            }
+            link->Release();
+            return ok;
+        }
+
+        // The AppUserModelID a shortcut carries (its property store's PKEY_AppUserModel_ID) — what the taskbar groups a
+        // pin and its app's windows by, and what routes an unpackaged app's toasts through its Start-menu shortcut.
+        // Caller holds COM.
+        //   lnkPath — the shortcut.
+        //   returns — the id, or "" when it has none or cannot be read.
+        //   throws  — std::bad_alloc only.
+        inline std::wstring ShortcutAumid(const std::wstring& lnkPath)
+        {
+            std::wstring id;
+            IShellLinkW* link = nullptr;
+            if (FAILED(::CoCreateInstance(__uuidof(ShellLink), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) || !link)
+            {
+                return id;
+            }
+            IPersistFile* file = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && file)
+            {
+                if (SUCCEEDED(file->Load(lnkPath.c_str(), STGM_READ)))
+                {
+                    IPropertyStore* store = nullptr;
+                    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store))) && store)
+                    {
+                        PROPVARIANT pv{};
+                        if (SUCCEEDED(store->GetValue(PkeyAppUserModelId(), &pv)))
+                        {
+                            if (pv.vt == VT_LPWSTR && pv.pwszVal)
+                            {
+                                id = pv.pwszVal;
+                            }
+                            ::PropVariantClear(&pv);
+                        }
+                        store->Release();
+                    }
+                }
+                file->Release();
+            }
+            link->Release();
+            return id;
+        }
+
+        // The current user's taskbar pins folder (%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\
+        // TaskBar). Caller need not hold COM.
+        //   returns — the folder, or "" when %APPDATA% cannot be resolved.
+        //   throws  — std::bad_alloc only.
+        inline std::wstring TaskbarPinsDir()
+        {
+            const std::wstring appData = ShellFolder(CSIDL_APPDATA);
+            return appData.empty() ? std::wstring{} : appData + L"\\" + kTaskbarPinsSubdir;
         }
 
         struct ComScope
@@ -1732,6 +1985,437 @@ namespace Agentmaster::PortableInstall
             note(L"registration crashed (exception)");
         }
         return all;
+    }
+
+    // ============================ the all-users install, per user ============================
+    //
+    // Since 2026-10-22 an install for all users gives every user icons of their OWN (EnsureMachineCopyUserSetup)
+    // instead of shared ones; a user's own install takes those, and the shared copy's taskbar pins, over
+    // (RegisterInstall writes the same file names; RepointSharedCopyTaskbarPins); and the shared copy passes every
+    // launch to the user's own install (InstallHandoff.h). What a user WITHOUT administrator rights can change was
+    // measured first, in a test desktop as a standard user (PROFILES.md §2c): the shared desktop icon and Start-menu
+    // entry, HKLM and the machine PATH refuse every change; their own folders, HKCU and taskbar pins are theirs; a
+    // same-named icon of their own does NOT hide a shared one (the desktop and Start show both); Windows refuses an
+    // app that asks to change a Start pin.
+
+    // The all-users install's folder, from its Apps & Features entry (HKLM: kMachineUninstallKey, else the key an
+    // install registered before 2026-10-21 used), when it still holds the app exe.
+    //   returns — the folder, or "".
+    //   throws  — std::bad_alloc only.
+    inline std::wstring MachineInstallDirFromRegistry()
+    {
+        for (const wchar_t* key : { kMachineUninstallKey, kUninstallKey })
+        {
+            const std::wstring loc = detail::RegReadString(HKEY_LOCAL_MACHINE, key, L"InstallLocation");
+            if (!loc.empty() && DirHoldsAppExe(loc))
+            {
+                return loc;
+            }
+        }
+        return {};
+    }
+
+    // Whether the all-users install's Active Setup component starts a program inside `dir` — the guard that keeps the
+    // per-user step to the copy the component names: an unzip an administrator dropped into another protected folder
+    // is a machine copy too, but gets no icons of its own.
+    //   dir     — the folder to check.
+    //   returns — true when the component's StubPath names a program in `dir`.
+    //   throws  — std::bad_alloc only.
+    inline bool ActiveSetupNamesFolder(const std::wstring& dir)
+    {
+        const std::wstring program = CommandProgram(detail::RegReadString(HKEY_LOCAL_MACHINE, kActiveSetupKey, L"StubPath"));
+        if (program.empty() || dir.empty())
+        {
+            return false;
+        }
+        return Profiles::detail::SamePath(std::filesystem::path{ program }.parent_path().wstring(), dir);
+    }
+
+    // Make the shared copy's icons in a user's own desktop and Start-menu folders — each one only where no
+    // "Agentmaster" icon exists yet: an existing one is the user's (their own install's, or one they keep), and is
+    // never overwritten. A new icon carries this copy's AppUserModelID for that user. Caller holds COM.
+    //   desktopDir  — the user's desktop folder ("" skips it).
+    //   programsDir — the user's Start-menu Programs folder ("" skips it).
+    //   exe         — the shared copy's app exe.
+    //   aumid       — its AppUserModelID for this user ("" = none).
+    //   returns     — the number of icons made.
+    //   throws      — std::bad_alloc only.
+    inline int RegisterMachineCopyUserIconsIn(const std::wstring& desktopDir, const std::wstring& programsDir, const std::wstring& exe, const std::wstring& aumid)
+    {
+        int made = 0;
+        const std::wstring workDir = std::filesystem::path{ exe }.parent_path().wstring();
+        for (const std::wstring& folder : { desktopDir, programsDir })
+        {
+            if (folder.empty())
+            {
+                continue;
+            }
+            const std::wstring lnk = folder + L"\\" + kShortcutLeaf;
+            std::error_code ec;
+            if (std::filesystem::exists(std::filesystem::path{ lnk }, ec))
+            {
+                continue;
+            }
+            Profiles::detail::EnsureDirExists(folder);
+            if (detail::WriteShortcut(lnk, exe, workDir, aumid, nullptr))
+            {
+                ++made;
+            }
+        }
+        return made;
+    }
+
+    // Re-point every taskbar pin whose target lies inside `fromDir` at `toExe` (detail::RepointShortcut: the pin file
+    // stays in place, so the taskbar keeps it). Caller holds COM.
+    //   pinsDir — the taskbar pins folder (detail::TaskbarPinsDir; tests pass a scratch folder).
+    //   fromDir — the install whose pins move.
+    //   toExe   — the app exe they move to.
+    //   aumid   — toExe's AppUserModelID for this user ("" leaves each pin's own).
+    //   returns — the number of pins re-pointed.
+    //   throws  — std::bad_alloc only.
+    inline int RepointPinsIn(const std::wstring& pinsDir, const std::wstring& fromDir, const std::wstring& toExe, const std::wstring& aumid)
+    {
+        if (pinsDir.empty() || fromDir.empty() || toExe.empty())
+        {
+            return 0;
+        }
+        int moved = 0;
+        const std::wstring workDir = std::filesystem::path{ toExe }.parent_path().wstring();
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator{ std::filesystem::path{ pinsDir }, ec }; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec))
+        {
+            const std::filesystem::path& p = it->path();
+            if (::_wcsicmp(p.extension().c_str(), L".lnk") != 0)
+            {
+                continue;
+            }
+            const std::wstring target = detail::ShortcutTarget(p.wstring());
+            if (target.empty() || !IsSameOrBelow(std::filesystem::path{ target }.parent_path().wstring(), fromDir))
+            {
+                continue; // another app's pin, or one that cannot be read: left alone
+            }
+            if (detail::RepointShortcut(p.wstring(), toExe, workDir, aumid))
+            {
+                ++moved;
+            }
+        }
+        return moved;
+    }
+
+    // Stamp this copy's AppUserModelID on the user's own "Agentmaster" icons and taskbar pins that start it but carry
+    // another id or none — in place (detail::RepointShortcut keeps everything else; a link that already carries the id is
+    // never rewritten). Who needs it: the icons and pins a user's own copy's uninstall hands back to this copy
+    // (Move-AmUserEntriesToMachineCopy), made by a script that cannot compute the id — an icon without it does not
+    // route this copy's toasts, and a pin that still names the removed copy opens this copy's first window as a second
+    // taskbar button. Run ONLY by `--register-user`, a process that opens no window: the app itself defers stamping a pin
+    // that names it with another id until it exits (WindowEmperor::_setupAumid, GH#20053), because a pin changed while
+    // its app starts splits the taskbar button. Nothing for a user with an install of their own (their copy owns the
+    // icons and pins). Caller need not hold COM.
+    //   exeDir  — the shared copy's folder.
+    //   aumid   — its AppUserModelID for this user ("" = nothing to stamp).
+    //   returns — the number of links stamped.
+    //   throws  — nothing.
+    inline int StampMachineCopyUserLinks(const std::wstring& exeDir, const std::wstring& aumid) noexcept
+    {
+        try
+        {
+            if (exeDir.empty() || aumid.empty() || !InstallHandoff::UserCopyFor(exeDir, kAppExeLeaf).empty())
+            {
+                return 0;
+            }
+            detail::ComScope com;
+            const std::wstring exe = AppExeIn(exeDir);
+            std::vector<std::wstring> links;
+            for (const std::wstring& folder : { detail::ShellFolder(CSIDL_DESKTOPDIRECTORY), detail::ShellFolder(CSIDL_PROGRAMS) })
+            {
+                if (!folder.empty())
+                {
+                    links.push_back(folder + L"\\" + kShortcutLeaf);
+                }
+            }
+            std::error_code ec;
+            const std::wstring pins = detail::TaskbarPinsDir();
+            if (!pins.empty())
+            {
+                for (auto it = std::filesystem::directory_iterator{ std::filesystem::path{ pins }, ec }; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec))
+                {
+                    if (::_wcsicmp(it->path().extension().c_str(), L".lnk") == 0)
+                    {
+                        links.push_back(it->path().wstring());
+                    }
+                }
+            }
+            int stamped = 0;
+            for (const std::wstring& lnk : links)
+            {
+                std::error_code existsEc;
+                if (!std::filesystem::exists(std::filesystem::path{ lnk }, existsEc))
+                {
+                    continue;
+                }
+                const std::wstring target = detail::ShortcutTarget(lnk);
+                if (target.empty() || !IsSameOrBelow(std::filesystem::path{ target }.parent_path().wstring(), exeDir))
+                {
+                    continue; // another app's link, or one that cannot be read: left alone
+                }
+                if (detail::ShortcutAumid(lnk) == aumid)
+                {
+                    continue; // already right: never rewritten
+                }
+                if (detail::RepointShortcut(lnk, exe, exeDir, aumid))
+                {
+                    ++stamped;
+                }
+            }
+            if (stamped > 0)
+            {
+                LogInstall(L"all-users copy " + exeDir + L": its id stamped on " + std::to_wstring(stamped) + L" of this user's icons and taskbar pins", false);
+            }
+            return stamped;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"stamping the all-users copy's id on this user's icons CRASHED (exception) \x2014 left as they were", false);
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return 0;
+        }
+    }
+
+    // Where a user's own install registers itself (RegisterInstall), as subkeys of `root`. The defaults are the real
+    // places; a test passes scratch keys under a key of its own.
+    struct UserRegistrationKeys
+    {
+        HKEY root{ HKEY_CURRENT_USER };
+        std::wstring classesRoot{ L"Software\\Classes" }; // the "Open in Agentmaster" verbs live under <this>\<base>\shell
+        std::wstring uninstallKey{ kUninstallKey }; // the Apps & Features entry
+        std::wstring environmentKey{ kEnvironmentKey }; // the value Path
+    };
+
+    // PURE-ish: whether a registered install folder is GONE (deleted by hand) rather than just out of reach. A folder
+    // on a drive that is not there right now (an unplugged USB stick, a disconnected share) is out of reach and its
+    // registration must survive; a folder whose drive is there but which holds no app exe is gone.
+    //   dir     — the folder an HKCU entry names.
+    //   returns — true when its drive or share answers and the folder holds no app exe.
+    //   throws  — std::bad_alloc only.
+    inline bool InstallFolderIsGone(const std::wstring& dir)
+    {
+        if (dir.empty())
+        {
+            return false;
+        }
+        std::error_code ec;
+        const std::filesystem::path root = std::filesystem::path{ dir }.root_path();
+        if (root.empty() || !std::filesystem::exists(root, ec))
+        {
+            return false;
+        }
+        return !DirHoldsAppExe(dir);
+    }
+
+    // Remove what a user's own install left when its folder was deleted by hand instead of uninstalled — only the
+    // entries that point INTO that folder: the "Open in Agentmaster" verbs (they keep replacing the shared copy's
+    // for this user, and open nothing), the Apps & Features entry, the PATH entry, and the desktop and Start-menu
+    // icons; its taskbar pins go back to the shared copy. Caller holds COM.
+    //   staleDir    — the deleted install's folder.
+    //   keys        — where the registrations live (UserRegistrationKeys{} = the real places).
+    //   desktopDir  — the user's desktop folder ("" skips it).
+    //   programsDir — the user's Start-menu Programs folder ("" skips it).
+    //   pinsDir     — the user's taskbar pins folder ("" skips the pins).
+    //   sharedExe   — the shared copy's app exe the pins move to.
+    //   sharedAumid — its AppUserModelID for this user.
+    //   returns     — the number of entries removed or re-pointed.
+    //   throws      — std::bad_alloc only.
+    inline int CleanStaleUserInstall(const std::wstring& staleDir, const UserRegistrationKeys& keys, const std::wstring& desktopDir, const std::wstring& programsDir,
+                                     const std::wstring& pinsDir, const std::wstring& sharedExe, const std::wstring& sharedAumid)
+    {
+        int n = 0;
+        for (const wchar_t* base : { L"Directory", L"Directory\\Background", L"Drive" })
+        {
+            const std::wstring verbKey = keys.classesRoot + L"\\" + base + L"\\shell\\" + kContextVerb;
+            const std::wstring program = CommandProgram(detail::RegReadString(keys.root, (verbKey + L"\\command").c_str(), nullptr));
+            if (!program.empty() && IsSameOrBelow(std::filesystem::path{ program }.parent_path().wstring(), staleDir) &&
+                ::RegDeleteTreeW(keys.root, verbKey.c_str()) == ERROR_SUCCESS)
+            {
+                ++n;
+            }
+        }
+        const std::wstring loc = detail::RegReadString(keys.root, keys.uninstallKey.c_str(), L"InstallLocation");
+        if (!loc.empty() && Profiles::detail::SamePath(loc, staleDir) && ::RegDeleteTreeW(keys.root, keys.uninstallKey.c_str()) == ERROR_SUCCESS)
+        {
+            ++n;
+        }
+        const std::wstring path = detail::RegReadString(keys.root, keys.environmentKey.c_str(), L"Path");
+        if (PathListContains(path, staleDir) && detail::RegWriteString(keys.root, keys.environmentKey, L"Path", RemoveDirFromPathList(path, staleDir), REG_EXPAND_SZ))
+        {
+            ++n;
+            if (keys.root == HKEY_CURRENT_USER && keys.environmentKey == kEnvironmentKey)
+            {
+                detail::BroadcastEnvironmentChange(); // only for the real PATH: new shells pick the change up
+            }
+        }
+        for (const std::wstring& folder : { desktopDir, programsDir })
+        {
+            if (folder.empty())
+            {
+                continue;
+            }
+            const std::wstring lnk = folder + L"\\" + kShortcutLeaf;
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::path{ lnk }, ec))
+            {
+                continue;
+            }
+            const std::wstring target = detail::ShortcutTarget(lnk);
+            if (!target.empty() && IsSameOrBelow(std::filesystem::path{ target }.parent_path().wstring(), staleDir) && ::DeleteFileW(lnk.c_str()))
+            {
+                ++n;
+            }
+        }
+        n += RepointPinsIn(pinsDir, staleDir, sharedExe, sharedAumid);
+        return n;
+    }
+
+    // The all-users install's per-user part, for the user running this process: their OWN "Agentmaster" desktop and
+    // Start-menu icons for the shared copy. Windows runs it through Active Setup at each user's next sign-in
+    // (HandleRegisterUserFlagAtStartup); the shared copy's own start runs it too (MachineCopyUserUpkeep), which
+    // covers the user who just installed it. ONCE per user: the HKCU Version marks it done exactly as Active Setup
+    // marks it, so an icon the user deletes stays deleted (an update keeps the install's Version; only a new install
+    // writes a newer one). A user with an install of their own gets no icons — their copy is the one they use
+    // (InstallHandoff.h), and its icons carry the same names.
+    //   exeDir — the shared copy's folder (the running exe's).
+    //   aumid  — the AppUserModelID this copy runs under for this user ("" = none).
+    //   force  — make missing icons even when this user got them before (after CleanStaleUserInstall removed the
+    //            icons of their deleted own copy).
+    //   returns — the number of icons made.
+    //   throws  — nothing.
+    inline int EnsureMachineCopyUserSetup(const std::wstring& exeDir, const std::wstring& aumid, bool force) noexcept
+    {
+        try
+        {
+            const std::wstring machineVersion = detail::RegReadString(HKEY_LOCAL_MACHINE, kActiveSetupKey, L"Version");
+            if (machineVersion.empty() || !ActiveSetupNamesFolder(exeDir))
+            {
+                return 0; // no per-user model here: an all-users install registered before 2026-10-22, or another copy
+            }
+            const std::wstring userVersion = detail::RegReadString(HKEY_CURRENT_USER, kActiveSetupKey, L"Version");
+            if (!force && ActiveSetupDone(userVersion, machineVersion))
+            {
+                return 0;
+            }
+            int made = 0;
+            const bool ownCopy = !InstallHandoff::UserCopyFor(exeDir, kAppExeLeaf).empty();
+            if (!ownCopy)
+            {
+                detail::ComScope com;
+                made = RegisterMachineCopyUserIconsIn(detail::ShellFolder(CSIDL_DESKTOPDIRECTORY), detail::ShellFolder(CSIDL_PROGRAMS), AppExeIn(exeDir), aumid);
+            }
+            // Marked done whatever was made: an icon that already existed is the user's, and one they delete later
+            // must not come back at their next sign-in or start.
+            detail::RegWriteString(HKEY_CURRENT_USER, kActiveSetupKey, L"Version", machineVersion);
+            LogInstall(ownCopy ? L"all-users copy " + exeDir + L": this user has an install of their own, no icons made for the shared copy" :
+                                 L"all-users copy " + exeDir + L": " + std::to_wstring(made) + L" icon(s) made in this user's own desktop and Start menu",
+                       false);
+            return made;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"the all-users copy's per-user step CRASHED (exception) \x2014 no icons made", false);
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return 0;
+        }
+    }
+
+    // The shared copy's per-user upkeep at every start that runs it (EnsureInstallDecidedAtStartup): first the
+    // leftovers of this user's own install when that was deleted by hand (its HKCU entry names a folder that is gone —
+    // its right-click entry would keep replacing the shared copy's and open nothing), then the user's icons
+    // (EnsureMachineCopyUserSetup; forced after such a clean-up, which removed their icons). Registry reads only, unless
+    // something is due.
+    //   exeDir — the shared copy's folder.
+    //   aumid  — its AppUserModelID for this user.
+    //   throws — nothing.
+    inline void MachineCopyUserUpkeep(const std::wstring& exeDir, const std::wstring& aumid) noexcept
+    {
+        try
+        {
+            bool force = false;
+            const std::wstring registered = InstallHandoff::ReadUserInstallDir();
+            if (!registered.empty() && !Profiles::detail::SamePath(registered, exeDir) && InstallFolderIsGone(registered))
+            {
+                detail::ComScope com;
+                const int n = CleanStaleUserInstall(registered, UserRegistrationKeys{}, detail::ShellFolder(CSIDL_DESKTOPDIRECTORY), detail::ShellFolder(CSIDL_PROGRAMS),
+                                                    detail::TaskbarPinsDir(), AppExeIn(exeDir), aumid);
+                LogInstall(L"this user's own install " + registered + L" is gone (deleted by hand): " + std::to_wstring(n) +
+                           L" leftover entr" + (n == 1 ? L"y" : L"ies") + L" removed, or moved to the all-users copy");
+                force = true;
+            }
+            EnsureMachineCopyUserSetup(exeDir, aumid, force);
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"the all-users copy's per-user upkeep CRASHED (exception) \x2014 left as it was");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+        }
+    }
+
+    // `Agentmaster.exe --register-user` — the all-users install's Active Setup command (kRegisterUserFlag). Handled
+    // BEFORE the single-instance handoff: Windows runs it at sign-in, before any Agentmaster could be running, and a
+    // running instance must never receive it as a command line either. Never shows UI, never starts the app. Two
+    // steps: the user's icons when due (EnsureMachineCopyUserSetup), then — every run — this copy's id stamped on the
+    // user's icons and pins of it that lack it (StampMachineCopyUserLinks; the uninstall of a user's own copy runs this
+    // command for that after it handed its icons and pins back).
+    //   aumidFor — the EXE's AppUserModelID formula for an image path: the icons carry the id the copy runs under.
+    //   returns  — true when the flag was present (handled: the caller exits); false otherwise.
+    //   throws   — nothing.
+    inline bool HandleRegisterUserFlagAtStartup(const std::function<std::wstring(const std::wstring&)>& aumidFor) noexcept
+    {
+        try
+        {
+            if (!Profiles::detail::CommandLineHasFlag(kRegisterUserFlag))
+            {
+                return false;
+            }
+            const std::wstring exeDir = Profiles::detail::ExeDirPath();
+            if (!exeDir.empty() && Profiles::IsMachineCopyIn(exeDir))
+            {
+                const std::wstring exe = AppExeIn(exeDir);
+                const std::wstring aumid = aumidFor ? aumidFor(exe) : std::wstring{};
+                EnsureMachineCopyUserSetup(exeDir, aumid, false);
+                // Every run, not only a due one: a user's own copy's uninstall hands its icons and pins back made by a
+                // script, which cannot compute this id, and then runs this command for the id (Uninstall-AmCopy).
+                StampMachineCopyUserLinks(exeDir, aumid);
+            }
+            return true;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"--register-user handling CRASHED (exception) \x2014 no icons made", false);
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return true; // never start the app on this flag
+        }
     }
 
     // ============================ the embedded install core (other-rights steps) ============================
@@ -2780,7 +3464,7 @@ namespace Agentmaster::PortableInstall
         }
         else
         {
-            machineLabel = L"Install for all users of this PC\n" + machineDir + L"  \x2014  needs administrator rights; every user keeps their own data";
+            machineLabel = L"Install for all users of this PC\n" + machineDir + L"  \x2014  needs administrator rights; every user gets their own icons and keeps their own data";
         }
 
         const std::wstring forUserLabel = L"Set it up for " + who.sessionUser + L" (recommended)\nStarts this copy again as " + who.sessionUser +
@@ -2809,6 +3493,15 @@ namespace Agentmaster::PortableInstall
         else if (account == AccountPlan::AsIsElevated)
         {
             content += L"\n\nAgentmaster is running with administrator rights. Installing it just for you needs none, and the installed copy starts without them.";
+        }
+        if (ex.machineHasExe && !otherAccount)
+        {
+            // What a copy of one's own means next to the shared one (InstallHandoff.h, RepointSharedCopyTaskbarPins):
+            // stated before the user picks, because the shared copy's entries stay visible (an administrator owns them).
+            content += L"\n\nAgentmaster is also installed for all users of this PC (v" + FormatVersion(ex.machineVersion) +
+                       L"). A copy of your own takes over for you: your Agentmaster icons, your taskbar pins, the right-click entry and "
+                       L"the agentmaster command open it, and it updates without administrator rights. The copy for all users stays for "
+                       L"the other users.";
         }
         if (ex.package)
         {
@@ -2940,6 +3633,17 @@ namespace Agentmaster::PortableInstall
         f.profilePointerExists = Profiles::LocalProfilePointerExistsIn(exeDir);
         f.installedTargetExists = f.decision.kind == Decision::InstalledTo && DirHoldsAppExe(f.decision.dir);
         f.machineCopy = f.portableMarker && Profiles::IsMachineCopyIn(exeDir);
+        // The hand-off is looked into only for a shared copy: every other launch skips the registry read.
+        if (f.machineCopy)
+        {
+            InstallHandoff::HandoffFacts h;
+            h.sharedCopy = true;
+            h.allowed = allowUi; // a -Embedding activation and session 0 are served by this process itself
+            h.optOut = InstallHandoff::OptedOut();
+            f.userCopyDir = h.optOut ? std::wstring{} : InstallHandoff::UserCopyFor(exeDir, kAppExeLeaf);
+            h.userCopyUsable = !f.userCopyDir.empty();
+            f.handoffToUserCopy = InstallHandoff::ShouldHandOff(h);
+        }
         return f;
     }
 
@@ -2996,9 +3700,19 @@ namespace Agentmaster::PortableInstall
                 allowUi = false;
             }
             const StartupFacts facts = GatherStartupFacts(exeDir, allowUi);
+            // The shared (all-users) copy's per-user upkeep when it runs ITSELF: the user's own icons for it, and the
+            // leftovers of a user's own install that was deleted by hand (MachineCopyUserUpkeep). Never for a launch
+            // without UI (-Embedding, session 0): those are not the user starting Agentmaster.
+            const auto machineCopyUpkeep = [&]() {
+                if (facts.machineCopy && facts.allowUi)
+                {
+                    MachineCopyUserUpkeep(exeDir, aumidFor ? aumidFor(AppExeIn(exeDir)) : std::wstring{});
+                }
+            };
             switch (DecideStartup(facts))
             {
             case StartupPlan::Continue:
+                machineCopyUpkeep();
                 return StartupAction::Continue;
             case StartupPlan::ContinueDeferProfile:
                 return StartupAction::ContinueDeferProfile;
@@ -3012,6 +3726,25 @@ namespace Agentmaster::PortableInstall
                 }
                 LogInstall(L"handoff FAILED to start " + target + L" \x2014 running from the unzip instead");
                 return StartupAction::ContinueDeferProfile;
+            }
+            case StartupPlan::HandoffToUserCopy:
+            {
+                // The shared copy started by a user who has an install of their own (InstallHandoff.h): that copy runs
+                // instead, with the same arguments — whatever started this one (the machine PATH in a terminal, a
+                // Start pin, an old icon, a double-click in Program Files). The TOKEN is kept, as the launcher stub's
+                // hand-off above keeps it: this redirects a start the user made, it installs nothing, so an elevated
+                // start ("Run as administrator", an elevated terminal) gives the elevated start a launch of their own
+                // copy would; dropping rights (startInstalled) would cost a one-shot scheduled task (~6 s) at EVERY
+                // start on a PC with UAC off, where every administrator process is elevated and the hop changes nothing.
+                const std::wstring target = FindAppExeIn(facts.userCopyDir);
+                LogInstall(L"all-users copy " + exeDir + L" -> handing off to this user's own install " + target);
+                if (!target.empty() && detail::LaunchApp(target, detail::CommandLineTail()))
+                {
+                    return StartupAction::Exit;
+                }
+                LogInstall(L"handoff FAILED to start " + target + L" \x2014 the all-users copy runs itself");
+                machineCopyUpkeep();
+                return StartupAction::Continue;
             }
             case StartupPlan::Prompt:
                 break;
@@ -3274,6 +4007,51 @@ namespace Agentmaster::PortableInstall
         }
     }
 
+    // The user's OWN install, at every start: move the user's taskbar pins of the all-users copy over to THIS copy,
+    // so the pin they already use opens their own copy and its window groups under that pin (the pin then carries
+    // this copy's AppUserModelID). The EXE runs this right before it sets its own AppUserModelID (_setupAumid), which
+    // then finds the pin already matching. Only the user's own REGISTERED install does it (the HKCU entry names this
+    // folder). Start pins cannot be changed by an app: the shared copy hands those launches on instead
+    // (InstallHandoff.h). Registry reads only, unless a pin targets the all-users copy.
+    //   ourAumid — the AppUserModelID this copy runs under.
+    //   returns  — the number of pins re-pointed.
+    //   throws   — nothing.
+    inline int RepointSharedCopyTaskbarPins(const std::wstring& ourAumid) noexcept
+    {
+        try
+        {
+            const std::wstring exeDir = Profiles::detail::ExeDirPath();
+            if (exeDir.empty() || !IsInstalledPortableIn(exeDir) || !Profiles::detail::SamePath(InstallHandoff::ReadUserInstallDir(), exeDir))
+            {
+                return 0;
+            }
+            const std::wstring machineDir = MachineInstallDirFromRegistry();
+            if (machineDir.empty() || Profiles::detail::SamePath(machineDir, exeDir))
+            {
+                return 0;
+            }
+            detail::ComScope com;
+            const int n = RepointPinsIn(detail::TaskbarPinsDir(), machineDir, AppExeIn(exeDir), ourAumid);
+            if (n > 0)
+            {
+                LogInstall(L"moved " + std::to_wstring(n) + L" taskbar pin(s) of the all-users copy (" + machineDir + L") to this user's own install " + exeDir);
+            }
+            return n;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"moving the all-users copy's taskbar pins CRASHED (exception) \x2014 left as they were");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through
+            }
+            return 0;
+        }
+    }
+
     // ============================ uninstall ============================
 
     // Materialize the embedded am-update.ps1 into %TEMP% (NOT the install dir — it is about to be
@@ -3402,9 +4180,15 @@ namespace Agentmaster::PortableInstall
             {
                 profile = Profiles::DefaultProfileDir();
             }
+            // A user's own copy next to an all-users one hands its icons and taskbar pins back to the shared copy
+            // instead of deleting them (the PowerShell core's Move-AmUserEntriesToMachineCopy): the confirm says so.
+            const std::wstring sharedDir = machine ? std::wstring{} : MachineInstallDirFromRegistry();
             const std::wstring content =
                 L"This removes Agentmaster" + std::wstring{ machine ? L" (installed for all users of this PC)" : L"" } + L" from\n    " + exeDir +
-                L"\n\nGone: its files, the desktop and Start-menu shortcuts, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry." +
+                (machine ? std::wstring{ L"\n\nGone: its files, the Agentmaster icons it gave each user, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry." } :
+                 !sharedDir.empty() ?
+                           L"\n\nGone: its files, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry. Your Agentmaster icons and taskbar pins open the copy installed for all users instead:\n    " + sharedDir :
+                           std::wstring{ L"\n\nGone: its files, the desktop and Start-menu shortcuts, the \x201COpen in Agentmaster\x201D right-click entry, the Apps & Features entry and the PATH entry." }) +
                 (machine ? std::wstring{ L"\n\nKept: every user's own data (sessions, settings, window layouts in their profile folder, such as\n    " } + profile + L")." +
                                L"\n\nThis needs administrator rights." :
                            std::wstring{ L"\n\nKept: your data \x2014 sessions, settings, window layouts \x2014 in the profile folder\n    " } + profile + L".") +

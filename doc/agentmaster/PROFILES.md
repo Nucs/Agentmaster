@@ -218,22 +218,89 @@ InstallLocation, DisplayIcon, `UninstallString` = `"<exe>" --uninstall-portable`
 EstimatedSize); and the folder on the **user PATH** (`WM_SETTINGCHANGE` broadcast). `install.path` =
 `installed`, `profile.path` = the Default profile (absolute). The work runs under a marquee TaskDialog;
 then the INSTALLED copy is launched and the installing process exits (an in-place install carries on).
-*For all users* — the same pieces machine-wide, written by the shared PowerShell core
-(`Install-AmMachineCopy`): the all-users desktop and Start menu, `HKLM\Software\Classes` verbs,
-`HKLM\...\Uninstall\AgentmasterAllUsers`, the machine PATH; `install.path` = `machine` and NO `profile.path`
-(each user resolves their own profile). It refuses a release whose zip has no `.am-manifest` (built
-before 2026-10-21): that app would not know what `install.path = machine` means. Its shortcuts and its
-Apps & Features entry are named **Agentmaster (all users)**, a per-user install's **Agentmaster**
-(`Get-AmRegistrationName`), and its Apps & Features entry has its own key NAME (`AgentmasterAllUsers`,
-`kMachineUninstallKey`; both since the evening of 2026-10-21). Before, both installs said *Agentmaster* in
-Start, on the desktop and in Apps & Features — and both entries were `...\Uninstall\Agentmaster`: Windows
-lists an Uninstall key name ONCE, so Settings → Installed apps showed only the all-users entry and the
-per-user copy could not be uninstalled there (measured in the test desktop: "1 app found"; with the HKLM
-key renamed, both listed). An all-users copy registered under the old names gets the new ones at its next
-update (the old `Agentmaster.lnk` and the old-name entry are replaced only when they point into the
-folder; detection reads the new key, then the old). Where both installs exist, Windows puts the machine
-PATH BEFORE the user PATH, so `agentmaster-cli` in a new shell is the all-users copy's; the "Open in
-Agentmaster" verbs are the per-user copy's (`HKCU\Software\Classes` outranks `HKLM\Software\Classes`).
+*For all users* — written by the shared PowerShell core (`Install-AmMachineCopy`): `HKLM\Software\Classes`
+verbs, `HKLM\...\Uninstall\AgentmasterAllUsers`, the machine PATH, and — instead of shortcuts in the common
+Start menu and on the Public desktop — an **Active Setup component** that gives every user icons of their
+OWN (since 2026-10-22; the next paragraph); `install.path` = `machine` and NO `profile.path` (each user
+resolves their own profile). It refuses a release whose zip has no `.am-manifest` (built before
+2026-10-21): that app would not know what `install.path = machine` means. Its Apps & Features entry is
+named **Agentmaster (all users)**, a per-user install's **Agentmaster** (`Get-AmRegistrationName`), and
+has its own key NAME (`AgentmasterAllUsers`, `kMachineUninstallKey`; both since the evening of
+2026-10-21). Before, both entries were `...\Uninstall\Agentmaster`: Windows lists an Uninstall key name
+ONCE, so Settings → Installed apps showed only the all-users entry and the per-user copy could not be
+uninstalled there (measured in the test desktop: "1 app found"; with the HKLM key renamed, both listed).
+An all-users copy registered under the old names gets the new ones at its next update (the old shared
+shortcuts and the old-name entry are removed only when they point into the folder; detection reads the
+new key, then the old).
+
+**A user's own install wins for that user** (2026-10-22; the user's request "make our install be able to
+deal with these cases": a user who installed a copy of their own beside an older all-users one — the
+all-users update's *[U] just for you*, for one — kept landing in the shared copy, and the two then ran on
+one profile). What a user WITHOUT administrator rights can change was measured first, as a standard user
+in the test desktop: the Public desktop, the common Start menu, Program Files, the HKLM verbs and the
+machine PATH refuse every change; their own desktop, Start-menu folder, HKCU and taskbar pins are theirs;
+an HKCU verb REPLACES the HKLM one of the same name (one menu entry); a same-named icon of their own does
+NOT hide a shared one (the desktop showed two, Start listed "Apps 2": it keys its entries by target); the
+machine PATH comes before the user PATH; Windows refuses an app that asks to change a Start pin
+(`E_ACCESSDENIED`); and a taskbar pin re-pointed in place is followed (the window groups under it). So:
+
+- **No shared icons.** The all-users install registers the Active Setup component
+  `HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}`
+  (`kActiveSetupKey`, `$script:AmActiveSetupId`): StubPath `"<exe>" --register-user`, Version
+  `1,<year>,<MMdd>,<HHmm>`, IsInstalled 1, DontAsk 2. Windows runs the StubPath once for each user whose
+  own Version (HKCU, the same subkey) is lower, at their next sign-in: `Agentmaster.exe --register-user`
+  (handled in the prelude before the single-instance handoff, `HandleRegisterUserFlagAtStartup` →
+  `EnsureMachineCopyUserSetup`; it never starts the app) makes the user's own *Agentmaster* desktop and
+  Start-menu icons, stamped with the AUMID the shared copy runs under for them — only where no
+  *Agentmaster* icon exists yet, and none for a user with an install of their own — and writes their HKCU
+  Version, as Windows itself does. The shared copy's own start runs the same step (`MachineCopyUserUpkeep`),
+  and the installer runs it for the signed-in user at once (`Invoke-AmUserIconStep`). An icon a user
+  deletes stays deleted: an update keeps the component's Version, and only a fresh install writes a newer
+  one (so after an all-users uninstall, a reinstall gives every user icons again).
+- **The user's own install takes over.** Its icons have the same file name (`Agentmaster.lnk`), so it
+  replaces the shared copy's per-user ones — made ANEW (a WScript.Shell shortcut saved over one that exists
+  keeps the old one's AppUserModelID) — and at every start it re-points the user's taskbar pins of the
+  shared copy at itself IN PLACE (`RepointSharedCopyTaskbarPins` → `RepointPinsIn`; a pin deleted and made
+  again can drop out of the taskbar), with its own AUMID, so its window groups under the pin. Its HKCU verbs
+  already replace the HKLM ones.
+- **The shared copy hands every launch to it** (`InstallHandoff.h`): the app
+  (`StartupPlan::HandoffToUserCopy`, checked FIRST in `DecideStartup` — a launch from an Agentmaster tab
+  carries `AGENTMASTER_PROFILE`, and the machine PATH finds the shared copy first in that tab too) and
+  `agentmaster-cli` (`ForwardCliToUserInstall`: the user's copy's CLI on the same console with the same
+  standard handles, its exit code passed on). That covers what the user cannot redirect: the machine PATH, a
+  Start pin, an old taskbar pin, a double-click in Program Files. ALWAYS the user's own copy, also when an
+  administrator later updates the shared one past it (the user's decision of 2026-10-22: their copy offers
+  the same update itself, without rights). Loops are impossible by construction: the target must hold the
+  exe, must not be the running folder, and must not be a shared copy itself. A launch the process must
+  serve itself (`-Embedding`, session 0) is never handed off. The app hand-off keeps the token, like a
+  launcher stub's (an elevated start stays elevated, as a start of the user's own copy would; dropping
+  rights would cost a scheduled task at every start on a PC with UAC off). It runs AFTER the
+  single-instance hand-off: a shared instance that is already running (started before the user's own
+  install existed) keeps taking the shared copy's launches until it exits, so the hand-off never puts a
+  second instance on the same profile. `AGENTMASTER_NO_HANDOFF=1` makes the shared copy run itself (an
+  administrator testing it).
+- **Uninstalls give back.** Removing the user's own copy while the all-users one stays hands its icons and
+  pins to the shared copy (`Move-AmUserEntriesToMachineCopy`: the icons it had made anew, the pins
+  re-pointed in place, the component marked done for the user) instead of leaving the user without one. A
+  script cannot compute the app's per-path AppUserModelID, and without it the Start icon routes none of the
+  shared copy's toasts, and the pin, which still names the removed copy, opens the shared copy's first
+  window as a second taskbar button (the app defers stamping such a pin until it exits, `_setupAumid`,
+  GH#20053). So once the user's copy is unregistered, the uninstall runs the shared copy's own
+  `--register-user` (`Invoke-AmMachineCopyUserCommand`, only when the Active Setup component names that very
+  exe — an older copy would start the app instead); that process opens no window and stamps the id on the
+  user's *Agentmaster* icons and pins of it that lack it (`StampMachineCopyUserLinks`, every run; a link
+  that already carries the id is never rewritten). The all-users uninstall removes the Active Setup
+  component (only when its command starts a program in its folder) and sweeps the icons it gave every user
+  (`Get-AmUserShellFolders`: every real profile's desktop and Start-menu folders, a OneDrive desktop, a
+  signed-in user's redirected folders; only icons that point into its folder — a user's own install's icon
+  of the same name stays). Taskbar pins are left, as Windows leaves the pin of any program that was
+  uninstalled (it then offers to delete it on a click).
+- **A user's own copy deleted by hand.** Its HKCU entry then names a folder that is GONE (`InstallFolderIsGone`:
+  the drive answers and the folder holds no app exe — a folder on a drive that is not there now, an
+  unplugged stick, is kept). The shared copy's start removes its leftovers that point into that folder —
+  the verbs (they would keep replacing the shared copy's and open nothing), the Apps & Features entry, the
+  PATH entry, the icons — moves its taskbar pins back, and makes the user's icons again
+  (`CleanStaleUserInstall`, then `EnsureMachineCopyUserSetup` forced).
 
 **Machine copies** (`Profiles::IsMachineCopyIn`): a portable folder whose `install.path` says `machine`,
 or one THIS account cannot write (a write probe — the all-users install as a standard user sees it, a
@@ -334,7 +401,10 @@ a refused one says why); anything else (the package, a plain or kept portable, a
 folder) → an information dialog, nothing removed (before 2026-10-21 the flag ran the portable
 uninstaller on WHATEVER folder the exe sat in). The uninstallers remove the shortcuts that point INTO
 the folder, the three verbs that point into it, the Apps & Features entry whose InstallLocation IS the
-folder, the PATH entry and the shipped files; every profile folder is kept. The whole flow logs
+folder, the PATH entry and the shipped files; every profile folder is kept. The all-users one also
+removes its Active Setup component and the icons it gave every user; a per-user one, beside an all-users
+install, first hands its icons and taskbar pins to that copy (*A user's own install wins*, above). The
+confirm says which. The whole flow logs
 `[install]` lines into the running account's Default profile `hooks.log` (only after a decision that
 writes anyway — a pristine "later" creates nothing).
 
@@ -407,11 +477,12 @@ v0.7.10 release.
 - **An all-users install needs an administrator for every update and its uninstall** — also when the
   person who installed it later lost those rights. A standard user is told so and can install just for
   themselves next to it: the in-app update offers exactly that when the approval is declined or refused
-  (*[U] Install … just for you instead*, the same data), and Start, the desktop and Apps & Features then show
-  *Agentmaster* (theirs, updated without rights) beside *Agentmaster (all users)* (the shared one). No
-  account without administrator rights can change, update or take over the all-users copy itself: Program
-  Files and HKLM are Windows-protected; it stays for the other users until an administrator updates or
-  removes it.
+  (*[U] Install … just for you instead*, the same data). Since 2026-10-22 their own copy then wins for them
+  everywhere (§2b, *A user's own install wins*): their *Agentmaster* icons and taskbar pins open it, and a
+  start of the shared copy (the machine PATH, a Start pin, Program Files) is handed to it; Apps & Features
+  lists *Agentmaster* (theirs, updated without rights) beside *Agentmaster (all users)*. No account without
+  administrator rights can change, update or take over the all-users copy itself: Program Files and HKLM
+  are Windows-protected; it stays for the other users until an administrator updates or removes it.
 - **A signed-in administrator who runs things elevated** (by habit, or on a PC with UAC off) never hands
   those rights to the app it installs: the copy is started through the unelevated hop.
 - **Another account at the keyboard** (an administrator typing UAC credentials for a standard user,
@@ -503,16 +574,61 @@ Found beside it, on the development PC: the generated `.cmd` files' missing `chc
 reached PowerShell garbled on a CP 437 console). Observed and not investigated: twice in A4, a first click on
 ⚙ or *Check for updates* did nothing and a second one worked (not seen in A5 or B1).
 
+**A user's own install wins (2026-10-22).** The checks of §2b's *A user's own install wins*: a Release
+build of these sources made into the portable zip, a CLEAN Windows 11 25H2 test desktop with UAC off (the
+signed-in administrator's processes are elevated, which the hand-off must not slow down), the all-users
+install made through the app's own question, and a second, standard account. The kit's `Get-AmQaState`
+now also shows the Active Setup component, each account's marker, the taskbar pins and every link's
+AppUserModelID.
+
+| What | Result |
+|---|---|
+| *Install for all users* from a fresh copy | no shortcut in the common Start menu or on the Public desktop; the Active Setup component (StubPath, a Version, IsInstalled, DontAsk); the installed copy's first start made the user's own desktop and Start icons, stamped with its AUMID, and wrote their marker |
+| the marker and both icons deleted, then a restart | 17 s after the boot, Windows' Active Setup ran the stub at sign-in: both icons back with the AUMID, the marker written, no app started |
+| the desktop icon deleted, the shared copy started from Start | the icon stays deleted |
+| the shared copy pinned through its taskbar button; then a copy of the user's own beside it (*Install just for you*, recommended; the question's note says what a copy of one's own takes over) | the desktop and Start icons replaced by the user's copy's (its AUMID); the pin re-pointed IN PLACE with that AUMID ("moved 1 taskbar pin(s)"); one taskbar button, "1 running window pinned" |
+| `"C:\Program Files\Agentmaster\Agentmaster.exe" -d C:\Windows` | handed off: the user's copy started with `-d C:\Windows` (its tab in `C:\Windows`, in front), the shared process gone; logged |
+| the same while the user's copy runs | one process, the user's copy, with a new window |
+| `AGENTMASTER_NO_HANDOFF=1` | the shared copy runs itself |
+| the shared copy's `agentmaster-cli.exe`, with the user's CLI swapped for a renamed `cmd.exe` | the user's copy ran: the arguments, a redirected `>` file and exit code 7 went through; with the opt-out the shared CLI answered itself (exit 2); the real CLI restored, `--json sessions` → 0 and the JSON |
+| the user's copy uninstalled with its own *Uninstall* (the confirm names the hand-back) | its files, entry, verbs and PATH gone; its icons and the pin open the shared copy, and the shared copy's `--register-user` stamped its id on all three ("its id stamped on 3 of this user's icons and taskbar pins") |
+| `--register-user` as the second account | that account's own icons; no `.agentmaster` folder made for it |
+| the user's copy installed again, its folder deleted by hand, the shared copy started | "gone (deleted by hand): 8 leftover entries removed, or moved to the all-users copy" (3 verbs, the entry, the PATH entry, 2 icons, the pin); the icons made again for the shared copy |
+| the all-users uninstall (with an older and with the final build) | files, the component, the entry, verbs and machine PATH gone; every user's icons of it swept, the second account's included; after a reinstall the second account got icons again (a newer Version) |
+
+**Fixed during that QA** (each re-checked with a rebuilt zip):
+
+- **The all-users entry's version.** Settings showed `1,2026,1022,944`: the new Active Setup step in
+  `Register-AmInstall` set `$version`, and PowerShell variable names ignore case, so it overwrote the
+  `-Version` parameter. Renamed (`$asVersion`); the suite checks an all-users registration's DisplayVersion.
+- **The handed-back links' id.** The icons a script made carried no AppUserModelID and the pin kept the
+  removed copy's; the uninstall now runs the shared copy's `--register-user`, which stamps it (§2b).
+
+Found by the suite on the way: `Get-AmRegistrationTargets` threw when the user's AppData folder does not
+exist (`Join-Path` on the `''` .NET answers), and `Get-AmUserShellFolders` reached an `@(...)` caller as ONE
+item, its folders joined by spaces. Found by review: the app hand-off dropped rights through the
+scheduled-task hop, which would cost ~6 s at every start on a PC with UAC off; it keeps the token now, like a
+launcher stub's.
+
+**Not covered there:** a standard signed-in user with UAC on (the same HKCU entry and `install.path` decide
+for every account); a desktop moved into OneDrive; a taskbar pin's grouping right after a restart of Explorer
+(Explorer's UI Automation id of the pinned button kept the id it had when pinned, while the grouping followed
+the re-pointed pin).
+
 **Automated coverage:** the m5 suite (`TestPortableInstall`, `TestProfileBootstrap`: the decision and
 pointer files, the startup plan, the account plan, the prompt default, the manifest and legacy names on a
 real scratch tree, the download mark removed from copied and in-place files but not from a user's own,
 the machine-copy rules with a real deny ACL, the uninstall target, the start-failure text, the mutex
-verdict) and `tools\tests\Test-AgentmasterInstaller.ps1` (plain PowerShell, 5.1 and 7: the shared core's
-identity across both scripts, the manifest, the version text, the decision and pointer files, the write
-probe with a real deny ACL, per-user and all-users installs and uninstalls into a scratch registry key and
-scratch folders, the download mark on an installed layout, the Win32 error reading, the identity, a phase
-script that runs and reports back; `-IncludeScheduledTask` adds a real one-shot task — run it on a test
-desktop).
+verdict; since 2026-10-22 also the Active Setup version rules, the hand-off rule and its loop guards on real
+folders, the per-user icons, the pins re-pointed in place with their id, a link's id read back, and the
+leftovers of a copy deleted by hand on scratch HKCU keys) and `tools\tests\Test-AgentmasterInstaller.ps1`
+(plain PowerShell, 5.1 and 7: the shared core's identity across both scripts, the manifest, the version
+text, the decision and pointer files, the write probe with a real deny ACL, per-user and all-users installs
+and uninstalls into a scratch registry key and scratch folders, the download mark on an installed layout,
+the Win32 error reading, the identity, a phase script that runs and reports back; since 2026-10-22 the Active
+Setup component — written, kept by an update, removed with its copy, never another copy's — the icons swept
+from scratch user folders, the hand-back of icons and pins, and the guard of the shared copy's command;
+`-IncludeScheduledTask` adds a real one-shot task — run it on a test desktop).
 
 **Not covered:** *[A]* in either question (the all-users update's after a decline or a refused swap, and
 the package update's certificate question); a swap that fails half way in a real desktop (the put-back is

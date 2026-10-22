@@ -20,7 +20,10 @@
     and uninstall remove ONLY what Agentmaster ships (a user's file, settings\, profile\, profile.path stay);
     an upgrade whose copy fails puts the previous version back (a source file held open forces the failure);
     the decision / pointer files; the write probe (a real deny ACL); the user and machine installs and their
-    registration, written and removed - the all-users one named "Agentmaster (all users)"; the profile a
+    registration, written and removed - the all-users one named "Agentmaster (all users)", with no shared
+    shortcut but an Active Setup component that gives each user icons of their own (kept by an update, removed
+    with the copy, its icons swept from every user's folders); a user's own install taking the "Agentmaster" icon
+    over, and giving its icons and taskbar pins back to the all-users copy when it is removed; the profile a
     per-user install uses and the data it copies in; when the old script's "Agentmaster (Portable)" shortcut
     is retired; the in-app updater's choices when the all-users copy cannot be updated; a phase script runs
     and reports back.
@@ -43,6 +46,9 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installer = Join-Path $repo 'tools\Install-Agentmaster.ps1'
 $updater = Join-Path $repo 'src\cascadia\TerminalApp\AgentMaster\am-update.ps1'
+# Taken BEFORE the scripts are dot-sourced below: they define a $repo of their own (the GitHub repository name),
+# which then replaces this one.
+$portableInstallH = Join-Path $repo 'src\cascadia\TerminalApp\AgentMaster\PortableInstall.h'
 
 $script:checks = 0
 $script:failures = 0
@@ -121,6 +127,12 @@ foreach ($f in $installerFunctions) { Assert ([bool](Get-Command $f -ErrorAction
 foreach ($f in @('Invoke-PortableUpdate', 'Invoke-MachineInstall', 'Invoke-MachineUninstall', 'Invoke-RunAsMainUser', 'Invoke-SwitchToUserInstall')) {
     Assert ([bool](Get-Command $f -ErrorAction SilentlyContinue)) "library: am-update.ps1 defines $f"
 }
+# The REAL targets and user folders (read only), taken before any test below redirects USERPROFILE: the shell caches a
+# known folder per process, and once looked up under the scratch profile, PowerShell 7 keeps answering '' for it.
+$realUserTargets = Get-AmRegistrationTargets -Scope User
+$realMachineTargets = Get-AmRegistrationTargets -Scope Machine
+$realShellFolders = @(Get-AmUserShellFolders)
+$realDesktop = [Environment]::GetFolderPath('DesktopDirectory')
 
 $root = Join-Path $env:TEMP ('am-installer-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $regRoot = 'HKCU:\Software\Agentmaster-InstallerTest-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -176,6 +188,10 @@ try {
     function New-TestTargets {
         param([string]$Name, [switch]$Machine)
         # The all-users shape names its entry AgentmasterAllUsers and remembers the old name (Get-AmRegistrationTargets).
+        # Every other place the core may touch is a scratch one too: the Active Setup component and this user's marker
+        # of it, the taskbar pins, the users' folders the all-users uninstall sweeps (ProfileFolders; without the key it
+        # would read every real profile), and MachineDir ('' = no all-users copy a per-user uninstall hands its icons
+        # to; without the key it would read the real HKLM).
         @{
             UninstallKey       = if ($Machine) { "$regRoot\$Name\Uninstall\AgentmasterAllUsers" } else { "$regRoot\$Name\Uninstall\Agentmaster" }
             LegacyUninstallKey = if ($Machine) { "$regRoot\$Name\Uninstall\Agentmaster" } else { '' }
@@ -184,7 +200,46 @@ try {
             StartMenu          = Join-Path $root "$Name-startmenu"
             Desktop            = Join-Path $root "$Name-desktop"
             Broadcast          = $false
+            ActiveSetupKey     = "$regRoot\$Name\ActiveSetup"
+            UserActiveSetupKey = "$regRoot\$Name\UserActiveSetup"
+            PinsDir            = if ($Machine) { '' } else { Join-Path $root "$Name-pins" }
+            ProfileFolders     = @()
+            MachineDir         = ''
         }
+    }
+    <#
+    .SYNOPSIS
+        Make a shortcut (WScript.Shell, like the core) - its folder too.
+    .PARAMETER Lnk
+        The .lnk file to write.
+    .PARAMETER Target
+        Its target.
+    .PARAMETER Arguments
+        Its arguments ('' for none).
+    .NOTES
+        Throws when the shortcut cannot be saved.
+    #>
+    function New-TestShortcut {
+        param([string]$Lnk, [string]$Target, [string]$Arguments = '')
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Lnk) | Out-Null
+        $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Lnk)
+        $s.TargetPath = $Target
+        if ($Arguments) { $s.Arguments = $Arguments }
+        $s.Save()
+    }
+    <#
+    .SYNOPSIS
+        A shortcut's target and arguments ('' / '' when it does not exist).
+    .PARAMETER Lnk
+        The .lnk file.
+    .OUTPUTS
+        [pscustomobject] Target, Arguments.
+    #>
+    function Get-TestShortcut {
+        param([string]$Lnk)
+        if (-not (Test-Path -LiteralPath $Lnk)) { return [pscustomobject]@{ Target = ''; Arguments = '' } }
+        $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Lnk)
+        return [pscustomobject]@{ Target = [string]$s.TargetPath; Arguments = [string]$s.Arguments }
     }
 
     # ---- manifest names -----------------------------------------------------------------------------------
@@ -368,7 +423,12 @@ try {
     $path = (Get-Item -LiteralPath $tu.EnvKey).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     Assert ($path -eq $userDir) 'user install: the folder is on the (scratch) PATH'
     Assert ((Test-Path (Join-Path $tu.StartMenu 'Agentmaster.lnk')) -and (Test-Path (Join-Path $tu.Desktop 'Agentmaster.lnk'))) 'user install: Start-menu and desktop shortcuts'
+    # The shared copy's per-user icon carries the same name: a user's own install takes it over, made ANEW (a shortcut
+    # WScript.Shell saves over keeps the old one's other properties - its arguments here, its AppUserModelID for real).
+    New-TestShortcut -Lnk (Join-Path $tu.Desktop 'Agentmaster.lnk') -Target (Join-Path $root 'all-users-copy\Agentmaster.exe') -Arguments '--from-the-shared-icon'
     $null = Register-AmInstall -Scope User -Dir $userDir -Version '9.9.9.0' -Targets $tu
+    $fresh = Get-TestShortcut (Join-Path $tu.Desktop 'Agentmaster.lnk')
+    Assert ($fresh.Target -eq (Join-Path $userDir 'Agentmaster.exe') -and $fresh.Arguments -eq '') 'user install: an "Agentmaster" icon already there (the shared copy''s) is replaced by a fresh one of its own'
     $path2 = (Get-Item -LiteralPath $tu.EnvKey).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     Assert ($path2 -eq $userDir) 'user install: a second registration does not add the PATH entry twice'
     $kept = Join-Path $root 'kept-portable'
@@ -413,22 +473,33 @@ try {
     $tm = New-TestTargets 'machine' -Machine
     $real = Get-AmRegistrationTargets -Scope Machine
     Assert ($real.UninstallKey -like '*\Uninstall\AgentmasterAllUsers' -and $real.LegacyUninstallKey -like '*\Uninstall\Agentmaster' -and (Get-AmRegistrationTargets -Scope User).UninstallKey -like 'HKCU:*\Uninstall\Agentmaster') 'targets: the all-users entry has its own key name (a shared one hid the per-user entry in Settings)'
+    # Under the scratch USERPROFILE (set above) the user's AppData does not exist, and .NET answers '' for it in
+    # PowerShell 7: the targets must still come back, with no pins folder (before, Join-Path threw on the '').
+    $scratchUser = $null
+    try { $scratchUser = Get-AmRegistrationTargets -Scope User } catch { $scratchUser = $null }
+    Assert ($null -ne $scratchUser -and $scratchUser.UninstallKey -like 'HKCU:*') 'targets: a profile whose AppData does not exist still has targets (no pins folder then)'
+    # The real ones (read at the top, under the real profile).
+    Assert ($realMachineTargets.ActiveSetupKey -eq ('HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\' + $script:AmActiveSetupId) -and $realUserTargets.UserActiveSetupKey -eq ('HKCU:\SOFTWARE\Microsoft\Active Setup\Installed Components\' + $script:AmActiveSetupId)) 'targets: the Active Setup component (HKLM) and this user''s marker of it (HKCU)'
+    Assert ($realMachineTargets.PinsDir -eq '' -and $realUserTargets.PinsDir -like '*\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar') 'targets: taskbar pins are a user''s own (none for the all-users scope)'
+    $pinstallH = [IO.File]::ReadAllText($portableInstallH)
+    Assert ($script:AmActiveSetupId -match '^\{[0-9A-F-]{36}\}$' -and $pinstallH.Contains('Installed Components\\' + $script:AmActiveSetupId + '"')) 'targets: the script''s Active Setup id is the app''s (PortableInstall.h kActiveSetupKey)'
+    $asv = New-AmActiveSetupVersion
+    $asParts = @($asv -split ',')
+    Assert ($asParts.Count -eq 4 -and $asParts[0] -eq '1' -and (@($asParts | Where-Object { $_ -notmatch '^\d{1,5}$' -or [int]$_ -gt 65535 }).Count -eq 0)) "active setup version: 1,<year>,<MMdd>,<HHmm>, each part a number below 65536 (got $asv)"
+    Assert ($realDesktop -and @($realShellFolders | Where-Object { $_ -ieq $realDesktop.TrimEnd('\') }).Count -eq 1) 'user folders: the sweep list holds this user''s own desktop, once (one path per item, no trailing backslash)'
     $oldLayout = Join-Path $root 'release-old'
     New-TestLayout -Dir $oldLayout -Version '0.7.9.0' -NoManifest
     $threw = $false
     try { Install-AmMachineCopy -LayoutDir $oldLayout -DestDir (Join-Path $root 'machine-old') -Version '0.7.9.0' -Targets $tm } catch { $threw = $true }
     Assert $threw 'machine install: a release without a manifest is refused (its app would not know install.path = machine)'
     $machineDir = Join-Path $root 'machine-install'
-    # An all-users copy registered by the first build with all-users installs named its shortcut Agentmaster.lnk:
-    # the renamed one replaces it when it points into the folder; one leading elsewhere is not touched.
-    $wshm = New-Object -ComObject WScript.Shell
-    New-Item -ItemType Directory -Force -Path $tm.StartMenu, $tm.Desktop | Out-Null
-    $olderStart = $wshm.CreateShortcut((Join-Path $tm.StartMenu 'Agentmaster.lnk'))
-    $olderStart.TargetPath = Join-Path $machineDir 'Agentmaster.exe'
-    $olderStart.Save()
-    $foreignDesk = $wshm.CreateShortcut((Join-Path $tm.Desktop 'Agentmaster.lnk'))
-    $foreignDesk.TargetPath = Join-Path $root 'a-users-own-copy\Agentmaster.exe'
-    $foreignDesk.Save()
+    # The shared shortcuts older all-users registrations made - "Agentmaster.lnk" (the first build with all-users
+    # installs) and "Agentmaster (all users).lnk" (2026-10-21) - go when they point into the folder (since 2026-10-22
+    # every user gets icons of their own instead); one leading elsewhere is not touched.
+    New-TestShortcut -Lnk (Join-Path $tm.StartMenu 'Agentmaster.lnk') -Target (Join-Path $machineDir 'Agentmaster.exe')
+    New-TestShortcut -Lnk (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk') -Target (Join-Path $machineDir 'Agentmaster.exe')
+    New-TestShortcut -Lnk (Join-Path $tm.Desktop 'Agentmaster (all users).lnk') -Target (Join-Path $machineDir 'Agentmaster.exe')
+    New-TestShortcut -Lnk (Join-Path $tm.Desktop 'Agentmaster.lnk') -Target (Join-Path $root 'a-users-own-copy\Agentmaster.exe')
     # ...and its Apps & Features entry under the old key name, which the renamed key replaces.
     New-Item -Path $tm.LegacyUninstallKey -Force | Out-Null
     New-ItemProperty -LiteralPath $tm.LegacyUninstallKey -Name 'InstallLocation' -Value $machineDir -PropertyType String -Force | Out-Null
@@ -437,10 +508,20 @@ try {
     Assert ((Get-AmInstallDecision -Dir $machineDir) -eq 'machine') 'machine install: install.path = machine'
     Assert (-not (Test-Path (Join-Path $machineDir 'profile.path'))) 'machine install: no profile.path (each user resolves their own)'
     Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).InstallLocation -eq $machineDir) 'machine install: registered'
+    Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).DisplayVersion -eq '9.9.9') "machine install: Apps & Features shows the installed version (the Active Setup step once overwrote it - PowerShell names ignore case - found in the test desktop; got $((Get-ItemProperty -LiteralPath $tm.UninstallKey).DisplayVersion))"
     Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).DisplayName -eq 'Agentmaster (all users)') 'machine install: Apps & Features reads "Agentmaster (all users)" (a user''s own copy reads "Agentmaster")'
-    Assert ((Test-Path (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk')) -and (Test-Path (Join-Path $tm.Desktop 'Agentmaster (all users).lnk'))) 'machine install: its shortcuts are named "Agentmaster (all users)"'
-    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster.lnk'))) 'machine install: an older Agentmaster.lnk pointing into the folder is replaced by the renamed one'
-    Assert (Test-Path (Join-Path $tm.Desktop 'Agentmaster.lnk')) 'machine install: an Agentmaster.lnk leading elsewhere stays'
+    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk')) -and -not (Test-Path (Join-Path $tm.Desktop 'Agentmaster (all users).lnk'))) 'machine install: no shared shortcut (a user without administrator rights could neither remove nor re-point it); the 2026-10-21 ones go'
+    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster.lnk'))) 'machine install: an older shared Agentmaster.lnk pointing into the folder goes'
+    Assert ((Get-TestShortcut (Join-Path $tm.Desktop 'Agentmaster.lnk')).Target -eq (Join-Path $root 'a-users-own-copy\Agentmaster.exe')) 'machine install: an Agentmaster.lnk leading elsewhere stays'
+    $asItem = Get-Item -LiteralPath $tm.ActiveSetupKey
+    Assert ([string]$asItem.GetValue('StubPath') -eq ('"' + (Join-Path $machineDir 'Agentmaster.exe') + '" --register-user')) 'machine install: the Active Setup component runs "<exe>" --register-user for every user (their own icons, once)'
+    Assert ([int]$asItem.GetValue('IsInstalled') -eq 1 -and [int]$asItem.GetValue('DontAsk') -eq 2 -and [string]$asItem.GetValue('') -eq 'Agentmaster (all users)') 'machine install: ...installed, never asked about, named'
+    $firstVersion = [string]$asItem.GetValue('Version')
+    Assert ($firstVersion -match '^1,\d{4},\d{1,4},\d{1,4}$') "machine install: a fresh install writes a new Active Setup version (got $firstVersion)"
+    New-ItemProperty -LiteralPath $tm.ActiveSetupKey -Name 'Version' -Value '1,2000,101,1' -PropertyType String -Force | Out-Null
+    $null = Register-AmInstall -Scope Machine -Dir $machineDir -Version '9.9.9.0' -Targets $tm
+    Assert ([string](Get-Item -LiteralPath $tm.ActiveSetupKey).GetValue('Version') -eq '1,2000,101,1') 'machine install: a re-registration (an update) keeps the version, so an icon a user deleted does not come back'
+    Assert ((Get-ItemProperty -LiteralPath $tm.UninstallKey).DisplayVersion -eq '9.9.9') 'machine install: ...and Apps & Features still shows the installed version'
     Assert ((Get-AmRegistrationName -Scope User) -eq 'Agentmaster' -and (Get-AmRegistrationName -Scope Machine) -eq 'Agentmaster (all users)') 'registration name: per scope'
 
     # ---- uninstall: only what is ours, and only registrations pointing into the folder ----------------------
@@ -462,11 +543,70 @@ try {
     # An old-name entry describing ANOTHER folder is not this copy's to remove.
     New-Item -Path $tm.LegacyUninstallKey -Force | Out-Null
     New-ItemProperty -LiteralPath $tm.LegacyUninstallKey -Name 'InstallLocation' -Value (Join-Path $root 'another-all-users-copy') -PropertyType String -Force | Out-Null
+    # The icons it gave the users of this PC: one user's (into the folder) is swept, another user's own copy's is kept.
+    $user1Desk = Join-Path $root 'users\one\Desktop'
+    $user2Progs = Join-Path $root 'users\two\Programs'
+    New-TestShortcut -Lnk (Join-Path $user1Desk 'Agentmaster.lnk') -Target (Join-Path $machineDir 'Agentmaster.exe')
+    New-TestShortcut -Lnk (Join-Path $user2Progs 'Agentmaster.lnk') -Target (Join-Path $root 'users\two\own-copy\Agentmaster.exe')
+    $tm.ProfileFolders = @($user1Desk, $user2Progs, (Join-Path $root 'users\three\no-desktop'))
     $null = Uninstall-AmCopy -Scope Machine -Dir $machineDir -Targets $tm
     Assert (-not (Test-Path -LiteralPath $tm.UninstallKey) -and (Test-Path -LiteralPath $tm.LegacyUninstallKey)) 'uninstall (all users): its entry goes; an old-name entry of another folder stays'
     Assert (-not (Test-Path -LiteralPath $machineDir)) 'uninstall: a folder left empty is removed (a set-aside folder of an interrupted upgrade is ours too)'
-    Assert (-not (Test-Path (Join-Path $tm.StartMenu 'Agentmaster (all users).lnk')) -and -not (Test-Path (Join-Path $tm.Desktop 'Agentmaster (all users).lnk'))) 'uninstall: the all-users shortcuts go'
+    Assert (-not (Test-Path -LiteralPath $tm.ActiveSetupKey)) 'uninstall (all users): the Active Setup component goes (no user gets icons of a removed copy)'
+    Assert (-not (Test-Path (Join-Path $user1Desk 'Agentmaster.lnk'))) 'uninstall (all users): the icons it gave each user go'
+    Assert ((Get-TestShortcut (Join-Path $user2Progs 'Agentmaster.lnk')).Target -like '*\users\two\own-copy\Agentmaster.exe') 'uninstall (all users): a user''s icon of their OWN install (the same name) stays'
     Assert (Test-Path (Join-Path $tm.Desktop 'Agentmaster.lnk')) 'uninstall: a shortcut leading to another copy stays'
+    # An Active Setup component that starts another copy - a sibling folder whose name only begins like this one's
+    # included - is not this copy's to remove.
+    $tas = New-TestTargets 'active-setup-other' -Machine
+    $siblingDir = Join-Path $root 'machine-install-2'
+    New-Item -Path $tas.ActiveSetupKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $tas.ActiveSetupKey -Name 'StubPath' -Value ('"' + (Join-Path $siblingDir 'Agentmaster.exe') + '" --register-user') -PropertyType String -Force | Out-Null
+    $null = Unregister-AmInstall -Scope Machine -Dir (Join-Path $root 'machine-install') -Targets $tas
+    Assert (Test-Path -LiteralPath $tas.ActiveSetupKey) 'uninstall (all users): an Active Setup component that starts another copy (a sibling folder) stays'
+    New-ItemProperty -LiteralPath $tas.ActiveSetupKey -Name 'StubPath' -Value ((Join-Path $siblingDir 'Agentmaster.exe') + ' --register-user') -PropertyType String -Force | Out-Null
+    $null = Unregister-AmInstall -Scope Machine -Dir $siblingDir -Targets $tas
+    Assert (-not (Test-Path -LiteralPath $tas.ActiveSetupKey)) 'uninstall (all users): ...and goes with the copy it starts (an unquoted command too)'
+
+    # ---- a user's own install removed while the all-users one stays: its icons and pins go back to that copy -------
+    $sharedDir = Join-Path $root 'shared-all-users'
+    New-TestLayout -Dir $sharedDir
+    Set-AmInstallDecision -Dir $sharedDir -Value 'machine'
+    $th = New-TestTargets 'handback'
+    $th.MachineDir = $sharedDir
+    New-Item -Path $th.ActiveSetupKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $th.ActiveSetupKey -Name 'Version' -Value '1,2026,1022,1200' -PropertyType String -Force | Out-Null
+    $ownDir = Join-Path $root 'own-install'
+    $null = Install-AmUserCopy -LayoutDir $src -DestDir $ownDir -Version '9.9.9.0' -Targets $th
+    New-TestShortcut -Lnk (Join-Path $th.PinsDir 'Agentmaster.lnk') -Target (Join-Path $ownDir 'Agentmaster.exe') -Arguments '--pinned'
+    New-TestShortcut -Lnk (Join-Path $th.PinsDir 'Other app.lnk') -Target (Join-Path $root 'other-app\Other.exe')
+    $null = Uninstall-AmCopy -Scope User -Dir $ownDir -Targets $th
+    $sharedExe = Join-Path $sharedDir 'Agentmaster.exe'
+    Assert ((Get-TestShortcut (Join-Path $th.Desktop 'Agentmaster.lnk')).Target -eq $sharedExe -and (Get-TestShortcut (Join-Path $th.StartMenu 'Agentmaster.lnk')).Target -eq $sharedExe) 'hand back: the user''s desktop and Start-menu icons now open the all-users copy (the user is not left without one)'
+    $pin = Get-TestShortcut (Join-Path $th.PinsDir 'Agentmaster.lnk')
+    Assert ($pin.Target -eq $sharedExe -and $pin.Arguments -eq '--pinned') 'hand back: the taskbar pin is re-pointed in place (the same file: the taskbar keeps it)'
+    Assert ((Get-TestShortcut (Join-Path $th.PinsDir 'Other app.lnk')).Target -like '*\other-app\Other.exe') 'hand back: another app''s pin is left alone'
+    Assert ([string](Get-Item -LiteralPath $th.UserActiveSetupKey).GetValue('Version') -eq '1,2026,1022,1200') 'hand back: the all-users copy''s per-user step is marked done for this user (no second set of icons at the next sign-in)'
+    Assert (-not (Test-Path -LiteralPath $th.UninstallKey) -and -not (Test-Path (Join-Path $ownDir 'Agentmaster.exe'))) 'hand back: the user''s own install is still removed'
+    # The handed-back links get the shared copy's id from its own --register-user (Invoke-AmMachineCopyUserCommand) -
+    # run only when the Active Setup component names that very exe (an older copy would start the app instead). A copy
+    # of PING.EXE stands in for the shared exe: it ends at once whatever its arguments.
+    $cmdDir = Join-Path $root 'stub-copy'
+    New-Item -ItemType Directory -Force -Path $cmdDir | Out-Null
+    Copy-Item -LiteralPath "$env:SystemRoot\System32\PING.EXE" -Destination (Join-Path $cmdDir 'Agentmaster.exe')
+    $tc = New-TestTargets 'stub-command' -Machine
+    Assert (-not (Invoke-AmMachineCopyUserCommand -MachineDir $cmdDir -Targets $tc)) 'user command: no Active Setup component -> not run'
+    New-Item -Path $tc.ActiveSetupKey -Force | Out-Null
+    New-ItemProperty -LiteralPath $tc.ActiveSetupKey -Name 'StubPath' -Value ('"' + (Join-Path $root 'another-copy\Agentmaster.exe') + '" --register-user') -PropertyType String -Force | Out-Null
+    Assert (-not (Invoke-AmMachineCopyUserCommand -MachineDir $cmdDir -Targets $tc)) 'user command: a component that starts another copy -> not run'
+    New-ItemProperty -LiteralPath $tc.ActiveSetupKey -Name 'StubPath' -Value ('"' + (Join-Path $cmdDir 'Agentmaster.exe') + '" --register-user') -PropertyType String -Force | Out-Null
+    Assert (Invoke-AmMachineCopyUserCommand -MachineDir $cmdDir -Targets $tc) 'user command: the component names this exe -> it runs, and is waited for'
+    Assert (-not (Invoke-AmMachineCopyUserCommand -MachineDir (Join-Path $root 'no-copy-here') -Targets $tc)) 'user command: no exe in the folder -> not run'
+    $tn = New-TestTargets 'no-shared'
+    $ownDir2 = Join-Path $root 'own-install-2'
+    $null = Install-AmUserCopy -LayoutDir $src -DestDir $ownDir2 -Version '9.9.9.0' -Targets $tn
+    $null = Uninstall-AmCopy -Scope User -Dir $ownDir2 -Targets $tn
+    Assert (-not (Test-Path (Join-Path $tn.Desktop 'Agentmaster.lnk')) -and -not (Test-Path -LiteralPath $tn.UserActiveSetupKey)) 'hand back: with no all-users copy the icons just go'
 
     # ---- the in-app updater's question when the all-users copy cannot be updated (am-update.ps1) -----------
     $declined = Get-MachineUpdateChoices -Code 1223
@@ -525,6 +665,12 @@ try {
     Assert ($p.ExitCode -eq 0) "phase: it runs with the core loaded (exit $($p.ExitCode))"
     $result = Read-AmPhaseRecord -PhaseDir $phaseDir
     Assert ($result -eq (Get-AmDefaultUserInstallDir)) 'phase: its result comes back'
+    # An all-users install registers itself inside an elevated phase: the Active Setup id must be defined there.
+    $asDir = Join-Path $root 'phase-active-setup'
+    New-Item -ItemType Directory -Force -Path $asDir | Out-Null
+    $ps1a = Write-AmPhaseScript -PhaseDir $asDir -Body "[IO.File]::WriteAllText((Join-Path `$PhaseDir 'result.txt'), (Get-AmRegistrationTargets -Scope Machine).ActiveSetupKey)"
+    $pa = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ps1a`"" -Wait -PassThru -WindowStyle Hidden
+    Assert ($pa.ExitCode -eq 0 -and (Read-AmPhaseRecord -PhaseDir $asDir) -eq $real.ActiveSetupKey) 'phase: the Active Setup id is defined in a phase script (an all-users registration runs in one)'
     $failDir = Join-Path $root 'phase-fail'
     New-Item -ItemType Directory -Force -Path $failDir | Out-Null
     $ps1f = Write-AmPhaseScript -PhaseDir $failDir -Body "throw 'planned failure'"

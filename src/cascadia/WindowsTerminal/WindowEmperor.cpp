@@ -606,6 +606,10 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
 #endif
         if (!IsPackaged())
         {
+            // Agentmaster (PortableInstall.h): a user's OWN install, next to an install for all users, moves the
+            // user's taskbar pins of the shared copy to itself — stamped with this AUMID, so the _setupAumid scan
+            // below finds the pin already matching and the window groups under it. A no-op for every other copy.
+            ::Agentmaster::PortableInstall::RepointSharedCopyTaskbarPins(unpackagedAumid);
             _setupAumid(unpackagedAumid);
         }
     }
@@ -616,6 +620,17 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // commandline it can't parse. Confirms, launches the detached uninstaller, and exits WITHOUT
     // starting the app (or exits on Cancel) — never a window.
     if (::Agentmaster::PortableInstall::HandleUninstallFlagAtStartup())
+    {
+        TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+        __assume(false);
+    }
+
+    // Agentmaster (PortableInstall.h): `Agentmaster.exe --register-user` — the command Windows' Active Setup runs
+    // once for each user at their next sign-in after an install for ALL users: it gives that user their own
+    // "Agentmaster" desktop and Start-menu icons for the shared copy (stamped with the AUMID this copy runs under for
+    // them) and exits. Like the uninstall flag, handled BEFORE the single-instance handoff: it must never reach a
+    // running instance as a command line, and it never starts the app.
+    if (::Agentmaster::PortableInstall::HandleRegisterUserFlagAtStartup([](const std::wstring& exe) { return unpackagedAumidForImagePath(exe); }))
     {
         TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
         __assume(false);
