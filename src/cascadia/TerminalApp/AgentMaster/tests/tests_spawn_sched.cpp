@@ -5050,6 +5050,318 @@ void TestPortableInstall()
         CHECK(P::detail::IsDirWritableByUs(ro) && !P::IsMachineCopyIn(ro), "write probe: the same folder writable again -> not a machine copy");
     }
 
+    // ---- 2026-10-22: a user's own install wins over the all-users one for that user (InstallHandoff.h + the
+    //      all-users install's per-user icons, PROFILES.md §2c). The HKLM half (EnsureMachineCopyUserSetup,
+    //      ActiveSetupNamesFolder, MachineInstallDirFromRegistry) needs administrator rights to stage, so the
+    //      test desktop's QA pass covers it; everything below runs on scratch folders and scratch HKCU keys. ----
+    {
+        namespace IH = ::Agentmaster::InstallHandoff;
+        namespace fs = std::filesystem;
+
+        // The Active Setup version: Windows' own comparison, four comma-separated numbers.
+        {
+            const auto v = PI::ParseActiveSetupVersion(L"1,2026,1022,1530");
+            CHECK(v[0] == 1 && v[1] == 2026 && v[2] == 1022 && v[3] == 1530, "active setup version: four comma-separated parts");
+            const auto shortV = PI::ParseActiveSetupVersion(L"3");
+            CHECK(shortV[0] == 3 && shortV[1] == 0 && shortV[2] == 0 && shortV[3] == 0, "active setup version: a missing part reads 0");
+            const auto odd = PI::ParseActiveSetupVersion(L"1, 2 ,x,4");
+            CHECK(odd[0] == 1 && odd[1] == 2 && odd[2] == 0 && odd[3] == 4, "active setup version: spaces are skipped, a part that is no number reads 0");
+            CHECK(PI::ParseActiveSetupVersion(L"99999999999,1")[0] == 0xFFFFFFFFu, "active setup version: a too-large part saturates instead of wrapping");
+            CHECK(PI::ParseActiveSetupVersion(L"1,2,3,4,5")[3] == 4, "active setup version: a fifth part is ignored");
+            CHECK(PI::ParseActiveSetupVersion(L"").at(0) == 0, "active setup version: empty reads all zeros");
+        }
+        CHECK(PI::ActiveSetupDone(L"", L""), "active setup: no machine version (an all-users install from before 2026-10-22) -> nothing to do");
+        CHECK(!PI::ActiveSetupDone(L"", L"1,2026,1022,1530"), "active setup: a user who never got it -> due");
+        CHECK(PI::ActiveSetupDone(L"1,2026,1022,1530", L"1,2026,1022,1530"), "active setup: the same version -> done (an update keeps it: deleted icons stay deleted)");
+        CHECK(!PI::ActiveSetupDone(L"1,2026,1021,0900", L"1,2026,1022,1530"), "active setup: an older user version -> due (a new install)");
+        CHECK(!PI::ActiveSetupDone(L"1,2026,1022,0930", L"1,2026,1022,1530"), "active setup: ...also when only the time part is older");
+        CHECK(PI::ActiveSetupDone(L"1,2026,1023,0000", L"1,2026,1022,1530"), "active setup: a newer user version -> done");
+
+        // The program a StubPath / verb command starts.
+        CHECK(PI::CommandProgram(L"\"C:\\Program Files\\Agentmaster\\Agentmaster.exe\" --register-user") == L"C:\\Program Files\\Agentmaster\\Agentmaster.exe",
+              "command program: a quoted path with spaces");
+        CHECK(PI::CommandProgram(L"C:\\x\\Agentmaster.exe -d \"%V\"") == L"C:\\x\\Agentmaster.exe", "command program: an unquoted path ends at the first space");
+        CHECK(PI::CommandProgram(L"  \t\"C:\\a b\\x.exe\"") == L"C:\\a b\\x.exe", "command program: leading blanks are skipped");
+        CHECK(PI::CommandProgram(L"\"C:\\unterminated") == L"C:\\unterminated", "command program: an unterminated quote runs to the end");
+        CHECK(PI::CommandProgram(L"").empty() && PI::CommandProgram(L"   ").empty(), "command program: an empty command names no program");
+
+        // The prelude's plan: the hand-off is checked FIRST.
+        {
+            PI::StartupFacts f;
+            f.handoffToUserCopy = true;
+            f.userCopyDir = L"C:\\Users\\x\\.agentmaster\\bin";
+            CHECK(PI::DecideStartup(f) == PI::StartupPlan::HandoffToUserCopy, "plan: the shared copy of a user with an install of their own hands the launch to it");
+            f.portableMarker = true;
+            f.envProfileSet = true;
+            f.machineCopy = true;
+            f.decision = { PI::Decision::Machine, {} };
+            CHECK(PI::DecideStartup(f) == PI::StartupPlan::HandoffToUserCopy,
+                  "plan: ...before the AGENTMASTER_PROFILE override (a launch from an Agentmaster tab carries it, and the machine PATH finds the shared copy first)");
+            f.handoffToUserCopy = false;
+            CHECK(PI::DecideStartup(f) == PI::StartupPlan::Continue, "plan: without the hand-off the all-users copy runs itself");
+        }
+
+        // The hand-off rule.
+        {
+            IH::HandoffFacts h;
+            CHECK(!IH::ShouldHandOff(h), "handoff: nothing set -> this copy runs");
+            h.sharedCopy = true;
+            h.userCopyUsable = true;
+            CHECK(IH::ShouldHandOff(h), "handoff: a shared copy + the user's own install -> hand off");
+            h.allowed = false;
+            CHECK(!IH::ShouldHandOff(h), "handoff: a launch this process must serve itself (-Embedding, session 0) -> this copy runs");
+            h.allowed = true;
+            h.optOut = true;
+            CHECK(!IH::ShouldHandOff(h), "handoff: AGENTMASTER_NO_HANDOFF -> this copy runs");
+            h.optOut = false;
+            h.sharedCopy = false;
+            CHECK(!IH::ShouldHandOff(h), "handoff: a copy that is not the shared one never hands off (no chain, no loop)");
+            h.sharedCopy = true;
+            h.userCopyUsable = false;
+            CHECK(!IH::ShouldHandOff(h), "handoff: no usable own install -> this copy runs");
+        }
+        CHECK(IH::IsOptOutValue(L"1") && IH::IsOptOutValue(L"true") && IH::IsOptOutValue(L"YES") && IH::IsOptOutValue(L" Yes\t"), "opt-out: 1 / true / yes in any case, blanks ignored");
+        CHECK(!IH::IsOptOutValue(L"") && !IH::IsOptOutValue(L"0") && !IH::IsOptOutValue(L"no") && !IH::IsOptOutValue(L"on"), "opt-out: empty, 0, no or anything else keeps the hand-off");
+        {
+            const std::wstring saved = P::detail::GetEnvVar(IH::kOptOutVariable);
+            ::SetEnvironmentVariableW(IH::kOptOutVariable, L"1");
+            const bool on = IH::OptedOut();
+            ::SetEnvironmentVariableW(IH::kOptOutVariable, L"0");
+            const bool off = IH::OptedOut();
+            ::SetEnvironmentVariableW(IH::kOptOutVariable, saved.empty() ? nullptr : saved.c_str());
+            CHECK(on && !off, "opt-out: read from this process's AGENTMASTER_NO_HANDOFF");
+        }
+
+        // The loop guards on real folders: the user's own install, a shared copy, a second shared copy.
+        const std::wstring own = exeDir + L"\\own-copy";
+        const std::wstring shared = exeDir + L"\\shared-copy";
+        const std::wstring shared2 = exeDir + L"\\shared-copy-2";
+        const auto makeCopy = [](const std::wstring& dir, PI::Decision kind, bool withCli) {
+            fs::create_directories(fs::path{ dir });
+            std::ofstream{ fs::path{ dir } / L".portable", std::ios::binary };
+            std::ofstream{ fs::path{ dir } / L"Agentmaster.exe", std::ios::binary } << "exe";
+            if (withCli)
+            {
+                std::ofstream{ fs::path{ dir } / L"agentmaster-cli.exe", std::ios::binary } << "cli";
+            }
+            return PI::SaveInstallDecisionIn(dir, { kind, {} });
+        };
+        CHECK(makeCopy(own, PI::Decision::Installed, true) && makeCopy(shared, PI::Decision::Machine, true) && makeCopy(shared2, PI::Decision::Machine, false),
+              "handoff folders: the scratch copies are made");
+        CHECK(P::IsMachineCopyIn(shared) && !P::IsMachineCopyIn(own), "handoff folders: install.path = machine is a shared copy, installed is not");
+        CHECK(IH::UsableUserCopy(own, shared, IH::kAppExeLeaf) == own, "user copy: the shared copy hands the app to the user's own install");
+        CHECK(IH::UsableUserCopy(own, shared, IH::kCliExeLeaf) == own, "user copy: ...and the CLI");
+        CHECK(IH::UsableUserCopy(L"", shared, IH::kAppExeLeaf).empty(), "user copy: no registered install -> nothing to hand to");
+        {
+            std::wstring upper = own;
+            for (wchar_t& c : upper)
+            {
+                c = (c >= L'a' && c <= L'z') ? static_cast<wchar_t>(c - L'a' + L'A') : c; // the scratch path is ASCII
+            }
+            CHECK(IH::UsableUserCopy(upper, own, IH::kAppExeLeaf).empty(), "user copy: the running copy itself (any case) -> never a hand-off to itself");
+        }
+        CHECK(IH::UsableUserCopy(own, shared, L"missing.exe").empty(), "user copy: the exe is not there (uninstalled, deleted by hand) -> nothing to hand to");
+        CHECK(IH::UsableUserCopy(shared2, shared, IH::kAppExeLeaf).empty(), "user copy: a registered folder that is a shared copy itself never receives a hand-off");
+        CHECK(IH::UsableUserCopy(exeDir + L"\\no-such-folder", shared, IH::kAppExeLeaf).empty(), "user copy: a missing folder -> nothing to hand to");
+
+        // When a registered install folder counts as GONE (cleaned up) rather than out of reach (kept).
+        {
+            CHECK(!PI::InstallFolderIsGone(L""), "gone: no folder named -> not gone");
+            CHECK(!PI::InstallFolderIsGone(own), "gone: a folder that holds the app exe -> not gone");
+            CHECK(PI::InstallFolderIsGone(exeDir + L"\\deleted-by-hand"), "gone: a missing folder on a drive that is there -> gone");
+            const std::wstring emptied = exeDir + L"\\emptied";
+            fs::create_directories(fs::path{ emptied });
+            CHECK(PI::InstallFolderIsGone(emptied), "gone: a folder left without the app exe -> gone");
+            const DWORD drives = ::GetLogicalDrives();
+            wchar_t freeLetter = 0;
+            for (wchar_t c = L'Z'; c >= L'D'; --c)
+            {
+                if ((drives & (1u << (c - L'A'))) == 0)
+                {
+                    freeLetter = c;
+                    break;
+                }
+            }
+            if (freeLetter != 0)
+            {
+                const std::wstring offline = std::wstring{ freeLetter } + L":\\Apps\\Agentmaster";
+                CHECK(!PI::InstallFolderIsGone(offline), "gone: a folder on a drive that is not there now (an unplugged stick) -> kept, not gone");
+            }
+        }
+        {
+            const std::wstring pins = PI::detail::TaskbarPinsDir();
+            const std::wstring tail = std::wstring{ L"\\" } + PI::kTaskbarPinsSubdir;
+            CHECK(pins.size() > tail.size() && pins.compare(pins.size() - tail.size(), tail.size(), tail) == 0, "pins folder: <APPDATA>\\...\\User Pinned\\TaskBar");
+        }
+
+        // The shortcuts on scratch folders (COM, like the real step).
+        PI::detail::ComScope com;
+        const auto linkAumid = [](const std::wstring& lnk) -> std::wstring {
+            std::wstring out;
+            IShellLinkW* link = nullptr;
+            if (FAILED(::CoCreateInstance(__uuidof(ShellLink), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) || !link)
+            {
+                return out;
+            }
+            IPersistFile* file = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && file)
+            {
+                if (SUCCEEDED(file->Load(lnk.c_str(), STGM_READ)))
+                {
+                    IPropertyStore* store = nullptr;
+                    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store))) && store)
+                    {
+                        PROPVARIANT pv{};
+                        if (SUCCEEDED(store->GetValue(PI::detail::PkeyAppUserModelId(), &pv)))
+                        {
+                            if (pv.vt == VT_LPWSTR && pv.pwszVal)
+                            {
+                                out = pv.pwszVal;
+                            }
+                            ::PropVariantClear(&pv);
+                        }
+                        store->Release();
+                    }
+                }
+                file->Release();
+            }
+            link->Release();
+            return out;
+        };
+        // Reads (args == nullptr) or sets a link's arguments: a value the re-point must leave alone, which shows it
+        // changed the pin IN PLACE instead of writing a new one.
+        const auto linkArgs = [](const std::wstring& lnk, const wchar_t* args) -> std::wstring {
+            std::wstring out;
+            IShellLinkW* link = nullptr;
+            if (FAILED(::CoCreateInstance(__uuidof(ShellLink), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) || !link)
+            {
+                return out;
+            }
+            IPersistFile* file = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && file)
+            {
+                if (SUCCEEDED(file->Load(lnk.c_str(), args ? STGM_READWRITE : STGM_READ)))
+                {
+                    if (args)
+                    {
+                        link->SetArguments(args);
+                        file->Save(nullptr, TRUE);
+                    }
+                    wchar_t buf[512]{};
+                    if (SUCCEEDED(link->GetArguments(buf, ARRAYSIZE(buf))))
+                    {
+                        out = buf;
+                    }
+                }
+                file->Release();
+            }
+            link->Release();
+            return out;
+        };
+        CHECK(SUCCEEDED(com.hr), "shortcuts: COM is up");
+        const std::wstring ownExe = PI::AppExeIn(own);
+        const std::wstring sharedExe = PI::AppExeIn(shared);
+        const std::wstring ownAumid = L"WindowsTerminalDev.am7e8dOwn.am7e8dUser";
+        const std::wstring sharedAumid = L"WindowsTerminalDev.am7e8dShared.am7e8dUser";
+
+        // The all-users install's icons in a user's own folders: made once, never over an icon that is there.
+        {
+            const std::wstring desk = exeDir + L"\\user-desktop";
+            const std::wstring progs = exeDir + L"\\user-start\\Programs"; // not there yet: the step makes it
+            fs::create_directories(fs::path{ desk });
+            CHECK(PI::RegisterMachineCopyUserIconsIn(desk, progs, sharedExe, sharedAumid) == 2, "per-user icons: a desktop and a Start-menu icon are made");
+            CHECK(PI::detail::ShortcutTarget(desk + L"\\Agentmaster.lnk") == sharedExe && PI::detail::ShortcutTarget(progs + L"\\Agentmaster.lnk") == sharedExe,
+                  "per-user icons: both open the shared copy");
+            CHECK(linkAumid(desk + L"\\Agentmaster.lnk") == sharedAumid, "per-user icons: ...with the id that copy runs under for this user (one taskbar group)");
+            CHECK(PI::RegisterMachineCopyUserIconsIn(desk, progs, sharedExe, sharedAumid) == 0, "per-user icons: a second run makes nothing (no duplicate)");
+            CHECK(::DeleteFileW((desk + L"\\Agentmaster.lnk").c_str()) != FALSE && PI::detail::WriteShortcut(desk + L"\\Agentmaster.lnk", ownExe, own, ownAumid, nullptr),
+                  "per-user icons: the desktop icon now opens the user's own copy");
+            ::DeleteFileW((progs + L"\\Agentmaster.lnk").c_str());
+            CHECK(PI::RegisterMachineCopyUserIconsIn(desk, progs, sharedExe, sharedAumid) == 1, "per-user icons: only the missing Start-menu icon is made");
+            CHECK(PI::detail::ShortcutTarget(desk + L"\\Agentmaster.lnk") == ownExe, "per-user icons: an icon the user has is never overwritten");
+            CHECK(PI::RegisterMachineCopyUserIconsIn(L"", L"", sharedExe, sharedAumid) == 0, "per-user icons: no folders -> nothing made");
+        }
+
+        // Taskbar pins move IN PLACE, and only the pins of the copy that moves.
+        {
+            const std::wstring pins = exeDir + L"\\pins";
+            fs::create_directories(fs::path{ pins });
+            const std::wstring otherExe = exeDir + L"\\other-app\\Other.exe";
+            fs::create_directories(fs::path{ otherExe }.parent_path());
+            std::ofstream{ fs::path{ otherExe }, std::ios::binary } << "x";
+            CHECK(PI::detail::WriteShortcut(pins + L"\\Agentmaster (all users).lnk", sharedExe, shared, sharedAumid, nullptr) &&
+                      PI::detail::WriteShortcut(pins + L"\\Other.lnk", otherExe, fs::path{ otherExe }.parent_path().wstring(), L"", nullptr),
+                  "pins: a pin of the shared copy and one of another app");
+            std::ofstream{ fs::path{ pins } / L"desktop.ini", std::ios::binary } << "[.ShellClassInfo]";
+            CHECK(PI::detail::ShortcutAumid(pins + L"\\Agentmaster (all users).lnk") == sharedAumid && PI::detail::ShortcutAumid(pins + L"\\Other.lnk").empty() &&
+                      PI::detail::ShortcutAumid(pins + L"\\no-such.lnk").empty(),
+                  "link id: read back as the test's own reader reads it; none -> \"\"; no file -> \"\"");
+            CHECK(linkArgs(pins + L"\\Agentmaster (all users).lnk", L"--am7e8d-kept") == L"--am7e8d-kept", "pins: the shared copy's pin carries a value of its own");
+            CHECK(PI::RepointPinsIn(pins, shared, ownExe, ownAumid) == 1, "pins: exactly the shared copy's pin is re-pointed");
+            CHECK(PI::detail::ShortcutTarget(pins + L"\\Agentmaster (all users).lnk") == ownExe, "pins: ...at the user's own copy, under the same file name");
+            CHECK(linkAumid(pins + L"\\Agentmaster (all users).lnk") == ownAumid, "pins: ...with that copy's id, so its window groups under the pin");
+            CHECK(linkArgs(pins + L"\\Agentmaster (all users).lnk", nullptr) == L"--am7e8d-kept", "pins: ...in place: the pin's own data survives");
+            CHECK(PI::detail::ShortcutTarget(pins + L"\\Other.lnk") == otherExe, "pins: another app's pin is left alone");
+            CHECK(PI::RepointPinsIn(pins, shared, ownExe, ownAumid) == 0, "pins: a second run moves nothing");
+            CHECK(PI::RepointPinsIn(L"", shared, ownExe, ownAumid) == 0 && PI::RepointPinsIn(exeDir + L"\\no-pins", shared, ownExe, ownAumid) == 0,
+                  "pins: no pins folder -> nothing moved");
+        }
+
+        // The leftovers of a user's own install deleted by hand, on scratch HKCU keys.
+        {
+            const std::wstring testRoot = L"Software\\AgentmasterTests\\" + NewSessionId();
+            PI::UserRegistrationKeys keys;
+            keys.classesRoot = testRoot + L"\\Classes";
+            keys.uninstallKey = testRoot + L"\\Uninstall\\Agentmaster";
+            keys.environmentKey = testRoot + L"\\Environment";
+            const std::wstring stale = exeDir + L"\\stale-copy";
+            CHECK(makeCopy(stale, PI::Decision::Installed, true), "stale: the user's own copy is made");
+            const std::wstring staleExe = PI::AppExeIn(stale);
+            const std::wstring desk = exeDir + L"\\stale-desktop";
+            const std::wstring progs = exeDir + L"\\stale-programs";
+            const std::wstring pins = exeDir + L"\\stale-pins";
+            for (const auto& d : { desk, progs, pins })
+            {
+                fs::create_directories(fs::path{ d });
+            }
+            const std::wstring dirVerb = keys.classesRoot + L"\\Directory\\shell\\" + PI::kContextVerb;
+            const std::wstring bgVerb = keys.classesRoot + L"\\Directory\\Background\\shell\\" + PI::kContextVerb;
+            const std::wstring driveVerb = keys.classesRoot + L"\\Drive\\shell\\" + PI::kContextVerb;
+            bool staged = PI::detail::RegWriteString(HKEY_CURRENT_USER, dirVerb + L"\\command", nullptr, PI::ContextMenuCommand(staleExe, L"%1"));
+            staged = PI::detail::RegWriteString(HKEY_CURRENT_USER, bgVerb + L"\\command", nullptr, PI::ContextMenuCommand(staleExe, L"%V")) && staged;
+            staged = PI::detail::RegWriteString(HKEY_CURRENT_USER, driveVerb + L"\\command", nullptr, PI::ContextMenuCommand(sharedExe, L"%1")) && staged;
+            staged = PI::detail::RegWriteString(HKEY_CURRENT_USER, keys.uninstallKey, L"InstallLocation", stale) && staged;
+            staged = PI::detail::RegWriteString(HKEY_CURRENT_USER, keys.environmentKey, L"Path", L"C:\\Windows;" + stale + L";D:\\tools", REG_EXPAND_SZ) && staged;
+            staged = PI::detail::WriteShortcut(desk + L"\\Agentmaster.lnk", staleExe, stale, ownAumid, nullptr) && staged;
+            staged = PI::detail::WriteShortcut(progs + L"\\Agentmaster.lnk", sharedExe, shared, sharedAumid, nullptr) && staged;
+            staged = PI::detail::WriteShortcut(pins + L"\\Agentmaster.lnk", staleExe, stale, ownAumid, nullptr) && staged;
+            CHECK(staged, "stale: its verbs, entry, PATH entry, icons and pin are staged");
+            std::error_code rmEc;
+            fs::remove_all(fs::path{ stale }, rmEc); // the user deletes the folder instead of uninstalling
+            CHECK(PI::InstallFolderIsGone(stale), "stale: its folder is gone");
+            const int n = PI::CleanStaleUserInstall(stale, keys, desk, progs, pins, sharedExe, sharedAumid);
+            CHECK(n == 6, "stale: 2 verbs + the entry + the PATH entry + the desktop icon + the pin");
+            CHECK(PI::detail::RegReadString(HKEY_CURRENT_USER, (dirVerb + L"\\command").c_str(), nullptr).empty() &&
+                      PI::detail::RegReadString(HKEY_CURRENT_USER, (bgVerb + L"\\command").c_str(), nullptr).empty(),
+                  "stale: its right-click entries are gone (the shared copy's show again)");
+            CHECK(PI::CommandProgram(PI::detail::RegReadString(HKEY_CURRENT_USER, (driveVerb + L"\\command").c_str(), nullptr)) == sharedExe,
+                  "stale: an entry that opens another copy is kept");
+            CHECK(PI::detail::RegReadString(HKEY_CURRENT_USER, keys.uninstallKey.c_str(), L"InstallLocation").empty(), "stale: its Apps & Features entry is gone");
+            CHECK(PI::detail::RegReadString(HKEY_CURRENT_USER, keys.environmentKey.c_str(), L"Path") == L"C:\\Windows;D:\\tools", "stale: its PATH entry is gone, the rest kept");
+            CHECK(!fs::exists(fs::path{ desk } / L"Agentmaster.lnk"), "stale: its desktop icon is gone");
+            CHECK(PI::detail::ShortcutTarget(progs + L"\\Agentmaster.lnk") == sharedExe, "stale: an icon of the shared copy is kept");
+            CHECK(PI::detail::ShortcutTarget(pins + L"\\Agentmaster.lnk") == sharedExe && linkAumid(pins + L"\\Agentmaster.lnk") == sharedAumid,
+                  "stale: its taskbar pin goes back to the shared copy");
+            CHECK(PI::CleanStaleUserInstall(stale, keys, desk, progs, pins, sharedExe, sharedAumid) == 0, "stale: a second run finds nothing");
+            CHECK(PI::detail::RegWriteString(HKEY_CURRENT_USER, keys.uninstallKey, L"InstallLocation", own) &&
+                      PI::CleanStaleUserInstall(stale, keys, L"", L"", L"", sharedExe, sharedAumid) == 0 &&
+                      PI::detail::RegReadString(HKEY_CURRENT_USER, keys.uninstallKey.c_str(), L"InstallLocation") == own,
+                  "stale: an entry that names another folder is never removed");
+            CHECK(::RegDeleteTreeW(HKEY_CURRENT_USER, testRoot.c_str()) == ERROR_SUCCESS, "stale: the scratch keys are removed again");
+            ::RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\AgentmasterTests"); // only when empty: another run's keys stay
+        }
+    }
+
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::path{ exeDir }, ec);
 }

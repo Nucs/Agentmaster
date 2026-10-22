@@ -11,7 +11,7 @@ uninstalls for real.
 | `amprobe.cpp` + `amprobe.rc` | A GUI exe NAMED `Agentmaster.exe` that is the app's startup prelude and nothing else — `HandleUninstallFlagAtStartup` → `EnsureInstallDecidedAtStartup` → `EnsureProfileResolvedAtStartup` → `RefreshInstalledRegistration` from `PortableInstall.h` / `ProfileBootstrap.h`, with the repository's real `am-update.ps1` embedded as `AM_UPDATE_PS1` — that logs one line per step to `C:\amqa\probe.log` (`START` with the account, elevation, session user and account plan; the install step's outcome; `RESULT` with the decision, machine-copy / installed flags and the resolved profile). |
 | `build.cmd` | Builds it (`/W4`, static CRT, embedded manifest) into `Q:\tmp\amprobe` (or the folder given). Not part of the product build. |
 | `stage.py` | Stages fake portable unzips of the probe (`probe-<ver>` with `.portable`, `.am-version`, `.am-manifest`), a release-shaped zip of the newest one, and the scripts, into a desktop's persist folder (`Z:\amqa` in the guest). |
-| `amqa-guest.ps1` | Guest-side helpers for the REAL app (dot-source it in the guest): `Get-AmQaState` prints every install, Apps & Features entry, PATH entry, verb, shortcut, profile (+ its last `[install]` lines) and running `Agentmaster.exe` with its account and real token elevation; `New-AmQaCopy <version> <name>` makes a fresh stamped copy of the build; `Reset-AmQa` removes every install, registration and profile between scenarios. |
+| `amqa-guest.ps1` | Guest-side helpers for the REAL app (dot-source it in the guest): `Get-AmQaState` prints every install, Apps & Features entry, PATH entry, verb, the all-users install's Active Setup component and each account's marker of it, every shortcut and taskbar pin with its AppUserModelID (`Get-AmQaLinkAumid`, `Get-AmQaPins`), each profile (+ its last `[install]` lines) and each running `Agentmaster.exe` with its account, real token elevation and command line; `New-AmQaCopy <version> <name>` makes a fresh stamped copy of the build; `Reset-AmQa` removes every install, registration, pin file, Active Setup entry and profile between scenarios. |
 | `qm.py` | Hardware-level keys and screen of the desktop through QEMU's monitor (`key`, `type`, `shot`) — the only way to see and answer a UAC consent or credential prompt, which sits on the secure desktop where the desktop's own agent (SendInput, its screenshots) cannot reach. |
 | `mkmsix.ps1` | PowerShell 7, on the development PC: re-packs a build's unsigned `.msix` at a chosen (older) version and signs it with a throwaway `CN=Agentmaster` certificate made in memory; leaves the signed `.msix` and the public `qa-signing.cer`. The test desktop trusts the `.cer` and installs the package, so the app's own PACKAGE update can run there. |
 
@@ -152,3 +152,37 @@ for the release: Windows PowerShell 5.1's `Invoke-WebRequest` refuses `file://`.
 key NAME once, so two installs need two key names; a screenshot taken right after a click can still show
 the previous frame (take another before deciding the click did nothing — though twice a first click on ⚙
 or *Check for updates* really did nothing).
+
+## A user's own install beside the all-users one (2026-10-22)
+
+The checks behind PROFILES.md §2b *A user's own install wins* / §2c (the per-user icons through Active Setup,
+the take-over, the hand-off of the app and the CLI, the uninstalls, a copy deleted by hand). The same setup
+as above, with UAC left OFF (the hand-off must stay quick for an elevated start) and one standard account
+`qastd`. How each step was made:
+
+1. **The all-users install:** a fresh copy (`New-AmQaCopy '0.8.0.0' m1`) started through Explorer, *Install for
+   all users* clicked through the agent's `find_elements` + `element_action` (the TaskDialog's command links
+   are buttons). The installed copy's first start makes the user's icons.
+2. **Windows' own Active Setup:** delete the user's marker (`HKCU\SOFTWARE\Microsoft\Active Setup\Installed
+   Components\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}`) and both icons, `shutdown /r`: the desktop signs
+   `Docker` in again, and Windows runs the StubPath at that sign-in (the icons came back 17 s after the boot).
+3. **Another account's step:** `Start-Process 'C:\Program Files\Agentmaster\Agentmaster.exe' -ArgumentList
+   '--register-user' -Credential <qastd> -LoadUserProfile` with all three standard streams redirected.
+4. **A taskbar pin:** start the copy, right-click its taskbar button (the button's name is "Agentmaster - 1
+   running window"), then *Pin to taskbar* in the jump list (a plain `click` on its position: the jump list
+   is not in the agent's accessibility tree). Programs cannot pin by themselves on Windows 11.
+5. **The user's own copy:** a fresh copy stamped NEWER (`New-AmQaCopy '0.8.1.0' u1`), *Install just for you*.
+6. **The app hand-off:** the agent's `launch` of `"C:\Program Files\Agentmaster\Agentmaster.exe" -d C:\Windows`,
+   then the process list (`Get-AmQaState` prints each process's command line). The opt-out:
+   `launch('cmd.exe /c set AGENTMASTER_NO_HANDOFF=1&& start "" "<exe>"')`.
+7. **The CLI hand-off:** copy `C:\Windows\System32\cmd.exe` over the user's `agentmaster-cli.exe` (keep the real
+   one aside), then run the SHARED CLI as `& <shared cli> /c "echo HANDOFF-%USERNAME% & exit 7"`: the output,
+   `$LASTEXITCODE` and a `> file` redirect show what reached the user's copy. Put the real CLI back after.
+8. **A copy deleted by hand:** stop it, `Remove-Item -Recurse` its folder, start the shared copy.
+
+**Traps met:** the agent's `launch` reported a timeout for the start through `cmd /c start` although the app
+ran (the hand-off's own start was found, its window belonging to the copy it started): read the process list; Explorer's UI Automation id of a pinned taskbar button (`Appid: …`) keeps the
+AppUserModelID the pin had when it was pinned, while the grouping follows the pin file as it is now (one
+button, "1 running window pinned"); the agent kills with `Stop-Process`, which skips the app's own exit path,
+so a pin's id the app would stamp at its exit stays as it was; a `Reset-AmQa` deletes pin files, and the
+taskbar shows such a pin blank until Explorer restarts.

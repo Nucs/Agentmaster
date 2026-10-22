@@ -603,6 +603,12 @@ $script:AmLegacyShippedPatterns = @('Microsoft.Terminal.*.dll')
 # PortableInstall.h kSetAsideLeafPrefix is the same name.
 $script:AmSetAsidePrefix = '.am-previous-'
 
+# The all-users install's Active Setup component (PortableInstall.h kActiveSetupKey, the same id): Windows runs its
+# StubPath - "Agentmaster.exe --register-user" - ONCE for each user at their next sign-in, which gives that user their
+# OWN Agentmaster desktop and Start-menu icons for the shared copy. Since 2026-10-22 the all-users install makes no
+# shared icons: a user without administrator rights can neither remove nor re-point one (measured; PROFILES.md 2c).
+$script:AmActiveSetupId = '{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}'
+
 <#
 .SYNOPSIS
     True when $Name is a plain top-level entry name a manifest may list (no separator, drive or stream
@@ -984,16 +990,24 @@ function Test-AmDirWritable {
     own - Settings -> Installed apps showed only "Agentmaster (all users)", so the per-user copy could not be
     uninstalled from there (found in a test desktop on 2026-10-21). LegacyUninstallKey is where an all-users
     copy registered before that day keeps its entry: read for detection, replaced at its next registration.
+    The all-users install's icons are no longer shared (since 2026-10-22): StartMenu / Desktop of the Machine scope
+    are the common folders only so that an all-users registration made before then gets its shared shortcuts
+    removed; each user's own icons come from the Active Setup component (ActiveSetupKey) instead.
 .PARAMETER Scope
     'User' (HKCU, the user's own folders) or 'Machine' (HKLM, the common Start menu and the public desktop).
 .OUTPUTS
     [hashtable] UninstallKey, LegacyUninstallKey ('' for User), ClassesRoot, EnvKey, StartMenu, Desktop,
-    Broadcast.
+    Broadcast, ActiveSetupKey (the HKLM component: its command and Version), UserActiveSetupKey (HKCU: the Version
+    this user already got), PinsDir (the user's taskbar pins; '' for Machine).
 .NOTES
-    A test passes its own hashtable of the same shape (scratch keys and folders) instead.
+    A test passes its own hashtable of the same shape (scratch keys and folders) instead, and may add MachineDir
+    (Uninstall-AmCopy: the all-users install a per-user uninstall hands the icons to) and ProfileFolders
+    (Unregister-AmInstall: every user's desktop and Start-menu folders the all-users uninstall sweeps).
 #>
 function Get-AmRegistrationTargets {
     param([ValidateSet('User', 'Machine')][string]$Scope)
+    $activeSetup = 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\' + $script:AmActiveSetupId
+    $userActiveSetup = 'HKCU:\SOFTWARE\Microsoft\Active Setup\Installed Components\' + $script:AmActiveSetupId
     if ($Scope -eq 'Machine') {
         return @{
             UninstallKey       = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentmasterAllUsers'
@@ -1003,8 +1017,14 @@ function Get-AmRegistrationTargets {
             StartMenu          = [Environment]::GetFolderPath('CommonPrograms')
             Desktop            = [Environment]::GetFolderPath('CommonDesktopDirectory')
             Broadcast          = $true
+            ActiveSetupKey     = $activeSetup
+            UserActiveSetupKey = $userActiveSetup
+            PinsDir            = ''
         }
     }
+    # GetFolderPath answers '' for a folder that does not exist (a profile never signed in to interactively, a
+    # redirected %USERPROFILE%): then there are no pins to move, and Join-Path must not see the empty path (it throws).
+    $appData = [Environment]::GetFolderPath('ApplicationData')
     return @{
         UninstallKey       = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster'
         LegacyUninstallKey = ''
@@ -1013,6 +1033,9 @@ function Get-AmRegistrationTargets {
         StartMenu          = [Environment]::GetFolderPath('Programs')
         Desktop            = [Environment]::GetFolderPath('DesktopDirectory')
         Broadcast          = $true
+        ActiveSetupKey     = $activeSetup
+        UserActiveSetupKey = $userActiveSetup
+        PinsDir            = if ($appData) { Join-Path $appData 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar' } else { '' }
     }
 }
 
@@ -1101,17 +1124,222 @@ function Test-AmShortcutInto {
 
 <#
 .SYNOPSIS
+    A new Active Setup Version for an all-users install made now: "1,<year>,<MMdd>,<HHmm>".
+.DESCRIPTION
+    Windows runs the component's StubPath for every user whose own Version (HKCU) is LOWER than this one, so a FRESH
+    install must write a newer value than any earlier install of the PC did - after an all-users uninstall swept the
+    users' icons, a reinstall then gives every user icons again. An update keeps the installed value
+    (Register-AmInstall), so an icon a user deleted is not made again at their next sign-in. Each part stays below
+    65536 (the parts are compared as numbers).
+.OUTPUTS
+    [string]
+#>
+function New-AmActiveSetupVersion {
+    $now = Get-Date
+    return ('1,{0},{1},{2}' -f $now.Year, [int]$now.ToString('MMdd'), [int]$now.ToString('HHmm'))
+}
+
+<#
+.SYNOPSIS
+    Every user's own desktop and Start-menu Programs folders on this PC - where an all-users install's per-user icons
+    live - for the all-users uninstall to sweep.
+.DESCRIPTION
+    The profiles of real accounts (ProfileList, SIDs S-1-5-21-...): their default Desktop and Programs folders, a
+    desktop moved into OneDrive ("OneDrive\Desktop", "OneDrive - <organization>\Desktop"), and - for a user who is
+    signed in now, whose hive is loaded - wherever their User Shell Folders say. A user whose desktop was redirected
+    elsewhere while they are signed out keeps an icon that points at nothing; Windows offers to delete it on a click.
+.OUTPUTS
+    [string] the existing folders, each once, without a trailing backslash - one per pipeline item, so collect them
+    with @(Get-AmUserShellFolders) (none is an empty pipeline).
+.NOTES
+    Never throws: a profile that cannot be read is skipped. Needs administrator rights to read other profiles.
+#>
+function Get-AmUserShellFolders {
+    $out = New-Object System.Collections.Generic.List[string]
+    $list = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($k in @(Get-ChildItem -LiteralPath $list -ErrorAction SilentlyContinue)) {
+        try {
+            $sid = $k.PSChildName
+            if ($sid -notlike 'S-1-5-21-*') { continue }   # SYSTEM, LOCAL SERVICE and NETWORK SERVICE have no icons of ours
+            $profilePath = [Environment]::ExpandEnvironmentVariables([string]$k.GetValue('ProfileImagePath'))
+            if (-not $profilePath -or -not (Test-Path -LiteralPath $profilePath)) { continue }
+            $candidates = @((Join-Path $profilePath 'Desktop'), (Join-Path $profilePath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs'))
+            foreach ($od in @(Get-ChildItem -LiteralPath $profilePath -Directory -Filter 'OneDrive*' -ErrorAction SilentlyContinue)) {
+                $candidates += (Join-Path $od.FullName 'Desktop')
+            }
+            $usf = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            if (Test-Path -LiteralPath $usf) {
+                $item = Get-Item -LiteralPath $usf
+                foreach ($name in 'Desktop', 'Programs') {
+                    $raw = [string]$item.GetValue($name, '', 'DoNotExpandEnvironmentNames')
+                    if (-not $raw) { continue }
+                    # The user's own variables, not this (administrator's) process's: their profile and AppData.
+                    $raw = $raw -replace '%USERPROFILE%', $profilePath.Replace('$', '$$')
+                    $raw = $raw -replace '%APPDATA%', (Join-Path $profilePath 'AppData\Roaming').Replace('$', '$$')
+                    $raw = $raw -replace '%LOCALAPPDATA%', (Join-Path $profilePath 'AppData\Local').Replace('$', '$$')
+                    $candidates += [Environment]::ExpandEnvironmentVariables($raw)
+                }
+            }
+            foreach ($c in $candidates) {
+                if (-not $c) { continue }
+                $c = $c.TrimEnd('\')   # the same folder with and without a trailing backslash is one folder
+                if ((Test-Path -LiteralPath $c) -and -not ($out | Where-Object { $_ -ieq $c })) { $out.Add($c) }
+            }
+        } catch {
+            Write-Info "skipped a profile while looking for Agentmaster icons: $($_.Exception.Message)"
+        }
+    }
+    # Unrolled into the pipeline: callers collect it with @(...) (a one-element "return , $array" would reach such a
+    # caller as ONE item, the folders joined by spaces once it is turned into a path).
+    return $out.ToArray()
+}
+
+<#
+.SYNOPSIS
+    A user's own install is being removed while Agentmaster stays installed for all users: give the user's icons and
+    taskbar pins to the shared copy instead of deleting them.
+.DESCRIPTION
+    The user's own install had replaced the shared copy's per-user icons (the same names) and taken its taskbar pins
+    over (PortableInstall.h RepointSharedCopyTaskbarPins); without this the user would be left with no icon at all,
+    since the shared copy's per-user step already ran for them. The desktop and Start-menu icons are made anew (no
+    AppUserModelID of the removed copy stays on them); a taskbar pin is re-pointed IN PLACE, because a pin deleted
+    and made again can drop out of the taskbar. Neither carries the shared copy's AppUserModelID (this script cannot
+    compute the app's per-path formula): once the user's install is unregistered, Uninstall-AmCopy runs the shared
+    copy's own --register-user, which stamps it (Invoke-AmMachineCopyUserCommand). The shared copy's per-user step is
+    marked done for this user (UserActiveSetupKey), so Windows does not make a second set of icons at their next
+    sign-in.
+.PARAMETER UserDir
+    The user's install being removed.
+.PARAMETER MachineDir
+    The all-users install.
+.PARAMETER Targets
+    Overrides Get-AmRegistrationTargets -Scope User (tests).
+.OUTPUTS
+    [int] the number of icons and pins handed over.
+.NOTES
+    Never throws for one icon: one that cannot be changed is reported and the rest goes on.
+#>
+function Move-AmUserEntriesToMachineCopy {
+    param([string]$UserDir, [string]$MachineDir, [hashtable]$Targets)
+    if (-not $Targets) { $Targets = Get-AmRegistrationTargets -Scope User }
+    $machineExe = Get-AppExe $MachineDir
+    if (-not $machineExe) { return 0 }
+    $moved = 0
+    $sh = New-Object -ComObject WScript.Shell
+    foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
+        if (-not $folder) { continue }
+        $lnk = Join-Path $folder 'Agentmaster.lnk'
+        if (-not (Test-AmShortcutInto -Lnk $lnk -Dir $UserDir)) { continue }
+        try {
+            Remove-Item -LiteralPath $lnk -Force
+            $s = $sh.CreateShortcut($lnk)
+            $s.TargetPath = $machineExe
+            $s.WorkingDirectory = $MachineDir
+            $s.Description = 'Agentmaster - manage your Claude Code sessions (installed for all users of this PC)'
+            $s.IconLocation = "$machineExe,0"
+            $s.Save()
+            $moved++
+        } catch {
+            Write-Warn "could not hand $lnk to the copy installed for all users: $($_.Exception.Message)"
+        }
+    }
+    if ($Targets.PinsDir -and (Test-Path -LiteralPath $Targets.PinsDir)) {
+        foreach ($pin in @(Get-ChildItem -LiteralPath $Targets.PinsDir -Filter '*.lnk' -File -ErrorAction SilentlyContinue)) {
+            if (-not (Test-AmShortcutInto -Lnk $pin.FullName -Dir $UserDir)) { continue }
+            try {
+                $s = $sh.CreateShortcut($pin.FullName)
+                $s.TargetPath = $machineExe
+                $s.WorkingDirectory = $MachineDir
+                $s.IconLocation = "$machineExe,0"
+                $s.Save()
+                $moved++
+            } catch {
+                Write-Warn "could not hand the taskbar pin $($pin.Name) to the copy installed for all users: $($_.Exception.Message)"
+            }
+        }
+    }
+    try {
+        $version = ''
+        if ($Targets.ActiveSetupKey -and (Test-Path -LiteralPath $Targets.ActiveSetupKey)) {
+            $version = [string](Get-Item -LiteralPath $Targets.ActiveSetupKey).GetValue('Version')
+        }
+        if ($version -and $Targets.UserActiveSetupKey) {
+            New-Item -Path $Targets.UserActiveSetupKey -Force | Out-Null
+            New-ItemProperty -LiteralPath $Targets.UserActiveSetupKey -Name 'Version' -Value $version -PropertyType String -Force | Out-Null
+        }
+    } catch {
+        Write-Info "the all-users copy's per-user step was not marked done: $($_.Exception.Message)"
+    }
+    return $moved
+}
+
+<#
+.SYNOPSIS
+    Run the all-users copy's per-user command (Agentmaster.exe --register-user) for this user, and wait for it.
+.DESCRIPTION
+    The icons and taskbar pins a user's own install hands back to the all-users copy (Move-AmUserEntriesToMachineCopy)
+    carry no AppUserModelID of that copy - this script cannot compute the app's per-path formula: an icon without it does
+    not route the copy's toasts, and a pin that still names the removed copy opens the copy's first window as a second
+    taskbar button. The copy's own command stamps its id on them (PortableInstall.h StampMachineCopyUserLinks); it opens
+    no window. Run it only once the user's own install is unregistered (with it registered, the copy leaves the user's
+    links to it), and only when the Active Setup component names this very exe: a copy registered before 2026-10-22 does
+    not know the flag and would start the app instead.
+.PARAMETER MachineDir
+    The all-users install.
+.PARAMETER Targets
+    Overrides Get-AmRegistrationTargets (tests): its ActiveSetupKey is the component that is read.
+.OUTPUTS
+    [bool] true when the command ran and ended within 60 s.
+.NOTES
+    Never throws: a command that cannot run leaves the links without the id (the app still stamps a pin of its own at
+    its next exit).
+#>
+function Invoke-AmMachineCopyUserCommand {
+    param([string]$MachineDir, [hashtable]$Targets)
+    try {
+        $exe = Get-AppExe $MachineDir
+        if (-not $exe) { return $false }
+        $as = if ($Targets -and $Targets.ActiveSetupKey) { [string]$Targets.ActiveSetupKey } else { [string](Get-AmRegistrationTargets -Scope Machine).ActiveSetupKey }
+        if (-not $as -or -not (Test-Path -LiteralPath $as)) { return $false }
+        $stub = [string](Get-Item -LiteralPath $as).GetValue('StubPath')
+        # The program the command starts: its first token, quoted or not.
+        $program = if ($stub -match '^\s*"([^"]*)"') { $Matches[1] } else { (("$stub".Trim()) -split '\s+')[0] }
+        if (-not $program -or ([IO.Path]::GetFullPath($program)) -ine ([IO.Path]::GetFullPath($exe))) { return $false }
+        # Hidden: the command opens no window anyway; a stand-in console program (the tests) must not flash one.
+        $p = Start-Process -FilePath $exe -ArgumentList '--register-user' -PassThru -WindowStyle Hidden
+        if (-not $p.WaitForExit(60000)) {
+            Write-Info 'the copy installed for all users did not finish marking your icons within 60 s'
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Info "your icons were not marked for the copy installed for all users: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Register an installed copy: Start-menu + desktop shortcuts, the "Open in Agentmaster" verbs on folders,
     folder backgrounds and drives, an Apps & Features entry, and the folder on PATH.
 .DESCRIPTION
     The same shape PortableInstall.h RegisterInstall writes (keys, values, names). The shortcuts carry no
     AppUserModelID: the script cannot compute the app's per-path formula (the app's own installer stamps it).
-    An all-users copy's shortcuts and Apps & Features entry are named "Agentmaster (all users)"
-    (Get-AmRegistrationName); the shortcuts an all-users copy registered before that name (Agentmaster.lnk in
-    the common folders, pointing into $Dir) are replaced by the renamed ones.
+    A user's shortcut is made anew each time (an "Agentmaster.lnk" already there - the shared copy's per-user icon,
+    or an older one of its own - is deleted first: a shortcut saved over keeps the old one's AppUserModelID).
+    An all-users copy makes NO shortcut in the shared Start menu or on the shared desktop (since 2026-10-22): a user
+    without administrator rights can neither remove nor re-point one, and a user's own install would sit beside it
+    (measured in a test desktop; PROFILES.md 2c). It registers an Active Setup component instead (ActiveSetupKey:
+    StubPath "<exe>" --register-user), through which Windows gives every user icons of their own, once, at their
+    next sign-in (PortableInstall.h EnsureMachineCopyUserSetup; the shared copy's own start does it too). A FRESH
+    install writes a new Version (New-AmActiveSetupVersion); a re-registration keeps the one there, so an icon a
+    user deleted is not made again. The shared shortcuts an older all-users registration made ("Agentmaster (all
+    users).lnk", and "Agentmaster.lnk" before that, pointing into $Dir) are removed. Its Apps & Features entry is
+    named "Agentmaster (all users)" (Get-AmRegistrationName).
     Where both installs exist, Windows puts the machine PATH before the user PATH, so a shell finds the
-    all-users copy's agentmaster-cli.exe first; the "Open in Agentmaster" verbs of the user's own copy win
-    (HKCU\Software\Classes overrides HKLM\Software\Classes).
+    all-users copy's agentmaster-cli.exe first - which hands the call to the user's own copy (the app's
+    InstallHandoff.h); the "Open in Agentmaster" verbs of the user's own copy win (HKCU\Software\Classes
+    overrides HKLM\Software\Classes).
 .PARAMETER Scope
     'User' or 'Machine' (see Get-AmRegistrationTargets).
 .PARAMETER Dir
@@ -1133,21 +1361,46 @@ function Register-AmInstall {
         $sh = New-Object -ComObject WScript.Shell
         foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
             if (-not $folder) { continue }
+            if ($Scope -eq 'Machine') {
+                # No shared shortcut any more; the ones an older all-users registration made go - only when they
+                # point here ("Agentmaster (all users).lnk" since 2026-10-21, "Agentmaster.lnk" before that).
+                foreach ($older in 'Agentmaster (all users).lnk', 'Agentmaster.lnk') {
+                    $lnk = Join-Path $folder $older
+                    if (Test-AmShortcutInto -Lnk $lnk -Dir $Dir) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
+                }
+                continue
+            }
             New-Item -ItemType Directory -Force -Path $folder | Out-Null
-            $s = $sh.CreateShortcut((Join-Path $folder "$name.lnk"))
+            $lnk = Join-Path $folder "$name.lnk"
+            # Made anew: WScript.Shell loads a shortcut that exists and saves its old properties back (an
+            # AppUserModelID of the shared copy, for one), so the old file goes first.
+            if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force }
+            $s = $sh.CreateShortcut($lnk)
             $s.TargetPath = $exe
             $s.WorkingDirectory = $Dir
-            $s.Description = if ($Scope -eq 'Machine') { 'Agentmaster - manage your Claude Code sessions (installed for all users of this PC)' } else { 'Agentmaster - manage your Claude Code sessions' }
+            $s.Description = 'Agentmaster - manage your Claude Code sessions'
             $s.IconLocation = "$exe,0"
             $s.Save()
-            if ($Scope -eq 'Machine') {
-                # An all-users copy registered by a build of 2026-10-21 (the first with installs for all users)
-                # named its shortcuts Agentmaster.lnk: the renamed one replaces it - only when it points here.
-                $older = Join-Path $folder 'Agentmaster.lnk'
-                if (Test-AmShortcutInto -Lnk $older -Dir $Dir) { Remove-Item -LiteralPath $older -Force -ErrorAction SilentlyContinue }
-            }
         }
     } catch { $notes += "shortcuts: $($_.Exception.Message)" }
+    if ($Scope -eq 'Machine' -and $Targets.ActiveSetupKey) {
+        try {
+            $as = $Targets.ActiveSetupKey
+            # NOT $version: PowerShell variable names ignore case, so that would overwrite the -Version parameter the
+            # Apps & Features entry below is stamped with (found in the test desktop: DisplayVersion "1,2026,1022,944").
+            $asVersion = ''
+            if (Test-Path -LiteralPath $as) { $asVersion = [string](Get-Item -LiteralPath $as).GetValue('Version') }
+            # A re-registration (an update) keeps the Version: Windows would otherwise run the per-user step again for
+            # every user, and an icon a user deleted would come back.
+            if (-not $asVersion) { $asVersion = New-AmActiveSetupVersion }
+            New-Item -Path $as -Force | Out-Null
+            Set-Item -LiteralPath $as -Value 'Agentmaster (all users)'
+            New-ItemProperty -LiteralPath $as -Name 'StubPath' -Value "`"$exe`" --register-user" -PropertyType String -Force | Out-Null
+            New-ItemProperty -LiteralPath $as -Name 'Version' -Value $asVersion -PropertyType String -Force | Out-Null
+            New-ItemProperty -LiteralPath $as -Name 'IsInstalled' -Value 1 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -LiteralPath $as -Name 'DontAsk' -Value 2 -PropertyType DWord -Force | Out-Null
+        } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
+    }
     try {
         foreach ($verb in @(@('Directory', '%1'), @('Directory\Background', '%V'), @('Drive', '%1'))) {
             $key = "$($Targets.ClassesRoot)\$($verb[0])\shell\Agentmaster"
@@ -1236,6 +1489,43 @@ function Unregister-AmInstall {
             }
         }
     } catch { $notes += "shortcuts: $($_.Exception.Message)" }
+    if ($Scope -eq 'Machine') {
+        # The all-users install's per-user part: its Active Setup component (only when it starts a program in $Dir),
+        # and the icons it gave every user in their own desktop and Start-menu folders (only those pointing into $Dir:
+        # a user's own install, which carries the same name, keeps its icons).
+        try {
+            $as = [string]$Targets.ActiveSetupKey
+            if ($as -and (Test-Path -LiteralPath $as)) {
+                $stub = [string](Get-Item -LiteralPath $as).GetValue('StubPath')
+                # The program the command starts: its first token, quoted or not (a plain substring test would also
+                # match a sibling folder such as ...\Agentmaster2).
+                $program = if ($stub -match '^\s*"([^"]*)"') { $Matches[1] } else { (("$stub".Trim()) -split '\s+')[0] }
+                if (-not $stub -or (& $inside $program)) {
+                    Remove-Item -LiteralPath $as -Recurse -Force
+                    Write-Ok 'removed the step that gave each user their own icons'
+                } else {
+                    Write-Info "kept the Active Setup entry (it starts another copy: $stub)"
+                }
+            }
+        } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
+        try {
+            $folders = if ($Targets.ContainsKey('ProfileFolders')) { @($Targets.ProfileFolders) } else { @(Get-AmUserShellFolders) }
+            $sh = New-Object -ComObject WScript.Shell
+            $swept = 0
+            foreach ($folder in $folders) {
+                if (-not $folder) { continue }
+                $lnk = Join-Path $folder 'Agentmaster.lnk'
+                if (-not (Test-Path -LiteralPath $lnk)) { continue }
+                $target = ''
+                try { $target = $sh.CreateShortcut($lnk).TargetPath } catch { $target = '' }
+                if (& $inside $target) {
+                    try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; $swept++ }
+                    catch { $notes += "icon $lnk : $($_.Exception.Message)" }
+                }
+            }
+            if ($swept -gt 0) { Write-Ok "removed $swept icon(s) it gave the users of this PC" }
+        } catch { $notes += "each user's icons: $($_.Exception.Message)" }
+    }
     try {
         foreach ($base in 'Directory', 'Directory\Background', 'Drive') {
             $key = "$($Targets.ClassesRoot)\$base\shell\Agentmaster"
@@ -1295,6 +1585,19 @@ function Uninstall-AmCopy {
     param([ValidateSet('User', 'Machine')][string]$Scope, [string]$Dir, [hashtable]$Targets, [switch]$Force)
     $full = (Resolve-AmPath $Dir).TrimEnd('\')
     Stop-ProcessesUnder -DirPath $full -AllowOtherUsers:$Force
+    $handedTo = ''
+    if ($Scope -eq 'User') {
+        # Agentmaster stays installed for all users: the user's icons and taskbar pins go to that copy instead of away
+        # (Move-AmUserEntriesToMachineCopy); Unregister-AmInstall then keeps them, as they no longer point here.
+        $machine = if ($Targets -and $Targets.ContainsKey('MachineDir')) { [string]$Targets.MachineDir } else { Find-AmMachineInstallDir }
+        if ($machine -and ((Resolve-AmPath $machine).TrimEnd('\') -ine $full)) {
+            $handed = Move-AmUserEntriesToMachineCopy -UserDir $full -MachineDir $machine -Targets $Targets
+            if ($handed -gt 0) {
+                Write-Ok "your Agentmaster icons and taskbar pins now open the copy installed for all users ($machine)"
+                $handedTo = $machine
+            }
+        }
+    }
     Write-Step 'Removing shortcuts, the right-click menu, the Apps & Features entry and the PATH entry'
     foreach ($n in (Unregister-AmInstall -Scope $Scope -Dir $full -Targets $Targets)) { Write-Warn $n }
     Write-Step "Removing the files Agentmaster installed in $full"
@@ -1306,6 +1609,9 @@ function Uninstall-AmCopy {
     }
     $decision = Join-Path $full 'install.path'
     if (Test-Path -LiteralPath $decision) { Remove-Item -LiteralPath $decision -Force -ErrorAction SilentlyContinue }
+    # The handed-back icons and pins get the all-users copy's id from the copy itself, now that this install is no
+    # longer registered (Invoke-AmMachineCopyUserCommand).
+    if ($handedTo) { $null = Invoke-AmMachineCopyUserCommand -MachineDir $handedTo -Targets $Targets }
     $left = @(Get-ChildItem -LiteralPath $full -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
     if ($left.Count -eq 0) {
         Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
@@ -1645,7 +1951,45 @@ function Install-AmMachineCopy {
     Install-AmLayout -SourceDir $LayoutDir -DestDir $DestDir
     Set-AmInstallDecision -Dir $DestDir -Value 'machine'
     foreach ($n in (Register-AmInstall -Scope Machine -Dir $DestDir -Version $Version -Targets $Targets)) { Write-Warn "registration: $n" }
-    Write-Ok 'installed for all users of this PC'
+    Write-Ok 'installed for all users of this PC (each user gets their own Agentmaster icons at their next sign-in, or when they first start it)'
+}
+
+<#
+.SYNOPSIS
+    Give the user signed in to Windows their own Agentmaster icons for the all-users copy NOW, instead of at their
+    next sign-in: the step Windows' Active Setup runs for every user (Agentmaster.exe --register-user), run once here.
+.DESCRIPTION
+    Run by the signed-in user's own account: the app is started directly (an elevated start is still the same user,
+    whose desktop and HKCU it writes). Run by another account or SYSTEM: a one-shot task for the signed-in user
+    (Invoke-AmAsUser). The step is idempotent - a user who already got their icons, or who has an install of their
+    own, gets nothing more.
+.PARAMETER Exe
+    The all-users copy's Agentmaster.exe.
+.PARAMETER Identity
+    Get-AmIdentity's result.
+.OUTPUTS
+    [bool] true when the step ran.
+.NOTES
+    Never throws: a step that cannot run leaves the icons to the user's next sign-in, and says so.
+#>
+function Invoke-AmUserIconStep {
+    param([string]$Exe, $Identity)
+    if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    try {
+        if ($Identity.IsMainUser) {
+            $p = Start-Process -FilePath $Exe -ArgumentList '--register-user' -PassThru -Wait
+            return ($p.ExitCode -eq 0)
+        }
+        if (-not $Identity.MainUserSid -or -not ($Identity.Elevated -or $Identity.IsSystem)) {
+            Write-Info "$($Identity.MainUserName) gets the Agentmaster icons at their next sign-in"
+            return $false
+        }
+        $null = Invoke-AmAsUser -UserSid $Identity.MainUserSid -FilePath $Exe -Arguments '--register-user' -Wait -TimeoutSec 60
+        return $true
+    } catch {
+        Write-Info "the Agentmaster icons come at the next sign-in: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # ---- where the installs are ------------------------------------------------------------------------------
@@ -1971,6 +2315,7 @@ function Write-AmPhaseScript {
             "`$script:AmLegacyShippedNames = @(" + (($script:AmLegacyShippedNames | ForEach-Object { & $q $_ }) -join ',') + ")`r`n" +
             "`$script:AmLegacyShippedPatterns = @(" + (($script:AmLegacyShippedPatterns | ForEach-Object { & $q $_ }) -join ',') + ")`r`n" +
             "`$script:AmSetAsidePrefix = " + (& $q $script:AmSetAsidePrefix) + "`r`n" +
+            "`$script:AmActiveSetupId = " + (& $q $script:AmActiveSetupId) + "`r`n" +
             "`$script:AmReleaseFamily = " + (& $q $script:AmReleaseFamily) + "`r`n" +
             "`$script:AmCoreFunctionNames = @(" + (($script:AmCoreFunctionNames | ForEach-Object { & $q $_ }) -join ',') + ")`r`n" +
             (Export-AmFunctions -Names $script:AmCoreFunctionNames) + "`r`n" +
@@ -2013,11 +2358,12 @@ $script:AmCoreFunctionNames = @(
     'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
     'Install-AmLayout', 'Restore-AmSetAside', 'Get-AppExe', 'Get-AmLayoutRoot', 'Get-AmInstallDecision', 'Set-AmInstallDecision',
     'Get-AmUserProfileDir', 'Set-AmProfilePointer', 'Test-AmDirWritable', 'Get-AmRegistrationTargets',
-    'Send-AmEnvironmentChange', 'Format-AmVersion', 'Get-AmRegistrationName', 'Test-AmShortcutInto', 'Register-AmInstall',
+    'Send-AmEnvironmentChange', 'Format-AmVersion', 'Get-AmRegistrationName', 'Test-AmShortcutInto',
+    'New-AmActiveSetupVersion', 'Get-AmUserShellFolders', 'Move-AmUserEntriesToMachineCopy', 'Invoke-AmMachineCopyUserCommand', 'Register-AmInstall',
     'Unregister-AmInstall', 'Uninstall-AmCopy',
     'Invoke-AmAsUser', 'Start-AmAppAsUser', 'Export-AmFunctions', 'Invoke-AmPhaseAsUser',
     'Copy-AmProfileData', 'Remove-AmLegacyScriptShortcut',
-    'Install-AmUserCopy', 'Install-AmMachineCopy', 'Get-AmDefaultUserInstallDir', 'Get-AmDefaultMachineInstallDir',
+    'Install-AmUserCopy', 'Install-AmMachineCopy', 'Invoke-AmUserIconStep', 'Get-AmDefaultUserInstallDir', 'Get-AmDefaultMachineInstallDir',
     'Find-AmUserInstallDir', 'Find-AmMachineInstallDir', 'Get-AmInstalledVersion', 'Expand-AmZip',
     'Invoke-AmUserInstall', 'Invoke-AmMachineInstall', 'Get-AmWin32ErrorCode', 'Invoke-AmElevatedPowerShell', 'Invoke-AmElevatedPhase', 'Write-AmPhaseScript',
     'Read-AmPhaseRecord')
@@ -2468,7 +2814,7 @@ function Invoke-UserScopeFlow {
     Write-Host ("Done - Agentmaster $relVer is installed " + $(if ($forMain) { "for $($Identity.MainUserName)" } else { 'just for you' }) + ': ' + $exe) -ForegroundColor White
     Write-Info "Launch: the 'Agentmaster' Start-menu entry, the desktop icon, or 'Agentmaster.exe' on your PATH."
     Write-Info 'Upgrade: Agentmaster updates itself; re-running this script works too.'
-    if ($State.MachineDir) { Write-Info "Agentmaster is also installed for all users at $($State.MachineDir): Start shows both." }
+    if ($State.MachineDir) { Write-Info "Agentmaster is also installed for all users at $($State.MachineDir): your own copy takes over for you - your icons, taskbar pins, the right-click entry and the agentmaster command open it." }
     if ($Launch -and $exe) {
         Write-Step 'Launching Agentmaster'
         $null = Start-AmAppAsUser -Exe $exe -Identity $Identity
@@ -2509,10 +2855,12 @@ function Invoke-MachineScopeFlow {
         if ($r.Code -ne 0) { throw "The install for all users did not complete (exit code $($r.Code)); its record is above." }
         $exe = $r.Result
     }
+    # The signed-in user gets their own icons now; everyone else at their next sign-in (Active Setup).
+    $null = Invoke-AmUserIconStep -Exe $exe -Identity $Identity
     Write-Host ''
     Write-Host "Done - Agentmaster $relVer is installed for all users: $exe" -ForegroundColor White
-    Write-Info 'Every user keeps their own data; updating it needs administrator approval.'
-    if ($State.UserDir) { Write-Info "A per-user copy is installed too, at $($State.UserDir): Start shows both (remove it with -Uninstall -Scope User)." }
+    Write-Info 'Every user keeps their own data and gets their own Agentmaster icons (at their next sign-in, or when they first start it); updating it needs administrator approval.'
+    if ($State.UserDir) { Write-Info "A per-user copy is installed too, at $($State.UserDir): for its user it stays the copy they use (remove it with -Uninstall -Scope User to use the shared one)." }
     if ($Launch -and $exe) {
         Write-Step 'Launching Agentmaster'
         $null = Start-AmAppAsUser -Exe $exe -Identity $Identity

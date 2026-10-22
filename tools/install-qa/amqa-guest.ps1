@@ -37,6 +37,56 @@ public static class AmQaToken {
 # The accounts the QA uses: the signed-in Docker plus the two test accounts (absent ones are skipped).
 $AmQaAccounts = @('Docker', 'qastd', 'qaadmin')
 
+# The all-users install's Active Setup component (PortableInstall.h kActiveSetupKey): Windows runs its StubPath once
+# for each user whose own Version (HKCU, the same subkey) is lower - it gives them their own icons for the shared copy.
+$AmQaActiveSetupSubkey = 'Software\Microsoft\Active Setup\Installed Components\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}'
+
+function Get-AmQaSid([string]$account) {
+    <#
+    .SYNOPSIS
+    The SID of a local account, or $null when it does not exist.
+    .PARAMETER account
+    The account name.
+    .OUTPUTS
+    [string] the SID.
+    #>
+    try { (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
+}
+
+function Get-AmQaLinkAumid([string]$lnk) {
+    <#
+    .SYNOPSIS
+    The AppUserModelID a shortcut carries (System.AppUserModel.ID) - the id the taskbar groups a pin and the windows
+    of the app it starts by; '' when it has none or cannot be read.
+    .PARAMETER lnk
+    The .lnk file.
+    .OUTPUTS
+    [string]
+    #>
+    try {
+        $item = (New-Object -ComObject Shell.Application).NameSpace((Split-Path -Parent $lnk)).ParseName((Split-Path -Leaf $lnk))
+        [string]$item.ExtendedProperty('System.AppUserModel.ID')
+    } catch { '' }
+}
+
+function Get-AmQaPins([string]$account) {
+    <#
+    .SYNOPSIS
+    An account's taskbar pins that start an Agentmaster.exe (or WindowsTerminal.exe), with their targets.
+    .PARAMETER account
+    The account name.
+    .OUTPUTS
+    [pscustomobject] Lnk, Target - one per such pin.
+    #>
+    $pins = "C:\Users\$account\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+    if (-not (Test-Path -LiteralPath $pins)) { return }
+    $sh = New-Object -ComObject WScript.Shell
+    foreach ($l in @(Get-ChildItem -LiteralPath $pins -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
+        $t = [string]$sh.CreateShortcut($l.FullName).TargetPath
+        if ($t -match '\\(Agentmaster|WindowsTerminal)\.exe$') { [pscustomobject]@{ Lnk = $l.FullName; Target = $t } }
+    }
+}
+
 function Get-AmQaInstallFacts([string]$dir) {
     <#
     .SYNOPSIS
@@ -62,7 +112,8 @@ function Get-AmQaState {
     Read-only. Covers the per-user installs of each QA account (the old script's copy in
     %LOCALAPPDATA%\Programs\Agentmaster too), the all-users install, the MSIX packages, HKCU (each
     loaded user hive) and HKLM entries with their display names, the user and machine PATH, the
-    right-click verbs, the shortcuts on both desktops and both Start menus, each account's profile + its
+    right-click verbs, the all-users install's Active Setup component and each account's marker of it, the
+    shortcuts on both desktops and both Start menus, each account's taskbar pins, each account's profile + its
     last [install] lines, and the running Agentmaster.exe processes with their account and token elevation.
     .OUTPUTS
     Text lines (one fact per line).
@@ -110,6 +161,21 @@ function Get-AmQaState {
     foreach ($k in 'Directory\shell\Agentmaster', 'Directory\Background\shell\Agentmaster', 'Drive\shell\Agentmaster') {
         if (Test-Path "HKLM:\Software\Classes\$k") { "  verb HKLM: $k" }
     }
+    "== each user's icons (Active Setup)"
+    $as = "HKLM:\$AmQaActiveSetupSubkey"
+    if (Test-Path $as) {
+        $e = Get-Item $as
+        "  HKLM component: name='{0}' version={1} stub={2} installed={3}" -f $e.GetValue(''), $e.GetValue('Version'), $e.GetValue('StubPath'), $e.GetValue('IsInstalled')
+    }
+    foreach ($a in $AmQaAccounts) {
+        $sid = Get-AmQaSid $a
+        if (-not $sid) { continue }
+        # A user's marker is in their hive: readable only while it is loaded (signed in, or a process of theirs runs).
+        if (-not (Test-Path "Registry::HKEY_USERS\$sid")) { "  ${a}: hive not loaded (marker unknown)"; continue }
+        $uk = "Registry::HKEY_USERS\$sid\$AmQaActiveSetupSubkey"
+        $v = if (Test-Path $uk) { (Get-Item $uk).GetValue('Version') } else { '-' }
+        "  ${a}: marker version=$v"
+    }
     "== shortcuts"
     $places = @('C:\Users\Public\Desktop', 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs')
     foreach ($a in $AmQaAccounts) { $places += "C:\Users\$a\Desktop"; $places += "C:\Users\$a\AppData\Roaming\Microsoft\Windows\Start Menu\Programs" }
@@ -117,10 +183,12 @@ function Get-AmQaState {
         if (Test-Path -LiteralPath $pl) {
             Get-ChildItem -LiteralPath $pl -Filter 'Agentmaster*.lnk' -ErrorAction SilentlyContinue | ForEach-Object {
                 $t = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName).TargetPath
-                "  $($_.FullName) -> $t"
+                "  $($_.FullName) -> $t  aumid=$(Get-AmQaLinkAumid $_.FullName)"
             }
         }
     }
+    "== taskbar pins"
+    foreach ($a in $AmQaAccounts) { Get-AmQaPins $a | ForEach-Object { "  ${a}: $($_.Lnk) -> $($_.Target)  aumid=$(Get-AmQaLinkAumid $_.Lnk)" } }
     "== profiles"
     foreach ($a in $AmQaAccounts) {
         $pd = "C:\Users\$a\.agentmaster"
@@ -139,7 +207,7 @@ function Get-AmQaState {
         # Only the app's own updater / uninstaller scripts; never this very query (its command line names Agentmaster too).
         if ($_.Name -eq 'powershell.exe' -and ($_.ProcessId -eq $PID -or $_.CommandLine -notmatch 'am-update|am-uninstall|Install-Agentmaster')) { return }
         $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner
-        "  pid={0} {1} user={2} session={3} elevated={4} path={5}" -f $_.ProcessId, $_.Name, $o.User, $_.SessionId, [AmQaToken]::Elevated([int]$_.ProcessId), $_.ExecutablePath
+        "  pid={0} {1} user={2} session={3} elevated={4} path={5} cmd={6}" -f $_.ProcessId, $_.Name, $o.User, $_.SessionId, [AmQaToken]::Elevated([int]$_.ProcessId), $_.ExecutablePath, $_.CommandLine
     }
 }
 
@@ -151,8 +219,8 @@ function Reset-AmQa {
     For a disposable test desktop only: ends Agentmaster.exe / its am-update powershell, removes the
     MSIX packages (every user's), deletes the per-user installs, the old script's copies
     (%LOCALAPPDATA%\Programs\Agentmaster) and the profiles of the QA accounts, the all-users install,
-    the HKLM / each loaded HKCU uninstall entry, the right-click verbs, the PATH entries and the
-    shortcuts. The QA copies under C:\amqa stay (each scenario still starts from a FRESH copy of them).
+    the HKLM / each loaded HKCU uninstall entry, the right-click verbs, the PATH entries, the
+    shortcuts, the taskbar pin files, the Active Setup component and each loaded hive's marker. The QA copies under C:\amqa stay (each scenario still starts from a FRESH copy of them).
     .OUTPUTS
     One line per removed item.
     #>
@@ -172,9 +240,12 @@ function Reset-AmQa {
         foreach ($pl in "C:\Users\$a\Desktop", "C:\Users\$a\AppData\Roaming\Microsoft\Windows\Start Menu\Programs") {
             Get-ChildItem -LiteralPath $pl -Filter 'Agentmaster*.lnk' -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force; "removed $($_.FullName)" }
         }
-        $sid = try { (New-Object System.Security.Principal.NTAccount($a)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
+        # Taskbar pin files of Agentmaster: the taskbar shows such a pin blank until Explorer restarts (sign out or
+        # Stop-Process explorer) - a scenario that checks pins pins the app again through its taskbar button.
+        Get-AmQaPins $a | ForEach-Object { Remove-Item -LiteralPath $_.Lnk -Force; "removed pin $($_.Lnk)" }
+        $sid = Get-AmQaSid $a
         if (-not $sid -or -not (Test-Path "Registry::HKEY_USERS\$sid")) { continue }
-        foreach ($k in 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'Software\Classes\Directory\shell\Agentmaster', 'Software\Classes\Directory\Background\shell\Agentmaster', 'Software\Classes\Drive\shell\Agentmaster') {
+        foreach ($k in 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'Software\Classes\Directory\shell\Agentmaster', 'Software\Classes\Directory\Background\shell\Agentmaster', 'Software\Classes\Drive\shell\Agentmaster', $AmQaActiveSetupSubkey) {
             $rk = "Registry::HKEY_USERS\$sid\$k"
             if (Test-Path $rk) { Remove-Item $rk -Recurse -Force; "removed HKCU($a)\$k" }
         }
@@ -186,7 +257,7 @@ function Reset-AmQa {
         }
     }
     if (Test-Path 'C:\Program Files\Agentmaster') { Remove-Item 'C:\Program Files\Agentmaster' -Recurse -Force -ErrorAction SilentlyContinue; 'removed C:\Program Files\Agentmaster' }
-    foreach ($k in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentmasterAllUsers', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'HKLM:\Software\Classes\Directory\shell\Agentmaster', 'HKLM:\Software\Classes\Directory\Background\shell\Agentmaster', 'HKLM:\Software\Classes\Drive\shell\Agentmaster') {
+    foreach ($k in 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentmasterAllUsers', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'HKLM:\Software\Classes\Directory\shell\Agentmaster', 'HKLM:\Software\Classes\Directory\Background\shell\Agentmaster', 'HKLM:\Software\Classes\Drive\shell\Agentmaster', "HKLM:\$AmQaActiveSetupSubkey") {
         if (Test-Path $k) { Remove-Item $k -Recurse -Force; "removed $k" }
     }
     $mp = [Environment]::GetEnvironmentVariable('Path', 'Machine')
