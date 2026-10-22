@@ -1319,6 +1319,16 @@ namespace winrt::TerminalApp::implementation
             _ArmDraftRestore(spec.sessionId, info.pendingInput, _sessionRegistry->PasteJournal(spec.sessionId), DraftFillOrigin::Resume, std::wstring{});
         }
 
+        // Agentmaster (HOOKS.md "Interrupted turns"): a REOPENED fork whose user chose "Fork interrupted" and that was not
+        // stopped for good yet (a background tab never visited, an app closed before the Esc, a stop whose fork would still
+        // continue on its next start) continues its source's turn again when this connection starts — a re-fork reads the
+        // source anew — so the stop watch follows it here. A fresh fork arms its watch in its own seam (the flag is set after
+        // this launch returns).
+        if (restored && info.stopForkedTurn)
+        {
+            _ArmForkTurnStop(spec.sessionId, L"restore");
+        }
+
         // Agentmaster: a session's title is ONE value — the Explorer-tree name, the persisted
         // SessionInfo.title, and the WT tab title are the same thing. Pin the tab to it now
         // (SetTabText) so the tab strip shows the managed name instead of floating with claude's
@@ -1547,16 +1557,24 @@ namespace winrt::TerminalApp::implementation
         // has AV'd before), so log BEFORE the work: a restart-begin with no restart-done pinpoints a crash
         // mid-rebuild. The downstream [restart]/[restart-blocked] carry the mechanism.
         ::Agentmaster::LogNav(L"restart-begin " + ::Agentmaster::ShortId(id));
-        if (_RestartClaudeSessionLocal(id))
+        if (_RestartClaudeSessionLocal(id, ::Agentmaster::RestartTurnChoice::Ask))
         {
             ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (local)");
+            return;
+        }
+        // Agentmaster (HOOKS.md "Interrupted turns"): a turn the user interrupted is asked about HERE, in the window the user
+        // clicked in — not in the hosting window, which may be behind this one — and the hand-off carries the answer.
+        if (auto question = _UninterruptQuestionFor(id))
+        {
+            ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (asked here: the turn the user interrupted; the hosting window restarts with the answer)");
+            _AskUninterruptThenFanOut(std::move(*question));
             return;
         }
         // Not hosted here -> hand the restart to the window that owns the tab; that window's own
         // _RestartClaudeSessionLocal does the rebuild. So "fan-out" is the HANDOFF, not the completion —
         // the receiving window's mechanism tags carry the rest.
         ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
-        ::Agentmaster::RestartSessionInOtherWindows(id, _windowId);
+        ::Agentmaster::RestartSessionInOtherWindows(id, _windowId, ::Agentmaster::RestartTurnChoice::KeepInterrupted);
     }
 
     // Agentmaster (cross-window restart): restart `sessionId`'s tab IN THIS WINDOW — the local half of
@@ -1567,7 +1585,9 @@ namespace winrt::TerminalApp::implementation
     // re-point the injector). Acts on the tab's ACTIVE pane, exactly like the tab menu — a managed session
     // is normally single-pane; returns true whenever the tab is found here so a hosted session never fans
     // out to other windows.
-    bool TerminalPage::_RestartClaudeSessionLocal(const std::wstring& sessionId)
+    // turnChoice (HOOKS.md "Interrupted turns"): Ask takes the tab menu's own path (_restartPaneConnection asks about a turn the
+    // user interrupted, in THIS window); an answer another window or the Telegram bot already got restarts with it directly.
+    bool TerminalPage::_RestartClaudeSessionLocal(const std::wstring& sessionId, ::Agentmaster::RestartTurnChoice turnChoice)
     {
         const auto it = _claudeTabs.find(sessionId);
         const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
@@ -1579,7 +1599,14 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto content = tabImpl->GetActiveContent().try_as<TerminalApp::TerminalPaneContent>())
             {
-                _restartPaneConnection(content, nullptr);
+                if (turnChoice == ::Agentmaster::RestartTurnChoice::Ask)
+                {
+                    _restartPaneConnection(content, nullptr);
+                }
+                else
+                {
+                    _RestartPaneWithTurnChoice(content, turnChoice);
+                }
             }
         }
         return true;
@@ -2730,7 +2757,13 @@ namespace winrt::TerminalApp::implementation
     // else fresh reusing <id> — exactly as the launch path does, and re-point the stdin injector (Claude).
     // Returns false for a plain shell / external tab so the caller falls through to the upstream replay
     // (correct there — a shell has no conversation to resume).
-    bool TerminalPage::_RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent)
+    // turnChoice (HOOKS.md "Interrupted turns"): Uninterrupt — the user answered "Continue the turn" to the restart question
+    // — plans the interrupt rewind again HERE (the transcript may have moved since the question), and when it is still due
+    // holds the new connection's Start until the old claude has exited, appends the rewind line (_StartAfterInterruptRewind)
+    // and gives the new claude CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 so it continues by itself. KeepInterrupted restarts as
+    // this seam always did. Either way a fork whose user chose "Fork interrupted" (SessionInfo::stopForkedTurn) is watched
+    // again on its new connection — unless the answer was Uninterrupt, which is the user letting it run.
+    bool TerminalPage::_RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice)
     {
         if (!_sessionRegistry || !paneContent)
         {
@@ -2821,6 +2854,11 @@ namespace winrt::TerminalApp::implementation
         // (the `rewindHolders`) has exited and the line is appended.
         bool holdStartForRewind = false;
         std::shared_ptr<::Agentmaster::ProcessExitWait> rewindHolders;
+        // Agentmaster (HOOKS.md "Interrupted turns"): set when the user chose to continue the turn they interrupted and the
+        // interrupt rewind is still due — the new connection is then swapped in WITHOUT a Start, and _StartAfterInterruptRewind
+        // starts it after the old claude (`interruptHolders`) has exited and the line is appended.
+        bool holdStartForInterruptRewind = false;
+        std::shared_ptr<::Agentmaster::ProcessExitWait> interruptHolders;
 
         TerminalConnection::ConptyConnection newConn{ nullptr };
         if (isCodex)
@@ -2872,7 +2910,51 @@ namespace winrt::TerminalApp::implementation
             // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
             // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline, spec.authTokenEnv);
-            newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
+            // Agentmaster (HOOKS.md "Interrupted turns" — the restart question's "Continue the turn"). Planned NOW, while the old
+            // claude still runs (the user answered a moment ago, but the file may have moved since: a hook's row, the old claude's
+            // last lines). Only a RESUME reads the tail — a re-fork / fresh restart has no interrupt of its own to take back. When
+            // the rewind is still due, the new claude gets CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 (the switch that makes it SEND the
+            // continuation; a settings file that sets it off still wins — the question said so), and its Start waits for the old
+            // claude's exit (that exit re-stamps the interrupt as the leaf: the API-error rewind's TIMING rule).
+            auto connectionEnv = spec.env;
+            const bool specResumes = spec.commandline.find(L"--fork-session") == std::wstring::npos && spec.commandline.find(L"--resume ") != std::wstring::npos;
+            if (turnChoice == ::Agentmaster::RestartTurnChoice::Uninterrupt)
+            {
+                const auto interruptPlan = specResumes ? ::Agentmaster::PlanInterruptRewindForSession(managedId) : ::Agentmaster::InterruptRewindPlan{};
+                if (interruptPlan.verdict == ::Agentmaster::InterruptRewindVerdict::Rewind)
+                {
+                    interruptHolders = std::make_shared<::Agentmaster::ProcessExitWait>(::Agentmaster::ProcessExitWait::ForSession(managedId));
+                    // A claude in ANOTHER tab running the same conversation (OBSERVER.md §20) is not ended by this restart (the
+                    // API-error rewind's rule, below): its exit would come at no known time, so the restart goes without the line.
+                    const auto pids = interruptHolders->Pids();
+                    const auto foreign = std::find_if(pids.begin(), pids.end(), [&](const uint32_t p) { return info->pid != 0 && p != info->pid; });
+                    if (foreign != pids.end())
+                    {
+                        ::Agentmaster::InterruptRewindResult skipped;
+                        skipped.outcome = ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                        skipped.plan = interruptPlan;
+                        skipped.detail = L"claude pid " + std::to_wstring(*foreign) + L" in another tab also runs this conversation (this restart cannot end it)";
+                        ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeInterruptRewind(skipped, managedId, L"restart") + L"\n");
+                        interruptHolders.reset();
+                    }
+                    else
+                    {
+                        holdStartForInterruptRewind = true;
+                        connectionEnv.emplace_back(std::wstring{ ::Agentmaster::kClaudeResumeInterruptedTurnEnv }, L"1");
+                    }
+                }
+                else
+                {
+                    // The user said "continue", but there is nothing to take back any more (or a re-fork / fresh restart reads no
+                    // tail): say so, and restart as usual.
+                    ::Agentmaster::InterruptRewindResult skipped;
+                    skipped.outcome = interruptPlan.verdict == ::Agentmaster::InterruptRewindVerdict::NotApplicable ? ::Agentmaster::ApiErrorRewindOutcome::NotNeeded : ::Agentmaster::ApiErrorRewindOutcome::Skipped;
+                    skipped.plan = interruptPlan;
+                    skipped.detail = specResumes ? interruptPlan.reason : std::wstring{ L"this restart re-forks or starts fresh (no tail of its own to rewind)" };
+                    ::Agentmaster::AppendStateLog(L"hooks.log", ::Agentmaster::DescribeInterruptRewind(skipped, managedId, L"restart") + L"\n");
+                }
+            }
+            newConn = _BuildAgentConnection(hostedCmd, dir, title, connectionEnv, /*inheritCursor*/ true);
             // Log the mode straight off the built artifact (no second transcript stat / no race).
             reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
             const bool resumed = !reforked && spec.commandline.find(L"--resume ") != std::wstring::npos;
@@ -2885,7 +2967,9 @@ namespace winrt::TerminalApp::implementation
             // line itself may only land once that claude has EXITED — at exit it re-stamps the error as the active leaf —
             // so its process handles are opened here, BEFORE the swap below tells it to close, and the new connection's
             // Start is held until _StartAfterApiErrorRewind has waited and appended. Re-fork / fresh never read a tail.
-            if (resumed && appSettings.resumeApiErrorTurns)
+            // (HOOKS.md "Interrupted turns": a tail the interrupt rewind takes back ends in the user's interrupt, never in an API
+            // error — and the two never hold one Start together.)
+            if (resumed && appSettings.resumeApiErrorTurns && !holdStartForInterruptRewind)
             {
                 const auto plan = ::Agentmaster::PlanApiErrorRewindForSession(managedId);
                 if (plan.verdict == ::Agentmaster::ApiErrorRewindVerdict::Rewind)
@@ -2995,7 +3079,13 @@ namespace winrt::TerminalApp::implementation
         // "press Enter to restart" INTO the restarted pane (the reported banner). Same teardown, silent.
         control.HardResetWithoutErase();
         control.Connection(newConn);
-        if (holdStartForRewind)
+        if (holdStartForInterruptRewind)
+        {
+            // HOOKS.md "Interrupted turns": the same hold for the user's "Continue the turn" — wait for the old claude, take the
+            // interrupt back, THEN start.
+            _StartAfterInterruptRewind(managedId, newConn, interruptHolders);
+        }
+        else if (holdStartForRewind)
         {
             // The API-error rewind (above): the swap just told the old claude to close; wait for it, append the line,
             // THEN start — the pane keeps showing the old screen for that second or two.
@@ -3004,6 +3094,21 @@ namespace winrt::TerminalApp::implementation
         else
         {
             newConn.Start();
+        }
+        // Agentmaster (HOOKS.md "Interrupted turns"): a fork whose user chose "Fork interrupted" continues its source's turn
+        // again on this new claude (a re-fork reads the source again; a resume of an unfinished own tail continues it) — the stop
+        // watch follows it onto the new connection. A "Continue the turn" answer is the user letting it run: the intent goes.
+        if (!isCodex && info->stopForkedTurn)
+        {
+            if (turnChoice == ::Agentmaster::RestartTurnChoice::Uninterrupt)
+            {
+                _sessionRegistry->Update(managedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = false; });
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-stop] " + ::Agentmaster::ShortId(managedId) + L" restart: the user continued the turn \x2014 the fork's stop intent is cleared\n");
+            }
+            else
+            {
+                _ArmForkTurnStop(managedId, L"restart");
+            }
         }
 
         // Re-point this session's stdin injector at the freshly-started connection (Claude only — Codex
@@ -3572,6 +3677,14 @@ namespace winrt::TerminalApp::implementation
             _ArmDraftRestore(sid, info->pendingInput, _sessionRegistry->PasteJournal(sid), DraftFillOrigin::Resume, std::wstring{});
         }
 
+        // HOOKS.md "Interrupted turns": a fork whose user chose "Fork interrupted" continues its source's turn again when this
+        // parked connection is woken (it re-forks, or resumes an unfinished tail) — the stop watch waits for that start (its
+        // dormant phase costs a 1 s timer tick until the tab is entered).
+        if (!isCodex && info->stopForkedTurn)
+        {
+            _ArmForkTurnStop(sid, L"deactivate");
+        }
+
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[deactivate] " + sid8 + (isCodex ? L" codex" : L" claude") + L" parked dormant \"" + title + L"\" cwd=" + dir +
                                           L" (a never-initialized control on a not-started " + parkMode +
@@ -3880,7 +3993,10 @@ namespace winrt::TerminalApp::implementation
     // fresh in the same dir (Rule #6). insertPosition threads tab placement (-1 == end). Returns false
     // only when `sourceId` is not a known managed session. forkedIdOut (optional, SESSIONS.md §9.14): receives the
     // NEW session's id — "" when no tab opened (the native-exe gate, a failed launch) — for the AI search's fork tool.
-    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride, std::wstring* forkedIdOut)
+    // forkTurn (HOOKS.md "Interrupted turns"): Interrupted — the user's "Fork interrupted" — records the stop intent on the new
+    // Claude fork (SessionInfo::stopForkedTurn, persisted) and arms the fork stop watch: the fork's tab is locked and ONE Esc goes
+    // the moment the fork's claude starts the turn it continues. A Codex fork ignores it (no Claude resume to stop).
+    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride, std::wstring* forkedIdOut, ::Agentmaster::ForkTurnChoice forkTurn)
     {
         if (forkedIdOut)
         {
@@ -3940,7 +4056,14 @@ namespace winrt::TerminalApp::implementation
         const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride);
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
         _CarryDraftIntoFork(sourceId, forkedId, std::move(carry)); // a no-op for an empty draft / a failed launch
-        ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}));
+        // HOOKS.md "Interrupted turns": "Fork interrupted" — persist the intent, then watch the fork (a fresh fork — no source
+        // transcript — continues nothing, and its watch simply ends once the fork idles with its box up).
+        if (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted && !forkedId.empty())
+        {
+            _sessionRegistry->Update(forkedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
+            _ArmForkTurnStop(forkedId, L"fork");
+        }
+        ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}) + (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? std::wstring{ L" (fork interrupted)" } : std::wstring{}));
         if (forkedIdOut)
         {
             *forkedIdOut = forkedId;

@@ -554,7 +554,8 @@ namespace Agentmaster
                 // §21.23: ANSWERED — the window says which session it opened, or why nothing opened. The service builds its plain
                 // `launch` on top of it (MessagingService's constructor).
                 hooks.launchAnswered = [](const RemoteLaunchRequest& req, RemoteLaunchReply reply) { return RequestLaunchInWindow(req, std::move(reply)); };
-                hooks.restartSession = [](const std::wstring& sid) { RestartSessionInOtherWindows(sid, L""); };
+                // HOOKS.md "Interrupted turns": the bot asks its own question (buttons in the topic) and passes the answer.
+                hooks.restartSession = [](const std::wstring& sid, RestartTurnChoice turnChoice) { RestartSessionInOtherWindows(sid, L"", turnChoice); };
                 hooks.deactivateSession = [](const std::wstring& sid) { DeactivateSessionInOtherWindows(sid, L""); };
                 hooks.windowsRestoring = []() { return WindowsStillRestoring(); };
                 hooks.versionWord = []() { return AppVersionWordForMessaging(); };
@@ -1682,7 +1683,7 @@ namespace Agentmaster
         }
     }
 
-    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
+    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> handler)
     {
         if (!handler)
         {
@@ -1713,7 +1714,7 @@ namespace Agentmaster
         }
     }
 
-    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId)
+    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId, RestartTurnChoice turnChoice)
     {
         if (sessionId.empty())
         {
@@ -1723,7 +1724,7 @@ namespace Agentmaster
         // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern): each
         // sink hops into its own window's dispatcher, so holding the engine lock across foreign-window
         // marshaling would be a needless ordering hazard.
-        std::vector<std::function<void(const std::wstring&)>> sinks;
+        std::vector<std::function<void(const std::wstring&, RestartTurnChoice)>> sinks;
         {
             std::lock_guard<std::mutex> lk(e.restartMutex);
             sinks.reserve(e.restartSinks.size());
@@ -1737,7 +1738,7 @@ namespace Agentmaster
         }
         for (const auto& fn : sinks)
         {
-            fn(sessionId); // fire-and-forget; the (single) hosting window restarts the session, the rest miss
+            fn(sessionId, turnChoice); // fire-and-forget; the (single) hosting window restarts the session, the rest miss
         }
     }
 

@@ -469,7 +469,14 @@ namespace winrt::TerminalApp::implementation
                 // seam, also used by the Triage Board / Explorer-tree "Fork session" so the two can't
                 // drift. ALWAYS return for a managed tab — it must never be naively duplicated (re-running
                 // a `--resume <id>` commandline = two writers on one transcript -> corruption).
-                _ForkManagedSessionById(sourceId, insertPosition);
+                // HOOKS.md "Interrupted turns": a source in the middle of a turn is asked about first ("Fork interrupted or
+                // uninterrupted?") — _ForkAskingAboutRunningTurn forks at once when there is nothing to ask.
+                ForkLaunchRequest request;
+                request.sourceId = sourceId;
+                request.managed = true;
+                request.insertPosition = insertPosition;
+                request.origin = L"duplicate-tab";
+                _ForkAskingAboutRunningTurn(std::move(request));
                 return;
             }
         }

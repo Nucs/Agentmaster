@@ -775,6 +775,138 @@ second run writes nothing, untouched torn / healthy / refusal files, the window 
 behavior — Claude Code continuing after the line, and the exit re-stamp — was measured on a throwaway
 session with the ConPTY driver (skill `claude-wrap-ConPTY`); the app's seams are not yet run live.
 
+### Interrupted turns — the restart and fork questions (2026-10-22, NOT BUILT yet)
+
+**The request** (the user, 2026-10-22): "When restarting a session and user has interrupted the session, ask
+user if he/she would like to uninterrupt (we edit the session transcripts on disk before restart). This is
+supposed to allow automated continuation when the session opens. A fork that is in the middle of a run should
+be prompted if to fork as interrupted or uninterrupted and thus user chooses if agentmaster should lock the tab
+and press esc once the tab starts running as its supposed to be stopped from the auto resume."
+
+**What Claude Code 2.1.291 does with an Esc** (read from its bundle, then measured):
+- Esc mid-turn writes a user row whose whole text is `[Request interrupted by user]` (`VS`, during a reply) or
+  `[Request interrupted by user for tool use]` (`gu`, during a tool call — under it the "The user doesn't want to
+  proceed with this tool use …" results Claude Code writes for the calls it cut).
+- Its resume classifier (`bfo` → `_Mt`) counts such a row as a FINISHED turn. Only the same row with
+  `interruptedByShutdown: true` (written when a claude is shut down mid-turn — a Restart, an app close) is
+  continued. So a restarted session waits at the user's Esc, and so does a fork of it.
+- ⚠ An Esc BEFORE any output writes no row at all: the prompt goes back into the input box, the transcript ends
+  at the prompt, and the next resume SENDS IT AGAIN by itself (probe e5). Agentmaster cannot tell that tail from
+  a turn a crash cut off (*Cut-off turns*: a bare prompt), so it asks nothing there — not fixed.
+
+**The live probes** (the real `claude.exe` 2.1.291 on a ConPTY against the e2e mock, `tools/e2e-spike/mockllm.py`,
+in a scratch `CLAUDE_CONFIG_DIR`; zero API traffic):
+
+| Probe | Shape | Without the line | With the line |
+|---|---|---|---|
+| e1 | Esc during a reply (streamed text, then `VS`) | resume: no request | the prompt sent again (`interrupted_prompt`) |
+| e2 | Esc during the FIRST tool call (`gu` over a rejected result) | no request | the whole turn again, 3 requests |
+| e2' | Esc during the SECOND tool call | no request | `Continue from where you left off.` from the first call's result, 2 requests |
+| e3 | fork of a source waiting on its 2nd request | — | the fork went busy 4.9 s after launch, request at 6.0 s; one Esc → `Continue…` + `VS` |
+| e3b | fork of a source inside `sleep 40` | — | busy 5.5 s, request 5.9 s: the fork RE-RAN the call (Claude Code drops a call with no result and continues) |
+| e4 | the e3 fork, uninterrupted later | — | the line stepped over the fork's own `Continue…` row: continued |
+| e5 | Esc before any output | the prompt is resent by itself | — |
+
+The fork's heartbeat (`~/.claude/sessions/<pid>.json`) named the fork's own id and read `busy` at the first sign
+of the continued turn in every fork probe. The continued turn fires NO `UserPromptSubmit` hook.
+
+**The rewind — the API-error rewind's line, aimed past the interrupt** (`PlanInterruptRewind`,
+`AgentMaster/ApiErrorRewind.{h,cpp}`; one parse — `ParseBranch` — now serves both rewinds and the classifier):
+from the interrupt row up, step over bookkeeping rows, the interrupted reply (ONE `message.id`), transient API-error
+rows, Claude Code's own `Continue from where you left off.` rows, and — for `gu` — the cut batch's results between
+the interrupt and the reply. The first other user row is the target; the line is
+`{"type":"last-prompt","lastPrompt":…,"leafUuid":"<target>","explicit":true,"sessionId":…}` (never `rewound`).
+
+| Verdict | When |
+|---|---|
+| `NotApplicable` | no `[Request interrupted by user` bytes in the tail (one scan, no JSON); the branch ends elsewhere; a SHUTDOWN interrupt (Claude Code continues it); the conversation went on; already rewound |
+| `Rewind` | the target is a prompt (resent) or a tool result Claude Code continues |
+| `WouldNotContinue` | the target is a meta row (a slash command's expanded text), a compaction summary, a local command's echo, or a tool result the user denied (all "doesn't want to" results, `backgroundedByTurnAbort`, `toolDenialEndsTurn` in its batch) — a rewind would only hide the reply, so nothing is offered |
+| `UnknownShape` | two replies above the interrupt, a refused response, an earlier interrupt, the root, a parent cycle |
+| `NeedMoreHistory` / `TornTail` | as the API-error planner's |
+
+**The restart question.** `_restartPaneConnection` (the tab menu's "Restart session", the `restartConnection`
+action, a dead pane's Enter) and the Manager's Restart ask first when the pane hosts a managed CLAUDE session whose
+plan is `Rewind` (`_UninterruptQuestionFor`): "Continue the interrupted turn?" — **Continue the turn** /
+**Keep it interrupted** (the default: a habitual Enter must never make an agent run a turn the user stopped) /
+**Cancel** (no restart). The text quotes the prompt that would be resent, and says when
+`CLAUDE_CODE_RESUME_INTERRUPTED_TURN` is not simply on (below).
+- Asked WHERE THE USER CLICKED: the tab menu in the hosting window (`_AskUninterruptThenRestart`); the Manager's
+  restart of a session another window hosts in the Manager's window (`_AskUninterruptThenFanOut`), which hands the
+  ANSWER over — the engine's restart sink now carries a `RestartTurnChoice` (`Engine.h`), so the hosting window
+  never asks twice; a Telegram restart in the topic (MESSAGING.md §21.37).
+- "Continue the turn" = `_RestartManagedSession(…, Uninterrupt)`: it plans AGAIN (the file moves while a dialog is
+  up), and when the rewind is still due it opens the old claude's `ProcessExitWait`, swaps the new connection in
+  WITHOUT `Start`, adds `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` to the new claude's environment, and
+  `_StartAfterInterruptRewind` waits for the old claude's exit (its exit re-stamps the interrupt as its leaf — the
+  API-error rewind's TIMING rule), appends the line (`RewindInterruptTailForSession`), and starts. A failure or a
+  timeout still starts the claude, with the turn kept interrupted. A claude of the same conversation in ANOTHER tab
+  skips the line (this restart cannot end it).
+- The switch: a settings file's `env` outranks a process environment, so the restart can only SET it when no
+  settings file decides (`ResolveClaudeAutoContinue`: managed policy > the project's `settings.local.json` >
+  `settings.json` > the user's `settings.json` > the launch's env > Agentmaster's env; `AutoContinueAtRestart`).
+  Off in a settings file: the interrupt is still taken back, and the user's next message continues the turn (the
+  dialog says so). This machine sets it on in `~/.claude/settings.json`.
+
+**The fork question.** Every INTERACTIVE fork goes through `_ForkAskingAboutRunningTurn` (the tab menu's "Fork
+session" and its model submenu, Ctrl+Shift+D, the board / tree / side-panel card menus, the Sessions page's row menu
+— its background open preserved — and detail pane and Resume/Fork dialog, the launch bar's and the "+" card's
+Fork). It asks when `AssessForkContinuation` says so: a Claude source with a transcript, the switch ON where the
+fork runs (with it off, a fork only prepares the continuation and waits), and either the source's tail is one a
+resume continues (`ClassifyResumeContinuation`) or the source is Running / NeedsApproval right now (a running
+session's tail changes every second). "Fork a session in the middle of a turn?" — **Fork interrupted** (the
+default: two sessions running one turn side by side is what a stray Enter must not cause) / **Fork uninterrupted** /
+**Cancel**. The text names a tool call the fork would run again. Programmatic forks keep today's behavior (the AI
+search's fork tool: `ForkTurnChoice::Uninterrupted`); Telegram asks in its topic.
+
+**The classifier** (`ClassifyResumeContinuation`, a mirror of `bfo` from the active leaf): system / progress rows,
+transient API errors and queued task notifications are stepped over; an assistant tool_use at the tail is a call in
+flight — DROPPED and named (the fork runs it again), with a thinking-only row right above it; any other assistant
+row = finished (a reply's text above a dropped call included). A user tail: compaction summary, user interrupt,
+local command, meta row, denied / backgrounded tool result = finished; a shutdown interrupt and a tool result continue
+the turn; a plain prompt is resent. An attachment tail continues from the first user row above it (even a meta one —
+`bfo`'s attachment branch) unless a reply comes first. A leaf from Claude Code's own rewind (`rewound: true`) = none.
+Not mirrored: the special tool cards (`vMt`), a max-turns ending, the `n` flag of `MR(n)`.
+
+**The fork stop watch** ("Fork interrupted"; `TerminalPage.AgentTurns.cpp`, the pure rule `DecideForkTurnStop` in
+`AgentMaster/InterruptedTurns.h`):
+- The intent is PERSISTED on the fork (`SessionInfo::stopForkedTurn`, `sessions.json`), and the watch is armed at
+  every seam that gives the session a NEW connection: the fork launch, a restored launch (window restore, Sessions
+  "Resume here"), Restart (a "Continue the turn" answer clears the intent instead), Deactivate.
+- The tab is locked read-only as soon as the watch sees its control (a read-only the user set is never touched);
+  the KEYBOARD is blocked, our own write is not.
+- Dormant (a background tab not visited yet): a 1 s timer, unbounded. Started: a 100 ms timer — the claude.exe under
+  the connection's shell is found once (a Toolhelp snapshot at most every 400 ms), then ITS heartbeat file is read
+  (`ReadSessionPresenceForPid`, pid-validated by `PresenceRowMatchesProcess`).
+- Heartbeat `busy` or `waiting` (or, with no heartbeat, the registry's Running / NeedsApproval) → ONE Esc written into
+  the fork's connection. Still running 1.5 s later → another, at most 3, then GAVE UP (logged; the user presses Esc).
+  Idle with the input box on screen for 6 s, or 45 s after the start with no turn → nothing to stop.
+- At the end the lock is released; a fork-carry fill (the source's unsent prompt, PENDING_INPUT.md §11) that the watch
+  held is re-anchored so the continued turn it stopped is not read as "the user drove the fork"; the intent is kept
+  only while the fork's next start would still continue a turn (its own transcript, else its source's — a fork with
+  no transcript re-forks).
+- ⚠ A fork taken while its source RAN A TOOL re-runs that call (probe e3b): the Esc lands within one 100 ms tick of
+  the heartbeat, which stops a long call, but a call that finishes in that window has run.
+- A tab torn out into another window ends the watch ("gone"); the intent stays for the next start.
+
+**Logs** (hooks.log): `[interrupt-rewind] <sid8> restart: took back the interrupt during a reply (<id8>, <ts>) — 1
+interrupted-reply row(s), 0 cut tool result(s), … — to <target8> (prompt); line at byte N; the restarted claude sends
+the prompt again (waited N ms for 1 claude process(es))`, `… not offered — <why>`, `NOT taken back — <why>`;
+`[fork-question] <sid8> not asked: <why>`; `[fork-stop] <sid8> armed (fork) …`, `… started …`, `… its claude is pid N`,
+`… heartbeat: idle -> busy (N ms after start)`, `… Esc pressed (1/3) …`, `… stopped: …; the tab is unlocked; the stop
+intent is cleared`; `[nav] restart-question` / `restart-answer <sid8> -> uninterrupt | keep-interrupted | cancelled`,
+`[nav] fork-question` / `fork-answer`.
+
+**Tests.** `TestInterruptedTurns` (`tests_rewind.cpp`): the planner on the probes' shapes and every refusal, the
+classifier, the switch's precedence on scratch settings files, the session front doors (a scratch
+`CLAUDE_CONFIG_DIR`), `DecideForkTurnStop`'s table and the dialogs' words. The live behavior was measured with the
+probes above (scratchpad `interrupt_probe.py`), and then the COMPILED planner, linked into a probe from the harness's
+objects (`rewind_probe.exe`), was run on transcripts the real claude wrote: an Esc during a reply (planned to the
+prompt, appended; the resume sent it again) and an Esc during the second tool call (planned to the first result past
+one cut result; the resume wrote `Continue from where you left off.` and finished the turn); the classifier read a
+live source inside `sleep 40` as `ContinuesTurn`, dropped `Bash`. The app's dialogs, the fan-out and the stop watch are
+not yet run live.
+
 ### Transcript watcher — the scanner's change feed (ReadDirectoryChangesW)
 
 **The 2026-09-25 finding: the scanner thread used ~35% of a core.** On the release instance (~60 live

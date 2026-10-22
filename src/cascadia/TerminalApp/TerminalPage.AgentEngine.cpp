@@ -561,6 +561,17 @@ namespace winrt::TerminalApp::implementation
             CATCH_LOG();
         }
         _LeaveRestoreWake(L"the window closed");
+        // Agentmaster (HOOKS.md "Interrupted turns"): stop the fork stop watch's timer (UI-affine — the same guard as the timers
+        // above). Its watches die with the page: a fork tab that closes with its window keeps its persisted stop intent
+        // (SessionInfo::stopForkedTurn), so the window that reopens it watches it again.
+        if (_forkTurnStopTimer)
+        {
+            try
+            {
+                _forkTurnStopTimer.Stop();
+            }
+            CATCH_LOG();
+        }
         // Agentmaster (side panel "+" launcher, SIDE_PANEL.md §2e): stop its launch bar's PRESETS hover timer and close
         // an open hover menu and drop-down. Shutdown is noexcept and guards each UI-affine call itself (a pool-thread
         // teardown throws RPC_E_WRONG_THREAD there — caught and logged inside), so it needs no guard here.
@@ -1465,11 +1476,14 @@ namespace winrt::TerminalApp::implementation
         {
             const auto weakThis = get_weak();
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
-            _windowRestartToken = ::Agentmaster::RegisterWindowRestartHandler(_windowId, [weakThis, dispatcher](const std::wstring& id) {
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+            // HOOKS.md "Interrupted turns": `turnChoice` is the answer the caller already got to "continue the turn you
+            // interrupted?" (the window the user clicked in, or the Telegram topic) — it restarts with it, so the hosting
+            // window never asks a second time. Ask (nobody asked yet) lets this window ask.
+            _windowRestartToken = ::Agentmaster::RegisterWindowRestartHandler(_windowId, [weakThis, dispatcher](const std::wstring& id, ::Agentmaster::RestartTurnChoice turnChoice) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id, turnChoice]() {
                     if (auto self = weakThis.get())
                     {
-                        self->_RestartClaudeSessionLocal(id);
+                        self->_RestartClaudeSessionLocal(id, turnChoice);
                     }
                 });
             });
@@ -2121,7 +2135,13 @@ namespace winrt::TerminalApp::implementation
         content->SetForkSessionHandler([weakThis](winrt::hstring id, winrt::hstring dir, winrt::hstring title) {
             if (auto self = weakThis.get())
             {
-                self->_ForkSessionFromDisk(std::wstring{ id }, std::wstring{ dir }, std::wstring{ title });
+                // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn.
+                ForkLaunchRequest request;
+                request.sourceId = std::wstring{ id };
+                request.dir = std::wstring{ dir };
+                request.title = std::wstring{ title };
+                request.origin = L"launch-bar";
+                self->_ForkAskingAboutRunningTurn(std::move(request));
             }
         });
         // Agentmaster: the Triage Board / Explorer-tree session menu's "Restart session" — restart a
@@ -2141,7 +2161,13 @@ namespace winrt::TerminalApp::implementation
         content->SetForkManagedSessionHandler([weakThis](winrt::hstring id, winrt::hstring model) {
             if (auto self = weakThis.get())
             {
-                self->_ForkManagedSessionById(std::wstring{ id }, static_cast<uint32_t>(-1), std::wstring{ model });
+                // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn.
+                ForkLaunchRequest request;
+                request.sourceId = std::wstring{ id };
+                request.managed = true;
+                request.model = std::wstring{ model };
+                request.origin = L"board";
+                self->_ForkAskingAboutRunningTurn(std::move(request));
             }
         });
         content->SetRenameHandler([weakThis](winrt::hstring id, winrt::hstring title) {

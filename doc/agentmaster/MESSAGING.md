@@ -5273,6 +5273,34 @@ last ~5 minutes is refreshed about every 2 s; the turn's final message removes t
 If the line must sit ABOVE the card, it can only be an edited message: one topic at a time (the one the user last acted in),
 every 5–10 s.
 
+### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; NOT BUILT yet)
+
+The PC asks two questions since 2026-10-22 (HOOKS.md "Interrupted turns"): a restart of a turn the user interrupted asks
+whether to continue it (one rewind line in the transcript before the new claude starts), and a fork of a session in the
+middle of a turn asks whether the fork may continue that turn by itself or is stopped (its tab locked, ONE Esc the moment
+it runs). A restart or a fork the PHONE asks for must never pop a dialog on the PC, so the bot asks in the topic and passes
+the answer on:
+
+- **Restart** — `/restartsession` at rest and the card's 🔄 Restart Session (`_restartFromCard`): when the session's tail is
+  a user interrupt a rewind would let Claude Code continue (`PlanInterruptRewindForSession` == Rewind),
+  `_askUninterruptBeforeRestart` posts "⏸ You interrupted <title> …" with ▶ Continue the turn (token
+  `restart-uninterrupt`) · ⏸ Keep it interrupted (`restart-keep`) · Cancel; the card's toast says the question is below.
+  The answer goes to the hosting window through `ServiceHooks::restartSession(id, RestartTurnChoice)` → the engine's
+  restart sink (`Engine.h`, which now carries the choice), so the window restarts with it and asks nothing. A restart of
+  a RUNNING turn (`confirm-restartsession`) and ▶ Reactivate of an errored or exited session pass KeepInterrupted (no turn
+  the user interrupted). A Codex session is never asked.
+- **Fork** — `/forksession`, the card's ⑂ Fork (which runs `/forksession`) and the Search topic's ⑂ pick build their
+  `RemoteLaunchRequest` with `forkTurn = Ask`; `_requestLaunch` resolves it before the request leaves the bot:
+  `_askForkTurnBeforeLaunch` posts "⑂ <title> is in the middle of a turn …" (naming a tool call the fork would run
+  again) with ⏸ Fork interrupted (`fork-interrupted`) · ▶ Fork uninterrupted (`fork-uninterrupted`) · Cancel when
+  `AssessForkContinuation` says a fork would continue the turn (the source Running / NeedsApproval, or its tail one a
+  resume continues; `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` on where it runs). The tokens carry the request's dir, title
+  and model (U+001F-separated), and a tap sends the request again with the answer; the window forks with it
+  (`_ForkSessionFromDisk(…, forkTurn)`, which arms the fork stop watch for Interrupted). No question: it forks as before.
+- Logs: `[nav] remote telegram restart <sid8> -> asked: the turn the user interrupted (…)`, `… /restartsession <sid8> ->
+  continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
+  interrupted | uninterrupted`.
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups

@@ -1518,6 +1518,17 @@ namespace Agentmaster
         // link right when the restart seam needed it). Re-armed (reset false) by the restart seam when
         // it re-forks. Always false after a load (a restored fork's re-fork spawns a fresh echo).
         bool forkEchoConsumed{ false };
+        // Agentmaster (PERSISTED — HOOKS.md "Interrupted turns", the "Fork interrupted" answer): this fork must
+        // NOT continue its source's unfinished turn by itself. Claude Code's resume continues such a turn as soon
+        // as a fork's claude starts — and again at every later start of a fork that has nothing of its own yet
+        // (a re-fork reads the source again) or whose own tail still ends unfinished. While true, every seam that
+        // gives the session a NEW connection (the fork launch, a window restore / a Sessions-page resume, Restart,
+        // Deactivate) arms TerminalPage's FORK STOP WATCH: the tab is locked read-only and ONE Esc is pressed the
+        // moment the fork's own heartbeat reports a running turn. Cleared once a stopped (or idle) fork would no
+        // longer continue anything on its next start (ClassifyResumeContinuation over the fork's own transcript,
+        // else its source's), and by a Restart whose user chose to continue the turn after all. Omitted from
+        // sessions.json when false, so a fleet with no stopped fork is byte-unchanged.
+        bool stopForkedTurn{ false };
         // Agentmaster (PERSISTED — the summary's conversation chain): the session THIS one continues, when
         // Agentmaster SAW it continue in a way no transcript records, and how:
         //   continuedVia "clear"    — a /clear in the same terminal. SessionRegistry::OnHookEvent pairs the
