@@ -22,7 +22,16 @@
      Notes:   strip this comment (awk 'f{print} /^## Agentmaster 0.8.0/{f=1; print}' <draft> > body.md), then
               gh release edit v0.8.0 -R Nucs/Agentmaster --notes-file body.md
      Publish: gh release edit v0.8.0 -R Nucs/Agentmaster --draft=false --latest --prerelease=false (REPLACES 0.7.0 as Latest).
-     Assets: Agentmaster_0.8.0.0.msixbundle, Agentmaster_0.8.0.0_x64.zip, Agentmaster_0.8.0.0_arm64.zip, Agentmaster.cer. -->
+     Assets: Agentmaster_0.8.0.0.msixbundle, Agentmaster_0.8.0.0_x64.zip, Agentmaster_0.8.0.0_arm64.zip, Agentmaster.cer.
+     DONE 2026-10-22 (times UTC):
+       - pushed 7248d2592..7ee5fadcc; tag v0.8.0 -> 7ee5fadcc (this draft's commit);
+       - ci.yml run 39800299648 (x64, from scratch): success;
+       - release.yml run 39800356681: success (queued ~7 min, built 15:04-15:28, x64 + arm64; the first arm64 build
+         of the session database service and the first "Fetch libduckdb" step passed);
+       - assets: bundle 51,911,334 B, x64 zip 28,494,890 B, arm64 zip 29,945,712 B, cer 768 B. The x64 zip was
+         downloaded and listed: Agentmaster.exe, WindowsTerminal.exe, agentmaster-cli.exe, agentmaster-sessiondb.exe,
+         duckdb.dll, .portable, .am-version (0.8.0.0), .am-manifest;
+       - notes applied (equal to this body), published 15:29:24Z as stable + Latest; /releases/latest = v0.8.0. -->
 ## Agentmaster 0.8.0
 
 **0.8.0 is a stable release: the whole 0.7.x pre-release line plus a large final batch, now the default for everyone.** Since the last stable (0.7.0), Agentmaster went **mobile through Telegram**: every working session is a topic on your phone with its whole conversation, a message there is queued as that session's next prompt, Claude's questions are answered with a tap, and a Search topic finds and reopens old sessions. On the PC, the Agent Manager moved behind the tab strip's **Home** button beside a **fleet side panel**; the prompt queue became the **Prompt Queue Runner** in every build, with delivery that is atomic and verified; **presets** run Claude Code on other models and providers; an **AI search** reads your sessions and reopens them into the right window; **Show Transcript** renders any conversation as Markdown; and installing became a choice: just for you (no administrator rights), for all users of the PC, or as the app package. It also fixes what made the line worth graduating: five UI freezes (the latest a session hopping between two tabs 175,000 times), a launch that hung with no window, two crash classes, a memory leak in every terminal, turns that never continued after an API error or a restart, and much of the CPU a fleet of hundreds of tabs cost. This build becomes the new default **Latest**; the highlights are below, followed by the complete per-version changelog since 0.7.0.

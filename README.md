@@ -11,8 +11,8 @@ Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity 
 
 ## ✨ What it does for you
 
-### 🗂️ One tab to run the whole fleet
-A pinned **Manager** tab is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which.
+### 🗂️ One page to run the whole fleet
+The **Agent Manager** — one click on the tab strip's **Home** button — is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Prompt Queue** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which. A **side panel** beside the terminal keeps the session cards in view while you work.
 
 ### 💾 Never lose a session — ever
 Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted.
@@ -37,10 +37,17 @@ You never have to open the Manager to read a session. Every classified tab wears
 </tr>
 </table>
 
+### 📱 Your fleet in your pocket
+Turn on the **Telegram** bot (**Settings → Messaging**, with a bot of your own; only your account is answered) and every working session becomes a topic on your phone: its whole conversation, Claude's replies with their Markdown rendered, and a live status card with buttons. A message in a topic is queued as that session's next prompt (`/steer` sends it into the running turn). From the phone you can answer Claude's questions with a tap, see the screen, fork or restart a session, start a new one in any folder and window, and ask the 🔎 Search topic to find and reopen old sessions.
+
 > **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Prompt Queue Runner defaults).
 
 #### Additional features
 - **Prompt Queue Runner** — auto-sends the next queued prompt on turn-complete (per session: Auto or Paused, plus one Pause for all sessions), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
+- **AI search** — the Sessions page's **AI** toggle takes a request in plain words; a hosted Sonnet 5.5 reads your sessions, shows the ones that fit with the evidence, and can reopen them into the window you choose.
+- **Presets** — launch or fork a session on other models and providers (OpenRouter, Xiaomi MiMo, NanoGPT, your own RunPod endpoint, any Anthropic-compatible URL), keys kept in Windows Credential Manager.
+- **Show Transcript** — any conversation as Markdown in a reading view; **Copy ▸ Transcript** at five detail levels.
+- **Deactivate** — park a session's claude while its tab keeps its place; entering the tab resumes the conversation.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
 - **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release and (warning-gated) nightly opt-ins, and uninstall. Nightly builds — unstable dev versions, tag contains `nightly` — are always skipped unless you accept the nightly opt-in.
 - **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.
@@ -53,7 +60,7 @@ You never have to open the Manager to read a session. Every classified tab wears
 
 ## 🟢 Status
 
-In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **1,100+** checks.
+In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **9,000+** checks.
 
 - **Claude Code** — fully managed: launch · observe · drive · persist · restore.
 - **Codex** (OpenAI Codex CLI) — managed for observe + state + the full launch / restore / adopt lifecycle (driving its TUI is next).
