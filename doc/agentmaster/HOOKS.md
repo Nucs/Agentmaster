@@ -794,8 +794,9 @@ and press esc once the tab starts running as its supposed to be stopped from the
   at the prompt, and the next resume SENDS IT AGAIN by itself (probe e5). Agentmaster cannot tell that tail from
   a turn a crash cut off (*Cut-off turns*: a bare prompt), so it asks nothing there — not fixed.
 
-**The live probes** (the real `claude.exe` 2.1.291 on a ConPTY against the e2e mock, `tools/e2e-spike/mockllm.py`,
-in a scratch `CLAUDE_CONFIG_DIR`; zero API traffic):
+**The live probes** (`tools/interrupt-probe/`: the real `claude.exe` 2.1.291 on a ConPTY against the e2e mock,
+`tools/e2e-spike/mockllm.py`, in a scratch `CLAUDE_CONFIG_DIR`; zero API traffic; re-run them after a Claude
+Code update — the kit's README says what to change when a result moves):
 
 | Probe | Shape | Without the line | With the line |
 |---|---|---|---|
@@ -900,8 +901,9 @@ intent is cleared`; `[nav] restart-question` / `restart-answer <sid8> -> uninter
 **Tests.** `TestInterruptedTurns` (`tests_rewind.cpp`): the planner on the probes' shapes and every refusal, the
 classifier, the switch's precedence on scratch settings files, the session front doors (a scratch
 `CLAUDE_CONFIG_DIR`), `DecideForkTurnStop`'s table and the dialogs' words. The live behavior was measured with the
-probes above (scratchpad `interrupt_probe.py`), and then the COMPILED planner, linked into a probe from the harness's
-objects (`rewind_probe.exe`), was run on transcripts the real claude wrote: an Esc during a reply (planned to the
+probes above (`tools/interrupt-probe/interrupt_probe.py`), and then the COMPILED planner, linked into a probe from
+the harness's objects (`rewind_probe.exe`, `build_rewind_probe.bat` + `cpp_probe.py`), was run on transcripts the
+real claude wrote: an Esc during a reply (planned to the
 prompt, appended; the resume sent it again) and an Esc during the second tool call (planned to the first result past
 one cut result; the resume wrote `Continue from where you left off.` and finished the turn); the classifier read a
 live source inside `sleep 40` as `ContinuesTurn`, dropped `Bash`. The app's dialogs, the fan-out and the stop watch are
