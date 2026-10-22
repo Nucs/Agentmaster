@@ -20,8 +20,16 @@
           machine-wide: administrator approval once PER RELEASE.
 
     Re-running the script is the upgrade path: an existing install is found and upgraded in place, and the
-    question's default follows what is installed. Only the files Agentmaster ships are replaced or removed;
-    your data (sessions, settings, the profile folder) and anything else you keep in the folder stay.
+    question's default follows what is installed (for a standard user, whose approval would need an
+    administrator's password, it stays "Just for you"). An install that is up to date downloads nothing and asks
+    for no approval. Only the files Agentmaster ships are replaced or removed; your data (sessions, settings, the
+    profile folder) and anything else you keep in the folder stay; an upgrade that fails or is stopped (Ctrl+C)
+    puts the previous version back.
+
+    A running Agentmaster closes for its upgrade (the script asks first, when it can) and starts again when the
+    upgrade is done. When the script itself runs inside that Agentmaster - typed into one of its tabs - it would
+    close with it half way, so it goes on in a new PowerShell window of its own, which keeps a record of the run in
+    the download folder.
 
     The script installs for the user SIGNED IN to Windows, even when it runs under another account (started
     with an administrator's UAC credentials, with "Run as different user", or by a deployment tool as
@@ -38,7 +46,9 @@
 
 .PARAMETER Version
     Specific version to install, e.g. "0.4.0" (a leading "v" is fine). Default: the latest release.
-    A nightly is named by its FULL suffixed version (e.g. "0.6.10-prerelease-nightly").
+    A version published only with a suffix is found by its number ("0.7.10" installs v0.7.10-prerelease); a
+    nightly is named by its FULL suffixed version (e.g. "0.6.10-prerelease-nightly"), or by its number with
+    -Nightly.
 
 .PARAMETER Prerelease
     Consider pre-releases when picking the newest version (ignored when -Version is given). NIGHTLY builds
@@ -58,8 +68,8 @@
     Install for the account running this script even when another user is signed in to Windows.
 
 .PARAMETER Force
-    Reinstall even if the installed version is the same or newer. For an all-users install it also closes
-    other users' running instances.
+    Reinstall even if the installed version is the same or newer, and close a running Agentmaster without
+    asking. For an all-users install it also closes other users' running instances.
 
 .PARAMETER Launch
     Start Agentmaster after a successful install/upgrade (always without administrator rights).
@@ -70,7 +80,13 @@
 
 .PARAMETER InstallDir
     The install folder of a User or Machine install. Default: the existing install's folder, else
-    %USERPROFILE%\.agentmaster\bin (User) or <Program Files>\Agentmaster (Machine).
+    %USERPROFILE%\.agentmaster\bin (User) or <Program Files>\Agentmaster (Machine). A relative path is taken from
+    the current folder; a folder that holds other files gets an "Agentmaster" folder inside it. An existing
+    install is upgraded where it is: to move it, uninstall it first.
+
+.PARAMETER ZipPath
+    Install a portable zip you already have (-Scope User or Machine) instead of downloading a release - an offline
+    PC, or a build of your own. Its version comes from its name (Agentmaster_<a.b.c.d>_<arch>.zip) or its .am-version.
 
 .PARAMETER DownloadDir
     Where to cache downloads. Default: %TEMP%\Agentmaster-install.
@@ -79,7 +95,8 @@
     owner/name of the GitHub repo. Default: Nucs/Agentmaster.
 
 .PARAMETER GitHubToken
-    Optional token to lift the unauthenticated GitHub API rate limit. Defaults to $env:GITHUB_TOKEN.
+    Optional token to lift the unauthenticated GitHub API rate limit (60 requests an hour for a network address).
+    Defaults to $env:GITHUB_TOKEN; a token GitHub refuses is dropped, and the run goes on without one.
 
 .EXAMPLE
     .\Install-Agentmaster.ps1
@@ -92,6 +109,10 @@
 .EXAMPLE
     .\Install-Agentmaster.ps1 -Scope Machine
     Install or upgrade for all users of this PC (one UAC prompt).
+
+.EXAMPLE
+    .\Install-Agentmaster.ps1 -Scope User -ZipPath .\Agentmaster_0.8.0.0_x64.zip
+    Install or upgrade just for you from a zip on disk - nothing is downloaded.
 
 .EXAMPLE
     .\Install-Agentmaster.ps1 -Uninstall
@@ -124,10 +145,51 @@ param(
     [switch]   $Launch,
     [switch]   $Uninstall,
     [string]   $InstallDir,
+    [string]   $ZipPath,
     [string]   $DownloadDir,
     [string]   $Repo        = 'Nucs/Agentmaster',
     [string]   $GitHubToken = $env:GITHUB_TOKEN
 )
+
+# Only a run as a FILE has a script scope of its own. "irm ... | iex" ran this text IN the caller's scope: its
+# $ErrorActionPreference = 'Stop' (below) and every function stayed in the user's PowerShell afterwards, and that
+# preference turned every later error in their window into a stop (measured in 5.1 and 7); a script block
+# ("& ([scriptblock]::Create(...))") has a scope of its own but not a script scope, so the $script: lists of the
+# install core landed in the caller's script scope - the global one at the prompt. Every such run starts the whole
+# text again inside a throwaway dynamic module, whose script scope is discarded with it, with the parameters it was
+# given (Invoke-Command and a script block bind them; iex binds none), and ends here. A run is told by $PSCmdlet:
+# a file, a script block or a dot-sourced run has its own (this script's [CmdletBinding()]); iex and Invoke-Command
+# bind no cmdlet, so it is unset - or, inside an advanced function, the caller's, whose text is not this one.
+# $MyInvocation cannot tell: under iex it is the CALLER's. A dot-sourced run (the tests load the functions so) and
+# the run inside the module ($script:AmInstallerIsolated, set there) stay as they are. The parse tree's root holds
+# the whole text in every way this script runs.
+$amSelf = { }.Ast
+while ($amSelf.Parent) { $amSelf = $amSelf.Parent }
+$amOwnText = $false
+$amOwnScope = $false
+# Under a caller's Set-StrictMode an unset variable throws: then it is simply not set.
+try { $amOwnText = [bool]$PSCmdlet -and ($PSCmdlet.MyInvocation.MyCommand.ScriptBlock.Ast.Extent.Text -ceq $amSelf.Extent.Text) } catch { $amOwnText = $false }
+try { $amOwnScope = [bool]$script:AmInstallerIsolated } catch { $amOwnScope = $false }
+if ($amOwnText -and (($PSCmdlet.MyInvocation.MyCommand -is [System.Management.Automation.ExternalScriptInfo]) -or ($MyInvocation.InvocationName -eq '.'))) { $amOwnScope = $true }
+if (-not $amOwnScope) {
+    $amNames = @($amSelf.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    $amArgs = @{}
+    foreach ($amKey in @($PSBoundParameters.Keys)) { if ($amNames -contains $amKey) { $amArgs[$amKey] = $PSBoundParameters[$amKey] } }
+    & (New-Module -Name 'Agentmaster-installer' -ScriptBlock { }) {
+        param([string]$Text, [hashtable]$Arguments)
+        $script:AmInstallerIsolated = $true
+        & ([scriptblock]::Create($Text)) @Arguments
+    } $amSelf.Extent.Text $amArgs
+    # Under iex the parameters were bound into the caller's scope before any statement ran, with this script's type and
+    # ValidateSet attributes on them (a later "$Scope = 'x'" of the user's would fail): they go too.
+    if (-not $amOwnText) {
+        Remove-Variable -Name Scope, Version, Prerelease, Nightly, Portable, Elevate, ForCurrentAccount, Force, Launch, Uninstall,
+            InstallDir, ZipPath, DownloadDir, Repo, GitHubToken -ErrorAction SilentlyContinue
+    }
+    Remove-Variable -Name amSelf, amOwnText, amOwnScope, amNames, amArgs, amKey -ErrorAction SilentlyContinue
+    return
+}
+Remove-Variable -Name amSelf, amOwnText, amOwnScope -ErrorAction SilentlyContinue
 
 $ErrorActionPreference = 'Stop'
 
@@ -527,6 +589,116 @@ function Remove-AmPackage {
 # ---- processes -----------------------------------------------------------------------------------------
 <#
 .SYNOPSIS
+    True when $Path lies inside one of $Dirs (case-insensitive, whole folder names: C:\a\b is inside C:\a, C:\ab is
+    not).
+.PARAMETER Path
+    A file or folder path.
+.PARAMETER Dirs
+    The folders.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a path that cannot be resolved counts as outside.
+#>
+function Test-AmPathUnder {
+    param([string]$Path, [string[]]$Dirs)
+    if (-not $Path) { return $false }
+    try { $full = ([IO.Path]::GetFullPath($Path)).TrimEnd('\') + '\' } catch { return $false }
+    foreach ($d in @($Dirs)) {
+        if (-not $d) { continue }
+        try { $prefix = (Resolve-AmPath $d).TrimEnd('\') + '\' } catch { continue }
+        if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    The program that hosts THIS process's console: conhost.exe for a console window of its own, a terminal's
+    OpenConsole.exe for a tab (a pseudoconsole) - '' when the process has no console or the host cannot be told.
+.DESCRIPTION
+    A process attached to a console ends with that console's host: when a terminal closes, its OpenConsole.exe ends
+    every process attached to it (CTRL_CLOSE). The host is what Windows records for the process itself -
+    NtQueryInformationProcess(ProcessConsoleHostProcess, class 49), the value Task Manager groups by, its low two bits
+    flags (the app's own ProcessInspect.cpp ReadConsoleHostPid reads it the same way). NOT the console window's
+    owner: Windows hands a console window to its first CLIENT, so GetWindowThreadProcessId named the tab's shell
+    (powershell.exe), never OpenConsole.exe (seen in a test desktop, 2026-10-22).
+.OUTPUTS
+    [string] the host's exe path, or ''.
+.NOTES
+    Never throws: any failure reads as unknown. The one-function type is compiled once per session.
+#>
+function Get-AmConsoleHostExe {
+    try {
+        if (-not ('Agentmaster.AmConsoleHostQuery' -as [type])) {
+            $sig = '[DllImport("ntdll.dll")] public static extern int NtQueryInformationProcess(IntPtr processHandle, int processInformationClass, out IntPtr processInformation, int processInformationLength, out int returnLength);'
+            Add-Type -MemberDefinition $sig -Name 'AmConsoleHostQuery' -Namespace 'Agentmaster' -ErrorAction Stop | Out-Null
+        }
+        $value = [IntPtr]::Zero
+        $length = 0
+        # -1 is GetCurrentProcess()'s pseudo handle: this process itself, no handle to open or close.
+        $status = [Agentmaster.AmConsoleHostQuery]::NtQueryInformationProcess([IntPtr](-1), 49, [ref]$value, [IntPtr]::Size, [ref]$length)
+        if ($status -ne 0) { return '' }
+        $hostPid = [long]($value.ToInt64() -band (-bnot 3))
+        if ($hostPid -le 0) { return '' }
+        return [string](Get-CimInstance Win32_Process -Filter "ProcessId=$hostPid" -ErrorAction Stop).ExecutablePath
+    } catch {
+        return ''
+    }
+}
+
+<#
+.SYNOPSIS
+    The exe paths of this process's ancestors, parent first (a parent that exited, or whose id the system gave to a
+    later process, ends the chain).
+.OUTPUTS
+    [string[]]
+.NOTES
+    Never throws: a failed process query gives an empty list.
+#>
+function Get-AmAncestorExes {
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $byId = @{}
+        foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+        $cur = $byId[[int]$PID]
+        for ($depth = 0; $cur -and $depth -lt 64; $depth++) {
+            $parent = $byId[[int]$cur.ParentProcessId]
+            # A reused id: the process that holds the parent's id now started AFTER its supposed child.
+            if (-not $parent -or ($parent.CreationDate -and $cur.CreationDate -and $parent.CreationDate -gt $cur.CreationDate)) { break }
+            if ($parent.ExecutablePath) { $out.Add([string]$parent.ExecutablePath) }
+            $cur = $parent
+        }
+    } catch {
+        Write-Info "this PowerShell's parent processes could not be read: $($_.Exception.Message)"
+    }
+    return $out.ToArray()
+}
+
+<#
+.SYNOPSIS
+    True when closing the Agentmaster in one of $Dirs could end THIS PowerShell: its console host lives there (an
+    Agentmaster tab), or one of its parent processes does (a PowerShell started from inside such a tab without a
+    console of its own).
+.DESCRIPTION
+    Install-Agentmaster.ps1 asks this before it closes a running Agentmaster, and continues in a new window of its own
+    when it is true. Erring towards true costs a second window; missing a case cost an install that ended half way.
+.PARAMETER Dirs
+    The install folders this run closes.
+.OUTPUTS
+    [bool]
+#>
+function Test-AmHostedIn {
+    param([string[]]$Dirs)
+    if (Test-AmPathUnder -Path (Get-AmConsoleHostExe) -Dirs $Dirs) { return $true }
+    foreach ($exe in @(Get-AmAncestorExes)) {
+        if (Test-AmPathUnder -Path $exe -Dirs $Dirs) { return $true }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
     Close the Agentmaster GUI processes that run from $DirPath and wait for their ConPTY hosts to drain.
 .DESCRIPTION
     Kills ONLY the GUI process (Agentmaster.exe / a pre-rename WindowsTerminal.exe), path-filtered, so the
@@ -536,18 +708,33 @@ function Remove-AmPackage {
     closes its pipe handles; each host then ends its clients itself and exits. A host still alive after 30 s
     is wedged and is killed as the last resort.
     An all-users copy can run for OTHER users of the PC at the same time; closing their windows would lose
-    their work, so that case throws unless -AllowOtherUsers.
+    their work, so that case throws unless -AllowOtherUsers. A PowerShell whose own console the Agentmaster in
+    $DirPath hosts (a tab of it) would end with it, half way through: that case throws before anything is closed.
 .PARAMETER DirPath
     The install folder.
 .PARAMETER AllowOtherUsers
     Close other users' instances too (an explicit -Force of the caller).
+.PARAMETER OwnSids
+    Further accounts whose instances count as this run's own, not another user's: the user who asked for the step.
+    A standard user's all-users upgrade runs as the ADMINISTRATOR whose password answered the UAC prompt, so without
+    it the user's own Agentmaster read as another user's and the step failed - after the download and the prompt.
 .NOTES
-    Throws only for other users' instances without -AllowOtherUsers.
+    Throws for other users' instances without -AllowOtherUsers, and when this PowerShell runs inside the Agentmaster
+    in $DirPath.
 #>
 function Stop-ProcessesUnder {
-    param($DirPath, [switch]$AllowOtherUsers)
+    param($DirPath, [switch]$AllowOtherUsers, [string[]]$OwnSids = @())
     if (-not $DirPath) { return }
     $prefix = (Resolve-AmPath $DirPath).TrimEnd('\') + '\'
+    # This PowerShell's own console may belong to the Agentmaster being closed (the command typed into an Agentmaster
+    # tab): closing it ends this script half way through the copy, its console host taking it down. Install-Agentmaster
+    # .ps1 continues in a window of its own before it gets here (Test-AmHostedIn); anything else run from such a tab
+    # stops HERE, before anything changed. Only the console host decides: the in-app updater runs in a console of its
+    # own although the app started it.
+    $consoleHost = Get-AmConsoleHostExe
+    if ($consoleHost -and (Test-AmPathUnder -Path $consoleHost -Dirs @($DirPath))) {
+        throw "This PowerShell window runs inside the Agentmaster in $DirPath, which must close for this step - and this window would close with it, half way through. Run it from a PowerShell window outside Agentmaster (Win+R, then powershell)."
+    }
     $gui = @(Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
     if (-not $AllowOtherUsers) {
@@ -555,7 +742,7 @@ function Stop-ProcessesUnder {
         $others = @($gui | Where-Object {
             $sid = $null
             try { $sid = (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop).Sid } catch { $sid = $null }
-            $sid -and $sid -ne $mine
+            $sid -and $sid -ne $mine -and (@($OwnSids) -notcontains $sid)
         })
         if ($others.Count -gt 0) {
             # Worded for both scripts: the in-app updater has no -Force, Install-Agentmaster.ps1 has one.
@@ -725,8 +912,9 @@ function Remove-AmEntries {
     the layout. When a move or the copy fails, what the copy laid down is removed and the set-aside entries
     are moved back (Restore-AmSetAside): the folder holds the previous version again, so a caller can start
     it. Until 2026-10-21 the old files were deleted before the copy, and a copy that failed half way left a
-    folder with neither version - the in-app update then had nothing to start. The set-aside folder is
-    deleted on success; one that could not be deleted (a file in it still in use) goes at the next run.
+    folder with neither version - the in-app update then had nothing to start. A run stopped half way (Ctrl+C)
+    puts the previous version back as well. The set-aside folder is deleted on success; one that could not be
+    deleted (a file in it still in use) goes at the next run.
     The source's own profile data, pointer and decision files never travel (the destination keeps its own);
     preserved user state in the destination is never touched; anything else a user keeps in the folder
     stays. Every copied file loses the "downloaded from the Internet" mark (the Zone.Identifier stream a
@@ -763,6 +951,10 @@ function Install-AmLayout {
     $aside = Join-Path $DestDir ($script:AmSetAsidePrefix + [guid]::NewGuid().ToString('N').Substring(0, 8))
     $moved = New-Object System.Collections.Generic.List[string]
     $laid = New-Object System.Collections.Generic.List[string]
+    # Set once the new layout is complete, or once the catch below took over the put-back. A run STOPPED half way
+    # (Ctrl+C) never reaches the catch - PowerShell runs only the finally then (measured in 5.1 and 7) - so the
+    # finally puts the previous version back itself; before, a Ctrl+C during the copy left a folder with neither.
+    $settled = $false
     try {
         if ($replace.Count -gt 0) { New-Item -ItemType Directory -Force -Path $aside | Out-Null }
         foreach ($n in $replace) {
@@ -781,13 +973,20 @@ function Install-AmLayout {
         if (-not (Test-Path -LiteralPath (Join-Path $DestDir 'Agentmaster.exe'))) {
             throw "The installed folder holds no Agentmaster.exe: $DestDir"
         }
+        $settled = $true
     } catch {
+        $settled = $true
         $failure = $_
         Write-Warn "the new version could not be laid in ($($failure.Exception.Message)); putting the previous version back"
         if (-not (Restore-AmSetAside -DestDir $DestDir -AsideDir $aside -Laid $laid.ToArray() -Moved $moved.ToArray())) {
             throw "The new version could not be laid in ($($failure.Exception.Message)), and the previous version could not be put back completely: its files are in $aside."
         }
         throw $failure
+    } finally {
+        if (-not $settled) {
+            Write-Warn 'the install was stopped half way; putting the previous version back'
+            $null = Restore-AmSetAside -DestDir $DestDir -AsideDir $aside -Laid $laid.ToArray() -Moved $moved.ToArray()
+        }
     }
     if (Test-Path -LiteralPath $aside) { Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -865,7 +1064,7 @@ function Get-AmLayoutRoot {
     param([string]$ExtractDir)
     $src = Get-ChildItem -LiteralPath $ExtractDir -Directory | Where-Object { $_.Name -like 'agentmaster-*' -or $_.Name -like 'terminal-*' } | Select-Object -First 1
     $root = if ($src) { $src.FullName } else { $ExtractDir }
-    if (-not (Get-AppExe $root)) { throw 'The downloaded zip does not look like an Agentmaster portable build (no app exe inside).' }
+    if (-not (Get-AppExe $root)) { throw 'The zip does not look like an Agentmaster portable build (no app exe inside).' }
     return $root
 }
 
@@ -1141,6 +1340,67 @@ function New-AmActiveSetupVersion {
 
 <#
 .SYNOPSIS
+    True when an Agentmaster.exe knows the per-user command "--register-user" (the all-users install's Active Setup
+    step, PortableInstall.h kRegisterUserFlag) - any build since 2026-10-22; false for an older one.
+.DESCRIPTION
+    Install-Agentmaster.ps1 can install an OLDER release than itself (-Version, or the newest published one), and an
+    older app does not know the flag: registered as every user's sign-in command, it would start the app - or show its
+    "unknown argument" message - at every user's next sign-in, and the installer's own "icons now" step would hang on
+    it. The flag's name is a UTF-16 string in the exe of every build that handles it (the C++ constant); no release
+    before 2026-10-22 holds it (the embedded am-update.ps1 holds it only as ASCII text). Reading the exe is the one
+    signal that also works for a build that was never published (a QA zip, a local build).
+.PARAMETER Exe
+    The app exe.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: an exe that cannot be read counts as an older one (the 2026-10-21 shape is the safe one).
+#>
+function Test-AmAppHandlesRegisterUser {
+    param([string]$Exe)
+    if (-not $Exe -or -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { return $false }
+    try {
+        # Latin-1 maps every byte to one char, so an ordinal IndexOf is a byte search of the UTF-16LE pattern.
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $haystack = $latin1.GetString([IO.File]::ReadAllBytes((Resolve-AmPath $Exe)))
+        $needle = $latin1.GetString([Text.Encoding]::Unicode.GetBytes('register-user'))
+        return $haystack.IndexOf($needle, [StringComparison]::Ordinal) -ge 0
+    } catch {
+        Write-Info "could not read $Exe to see whether it gives each user their own icons: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    True when the all-users install's Active Setup component starts THIS exe - the per-user icon model of an all-users
+    copy (since 2026-10-22). False for an older all-users registration, which made shared shortcuts instead.
+.PARAMETER Key
+    The component's key (Get-AmRegistrationTargets ActiveSetupKey, or a test's scratch key).
+.PARAMETER Exe
+    The all-users copy's app exe.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a key that cannot be read counts as no component.
+#>
+function Test-AmActiveSetupStarts {
+    param([string]$Key, [string]$Exe)
+    if (-not $Key -or -not $Exe) { return $false }
+    try {
+        if (-not (Test-Path -LiteralPath $Key)) { return $false }
+        $stub = [string](Get-Item -LiteralPath $Key).GetValue('StubPath')
+        # The program the command starts: its first token, quoted or not.
+        $program = if ($stub -match '^\s*"([^"]*)"') { $Matches[1] } else { (("$stub".Trim()) -split '\s+')[0] }
+        if (-not $program) { return $false }
+        return ([IO.Path]::GetFullPath($program)) -ieq ([IO.Path]::GetFullPath($Exe))
+    } catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Every user's own desktop and Start-menu Programs folders on this PC - where an all-users install's per-user icons
     live - for the all-users uninstall to sweep.
 .DESCRIPTION
@@ -1207,7 +1467,9 @@ function Get-AmUserShellFolders {
     compute the app's per-path formula): once the user's install is unregistered, Uninstall-AmCopy runs the shared
     copy's own --register-user, which stamps it (Invoke-AmMachineCopyUserCommand). The shared copy's per-user step is
     marked done for this user (UserActiveSetupKey), so Windows does not make a second set of icons at their next
-    sign-in.
+    sign-in. The desktop and Start-menu icons are handed back only to a shared copy that gives every user icons of
+    their own (its Active Setup component starts it, Test-AmActiveSetupStarts); an all-users copy of an older release
+    has shared shortcuts, so the user's icons just go then (the pins are still re-pointed: they stay working).
 .PARAMETER UserDir
     The user's install being removed.
 .PARAMETER MachineDir
@@ -1226,8 +1488,12 @@ function Move-AmUserEntriesToMachineCopy {
     if (-not $machineExe) { return 0 }
     $moved = 0
     $sh = New-Object -ComObject WScript.Shell
+    # The desktop and Start-menu icons go to the shared copy only when it gives every user icons of their own (its
+    # Active Setup component starts it). An all-users copy of an older release has shared shortcuts instead, and an
+    # icon handed back would sit beside them: then Unregister-AmInstall just removes the user's.
+    $perUserModel = Test-AmActiveSetupStarts -Key $Targets.ActiveSetupKey -Exe $machineExe
     foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
-        if (-not $folder) { continue }
+        if (-not $folder -or -not $perUserModel) { continue }
         $lnk = Join-Path $folder 'Agentmaster.lnk'
         if (-not (Test-AmShortcutInto -Lnk $lnk -Dir $UserDir)) { continue }
         try {
@@ -1320,6 +1586,40 @@ function Invoke-AmMachineCopyUserCommand {
 
 <#
 .SYNOPSIS
+    Remove the Agentmaster icons an all-users copy gave every user ("Agentmaster.lnk" in each user's own desktop and
+    Start-menu folders) - only those that point into $Dir: a user's own install, whose icons carry the same name,
+    keeps its icons.
+.DESCRIPTION
+    Used by the all-users uninstall (Unregister-AmInstall) and when an older release is registered over a newer one
+    for all users (Register-AmInstall: its shared shortcuts replace the users' own icons).
+.PARAMETER Dir
+    The all-users install folder.
+.PARAMETER Targets
+    The registration targets: their ProfileFolders when present (a test's scratch folders), else every user's
+    folders on this PC (Get-AmUserShellFolders, which needs administrator rights to read other profiles).
+.OUTPUTS
+    [pscustomobject] Removed (the number of icons removed), Notes (one line per icon that could not be removed).
+.NOTES
+    Never throws for one icon: one that cannot be removed is a note and the rest goes on.
+#>
+function Remove-AmUserIconsInto {
+    param([string]$Dir, [hashtable]$Targets)
+    $notes = @()
+    $swept = 0
+    $folders = if ($Targets -and $Targets.ContainsKey('ProfileFolders')) { @($Targets.ProfileFolders) } else { @(Get-AmUserShellFolders) }
+    foreach ($folder in $folders) {
+        if (-not $folder) { continue }
+        $lnk = Join-Path $folder 'Agentmaster.lnk'
+        # Test-AmShortcutInto never throws: a shortcut that cannot be read counts as pointing elsewhere and stays.
+        if (-not (Test-AmShortcutInto -Lnk $lnk -Dir $Dir)) { continue }
+        try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; $swept++ }
+        catch { $notes += "icon $lnk : $($_.Exception.Message)" }
+    }
+    return [pscustomobject]@{ Removed = $swept; Notes = $notes }
+}
+
+<#
+.SYNOPSIS
     Register an installed copy: Start-menu + desktop shortcuts, the "Open in Agentmaster" verbs on folders,
     folder backgrounds and drives, an Apps & Features entry, and the folder on PATH.
 .DESCRIPTION
@@ -1336,6 +1636,11 @@ function Invoke-AmMachineCopyUserCommand {
     user deleted is not made again. The shared shortcuts an older all-users registration made ("Agentmaster (all
     users).lnk", and "Agentmaster.lnk" before that, pointing into $Dir) are removed. Its Apps & Features entry is
     named "Agentmaster (all users)" (Get-AmRegistrationName).
+    All of that only when the app knows the per-user command (Test-AmAppHandlesRegisterUser). An OLDER app - a
+    release before 2026-10-22, which Install-Agentmaster.ps1 can install - keeps the 2026-10-21 shape: shared
+    shortcuts named "Agentmaster (all users)" and no Active Setup component (its unknown flag would start the app at
+    every user's sign-in). Registered over a newer release (a downgrade), it also removes the component that starts
+    this copy and the icons it gave every user (Remove-AmUserIconsInto).
     Where both installs exist, Windows puts the machine PATH before the user PATH, so a shell finds the
     all-users copy's agentmaster-cli.exe first - which hands the call to the user's own copy (the app's
     InstallHandoff.h); the "Open in Agentmaster" verbs of the user's own copy win (HKCU\Software\Classes
@@ -1357,18 +1662,25 @@ function Register-AmInstall {
     $notes = @()
     $exe = Join-Path $Dir 'Agentmaster.exe'
     $name = Get-AmRegistrationName -Scope $Scope
+    # An all-users copy gives every user icons of their own only when its app knows the per-user command; an OLDER app
+    # (a release before 2026-10-22, which Install-Agentmaster.ps1 can install) keeps the 2026-10-21 shape - shared
+    # shortcuts named "Agentmaster (all users)" and no Active Setup component: registered as every user's sign-in
+    # command, the unknown flag would start the app at every sign-in (Test-AmAppHandlesRegisterUser).
+    $perUserIcons = ($Scope -eq 'Machine') -and (Test-AmAppHandlesRegisterUser -Exe $exe)
     try {
         $sh = New-Object -ComObject WScript.Shell
         foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
             if (-not $folder) { continue }
             if ($Scope -eq 'Machine') {
-                # No shared shortcut any more; the ones an older all-users registration made go - only when they
-                # point here ("Agentmaster (all users).lnk" since 2026-10-21, "Agentmaster.lnk" before that).
-                foreach ($older in 'Agentmaster (all users).lnk', 'Agentmaster.lnk') {
+                # The shared shortcuts an older all-users registration made go - only when they point here: both names
+                # for the per-user model ("Agentmaster (all users).lnk" since 2026-10-21, "Agentmaster.lnk" before that),
+                # only the plain one for an older app, whose "Agentmaster (all users).lnk" is made again below.
+                $olderNames = if ($perUserIcons) { @('Agentmaster (all users).lnk', 'Agentmaster.lnk') } else { @('Agentmaster.lnk') }
+                foreach ($older in $olderNames) {
                     $lnk = Join-Path $folder $older
                     if (Test-AmShortcutInto -Lnk $lnk -Dir $Dir) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
                 }
-                continue
+                if ($perUserIcons) { continue }
             }
             New-Item -ItemType Directory -Force -Path $folder | Out-Null
             $lnk = Join-Path $folder "$name.lnk"
@@ -1383,7 +1695,18 @@ function Register-AmInstall {
             $s.Save()
         }
     } catch { $notes += "shortcuts: $($_.Exception.Message)" }
-    if ($Scope -eq 'Machine' -and $Targets.ActiveSetupKey) {
+    if ($Scope -eq 'Machine' -and $Targets.ActiveSetupKey -and -not $perUserIcons -and (Test-AmActiveSetupStarts -Key $Targets.ActiveSetupKey -Exe $exe)) {
+        # A newer release had given every user icons of their own, and this OLDER app is registered over it (a
+        # downgrade): its component goes - Windows must not run the unknown flag at sign-in - and so do the users' own
+        # icons of it, which the shared shortcuts above replace.
+        try {
+            Remove-Item -LiteralPath $Targets.ActiveSetupKey -Recurse -Force
+            $sweep = Remove-AmUserIconsInto -Dir $Dir -Targets $Targets
+            $notes += @($sweep.Notes)
+            Write-Info "this release gives no user icons of their own: shared shortcuts instead ($($sweep.Removed) user icon(s) removed)"
+        } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
+    }
+    if ($perUserIcons -and $Targets.ActiveSetupKey) {
         try {
             $as = $Targets.ActiveSetupKey
             # NOT $version: PowerShell variable names ignore case, so that would overwrite the -Version parameter the
@@ -1509,21 +1832,9 @@ function Unregister-AmInstall {
             }
         } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
         try {
-            $folders = if ($Targets.ContainsKey('ProfileFolders')) { @($Targets.ProfileFolders) } else { @(Get-AmUserShellFolders) }
-            $sh = New-Object -ComObject WScript.Shell
-            $swept = 0
-            foreach ($folder in $folders) {
-                if (-not $folder) { continue }
-                $lnk = Join-Path $folder 'Agentmaster.lnk'
-                if (-not (Test-Path -LiteralPath $lnk)) { continue }
-                $target = ''
-                try { $target = $sh.CreateShortcut($lnk).TargetPath } catch { $target = '' }
-                if (& $inside $target) {
-                    try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; $swept++ }
-                    catch { $notes += "icon $lnk : $($_.Exception.Message)" }
-                }
-            }
-            if ($swept -gt 0) { Write-Ok "removed $swept icon(s) it gave the users of this PC" }
+            $sweep = Remove-AmUserIconsInto -Dir $full -Targets $Targets
+            $notes += @($sweep.Notes)
+            if ($sweep.Removed -gt 0) { Write-Ok "removed $($sweep.Removed) icon(s) it gave the users of this PC" }
         } catch { $notes += "each user's icons: $($_.Exception.Message)" }
     }
     try {
@@ -1578,13 +1889,16 @@ function Unregister-AmInstall {
     Overrides Get-AmRegistrationTargets (tests).
 .PARAMETER Force
     Close other users' instances of an all-users copy too.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Stop-ProcessesUnder): the user who asked for
+    the uninstall, when an administrator's credentials run it.
 .OUTPUTS
     [string[]] the names left in the folder (empty when the folder was removed).
 #>
 function Uninstall-AmCopy {
-    param([ValidateSet('User', 'Machine')][string]$Scope, [string]$Dir, [hashtable]$Targets, [switch]$Force)
+    param([ValidateSet('User', 'Machine')][string]$Scope, [string]$Dir, [hashtable]$Targets, [switch]$Force, [string[]]$OwnSids = @())
     $full = (Resolve-AmPath $Dir).TrimEnd('\')
-    Stop-ProcessesUnder -DirPath $full -AllowOtherUsers:$Force
+    Stop-ProcessesUnder -DirPath $full -AllowOtherUsers:$Force -OwnSids $OwnSids
     $handedTo = ''
     if ($Scope -eq 'User') {
         # Agentmaster stays installed for all users: the user's icons and taskbar pins go to that copy instead of away
@@ -1936,22 +2250,31 @@ function Install-AmUserCopy {
     Overrides the registration targets (tests).
 .PARAMETER Force
     Close other users' running instances.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Stop-ProcessesUnder): the user who asked for
+    the install, when an administrator's credentials run it.
 .NOTES
     Needs administrator rights; throws without them, when the layout predates all-users support (no
     .am-manifest: its app would not know install.path = machine), or when the copy fails.
 #>
 function Install-AmMachineCopy {
-    param([string]$LayoutDir, [string]$DestDir, [string]$Version, [hashtable]$Targets, [switch]$Force)
+    param([string]$LayoutDir, [string]$DestDir, [string]$Version, [hashtable]$Targets, [switch]$Force, [string[]]$OwnSids = @())
     if (-not $Targets -and -not (Test-Admin)) { throw 'Installing for all users needs administrator rights.' }
     if (@(Read-AmManifest -Dir $LayoutDir).Count -eq 0) {
         throw "This release predates installs for all users (its zip has no .am-manifest). Install it just for you, or pick a newer release."
     }
-    Stop-ProcessesUnder -DirPath $DestDir -AllowOtherUsers:$Force
+    Stop-ProcessesUnder -DirPath $DestDir -AllowOtherUsers:$Force -OwnSids $OwnSids
     Write-Step "Installing Agentmaster $Version for all users into $DestDir"
     Install-AmLayout -SourceDir $LayoutDir -DestDir $DestDir
     Set-AmInstallDecision -Dir $DestDir -Value 'machine'
     foreach ($n in (Register-AmInstall -Scope Machine -Dir $DestDir -Version $Version -Targets $Targets)) { Write-Warn "registration: $n" }
-    Write-Ok 'installed for all users of this PC (each user gets their own Agentmaster icons at their next sign-in, or when they first start it)'
+    # Said as Register-AmInstall did it: an app that knows --register-user gives each user icons of their own, an older
+    # one has shared shortcuts (Test-AmAppHandlesRegisterUser).
+    if (Test-AmAppHandlesRegisterUser -Exe (Join-Path $DestDir 'Agentmaster.exe')) {
+        Write-Ok 'installed for all users of this PC (each user gets their own Agentmaster icons at their next sign-in, or when they first start it)'
+    } else {
+        Write-Ok 'installed for all users of this PC (an older release: its Start-menu and desktop shortcuts, "Agentmaster (all users)", are shared by every user)'
+    }
 }
 
 <#
@@ -1962,7 +2285,7 @@ function Install-AmMachineCopy {
     Run by the signed-in user's own account: the app is started directly (an elevated start is still the same user,
     whose desktop and HKCU it writes). Run by another account or SYSTEM: a one-shot task for the signed-in user
     (Invoke-AmAsUser). The step is idempotent - a user who already got their icons, or who has an install of their
-    own, gets nothing more.
+    own, gets nothing more. Nothing runs for an app that does not know the flag (Test-AmAppHandlesRegisterUser).
 .PARAMETER Exe
     The all-users copy's Agentmaster.exe.
 .PARAMETER Identity
@@ -1975,6 +2298,9 @@ function Install-AmMachineCopy {
 function Invoke-AmUserIconStep {
     param([string]$Exe, $Identity)
     if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    # An older app does not know the flag: it would start (or show its "unknown argument" message) and -Wait would
+    # hang on it. Its all-users copy has shared shortcuts instead (Register-AmInstall).
+    if (-not (Test-AmAppHandlesRegisterUser -Exe $Exe)) { return $false }
     try {
         if ($Identity.IsMainUser) {
             $p = Start-Process -FilePath $Exe -ArgumentList '--register-user' -PassThru -Wait
@@ -2086,6 +2412,32 @@ function Get-AmInstalledVersion {
 
 <#
 .SYNOPSIS
+    True when $Dir already holds $Version or a newer one as the install of the given kind - the ONE up-to-date rule:
+    the installs skip themselves by it, and Install-Agentmaster.ps1 asks it before it downloads or asks for
+    administrator approval, so the two can never disagree.
+.PARAMETER Dir
+    The install folder.
+.PARAMETER Version
+    The release version ("1.2.3.4").
+.PARAMETER Decision
+    The install.path the folder must hold: 'installed' (a per-user install) or 'machine' (the all-users one). A
+    folder kept portable, or holding the other kind, is never up to date: installing it is the point.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a folder without a stamp, or a version that is not a dotted number, reads as not up to date.
+#>
+function Test-AmUpToDate {
+    param([string]$Dir, [string]$Version, [string]$Decision)
+    if (-not $Dir) { return $false }
+    $cur = Get-AmInstalledVersion -Dir $Dir
+    if (-not $cur) { return $false }
+    if ((Get-AmInstallDecision -Dir $Dir) -ne $Decision) { return $false }
+    try { return ($cur -ge [version]$Version) } catch { return $false }
+}
+
+<#
+.SYNOPSIS
     Expand a release zip into a fresh folder and return its layout root (Get-AmLayoutRoot).
 .PARAMETER ZipPath
     The downloaded zip.
@@ -2132,10 +2484,8 @@ function Invoke-AmUserInstall {
     $dest = $DestDir
     if (-not $dest) { $dest = Find-AmUserInstallDir }
     if (-not $dest) { $dest = Get-AmDefaultUserInstallDir }
-    $cur = Get-AmInstalledVersion -Dir $dest
-    $registered = (Get-AmInstallDecision -Dir $dest) -eq 'installed'
-    if (-not $Force -and $cur -and $registered -and $cur -ge [version]$Version) {
-        Write-Ok "Already up to date for this user (installed $cur >= release $Version) at $dest. Use -Force to reinstall."
+    if (-not $Force -and (Test-AmUpToDate -Dir $dest -Version $Version -Decision 'installed')) {
+        Write-Ok "Already up to date for this user (installed $(Get-AmInstalledVersion -Dir $dest) >= release $Version) at $dest. Use -Force to reinstall."
     } else {
         $work = Join-Path $env:TEMP ('Agentmaster-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -2174,25 +2524,26 @@ function Invoke-AmUserInstall {
     Reinstall an up-to-date folder, and close other users' running instances.
 .PARAMETER ResultFile
     When set, the installed exe's path is written there.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Install-AmMachineCopy).
 .OUTPUTS
     [string] the installed Agentmaster.exe.
 .NOTES
     Throws without administrator rights, for a release that predates all-users installs, or when it fails.
 #>
 function Invoke-AmMachineInstall {
-    param([string]$ZipPath, [string]$Version, [string]$DestDir = '', [switch]$Force, [string]$ResultFile = '')
+    param([string]$ZipPath, [string]$Version, [string]$DestDir = '', [switch]$Force, [string]$ResultFile = '', [string[]]$OwnSids = @())
     $dest = $DestDir
     if (-not $dest) { $dest = Find-AmMachineInstallDir }
     if (-not $dest) { $dest = Get-AmDefaultMachineInstallDir }
-    $cur = Get-AmInstalledVersion -Dir $dest
-    if (-not $Force -and $cur -and (Get-AmInstallDecision -Dir $dest) -eq 'machine' -and $cur -ge [version]$Version) {
-        Write-Ok "Already up to date for all users (installed $cur >= release $Version) at $dest. Use -Force to reinstall."
+    if (-not $Force -and (Test-AmUpToDate -Dir $dest -Version $Version -Decision 'machine')) {
+        Write-Ok "Already up to date for all users (installed $(Get-AmInstalledVersion -Dir $dest) >= release $Version) at $dest. Use -Force to reinstall."
     } else {
         $work = Join-Path $env:TEMP ('Agentmaster-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         try {
             $root = Expand-AmZip -ZipPath $ZipPath -WorkDir $work
-            Install-AmMachineCopy -LayoutDir $root -DestDir $dest -Version $Version -Force:$Force
+            Install-AmMachineCopy -LayoutDir $root -DestDir $dest -Version $Version -Force:$Force -OwnSids $OwnSids
         } finally {
             Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -2355,16 +2706,17 @@ $script:AmCoreFunctionNames = @(
     'Write-Step', 'Write-Ok', 'Write-Warn', 'Write-Info', 'Resolve-AmPath', 'Initialize-Net', 'Import-AppxModule', 'Get-OSArch',
     'Test-Admin', 'Test-CanElevate', 'Get-AmIdentity', 'Get-FileSha256', 'Test-CertInMachineStore',
     'Test-CertTrustedMachine', 'Approve-SigningCert', 'Get-VCLibs', 'Get-AmPackage', 'Remove-AmPackage',
-    'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
+    'Test-AmPathUnder', 'Get-AmConsoleHostExe', 'Get-AmAncestorExes', 'Test-AmHostedIn', 'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
     'Install-AmLayout', 'Restore-AmSetAside', 'Get-AppExe', 'Get-AmLayoutRoot', 'Get-AmInstallDecision', 'Set-AmInstallDecision',
     'Get-AmUserProfileDir', 'Set-AmProfilePointer', 'Test-AmDirWritable', 'Get-AmRegistrationTargets',
     'Send-AmEnvironmentChange', 'Format-AmVersion', 'Get-AmRegistrationName', 'Test-AmShortcutInto',
-    'New-AmActiveSetupVersion', 'Get-AmUserShellFolders', 'Move-AmUserEntriesToMachineCopy', 'Invoke-AmMachineCopyUserCommand', 'Register-AmInstall',
+    'New-AmActiveSetupVersion', 'Test-AmAppHandlesRegisterUser', 'Test-AmActiveSetupStarts', 'Get-AmUserShellFolders',
+    'Move-AmUserEntriesToMachineCopy', 'Invoke-AmMachineCopyUserCommand', 'Remove-AmUserIconsInto', 'Register-AmInstall',
     'Unregister-AmInstall', 'Uninstall-AmCopy',
     'Invoke-AmAsUser', 'Start-AmAppAsUser', 'Export-AmFunctions', 'Invoke-AmPhaseAsUser',
     'Copy-AmProfileData', 'Remove-AmLegacyScriptShortcut',
     'Install-AmUserCopy', 'Install-AmMachineCopy', 'Invoke-AmUserIconStep', 'Get-AmDefaultUserInstallDir', 'Get-AmDefaultMachineInstallDir',
-    'Find-AmUserInstallDir', 'Find-AmMachineInstallDir', 'Get-AmInstalledVersion', 'Expand-AmZip',
+    'Find-AmUserInstallDir', 'Find-AmMachineInstallDir', 'Get-AmInstalledVersion', 'Test-AmUpToDate', 'Expand-AmZip',
     'Invoke-AmUserInstall', 'Invoke-AmMachineInstall', 'Get-AmWin32ErrorCode', 'Invoke-AmElevatedPowerShell', 'Invoke-AmElevatedPhase', 'Write-AmPhaseScript',
     'Read-AmPhaseRecord')
 # <<<<<<<< AGENTMASTER SHARED INSTALL CORE <<<<<<<<
@@ -2446,13 +2798,89 @@ function Read-Answer {
 <#
 .SYNOPSIS
     The GitHub API request headers (a token lifts the unauthenticated rate limit).
+.DESCRIPTION
+    The token is left out once GitHub refused it in this run (Invoke-GitHubApi): a stale $env:GITHUB_TOKEN must not
+    block an install from a public repository.
 .OUTPUTS
     [hashtable]
 #>
 function Get-GitHubHeaders {
     $h = @{ 'User-Agent' = 'Agentmaster-Installer'; 'Accept' = 'application/vnd.github+json' }
-    if ($GitHubToken) { $h['Authorization'] = "Bearer $GitHubToken" }
+    if ($GitHubToken -and -not $script:AmGitHubTokenRefused) { $h['Authorization'] = "Bearer $GitHubToken" }
     return $h
+}
+
+<#
+.SYNOPSIS
+    What a failed web request tells: its HTTP status and GitHub's rate-limit headers - in Windows PowerShell 5.1 (a
+    WebException over an HttpWebResponse) and in PowerShell 7 (an HttpResponseException over an HttpResponseMessage).
+.PARAMETER ErrorRecord
+    The caught error ($_ in a catch block).
+.OUTPUTS
+    [pscustomobject] Status (0 = no HTTP answer: a network failure), RateRemaining and RateReset ('' when absent).
+.NOTES
+    Never throws.
+#>
+function Get-WebFailure {
+    param($ErrorRecord)
+    $out = [pscustomobject]@{ Status = 0; RateRemaining = ''; RateReset = '' }
+    $resp = $null
+    try { $resp = $ErrorRecord.Exception.Response } catch { $resp = $null }
+    if (-not $resp) { return $out }
+    try { $out.Status = [int]$resp.StatusCode } catch { $out.Status = 0 }
+    foreach ($pair in @(@('RateRemaining', 'X-RateLimit-Remaining'), @('RateReset', 'X-RateLimit-Reset'))) {
+        $value = ''
+        try {
+            if ($resp.Headers -is [System.Net.WebHeaderCollection]) {
+                $value = [string]$resp.Headers[$pair[1]]
+            } else {
+                $values = $null
+                if ($resp.Headers.TryGetValues($pair[1], [ref]$values)) { $value = [string](@($values)[0]) }
+            }
+        } catch {
+            # A header that cannot be read is a header that is not there: the caller then shows the error as it is.
+            $value = ''
+        }
+        $out.($pair[0]) = $value
+    }
+    return $out
+}
+
+<#
+.SYNOPSIS
+    One GitHub API request (Invoke-RestMethod) that says what to do when GitHub refuses it.
+.DESCRIPTION
+    A refused token (401 - a stale $env:GITHUB_TOKEN, which this project's own build PC has) is dropped for the rest
+    of the run and the request made again without it: the releases are public. An exhausted rate limit (403 or 429
+    with X-RateLimit-Remaining 0; 60 requests an hour for a network address without a token) becomes a message that
+    says until when and how to pass a token. Every other failure is rethrown as it is (Get-WebFailure reads it).
+.PARAMETER Uri
+    The API URL.
+.OUTPUTS
+    The parsed JSON answer.
+.NOTES
+    Throws the rate-limit message, or the original error.
+#>
+function Invoke-GitHubApi {
+    param([string]$Uri)
+    try {
+        return Invoke-RestMethod -Uri $Uri -Headers (Get-GitHubHeaders)
+    } catch {
+        $failure = Get-WebFailure $_
+        if ($failure.Status -eq 401 -and $GitHubToken -and -not $script:AmGitHubTokenRefused) {
+            Write-Warn 'GitHub refused the token (-GitHubToken, or $env:GITHUB_TOKEN): going on without one'
+            $script:AmGitHubTokenRefused = $true
+            return (Invoke-GitHubApi -Uri $Uri)
+        }
+        if (($failure.Status -eq 403 -or $failure.Status -eq 429) -and $failure.RateRemaining -eq '0') {
+            $until = ''
+            if ($failure.RateReset -match '^\d+$') {
+                try { $until = ' until ' + [DateTimeOffset]::FromUnixTimeSeconds([long]$failure.RateReset).LocalDateTime.ToString('HH:mm') } catch { $until = '' }
+            }
+            throw "GitHub refuses more requests from this network$until (its limit without a token is 60 an hour). Run the installer again later, or pass -GitHubToken <a GitHub token> (or set `$env:GITHUB_TOKEN)."
+        }
+        throw
+    }
 }
 
 <#
@@ -2470,35 +2898,67 @@ function Test-NightlyTag {
 
 <#
 .SYNOPSIS
+    The releases a version names when no tag is exactly "v<version>": those tagged "v<version>-<suffix>" - how this
+    repository publishes its pre-releases ("v0.7.10-prerelease", "v0.7.8-prerelease-nightly").
+.PARAMETER Releases
+    The GitHub release objects, newest first (the API's order).
+.PARAMETER Tag
+    The asked tag ("v0.7.10"). A 4-part one ending in ".0" ("v0.7.10.0": the version the assets and the app show)
+    finds the 3-part tag's releases too.
+.OUTPUTS
+    The matching release objects, newest first (drafts never count).
+.NOTES
+    Never throws.
+#>
+function Find-ReleasesByVersion {
+    param($Releases, [string]$Tag)
+    $prefixes = @($Tag)
+    if ($Tag -match '^(v\d+\.\d+\.\d+)\.0$') { $prefixes += $Matches[1] }
+    return @($Releases | Where-Object {
+            $t = [string]$_.tag_name
+            (-not $_.draft) -and (@($prefixes | Where-Object { $t -ieq $_ -or $t.StartsWith("$_-", [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)
+        })
+}
+
+<#
+.SYNOPSIS
     The release to install: -Version, or the newest on the requested channel.
 .DESCRIPTION
     The in-app updater's channel model (Updater.h ReleaseAllowedOnChannel): stable is always eligible; a
-    NIGHTLY (by tag) only under -Nightly; any other prerelease only under -Prerelease.
-.PARAMETER Headers
-    The API headers.
+    NIGHTLY (by tag) only under -Nightly; any other prerelease only under -Prerelease. -Version names a tag
+    ("0.7.10-prerelease"), or just a version ("0.7.10"): when no release is tagged exactly so, the newest one tagged
+    with a suffix is taken (Find-ReleasesByVersion; a nightly only under -Nightly), and the run says which.
 .OUTPUTS
     The GitHub release object.
 .NOTES
-    Throws when the release does not exist or nothing is on the channel.
+    Throws when the release does not exist, nothing is on the channel, or GitHub cannot be asked (Invoke-GitHubApi).
 #>
 function Get-Release {
-    param($Headers)
     $base = "https://api.github.com/repos/$Repo/releases"
     if ($Version) {
         $tag = if ($Version -match '^v') { $Version } else { "v$Version" }
         Write-Step "Resolving release $tag from $Repo"
         try {
-            return Invoke-RestMethod -Uri "$base/tags/$tag" -Headers $Headers
+            return (Invoke-GitHubApi -Uri "$base/tags/$tag")
         } catch {
-            throw "Release '$tag' not found in $Repo. Check the version, or list with: gh release list -R $Repo"
+            # Only "no such tag" goes on to the suffixed tags; a network failure or a refusal is shown as it is.
+            if ((Get-WebFailure $_).Status -ne 404) { throw }
         }
+        $all = @(Find-ReleasesByVersion -Releases (Invoke-GitHubApi -Uri "$base`?per_page=100") -Tag $tag)
+        $pick = @($all | Where-Object { [bool]$Nightly -or -not (Test-NightlyTag $_.tag_name) }) | Select-Object -First 1
+        if ($pick) {
+            Write-Info "$tag is published as $($pick.tag_name)"
+            return $pick
+        }
+        if ($all.Count -gt 0) { throw "$tag is published only as a nightly build ($($all[0].tag_name)): add -Nightly to install it." }
+        throw "Release '$tag' not found in $Repo. Check the version; the releases are listed at https://github.com/$Repo/releases"
     }
     if ($Prerelease -or $Nightly) {
         $incl = if ($Prerelease -and $Nightly) { 'pre-releases + nightlies' }
                 elseif ($Nightly)              { 'nightlies' }
                 else                           { 'pre-releases' }
         Write-Step "Resolving newest release (incl. $incl) from $Repo"
-        $all = Invoke-RestMethod -Uri "$base`?per_page=20" -Headers $Headers
+        $all = Invoke-GitHubApi -Uri "$base`?per_page=20"
         $r = $all | Where-Object {
             if ($_.draft) { return $false }
             if (Test-NightlyTag $_.tag_name) { return [bool]$Nightly }
@@ -2510,19 +2970,17 @@ function Get-Release {
     }
     Write-Step "Resolving latest release from $Repo"
     try {
-        $r = Invoke-RestMethod -Uri "$base/latest" -Headers $Headers
+        $r = Invoke-GitHubApi -Uri "$base/latest"
     } catch {
         # GitHub answers /latest with 404 while a repository has only pre-releases (and no stable one yet):
         # say what to do instead of showing the raw web error. Any other failure (network, rate limit) is
         # shown as it is.
-        $status = 0
-        try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 }
-        if ($status -eq 404) { throw "$Repo has no stable release yet. Install the newest pre-release with -Prerelease, or a given one with -Version <x.y.z>." }
+        if ((Get-WebFailure $_).Status -eq 404) { throw "$Repo has no stable release yet. Install the newest pre-release with -Prerelease, or a given one with -Version <x.y.z>." }
         throw
     }
     if ($r -and (Test-NightlyTag $r.tag_name)) {
         Write-Warn "latest ($($r.tag_name)) is a NIGHTLY (unstable dev build) - skipped on the default channel (use -Nightly to opt in)"
-        $all = Invoke-RestMethod -Uri "$base`?per_page=20" -Headers $Headers
+        $all = Invoke-GitHubApi -Uri "$base`?per_page=20"
         $r = $all | Where-Object { -not $_.draft -and -not $_.prerelease -and -not (Test-NightlyTag $_.tag_name) } | Select-Object -First 1
         if (-not $r) { throw "No stable (non-nightly) release found in $Repo. Use -Version <x.y.z>, -Prerelease, or -Nightly." }
     }
@@ -2623,6 +3081,469 @@ function Find-Asset {
     return $a
 }
 
+# ---- what a User or Machine install installs (a release's zip, or -ZipPath) --------------------------------
+<#
+.SYNOPSIS
+    The version of a portable zip: from its name (Agentmaster_<a.b.c.d>_<arch>.zip, the release assets' form), else
+    from the .am-version stamp of its layout (the zip's top, or one wrapper folder down: agentmaster-<ver>\).
+.PARAMETER Path
+    The zip.
+.OUTPUTS
+    [version], or $null when neither tells.
+.NOTES
+    Never throws: a zip that cannot be read reads as unknown, and says why.
+#>
+function Get-ZipVersion {
+    param([string]$Path)
+    if ((Split-Path -Leaf $Path) -match '_(\d+\.\d+\.\d+\.\d+)(_|\.zip$)') { return [version]$Matches[1] }
+    $zip = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-AmPath $Path))
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            if ($name -ne '.am-version' -and $name -notmatch '^[^/]+/\.am-version$') { continue }
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try { $text = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+            return [version]$text
+        }
+    } catch {
+        Write-Info "the version inside $Path could not be read: $($_.Exception.Message)"
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    What a User or Machine install installs: the release's portable zip for this PC's processor, or the -ZipPath one
+    (an offline PC, a build of one's own).
+.PARAMETER Release
+    The GitHub release ($null with -ZipPath).
+.OUTPUTS
+    [pscustomobject] Label (for the console), Tag (the release tag; '' for a local zip), Version, Name (the zip's file
+    name), Asset (the GitHub asset; $null for a local zip), LocalPath (the local zip; '' until a release asset is
+    downloaded, Get-SourceZip).
+.NOTES
+    Throws when the release has no zip for this PC; for -ZipPath, when it names no file, names a zip for another
+    processor (an x64 zip on an ARM64 PC only warns: it runs emulated), or a zip whose version cannot be told.
+#>
+function Get-InstallSource {
+    param($Release)
+    if ($ZipPath) {
+        $full = Resolve-AmPath $ZipPath
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "-ZipPath names no file: $full" }
+        $leaf = Split-Path -Leaf $full
+        if ($leaf -match '_(x64|arm64|x86)\.zip$') {
+            $zipArch = $Matches[1].ToLowerInvariant()
+            $os = Get-OSArch
+            if ($zipArch -ne $os) {
+                if ($zipArch -eq 'x64' -and $os -eq 'arm64') { Write-Warn "$leaf is the x64 build: on this ARM64 PC it runs emulated (the _arm64.zip runs natively)" }
+                else { throw "$leaf is the $zipArch build, and this PC needs the $os one (the _$os.zip of the release)." }
+            }
+        }
+        $ver = Get-ZipVersion -Path $full
+        if (-not $ver) { throw "The version of $leaf cannot be told: name it Agentmaster_<a.b.c.d>_<arch>.zip, as the release assets are named." }
+        return [pscustomobject]@{ Label = "zip $leaf"; Tag = ''; Version = $ver; Name = $leaf; Asset = $null; LocalPath = $full }
+    }
+    $zipAsset = Find-Asset $Release "_$([regex]::Escape((Get-OSArch)))\.zip$"
+    if (-not $zipAsset) { throw "Release $($Release.tag_name) has no portable $(Get-OSArch) zip." }
+    $relVer = Get-AssetVersion -AssetName $zipAsset.name -TagName $Release.tag_name
+    return [pscustomobject]@{ Label = "release $($Release.tag_name)"; Tag = [string]$Release.tag_name; Version = $relVer; Name = [string]$zipAsset.name; Asset = $zipAsset; LocalPath = '' }
+}
+
+<#
+.SYNOPSIS
+    The local zip of an install source: the -ZipPath file, or the release asset downloaded (cached and SHA-256 checked)
+    into the download folder.
+.PARAMETER Source
+    Get-InstallSource's result.
+.OUTPUTS
+    [string] the zip's path.
+.NOTES
+    Throws when the download fails (Save-Asset).
+#>
+function Get-SourceZip {
+    param($Source)
+    if ($Source.LocalPath) { return $Source.LocalPath }
+    return (Save-Asset $Source.Asset $DownloadDir)
+}
+
+# ---- the install folder an -InstallDir names ---------------------------------------------------------------
+<#
+.SYNOPSIS
+    True when two paths name the same folder (case-insensitive, a trailing separator ignored).
+.PARAMETER A
+    A path.
+.PARAMETER B
+    Another path.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a path that cannot be resolved matches nothing.
+#>
+function Test-SamePath {
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $false }
+    try { return ((Resolve-AmPath $A).TrimEnd('\') -ieq (Resolve-AmPath $B).TrimEnd('\')) } catch { return $false }
+}
+
+<#
+.SYNOPSIS
+    True when $Dir holds an Agentmaster install, or what an uninstalled one leaves behind (its version stamp, manifest,
+    decision file or profile pointer).
+.PARAMETER Dir
+    A folder.
+.OUTPUTS
+    [bool]
+#>
+function Test-AgentmasterFolder {
+    param([string]$Dir)
+    if (Get-AppExe $Dir) { return $true }
+    foreach ($name in '.am-version', '.am-manifest', 'install.path', 'profile.path') {
+        if (Test-Path -LiteralPath (Join-Path $Dir $name)) { return $true }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    The folder an -InstallDir names, made safe to install into: an absolute path (the step that needs administrator
+    rights, and a run for the signed-in user, are other processes whose current folder is another one: a relative
+    "-InstallDir .\am" landed in C:\Windows\System32 there), and an "Agentmaster" folder inside it when it holds other
+    files and no Agentmaster install - the app's own rule for a folder the user picks (PortableInstall.h): the
+    installer never spreads its files among somebody else's.
+.PARAMETER Path
+    The -InstallDir argument.
+.OUTPUTS
+    [string]
+.NOTES
+    Throws when the path names a file, a drive that does not exist, or no folder on a drive or network share.
+#>
+function Resolve-InstallDirArgument {
+    param([string]$Path)
+    try { $full = Resolve-AmPath $Path } catch { throw "-InstallDir cannot be used: $Path ($($_.Exception.Message))" }
+    if ($full -notmatch '^[A-Za-z]:\\' -and $full -notmatch '^\\\\[^\\]+\\[^\\]+') { throw "-InstallDir must name a folder on a drive or a network share: $Path" }
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
+    if (Test-Path -LiteralPath $full -PathType Leaf) { throw "-InstallDir names a file, not a folder: $full" }
+    if ((Test-Path -LiteralPath $full) -and -not (Test-AgentmasterFolder $full) -and
+        @(Get-ChildItem -LiteralPath $full -Force -ErrorAction SilentlyContinue).Count -gt 0) {
+        $sub = Join-Path $full 'Agentmaster'
+        Write-Info "$full holds other files: Agentmaster goes into $sub"
+        return $sub
+    }
+    return $full
+}
+
+<#
+.SYNOPSIS
+    Refuse an -InstallDir that would make a second install of the same kind beside the existing one (the registration
+    would move to the new folder and leave the old copy orphaned), or lay one kind over the other kind's folder.
+.PARAMETER ScopeChoice
+    User or Machine.
+.PARAMETER State
+    Get-InstallState's result.
+.NOTES
+    Throws with what to do instead.
+#>
+function Assert-InstallDirFits {
+    param([string]$ScopeChoice, $State)
+    if (-not $InstallDir) { return }
+    $same = if ($ScopeChoice -eq 'User') { $State.UserDir } else { $State.MachineDir }
+    $other = if ($ScopeChoice -eq 'User') { $State.MachineDir } else { $State.UserDir }
+    if ($other -and (Test-SamePath $other $InstallDir)) {
+        $otherKind = if ($ScopeChoice -eq 'User') { 'the install for all users' } else { 'a per-user install' }
+        throw "$InstallDir holds ${otherKind}: pick another folder, or leave out -InstallDir."
+    }
+    if ($same -and -not (Test-SamePath $same $InstallDir)) {
+        $kind = if ($ScopeChoice -eq 'User') { 'just for you' } else { 'for all users' }
+        throw "Agentmaster is already installed $kind at $same. To move it, uninstall it first (-Uninstall -Scope $ScopeChoice) and then install with -InstallDir; or leave out -InstallDir to upgrade it where it is."
+    }
+}
+
+# ---- the running app: ask, continue elsewhere, start again --------------------------------------------------
+<#
+.SYNOPSIS
+    The Agentmaster GUI processes running from $Dir (Agentmaster.exe, or a pre-rename WindowsTerminal.exe), with their
+    owners.
+.DESCRIPTION
+    Without administrator rights, another user's processes cannot be read (their path reads empty), so they are not
+    listed: the step that runs with the rights finds them (Stop-ProcessesUnder).
+.PARAMETER Dir
+    An install folder.
+.OUTPUTS
+    [pscustomobject[]] ProcessId, OwnerSid ('' when it cannot be read).
+.NOTES
+    Never throws: a failed process query reads as nothing running, and says so.
+#>
+function Get-RunningAgentmaster {
+    param([string]$Dir)
+    $out = @()
+    if (-not $Dir) { return $out }
+    try {
+        $prefix = (Resolve-AmPath $Dir).TrimEnd('\') + '\'
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" -ErrorAction Stop |
+                Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })) {
+            $sid = ''
+            try { $sid = [string](Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop).Sid } catch { $sid = '' }
+            $out += [pscustomobject]@{ ProcessId = [int]$p.ProcessId; OwnerSid = $sid }
+        }
+    } catch {
+        Write-Info "the running Agentmaster processes could not be listed: $($_.Exception.Message)"
+    }
+    return $out
+}
+
+<#
+.SYNOPSIS
+    Ask before this run closes a running Agentmaster: an upgrade closes it and starts it again afterwards, an uninstall
+    closes it - and either cuts off a turn a session is working on. Asked only of a person (Test-CanPrompt) and not
+    under -Force; a run that cannot ask goes on, and says so.
+.PARAMETER Running
+    The instances the step closes that belong to the user this run is for (Get-RunningAgentmaster).
+.PARAMETER Dir
+    Their install folder.
+.PARAMETER Action
+    'upgrade' or 'uninstall'.
+.OUTPUTS
+    [bool] false only when the person said no.
+#>
+function Confirm-AppClose {
+    param($Running, [string]$Dir, [ValidateSet('upgrade', 'uninstall')][string]$Action)
+    if (@($Running).Count -eq 0) { return $true }
+    $what = if ($Action -eq 'upgrade') { 'It closes for the upgrade and starts again when the upgrade is done' } else { 'The uninstall closes it' }
+    $line = "Agentmaster is running from $Dir. $what; a session working right now is cut off (its conversation is kept)."
+    if ($Force -or -not (Test-CanPrompt)) { Write-Info $line; return $true }
+    Write-Host ''
+    Write-Host "    $line" -ForegroundColor Yellow
+    return [bool](Read-Answer -Prompt '    Go on? [Y/n]' -Default $true -Answers @{ 'y' = $true; 'yes' = $true; 'n' = $false; 'no' = $false })
+}
+
+<#
+.SYNOPSIS
+    Start the installed Agentmaster for the user this run is for, without administrator rights - through that user's
+    own Explorer when this PowerShell is that user, so the app gets the shell's environment: the PATH the install just
+    changed, and not this PowerShell's own module path (PowerShell 7's breaks Windows PowerShell in the app's tabs).
+.PARAMETER Exe
+    The installed Agentmaster.exe.
+.PARAMETER Identity
+    Get-AmIdentity's result.
+.OUTPUTS
+    [bool] true when the start was handed over.
+.NOTES
+    Never throws: without an Explorer in this session it falls back to Start-AmAppAsUser, which warns when it cannot.
+#>
+function Start-InstalledApp {
+    param([string]$Exe, $Identity)
+    if ($Identity.IsMainUser -and -not $Identity.Elevated -and $Exe -and (Test-Path -LiteralPath $Exe)) {
+        $shell = $null
+        try { $shell = @(Get-Process -Name explorer -ErrorAction Stop | Where-Object { $_.SessionId -eq $Identity.SessionId }) | Select-Object -First 1 } catch { $shell = $null }
+        if ($shell) {
+            try {
+                Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"' + $Exe + '"') -ErrorAction Stop
+                return $true
+            } catch {
+                Write-Info "Explorer could not start it ($($_.Exception.Message)); starting it directly"
+            }
+        }
+    }
+    return (Start-AmAppAsUser -Exe $Exe -Identity $Identity)
+}
+
+<#
+.SYNOPSIS
+    This script's whole text, in every way it runs (a file, irm | iex, a script block): the root of its parse tree.
+.OUTPUTS
+    [string]
+#>
+function Get-InstallerText {
+    $root = { }.Ast
+    while ($root.Parent) { $root = $root.Parent }
+    return $root.Extent.Text
+}
+
+<#
+.SYNOPSIS
+    One command-line argument quoted the way Windows splits a command line (CommandLineToArgvW, which powershell.exe
+    -File and pwsh.exe -File follow): in double quotes when it holds a space, a tab or a quote, with the backslashes
+    before a quote, and at the end, doubled.
+.PARAMETER Value
+    The argument.
+.OUTPUTS
+    [string]
+#>
+function ConvertTo-CommandLineArgument {
+    param([string]$Value)
+    if ($Value -and $Value -notmatch '[\s"]') { return $Value }
+    $sb = New-Object System.Text.StringBuilder
+    $null = $sb.Append('"')
+    $slashes = 0
+    foreach ($c in $Value.ToCharArray()) {
+        if ($c -eq [char]'\') { $slashes++; continue }
+        if ($c -eq [char]'"') { $null = $sb.Append([char]'\', 2 * $slashes + 1) }
+        elseif ($slashes -gt 0) { $null = $sb.Append([char]'\', $slashes) }
+        $slashes = 0
+        $null = $sb.Append($c)
+    }
+    if ($slashes -gt 0) { $null = $sb.Append([char]'\', 2 * $slashes) }
+    $null = $sb.Append('"')
+    return $sb.ToString()
+}
+
+<#
+.SYNOPSIS
+    The command line that runs this install again with what this run already settled: the scope, the release tag (or
+    the -ZipPath zip), absolute folders, the switches - for the window Start-InstallerInNewWindow opens.
+.PARAMETER ScriptPath
+    The script copy the new window runs.
+.PARAMETER ScopeChoice
+    The scope ('' = the new run asks).
+.PARAMETER ReleaseTag
+    The release this run resolved ('' = none: -ZipPath, an uninstall).
+.OUTPUTS
+    [string] the arguments after powershell.exe / pwsh.exe.
+#>
+function Get-RelaunchArguments {
+    param([string]$ScriptPath, [string]$ScopeChoice, [string]$ReleaseTag)
+    $parts = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-CommandLineArgument $ScriptPath))
+    if ($ScopeChoice) { $parts += @('-Scope', $ScopeChoice) }
+    if ($ZipPath) { $parts += @('-ZipPath', (ConvertTo-CommandLineArgument (Resolve-AmPath $ZipPath))) }
+    elseif ($ReleaseTag) { $parts += @('-Version', (ConvertTo-CommandLineArgument $ReleaseTag)) }
+    if ($InstallDir) { $parts += @('-InstallDir', (ConvertTo-CommandLineArgument $InstallDir)) }
+    if ($DownloadDir) { $parts += @('-DownloadDir', (ConvertTo-CommandLineArgument (Resolve-AmPath $DownloadDir))) }
+    if ($Repo) { $parts += @('-Repo', (ConvertTo-CommandLineArgument $Repo)) }
+    if ($ForCurrentAccount) { $parts += '-ForCurrentAccount' }
+    # -Elevate still means "straight to the approval" for the package's certificate.
+    if ($Elevate) { $parts += '-Elevate' }
+    if ($Force) { $parts += '-Force' }
+    if ($Launch) { $parts += '-Launch' }
+    if ($Uninstall) { $parts += '-Uninstall' }
+    return ($parts -join ' ')
+}
+
+<#
+.SYNOPSIS
+    True when this run must go on in a window of its own before it closes the Agentmaster in $Dirs: this PowerShell
+    runs inside it (Test-AmHostedIn - a tab of it, or started from one), and it is not already that continued run.
+.PARAMETER Dirs
+    The folders whose running Agentmaster the next step closes (empty entries are ignored).
+.OUTPUTS
+    [bool]
+#>
+function Test-NeedsOwnWindow {
+    param([string[]]$Dirs)
+    if ($script:AmRelaunched) { return $false }
+    $list = @($Dirs | Where-Object { $_ })
+    if ($list.Count -eq 0) { return $false }
+    return (Test-AmHostedIn -Dirs $list)
+}
+
+<#
+.SYNOPSIS
+    Go on with this run in a NEW PowerShell window, because this one would close half way: it runs inside the
+    Agentmaster the install or uninstall must close (Test-NeedsOwnWindow).
+.DESCRIPTION
+    This script's text is written to the download folder and run there by the same PowerShell (powershell.exe or
+    pwsh.exe; another host - the ISE, an editor - gets Windows PowerShell), in a window - and a console - of its own,
+    which closing Agentmaster does not end. Environment variables carry what the command line must not: that it is
+    the continued run (it then skips this check, titles its window, records itself and waits for Enter at the end),
+    its record's path, and a -GitHubToken (a command line is readable by other processes; a token GitHub refused is
+    not passed on). The new run removes them from its environment at once, so the Agentmaster it starts again never
+    inherits them.
+.PARAMETER ScopeChoice
+    The scope this run settled on ('' = the new run asks).
+.PARAMETER ReleaseTag
+    The release this run resolved ('' = none).
+.OUTPUTS
+    [bool] true (the new window started).
+.NOTES
+    Throws when no new window can be started, with the way to run the installer by hand.
+#>
+function Start-InstallerInNewWindow {
+    param([string]$ScopeChoice, [string]$ReleaseTag)
+    $dir = if ($DownloadDir) { Resolve-AmPath $DownloadDir } else { Join-Path $env:TEMP 'Agentmaster-install' }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $copy = Join-Path $dir ('Install-Agentmaster-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+    [IO.File]::WriteAllText($copy, (Get-InstallerText), (New-Object System.Text.UTF8Encoding($false)))
+    $log = [IO.Path]::ChangeExtension($copy, '.log')
+    $hostExe = ''
+    try { $hostExe = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $hostExe = '' }
+    if (@('powershell.exe', 'pwsh.exe') -notcontains ([IO.Path]::GetFileName("$hostExe")).ToLowerInvariant()) {
+        $hostExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    }
+    $names = @('AGENTMASTER_INSTALLER_RELAUNCHED', 'AGENTMASTER_INSTALLER_LOG', 'AGENTMASTER_INSTALLER_GITHUB_TOKEN')
+    $saved = @{}
+    foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
+    Write-Step 'This PowerShell runs inside the Agentmaster this step closes, and would close with it half way: the step goes on in a new window'
+    try {
+        [Environment]::SetEnvironmentVariable('AGENTMASTER_INSTALLER_RELAUNCHED', '1', 'Process')
+        [Environment]::SetEnvironmentVariable('AGENTMASTER_INSTALLER_LOG', $log, 'Process')
+        # '-' tells the new run "no token" - also over a $env:GITHUB_TOKEN it inherits that GitHub refused here.
+        $token = if ($script:AmGitHubTokenRefused) { '-' } elseif ($GitHubToken) { $GitHubToken } else { $null }
+        [Environment]::SetEnvironmentVariable('AGENTMASTER_INSTALLER_GITHUB_TOKEN', $token, 'Process')
+        Start-Process -FilePath $hostExe -ArgumentList (Get-RelaunchArguments -ScriptPath $copy -ScopeChoice $ScopeChoice -ReleaseTag $ReleaseTag) -WorkingDirectory $dir -ErrorAction Stop
+    } catch {
+        throw "The step must close the Agentmaster this PowerShell runs in, and a new window for it could not be started ($($_.Exception.Message)). Run the installer from a PowerShell window outside Agentmaster (Win+R, then powershell)."
+    } finally {
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n], 'Process') }
+    }
+    Write-Ok 'it goes on in the new window (it starts Agentmaster again when it is done)'
+    Write-Info "its record: $log"
+    return $true
+}
+
+<#
+.SYNOPSIS
+    Take over what Start-InstallerInNewWindow passed to this run - when this run is that continued one - and remove it
+    from the environment at once (the Agentmaster this run starts must not inherit it).
+.DESCRIPTION
+    Sets $script:AmRelaunched and $script:AmRelaunchLog. The token is RETURNED, not set: the parameter lives in the
+    scope the main block runs in, which is the script scope only for a run as a file.
+.OUTPUTS
+    [pscustomobject] TokenGiven (the continued run was given a token decision) and Token ('' = none).
+.NOTES
+    Never throws.
+#>
+function Initialize-ContinuedRun {
+    $script:AmRelaunched = ($env:AGENTMASTER_INSTALLER_RELAUNCHED -eq '1')
+    $script:AmRelaunchLog = ''
+    $out = [pscustomobject]@{ TokenGiven = $false; Token = '' }
+    if ($script:AmRelaunched) {
+        $script:AmRelaunchLog = [string]$env:AGENTMASTER_INSTALLER_LOG
+        $token = [string]$env:AGENTMASTER_INSTALLER_GITHUB_TOKEN
+        if ($token) {
+            $out.TokenGiven = $true
+            $out.Token = if ($token -eq '-') { '' } else { $token }
+        }
+    }
+    foreach ($n in 'AGENTMASTER_INSTALLER_RELAUNCHED', 'AGENTMASTER_INSTALLER_LOG', 'AGENTMASTER_INSTALLER_GITHUB_TOKEN') {
+        [Environment]::SetEnvironmentVariable($n, $null, 'Process')
+    }
+    return $out
+}
+
+<#
+.SYNOPSIS
+    End the continued run of Start-InstallerInNewWindow: stop its record, delete its copy of the script, and keep the
+    window open until Enter is pressed, so its result can be read.
+.NOTES
+    Never throws: a step that fails is skipped (the record and the copy are in the download folder either way).
+#>
+function Complete-ContinuedRun {
+    if ($script:AmRelaunchTranscript) {
+        try { Stop-Transcript | Out-Null } catch { Write-Info "the record could not be closed: $($_.Exception.Message)" }
+    }
+    # Only the copy Start-InstallerInNewWindow wrote: its name, in the download folder it was given.
+    if ($PSCommandPath -and ([IO.Path]::GetFileName($PSCommandPath) -like 'Install-Agentmaster-*.ps1') -and
+        $DownloadDir -and (Test-SamePath (Split-Path -Parent $PSCommandPath) $DownloadDir)) {
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-CanPrompt) {
+        try { $null = Read-Host '    Press Enter to close this window' } catch { Write-Info 'this window can be closed' }
+    }
+}
+
 # ---- what is installed ------------------------------------------------------------------------------------
 <#
 .SYNOPSIS
@@ -2701,20 +3622,28 @@ function Show-IdentityNote {
 <#
 .SYNOPSIS
     The scope question: where Agentmaster should be installed. The no-administrator per-user install is the
-    default on a fresh PC; when something is installed already, the default is to upgrade THAT.
+    default on a fresh PC; when something is installed already, the default is to upgrade THAT - when this
+    account can.
+.DESCRIPTION
+    Upgrading the all-users copy or the package needs administrator approval; a standard user's approval takes an
+    ADMINISTRATOR's password (Test-CanElevate is false), so their default stays the per-user install, which then
+    takes over for them (PROFILES.md 2c) - a non-interactive run of a standard user no longer stops at a UAC
+    password prompt or a refusal.
 .PARAMETER Identity
     Get-AmIdentity's result.
 .PARAMETER State
     Get-InstallState's result.
+.PARAMETER NoPackage
+    Leave the package out (-ZipPath installs a portable zip: a per-user or all-users copy only).
 .OUTPUTS
     [string] User, Machine, Package or Cancel.
 #>
 function Read-InstallScope {
-    param($Identity, $State)
+    param($Identity, $State, [switch]$NoPackage)
     $default = 'User'
-    if (-not $State.UserDir) {
+    if (-not $State.UserDir -and ($State.MachineDir -or ($State.Package -and -not $NoPackage)) -and (Test-CanElevate)) {
         if ($State.MachineDir) { $default = 'Machine' }
-        elseif ($State.Package) { $default = 'Package' }
+        else { $default = 'Package' }
     }
     if (-not (Test-CanPrompt)) {
         Write-Info "non-interactive: installing for scope $default (pass -Scope to choose)"
@@ -2738,16 +3667,21 @@ function Read-InstallScope {
     Write-Host "          $userDir"
     Write-Host '      [2] For all users of this PC (needs administrator rights)' -ForegroundColor White
     Write-Host "          $machineDir"
-    Write-Host '      [3] As the app package (MSIX; needs administrator approval for each release''s certificate)' -ForegroundColor White
-    if ($pkgNote) { Write-Host "         $pkgNote" }
-    Write-Host '      [C] Cancel' -ForegroundColor White
-    Write-Host ''
-    return (Read-Answer -Prompt "    Choice [1/2/3/C] (Enter = $($keys[$default]))" -Default $default -Answers @{
+    $answers = @{
         '1' = 'User'; 'u' = 'User'; 'user' = 'User'
         '2' = 'Machine'; 'm' = 'Machine'; 'machine' = 'Machine'; 'a' = 'Machine'
-        '3' = 'Package'; 'p' = 'Package'; 'package' = 'Package'; 'msix' = 'Package'
         'c' = 'Cancel'; 'cancel' = 'Cancel'; 'q' = 'Cancel'; 'n' = 'Cancel'
-    })
+    }
+    $choices = '1/2/C'
+    if (-not $NoPackage) {
+        Write-Host '      [3] As the app package (MSIX; needs administrator approval for each release''s certificate)' -ForegroundColor White
+        if ($pkgNote) { Write-Host "         $pkgNote" }
+        foreach ($k in '3', 'p', 'package', 'msix') { $answers[$k] = 'Package' }
+        $choices = '1/2/3/C'
+    }
+    Write-Host '      [C] Cancel' -ForegroundColor White
+    Write-Host ''
+    return (Read-Answer -Prompt "    Choice [$choices] (Enter = $($keys[$default]))" -Default $default -Answers $answers)
 }
 
 <#
@@ -2776,94 +3710,190 @@ function Read-PackageTakeover {
 <#
 .SYNOPSIS
     Install or upgrade the per-user copy (no administrator rights) for the signed-in user.
-.PARAMETER Release
-    The GitHub release.
+.DESCRIPTION
+    In order: the folder (Invoke-AmUserInstall's own rule), whether it is up to date already (Test-AmUpToDate - then
+    nothing is downloaded), whether this PowerShell runs inside the Agentmaster the step closes (it then goes on in a
+    window of its own), the package takeover question, whether the running Agentmaster may close, the download, the
+    install - and the Agentmaster that was running is started again afterwards.
+.PARAMETER Source
+    Get-InstallSource's result (a release's zip, or -ZipPath).
 .PARAMETER Identity
     Get-AmIdentity's result.
 .PARAMETER State
     Get-InstallState's result.
 .NOTES
-    Throws when the release has no portable zip for this OS, when another account runs the script without
-    the rights to act for the signed-in user, or when the install fails.
+    Throws when another account runs the script without the rights to act for the signed-in user, or when the
+    download or the install fails.
 #>
 function Invoke-UserScopeFlow {
-    param($Release, $Identity, $State)
+    param($Source, $Identity, $State)
     $forMain = (-not $Identity.IsMainUser) -and -not $ForCurrentAccount
     # Refuse BEFORE the download: a standard account cannot schedule the per-user part for another user.
     if ($forMain -and -not ($Identity.Elevated -or $Identity.IsSystem)) {
         throw "This PowerShell runs as $($Identity.RunningName), but $($Identity.MainUserName) is signed in. Run the installer from $($Identity.MainUserName)'s own PowerShell (no 'Run as administrator' needed), or add -ForCurrentAccount to install for $($Identity.RunningName)."
     }
-    $zipAsset = Find-Asset $Release "_$([regex]::Escape((Get-OSArch)))\.zip$"
-    if (-not $zipAsset) { throw "Release $($Release.tag_name) has no portable $(Get-OSArch) zip." }
-    $relVer = Get-AssetVersion -AssetName $zipAsset.name -TagName $Release.tag_name
-    Write-Ok "release $($Release.tag_name)  (version $relVer)"
-    $removePackage = Read-PackageTakeover -State $State
-    $zipPath = Save-Asset $zipAsset $DownloadDir
-    if (-not $forMain) {
-        $exe = Invoke-AmUserInstall -ZipPath $zipPath -Version "$relVer" -DestDir $InstallDir -Force:$Force -RemovePackage:$removePackage
-    } else {
-        $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
-        $body = "`$null = Invoke-AmUserInstall -ZipPath (Join-Path `$PhaseDir " + (& $q $zipAsset.name) + ") -Version " + (& $q "$relVer") +
-                " -DestDir " + (& $q $InstallDir) + $(if ($Force) { ' -Force' } else { '' }) + $(if ($removePackage) { ' -RemovePackage' } else { '' }) +
-                " -ResultFile (Join-Path `$PhaseDir 'result.txt')"
-        $r = Invoke-AmPhaseAsUser -Identity $Identity -Body $body -Files @($zipPath)
-        if ($r.Code -ne 0) { throw "The install for $($Identity.MainUserName) did not complete (exit code $($r.Code)); its record is above." }
-        $exe = $r.Result
+    $relVer = $Source.Version
+    Write-Ok "$($Source.Label)  (version $relVer)"
+    # The folder Invoke-AmUserInstall picks: -InstallDir, the existing install, the default ('' only for a signed-in
+    # user whose profile folder is unknown: their own run then picks it).
+    $dest = if ($InstallDir) { $InstallDir }
+            elseif ($State.UserDir) { $State.UserDir }
+            elseif (-not $forMain) { Get-AmDefaultUserInstallDir }
+            elseif ($Identity.MainUserProfile) { Join-Path $Identity.MainUserProfile '.agentmaster\bin' }
+            else { '' }
+    $upToDate = (-not $Force) -and (Test-AmUpToDate -Dir $dest -Version "$relVer" -Decision 'installed')
+    # The Agentmaster the next steps close: this copy (unless it stays), and the package when the takeover question
+    # can be asked (Read-PackageTakeover).
+    $closing = @()
+    if (-not $upToDate) { $closing += $dest }
+    if ($State.Package -and $State.Package.InstallLocation -and (Test-CanPrompt)) { $closing += [string]$State.Package.InstallLocation }
+    if (Test-NeedsOwnWindow -Dirs $closing) {
+        $null = Start-InstallerInNewWindow -ScopeChoice 'User' -ReleaseTag $Source.Tag
+        return
     }
+    $removePackage = Read-PackageTakeover -State $State
+    $owner = if ($forMain) { $Identity.MainUserSid } else { $Identity.RunningSid }
+    $running = @()
+    if (-not $upToDate) {
+        $running = @(Get-RunningAgentmaster -Dir $dest | Where-Object { -not $_.OwnerSid -or $_.OwnerSid -eq $owner })
+        if (-not (Confirm-AppClose -Running $running -Dir $dest -Action 'upgrade')) { Write-Warn 'Cancelled - nothing was changed.'; return }
+    }
+    $wasRunning = ($running.Count -gt 0) -or ($removePackage -and $State.PackageRunning)
+    if ($upToDate -and -not $removePackage) {
+        Write-Ok "Already up to date for this user (installed $(Get-AmInstalledVersion -Dir $dest) >= release $relVer) at $dest. Use -Force to reinstall."
+        $exe = Join-Path $dest 'Agentmaster.exe'
+    } else {
+        # Up to date with the package to remove: the install skips itself and needs no zip.
+        $zipPath = if ($upToDate) { '' } else { Get-SourceZip -Source $Source }
+        if (-not $forMain) {
+            $exe = Invoke-AmUserInstall -ZipPath $zipPath -Version "$relVer" -DestDir $dest -Force:$Force -RemovePackage:$removePackage
+        } else {
+            $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
+            $zipArg = if ($zipPath) { "(Join-Path `$PhaseDir " + (& $q (Split-Path -Leaf $zipPath)) + ")" } else { "''" }
+            $body = "`$null = Invoke-AmUserInstall -ZipPath $zipArg -Version " + (& $q "$relVer") +
+                    " -DestDir " + (& $q $dest) + $(if ($Force) { ' -Force' } else { '' }) + $(if ($removePackage) { ' -RemovePackage' } else { '' }) +
+                    " -ResultFile (Join-Path `$PhaseDir 'result.txt')"
+            $r = Invoke-AmPhaseAsUser -Identity $Identity -Body $body -Files @(@($zipPath) | Where-Object { $_ })
+            if ($r.Code -ne 0) { throw "The install for $($Identity.MainUserName) did not complete (exit code $($r.Code)); its record is above." }
+            $exe = $r.Result
+        }
+    }
+    $installed = if ($exe) { Get-AmInstalledVersion -Dir (Split-Path -Parent $exe) } else { $null }
+    if (-not $installed) { $installed = $relVer }
     Write-Host ''
-    Write-Host ("Done - Agentmaster $relVer is installed " + $(if ($forMain) { "for $($Identity.MainUserName)" } else { 'just for you' }) + ': ' + $exe) -ForegroundColor White
+    Write-Host ("Done - Agentmaster $installed is installed " + $(if ($forMain) { "for $($Identity.MainUserName)" } else { 'just for you' }) + ': ' + $exe) -ForegroundColor White
     Write-Info "Launch: the 'Agentmaster' Start-menu entry, the desktop icon, or 'Agentmaster.exe' on your PATH."
     Write-Info 'Upgrade: Agentmaster updates itself; re-running this script works too.'
     if ($State.MachineDir) { Write-Info "Agentmaster is also installed for all users at $($State.MachineDir): your own copy takes over for you - your icons, taskbar pins, the right-click entry and the agentmaster command open it." }
-    if ($Launch -and $exe) {
-        Write-Step 'Launching Agentmaster'
-        $null = Start-AmAppAsUser -Exe $exe -Identity $Identity
+    if ($exe -and ($Launch -or $wasRunning)) {
+        Write-Step $(if ($Launch) { 'Launching Agentmaster' } else { 'Starting Agentmaster again (it was closed for the upgrade)' })
+        $null = Start-InstalledApp -Exe $exe -Identity $Identity
     }
+}
+
+<#
+.SYNOPSIS
+    The SIDs whose running Agentmaster this run closes as its own user's: the account running it and the user signed
+    in to Windows (Stop-ProcessesUnder -OwnSids).
+.PARAMETER Identity
+    Get-AmIdentity's result.
+.OUTPUTS
+    [string[]]
+#>
+function Get-OwnSids {
+    param($Identity)
+    return @(@($Identity.RunningSid, $Identity.MainUserSid) | Where-Object { $_ } | Select-Object -Unique)
+}
+
+<#
+.SYNOPSIS
+    A PowerShell array literal of quoted strings, for a phase script's text: @('a','b').
+.PARAMETER Values
+    The strings.
+.OUTPUTS
+    [string]
+#>
+function ConvertTo-PhaseArrayLiteral {
+    param([string[]]$Values)
+    return ('@(' + ((@($Values) | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join ',') + ')')
 }
 
 <#
 .SYNOPSIS
     Install or upgrade the all-users copy (administrator rights: one UAC prompt when this PowerShell is not
     elevated; only that step runs elevated).
-.PARAMETER Release
-    The GitHub release.
+.DESCRIPTION
+    Everything that can be known without the rights is settled before the download and the prompt: whether the copy
+    is up to date (then nothing is downloaded and nobody is asked), whether another user's Agentmaster that this
+    account can see runs from it, whether this PowerShell runs inside it (it then goes on in a window of its own),
+    and whether this user's running Agentmaster may close. The elevated step closes the instances of this user and
+    of the signed-in user as their own (-OwnSids): a standard user's approval runs it as the ADMINISTRATOR whose
+    password was typed. Afterwards the signed-in user gets their icons now (everyone else at their next sign-in), and
+    their Agentmaster, when it was running, starts again.
+.PARAMETER Source
+    Get-InstallSource's result (a release's zip, or -ZipPath).
 .PARAMETER Identity
     Get-AmIdentity's result.
 .PARAMETER State
     Get-InstallState's result.
 .NOTES
-    Throws when the approval is declined or the install fails.
+    Throws when another user's visible instance runs without -Force, when the approval is declined or refused, or
+    when the download or the install fails.
 #>
 function Invoke-MachineScopeFlow {
-    param($Release, $Identity, $State)
-    $zipAsset = Find-Asset $Release "_$([regex]::Escape((Get-OSArch)))\.zip$"
-    if (-not $zipAsset) { throw "Release $($Release.tag_name) has no portable $(Get-OSArch) zip." }
-    $relVer = Get-AssetVersion -AssetName $zipAsset.name -TagName $Release.tag_name
-    Write-Ok "release $($Release.tag_name)  (version $relVer)"
-    $zipPath = Save-Asset $zipAsset $DownloadDir
+    param($Source, $Identity, $State)
+    $relVer = $Source.Version
+    Write-Ok "$($Source.Label)  (version $relVer)"
     $dest = if ($InstallDir) { $InstallDir } elseif ($State.MachineDir) { $State.MachineDir } else { Get-AmDefaultMachineInstallDir }
-    if (Test-Admin) {
-        $exe = Invoke-AmMachineInstall -ZipPath $zipPath -Version "$relVer" -DestDir $dest -Force:$Force
+    $exe = Join-Path $dest 'Agentmaster.exe'
+    $running = @()
+    if ((-not $Force) -and (Test-AmUpToDate -Dir $dest -Version "$relVer" -Decision 'machine')) {
+        Write-Ok "Already up to date for all users (installed $(Get-AmInstalledVersion -Dir $dest) >= release $relVer) at $dest. Use -Force to reinstall."
     } else {
-        Write-Step 'Installing for all users needs administrator rights - Windows asks for approval'
-        $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
-        $body = "`$null = Invoke-AmMachineInstall -ZipPath (Join-Path `$PhaseDir " + (& $q $zipAsset.name) + ") -Version " + (& $q "$relVer") +
-                " -DestDir " + (& $q $dest) + $(if ($Force) { ' -Force' } else { '' }) + " -ResultFile (Join-Path `$PhaseDir 'result.txt')"
-        $r = Invoke-AmElevatedPhase -Body $body -Files @($zipPath)
-        if ($r.Code -eq 1223) { throw 'Administrator approval was declined - nothing was installed. Choose "Just for you" (-Scope User) for an install without administrator rights.' }
-        if ($r.Code -eq 1260) { throw 'Windows does not let this account run programs as administrator (a setting of this PC), so it cannot install for all users - nothing was installed. Choose "Just for you" (-Scope User): it needs no administrator rights.' }
-        if ($r.Code -ne 0) { throw "The install for all users did not complete (exit code $($r.Code)); its record is above." }
-        $exe = $r.Result
+        $own = Get-OwnSids -Identity $Identity
+        $all = @(Get-RunningAgentmaster -Dir $dest)
+        # Without administrator rights only a few other users' processes are visible; the elevated step finds the rest.
+        $others = @($all | Where-Object { $_.OwnerSid -and $own -notcontains $_.OwnerSid })
+        if ($others.Count -gt 0 -and -not $Force) {
+            throw "Agentmaster is running for $($others.Count) other user session(s) from $dest. They must close it first, or add -Force to close their windows (what they are working on is cut off)."
+        }
+        if (Test-NeedsOwnWindow -Dirs @($dest)) {
+            $null = Start-InstallerInNewWindow -ScopeChoice 'Machine' -ReleaseTag $Source.Tag
+            return
+        }
+        $running = @($all | Where-Object { -not $_.OwnerSid -or $own -contains $_.OwnerSid })
+        if (-not (Confirm-AppClose -Running $running -Dir $dest -Action 'upgrade')) { Write-Warn 'Cancelled - nothing was changed.'; return }
+        $zipPath = Get-SourceZip -Source $Source
+        if (Test-Admin) {
+            $exe = Invoke-AmMachineInstall -ZipPath $zipPath -Version "$relVer" -DestDir $dest -Force:$Force -OwnSids $own
+        } else {
+            Write-Step 'Installing for all users needs administrator rights - Windows asks for approval'
+            $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
+            $body = "`$null = Invoke-AmMachineInstall -ZipPath (Join-Path `$PhaseDir " + (& $q (Split-Path -Leaf $zipPath)) + ") -Version " + (& $q "$relVer") +
+                    " -DestDir " + (& $q $dest) + $(if ($Force) { ' -Force' } else { '' }) + " -OwnSids " + (ConvertTo-PhaseArrayLiteral $own) +
+                    " -ResultFile (Join-Path `$PhaseDir 'result.txt')"
+            $r = Invoke-AmElevatedPhase -Body $body -Files @($zipPath)
+            if ($r.Code -eq 1223) { throw 'Administrator approval was declined - nothing was installed. Choose "Just for you" (-Scope User) for an install without administrator rights.' }
+            if ($r.Code -eq 1260) { throw 'Windows does not let this account run programs as administrator (a setting of this PC), so it cannot install for all users - nothing was installed. Choose "Just for you" (-Scope User): it needs no administrator rights.' }
+            if ($r.Code -ne 0) { throw "The install for all users did not complete (exit code $($r.Code)); its record is above." }
+            $exe = $r.Result
+        }
     }
     # The signed-in user gets their own icons now; everyone else at their next sign-in (Active Setup).
     $null = Invoke-AmUserIconStep -Exe $exe -Identity $Identity
+    $installed = Get-AmInstalledVersion -Dir (Split-Path -Parent $exe)
+    if (-not $installed) { $installed = $relVer }
     Write-Host ''
-    Write-Host "Done - Agentmaster $relVer is installed for all users: $exe" -ForegroundColor White
-    Write-Info 'Every user keeps their own data and gets their own Agentmaster icons (at their next sign-in, or when they first start it); updating it needs administrator approval.'
+    Write-Host "Done - Agentmaster $installed is installed for all users: $exe" -ForegroundColor White
+    if (Test-AmAppHandlesRegisterUser -Exe $exe) {
+        Write-Info 'Every user keeps their own data and gets their own Agentmaster icons (at their next sign-in, or when they first start it); updating it needs administrator approval.'
+    } else {
+        Write-Info 'Every user keeps their own data; the shortcuts "Agentmaster (all users)" in the Start menu and on the desktop are shared (an older release); updating it needs administrator approval.'
+    }
     if ($State.UserDir) { Write-Info "A per-user copy is installed too, at $($State.UserDir): for its user it stays the copy they use (remove it with -Uninstall -Scope User to use the shared one)." }
-    if ($Launch -and $exe) {
-        Write-Step 'Launching Agentmaster'
-        $null = Start-AmAppAsUser -Exe $exe -Identity $Identity
+    if ($exe -and ($Launch -or $running.Count -gt 0)) {
+        Write-Step $(if ($Launch) { 'Launching Agentmaster' } else { 'Starting Agentmaster again (it was closed for the upgrade)' })
+        $null = Start-InstalledApp -Exe $exe -Identity $Identity
     }
 }
 
@@ -2939,7 +3969,9 @@ function Remove-BlockingInstall {
 .PARAMETER ForceFlag
     Force-apply over any version and close a running instance.
 .NOTES
-    Throws when the install fails for another reason. (am-update.ps1's twin always force-applies.)
+    Throws when the install fails for another reason - for a package that is still in use (0x80073D02), with what to
+    do: Invoke-PackageScopeFlow closes this user's app first (Stop-PackageApp), and -ForceApplicationShutdown does not
+    close it. (am-update.ps1's twin always force-applies.)
 #>
 function Install-Bundle {
     param($BundlePath, $Dir, [bool]$ForceFlag)
@@ -2950,6 +3982,9 @@ function Install-Bundle {
         return
     } catch {
         $msg = $_.Exception.Message
+        if ($msg -match '0x80073D02') {
+            throw 'Agentmaster (the package) is still in use and could not be replaced: close every Agentmaster window and run the installer again.'
+        }
         if ($msg -match '0x80073CF3' -or $msg -match 'dependency') {
             Write-Warn "Resolving missing framework dependencies..."
             $deps = Resolve-MissingDeps -Message $msg -Dir $Dir
@@ -2968,6 +4003,50 @@ function Install-Bundle {
         }
         throw
     }
+}
+
+<#
+.SYNOPSIS
+    Close one user's running Agentmaster package app - its GUI processes from the package's install folder - and wait
+    for the console hosts of its tabs to end: what Add-AppxPackage and Remove-AppxPackage need while the app runs, and
+    what -ForceApplicationShutdown / -ForceTargetApplicationShutdown do NOT do for this package (both fail with
+    0x80073D02 "the following apps need to be closed" - measured in a test desktop, 2026-10-22).
+.DESCRIPTION
+    Only $OwnerSid's processes: every user of a package version runs it from the same install folder, and an upgrade
+    or a removal for one user leaves the others' registrations, and their running windows, alone. The GUI is stopped
+    and its console hosts end their tabs themselves (as in Stop-ProcessesUnder: a host killed outright would orphan
+    its tab's processes); a host still alive after 30 s is left, and the deployment then says the package is in use.
+.PARAMETER InstallLocation
+    The package's install folder.
+.PARAMETER OwnerSid
+    The user whose instances close.
+.OUTPUTS
+    [int] the number of GUI processes closed.
+.NOTES
+    Never throws: a process that cannot be read or stopped is skipped.
+#>
+function Stop-PackageApp {
+    param([string]$InstallLocation, [string]$OwnerSid)
+    if (-not $InstallLocation) { return 0 }
+    $ids = @(Get-RunningAgentmaster -Dir $InstallLocation | Where-Object { -not $_.OwnerSid -or $_.OwnerSid -eq $OwnerSid } | ForEach-Object { $_.ProcessId })
+    if ($ids.Count -eq 0) { return 0 }
+    foreach ($id in $ids) {
+        Write-Warn "closing running instance (pid $id)"
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    $prefix = (Resolve-AmPath $InstallLocation).TrimEnd('\') + '\'
+    $deadline = (Get-Date).AddSeconds(30)
+    $hosts = @()
+    do {
+        # Only the hosts of the closed GUI (its children): another user's tabs run from the same folder.
+        $hosts = @(Get-CimInstance Win32_Process -Filter "Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and $ids -contains [int]$_.ParentProcessId })
+        if ($hosts.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if ($hosts.Count -gt 0) { Write-Warn "$($hosts.Count) console host(s) of the closed app did not end within 30 s" }
+    Start-Sleep -Milliseconds 700
+    return $ids.Count
 }
 
 <#
@@ -3007,11 +4086,25 @@ function Invoke-PackageScopeFlow {
     } else {
         Write-Step "Installing $relVer"
     }
+    # A running package makes the upgrade fail (0x80073D02): the app of the user this run is for closes first - asked
+    # before (Confirm-AppClose), closed right before the package is added (Stop-PackageApp) - and when this PowerShell
+    # runs inside it, the upgrade goes on in a window of its own.
+    $owner = if ($forMain) { $Identity.MainUserSid } else { $Identity.RunningSid }
+    $location = if ($installed) { [string]$installed.InstallLocation } else { '' }
+    $running = @(Get-RunningAgentmaster -Dir $location | Where-Object { -not $_.OwnerSid -or $_.OwnerSid -eq $owner })
+    $wasRunning = $running.Count -gt 0
+    if ($wasRunning) {
+        if (Test-NeedsOwnWindow -Dirs @($location)) {
+            $null = Start-InstallerInNewWindow -ScopeChoice 'Package' -ReleaseTag ([string]$Release.tag_name)
+            return
+        }
+        if (-not (Confirm-AppClose -Running $running -Dir $location -Action 'upgrade')) { Write-Warn 'Cancelled - nothing was changed.'; return }
+    }
     # The .cer is tiny - fetched first, so the question is asked only when it matters (this release's
     # certificate not yet trusted) and BEFORE the big bundle download.
     $cerPath = Save-Asset $cerAsset $DownloadDir
     if (-not (Test-Admin) -and -not $Elevate -and (Test-CanPrompt) -and -not (Test-CertTrustedMachine $cerPath)) {
-        if ((Read-PackageCertChoice) -eq 'user') { Invoke-UserScopeFlow -Release $Release -Identity $Identity -State $State; return }
+        if ((Read-PackageCertChoice) -eq 'user') { Invoke-UserScopeFlow -Source (Get-InstallSource -Release $Release) -Identity $Identity -State $State; return }
     }
     # The certificate is trusted BEFORE the big bundle download: a declined or refused approval then costs
     # nothing (a non-interactive standard user downloaded the whole bundle first - test desktop, 2026-10-21).
@@ -3022,10 +4115,12 @@ function Invoke-PackageScopeFlow {
         } catch {
             if ((Test-Admin) -or $Elevate -or -not (Test-CanPrompt)) { throw }
             Write-Warn $_.Exception.Message
-            if ((Read-PackageCertChoice) -eq 'user') { Invoke-UserScopeFlow -Release $Release -Identity $Identity -State $State; return }
+            if ((Read-PackageCertChoice) -eq 'user') { Invoke-UserScopeFlow -Source (Get-InstallSource -Release $Release) -Identity $Identity -State $State; return }
         }
     }
     $bundlePath = Save-Asset $bundleAsset $DownloadDir
+    # Closed only now, with everything downloaded and trusted: a failure before this point leaves the app running.
+    if ($wasRunning) { $null = Stop-PackageApp -InstallLocation $location -OwnerSid $owner }
     Write-Step "Installing the package"
     if ($forMain) {
         # Add-AppxPackage registers for the account that runs it: the signed-in user's own task does it.
@@ -3044,9 +4139,8 @@ function Invoke-PackageScopeFlow {
     Write-Host ""
     Write-Host "Done - Agentmaster $relVer is installed as the app package." -ForegroundColor White
     Write-Info "Launch: run 'agentmaster' or use the 'Agentmaster' Start-menu entry."
-    if ($installed -and -not $Force) { Write-Info "If Agentmaster is currently running, restart it to pick up the new version." }
     if ($State.UserDir -or $State.MachineDir) { Write-Info 'A copy installed from the portable zip exists too: Start shows both, and they share your data.' }
-    if ($Launch) { Start-AmPackageApp -Identity $Identity }
+    if ($Launch -or $wasRunning) { Start-AmPackageApp -Identity $Identity -Again:(-not $Launch) }
 }
 
 <#
@@ -3079,10 +4173,12 @@ function Read-PackageCertChoice {
     Start the packaged app for the signed-in user, without administrator rights.
 .PARAMETER Identity
     Get-AmIdentity's result.
+.PARAMETER Again
+    Say that it starts again after the upgrade closed it (instead of "Launching").
 #>
 function Start-AmPackageApp {
-    param($Identity)
-    Write-Step 'Launching Agentmaster'
+    param($Identity, [switch]$Again)
+    Write-Step $(if ($Again) { 'Starting Agentmaster again (it was closed for the upgrade)' } else { 'Launching Agentmaster' })
     if ($Identity.IsMainUser -and -not $Identity.Elevated) { Start-Process "shell:appsFolder\$Aumid"; return }
     try {
         $null = Invoke-AmAsUser -UserSid $(if ($Identity.MainUserSid) { $Identity.MainUserSid } else { $Identity.RunningSid }) `
@@ -3100,9 +4196,16 @@ function Start-AmPackageApp {
     Get-AmIdentity's result.
 .PARAMETER State
     Get-InstallState's result.
+.DESCRIPTION
+    A removal closes the Agentmaster it removes, which may be the one this PowerShell runs in: the removals that do
+    not close it go first, here, and the rest goes on in a window of its own (Start-InstallerInNewWindow; with -Scope
+    when one kind is left). Before a removal closes a running copy of this user, it asks (Confirm-AppClose); a
+    "no" keeps that copy and goes on with the others. The elevated step of the all-users removal closes this user's
+    and the signed-in user's instances as their own (-OwnSids).
 .NOTES
-    Throws when a removal needs rights this run does not have (the message says how), or several kinds are
-    installed in a non-interactive run without -Scope.
+    Throws when a removal needs rights this run does not have (the message says how), when another user's visible
+    instance of the all-users copy runs without -Force, or when several kinds are installed in a non-interactive run
+    without -Scope.
 #>
 function Invoke-UninstallFlow {
     param($Identity, $State)
@@ -3134,10 +4237,21 @@ function Invoke-UninstallFlow {
     }
     $forMain = (-not $Identity.IsMainUser) -and -not $ForCurrentAccount
     $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
-    foreach ($kind in $pick) {
+    $own = Get-OwnSids -Identity $Identity
+    $owner = if ($forMain) { $Identity.MainUserSid } else { $Identity.RunningSid }
+    $dirOf = @{
+        'User'    = [string]$State.UserDir
+        'Machine' = [string]$State.MachineDir
+        'Package' = $(if ($State.Package) { [string]$State.Package.InstallLocation } else { '' })
+    }
+    # The removals that would close the Agentmaster this PowerShell runs in wait for the new window.
+    $later = @($pick | Where-Object { $dirOf[$_] -and (Test-NeedsOwnWindow -Dirs @($dirOf[$_])) })
+    foreach ($kind in @($pick | Where-Object { $later -notcontains $_ })) {
         switch ($kind) {
             'User' {
                 if (-not $State.UserDir) { Write-Warn 'No per-user install found.'; continue }
+                $running = @(Get-RunningAgentmaster -Dir $State.UserDir | Where-Object { -not $_.OwnerSid -or $_.OwnerSid -eq $owner })
+                if (-not (Confirm-AppClose -Running $running -Dir $State.UserDir -Action 'uninstall')) { Write-Warn "Kept the per-user install at $($State.UserDir)."; continue }
                 if (-not $forMain) {
                     $null = Uninstall-AmCopy -Scope User -Dir $State.UserDir
                 } elseif ($Identity.Elevated -or $Identity.IsSystem) {
@@ -3149,11 +4263,19 @@ function Invoke-UninstallFlow {
             }
             'Machine' {
                 if (-not $State.MachineDir) { Write-Warn 'No install for all users found.'; continue }
+                $all = @(Get-RunningAgentmaster -Dir $State.MachineDir)
+                $others = @($all | Where-Object { $_.OwnerSid -and $own -notcontains $_.OwnerSid })
+                if ($others.Count -gt 0 -and -not $Force) {
+                    throw "Agentmaster is running for $($others.Count) other user session(s) from $($State.MachineDir). They must close it first, or add -Force to close their windows (what they are working on is cut off)."
+                }
+                $running = @($all | Where-Object { -not $_.OwnerSid -or $own -contains $_.OwnerSid })
+                if (-not (Confirm-AppClose -Running $running -Dir $State.MachineDir -Action 'uninstall')) { Write-Warn "Kept the install for all users at $($State.MachineDir)."; continue }
                 if (Test-Admin) {
-                    $null = Uninstall-AmCopy -Scope Machine -Dir $State.MachineDir -Force:$Force
+                    $null = Uninstall-AmCopy -Scope Machine -Dir $State.MachineDir -Force:$Force -OwnSids $own
                 } else {
                     Write-Step 'Removing the install for all users needs administrator rights - Windows asks for approval'
-                    $r = Invoke-AmElevatedPhase -Body ("`$null = Uninstall-AmCopy -Scope Machine -Dir " + (& $q $State.MachineDir) + $(if ($Force) { ' -Force' } else { '' }))
+                    $r = Invoke-AmElevatedPhase -Body ("`$null = Uninstall-AmCopy -Scope Machine -Dir " + (& $q $State.MachineDir) + $(if ($Force) { ' -Force' } else { '' }) +
+                                                      " -OwnSids " + (ConvertTo-PhaseArrayLiteral $own))
                     if ($r.Code -eq 1223) { throw 'Administrator approval was declined - the install for all users was left in place.' }
                     if ($r.Code -eq 1260) { throw 'Windows does not let this account run programs as administrator (a setting of this PC): ask an administrator to remove the install for all users.' }
                     if ($r.Code -ne 0) { throw "Removing the install for all users failed (exit code $($r.Code))." }
@@ -3161,6 +4283,10 @@ function Invoke-UninstallFlow {
             }
             'Package' {
                 if (-not $State.Package) { Write-Warn 'No package installed.'; continue }
+                $running = @(Get-RunningAgentmaster -Dir $dirOf['Package'] | Where-Object { -not $_.OwnerSid -or $_.OwnerSid -eq $owner })
+                if (-not (Confirm-AppClose -Running $running -Dir $dirOf['Package'] -Action 'uninstall')) { Write-Warn 'Kept the package.'; continue }
+                # The package's own shutdown switches do not close this app (Stop-PackageApp): it is closed first.
+                if ($running.Count -gt 0) { $null = Stop-PackageApp -InstallLocation $dirOf['Package'] -OwnerSid $owner }
                 if (-not $forMain) {
                     Remove-AmPackage -Package $State.Package
                 } elseif ($Identity.Elevated -or $Identity.IsSystem) {
@@ -3172,30 +4298,58 @@ function Invoke-UninstallFlow {
             }
         }
     }
+    if ($later.Count -gt 0) {
+        $null = Start-InstallerInNewWindow -ScopeChoice $(if ($later.Count -eq 1) { $later[0] } else { '' }) -ReleaseTag ''
+        return
+    }
     Write-Info 'Your profile data (sessions, settings, window layouts - e.g. %USERPROFILE%\.agentmaster) was left untouched.'
 }
 
 # ============================ main ============================================================
 # Tests dot-source this file to reach its functions without installing anything.
 if ($env:AGENTMASTER_INSTALLER_LIBRARY -eq '1') { return }
+# The continued run of Start-InstallerInNewWindow takes over what it was passed - before anything reads it.
+$continued = Initialize-ContinuedRun
+if ($continued.TokenGiven) { $GitHubToken = $continued.Token }
+$failed = $false
 try {
+    if ($script:AmRelaunched) {
+        try { $Host.UI.RawUI.WindowTitle = 'Agentmaster installer' } catch { Write-Info 'the window title could not be set' }
+        if ($script:AmRelaunchLog) {
+            try {
+                Start-Transcript -LiteralPath $script:AmRelaunchLog -Append | Out-Null
+                $script:AmRelaunchTranscript = $true
+            } catch {
+                Write-Info "this window keeps no record: $($_.Exception.Message)"
+            }
+        }
+    }
+    Write-Host ""
+    Write-Host "Agentmaster installer" -ForegroundColor White
+    Write-Host ""
+
+    # The arguments first (cheap, and nothing is touched yet). The older switches map onto the scope question.
+    if (-not $Scope) {
+        if ($Portable) { $Scope = 'User' }
+        elseif ($Elevate) { $Scope = 'Package' }
+    }
+    if ($ZipPath -and -not $Uninstall) {
+        if ($Scope -eq 'Package') { throw '-ZipPath installs a portable zip: use -Scope User or Machine (the package installs from a release).' }
+        $ZipPath = Resolve-AmPath $ZipPath
+        if ($Version -or $Prerelease -or $Nightly) { Write-Info '-Version, -Prerelease and -Nightly do not apply with -ZipPath: the zip is what is installed' }
+    }
+    if ($InstallDir -and -not $Uninstall) { $InstallDir = Resolve-InstallDirArgument -Path $InstallDir }
+
     Test-Windows
     Test-64BitHost
     Initialize-Net
     Import-AppxModule
 
     if (-not $DownloadDir) { $DownloadDir = Join-Path $env:TEMP 'Agentmaster-install' }
+    # Absolute, like every path a later step gets: the step that needs administrator rights, the run for the signed-in
+    # user and the continued run in a new window are other processes, with another current folder.
+    $DownloadDir = Resolve-AmPath $DownloadDir
     New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
-
-    Write-Host ""
-    Write-Host "Agentmaster installer" -ForegroundColor White
-    Write-Host ""
-
-    # The older switches map onto the scope question.
-    if (-not $Scope) {
-        if ($Portable) { $Scope = 'User' }
-        elseif ($Elevate) { $Scope = 'Package' }
-    }
 
     $identity = Get-AmIdentity
     Show-IdentityNote -Identity $identity
@@ -3203,25 +4357,38 @@ try {
 
     if ($Uninstall) { Invoke-UninstallFlow -Identity $identity -State $state; return }
 
-    $release = Get-Release -Headers (Get-GitHubHeaders)
-    if (-not $Scope) { $Scope = Read-InstallScope -Identity $identity -State $state }
+    $release = if ($ZipPath) { $null } else { Get-Release }
+    # A -ZipPath zip is read before any question: one that cannot be installed is refused first.
+    $source = if ($ZipPath) { Get-InstallSource -Release $null } else { $null }
+    if (-not $Scope) { $Scope = Read-InstallScope -Identity $identity -State $state -NoPackage:([bool]$ZipPath) }
+    if ($Scope -eq 'Package' -and $InstallDir) { Write-Warn '-InstallDir does not apply to the package: ignored' }
+    if ($Scope -eq 'User' -or $Scope -eq 'Machine') {
+        Assert-InstallDirFits -ScopeChoice $Scope -State $state
+        if (-not $source) { $source = Get-InstallSource -Release $release }
+    }
     switch ($Scope) {
-        'User'    { Invoke-UserScopeFlow -Release $release -Identity $identity -State $state }
-        'Machine' { Invoke-MachineScopeFlow -Release $release -Identity $identity -State $state }
+        'User'    { Invoke-UserScopeFlow -Source $source -Identity $identity -State $state }
+        'Machine' { Invoke-MachineScopeFlow -Source $source -Identity $identity -State $state }
         'Package' { Invoke-PackageScopeFlow -Release $release -Identity $identity -State $state }
         default   { Write-Warn 'Cancelled - nothing was installed.' }
     }
 }
 catch {
+    $failed = $true
     Write-Host ""
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     # The way out of a rights problem - pointless after a per-user install or an uninstall failed.
     if ($Scope -and $Scope -ne 'User' -and -not $Uninstall) {
         Write-Host "       For an install without administrator rights: -Scope User" -ForegroundColor DarkGray
     }
-    # Only set a failure exit code when invoked as a downloaded .ps1 file. A one-liner
-    # (irm|iex or & ([scriptblock]::Create(...))) shares the caller's shell, where 'exit'
-    # would CLOSE their window - so signal failure by message + LASTEXITCODE only.
     $global:LASTEXITCODE = 1
-    if ($PSCommandPath) { exit 1 }
 }
+finally {
+    # The continued run's window stays open until its result has been read.
+    if ($script:AmRelaunched) { Complete-ContinuedRun }
+}
+# Only set a failure exit code when invoked as a downloaded .ps1 file. A one-liner
+# (irm|iex or & ([scriptblock]::Create(...))) shares the caller's shell, where 'exit'
+# would CLOSE their window - so signal failure by message + LASTEXITCODE only. After the finally: an exit in the
+# catch would close the continued run's window before its error could be read.
+if ($failed -and $PSCommandPath) { exit 1 }

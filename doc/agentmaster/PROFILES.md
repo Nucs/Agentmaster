@@ -431,6 +431,56 @@ administrator is not at hand for the release's certificate), `-Portable` (the in
 phase scripts). Both stay pure ASCII: the app writes `am-update.ps1` without a BOM, and Windows
 PowerShell 5.1 reads a BOM-less script in the ANSI code page.
 
+**The installer's edge cases (2026-10-22; checked in a test desktop, §2c).**
+
+- **Nothing stays in the caller's PowerShell.** `irm … | iex` ran the text IN the caller's scope: its
+  `$ErrorActionPreference = 'Stop'` and every function stayed in the user's window afterwards, and that
+  preference turned every later error there into a stop. A script block (`& ([scriptblock]::Create(…))`)
+  has a scope of its own but no script scope, so the core's `$script:` lists landed in the caller's (the
+  global one at the prompt). Every run that is not a file run nor dot-sourced — told by `$PSCmdlet` and its
+  text, since under iex `$MyInvocation` is the CALLER's — now starts the whole text again inside a throwaway
+  dynamic module with the parameters it was given, and ends. A failed run inside it also no longer ends a
+  calling script with `exit 1` (only a file run exits).
+- **The release a version names.** This repository publishes with a suffix, so `-Version 0.7.10` (or
+  `0.7.10.0`, the version the app shows) installs `v0.7.10-prerelease` and says so; a version published
+  only as a nightly says to add `-Nightly`. A token GitHub refuses (401 — a stale `$env:GITHUB_TOKEN`) is
+  dropped and the request made again without it; an exhausted rate limit (60 an hour per network address)
+  says until when and how to pass a token; any other failure is shown as it is, never as "not found".
+- **`-ZipPath`** installs a zip on disk (User or Machine): its version from its name, else from the stamp
+  of its layout; a zip for another processor is refused (an x64 zip on an ARM64 PC only warns).
+- **`-InstallDir`** is made absolute (the elevated step and a run for the signed-in user are other
+  processes: a relative `.\am` would have landed in `C:\Windows\System32` there), a folder that holds other
+  files gets an `Agentmaster` folder inside it (the app's own rule for a picked folder), and a second copy
+  of the same kind elsewhere, or one kind laid over the other's folder, is refused with how to move it.
+- **The default** upgrades what is installed only when this account can: a standard user's approval for
+  the all-users copy or the package takes an administrator's password, so their default stays *Just for
+  you*, which then takes over for them.
+- **Up to date costs nothing**: the one rule `Test-AmUpToDate` (the core's installs use it too) is asked
+  before anything is downloaded or any approval asked; an all-users or package upgrade that would stop at
+  another user's visible instance stops before the download too.
+- **A running Agentmaster** closes for its upgrade or uninstall: an interactive run asks first ("Go on?",
+  not under `-Force`), and the one that ran is started again afterwards — through the user's own Explorer
+  when the run is that user, so it gets the shell's environment (the PATH the install just changed, not a
+  PowerShell 7 module path). The PACKAGE's app is closed by the installer itself, only the user's own
+  instances, right before the package is added or removed: `Add-AppxPackage -ForceApplicationShutdown`
+  and `-ForceTargetApplicationShutdown` do NOT close it (0x80073D02, "the following apps need to be
+  closed", measured).
+- **Typed into a tab of the Agentmaster it closes**, the run would close with it half way. It now goes on in
+  a NEW PowerShell window of its own: its text written to the download folder, the settled choices on the
+  command line (the scope, the resolved tag or the zip, absolute folders — never a token, which travels in
+  the environment and is removed there at once), a record of the window in the download folder, and Enter
+  to close it. Told by `Test-AmHostedIn`: the console's HOST (`NtQueryInformationProcess`
+  `ProcessConsoleHostProcess`, as the app's orphan reaper reads it — not the console window's owner, which
+  Windows gives to the first CLIENT, the tab's shell) or a parent process from the folder. An uninstall
+  removes what does not close it first and leaves the rest to the new window. `Stop-ProcessesUnder` itself
+  refuses when its own console's host is in the folder it closes.
+- **An older release for all users** (one without `--register-user`, probed in its exe) gets the shared
+  *Agentmaster (all users)* shortcuts and no Active Setup step; a downgrade to one removes the step and the
+  icons it gave. **A run stopped half way** (Ctrl+C) puts the previous version back (PowerShell runs only
+  the `finally` then, never the `catch`). **An administrator's password** typed for a standard user runs
+  the elevated step as that administrator: the user's own Agentmaster is closed as theirs (`-OwnSids`), not
+  refused as another user's.
+
 ### §2c Rights and accounts over time — the scenario matrix
 
 Checked on 2026-10-21 (the sources of that day's install commit; in the dev 0.0.1.33 build, where a packaged install never runs it, and in no release) in a disposable Windows 11 25H2 test
@@ -615,6 +665,50 @@ for every account); a desktop moved into OneDrive; a taskbar pin's grouping righ
 (Explorer's UI Automation id of the pinned button kept the id it had when pinned, while the grouping followed
 the re-pointed pin).
 
+**The installer's edge cases (2026-10-22, evening).** §2b's *The installer's edge cases*, checked with the
+scripts of that commit in a CLEAN Windows 11 25H2 test desktop (UAC off, the signed-in administrator
+`Docker`): the app is the QA build of the afternoon (`--register-user`, a manifest) in portable zips stamped
+0.8.1.0 … 0.8.5.0, plus the released v0.7.10 zip given a manifest (an older app without `--register-user`),
+and the real GitHub releases. The suite ran there first (263, then 267 checks, 0 failures, the real
+scheduled task included).
+
+| What | Result |
+|---|---|
+| `-Scope User -ZipPath` 0.8.1.0, then the same again | installed from the zip; the second run "Already up to date", nothing installed |
+| 0.8.2.0 typed into a Windows Terminal window while Agentmaster runs | "Agentmaster is running from … It closes for the upgrade and starts again …" → Enter → closed, upgraded, started again (its parent `explorer.exe`) |
+| 0.8.3.0 typed into a TAB of that Agentmaster | the tab: "the step goes on in a new window" + the record's path; a new window *Agentmaster installer* (the copy's command line: the scope, the zip, absolute folders, no token) → Go on? → the old app and the tab closed, upgraded, started again; "Press Enter to close this window"; the record complete, the script copy deleted |
+| 0.8.4.0 by the script-block form typed into a tab (the run in the tab's own process: the console-host path) | the same; the tab's session after it: `EAP=Continue`, no function, no `$script:` list, no parameter, no module |
+| `-Uninstall -Scope User` typed into a tab | the same new window: "The uninstall closes it" → removed, `profile.path` and the data kept |
+| `-Version 0.7.10` with a bogus `$env:GITHUB_TOKEN`, 0.8.4.0 installed | "GitHub refused the token … going on without one", "v0.7.10 is published as v0.7.10-prerelease", "Already up to date" — nothing downloaded |
+| `-Scope Machine -ZipPath` the older app | *Agentmaster (all users)* in the common Start menu and on the Public desktop, no Active Setup step, the user's own icons untouched |
+| the all-users copy upgraded to the QA build | the shared shortcuts gone, the Active Setup step (`"…\Agentmaster.exe" --register-user`) written |
+| the older app again: without / with `-Force` | "Already up to date for all users" / downgraded: the step removed, the shared shortcuts back |
+| a STANDARD account (`-ForCurrentAccount`, no `-Scope`, non-interactive) beside the all-users copy | "non-interactive: installing for scope User"; installed without rights; the note that its own copy takes over |
+| `-InstallDir .\relforeign` (a folder of other files) with a per-user install elsewhere | "… holds other files: Agentmaster goes into …\relforeign\Agentmaster", then refused: already installed, how to move it; nothing written |
+| the all-users upgrade typed into a tab of the all-users copy | the new window, Go on?, closed, upgraded, started again |
+| `-Scope Package -Version 0.7.9`, then the latest (v0.8.0) typed into the v0.7.9 package app's tab | 0.7.9 resolved and added (certificate trusted); the upgrade went on in a new window, asked, closed the user's instance right before the install, 0.8.0.0 added and started again |
+| `-Uninstall -Scope Package` typed into the package app's tab | the new window, Go on?, closed, removed, the data kept |
+| `irm \| iex` (no arguments), the all-users copy at 0.8.2.0 | the latest (v0.8.0) resolved, the all-users copy chosen (an administrator), "Already up to date", nothing downloaded; the caller's `EAP=Continue` |
+
+**Fixed during that QA:**
+
+- **The console host was misread.** `GetConsoleWindow` + `GetWindowThreadProcessId` named the tab's shell
+  (`powershell.exe`): Windows gives a console window to its first client. The host is now read with
+  `ProcessConsoleHostProcess` (measured: a tab's shell → `…\.agentmaster\bin\OpenConsole.exe`).
+- **The package's running app was not closed.** The first run asked, downloaded, and then failed with
+  0x80073D02 although `Add-AppxPackage -ForceApplicationShutdown` was passed; `-ForceTargetApplicationShutdown`
+  failed the same way, run by hand. The installer now closes the user's own instances itself
+  (`Stop-PackageApp`), as the copy installs do; the error text no longer says `-Force` closes it.
+- **The older release's text** said every user gets icons of their own; it now says its shortcuts are shared.
+
+**Not covered:** a real Ctrl+C half way through a copy (the suite stops one in a nested PowerShell: the
+previous version is back); a real exhausted rate limit; an administrator's password typed for a standard
+user (`-OwnSids`; a desktop with UAC off cannot ask for it — the suite closes a process of this account
+through it); the package as the WINDOWS DEFAULT TERMINAL: the app starts its update script with
+`ShellExecute` and a visible console, which would then open inside the package app the update closes (not
+checked; it predates this work). **Observed in the app, not investigated:** the test desktop's Agentmaster
+window got narrower at each restart (1115 px → 674 → 491; the window record then held 306 × 586).
+
 **Automated coverage:** the m5 suite (`TestPortableInstall`, `TestProfileBootstrap`: the decision and
 pointer files, the startup plan, the account plan, the prompt default, the manifest and legacy names on a
 real scratch tree, the download mark removed from copied and in-place files but not from a user's own,
@@ -627,7 +721,14 @@ text, the decision and pointer files, the write probe with a real deny ACL, per-
 and uninstalls into a scratch registry key and scratch folders, the download mark on an installed layout,
 the Win32 error reading, the identity, a phase script that runs and reports back; since 2026-10-22 the Active
 Setup component — written, kept by an update, removed with its copy, never another copy's — the icons swept
-from scratch user folders, the hand-back of icons and pins, and the guard of the shared copy's command;
+from scratch user folders, the hand-back of icons and pins, and the guard of the shared copy's command; since
+that evening an upgrade stopped half way (a Ctrl+C in a nested PowerShell: the previous version back), the
+older-release probe and its shared shortcuts and downgrade sweep, nothing left by iex / a script block /
+Invoke-Command (a child PowerShell of each edition), the release lookup against a fake GitHub API (the suffixed
+tag, nightly-only, a refused token, the rate limit in both editions' error shapes), the zip version, the
+`-InstallDir` rules, the scope default, the new window's command line split back by Windows'
+`CommandLineToArgvW`, the continued run's environment, the hosted check, the close question, the up-to-date
+rule, the console-host read, and the package app closed only for its own user;
 `-IncludeScheduledTask` adds a real one-shot task — run it on a test desktop).
 
 **Not covered:** *[A]* in either question (the all-users update's after a decline or a refused swap, and

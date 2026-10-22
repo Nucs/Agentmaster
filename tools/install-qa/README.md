@@ -186,3 +186,39 @@ AppUserModelID the pin had when it was pinned, while the grouping follows the pi
 button, "1 running window pinned"); the agent kills with `Stop-Process`, which skips the app's own exit path,
 so a pin's id the app would stamp at its exit stays as it was; a `Reset-AmQa` deletes pin files, and the
 taskbar shows such a pin blank until Explorer restarts.
+
+## The installer's edge cases (2026-10-22, evening)
+
+The checks behind PROFILES.md §2b *The installer's edge cases* / §2c: the installer script itself, the same
+kind of clean desktop with UAC OFF. How each step was made:
+
+1. **The kit:** the QA build's package (`CascadiaPackage_*.msix` in the build's AppPackages folder) made into
+   the portable zip by `build\scripts\New-UnpackagedTerminalDistribution.ps1 -TerminalAppX … -XamlAppX …
+   -PortableMode:$true`, then repacked with chosen versions (the wrapper folder `agentmaster-<v>` and
+   `.am-version` set; one copy with no version in its name, for `-ZipPath`'s stamp reading), the released
+   v0.7.10 zip given an `.am-manifest` (an older app without `--register-user`), and the scripts in their
+   repository layout (`repo\tools\…`, `repo\src\…\am-update.ps1` and `PortableInstall.h`, which the suite
+   reads).
+2. **A window OUTSIDE Agentmaster that a person types into:** `launch('explorer.exe
+   C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')` — Explorer starts it, so its input is the
+   keyboard (it opened in Windows Terminal, the image's default terminal); `type_text` the command,
+   `press_keys(['enter'])` to answer. Run the script as `powershell -NoProfile -ExecutionPolicy Bypass -File
+   …`: a `.ps1` by path meets the image's execution policy.
+3. **A run INSIDE an Agentmaster tab:** start the installed copy through Explorer, focus its window, and type
+   the same command into its tab (a child PowerShell: its parent chain reaches `Agentmaster.exe`), or the
+   script-block form (the run in the tab's own process: its console host is the copy's `OpenConsole.exe`).
+   The new window is a Windows Terminal window titled *Agentmaster installer*; its record is
+   `%TEMP%\Agentmaster-install\Install-Agentmaster-<8 hex>.log`.
+4. **A standard account's run:** `New-LocalUser` with a generated password kept in the guest, then
+   `Start-Process powershell.exe … -Credential … -LoadUserProfile` with all three standard streams redirected
+   (an empty file as input: the run cannot ask, so it says which default it took).
+5. **The package:** `-Scope Package -Version 0.7.9` (the real release; the image already has a newer
+   `Microsoft.UI.Xaml.2.8` and VCLibs), started with `explorer.exe shell:appsFolder\Agentmaster_56k4f06dsfp9r!App`
+   (its own update prompt: *Postpone*), then the upgrade typed into its tab.
+
+**Traps met:** a console window belongs to its first CLIENT, not to its host (`GetWindowThreadProcessId` on
+`GetConsoleWindow` names the shell; read the host with `ProcessConsoleHostProcess`); `Add-AppxPackage
+-ForceApplicationShutdown` / `-ForceTargetApplicationShutdown` do not close the running Agentmaster package
+(0x80073D02); a Windows Terminal window can hold two installer tabs, so an Enter can go to the other one (end a
+finished run's window by its process); the elevated agent's `Z:` stopped resolving for one command
+(`\\host.lan\Data` still worked); GitHub's 60 API requests an hour are shared by the PC and its test desktops.

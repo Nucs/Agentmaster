@@ -519,6 +519,116 @@ function Remove-AmPackage {
 # ---- processes -----------------------------------------------------------------------------------------
 <#
 .SYNOPSIS
+    True when $Path lies inside one of $Dirs (case-insensitive, whole folder names: C:\a\b is inside C:\a, C:\ab is
+    not).
+.PARAMETER Path
+    A file or folder path.
+.PARAMETER Dirs
+    The folders.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a path that cannot be resolved counts as outside.
+#>
+function Test-AmPathUnder {
+    param([string]$Path, [string[]]$Dirs)
+    if (-not $Path) { return $false }
+    try { $full = ([IO.Path]::GetFullPath($Path)).TrimEnd('\') + '\' } catch { return $false }
+    foreach ($d in @($Dirs)) {
+        if (-not $d) { continue }
+        try { $prefix = (Resolve-AmPath $d).TrimEnd('\') + '\' } catch { continue }
+        if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    The program that hosts THIS process's console: conhost.exe for a console window of its own, a terminal's
+    OpenConsole.exe for a tab (a pseudoconsole) - '' when the process has no console or the host cannot be told.
+.DESCRIPTION
+    A process attached to a console ends with that console's host: when a terminal closes, its OpenConsole.exe ends
+    every process attached to it (CTRL_CLOSE). The host is what Windows records for the process itself -
+    NtQueryInformationProcess(ProcessConsoleHostProcess, class 49), the value Task Manager groups by, its low two bits
+    flags (the app's own ProcessInspect.cpp ReadConsoleHostPid reads it the same way). NOT the console window's
+    owner: Windows hands a console window to its first CLIENT, so GetWindowThreadProcessId named the tab's shell
+    (powershell.exe), never OpenConsole.exe (seen in a test desktop, 2026-10-22).
+.OUTPUTS
+    [string] the host's exe path, or ''.
+.NOTES
+    Never throws: any failure reads as unknown. The one-function type is compiled once per session.
+#>
+function Get-AmConsoleHostExe {
+    try {
+        if (-not ('Agentmaster.AmConsoleHostQuery' -as [type])) {
+            $sig = '[DllImport("ntdll.dll")] public static extern int NtQueryInformationProcess(IntPtr processHandle, int processInformationClass, out IntPtr processInformation, int processInformationLength, out int returnLength);'
+            Add-Type -MemberDefinition $sig -Name 'AmConsoleHostQuery' -Namespace 'Agentmaster' -ErrorAction Stop | Out-Null
+        }
+        $value = [IntPtr]::Zero
+        $length = 0
+        # -1 is GetCurrentProcess()'s pseudo handle: this process itself, no handle to open or close.
+        $status = [Agentmaster.AmConsoleHostQuery]::NtQueryInformationProcess([IntPtr](-1), 49, [ref]$value, [IntPtr]::Size, [ref]$length)
+        if ($status -ne 0) { return '' }
+        $hostPid = [long]($value.ToInt64() -band (-bnot 3))
+        if ($hostPid -le 0) { return '' }
+        return [string](Get-CimInstance Win32_Process -Filter "ProcessId=$hostPid" -ErrorAction Stop).ExecutablePath
+    } catch {
+        return ''
+    }
+}
+
+<#
+.SYNOPSIS
+    The exe paths of this process's ancestors, parent first (a parent that exited, or whose id the system gave to a
+    later process, ends the chain).
+.OUTPUTS
+    [string[]]
+.NOTES
+    Never throws: a failed process query gives an empty list.
+#>
+function Get-AmAncestorExes {
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $byId = @{}
+        foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, ExecutablePath, CreationDate -ErrorAction Stop)) { $byId[[int]$p.ProcessId] = $p }
+        $cur = $byId[[int]$PID]
+        for ($depth = 0; $cur -and $depth -lt 64; $depth++) {
+            $parent = $byId[[int]$cur.ParentProcessId]
+            # A reused id: the process that holds the parent's id now started AFTER its supposed child.
+            if (-not $parent -or ($parent.CreationDate -and $cur.CreationDate -and $parent.CreationDate -gt $cur.CreationDate)) { break }
+            if ($parent.ExecutablePath) { $out.Add([string]$parent.ExecutablePath) }
+            $cur = $parent
+        }
+    } catch {
+        Write-Info "this PowerShell's parent processes could not be read: $($_.Exception.Message)"
+    }
+    return $out.ToArray()
+}
+
+<#
+.SYNOPSIS
+    True when closing the Agentmaster in one of $Dirs could end THIS PowerShell: its console host lives there (an
+    Agentmaster tab), or one of its parent processes does (a PowerShell started from inside such a tab without a
+    console of its own).
+.DESCRIPTION
+    Install-Agentmaster.ps1 asks this before it closes a running Agentmaster, and continues in a new window of its own
+    when it is true. Erring towards true costs a second window; missing a case cost an install that ended half way.
+.PARAMETER Dirs
+    The install folders this run closes.
+.OUTPUTS
+    [bool]
+#>
+function Test-AmHostedIn {
+    param([string[]]$Dirs)
+    if (Test-AmPathUnder -Path (Get-AmConsoleHostExe) -Dirs $Dirs) { return $true }
+    foreach ($exe in @(Get-AmAncestorExes)) {
+        if (Test-AmPathUnder -Path $exe -Dirs $Dirs) { return $true }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
     Close the Agentmaster GUI processes that run from $DirPath and wait for their ConPTY hosts to drain.
 .DESCRIPTION
     Kills ONLY the GUI process (Agentmaster.exe / a pre-rename WindowsTerminal.exe), path-filtered, so the
@@ -528,18 +638,33 @@ function Remove-AmPackage {
     closes its pipe handles; each host then ends its clients itself and exits. A host still alive after 30 s
     is wedged and is killed as the last resort.
     An all-users copy can run for OTHER users of the PC at the same time; closing their windows would lose
-    their work, so that case throws unless -AllowOtherUsers.
+    their work, so that case throws unless -AllowOtherUsers. A PowerShell whose own console the Agentmaster in
+    $DirPath hosts (a tab of it) would end with it, half way through: that case throws before anything is closed.
 .PARAMETER DirPath
     The install folder.
 .PARAMETER AllowOtherUsers
     Close other users' instances too (an explicit -Force of the caller).
+.PARAMETER OwnSids
+    Further accounts whose instances count as this run's own, not another user's: the user who asked for the step.
+    A standard user's all-users upgrade runs as the ADMINISTRATOR whose password answered the UAC prompt, so without
+    it the user's own Agentmaster read as another user's and the step failed - after the download and the prompt.
 .NOTES
-    Throws only for other users' instances without -AllowOtherUsers.
+    Throws for other users' instances without -AllowOtherUsers, and when this PowerShell runs inside the Agentmaster
+    in $DirPath.
 #>
 function Stop-ProcessesUnder {
-    param($DirPath, [switch]$AllowOtherUsers)
+    param($DirPath, [switch]$AllowOtherUsers, [string[]]$OwnSids = @())
     if (-not $DirPath) { return }
     $prefix = (Resolve-AmPath $DirPath).TrimEnd('\') + '\'
+    # This PowerShell's own console may belong to the Agentmaster being closed (the command typed into an Agentmaster
+    # tab): closing it ends this script half way through the copy, its console host taking it down. Install-Agentmaster
+    # .ps1 continues in a window of its own before it gets here (Test-AmHostedIn); anything else run from such a tab
+    # stops HERE, before anything changed. Only the console host decides: the in-app updater runs in a console of its
+    # own although the app started it.
+    $consoleHost = Get-AmConsoleHostExe
+    if ($consoleHost -and (Test-AmPathUnder -Path $consoleHost -Dirs @($DirPath))) {
+        throw "This PowerShell window runs inside the Agentmaster in $DirPath, which must close for this step - and this window would close with it, half way through. Run it from a PowerShell window outside Agentmaster (Win+R, then powershell)."
+    }
     $gui = @(Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
     if (-not $AllowOtherUsers) {
@@ -547,7 +672,7 @@ function Stop-ProcessesUnder {
         $others = @($gui | Where-Object {
             $sid = $null
             try { $sid = (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop).Sid } catch { $sid = $null }
-            $sid -and $sid -ne $mine
+            $sid -and $sid -ne $mine -and (@($OwnSids) -notcontains $sid)
         })
         if ($others.Count -gt 0) {
             # Worded for both scripts: the in-app updater has no -Force, Install-Agentmaster.ps1 has one.
@@ -717,8 +842,9 @@ function Remove-AmEntries {
     the layout. When a move or the copy fails, what the copy laid down is removed and the set-aside entries
     are moved back (Restore-AmSetAside): the folder holds the previous version again, so a caller can start
     it. Until 2026-10-21 the old files were deleted before the copy, and a copy that failed half way left a
-    folder with neither version - the in-app update then had nothing to start. The set-aside folder is
-    deleted on success; one that could not be deleted (a file in it still in use) goes at the next run.
+    folder with neither version - the in-app update then had nothing to start. A run stopped half way (Ctrl+C)
+    puts the previous version back as well. The set-aside folder is deleted on success; one that could not be
+    deleted (a file in it still in use) goes at the next run.
     The source's own profile data, pointer and decision files never travel (the destination keeps its own);
     preserved user state in the destination is never touched; anything else a user keeps in the folder
     stays. Every copied file loses the "downloaded from the Internet" mark (the Zone.Identifier stream a
@@ -755,6 +881,10 @@ function Install-AmLayout {
     $aside = Join-Path $DestDir ($script:AmSetAsidePrefix + [guid]::NewGuid().ToString('N').Substring(0, 8))
     $moved = New-Object System.Collections.Generic.List[string]
     $laid = New-Object System.Collections.Generic.List[string]
+    # Set once the new layout is complete, or once the catch below took over the put-back. A run STOPPED half way
+    # (Ctrl+C) never reaches the catch - PowerShell runs only the finally then (measured in 5.1 and 7) - so the
+    # finally puts the previous version back itself; before, a Ctrl+C during the copy left a folder with neither.
+    $settled = $false
     try {
         if ($replace.Count -gt 0) { New-Item -ItemType Directory -Force -Path $aside | Out-Null }
         foreach ($n in $replace) {
@@ -773,13 +903,20 @@ function Install-AmLayout {
         if (-not (Test-Path -LiteralPath (Join-Path $DestDir 'Agentmaster.exe'))) {
             throw "The installed folder holds no Agentmaster.exe: $DestDir"
         }
+        $settled = $true
     } catch {
+        $settled = $true
         $failure = $_
         Write-Warn "the new version could not be laid in ($($failure.Exception.Message)); putting the previous version back"
         if (-not (Restore-AmSetAside -DestDir $DestDir -AsideDir $aside -Laid $laid.ToArray() -Moved $moved.ToArray())) {
             throw "The new version could not be laid in ($($failure.Exception.Message)), and the previous version could not be put back completely: its files are in $aside."
         }
         throw $failure
+    } finally {
+        if (-not $settled) {
+            Write-Warn 'the install was stopped half way; putting the previous version back'
+            $null = Restore-AmSetAside -DestDir $DestDir -AsideDir $aside -Laid $laid.ToArray() -Moved $moved.ToArray()
+        }
     }
     if (Test-Path -LiteralPath $aside) { Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -857,7 +994,7 @@ function Get-AmLayoutRoot {
     param([string]$ExtractDir)
     $src = Get-ChildItem -LiteralPath $ExtractDir -Directory | Where-Object { $_.Name -like 'agentmaster-*' -or $_.Name -like 'terminal-*' } | Select-Object -First 1
     $root = if ($src) { $src.FullName } else { $ExtractDir }
-    if (-not (Get-AppExe $root)) { throw 'The downloaded zip does not look like an Agentmaster portable build (no app exe inside).' }
+    if (-not (Get-AppExe $root)) { throw 'The zip does not look like an Agentmaster portable build (no app exe inside).' }
     return $root
 }
 
@@ -1133,6 +1270,67 @@ function New-AmActiveSetupVersion {
 
 <#
 .SYNOPSIS
+    True when an Agentmaster.exe knows the per-user command "--register-user" (the all-users install's Active Setup
+    step, PortableInstall.h kRegisterUserFlag) - any build since 2026-10-22; false for an older one.
+.DESCRIPTION
+    Install-Agentmaster.ps1 can install an OLDER release than itself (-Version, or the newest published one), and an
+    older app does not know the flag: registered as every user's sign-in command, it would start the app - or show its
+    "unknown argument" message - at every user's next sign-in, and the installer's own "icons now" step would hang on
+    it. The flag's name is a UTF-16 string in the exe of every build that handles it (the C++ constant); no release
+    before 2026-10-22 holds it (the embedded am-update.ps1 holds it only as ASCII text). Reading the exe is the one
+    signal that also works for a build that was never published (a QA zip, a local build).
+.PARAMETER Exe
+    The app exe.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: an exe that cannot be read counts as an older one (the 2026-10-21 shape is the safe one).
+#>
+function Test-AmAppHandlesRegisterUser {
+    param([string]$Exe)
+    if (-not $Exe -or -not (Test-Path -LiteralPath $Exe -PathType Leaf)) { return $false }
+    try {
+        # Latin-1 maps every byte to one char, so an ordinal IndexOf is a byte search of the UTF-16LE pattern.
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $haystack = $latin1.GetString([IO.File]::ReadAllBytes((Resolve-AmPath $Exe)))
+        $needle = $latin1.GetString([Text.Encoding]::Unicode.GetBytes('register-user'))
+        return $haystack.IndexOf($needle, [StringComparison]::Ordinal) -ge 0
+    } catch {
+        Write-Info "could not read $Exe to see whether it gives each user their own icons: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    True when the all-users install's Active Setup component starts THIS exe - the per-user icon model of an all-users
+    copy (since 2026-10-22). False for an older all-users registration, which made shared shortcuts instead.
+.PARAMETER Key
+    The component's key (Get-AmRegistrationTargets ActiveSetupKey, or a test's scratch key).
+.PARAMETER Exe
+    The all-users copy's app exe.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a key that cannot be read counts as no component.
+#>
+function Test-AmActiveSetupStarts {
+    param([string]$Key, [string]$Exe)
+    if (-not $Key -or -not $Exe) { return $false }
+    try {
+        if (-not (Test-Path -LiteralPath $Key)) { return $false }
+        $stub = [string](Get-Item -LiteralPath $Key).GetValue('StubPath')
+        # The program the command starts: its first token, quoted or not.
+        $program = if ($stub -match '^\s*"([^"]*)"') { $Matches[1] } else { (("$stub".Trim()) -split '\s+')[0] }
+        if (-not $program) { return $false }
+        return ([IO.Path]::GetFullPath($program)) -ieq ([IO.Path]::GetFullPath($Exe))
+    } catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Every user's own desktop and Start-menu Programs folders on this PC - where an all-users install's per-user icons
     live - for the all-users uninstall to sweep.
 .DESCRIPTION
@@ -1199,7 +1397,9 @@ function Get-AmUserShellFolders {
     compute the app's per-path formula): once the user's install is unregistered, Uninstall-AmCopy runs the shared
     copy's own --register-user, which stamps it (Invoke-AmMachineCopyUserCommand). The shared copy's per-user step is
     marked done for this user (UserActiveSetupKey), so Windows does not make a second set of icons at their next
-    sign-in.
+    sign-in. The desktop and Start-menu icons are handed back only to a shared copy that gives every user icons of
+    their own (its Active Setup component starts it, Test-AmActiveSetupStarts); an all-users copy of an older release
+    has shared shortcuts, so the user's icons just go then (the pins are still re-pointed: they stay working).
 .PARAMETER UserDir
     The user's install being removed.
 .PARAMETER MachineDir
@@ -1218,8 +1418,12 @@ function Move-AmUserEntriesToMachineCopy {
     if (-not $machineExe) { return 0 }
     $moved = 0
     $sh = New-Object -ComObject WScript.Shell
+    # The desktop and Start-menu icons go to the shared copy only when it gives every user icons of their own (its
+    # Active Setup component starts it). An all-users copy of an older release has shared shortcuts instead, and an
+    # icon handed back would sit beside them: then Unregister-AmInstall just removes the user's.
+    $perUserModel = Test-AmActiveSetupStarts -Key $Targets.ActiveSetupKey -Exe $machineExe
     foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
-        if (-not $folder) { continue }
+        if (-not $folder -or -not $perUserModel) { continue }
         $lnk = Join-Path $folder 'Agentmaster.lnk'
         if (-not (Test-AmShortcutInto -Lnk $lnk -Dir $UserDir)) { continue }
         try {
@@ -1312,6 +1516,40 @@ function Invoke-AmMachineCopyUserCommand {
 
 <#
 .SYNOPSIS
+    Remove the Agentmaster icons an all-users copy gave every user ("Agentmaster.lnk" in each user's own desktop and
+    Start-menu folders) - only those that point into $Dir: a user's own install, whose icons carry the same name,
+    keeps its icons.
+.DESCRIPTION
+    Used by the all-users uninstall (Unregister-AmInstall) and when an older release is registered over a newer one
+    for all users (Register-AmInstall: its shared shortcuts replace the users' own icons).
+.PARAMETER Dir
+    The all-users install folder.
+.PARAMETER Targets
+    The registration targets: their ProfileFolders when present (a test's scratch folders), else every user's
+    folders on this PC (Get-AmUserShellFolders, which needs administrator rights to read other profiles).
+.OUTPUTS
+    [pscustomobject] Removed (the number of icons removed), Notes (one line per icon that could not be removed).
+.NOTES
+    Never throws for one icon: one that cannot be removed is a note and the rest goes on.
+#>
+function Remove-AmUserIconsInto {
+    param([string]$Dir, [hashtable]$Targets)
+    $notes = @()
+    $swept = 0
+    $folders = if ($Targets -and $Targets.ContainsKey('ProfileFolders')) { @($Targets.ProfileFolders) } else { @(Get-AmUserShellFolders) }
+    foreach ($folder in $folders) {
+        if (-not $folder) { continue }
+        $lnk = Join-Path $folder 'Agentmaster.lnk'
+        # Test-AmShortcutInto never throws: a shortcut that cannot be read counts as pointing elsewhere and stays.
+        if (-not (Test-AmShortcutInto -Lnk $lnk -Dir $Dir)) { continue }
+        try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; $swept++ }
+        catch { $notes += "icon $lnk : $($_.Exception.Message)" }
+    }
+    return [pscustomobject]@{ Removed = $swept; Notes = $notes }
+}
+
+<#
+.SYNOPSIS
     Register an installed copy: Start-menu + desktop shortcuts, the "Open in Agentmaster" verbs on folders,
     folder backgrounds and drives, an Apps & Features entry, and the folder on PATH.
 .DESCRIPTION
@@ -1328,6 +1566,11 @@ function Invoke-AmMachineCopyUserCommand {
     user deleted is not made again. The shared shortcuts an older all-users registration made ("Agentmaster (all
     users).lnk", and "Agentmaster.lnk" before that, pointing into $Dir) are removed. Its Apps & Features entry is
     named "Agentmaster (all users)" (Get-AmRegistrationName).
+    All of that only when the app knows the per-user command (Test-AmAppHandlesRegisterUser). An OLDER app - a
+    release before 2026-10-22, which Install-Agentmaster.ps1 can install - keeps the 2026-10-21 shape: shared
+    shortcuts named "Agentmaster (all users)" and no Active Setup component (its unknown flag would start the app at
+    every user's sign-in). Registered over a newer release (a downgrade), it also removes the component that starts
+    this copy and the icons it gave every user (Remove-AmUserIconsInto).
     Where both installs exist, Windows puts the machine PATH before the user PATH, so a shell finds the
     all-users copy's agentmaster-cli.exe first - which hands the call to the user's own copy (the app's
     InstallHandoff.h); the "Open in Agentmaster" verbs of the user's own copy win (HKCU\Software\Classes
@@ -1349,18 +1592,25 @@ function Register-AmInstall {
     $notes = @()
     $exe = Join-Path $Dir 'Agentmaster.exe'
     $name = Get-AmRegistrationName -Scope $Scope
+    # An all-users copy gives every user icons of their own only when its app knows the per-user command; an OLDER app
+    # (a release before 2026-10-22, which Install-Agentmaster.ps1 can install) keeps the 2026-10-21 shape - shared
+    # shortcuts named "Agentmaster (all users)" and no Active Setup component: registered as every user's sign-in
+    # command, the unknown flag would start the app at every sign-in (Test-AmAppHandlesRegisterUser).
+    $perUserIcons = ($Scope -eq 'Machine') -and (Test-AmAppHandlesRegisterUser -Exe $exe)
     try {
         $sh = New-Object -ComObject WScript.Shell
         foreach ($folder in @($Targets.StartMenu, $Targets.Desktop)) {
             if (-not $folder) { continue }
             if ($Scope -eq 'Machine') {
-                # No shared shortcut any more; the ones an older all-users registration made go - only when they
-                # point here ("Agentmaster (all users).lnk" since 2026-10-21, "Agentmaster.lnk" before that).
-                foreach ($older in 'Agentmaster (all users).lnk', 'Agentmaster.lnk') {
+                # The shared shortcuts an older all-users registration made go - only when they point here: both names
+                # for the per-user model ("Agentmaster (all users).lnk" since 2026-10-21, "Agentmaster.lnk" before that),
+                # only the plain one for an older app, whose "Agentmaster (all users).lnk" is made again below.
+                $olderNames = if ($perUserIcons) { @('Agentmaster (all users).lnk', 'Agentmaster.lnk') } else { @('Agentmaster.lnk') }
+                foreach ($older in $olderNames) {
                     $lnk = Join-Path $folder $older
                     if (Test-AmShortcutInto -Lnk $lnk -Dir $Dir) { Remove-Item -LiteralPath $lnk -Force -ErrorAction SilentlyContinue }
                 }
-                continue
+                if ($perUserIcons) { continue }
             }
             New-Item -ItemType Directory -Force -Path $folder | Out-Null
             $lnk = Join-Path $folder "$name.lnk"
@@ -1375,7 +1625,18 @@ function Register-AmInstall {
             $s.Save()
         }
     } catch { $notes += "shortcuts: $($_.Exception.Message)" }
-    if ($Scope -eq 'Machine' -and $Targets.ActiveSetupKey) {
+    if ($Scope -eq 'Machine' -and $Targets.ActiveSetupKey -and -not $perUserIcons -and (Test-AmActiveSetupStarts -Key $Targets.ActiveSetupKey -Exe $exe)) {
+        # A newer release had given every user icons of their own, and this OLDER app is registered over it (a
+        # downgrade): its component goes - Windows must not run the unknown flag at sign-in - and so do the users' own
+        # icons of it, which the shared shortcuts above replace.
+        try {
+            Remove-Item -LiteralPath $Targets.ActiveSetupKey -Recurse -Force
+            $sweep = Remove-AmUserIconsInto -Dir $Dir -Targets $Targets
+            $notes += @($sweep.Notes)
+            Write-Info "this release gives no user icons of their own: shared shortcuts instead ($($sweep.Removed) user icon(s) removed)"
+        } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
+    }
+    if ($perUserIcons -and $Targets.ActiveSetupKey) {
         try {
             $as = $Targets.ActiveSetupKey
             # NOT $version: PowerShell variable names ignore case, so that would overwrite the -Version parameter the
@@ -1501,21 +1762,9 @@ function Unregister-AmInstall {
             }
         } catch { $notes += "each user's icons (Active Setup): $($_.Exception.Message)" }
         try {
-            $folders = if ($Targets.ContainsKey('ProfileFolders')) { @($Targets.ProfileFolders) } else { @(Get-AmUserShellFolders) }
-            $sh = New-Object -ComObject WScript.Shell
-            $swept = 0
-            foreach ($folder in $folders) {
-                if (-not $folder) { continue }
-                $lnk = Join-Path $folder 'Agentmaster.lnk'
-                if (-not (Test-Path -LiteralPath $lnk)) { continue }
-                $target = ''
-                try { $target = $sh.CreateShortcut($lnk).TargetPath } catch { $target = '' }
-                if (& $inside $target) {
-                    try { Remove-Item -LiteralPath $lnk -Force -ErrorAction Stop; $swept++ }
-                    catch { $notes += "icon $lnk : $($_.Exception.Message)" }
-                }
-            }
-            if ($swept -gt 0) { Write-Ok "removed $swept icon(s) it gave the users of this PC" }
+            $sweep = Remove-AmUserIconsInto -Dir $full -Targets $Targets
+            $notes += @($sweep.Notes)
+            if ($sweep.Removed -gt 0) { Write-Ok "removed $($sweep.Removed) icon(s) it gave the users of this PC" }
         } catch { $notes += "each user's icons: $($_.Exception.Message)" }
     }
     try {
@@ -1570,13 +1819,16 @@ function Unregister-AmInstall {
     Overrides Get-AmRegistrationTargets (tests).
 .PARAMETER Force
     Close other users' instances of an all-users copy too.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Stop-ProcessesUnder): the user who asked for
+    the uninstall, when an administrator's credentials run it.
 .OUTPUTS
     [string[]] the names left in the folder (empty when the folder was removed).
 #>
 function Uninstall-AmCopy {
-    param([ValidateSet('User', 'Machine')][string]$Scope, [string]$Dir, [hashtable]$Targets, [switch]$Force)
+    param([ValidateSet('User', 'Machine')][string]$Scope, [string]$Dir, [hashtable]$Targets, [switch]$Force, [string[]]$OwnSids = @())
     $full = (Resolve-AmPath $Dir).TrimEnd('\')
-    Stop-ProcessesUnder -DirPath $full -AllowOtherUsers:$Force
+    Stop-ProcessesUnder -DirPath $full -AllowOtherUsers:$Force -OwnSids $OwnSids
     $handedTo = ''
     if ($Scope -eq 'User') {
         # Agentmaster stays installed for all users: the user's icons and taskbar pins go to that copy instead of away
@@ -1928,22 +2180,31 @@ function Install-AmUserCopy {
     Overrides the registration targets (tests).
 .PARAMETER Force
     Close other users' running instances.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Stop-ProcessesUnder): the user who asked for
+    the install, when an administrator's credentials run it.
 .NOTES
     Needs administrator rights; throws without them, when the layout predates all-users support (no
     .am-manifest: its app would not know install.path = machine), or when the copy fails.
 #>
 function Install-AmMachineCopy {
-    param([string]$LayoutDir, [string]$DestDir, [string]$Version, [hashtable]$Targets, [switch]$Force)
+    param([string]$LayoutDir, [string]$DestDir, [string]$Version, [hashtable]$Targets, [switch]$Force, [string[]]$OwnSids = @())
     if (-not $Targets -and -not (Test-Admin)) { throw 'Installing for all users needs administrator rights.' }
     if (@(Read-AmManifest -Dir $LayoutDir).Count -eq 0) {
         throw "This release predates installs for all users (its zip has no .am-manifest). Install it just for you, or pick a newer release."
     }
-    Stop-ProcessesUnder -DirPath $DestDir -AllowOtherUsers:$Force
+    Stop-ProcessesUnder -DirPath $DestDir -AllowOtherUsers:$Force -OwnSids $OwnSids
     Write-Step "Installing Agentmaster $Version for all users into $DestDir"
     Install-AmLayout -SourceDir $LayoutDir -DestDir $DestDir
     Set-AmInstallDecision -Dir $DestDir -Value 'machine'
     foreach ($n in (Register-AmInstall -Scope Machine -Dir $DestDir -Version $Version -Targets $Targets)) { Write-Warn "registration: $n" }
-    Write-Ok 'installed for all users of this PC (each user gets their own Agentmaster icons at their next sign-in, or when they first start it)'
+    # Said as Register-AmInstall did it: an app that knows --register-user gives each user icons of their own, an older
+    # one has shared shortcuts (Test-AmAppHandlesRegisterUser).
+    if (Test-AmAppHandlesRegisterUser -Exe (Join-Path $DestDir 'Agentmaster.exe')) {
+        Write-Ok 'installed for all users of this PC (each user gets their own Agentmaster icons at their next sign-in, or when they first start it)'
+    } else {
+        Write-Ok 'installed for all users of this PC (an older release: its Start-menu and desktop shortcuts, "Agentmaster (all users)", are shared by every user)'
+    }
 }
 
 <#
@@ -1954,7 +2215,7 @@ function Install-AmMachineCopy {
     Run by the signed-in user's own account: the app is started directly (an elevated start is still the same user,
     whose desktop and HKCU it writes). Run by another account or SYSTEM: a one-shot task for the signed-in user
     (Invoke-AmAsUser). The step is idempotent - a user who already got their icons, or who has an install of their
-    own, gets nothing more.
+    own, gets nothing more. Nothing runs for an app that does not know the flag (Test-AmAppHandlesRegisterUser).
 .PARAMETER Exe
     The all-users copy's Agentmaster.exe.
 .PARAMETER Identity
@@ -1967,6 +2228,9 @@ function Install-AmMachineCopy {
 function Invoke-AmUserIconStep {
     param([string]$Exe, $Identity)
     if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    # An older app does not know the flag: it would start (or show its "unknown argument" message) and -Wait would
+    # hang on it. Its all-users copy has shared shortcuts instead (Register-AmInstall).
+    if (-not (Test-AmAppHandlesRegisterUser -Exe $Exe)) { return $false }
     try {
         if ($Identity.IsMainUser) {
             $p = Start-Process -FilePath $Exe -ArgumentList '--register-user' -PassThru -Wait
@@ -2078,6 +2342,32 @@ function Get-AmInstalledVersion {
 
 <#
 .SYNOPSIS
+    True when $Dir already holds $Version or a newer one as the install of the given kind - the ONE up-to-date rule:
+    the installs skip themselves by it, and Install-Agentmaster.ps1 asks it before it downloads or asks for
+    administrator approval, so the two can never disagree.
+.PARAMETER Dir
+    The install folder.
+.PARAMETER Version
+    The release version ("1.2.3.4").
+.PARAMETER Decision
+    The install.path the folder must hold: 'installed' (a per-user install) or 'machine' (the all-users one). A
+    folder kept portable, or holding the other kind, is never up to date: installing it is the point.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a folder without a stamp, or a version that is not a dotted number, reads as not up to date.
+#>
+function Test-AmUpToDate {
+    param([string]$Dir, [string]$Version, [string]$Decision)
+    if (-not $Dir) { return $false }
+    $cur = Get-AmInstalledVersion -Dir $Dir
+    if (-not $cur) { return $false }
+    if ((Get-AmInstallDecision -Dir $Dir) -ne $Decision) { return $false }
+    try { return ($cur -ge [version]$Version) } catch { return $false }
+}
+
+<#
+.SYNOPSIS
     Expand a release zip into a fresh folder and return its layout root (Get-AmLayoutRoot).
 .PARAMETER ZipPath
     The downloaded zip.
@@ -2124,10 +2414,8 @@ function Invoke-AmUserInstall {
     $dest = $DestDir
     if (-not $dest) { $dest = Find-AmUserInstallDir }
     if (-not $dest) { $dest = Get-AmDefaultUserInstallDir }
-    $cur = Get-AmInstalledVersion -Dir $dest
-    $registered = (Get-AmInstallDecision -Dir $dest) -eq 'installed'
-    if (-not $Force -and $cur -and $registered -and $cur -ge [version]$Version) {
-        Write-Ok "Already up to date for this user (installed $cur >= release $Version) at $dest. Use -Force to reinstall."
+    if (-not $Force -and (Test-AmUpToDate -Dir $dest -Version $Version -Decision 'installed')) {
+        Write-Ok "Already up to date for this user (installed $(Get-AmInstalledVersion -Dir $dest) >= release $Version) at $dest. Use -Force to reinstall."
     } else {
         $work = Join-Path $env:TEMP ('Agentmaster-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -2166,25 +2454,26 @@ function Invoke-AmUserInstall {
     Reinstall an up-to-date folder, and close other users' running instances.
 .PARAMETER ResultFile
     When set, the installed exe's path is written there.
+.PARAMETER OwnSids
+    Accounts whose running instances are closed as this run's own (Install-AmMachineCopy).
 .OUTPUTS
     [string] the installed Agentmaster.exe.
 .NOTES
     Throws without administrator rights, for a release that predates all-users installs, or when it fails.
 #>
 function Invoke-AmMachineInstall {
-    param([string]$ZipPath, [string]$Version, [string]$DestDir = '', [switch]$Force, [string]$ResultFile = '')
+    param([string]$ZipPath, [string]$Version, [string]$DestDir = '', [switch]$Force, [string]$ResultFile = '', [string[]]$OwnSids = @())
     $dest = $DestDir
     if (-not $dest) { $dest = Find-AmMachineInstallDir }
     if (-not $dest) { $dest = Get-AmDefaultMachineInstallDir }
-    $cur = Get-AmInstalledVersion -Dir $dest
-    if (-not $Force -and $cur -and (Get-AmInstallDecision -Dir $dest) -eq 'machine' -and $cur -ge [version]$Version) {
-        Write-Ok "Already up to date for all users (installed $cur >= release $Version) at $dest. Use -Force to reinstall."
+    if (-not $Force -and (Test-AmUpToDate -Dir $dest -Version $Version -Decision 'machine')) {
+        Write-Ok "Already up to date for all users (installed $(Get-AmInstalledVersion -Dir $dest) >= release $Version) at $dest. Use -Force to reinstall."
     } else {
         $work = Join-Path $env:TEMP ('Agentmaster-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         try {
             $root = Expand-AmZip -ZipPath $ZipPath -WorkDir $work
-            Install-AmMachineCopy -LayoutDir $root -DestDir $dest -Version $Version -Force:$Force
+            Install-AmMachineCopy -LayoutDir $root -DestDir $dest -Version $Version -Force:$Force -OwnSids $OwnSids
         } finally {
             Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -2347,16 +2636,17 @@ $script:AmCoreFunctionNames = @(
     'Write-Step', 'Write-Ok', 'Write-Warn', 'Write-Info', 'Resolve-AmPath', 'Initialize-Net', 'Import-AppxModule', 'Get-OSArch',
     'Test-Admin', 'Test-CanElevate', 'Get-AmIdentity', 'Get-FileSha256', 'Test-CertInMachineStore',
     'Test-CertTrustedMachine', 'Approve-SigningCert', 'Get-VCLibs', 'Get-AmPackage', 'Remove-AmPackage',
-    'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
+    'Test-AmPathUnder', 'Get-AmConsoleHostExe', 'Get-AmAncestorExes', 'Test-AmHostedIn', 'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
     'Install-AmLayout', 'Restore-AmSetAside', 'Get-AppExe', 'Get-AmLayoutRoot', 'Get-AmInstallDecision', 'Set-AmInstallDecision',
     'Get-AmUserProfileDir', 'Set-AmProfilePointer', 'Test-AmDirWritable', 'Get-AmRegistrationTargets',
     'Send-AmEnvironmentChange', 'Format-AmVersion', 'Get-AmRegistrationName', 'Test-AmShortcutInto',
-    'New-AmActiveSetupVersion', 'Get-AmUserShellFolders', 'Move-AmUserEntriesToMachineCopy', 'Invoke-AmMachineCopyUserCommand', 'Register-AmInstall',
+    'New-AmActiveSetupVersion', 'Test-AmAppHandlesRegisterUser', 'Test-AmActiveSetupStarts', 'Get-AmUserShellFolders',
+    'Move-AmUserEntriesToMachineCopy', 'Invoke-AmMachineCopyUserCommand', 'Remove-AmUserIconsInto', 'Register-AmInstall',
     'Unregister-AmInstall', 'Uninstall-AmCopy',
     'Invoke-AmAsUser', 'Start-AmAppAsUser', 'Export-AmFunctions', 'Invoke-AmPhaseAsUser',
     'Copy-AmProfileData', 'Remove-AmLegacyScriptShortcut',
     'Install-AmUserCopy', 'Install-AmMachineCopy', 'Invoke-AmUserIconStep', 'Get-AmDefaultUserInstallDir', 'Get-AmDefaultMachineInstallDir',
-    'Find-AmUserInstallDir', 'Find-AmMachineInstallDir', 'Get-AmInstalledVersion', 'Expand-AmZip',
+    'Find-AmUserInstallDir', 'Find-AmMachineInstallDir', 'Get-AmInstalledVersion', 'Test-AmUpToDate', 'Expand-AmZip',
     'Invoke-AmUserInstall', 'Invoke-AmMachineInstall', 'Get-AmWin32ErrorCode', 'Invoke-AmElevatedPowerShell', 'Invoke-AmElevatedPhase', 'Write-AmPhaseScript',
     'Read-AmPhaseRecord')
 # <<<<<<<< AGENTMASTER SHARED INSTALL CORE <<<<<<<<
