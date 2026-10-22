@@ -2624,7 +2624,14 @@ namespace winrt::TerminalApp::implementation
             }
             if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
             {
-                page->_ForkManagedSessionById(sid, tab->TabViewIndex() + 1, std::wstring{ model });
+                // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn.
+                ForkLaunchRequest request;
+                request.sourceId = sid;
+                request.managed = true;
+                request.model = std::wstring{ model };
+                request.insertPosition = tab->TabViewIndex() + 1;
+                request.origin = L"tab-menu";
+                page->_ForkAskingAboutRunningTurn(std::move(request));
             }
         });
 
@@ -5067,6 +5074,16 @@ namespace winrt::TerminalApp::implementation
         // CURRENT conversation state (resume, transcript/rollout-gated), swaps it in, and re-points the
         // stdin injector; it returns false for a plain shell / external tab, which falls through to the
         // upstream replay below (correct there — a shell has no conversation to resume).
+        //
+        // Agentmaster (HOOKS.md "Interrupted turns"): a managed Claude session whose last turn the USER
+        // interrupted (Esc) is asked about first — continue that turn after the restart (one rewind line in the
+        // transcript before the new claude starts) or keep it interrupted. The question is async: it returns
+        // true while it is up, and its answer restarts this pane (_RestartPaneWithTurnChoice). Every other
+        // restart goes on below exactly as before.
+        if (_AskBeforeRestartIfInterrupted(paneContent))
+        {
+            return;
+        }
         if (_RestartManagedSession(paneContent))
         {
             return;

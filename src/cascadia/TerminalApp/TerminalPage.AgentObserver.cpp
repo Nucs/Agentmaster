@@ -9832,6 +9832,15 @@ namespace winrt::TerminalApp::implementation
                 ++it; // claude not launched yet (a pre-Connected WriteInput silently drops) — wait, unbounded (a background tab starts on a HUMAN's first visit)
                 continue;
             }
+            if (_forkTurnStopWatches.count(id) != 0)
+            {
+                // HOOKS.md "Interrupted turns": the FORK STOP WATCH owns this fork's input until the turn the fork continues
+                // by itself is stopped (an Esc into a box we just filled could clear our copy, and a fill typed into a running
+                // turn queues it as a message). The watch re-anchors this entry when it ends (_EndForkTurnStop), so the
+                // continued turn it stopped is not read as "the user drove the fork".
+                ++it;
+                continue;
+            }
             if (entry.startedSeenMs == 0)
             {
                 entry.startedSeenMs = now; // first tick with the session started — begin the settle

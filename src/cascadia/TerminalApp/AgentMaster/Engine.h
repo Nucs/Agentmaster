@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "InterruptedTurns.h" // RestartTurnChoice — what a restart does about a turn the user interrupted (HOOKS.md "Interrupted turns")
 #include "RemoteLaunch.h" // RemoteLaunchRequest — what a remote surface asks a window to open (MESSAGING.md)
 #include "SessionModels.h" // WindowRecord (M10 window-record claiming)
 #include "WindowTabTools.h" // WindowToolRequest / WindowToolOutcome / WindowCensus — the AI search's window and tab tools (SESSIONS.md §9.14)
@@ -237,7 +238,10 @@ namespace Agentmaster
         {
             uint64_t token{ 0 };
             std::wstring windowId;
-            std::function<void(const std::wstring& sessionId)> fn;
+            // sessionId: the session to restart; turnChoice: the answer to the "continue the interrupted turn?"
+            // question when the caller already has one (the window the user clicked in, Telegram) — Ask lets the
+            // hosting window ask (HOOKS.md "Interrupted turns").
+            std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> fn;
         };
         std::mutex restartMutex;
         std::vector<WindowRestartSink> restartSinks;
@@ -690,9 +694,12 @@ namespace Agentmaster
     // `sourceWindowId`'s (the caller already tried its own _claudeTabs): exactly one window hosts a
     // session's tab, so at most one sink acts; with no host anywhere (archived / mid-bind) every sink
     // misses and the call is a no-op. Used by the Triage Board / Explorer-tree "Restart session".
-    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
+    // HOOKS.md "Interrupted turns": `turnChoice` rides along to the hosting window — the answer the caller got to
+    // "continue the turn you interrupted?" (KeepInterrupted / Uninterrupt), or Ask to let that window ask. The
+    // default keeps a restart that never heard of the question exactly as it was.
+    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> handler);
     void UnregisterWindowRestartHandler(uint64_t token);
-    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId, RestartTurnChoice turnChoice = RestartTurnChoice::KeepInterrupted);
 
     // Agentmaster (cross-window "Close ▸ Of Same Folder"): register THIS window's close-session sink
     // (monotonic token; detach with UnregisterWindowCloseSessionHandler — removing a stale token is a

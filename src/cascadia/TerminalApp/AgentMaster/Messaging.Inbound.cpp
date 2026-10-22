@@ -18,6 +18,7 @@
 #include <chrono>
 #include <tuple> // the /idle list's (id, title, color square) rows (§21.13)
 
+#include "ApiErrorRewind.h" // HOOKS.md "Interrupted turns": PlanInterruptRewindForSession, AssessForkContinuation (the restart and fork questions)
 #include "ClaudeSpawn.h" // LogNav, ShortId, ResolveClaudeTranscriptPath, NewSessionId, LogSwallowedException
 #include "FolderProbe.h" // §21.17.4: SharedFolderProber — the poll thread's folder checks wait a bounded time
 #include "Persistence.h" // DeriveSessionTitle
@@ -375,7 +376,9 @@ namespace Agentmaster::Msg
             {
                 try
                 {
-                    _hooks.restartSession(sessionId);
+                    // HOOKS.md "Interrupted turns": an errored or exited session holds no turn the USER interrupted to ask
+                    // about — the restart goes as it always did.
+                    _hooks.restartSession(sessionId, RestartTurnChoice::KeepInterrupted);
                 }
                 catch (...)
                 {
@@ -1773,9 +1776,16 @@ namespace Agentmaster::Msg
                 }
                 else
                 {
+                    // HOOKS.md "Interrupted turns": a turn the USER interrupted is asked about here, in the topic — continue it
+                    // after the restart (the transcript gets one rewind line first) or keep it interrupted. The buttons restart.
+                    if (_askUninterruptBeforeRestart(sessionId, *s, threadId))
+                    {
+                        done(L"asked");
+                        return;
+                    }
                     if (_hooks.restartSession)
                     {
-                        _hooks.restartSession(sessionId);
+                        _hooks.restartSession(sessionId, RestartTurnChoice::KeepInterrupted);
                     }
                     _reply(threadId, L"Restarting the session.", false);
                 }
@@ -1799,6 +1809,8 @@ namespace Agentmaster::Msg
             req.dir = s->workingDir;
             req.title = name == L"forksession" ? s->title : std::wstring{};
             req.model = Trimmed(cmd.args);
+            // HOOKS.md "Interrupted turns": a fork of a session in the middle of a turn is asked about first (_requestLaunch).
+            req.forkTurn = name == L"forksession" ? ForkTurnChoice::Ask : ForkTurnChoice::Uninterrupted;
             _requestLaunch(req, threadId);
             done(L"ok");
             return;
@@ -2393,6 +2405,7 @@ namespace Agentmaster::Msg
             req.sessionId = sessionId;
             req.dir = dir;
             req.title = title;
+            req.forkTurn = ForkTurnChoice::Ask; // HOOKS.md "Interrupted turns": a running session's fork is asked about first
             _requestLaunch(req, threadId); // it says how the fork goes (and why not, when it cannot open)
             return;
         }
@@ -2722,13 +2735,45 @@ namespace Agentmaster::Msg
             {
                 if (_hooks.restartSession)
                 {
-                    _hooks.restartSession(tok.sessionId);
+                    // HOOKS.md "Interrupted turns": a RUNNING turn cut off by the restart is no user interrupt; Claude Code
+                    // continues a turn its shutdown cut by itself.
+                    _hooks.restartSession(tok.sessionId, RestartTurnChoice::KeepInterrupted);
                 }
                 _reply(threadId, L"Restarting the session.", false);
                 // §21.28: the restart is the window's work, and its card shows it (the turn cut off, the state after): the button stays
                 // busy until the card changes.
                 _awaitCardChange(tok.sessionId);
                 LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + L" -> confirmed");
+            }
+            else if (k == L"restart-uninterrupt" || k == L"restart-keep")
+            {
+                // HOOKS.md "Interrupted turns": the answer to "Continue the interrupted turn?" (_askUninterruptBeforeRestart).
+                // The hosting window plans again on the transcript as it is now (Uninterrupt) and restarts.
+                const bool uninterrupt = k == L"restart-uninterrupt";
+                if (_hooks.restartSession)
+                {
+                    _hooks.restartSession(tok.sessionId, uninterrupt ? RestartTurnChoice::Uninterrupt : RestartTurnChoice::KeepInterrupted);
+                }
+                _reply(threadId, uninterrupt ? L"\x25B6 Restarting it \x2014 the interrupt is taken back, and the turn goes on." : L"Restarting it \x2014 the turn stays interrupted.", false);
+                _awaitCardChange(tok.sessionId); // §21.28: until the card shows the restarted session
+                LogNav(L"remote telegram /restartsession " + ShortId(tok.sessionId) + (uninterrupt ? L" -> continue the interrupted turn" : L" -> keep it interrupted"));
+            }
+            else if (k == L"fork-interrupted" || k == L"fork-uninterrupted")
+            {
+                // HOOKS.md "Interrupted turns": the answer to "Fork a session in the middle of a turn?" (_askForkTurnBeforeLaunch).
+                // The payload carries the request's dir, title and model (U+001F-separated), so the fork goes exactly as asked.
+                RemoteLaunchRequest req;
+                req.kind = RemoteLaunchRequest::Kind::Fork;
+                req.sessionId = tok.sessionId;
+                const std::wstring& p = tok.payload;
+                const size_t a = p.find(L'\x1F');
+                const size_t b = a == std::wstring::npos ? std::wstring::npos : p.find(L'\x1F', a + 1);
+                req.dir = p.substr(0, a);
+                req.title = a == std::wstring::npos ? std::wstring{} : p.substr(a + 1, b == std::wstring::npos ? std::wstring::npos : b - a - 1);
+                req.model = b == std::wstring::npos ? std::wstring{} : p.substr(b + 1);
+                req.forkTurn = k == L"fork-interrupted" ? ForkTurnChoice::Interrupted : ForkTurnChoice::Uninterrupted;
+                LogNav(L"remote telegram fork " + ShortId(tok.sessionId) + L" -> " + ForkTurnChoiceName(req.forkTurn));
+                _requestLaunch(req, threadId); // it says how the fork goes
             }
             else if (k == L"confirm-deactivate")
             {
@@ -2890,6 +2935,16 @@ namespace Agentmaster::Msg
             _reply(threadId, L"The session's folder is not known; resume it from the Sessions page at the PC.", false);
             return;
         }
+        // HOOKS.md "Interrupted turns": a fork the topic asked for, of a session in the middle of a turn, is asked about first —
+        // the buttons send this request again with the answer. No question: it forks as it always did.
+        if (req.kind == RemoteLaunchRequest::Kind::Fork && req.forkTurn == ForkTurnChoice::Ask)
+        {
+            if (_askForkTurnBeforeLaunch(req, threadId))
+            {
+                return;
+            }
+            req.forkTurn = ForkTurnChoice::Uninterrupted;
+        }
         // §21.23: the revive goes in BEFORE the request goes out, under the launch's token: the window answers on its own thread,
         // possibly before _askLaunch returns, and its answer must find the revive (_settleLaunchAnswers).
         // §21.28: it also carries a tapped ⑂ Fork / 🆕 New Session / ▶ Resume, whose button stays busy until the thread says how
@@ -2986,9 +3041,15 @@ namespace Agentmaster::Msg
         {
             return L"Restarting is not available in this build.";
         }
+        // HOOKS.md "Interrupted turns": a turn the USER interrupted is asked about in the thread first (the buttons restart).
+        if (_askUninterruptBeforeRestart(sessionId, *s, threadId))
+        {
+            LogNav(L"remote telegram restart (card) " + ShortId(sessionId) + L" -> asked (an interrupted turn)");
+            return L"Your last turn was interrupted \x2014 choose below whether the restart continues it.";
+        }
         try
         {
-            _hooks.restartSession(sessionId);
+            _hooks.restartSession(sessionId, RestartTurnChoice::KeepInterrupted);
         }
         catch (...)
         {
@@ -3001,6 +3062,88 @@ namespace Agentmaster::Msg
         // stays busy until the card changes.
         _awaitCardChange(sessionId);
         return L"\U0001F504 Restarting it \x2014 the same conversation resumes in its tab.";
+    }
+
+    bool MessagingService::_askUninterruptBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId)
+    {
+        if (s.kind != AgentKind::Claude)
+        {
+            return false; // a Codex rollout has no interrupt rows to take back
+        }
+        // The plan reads the transcript's tail (one small read in the common case — no API-error or interrupt bytes there means
+        // no parse at all), on the bot's own thread.
+        const auto plan = PlanInterruptRewindForSession(sessionId);
+        if (plan.verdict != InterruptRewindVerdict::Rewind)
+        {
+            if (plan.verdict != InterruptRewindVerdict::NotApplicable)
+            {
+                AppendStateLog(L"hooks.log", L"[interrupt-rewind] " + ShortId(sessionId) + L" telegram restart: not offered \x2014 " + plan.reason + L"\n");
+            }
+            return false;
+        }
+        const AutoContinueSetting setting = ResolveClaudeAutoContinue(s.workingDir, ResolveSessionEnv(LoadAppSettings(), s.workingDir));
+        const AutoContinueAtRestart mode = ClassifyAutoContinueAtRestart(setting.on, setting.fromSettingsFile);
+        // The topic's words: the PC dialog's, shortened for a phone (UninterruptQuestionBody is the long form).
+        std::wstring html = L"\x23F8 You interrupted <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&s), s.title, _threadOf(sessionId)) + L"</b> ";
+        html += plan.duringToolUse ? L"during a tool call." : L"in the middle of a reply.";
+        html += L"\n\n<b>Continue the turn</b>: before the restart, Agentmaster adds one line to the transcript that takes the interrupt back";
+        if (mode == AutoContinueAtRestart::OffInSettings)
+        {
+            html += L"; CLAUDE_CODE_RESUME_INTERRUPTED_TURN is off in your settings, so your next message continues it.";
+        }
+        else if (plan.targetKind == L"prompt")
+        {
+            html += L", and the restarted Claude sends your prompt";
+            if (!plan.targetText.empty())
+            {
+                html += L" \x201C" + TgEscapeHtml(plan.targetText) + L"\x201D";
+            }
+            html += L" again.";
+        }
+        else
+        {
+            html += L", and the restarted Claude carries on from the last step that finished.";
+        }
+        html += L" Nothing is deleted.\n<b>Keep it interrupted</b>: the restarted session waits for you.";
+        const std::wstring yes = _tokenFor(L"restart-uninterrupt", sessionId, L"", kTokenTtlMsFor(1));
+        const std::wstring keep = _tokenFor(L"restart-keep", sessionId, L"", kTokenTtlMsFor(1));
+        const std::wstring no = _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1));
+        _reply(threadId, html, false, _buttons({ { { L"\x25B6 Continue the turn", yes }, { L"\x23F8 Keep it interrupted", keep } }, { { L"Cancel", no } } }));
+        LogNav(L"remote telegram restart " + ShortId(sessionId) + L" -> asked: the turn the user interrupted (" + plan.targetKind + L", " + (setting.on ? L"auto-continue on" : L"auto-continue off") + L")");
+        return true;
+    }
+
+    bool MessagingService::_askForkTurnBeforeLaunch(const RemoteLaunchRequest& req, int64_t threadId)
+    {
+        const auto s = _registry->Get(req.sessionId);
+        if (s && s->kind != AgentKind::Claude)
+        {
+            return false; // a Codex fork (`codex fork`) has no Claude resume to stop
+        }
+        const bool sourceRunning = s && s->live && (s->state == SessionState::Running || s->state == SessionState::NeedsApproval);
+        const auto outlook = AssessForkContinuation(req.sessionId, sourceRunning, req.dir, ResolveSessionEnv(LoadAppSettings(), req.dir));
+        if (!outlook.ask)
+        {
+            LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> not asked: " + outlook.why);
+            return false;
+        }
+        const std::wstring title = s ? s->title : req.title;
+        std::wstring html = L"\x2442 <b>" + (s ? TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), title, _threadOf(req.sessionId)) : TgEscapeHtml(title)) + L"</b> ";
+        html += sourceRunning ? L"is in the middle of a turn." : L"stopped in the middle of a turn.";
+        html += L" Claude Code continues that turn in the fork by itself as soon as the fork's Claude starts";
+        if (!outlook.tail.droppedTool.empty())
+        {
+            html += L" \x2014 the <code>" + TgEscapeHtml(outlook.tail.droppedTool) + L"</code> call it was running runs again in the fork";
+        }
+        html += L".\n\n<b>Fork interrupted</b>: Agentmaster locks the fork's tab and presses Esc the moment it starts running, so the fork waits for you.\n<b>Fork uninterrupted</b>: the fork runs the turn on its own.";
+        // The request's own fields ride the tokens, so the answer forks exactly what was asked (the model a /forksession typed).
+        const std::wstring payload = req.dir + L'\x1F' + req.title + L'\x1F' + req.model;
+        const std::wstring stop = _tokenFor(L"fork-interrupted", req.sessionId, payload, kTokenTtlMsFor(1));
+        const std::wstring go = _tokenFor(L"fork-uninterrupted", req.sessionId, payload, kTokenTtlMsFor(1));
+        const std::wstring no = _tokenFor(L"cancel", req.sessionId, L"", kTokenTtlMsFor(1));
+        _reply(threadId, html, false, _buttons({ { { L"\x23F8 Fork interrupted", stop }, { L"\x25B6 Fork uninterrupted", go } }, { { L"Cancel", no } } }));
+        LogNav(L"remote telegram fork " + ShortId(req.sessionId) + L" -> asked (" + (sourceRunning ? std::wstring{ L"running" } : outlook.tail.tailKind) + L")");
+        return true;
     }
 
     void MessagingService::_showCardPage(const std::wstring& sessionId, int64_t messageId, CardPage page)

@@ -155,7 +155,9 @@ namespace winrt::TerminalApp::implementation
     // dying on "No conversation found". Safe on a LIVE parent — the fork writes its own file.
     // insertPosition (SESSIONS.md §9.14): the 0-based strip slot for the fork; -1 = the end (Terminal's newTabPosition).
     // Returns the NEW session's id, or "" when no tab opened (a gate, a failed launch, missing arguments).
-    std::wstring TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride, uint32_t insertPosition)
+    // forkTurn (HOOKS.md "Interrupted turns"): Interrupted — the user's "Fork interrupted" — records the stop intent on the new
+    // fork (SessionInfo::stopForkedTurn, persisted) and arms the fork stop watch (TerminalPage.AgentTurns.cpp).
+    std::wstring TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride, uint32_t insertPosition, ::Agentmaster::ForkTurnChoice forkTurn)
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
         {
@@ -199,7 +201,13 @@ namespace winrt::TerminalApp::implementation
         // crash-resilience the begin/end pairing buys). The id is resolved from the just-created tab, so it
         // reflects what actually opened (a no-transcript parent degrades to a FRESH session, noted here).
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
-        ::Agentmaster::LogNav(L"sessions fork-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(forkParentId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no parent transcript)" } : std::wstring{}));
+        // HOOKS.md "Interrupted turns": "Fork interrupted" — persist the intent, then watch the fork.
+        if (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted && !forkedId.empty())
+        {
+            _sessionRegistry->Update(forkedId, [](::Agentmaster::SessionInfo& s) { s.stopForkedTurn = true; });
+            _ArmForkTurnStop(forkedId, L"fork");
+        }
+        ::Agentmaster::LogNav(L"sessions fork-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(forkParentId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no parent transcript)" } : std::wstring{}) + (forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? std::wstring{ L" (fork interrupted)" } : std::wstring{}));
         if (!_openClaudeTabInBackground)
         {
             _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.
@@ -256,7 +264,14 @@ namespace winrt::TerminalApp::implementation
         }
         else if (result == ContentDialogResult::Secondary)
         {
-            _ForkSessionFromDisk(sessionId, dir, forkTitle);
+            // HOOKS.md "Interrupted turns": a fork of a session in the middle of a turn asks "interrupted or uninterrupted?"
+            // first (a second dialog, only when it applies).
+            ForkLaunchRequest request;
+            request.sourceId = sessionId;
+            request.dir = dir;
+            request.title = forkTitle;
+            request.origin = L"sessions-open-dialog";
+            _ForkAskingAboutRunningTurn(std::move(request));
         }
         // else Close/Cancel -> do nothing
         }

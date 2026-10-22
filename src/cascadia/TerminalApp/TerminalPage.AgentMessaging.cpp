@@ -280,7 +280,10 @@ namespace winrt::TerminalApp::implementation
                 // A source with no transcript forks into a FRESH session (_ForkSessionFromDisk's own gate, read the same way
                 // before the call, since the fork's new id is always new and cannot tell it).
                 fresh = !::Agentmaster::ClaudeConversationExists(request.sessionId);
-                openedId = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model);
+                // HOOKS.md "Interrupted turns": the topic asked "Fork interrupted or uninterrupted?" and this is the answer (the
+                // bot resolves Ask before the request leaves it; a stray Ask forks as before).
+                openedId = _ForkSessionFromDisk(request.sessionId, request.dir, request.title, request.model, static_cast<uint32_t>(-1),
+                                                request.forkTurn == ::Agentmaster::ForkTurnChoice::Interrupted ? ::Agentmaster::ForkTurnChoice::Interrupted : ::Agentmaster::ForkTurnChoice::Uninterrupted);
                 break;
             }
             if (!openedId.empty())

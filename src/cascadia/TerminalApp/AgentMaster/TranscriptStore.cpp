@@ -1961,6 +1961,64 @@ namespace Agentmaster
                r.startedAtMs <= procStartUnixMs + kPresenceStartedAtLateSkewMs;
     }
 
+    namespace
+    {
+        // Parse ONE presence file into `r` (the body every presence reader shares — ReadSessionPresenceIn's loop
+        // and the by-pid reader). Returns true for a JSON object with a pid and a sessionId.
+        //   path — the `<pid>.json` file.
+        //   r    — receives the row.
+        // Throws std::bad_alloc only.
+        bool ParsePresenceFile(const std::wstring& path, SessionPresenceRow& r)
+        {
+            const std::string bytes = ReadFileWhole(path, 64 << 10);
+            if (bytes.empty())
+            {
+                return false;
+            }
+            const std::wstring wide = Utf8ToWide(bytes.data(), bytes.size());
+            const auto parsed = json::Parse(wide);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                return false;
+            }
+            r.pid = parsed->U32At(L"pid");
+            r.sessionId = parsed->StrAt(L"sessionId");
+            r.cwd = parsed->StrAt(L"cwd");
+            r.status = parsed->StrAt(L"status");
+            r.version = parsed->StrAt(L"version");
+            r.startedAtMs = parsed->I64At(L"startedAt");
+            r.updatedAtMs = parsed->I64At(L"updatedAt");
+            // Agentmaster: the blocked-on-user detail + the transition instant (see the header).
+            // Both absent on older claude builds -> "" / 0, which every consumer treats as
+            // "no such signal" and falls back to the transcript/hook belts.
+            r.waitingFor = parsed->StrAt(L"waitingFor");
+            r.statusUpdatedAtMs = parsed->I64At(L"statusUpdatedAt");
+            // Agentmaster: the exact process-creation stamp (see the header) — a decimal STRING,
+            // because a FILETIME (~1.3e17) is far past a double's 2^53 exact range; json::Value would
+            // round a numeric form, so only the string is decoded (a numeric one reads 0 = unknown,
+            // which falls back to the startedAt window rather than risking a false reject).
+            r.procStartUnixMs = PresenceProcStartToUnixMs(parsed->StrAt(L"procStart"));
+            return r.pid != 0 && !r.sessionId.empty();
+        }
+
+        // The live presence directory: `<claude home>\sessions`, the sibling of `<claude home>\projects`.
+        // Returns "" when the claude home cannot be resolved.
+        std::wstring LivePresenceDir()
+        {
+            std::wstring projects = ClaudeProjectsDir();
+            while (!projects.empty() && (projects.back() == L'\\' || projects.back() == L'/'))
+            {
+                projects.pop_back();
+            }
+            const size_t cut = projects.find_last_of(L"\\/");
+            if (cut == std::wstring::npos)
+            {
+                return {};
+            }
+            return projects.substr(0, cut) + L"\\sessions";
+        }
+    }
+
     std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir)
     {
         std::vector<SessionPresenceRow> out;
@@ -1981,42 +2039,34 @@ namespace Agentmaster
             {
                 continue;
             }
-            const std::string bytes = ReadFileWhole(root + L"\\" + fd.cFileName, 64 << 10);
-            if (bytes.empty())
-            {
-                continue;
-            }
-            const std::wstring wide = Utf8ToWide(bytes.data(), bytes.size());
-            const auto parsed = json::Parse(wide);
-            if (!parsed || parsed->type != json::Value::Type::Obj)
-            {
-                continue;
-            }
             SessionPresenceRow r;
-            r.pid = parsed->U32At(L"pid");
-            r.sessionId = parsed->StrAt(L"sessionId");
-            r.cwd = parsed->StrAt(L"cwd");
-            r.status = parsed->StrAt(L"status");
-            r.version = parsed->StrAt(L"version");
-            r.startedAtMs = parsed->I64At(L"startedAt");
-            r.updatedAtMs = parsed->I64At(L"updatedAt");
-            // Agentmaster: the blocked-on-user detail + the transition instant (see the header).
-            // Both absent on older claude builds -> "" / 0, which every consumer treats as
-            // "no such signal" and falls back to the transcript/hook belts.
-            r.waitingFor = parsed->StrAt(L"waitingFor");
-            r.statusUpdatedAtMs = parsed->I64At(L"statusUpdatedAt");
-            // Agentmaster: the exact process-creation stamp (see the header) — a decimal STRING,
-            // because a FILETIME (~1.3e17) is far past a double's 2^53 exact range; json::Value would
-            // round a numeric form, so only the string is decoded (a numeric one reads 0 = unknown,
-            // which falls back to the startedAt window rather than risking a false reject).
-            r.procStartUnixMs = PresenceProcStartToUnixMs(parsed->StrAt(L"procStart"));
-            if (r.pid != 0 && !r.sessionId.empty())
+            if (ParsePresenceFile(root + L"\\" + fd.cFileName, r))
             {
                 out.push_back(std::move(r));
             }
         } while (::FindNextFileW(h, &fd));
         ::FindClose(h);
         return out;
+    }
+
+    bool ReadSessionPresenceForPidIn(std::wstring_view sessionsDir, uint32_t pid, SessionPresenceRow& out)
+    {
+        if (sessionsDir.empty() || pid == 0)
+        {
+            return false;
+        }
+        SessionPresenceRow r;
+        if (!ParsePresenceFile(std::wstring{ sessionsDir } + L"\\" + std::to_wstring(pid) + L".json", r) || r.pid != pid)
+        {
+            return false; // missing, unparseable, or a file whose own pid disagrees with its name (never trusted)
+        }
+        out = std::move(r);
+        return true;
+    }
+
+    bool ReadSessionPresenceForPid(uint32_t pid, SessionPresenceRow& out)
+    {
+        return ReadSessionPresenceForPidIn(LivePresenceDir(), pid, out);
     }
 
     std::vector<SessionPresenceRow> ReadSessionPresence()

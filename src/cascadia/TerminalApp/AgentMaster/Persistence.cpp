@@ -694,6 +694,13 @@ namespace Agentmaster
         {
             o.Set(L"forkParentId", json::Value::MkStr(s.forkParentId));
         }
+        // Agentmaster (HOOKS.md "Interrupted turns" — SessionModels.h SessionInfo::stopForkedTurn): the "Fork
+        // interrupted" answer, so a fork that has not been stopped yet (a background tab never visited, an app
+        // closed before the Esc) is stopped at its next start too. Omitted when false (every other session).
+        if (s.stopForkedTurn)
+        {
+            o.Set(L"stopForkedTurn", json::Value::MkBool(true));
+        }
         // Agentmaster (the summary's conversation chain — SessionModels.h SessionInfo::continuedFromId):
         // the session this one continues when Agentmaster SAW it happen (a /clear in the same tab, a
         // /handover origin) — no transcript records it, so this record is the only durable copy, and the
@@ -749,6 +756,7 @@ namespace Agentmaster
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         s.forkParentId = v.StrAt(L"forkParentId"); // PERSISTED: the fork SOURCE, for re-forking a never-messaged fork on restore (absent => "")
+        s.stopForkedTurn = v.BoolAt(L"stopForkedTurn"); // PERSISTED (HOOKS.md "Interrupted turns"): the "Fork interrupted" answer, re-armed at the next start (absent => false)
         s.continuedFromId = v.StrAt(L"continuedFromId"); // PERSISTED (the summary's conversation chain): the /clear predecessor or /handover origin Agentmaster recorded (absent => "")
         s.continuedVia = v.StrAt(L"continuedVia"); // how it continued: "clear" | "handover" (absent => "")
         s.pendingInput = v.StrAt(L"pendingInput"); // PERSISTED (PENDING_INPUT.md §5): the unsent input-box draft memory (absent => "")

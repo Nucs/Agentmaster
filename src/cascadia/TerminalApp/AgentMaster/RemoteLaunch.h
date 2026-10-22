@@ -15,6 +15,8 @@
 #include <functional>
 #include <string>
 
+#include "InterruptedTurns.h" // ForkTurnChoice (HOOKS.md "Interrupted turns")
+
 namespace Agentmaster
 {
     struct RemoteLaunchRequest
@@ -44,6 +46,11 @@ namespace Agentmaster
         // request hosts it — the wizard's default places a new session beside the newest tab working in the same folder. A
         // session the window does not host (it moved or closed since the census) leaves the tab at the strip's end, as "" does.
         std::wstring afterSessionId;
+        // HOOKS.md "Interrupted turns" (Fork only): what the fork does about the source's unfinished turn, which Claude Code's
+        // resume would continue in the fork by itself. Interrupted arms the window's fork stop watch (the fork's tab locked, ONE
+        // Esc the moment it runs); Uninterrupted lets it run. Ask makes the BOT ask in the topic first (its _requestLaunch
+        // resolves it before the request reaches a window; a window that still sees Ask forks Uninterrupted).
+        ForkTurnChoice forkTurn{ ForkTurnChoice::Uninterrupted };
     };
 
     /// <summary>

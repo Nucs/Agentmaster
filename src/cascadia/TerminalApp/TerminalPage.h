@@ -43,6 +43,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/DraftCarry.h" // Agentmaster (PENDING_INPUT.md §11): PasteJournalEntry / DraftFillPaste — the fork carry's by-value pump state
+#include "AgentMaster/InterruptedTurns.h" // Agentmaster (HOOKS.md "Interrupted turns"): RestartTurnChoice / ForkTurnChoice / the fork stop watch's pure decision (by-value members + parameters)
 #include "AgentMaster/LaunchPresets.h" // Agentmaster (PRESETS, HARNESSES.md): LaunchArgs / CompiledClaudeLaunch — the launch seams' by-value snapshot + compile
 #include "AgentMaster/RemoteLaunch.h" // Agentmaster (MESSAGING.md §8.2): RemoteLaunchRequest — what the Telegram bot's launch sink asks this window to open
 #include "AgentMaster/RestoreWake.h" // Agentmaster (PERSISTENCE.md §14): RestoreWakeWindowJob — the restore wake's per-window job (by-value member)
@@ -2024,7 +2025,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _wid_NoThrow() const; // Agentmaster (splash/[startup]): the " [win <id>]" tag for log lines (empty until _windowId is set)
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _RestartClaudeSession(winrt::hstring sessionId); // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's connection in place — local first, then fan out to the hosting window (RestartSessionInOtherWindows), mirroring _ActivateClaudeSession
-        bool _RestartClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. Returns false when this window doesn't host the session's tab.
+        bool _RestartClaudeSessionLocal(const std::wstring& sessionId, ::Agentmaster::RestartTurnChoice turnChoice = ::Agentmaster::RestartTurnChoice::Ask); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. turnChoice (HOOKS.md "Interrupted turns"): Ask = the tab menu's path (a turn the user interrupted is asked about HERE); a decided answer (another window asked, Telegram asked) restarts with it through _RestartPaneWithTurnChoice. Returns false when this window doesn't host the session's tab.
         // Agentmaster (MESSAGING.md §8.2 — TerminalPage.AgentMessaging.cpp): the receiving half of the Telegram bot's
         // window-hosted actions. Runs `action` on the session's tab when THIS window hosts it ("start" = start a
         // dormant tab's claude in place; "screen" = answer the terminal's visible text through `reply`; "markunread";
@@ -2184,7 +2185,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)
         std::wstring _ManagedSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which MANAGED session (Claude OR Codex) owns this connection, matched by connection IDENTITY across _claudeTabs (agent-agnostic; works for a Codex tab with no tabToken yet)
-        bool _RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent); // Agentmaster: in-place "Restart session" for a managed Claude/Codex pane — rebuild the connection from the CURRENT conversation (resume, transcript/rollout-gated; never replay the launch commandline), swap it in, re-point the injector. Returns true if handled; false => not a managed agent (fall through to the upstream restart).
+        bool _RestartManagedSession(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice = ::Agentmaster::RestartTurnChoice::KeepInterrupted); // Agentmaster: in-place "Restart session" for a managed Claude/Codex pane — rebuild the connection from the CURRENT conversation (resume, transcript/rollout-gated; never replay the launch commandline), swap it in, re-point the injector. turnChoice (HOOKS.md "Interrupted turns"): Uninterrupt takes back a user interrupt before the new claude starts (planned again here, held Start, _StartAfterInterruptRewind, CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 in its env) and clears a fork's stop intent; anything else restarts as before (and re-arms the fork stop watch for a fork whose user chose "Fork interrupted"). Returns true if handled; false => not a managed agent (fall through to the upstream restart).
         // Agentmaster (HOOKS.md "API-error turns" — the API-ERROR REWIND, ApiErrorRewind.h). Three seams resume a conversation
         // whose turn may have died on an API error; each appends the one rewind line BEFORE a claude reads the transcript, and
         // never while a claude still runs it (that claude's exit would re-stamp the error as the active leaf).
@@ -2209,7 +2210,149 @@ namespace winrt::TerminalApp::implementation
         //       known state says the turn was in flight or had failed (Error / midTurnAtRestore): a 600-tab window restore
         //       must not read 600 transcripts. Off with AppSettings::resumeApiErrorTurns. Logs every non-trivial outcome.
         void _RewindApiErrorBeforeRestore(const ::Agentmaster::SessionInfo& restored, const ::Agentmaster::AppSettings& settings);
-        bool _ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, std::wstring* forkedIdOut = nullptr); // Agentmaster (Triage Board / Explorer-tree "Fork session"): fork a managed session by id — the kind-aware fork shared with _DuplicateTab (Claude: `--resume <id> --fork-session`; Codex: `codex fork <rolloutUuid>`; both transcript/rollout-gated -> fresh). Opens the fork in THIS window (window-agnostic: reads the shared registry, no live tab needed). Returns false if the id isn't a known managed session. modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork session" submenu ("" = Default; Claude only — a codex fork takes no --model). forkedIdOut (optional): receives the NEW session's id ("" when no tab opened: the native-exe gate, a failed launch) — the AI search's fork tool reports it to the model (SESSIONS.md §9.14)
+        bool _ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition = -1, const std::wstring& modelOverride = {}, std::wstring* forkedIdOut = nullptr, ::Agentmaster::ForkTurnChoice forkTurn = ::Agentmaster::ForkTurnChoice::Uninterrupted); // Agentmaster (Triage Board / Explorer-tree "Fork session"): fork a managed session by id — the kind-aware fork shared with _DuplicateTab (Claude: `--resume <id> --fork-session`; Codex: `codex fork <rolloutUuid>`; both transcript/rollout-gated -> fresh). Opens the fork in THIS window (window-agnostic: reads the shared registry, no live tab needed). Returns false if the id isn't a known managed session. modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork session" submenu ("" = Default; Claude only — a codex fork takes no --model). forkedIdOut (optional): receives the NEW session's id ("" when no tab opened: the native-exe gate, a failed launch) — the AI search's fork tool reports it to the model (SESSIONS.md §9.14). forkTurn (HOOKS.md "Interrupted turns"): Interrupted arms the fork stop watch on the new session (a Claude fork only); interactive callers go through _ForkAskingAboutRunningTurn, which asks first
+
+        // ===== INTERRUPTED TURNS (HOOKS.md "Interrupted turns"; AgentMaster/InterruptedTurns.h) — TerminalPage.AgentTurns.cpp =====
+        // The user's request of 2026-10-22: a Restart of a turn the user interrupted asks whether to continue that turn (the
+        // transcript gets one rewind line before the restarted claude starts), and a Fork of a session in the middle of a turn
+        // asks whether the fork may continue that turn by itself or must be stopped (the fork's tab locked, ONE Esc pressed the
+        // moment it starts running).
+
+        // What the restart question shows (built by _UninterruptQuestionFor from PlanInterruptRewind + the session).
+        struct UninterruptQuestion
+        {
+            std::wstring sessionId; // the session the question is about (a restart that finds another one on the pane does not apply the answer)
+            std::wstring title; // its title (the dialog quotes it)
+            bool duringToolUse{ false }; // the Esc came during a tool call
+            bool resendsPrompt{ false }; // the rewind lands on the user's prompt (sent again), else on a finished tool result
+            std::wstring promptText; // resendsPrompt: the prompt's first line
+            ::Agentmaster::AutoContinueAtRestart autoContinue{ ::Agentmaster::AutoContinueAtRestart::On }; // how CLAUDE_CODE_RESUME_INTERRUPTED_TURN stands where the session runs
+            std::wstring autoContinueSource; // where that value came from (the dialog names a settings file that turns it off)
+        };
+        // Should a restart of `sessionId` ask? Only for a managed CLAUDE session whose active branch ends in a user interrupt
+        // that Claude Code would continue after a rewind (PlanInterruptRewindForSession == Rewind). A non-trivial "no" is
+        // logged ([interrupt-rewind] … not offered). Reads the transcript's tail (one small read): an explicit-action path only.
+        //   sessionId — the session.
+        // Returns the question, or nullopt when there is nothing to ask. Never throws (a failure is logged and means "no").
+        std::optional<UninterruptQuestion> _UninterruptQuestionFor(const std::wstring& sessionId);
+        // _restartPaneConnection's question (the tab menu's "Restart session", the restartConnection action, a dead pane's
+        // Enter): when the pane hosts a managed session with an interrupted turn, start the async question and return true —
+        // its answer restarts THIS pane (_AskUninterruptThenRestart). false: restart as before.
+        //   paneContent — the pane being restarted.
+        // Returns true when the question is up. Never throws.
+        bool _AskBeforeRestartIfInterrupted(const TerminalApp::TerminalPaneContent& paneContent);
+        // Restart `paneContent` with a DECIDED turn choice: _restartPaneConnection's NotConnected guard, then
+        // _RestartManagedSession(paneContent, turnChoice), and for a non-managed pane the upstream path (_restartPaneConnection).
+        //   paneContent — the pane.
+        //   turnChoice  — KeepInterrupted or Uninterrupt (Ask behaves like _restartPaneConnection).
+        // Never throws past a logged catch.
+        void _RestartPaneWithTurnChoice(const TerminalApp::TerminalPaneContent& paneContent, ::Agentmaster::RestartTurnChoice turnChoice);
+        // The restart question's dialog (buttons only — the XAML Islands text-box rule does not apply), dark like every
+        // Agentmaster dialog. Primary = "Continue the turn" (Uninterrupt), Secondary = "Keep it interrupted" (the DEFAULT:
+        // a stray Enter must never make an agent run again), Close = Cancel (no restart).
+        //   question — what to show.
+        // Returns the dialog. Throws what XAML construction throws (callers are inside a try).
+        winrt::Windows::UI::Xaml::Controls::ContentDialog _BuildUninterruptDialog(const UninterruptQuestion& question);
+        // Ask, then restart the pane (the local path). The pane is held weakly: a tab closed while the dialog is up restarts
+        // nothing. fire_and_forget with a terminate-net (Rule #18).
+        //   weakContent — the pane.
+        //   question    — what to ask.
+        winrt::fire_and_forget _AskUninterruptThenRestart(winrt::weak_ref<TerminalApp::TerminalPaneContent> weakContent, UninterruptQuestion question);
+        // Ask HERE (the window the user clicked in), then hand the restart to the window that hosts the tab with the answer
+        // (RestartSessionInOtherWindows). fire_and_forget with a terminate-net.
+        //   question — what to ask (its sessionId is the session restarted).
+        winrt::fire_and_forget _AskUninterruptThenFanOut(UninterruptQuestion question);
+        // The RESTART half of the uninterrupt (the _StartAfterApiErrorRewind recipe): off the UI thread wait for the old
+        // claude(s) to exit (at most kApiErrorRewindExitWaitMs — its exit re-stamps its own leaf), append the rewind line
+        // (RewindInterruptTailForSession re-plans on the file as it is then), log, and start `newConn` on the UI thread while
+        // it is still NotConnected. A failed append still starts the connection, un-rewound. fire_and_forget, guarded.
+        //   sessionId — the conversation; newConn — the held connection; holders — may be null (nothing to wait for).
+        winrt::fire_and_forget _StartAfterInterruptRewind(std::wstring sessionId, winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection newConn, std::shared_ptr<::Agentmaster::ProcessExitWait> holders);
+
+        // One interactive fork, captured so the question can be asked before it runs (the fork then runs exactly as the
+        // call site would have run it).
+        struct ForkLaunchRequest
+        {
+            std::wstring sourceId; // the session forked
+            bool managed{ false }; // true: _ForkManagedSessionById (a session the registry knows); false: _ForkSessionFromDisk
+            std::wstring dir; // _ForkSessionFromDisk: the working dir
+            std::wstring title; // _ForkSessionFromDisk: the fork's base title ("" = derive one)
+            std::wstring model; // the launch-model pick ("" = Default)
+            uint32_t insertPosition{ static_cast<uint32_t>(-1) }; // the strip slot (-1 = the end)
+            bool background{ false }; // _openClaudeTabInBackground for the open (the Sessions page's row menu)
+            std::wstring origin; // the call site, for the [nav] line ("tab-menu", "board", "sessions-row", …)
+        };
+        // What the fork question shows (built by _ForkTurnQuestionFor).
+        struct ForkTurnQuestion
+        {
+            std::wstring title; // the source's title
+            bool resendsPrompt{ false }; // the fork would send the last prompt again
+            std::wstring rerunTool; // a tool call in flight the fork re-runs ("" = none)
+            bool sourceRunning{ false }; // the source runs right now (vs. a turn left unfinished on disk)
+            std::wstring tailKind; // what the source's transcript ends in (the log)
+        };
+        // Should a fork of `sourceId` ask? Only for a Claude source with a transcript when CLAUDE_CODE_RESUME_INTERRUPTED_TURN
+        // is on where the fork would run (ResolveClaudeAutoContinue) AND the fork would continue a turn by itself — the source's
+        // tail continues (ClassifyResumeContinuationForSession) or the source is Running / NeedsApproval right now.
+        //   sourceId — the session forked; dir — where the fork runs; title — its title for the dialog.
+        // Returns the question, or nullopt. Never throws (a failure is logged and means "no").
+        std::optional<ForkTurnQuestion> _ForkTurnQuestionFor(const std::wstring& sourceId, const std::wstring& dir, const std::wstring& title);
+        // EVERY interactive fork goes through here (the tab menu, Ctrl+Shift+D, the board / tree / side-panel menus, the
+        // Sessions page, the launch bar): no question => the fork runs at once, Uninterrupted (today's behavior); a question
+        // => _AskForkTurnThenFork. Programmatic forks (the AI search's tool, Telegram — which asks with its own buttons) call
+        // the fork seams directly with their answer.
+        //   request — the fork as the call site would run it.
+        // Never throws past a logged catch.
+        void _ForkAskingAboutRunningTurn(ForkLaunchRequest request);
+        // The fork question's dialog: Primary = "Fork interrupted" (the DEFAULT — two sessions running one turn side by side
+        // is what a stray Enter must not cause), Secondary = "Fork uninterrupted", Close = Cancel (no fork). Then the fork
+        // with the answer. fire_and_forget with a terminate-net.
+        winrt::fire_and_forget _AskForkTurnThenFork(ForkLaunchRequest request, ForkTurnQuestion question);
+        // Run `request` with `forkTurn` (Uninterrupted / Interrupted): _openClaudeTabInBackground set around the ONE open the
+        // way the call site set it, then the matching fork seam.
+        //   request — the fork; forkTurn — the answer.
+        // Returns the NEW session's id ("" when no tab opened). Throws what the fork seams throw (callers are inside a try).
+        std::wstring _LaunchForkRequest(const ForkLaunchRequest& request, ::Agentmaster::ForkTurnChoice forkTurn);
+
+        // ---- the FORK STOP WATCH (InterruptedTurns.h DecideForkTurnStop) ----
+        // One watched fork. Per-CONNECTION state resets when the tab's connection changes (a Restart / Deactivate gave it a
+        // new one): the watch follows whatever claude the tab runs.
+        struct ForkTurnStopWatch
+        {
+            std::wstring seam; // what armed it: "fork", "restore", "restart", "deactivate" (the log)
+            winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection connection{ nullptr }; // the connection the state below belongs to
+            winrt::weak_ref<winrt::Microsoft::Terminal::Control::TermControl> lockedControl; // the control this watch made read-only (released on every end)
+            bool lockTaken{ false }; // we set the read-only (a read-only the user set is never cleared)
+            int64_t armedTickMs{ 0 }; // GetTickCount64 at the arm
+            int64_t startedAtMs{ 0 }; // first tick that saw the connection Connected (0 = dormant so far)
+            uint32_t claudePid{ 0 }; // the fork's claude.exe under the connection's shell (0 = not found yet)
+            int64_t claudeStartUnixMs{ 0 }; // its creation time (the heartbeat's PID-reuse guard)
+            int64_t nextPidLookupMs{ 0 }; // the next process-tree lookup (throttled to kForkTurnStopPidLookupMs)
+            int64_t idleBoxSinceMs{ 0 }; // DecideForkTurnStop's idle-with-the-box-up stretch
+            int64_t lastBoxProbeMs{ 0 }; // the last input-box read (throttled: a buffer scan, not needed every 100 ms)
+            bool lastBoxUp{ false }; // what that read found: the input box on screen (Empty / Draft)
+            int32_t presses{ 0 }; // Esc presses on this connection
+            int64_t lastPressMs{ 0 };
+            std::wstring lastStatus; // the heartbeat status last logged (transitions only)
+        };
+        std::unordered_map<std::wstring, ForkTurnStopWatch> _forkTurnStopWatches; // fork session id -> its watch (UI thread only)
+        winrt::Windows::UI::Xaml::DispatcherTimer _forkTurnStopTimer{ nullptr }; // fast (100 ms) while a watched fork runs, slow (1 s) while all are dormant, stopped with none
+        int64_t _forkTurnStopTimerIntervalMs{ 0 }; // the interval _forkTurnStopTimer was last given (avoids re-setting an unchanged one)
+        // Arm (or re-arm) the watch for `forkId`: the session must be a live Claude session hosted in THIS window; a watch that
+        // already exists keeps its state. Starts the timer.
+        //   forkId — the fork's session id; seam — what armed it (the log).
+        // Never throws past a logged catch.
+        void _ArmForkTurnStop(const std::wstring& forkId, const std::wstring& seam);
+        // Re-tune the timer to the watches (fast / slow / stopped).
+        void _UpdateForkTurnStopTimer();
+        // One tick over every watch: gather the facts (the control, its connection, the fork's claude and its heartbeat, the
+        // input box, the registry), DecideForkTurnStop, act (lock at start, press Esc, end). UI thread; never throws.
+        void _ForkTurnStopTick();
+        // End `forkId`'s watch: release the lock we took, re-anchor a waiting fork-carry fill (its box was ours), and decide
+        // whether the persisted stop intent (SessionInfo::stopForkedTurn) stays for the next start (a resume of the fork would
+        // still continue a turn) or is cleared. Logs the outcome.
+        //   forkId — the watch; outcome — the final action; detail — log text.
+        void _EndForkTurnStop(const std::wstring& forkId, ::Agentmaster::ForkTurnStopAction outcome, const std::wstring& detail);
         void _DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab); // Agentmaster (cross-window move): a Claude tab is moving to ANOTHER window (tear-out / moveTab) — evict this window's per-window binding (NOT the injector/live) so teardown can't archive a session now alive elsewhere; the destination re-homes it
         void _DetachClaudePaneForMove(const winrt::com_ptr<Tab>& tab, const std::shared_ptr<Pane>& movingPane); // Agentmaster (cross-window move, pane-level): the movePane-to-window case — evict only if the LEAVING pane is the session's bound (first-terminal) pane; the tab may survive with its other panes
         void _RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title); // Agentmaster: Explorer-tree rename -> registry title (persist) + retitle the session's tab
@@ -2345,7 +2488,7 @@ namespace winrt::TerminalApp::implementation
         void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)
         std::wstring _ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title, uint32_t insertPosition = static_cast<uint32_t>(-1)); // resume ANY on-disk session into a managed tab: live here -> Jump; archived -> Restore; unknown -> minimal record + the transcript-gated resume seam. insertPosition: the 0-based strip slot (-1 = the end / Terminal's newTabPosition). Returns the session whose tab is open now — the target, or the FRESH id a resume without a transcript degraded to (Rule #6) — or "" when nothing opened (a gate, a failed launch, missing arguments); callers that do not need it ignore it (SESSIONS.md §9.14's resume tool reports it)
-        std::wstring _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride = {}, uint32_t insertPosition = static_cast<uint32_t>(-1)); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)"). modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork here" submenu ("" = Default). insertPosition: the 0-based strip slot (-1 = the end / Terminal's newTabPosition). Returns the NEW session's id, or "" when no tab opened
+        std::wstring _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride = {}, uint32_t insertPosition = static_cast<uint32_t>(-1), ::Agentmaster::ForkTurnChoice forkTurn = ::Agentmaster::ForkTurnChoice::Uninterrupted); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)"). modelOverride: the launch-model picker's per-LAUNCH `--model <id>` pick from a "Fork here" submenu ("" = Default). insertPosition: the 0-based strip slot (-1 = the end / Terminal's newTabPosition). forkTurn (HOOKS.md "Interrupted turns"): Interrupted arms the fork stop watch on the new session; interactive callers go through _ForkAskingAboutRunningTurn. Returns the NEW session's id, or "" when no tab opened
         winrt::fire_and_forget _PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle); // Sessions-page double-click on a NOT-live row: a Resume / Fork / Cancel ContentDialog (the adopt dialog's idiom) instead of resuming silently. Primary=Resume (claude --resume), Secondary=Fork (--fork-session, parent untouched), Close=Cancel; forkTitle is empty for a never-prompted row so the fork seam derives a smart name
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends

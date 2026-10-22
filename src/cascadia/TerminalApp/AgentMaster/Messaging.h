@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "AskQuestion.h" // §21.30: Claude's question dialogs answered from Telegram (the card's model, its renders, the decision lines)
+#include "InterruptedTurns.h" // HOOKS.md "Interrupted turns": RestartTurnChoice / ForkTurnChoice — the answers the topic's restart and fork questions pass on
 #include "MessagingDirectory.h" // the pinned directory's model and renders (§21.16)
 #include "MessagingFileLinks.h" // §21.32.4: the file links' pure rules (the link, the session key, the linked set)
 #include "MessagingFileServer.h" // §21.32.4: the file links' server, secret and LAN addresses (no Windows header in it)
@@ -181,7 +182,10 @@ namespace Agentmaster::Msg
         // opened; false when no window could take it (no reply follows).
         std::function<bool(const RemoteLaunchRequest&, RemoteLaunchReply)> launchAnswered;
         // The existing cross-window seams: restart a session's connection in place; park its tab.
-        std::function<void(const std::wstring& sessionId)> restartSession;
+        // HOOKS.md "Interrupted turns": restartSession carries the topic's answer to "continue the turn you interrupted?"
+        // (KeepInterrupted for every restart that asks nothing — a running turn cut off, an errored session reactivated),
+        // so the PC never shows a dialog for a restart the phone asked for.
+        std::function<void(const std::wstring& sessionId, RestartTurnChoice turnChoice)> restartSession;
         std::function<void(const std::wstring& sessionId)> deactivateSession;
         // The app's version word for the start note and the run marker (§21.18): "0.6.8.21", "dev 0.0.1.28", "portable
         // 0.7.9.0" (MessagingStartNote.h FormatAppVersionWord; Engine.cpp reads the package identity or the portable stamp).
@@ -1434,6 +1438,34 @@ namespace Agentmaster::Msg
         /// <returns>The toast, one plain sentence.</returns>
         /// <exception cref="std::bad_alloc">If the toast, a reply or a hold cannot be allocated.</exception>
         std::wstring _restartFromCard(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>
+        /// HOOKS.md "Interrupted turns" — the restart question, asked IN THE TOPIC (the PC shows no dialog for a restart the
+        /// phone asked for). When the session's active branch ends in a turn the USER interrupted and a rewind would let Claude
+        /// Code continue it (PlanInterruptRewindForSession == Rewind), posts "Continue the interrupted turn?" with three
+        /// single-use buttons: ▶ Continue the turn (token restart-uninterrupt), ⏸ Keep it interrupted (restart-keep) and Cancel.
+        /// Their handlers restart with the answer through ServiceHooks::restartSession. /restartsession at rest and the card's 🔄
+        /// Restart Session ask here; a restart of a RUNNING turn (confirm-restartsession) and ▶ Reactivate of an errored or
+        /// exited session never do (nothing the user interrupted).
+        /// </summary>
+        /// <param name="sessionId">The session to restart.</param>
+        /// <param name="s">Its record (the title for the question).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>True when the question was posted (the caller restarts nothing now); false when there is nothing to ask.</returns>
+        /// <exception cref="std::bad_alloc">If the question cannot be allocated.</exception>
+        bool _askUninterruptBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId);
+        /// <summary>
+        /// HOOKS.md "Interrupted turns" — the fork question, asked IN THE TOPIC for a fork the phone asked for (/forksession,
+        /// the card's ⑂ Fork, the Search topic's ⑂ pick). When a fork of `req.sessionId` would continue the source's turn by
+        /// itself (AssessForkContinuation — the source's tail or its live state, with CLAUDE_CODE_RESUME_INTERRUPTED_TURN on),
+        /// posts "Fork a session in the middle of a turn?" with ⏸ Fork interrupted (token fork-interrupted), ▶ Fork uninterrupted
+        /// (fork-uninterrupted) and Cancel. A tap rebuilds the request with the answer (RemoteLaunchRequest::forkTurn) and sends
+        /// it through _requestLaunch, so the window forks with the answer (an Interrupted fork arms its stop watch there).
+        /// </summary>
+        /// <param name="req">The fork request (dir already resolved).</param>
+        /// <param name="threadId">The topic.</param>
+        /// <returns>True when the question was posted; false when the fork may go on at once (Uninterrupted).</returns>
+        /// <exception cref="std::bad_alloc">If the question cannot be allocated.</exception>
+        bool _askForkTurnBeforeLaunch(const RemoteLaunchRequest& req, int64_t threadId);
         /// <summary>
         /// The second half of 🖼 Screen Image and /screenimage (§21.24), called with the hosting window's answer on ITS UI thread:
         /// parses the snapshot (ScreenSnapshot.h) and draws it as a PNG on a worker thread of its own (ScreenImage.h - ~90 to

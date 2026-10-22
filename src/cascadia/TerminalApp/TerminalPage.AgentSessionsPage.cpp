@@ -2467,9 +2467,17 @@ namespace winrt::TerminalApp::implementation
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, forkTitle, model]() {
                         if (auto self = weak.get())
                         {
-                            self->_openClaudeTabInBackground = true;
-                            auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
-                            self->_ForkSessionFromDisk(rid, rdir, forkTitle, std::wstring{ model });
+                            // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn; the
+                            // background open rides the request (the question is async, so the flag is set around the fork
+                            // itself, by _LaunchForkRequest).
+                            ForkLaunchRequest request;
+                            request.sourceId = rid;
+                            request.dir = rdir;
+                            request.title = forkTitle;
+                            request.model = std::wstring{ model };
+                            request.background = true;
+                            request.origin = L"sessions-row";
+                            self->_ForkAskingAboutRunningTurn(std::move(request));
                         }
                     });
                 },
@@ -2828,7 +2836,14 @@ namespace winrt::TerminalApp::implementation
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, forkTitle, model]() {
                     if (auto self = weak.get())
                     {
-                        self->_ForkSessionFromDisk(id, dir, forkTitle, std::wstring{ model });
+                        // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn.
+                        ForkLaunchRequest request;
+                        request.sourceId = id;
+                        request.dir = dir;
+                        request.title = forkTitle;
+                        request.model = std::wstring{ model };
+                        request.origin = L"sessions-detail";
+                        self->_ForkAskingAboutRunningTurn(std::move(request));
                     }
                 });
             };

@@ -3848,7 +3848,13 @@ namespace winrt::TerminalApp::implementation
                 if (const auto self = weakThis.get())
                 {
                     self->_SidePanelCloseLaunchCard(L"fork");
-                    self->_ForkSessionFromDisk(id, dir, title);
+                    // HOOKS.md "Interrupted turns": asked first when the session is in the middle of a turn.
+                    ForkLaunchRequest request;
+                    request.sourceId = id;
+                    request.dir = dir;
+                    request.title = title;
+                    request.origin = L"side-panel-launcher";
+                    self->_ForkAskingAboutRunningTurn(std::move(request));
                 }
             };
             host.claudeMissing = [weakThis]() {

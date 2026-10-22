@@ -437,6 +437,19 @@ namespace Agentmaster
     // Against the live `<claude home>/sessions` (the sibling of ClaudeProjectsDir()).
     std::vector<SessionPresenceRow> ReadSessionPresence();
 
+    // ONE heartbeat by its pid — `<sessionsDir>\<pid>.json`, parsed exactly as ReadSessionPresenceIn parses each
+    // file. For a caller that already KNOWS the claude's pid and must poll it fast: the fork stop watch
+    // (HOOKS.md "Interrupted turns") reads its fork's heartbeat every 100 ms for a few seconds, where a whole-
+    // directory read would open every live session's file each time. The row is RAW like every presence row:
+    // the caller still checks PresenceRowMatchesProcess against the process it got the pid from.
+    //   sessionsDir — the presence directory.
+    //   pid         — the claude process id.
+    //   out         — receives the row when the file exists and parses (its pid and sessionId non-empty).
+    // Returns true when `out` was filled. Throws std::bad_alloc only.
+    bool ReadSessionPresenceForPidIn(std::wstring_view sessionsDir, uint32_t pid, SessionPresenceRow& out);
+    // Against the live `<claude home>/sessions`.
+    bool ReadSessionPresenceForPid(uint32_t pid, SessionPresenceRow& out);
+
     // ===== the per-session sidecar index (`~/.agentmaster/sessions-index/<sid>.json`) ========
     // The Sessions page's cache (SESSIONS.md §6.2): one sidecar per session holding the
     // accumulated TranscriptStats + the (sizeBytes, mtimeMs) invalidation key. Load-or-refresh:
