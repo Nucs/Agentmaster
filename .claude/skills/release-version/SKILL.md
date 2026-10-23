@@ -3,7 +3,8 @@ name: release-version
 description: |
   Deploy or cut a versioned release of Agentmaster — the local deploy inner-loop
   (close → build → relaunch) AND the public GitHub release pipeline (tag or dispatch
-  release.yml → monitor → verify the 4 signed assets → apply notes → publish). Encodes
+  release.yml → monitor → verify the 6 assets (bundle, cert, 2 portable zips with public PDBs,
+  2 full-PDB symbols zips) → apply notes → publish). Encodes
   the hard rules: hold the build mutex, pin `-R Nucs/Agentmaster` (gh defaults to the
   upstream microsoft/terminal remote), confirm the version with the user first, build the
   RELEASE identity, and ALWAYS pre-validate with a clean local Release build (incremental
@@ -257,16 +258,22 @@ gh run watch <run-id> -R Nucs/Agentmaster --exit-status --interval 30 # exits no
 the x64+arm64 matrix is the long pole). The compile failure point is the **"Build CascadiaPackage
 (Release, …)"** step — an early `gh run view <id> -R Nucs/Agentmaster --json jobs` confirms it cleared.
 
-### B5. Verify the draft release + its 4 assets
+### B5. Verify the draft release + its 6 assets
 ```bash
-gh release view vX.Y.Z -R Nucs/Agentmaster            # title / tag / draft:true / 4 assets
+gh release view vX.Y.Z -R Nucs/Agentmaster            # title / tag / draft:true / 6 assets
 gh api repos/Nucs/Agentmaster/releases/<id>/assets | jq -r '.[]|"  \(.name): \(.size) bytes"'
 ```
-Expect exactly these, non-empty (rough sizes from v0.1.1):
-- `Agentmaster_<ver4>.msixbundle`  (~15 MB)
+Expect exactly these, non-empty (the msixbundle and zip sizes of v0.8.0, plus the symbol sizes measured
+2026-10-23 on a local x64 build — `doc/agentmaster/SYMBOLS.md`):
+- `Agentmaster_<ver4>.msixbundle`  (~50 MB; no PDBs inside, by the owner's choice)
 - `Agentmaster.cer`                (~768 bytes — DER cert; "0 MB" is just rounding, confirm it's > 0)
-- `Agentmaster_<ver4>_x64.zip`     (~11 MB)
-- `Agentmaster_<ver4>_arm64.zip`   (~11 MB)
+- `Agentmaster_<ver4>_x64.zip`     (~42 MB: ~27 MB of binaries + ~15 MB of PUBLIC PDBs beside them)
+- `Agentmaster_<ver4>_arm64.zip`   (~43 MB, the same shape)
+- `Agentmaster_<ver4>_x64_symbols.zip`   (~190 MB: the FULL PDB of every binary, Source Link + srcsrv indexed)
+- `Agentmaster_<ver4>_arm64_symbols.zip` (~190 MB)
+A missing, stale or unindexed PDB never gets this far: the build job's "Package the full symbols" step and the
+portable step's `-RequireSymbolsUnder` fail the run first. Spot-check one: `unzip -l Agentmaster_<ver4>_x64.zip |
+grep -c '\.pdb$'` → 16, and the same for the `_symbols.zip`.
 
 **Nightly note:** `<ver4>` is always the NUMERIC `X.Y.Z.0` — for a nightly the TAG/release name
 carry the `-prerelease-nightly` suffix but the asset names do NOT (prep strips components to

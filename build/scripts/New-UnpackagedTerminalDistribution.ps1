@@ -30,7 +30,22 @@ Param(
     [Parameter(HelpMessage="Include the portable mode marker file by default", ParameterSetName='AppX')]
     [Parameter(HelpMessage="Include the portable mode marker file by default", ParameterSetName='Layout')]
     [switch]
-    $PortableMode = $PSCmdlet.ParameterSetName -eq 'Layout'
+    $PortableMode = $PSCmdlet.ParameterSetName -eq 'Layout',
+
+    # Agentmaster: a folder of PDBs to put beside the binaries (release.yml passes the PUBLIC PDBs its link wrote with
+    # /PDBSTRIPPED - doc/agentmaster/SYMBOLS.md). Each binary gets the PDB whose GUID and age its debug record names,
+    # found anywhere under this folder; it replaces a PDB of the same name already in the folder. Empty: no PDBs added.
+    [Parameter(HelpMessage="Folder of PDBs to place beside the binaries (matched by GUID + age)", ParameterSetName='AppX')]
+    [Parameter(HelpMessage="Folder of PDBs to place beside the binaries (matched by GUID + age)", ParameterSetName='Layout')]
+    [string]
+    $SymbolsPath = '',
+
+    # Agentmaster: the build root. A binary whose recorded PDB path lies under it is one we built, and it MUST get its
+    # PDB from -SymbolsPath or no zip is made (tools\Export-AgentmasterSymbols.ps1 throws). Empty: nothing required.
+    [Parameter(HelpMessage="Build root whose binaries must each get a PDB", ParameterSetName='AppX')]
+    [Parameter(HelpMessage="Build root whose binaries must each get a PDB", ParameterSetName='Layout')]
+    [string]
+    $RequireSymbolsUnder = ''
 )
 
 $filesToRemove = @("*.xml", "*.winmd", "Appx*", "Images/*Tile*", "Images/*Logo*") # Remove from Terminal
@@ -138,6 +153,25 @@ $finalTerminalPriFile = Join-Path $terminalAppPath "resources.pri"
     -XamlRoot $xamlAppPath `
     -OutputPath $finalTerminalPriFile `
     -Verbose:$Verbose | Out-Host
+
+########
+# Agentmaster: symbols
+########
+
+# Every binary we built gets its PDB beside it (doc/agentmaster/SYMBOLS.md): in a release, the PUBLIC PDB, so a stack
+# trace from any install names every function; the full PDBs ship apart, in Agentmaster_<ver>_<arch>_symbols.zip.
+# This runs BEFORE the manifest below is written, so .am-manifest lists the PDBs: the in-app updater and the
+# installers replace them with the next version's and remove them on uninstall, like every file a release ships -
+# which also lets a user extract the full PDBs over these (same names) without leaving strays behind.
+# tools\Export-AgentmasterSymbols.ps1 matches each binary to its PDB by GUID + age and throws (stopping this script
+# before any zip exists) when a binary built under -RequireSymbolsUnder has none.
+If ($SymbolsPath) {
+	& (Join-Path $PSScriptRoot "..\..\tools\Export-AgentmasterSymbols.ps1") `
+		-BinaryFolder $terminalAppPath `
+		-PdbSearchPath $SymbolsPath `
+		-RequireUnder $RequireSymbolsUnder `
+		-CopyTo $terminalAppPath
+}
 
 ########
 # Packaging

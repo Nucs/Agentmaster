@@ -100,7 +100,8 @@ the one-line subject rarely captures the user-facing story.
      Range: v<prev>..<target> = N commits. RELEASING from <sha>. Tag vX.Y.Z -> X.Y.Z.0.
      <STABLE: publish --draft=false --latest (REPLACES <prevstable> as Latest; no --prerelease).>
      <PRE:    publish --draft=false --prerelease --latest=false (the stable <prevstable> stays Latest).>
-     Assets: Agentmaster_X.Y.Z.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
+     Assets: Agentmaster_X.Y.Z.0.msixbundle, _x64.zip, _arm64.zip, _x64_symbols.zip, _arm64_symbols.zip,
+     Agentmaster.cer. -->
 ## Agentmaster X.Y.Z<  (pre-release)>
 
 **X.Y.Z is a <stable release|pre-release>** building on <prev>. <one-paragraph headline of the top themes>.
@@ -129,10 +130,14 @@ Add `-Portable` (cert-free, no admin) or `-Launch` (start after install).< STABL
 
 **MSIX bundle (self-signed):** download `Agentmaster.cer` + `Agentmaster_X.Y.Z.0.msixbundle`, trust the cert once (`Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`, admin), then `Add-AppxPackage .\Agentmaster_X.Y.Z.0.msixbundle`.
 
+**Debugging symbols:** the portable zips carry a *public* PDB beside each binary (every function named in a stack trace); `Agentmaster_X.Y.Z.0_x64_symbols.zip` (or `_arm64`) holds the *full* PDBs, Source-Linked to this release's commit — extract it into the folder that holds `Agentmaster.exe`, or onto your debugger's symbol path (an MSIX install's folder is read-only).
+
 Runs as **`agentmaster`** / Start menu **Agentmaster**. Upgrading keeps your data (your existing `%USERPROFILE%\.agentmaster` carries over). Requires Windows 10 2004+ (19041), x64 or arm64, with [Claude Code](https://www.anthropic.com/claude-code) (`claude`) — and optionally Codex — on `PATH`. Built on Windows Terminal v1.24.2372 (MIT). Agentmaster is dual-licensed **AGPL-3.0-or-later** + commercial.
 ```
 
-Notes: assets are always `Agentmaster_<X.Y.Z>.0.*` (**ver4** = X.Y.Z.0) + a single `Agentmaster.cer`.
+Notes: assets are always `Agentmaster_<X.Y.Z>.0.*` (**ver4** = X.Y.Z.0) + a single `Agentmaster.cer`; from the
+release-symbols change of 2026-10-23 on, that includes `Agentmaster_<X.Y.Z>.0_<arch>_symbols.zip` per architecture
+(`doc/agentmaster/SYMBOLS.md`). A release cut before it has no symbols — never promise them in its notes.
 The `< … >` markers above are placeholders, not literal — keep the STABLE **or** PRE-RELEASE variant.
 
 **NIGHTLY variant** (see §5 for the framing block): title `## Agentmaster X.Y.Z-prerelease-nightly

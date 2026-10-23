@@ -3,7 +3,8 @@
 # A fork-friendly port of Windows Terminal's Azure-Pipelines "full release build"
 # (build/pipelines/ob-release.yml -> pipeline-onebranch-full-release-build.yml),
 # stripped of everything Microsoft-internal:
-#   - NO Azure / OneBranch / 1ES, NO ESRP signing, NO symbol publishing, NO vpack
+#   - NO Azure / OneBranch / 1ES, NO ESRP signing, NO symbol-SERVER publishing (upstream pushes to MSDL; this
+#     fork ships its symbols as release assets instead - see "Produces" and doc/agentmaster/SYMBOLS.md), NO vpack
 #   - NO scheduled cron (tag/dispatch only), NO NuGet *publishing* (restore stays — it's a build dep).
 #     A NIGHTLY release is still cut by tag/dispatch: tag it vX.Y.Z-prerelease-nightly (any tag
 #     containing "nightly") — prep strips the suffix for the numeric MSIX Identity Version and the
@@ -27,8 +28,17 @@
 #     zip without it cannot be installed for all users) — first launch asks where Agentmaster
 #     should live (just for you / for all users / here / keep it portable / later; PROFILES.md
 #     §2b), the in-app updater self-updates it IN PLACE via this very zip asset; unzip & run, no
-#     install/cert needed)
+#     install/cert needed). Beside every binary it also carries that binary's PUBLIC PDB (function
+#     names + addresses, written by the same link with /PDBSTRIPPED), listed in .am-manifest like
+#     every shipped file, so a stack trace from any install names every function.
 #   - Agentmaster_<ver>_arm64.zip    (portable)
+#   - Agentmaster_<ver>_x64_symbols.zip / _arm64_symbols.zip  (the FULL PDB of every binary we
+#     build - types, line numbers, locals - flat, extractable into an install folder over the public
+#     ones; Source-Linked AND srcsrv-indexed to this commit, so Visual Studio / WinDbg / cdb download
+#     each source file from GitHub. Agentmaster is open source: nothing in them is private.)
+#     Asset names matter: the in-app updater picks *_x64.zip / *_arm64.zip / *.msixbundle / *.cer
+#     by suffix (Updater.h ParseReleaseObj) and Install-Agentmaster.ps1 by "_<arch>\.zip$" - a
+#     "_symbols.zip" name matches none of them, in this build or any build already installed.
 #
 # Heads-up (things a runner may need that this box has natively):
 #   * windows-2022 must have the VS2022 "Desktop development with C++" AND
@@ -199,6 +209,27 @@ jobs:
         shell: pwsh
         run: .\build\scripts\Generate-ThirdPartyNotices.ps1 -MarkdownNoticePath .\NOTICE.md -OutputPath .\src\cascadia\CascadiaPackage\NOTICE.html
 
+      # Agentmaster: RELEASE SYMBOLS (doc/agentmaster/SYMBOLS.md). Two inputs of the build below:
+      #   * the Source Link map every module PDB embeds (link /SOURCELINK): this commit's raw.githubusercontent.com
+      #     files, and each GitHub submodule's at its own pin - written by tools\New-AgentmasterSourceLink.ps1;
+      #   * the folder the link writes each binary's PUBLIC PDB into (link /PDBSTRIPPED), later placed beside the
+      #     binaries in the portable zip. No trailing backslash on it: "\" before the closing quote of an msbuild
+      #     /p: argument would escape the quote (src\common.build.post.props adds the separator itself).
+      - name: Prepare the release symbols (Source Link map + public PDB folder)
+        shell: pwsh
+        run: |
+          $map = Join-Path $env:RUNNER_TEMP 'agentmaster-sourcelink.json'
+          $pub = Join-Path $env:RUNNER_TEMP 'agentmaster-public-pdbs'
+          .\tools\New-AgentmasterSourceLink.ps1 -RepoRoot $env:GITHUB_WORKSPACE -Repository $env:GITHUB_REPOSITORY `
+            -Commit $env:GITHUB_SHA -OutFile $map
+          New-Item -ItemType Directory -Force $pub | Out-Null
+          "AM_SOURCELINK=$map"  >> $env:GITHUB_ENV
+          "AM_PUBLIC_PDBS=$pub" >> $env:GITHUB_ENV
+
+      # Agentmaster: the two symbol properties (the step above) switch on link /SOURCELINK and /PDBSTRIPPED for every
+      # .exe / .dll (src\common.build.post.props). AppxSymbolPackageEnabled=false skips DesktopBridge's own .appxsym:
+      # an UNINDEXED zip of the same full PDBs that this workflow always built and threw away; the release ships its
+      # own source-indexed Agentmaster_<ver>_<arch>_symbols.zip instead (below).
       - name: Build CascadiaPackage (Release, Dev branding + RELEASE package identity)
         shell: pwsh
         run: |
@@ -208,6 +239,9 @@ jobs:
             /p:WindowsTerminalBranding=Dev `
             /p:AgentmasterPackageIdentity=Release `
             /p:AppxPackageSigningEnabled=false `
+            "/p:AgentmasterSourceLinkFile=$env:AM_SOURCELINK" `
+            "/p:AgentmasterPublicPdbDir=$env:AM_PUBLIC_PDBS" `
+            /p:AppxSymbolPackageEnabled=false `
             /t:Terminal\CascadiaPackage `
             /bl:msbuild-${{ matrix.name }}.binlog
 
@@ -230,6 +264,40 @@ jobs:
         continue-on-error: true
         run: .\build\scripts\Test-WindowsTerminalPackage.ps1 -Verbose -Path "${{ steps.loc.outputs.msix }}"
 
+      # Agentmaster: source-index the FULL PDBs of the package layout (the PDBs beside the binaries the .msix was made
+      # from) with upstream's build\scripts\Index-Pdbs.ps1: a "srcsrv" stream mapping every git-tracked source file to
+      # raw.githubusercontent.com at this commit, for cdb / classic WinDbg (Visual Studio and WinDbg read the Source
+      # Link map the link already embedded). pdbstr / srctool come from build\packages.config (restored above). GUID
+      # and age are untouched, so the PDBs still match the binaries. The indexer prints every source file of every
+      # PDB: that goes to a log (uploaded with the binlog); Export-AgentmasterSymbols.ps1 below checks the result.
+      - name: Source-index the full PDBs (srcsrv)
+        shell: pwsh
+        run: |
+          $layout = "src\cascadia\CascadiaPackage\bin\${{ matrix.platform }}\$env:CONFIGURATION"
+          if (-not (Test-Path "$layout\AppxManifest.xml")) { throw "no package layout at $layout" }
+          foreach ($tool in 'Microsoft.Debugging.Tools.PdbStr', 'Microsoft.Debugging.Tools.SrcTool') {
+            if (-not (Get-ChildItem packages -Directory -Filter "$tool.*" -ErrorAction Ignore)) {
+              throw "$tool was not restored (build\packages.config): the PDBs cannot be source-indexed"
+            }
+          }
+          # Beside the binlog (the workspace root), so the binlog artifact keeps both at its top level.
+          $log = Join-Path $env:GITHUB_WORKSPACE "index-pdbs-${{ matrix.name }}.log"
+          .\build\scripts\Index-Pdbs.ps1 -SearchDir $layout -SourceRoot $env:GITHUB_WORKSPACE -CommitId $env:GITHUB_SHA `
+            -Organization $env:GITHUB_REPOSITORY_OWNER -Repo "${{ github.event.repository.name }}" *> $log
+          Write-Host "Index-Pdbs.ps1: $((Get-Content $log).Count) log lines -> $log"
+          "AM_LAYOUT=$layout" >> $env:GITHUB_ENV
+
+      # Agentmaster: Agentmaster_<ver>_<arch>_symbols.zip = the FULL PDB of every binary we built, matched to it by GUID +
+      # age (tools\Export-AgentmasterSymbols.ps1). The step fails unless every one is found and carries BOTH indexes
+      # naming this commit: a release never ships an unindexed, stale or missing PDB.
+      - name: Package the full symbols
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force _symbols | Out-Null
+          .\tools\Export-AgentmasterSymbols.ps1 -BinaryFolder $env:AM_LAYOUT -PdbSearchPath $env:AM_LAYOUT `
+            -RequireUnder $env:GITHUB_WORKSPACE -RequireSourceLink $env:GITHUB_SHA -RequireSourceServer `
+            -ZipTo "_symbols\Agentmaster_${env:VER4}_${{ matrix.name }}_symbols.zip"
+
       - name: Build portable (unpackaged) distribution
         shell: pwsh
         run: |
@@ -244,12 +312,17 @@ jobs:
           # and the in-app updater self-updates it IN PLACE from this zip asset (Updater.h
           # -Portable). Without the marker the zip would share the global unpackaged settings
           # dir with any other unpackaged Terminal.
+          # -SymbolsPath / -RequireSymbolsUnder (Agentmaster, doc/agentmaster/SYMBOLS.md): the PUBLIC PDB the link
+          # wrote for each binary goes beside it, before .am-manifest is written; a binary we built without one
+          # stops the step (no zip is made).
           .\build\scripts\New-UnpackagedTerminalDistribution.ps1 `
             -TerminalAppX "${{ steps.loc.outputs.msix }}" `
             -XamlAppX $xaml.FullName `
             -Destination _unpackaged `
             -MakeAppxPath "${{ steps.loc.outputs.makeappx }}" `
-            -PortableMode:$true
+            -PortableMode:$true `
+            -SymbolsPath $env:AM_PUBLIC_PDBS `
+            -RequireSymbolsUnder $env:GITHUB_WORKSPACE
 
       - name: Stage the per-arch MSIX for bundling
         shell: pwsh
@@ -269,11 +342,23 @@ jobs:
           path: _unpackaged/*.zip
           if-no-files-found: error
 
+      # Agentmaster: the full symbols zip (already deflated: stored as is, compression would only cost time).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symbols-${{ matrix.name }}
+          path: _symbols/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: binlog-${{ matrix.name }}
-          path: msbuild-${{ matrix.name }}.binlog
+          # + the srcsrv indexer's log (Agentmaster): which source files of which PDB it mapped, for a failed check.
+          path: |
+            msbuild-${{ matrix.name }}.binlog
+            index-pdbs-${{ matrix.name }}.log
+          if-no-files-found: warn
 
   # ----------------------------------------------------------------------------
   bundle:
@@ -354,10 +439,11 @@ jobs:
     needs: [prep, build, bundle]
     runs-on: ubuntu-latest
     steps:
+      # symbols-* (Agentmaster): the full symbols zips; "dist/*.zip" below attaches them with the portable zips.
       - name: Download all release assets
         uses: actions/download-artifact@v4
         with:
-          pattern: "{bundle,portable-*}"
+          pattern: "{bundle,portable-*,symbols-*}"
           path: dist
           merge-multiple: true
 
@@ -407,6 +493,11 @@ jobs:
             3. `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle` (or double-click it).
 
             Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
+
+            ### Debugging symbols
+            Agentmaster is open source, so every release ships the symbols of every binary it builds:
+            - **In the portable zips**, a *public* PDB sits beside each binary: a stack trace or crash dump from any install names every function.
+            - **`Agentmaster_${{ needs.prep.outputs.ver4 }}_x64_symbols.zip`** (or `_arm64`) holds the *full* PDBs: types, line numbers, local variables. They are Source-Linked to this release's commit, so Visual Studio and WinDbg download each source file from GitHub as you debug. Extract the zip into the folder that holds `Agentmaster.exe` (it replaces the public PDBs; the next update brings public ones again), or anywhere on your debugger's symbol path - the way for an MSIX install, whose folder is read-only.
 
             ### Profiles & coexistence with a dev build
             Agentmaster keeps *everything* it persists (sessions, prompt queues, window layouts,
