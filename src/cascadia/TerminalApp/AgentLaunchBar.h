@@ -43,6 +43,13 @@
 //     closes the menu arms it (_NoteLaunchMenuClosing), and the release on Launch that follows runs ClickLaunch when
 //     the press was on Launch too (_OnLaunchButtonReleased). A second ClickLaunch within the double-click time is
 //     ignored, so a double-click out of habit still launches once.
+//     In EVERY host (SP-K1, 2026-10-23): in the side panel's "+" card a click still took two (measured on 0.8.0 by the
+//     e2e suite) while the Agent Manager page's row took one. The arm now also knows a press from the pointer message
+//     being processed (GetPointerInfo — a busy UI thread may process the press after the physical release, when the
+//     button already reads up), and a RELEASE WATCH (_OnLaunchReleaseWatchTick) completes an armed press whose release
+//     never reached Launch: it polls the physical button and, once it is up, judges the press and release points with
+//     the last pointer position seen on Launch (_NoteLaunchPointerOnButton). Every arm, completion and decline is one
+//     [launchbar] line in hooks.log, so a click that still does not launch says why.
 //   - A programmatic Text write re-validates EXPLICITLY: TextChanged does not fire reliably while the box is off the
 //     live tree (a hidden Manager page, a closed card), so the underline would stay on the previous text's state.
 //   - The drop-down's geometry is never computed inside a layout pass: a resize goes through QueuePathPickerRelayout
@@ -290,25 +297,58 @@ namespace winrt::TerminalApp::implementation
         // still finds it set and stacks nothing. Never throws: a failure (a torn-down menu, a pool-thread teardown) is
         // logged (Rule #18).
         void _CloseLaunchMenu() noexcept;
-        // The hover menu is closing (its Closing event; its Closed event calls it too, as a belt). When the primary mouse
-        // button is down at that moment, the close was a light-dismiss PRESS — XAML ate it, no element under the pointer
-        // got it — and the press is ARMED: its time and the cursor's screen position are kept for _OnLaunchButtonReleased,
-        // which turns it into a click if its release lands on Launch. A close with the button up (a menu pick, Esc, the
-        // pointer moving away, ClickLaunch's own close) arms nothing, and an arm already pending is kept (its cursor is the
-        // press point; Closed comes later). Never throws: a failed read arms nothing, and the press stays eaten (as before).
+        // The hover menu is closing (its Closing event; its Closed event calls it too, as a belt). When the close is a
+        // PRESS — the primary button is physically down (GetAsyncKeyState), or the pointer message XAML is processing is
+        // the primary button going down (GetPointerInfo for the pointer last seen on Launch: on a busy UI thread the press
+        // is processed after the physical release, and the button already reads up) — XAML's light dismiss ate it, and
+        // the press is ARMED: its time and its screen point (the message's own point when it is the press, else the
+        // cursor) are kept for _OnLaunchButtonReleased and the release watch, which turn it into a click if its release
+        // lands on Launch. The watch starts here (_StartLaunchReleaseWatch). A close that is no press (a menu pick, Esc,
+        // the pointer moving away, ClickLaunch's own close) arms nothing, and an arm already pending is kept (Closing
+        // comes first with the press point; Closed comes later). Logs one [launchbar] line per arm. Never throws: a
+        // failed read arms nothing, and the press stays eaten (as before).
         void _NoteLaunchMenuClosing() noexcept;
+        // Record where the pointer is on Launch (its PointerEntered, and every PointerMoved it gets before the hover menu
+        // takes the pointer): the screen pixel of this pointer message (GetPointerInfo; the cursor when that fails), the
+        // same point in Launch's own DIPs (GetCurrentPoint), and the pointer's id (the one _NoteLaunchMenuClosing asks
+        // GetPointerInfo about). The release watch maps screen points into Launch with it — the button does not move
+        // while its menu is up, and the hover menu's light dismiss keeps every later move from reaching the button.
+        // Never throws (a failed read leaves the previous sample).
+        //   e - the pointer event raised on Launch.
+        void _NoteLaunchPointerOnButton(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) noexcept;
+        // Start (or restart) the release watch for the press just armed: a DispatcherTimer every
+        // kLaunchReleaseWatchIntervalMs on the UI thread (created on first use). Never throws (a failed start is logged;
+        // the XAML release path still completes a release that reaches Launch).
+        void _StartLaunchReleaseWatch() noexcept;
+        // One tick of the release watch. Stops itself when no press is armed any more (ClickLaunch or the XAML release
+        // consumed it, it aged out, Shutdown ran). While the primary button is down it waits; once it has read UP on
+        // kLaunchReleaseWatchUpReads consecutive ticks — the XAML release, which input outranks the timer for, had its
+        // chance — it consumes the arm and judges the click: the press and the release (the cursor now) must both lie on
+        // Launch (_LaunchScreenPointOnButton), the button must be enabled and in the live tree, then ClickLaunch runs. Logs
+        // the completion or the reason it declined. Never throws (logged).
+        void _OnLaunchReleaseWatchTick() noexcept;
+        // Does the screen point `p` (pixels) lie on Launch? Judged with the last pointer sample on Launch
+        // (_NoteLaunchPointerOnButton): a point within kLaunchClickSlackPx of the sample is where the pointer rested on
+        // Launch; any other point is mapped into Launch's DIPs (the sample's DIPs + the pixel delta / the island's
+        // rasterization scale) and tested against the button's size with kLaunchClickSlackDips of slack.
+        //   p - the screen point.
+        // Returns false without a sample or a measured button. Never throws.
+        bool _LaunchScreenPointOnButton(POINT p) const noexcept;
         // True while an eaten press is armed and younger than kLaunchEatenPressMaxMs. While it is, the hover menu does not
         // reopen (_ShowLaunchMenu): the release of that press finds the pointer over Launch again, and a menu reopened
         // there would eat the next press too — the reason only a double-click got through. Never throws.
         bool _LaunchEatenPressPending() const noexcept;
         // The Launch button's PointerReleased, registered with handledEventsToo (ButtonBase marks every release handled).
         // Completes an eaten press: when one is armed, this release is the primary button's, and the PRESS point lies on
-        // Launch — the release point moved back by the cursor's screen delta since the press, converted to DIPs with the
-        // island's rasterization scale — the arm is dropped and ClickLaunch runs, as the button's Click would have. A
-        // release that Launch turned into a real Click finds no arm: ClickLaunch dropped it, and ButtonBase raises Click
-        // in OnPointerReleased, which runs before this instance handler. Logs one [launchbar] line per completed click.
-        // Never throws (logged; the press then stays eaten, as before).
-        //   e - the release's event args (its position on Launch and the button that was released).
+        // Launch, the arm is dropped and ClickLaunch runs, as the button's Click would have. The press lies on Launch when
+        // it is where this release is (within kLaunchClickSlackPx — XAML routed the release to Launch, so that point is
+        // on it), else when the release point moved back by the screen delta (in DIPs, with the island's rasterization
+        // scale) is inside the button. The release's screen point is its pointer message's own (GetPointerInfo), the
+        // cursor when that fails. A release that Launch turned into a real Click finds no arm: ClickLaunch dropped it, and
+        // ButtonBase raises Click in OnPointerReleased, which runs before this instance handler. A declined release
+        // consumes the arm too (a press dragged onto Launch is no click, as for a plain Button). Logs one [launchbar] line
+        // per completed or declined click. Never throws (logged; the release watch then judges the armed press).
+        //   e - the release's event args (its position on Launch, the button that was released, its pointer's id).
         void _OnLaunchButtonReleased(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) noexcept;
         // The Launch button's action. `target` (PRESETS): the hover menu's pick — "" = Default (a plain click), a model
         // id, or "@<presetId>" — handed to spawnClaude for a NEW session in the typed folder. A session id in the box
@@ -447,9 +487,27 @@ namespace winrt::TerminalApp::implementation
         // An EATEN PRESS (_NoteLaunchMenuClosing): GetTickCount64 when a press closed the hover menu; 0 = none armed.
         // Dropped by ClickLaunch, by its completion (_OnLaunchButtonReleased) and by age (kLaunchEatenPressMaxMs).
         uint64_t _launchEatenPressTick{ 0 };
-        // The cursor at that press, in screen pixels (GetCursorPos): the release maps it into Launch's own coordinates.
+        // The press point, in screen pixels: the press message's own point (GetPointerInfo) when the close came while it was
+        // processed, else the cursor at the close (GetCursorPos). The release maps it into Launch's own coordinates.
         int32_t _launchEatenPressX{ 0 };
         int32_t _launchEatenPressY{ 0 };
+        // The armed press had already been released physically when the menu closed (only the pointer message said "down":
+        // a busy UI thread). The release watch then needs no further "up" edge — the release came before the arm.
+        bool _launchEatenPressReleasedAtArm{ false };
+        // The RELEASE WATCH (SP-K1): a UI-thread DispatcherTimer that polls the physical primary button while a press is
+        // armed and completes the click when the XAML release never reached Launch (_OnLaunchReleaseWatchTick). Null until
+        // the first arm; its Tick holds only the bar's weak_ptr, and a tick that finds the bar gone stops its own timer.
+        // Stopped by its own tick when nothing is armed, by ClickLaunch and by Shutdown.
+        winrt::Windows::UI::Xaml::DispatcherTimer _launchReleaseWatch{ nullptr };
+        // Consecutive watch ticks that read the primary button UP (reset by a "down" read); the judgment waits for
+        // kLaunchReleaseWatchUpReads of them.
+        uint32_t _launchReleaseWatchUps{ 0 };
+        // The last pointer sample on Launch (_NoteLaunchPointerOnButton): valid once one was taken; the screen pixel of
+        // that pointer message; the same point in Launch's own DIPs; the pointer's id (0 = none seen yet).
+        bool _launchPointerSampleValid{ false };
+        POINT _launchPointerSampleScreen{};
+        winrt::Windows::Foundation::Point _launchPointerSampleLocal{};
+        uint32_t _launchPointerId{ 0 };
         // GetTickCount64 of the last ClickLaunch; 0 = none yet. A ClickLaunch within the system double-click time of it is
         // ignored, so a double-click launches once.
         uint64_t _lastClickLaunchTick{ 0 };

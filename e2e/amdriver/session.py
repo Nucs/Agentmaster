@@ -2,8 +2,10 @@
 
 `launch_session(app, folder)` is fixture F-S's real path (doc/agentmaster/flows/README.md): type the folder
 into the Agent Manager's launch row and click Launch Claude; the engine logs `[nav] open-new claude done
-new=<sid8>`, sessions.json gets the record, a tab titled by the folder opens selected, and Claude Code's input
-box appears in it.
+new=<sid8>`, sessions.json gets the record and a tab titled by the folder opens. Since MGR-K1's fix (2026-10-23)
+the page STAYS: the tab opens behind it, its claude starts in place and the page selects the session — Home reads
+"Jump back to <title>" — so the fixture clicks Home, the user's way to the new tab. A build before the fix (the
+published 0.8.0) selects the tab itself. Either way the test then stands on the tab with Claude Code's input box.
 
 `Session.ask(prompt)` types a prompt into the session's terminal and confirms it through the oracles the app
 does not control: the MOCK received it (the turn started), then sessions.json says the turn ended
@@ -225,7 +227,13 @@ class Session:
 
 
 def launch_session(app, folder: Path, mock=None, ready: bool = True, timeout_s: float = 60.0) -> Session:
-    """Launch a managed Claude session through the Agent Manager's launch row (fixture F-S's real path).
+    """Launch a managed Claude session through the Agent Manager's launch row (fixture F-S's real path) and end on
+    its tab.
+
+    Two builds, one result (see the module docstring): with MGR-K1 fixed the page stays and selects the new session
+    (`[nav] manager-page launch <sid8> …` in hooks.log, Home's name "Jump back to <title>"), and the fixture clicks
+    Home to reach the tab; the published 0.8.0 selects the tab itself. The page-stays behavior is asserted by its own
+    test (test_manager_page.py, MGR-07), not here.
 
     Args:
         app: The App.
@@ -236,7 +244,8 @@ def launch_session(app, folder: Path, mock=None, ready: bool = True, timeout_s: 
     Returns:
         The Session.
     Raises:
-        WaitTimeout: When the engine did not report the launch, or the tab / the box never appeared.
+        WaitTimeout: When the engine did not report the launch, the launch settled neither way, Home did not offer
+            the way back, or the tab / the box never appeared.
     """
     window = app.window
     mark = app.profile.hooks.mark()
@@ -245,6 +254,26 @@ def launch_session(app, folder: Path, mock=None, ready: bool = True, timeout_s: 
     rec = app.profile.wait_session(lambda s: s.id.startswith(m.group(1)), timeout_s,
                                    what=f"session {m.group(1)} in sessions.json")
     session = Session(app, rec.id, Path(folder), mock)
+
+    def settled() -> Optional[str]:
+        """One poll: how the launch ended.
+
+        Returns:
+            "page" (the page stayed and selected the session), "tab" (the tab was selected: a build before the
+            fix), or None while neither is true yet.
+        """
+        if app.profile.hooks.find(rf"\[nav\] manager-page launch {m.group(1)} ", since=mark):
+            return "page"
+        selected = window.tabs.selected()
+        if selected is not None and selected.title == rec.title and not window.manager.showing():
+            return "tab"
+        return None
+
+    how = wait_until(settled, timeout_s, what=f"the launch of {m.group(1)} to settle (on the page or on its tab)")
+    if how == "page":
+        wait_until(lambda: window.manager.home_name() == f"Jump back to {rec.title}", 15.0,
+                   what=f"Home to offer the way back to {rec.title!r}", describe=window.manager.home_name)
+        window.manager.click_home()
     window.tabs.wait_selected(rec.title, timeout_s=timeout_s)
     if ready:
         window.terminal.wait_input_box(timeout_s=timeout_s)

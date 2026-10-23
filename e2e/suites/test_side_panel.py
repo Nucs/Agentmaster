@@ -159,36 +159,42 @@ def test_plus_launcher_card(am, s1, mock):
     assert s1.state == "WaitingForInput"  # t1 got no stray Enter
 
 
-@pytest.mark.p1
+@pytest.mark.p0
 @pytest.mark.flow("SP-05")
-@pytest.mark.known_defect("SP-K1")
-def test_known_defect_plus_card_launch_needs_a_second_click(am, s1):
-    """SP-K1 (expected failure once fixed): in the + card, with Launch's presets menu open (the pointer rests on
-    Launch), ONE click does not launch: it only closes the menu; the second click launches. The Agent Manager
-    page's own launch row launches with one click in the same situation (0.8.0's fix; checked by the suite's
-    launch path, launch_session). Measured 2026-10-23 on 0.8.0 with a held (60 ms) click.
+@pytest.mark.needs_fix("SP-K1")
+def test_plus_card_launch_takes_one_click_with_its_menu_open(am, s1, mock):
+    """SP-05 phase 5 (SP-K1's fix, 2026-10-23): in the + card, with Launch's presets menu open (a hover opens it at
+    once), ONE click on Launch launches — exactly one session — as on the Agent Manager page's own row. On 0.8.0 the
+    click only closed the menu and a second click launched (SP-K1).
 
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: drop this test and launch with
-    a click in test_plus_launcher_card.
+    The app completes such a click itself (the menu's light dismiss eats the press): hooks.log says how, either
+    "its release on Launch completed the click" or "the release watch completed the click" — printed for the record,
+    since which of the two paths answers in a popup-hosted card is exactly what the fix had to cover.
 
     Args:
         am: The app.
-        s1: F-S.
+        s1: F-S (t1 on screen; the card opens over its tab).
+        mock: The scripted model.
     """
-    from amdriver.ui.menus import Menu
-    panel = am.window.side_panel
+    w = am.window
+    panel = w.side_panel
     card = panel.open_launcher()
     card.type_folder(str(am.iso.folder("t2")))
-    button = card.launch_button()
-    button.hover()
+    sessions_before = {s.id for s in am.profile.sessions()}
+    card.launch_button().hover()
     wait_until(lambda: Menu.open_menus(am), 5, what="Launch's presets menu (it opens on hover)")
     mark = am.profile.hooks.mark()
-    card.launch_button().click()
-    time.sleep(2.0)
-    assert not am.profile.hooks.find(r"\[nav\] open-new claude", since=mark)  # expected: launched
-    assert card.is_open() and not Menu.open_menus(am)  # the click only closed the presets menu
-    card.launch_button().click()
-    am.profile.hooks.wait(r"\[nav\] open-new claude done", since=mark, timeout_s=20)
+    card.launch_button().click()  # ONE click, held like a finger's (the driver's 60 ms)
+    new = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock,
+                           timeout_s=20)
+    wait_until(lambda: not card.is_open(), 5, what="the card closes after the launch")
+    w.tabs.wait_selected("t2")  # over a tab, the new tab opens in front
+    how = am.profile.hooks.find(r"\[launchbar\] Launch clicked while its hover menu was up: (.*)", since=mark)
+    print("SP-05 phase 5: " + (how[0].group(1) if how else "no [launchbar] completion line (a real Click: the press reached Launch)"))
+    time.sleep(2)
+    assert {s.id for s in am.profile.sessions()} - sessions_before == {new.id}  # exactly one new session
+    assert not am.profile.hooks.find(r"\[launchbar\] a second Launch click within the double-click time", since=mark)
+    w.terminal.wait_input_box()
 
 
 @pytest.mark.p1

@@ -613,6 +613,37 @@ Manager's own launch row, so a session starts from the side panel without leavin
      pointer input, and a stale "down" would arm every close); a touch or pen press (no mouse button
      state). The same light dismiss still eats a first click anywhere else (the box, a folder row)
      while the hover menu is up.
+   - **SP-K1 — on 0.8.0 the CARD still needed two clicks** (2026-10-23, the e2e suite; the page's row
+     took one). Fixed in code the same day (NOT BUILT yet; `AgentLaunchBar`, so both hosts get it):
+     - **The arm also reads the pointer message being processed:** `GetPointerInfo` for the pointer last
+       seen on Launch (the app calls `EnableMouseInPointer`, so the mouse is a pointer). When that message
+       is the primary button going down, the close is a press even when the button already reads up — a
+       busy UI thread, the first "Not covered" case above — and its own screen point is the press point.
+     - **A release WATCH** (`_StartLaunchReleaseWatch` / `_OnLaunchReleaseWatchTick`: a 15 ms
+       `DispatcherTimer` from the arm until the release, stopped by `ClickLaunch` and `Shutdown`)
+       completes an armed press whose release never completed the click: once the physical button has
+       read up twice (input outranks the timer, so the XAML release had its chance), it judges the press
+       and the release (the cursor) with the last pointer sample on Launch (`_NoteLaunchPointerOnButton`,
+       taken on its PointerEntered and PointerMoved: the menu's light dismiss keeps every later move from
+       the button). A point at the sample is on Launch; any other is mapped by the screen delta and the
+       rasterization scale.
+     - **The release path needs no mapping for a click that did not move:** XAML routed the release to
+       Launch, so a press at the release's own screen point (its pointer message's) was on Launch too.
+     - **Every arm, completion and decline is a `[launchbar]` line** (`… closed on a press at (x, y) px:
+       armed …`, `… its release on Launch completed the click`, `… the release watch completed the
+       click`, `… began off it …: no click`, `… aged out …`).
+     - **The cause, measured with the test build (2026-10-23, e2e run fix1):** the press is armed in both hosts
+       (`… armed for its release (the button is down, point from the press message)`), but in the card NO release
+       reaches Launch, and the watch completes the click (`… no release reached Launch; the release watch completed
+       the click`); on the Agent Manager page the release does reach Launch (`… its release on Launch completed the
+       click`). Checked by `e2e/suites/test_side_panel.py` `test_plus_card_launch_takes_one_click_with_its_menu_open`
+       (flows/02 SP-05 phase 5).
+9. **Over the Agent Manager page, a launch from the card stays behind the page** (MGR-K1's fix,
+   2026-10-23, NOT BUILT yet; flows/01 MGR-07): the card's spawn / resume / fork go through the page's
+   `_LaunchFromManagerPage`, so with the page on screen the new tab opens in the background, its claude
+   starts in place and the session is selected on the page (Home's `Jump back to <title>`), exactly as
+   from the page's own row. Over a tab the new tab opens in front, as before, and the page's lens now
+   follows it (`_NoteLaunchedSessionTab`). An id of a session that is already open still jumps to its tab.
 
 **Keys act on the KEY-UP** (the `AgentModelPrompt.h` rule): the card's `PreviewKeyDown` arms
 Escape (drop-down closed) or Enter on the focused Launch / Fork button and marks it handled; its

@@ -369,14 +369,17 @@ def double_click_ms() -> int:
 
 
 def read_bytes_shared(path) -> bytes:
-    """Read a whole file while letting its writer REPLACE it meanwhile (the handle grants FILE_SHARE_DELETE).
+    """Read a whole file with a handle that grants read, write and DELETE sharing, held only for the read.
 
-    ⚠ Why the suite never reads the app's state files with Python's open(): its handle grants read and write
-    sharing but NOT delete, and Agentmaster saves sessions.json, windows\\<id>.json, settings.json … with a temp
-    file + MoveFileExW(REPLACE_EXISTING), which needs DELETE on the target — a save that lands while such a
-    handle is open FAILS (`[persist-fail] … atomic replace failed — state NOT saved`) and is not retried until the
-    next change (measured 2026-10-23: a finished turn stayed "Running" on disk for a minute while the suite
-    polled; flows ROB-K1). A test that WANTS that failure holds the file with open() on purpose.
+    ⚠ It does NOT let the app replace the file meanwhile. Agentmaster saves sessions.json, windows\\<id>.json,
+    settings.json … with a temp file + MoveFileExW(REPLACE_EXISTING), and that classic replace fails with
+    ERROR_ACCESS_DENIED while ANY handle holds the target, this one included (measured 2026-10-23 on Windows 11
+    26200, NTFS; flows/20 ROB-K1): a save that lands during a read FAILS (`[persist-fail] … atomic replace failed —
+    state NOT saved`) and is not retried until the next change. Only a POSIX-semantics replace (FileRenameInfoEx with
+    FILE_RENAME_FLAG_POSIX_SEMANTICS), which the app does not use yet, goes through this handle — and not through
+    Python's open(), whose handle grants no delete sharing. So keep polls of these files sparse: in run fix4 a wait
+    that polled sessions.json every 0.2 s lost the very save it waited for. A test that WANTS that failure holds the
+    file with open() on purpose (test_robustness.py).
 
     Args:
         path: The file.

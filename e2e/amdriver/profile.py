@@ -12,9 +12,10 @@ read-only test bridge exists (E2E_TESTING.md §6.2):
 A log is read from a MARK (a byte offset taken before the action), so a check sees only what the action
 caused and never an earlier test's or an earlier phase's line.
 
-⚠ Every file here is read through win32.read_bytes_shared (a handle that grants FILE_SHARE_DELETE): the app saves
-its JSON files by replacing them (a temp file + MoveFileExW), and a save that meets a plain open() handle FAILS
-and is not retried (flows ROB-K1) — a polling test would otherwise change what it measures.
+⚠ Every file here is read through win32.read_bytes_shared (a handle held only for the read): the app saves its JSON
+files by replacing them (a temp file + MoveFileExW), and a save that meets ANY open handle FAILS and is not retried
+(flows ROB-K1; delete sharing does not help that replace, measured 2026-10-23) — so a test that polls these files
+often can still change what it measures. Prefer a log line where the fact is logged.
 """
 from __future__ import annotations
 

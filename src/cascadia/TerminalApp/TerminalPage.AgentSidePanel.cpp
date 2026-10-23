@@ -4139,20 +4139,33 @@ namespace winrt::TerminalApp::implementation
             // (_WireAgentManagerContent), so a launch from the card IS a launch from the Manager: the same transcript
             // gates, the same [nav] lines, the same new tab. Closing first keeps the card from sitting over the new
             // tab while the launch selects and focuses it.
+            // MGR-K1 (2026-10-23): over the Agent Manager page, a launch from the card is a PAGE launch
+            // (_LaunchFromManagerPage): the page stays, the new session starts behind it and is selected there, as when it is
+            // launched from the page's own row. Over a tab, the new tab opens in front as before.
             host.spawnClaude = [weakThis](const std::wstring& dir, const std::wstring& target) {
                 if (const auto self = weakThis.get())
                 {
                     self->_SidePanelCloseLaunchCard(L"launch");
                     // An empty title lets the page derive one from the dir; `target` is "" (Default), a model id or
                     // "@<presetId>" from the Launch hover menu.
-                    self->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, static_cast<uint32_t>(-1), winrt::hstring{ target });
+                    self->_LaunchFromManagerPage(L"plus-card", [&]() {
+                        return self->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, static_cast<uint32_t>(-1), winrt::hstring{ target });
+                    });
                 }
             };
             host.resumeSession = [weakThis](const std::wstring& id, const std::wstring& dir, const std::wstring& title) {
                 if (const auto self = weakThis.get())
                 {
                     self->_SidePanelCloseLaunchCard(L"resume");
-                    self->_ResumeSessionFromDisk(id, dir, title);
+                    // An OPEN session is no launch: its id jumps to its tab, as before (the Agent Manager row's rule).
+                    if (const auto existing = self->_sessionRegistry ? self->_sessionRegistry->GetWithoutQueue(id) : std::nullopt; existing && existing->live)
+                    {
+                        self->_ResumeSessionFromDisk(id, dir, title);
+                        return;
+                    }
+                    self->_LaunchFromManagerPage(L"plus-card resume", [&]() {
+                        return self->_ResumeSessionFromDisk(id, dir, title);
+                    });
                 }
             };
             host.forkSession = [weakThis](const std::wstring& id, const std::wstring& dir, const std::wstring& title) {
@@ -4165,6 +4178,7 @@ namespace winrt::TerminalApp::implementation
                     request.dir = dir;
                     request.title = title;
                     request.origin = L"side-panel-launcher";
+                    request.fromManagerPage = true; // MGR-K1: over the page, the fork stays behind it (decided when it runs)
                     self->_ForkAskingAboutRunningTurn(std::move(request));
                 }
             };

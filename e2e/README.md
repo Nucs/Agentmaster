@@ -135,6 +135,9 @@ since=mark)`), then the UI.
 - A behavior that is wrong today gets a `known_defect("<ID>")` test that asserts TODAY's behavior, named
   `test_known_defect_…`, with the expected behavior in comments: it fails when the defect is fixed, and is then
   replaced by the real assertion. Add the defect to its flow file's "Known defects".
+- The test that replaces it proves the FIX. Until a published release holds the fix, mark it `needs_fix("<ID>")`:
+  it passes against a build of the branch and fails on the older release, where a run deselects it with
+  `-m "not needs_fix"` (MGR-K1, SP-K1, TCM-K2, TAB-K4, TAB-K3 and A11Y-K1 since 2026-10-23).
 - A new surface: open it in a probe, `python -m amdriver dump --out Z:\e2e\out\dumps\<name>.txt`, read the names and
   the structure, then add a page object method — never pixel positions.
 
@@ -143,7 +146,11 @@ since=mark)`), then the UI.
 - **A click is a hand's click.** The pointer rests ~150 ms on the target before the press, and the button is HELD
   ~60 ms. A press on arrival races the target's hover work, and a down and an up sent together are both queued
   before the app handles the press — Agentmaster's one-click Launch over its presets menu reads the button's LIVE
-  state (`GetAsyncKeyState`), which is then already "up", so the click is lost.
+  state (`GetAsyncKeyState`), which is then already "up", so the click is lost. (Builds with SP-K1's fix also read the
+  press from its pointer message, so they would keep such a click; the hand's click stays the rule.)
+- **A launch from the Agent Manager page stays on the page** on builds with MGR-K1's fix (`[nav] manager-page launch
+  <sid8> (…): started in place, selected on the page`): `launch_session` then clicks Home ("Jump back to <title>") to
+  reach the new tab, so fixture F-S ends on the tab with either build. A launch from a tab still opens in front.
 - **Menus slide into place** for a few hundred ms after they open; a click read before that lands on the item above.
   `Menu` reads the items until two reads agree, and checks that a submenu belongs to the item it hovered.
 - **Home ignores a click within the double-click time** of a click that opened the page or jumped back (by
@@ -165,10 +172,13 @@ since=mark)`), then the UI.
   `PanelCard.selected`, `compose_buttons`.
 - **A tooltip opens on a hand's arrival**: `hover(glide=True)` moves in steps; `am.tooltips()` lists what shows (a
   rich session card has no name — read its texts).
-- **Read the app's files with delete sharing.** The app saves `sessions.json`, `windows\<id>.json`, `settings.json` …
-  by replacing them; a plain `open()` handle (read + write sharing, no delete) makes such a save FAIL —
-  `[persist-fail] … atomic replace failed` — and nothing retries it (ROB-K1). Every read in `amdriver` goes through
-  `win32.read_bytes_shared`; a test that holds a file with `open()` does it on purpose.
+- **A read of the app's files can make its save fail.** The app saves `sessions.json`, `windows\<id>.json`,
+  `settings.json` … by replacing them, and the replace FAILS while any handle holds the file, delete sharing or not —
+  `[persist-fail] … atomic replace failed` — and nothing retries it (ROB-K1; measured 2026-10-23, flows/20). Every
+  read in `amdriver` goes through `win32.read_bytes_shared`, which holds the file only for the read itself (and would
+  let a POSIX-semantics replace through, which the app does not use yet), so a wait that polls a file for a value the
+  app is about to save can still lose that save: run fix4's wait for a rename on disk timed out that way. Wait on the
+  logs where the fact is logged, and keep file polls sparse. A test that holds a file with `open()` does it on purpose.
 - **Shift+Click on a TAB switches to it on 0.8.0** (TAB-K4), with Shift held as long as you like; builds with TAB-K4's
   fix start the session in place and keep the selection (`[nav] tab-shift-click <sid8> …: started in place, no
   switch`). The tree row's and the board card's Shift+Click start a parked session in place on both. To wake a parked
@@ -203,8 +213,8 @@ since=mark)`), then the UI.
 
 | Id | Flow | What | Test |
 |---|---|---|---|
-| MGR-K1 | MGR-05 | A session launched from the Agent Manager page is not selected on the page: Home offers no way back and the right pane asks for a selection, until a tab switch | `test_manager_page.py::test_known_defect_a_launched_session_is_not_selected_on_the_page` |
-| SP-K1 | SP-05 E2 | In the + card, one click on Launch while its presets menu is open does not launch (a second click does); the page's own Launch takes one | `test_side_panel.py::test_known_defect_plus_card_launch_needs_a_second_click` |
+| MGR-K1 | MGR-05, MGR-07 | A session launched from the Agent Manager page is not selected on the page: Home offers no way back and the right pane asks for a selection, until a tab switch. **Fixed in code 2026-10-23** (not in a release): a launch on the page stays on the page and selects the new session there | `test_manager_page.py::test_a_launch_from_the_page_stays_on_the_page`, `…::test_a_plus_card_launch_follows_where_the_user_looks` (`needs_fix`) |
+| SP-K1 | SP-05 phase 5 | In the + card, one click on Launch while its presets menu is open does not launch (a second click does); the page's own Launch takes one. **Fixed in code 2026-10-23** (not in a release): measured, no release reaches the card's Launch; a release watch completes the click | `test_side_panel.py::test_plus_card_launch_takes_one_click_with_its_menu_open` (`needs_fix`) |
 | TCM-K1 | TCM-03 E1 | A blank tab rename is refused for the session, but the tab then shows Claude Code's own terminal title (`✳ …`) | `test_tab_menu.py::test_known_defect_blank_rename_shows_claudes_own_title` |
 | TCM-K2 | TCM-05 phase 5 | Tags from the tab menu leaves the keyboard in the terminal: a typed name lands in Claude's box, Esc reaches claude. **Fixed in code 2026-10-23** (not in a release): the tab menu's late Closed no longer pulls the keyboard out of an open popup, and the panel closes on the Esc key-up and gives the keyboard back to the terminal | `test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard` (`needs_fix`) |
 | SP-K2 | SP-04 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does, under the same input) | `test_side_panel.py::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
@@ -213,4 +223,4 @@ since=mark)`), then the UI.
 | TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter on 0.8.0). **Fixed in code 2026-10-23** (not in a release): the seven dialogs declared in `TerminalPage.xaml` were shown nested in the page, where UI Automation cannot read them; all are built in code now | `test_accessibility.py::test_the_quit_confirmation_is_readable`, `…::test_the_large_paste_warning_is_readable` (`needs_fix`) |
 | A11Y-K1 | MGR-05 phase 2, every page | Glyph buttons, cards and rows had no names, nothing had a stable id, and selection / pill / unread / draft were pixels only. **Fixed in code 2026-10-23** (not in a release): names, `am.*` AutomationIds and item status (`AgentAutomation.h`) | `test_accessibility.py::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_selection_is_readable_on_every_surface`, `…::test_the_tab_says_its_session_state` (`needs_fix`) |
 | TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
-| ROB-K1 | ROB-11 | A reader holding `sessions.json` without delete sharing makes the save fail; nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
+| ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
