@@ -174,7 +174,15 @@ the panel:
   `AgentManagerContent::BuildSessionMenuFor` (a public wrapper over `_MakeLazySessionMenu`), the
   exact lazily-filled flyout the board card shows, **anchored on the card** (its optional `anchor`
   argument, held weakly) so the menu's **Tags** item opens the tag panel right under the card,
-  as on the board (without an anchor it opened at the window's top-left). Selection flows BOTH
+  as on the board (without an anchor it opened at the window's top-left). The menu ends with
+  **Deactivate ▸** over **Close ▸**, the WT tab menu's two submenus with its items in its order
+  (2026-10-23, NOT BUILT yet; CLAUDE.md *C1 UI*, `AgentManagerContent::_MakeSessionScopeSubmenu`):
+  Deactivate Tab / Close Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
+  Other of Same Folder · All Tabs, and ★ Favorite & Close All Tabs under Close. Each runs on the
+  card's session's own tab in the window that hosts it (`TerminalPage::_RunSessionMenuScope`), so on
+  a GLOBAL list the card of another window's session acts in that window, and a Close there brings
+  it to the front to ask. The strip items gray like the tab menu's when the tab is in this window;
+  for another window's tab they stay enabled. Selection flows BOTH
   ways: the tab-switch funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both
   select the card here, with same-id early-outs breaking the echo.
 - **The tab strip follows a click only on the Agent Manager page.** While the Manager page is on screen, a

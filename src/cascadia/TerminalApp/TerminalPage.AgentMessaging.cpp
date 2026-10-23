@@ -109,6 +109,36 @@ namespace winrt::TerminalApp::implementation
                 }
                 answer = std::wstring{ ::Agentmaster::Msg::MenuAnswerResultWord(result) };
             }
+            else if (action == kSessionMenuDeactivateAction || action == kSessionMenuCloseAction)
+            {
+                // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — not the bot): another window's board card, tree row
+                // or side-panel card menu picked one of those items for a session whose tab lives HERE, and every scope is
+                // counted from that tab, in this window (TerminalPage::_RunSessionMenuScope). Run it as this tab's own
+                // menu would. The argument is the scope code in decimal — 1 to 9 digits and nothing else; anything else is
+                // refused, so a malformed request can never be read as "this tab" (scope 0).
+                bool digitsOnly = !arg.empty() && arg.size() <= 9;
+                int32_t scope = 0;
+                // The length test comes FIRST (the loop runs only while digitsOnly holds), so the sum never sees a 10th
+                // digit: 9 digits stay below INT32_MAX, and a longer argument is refused before any arithmetic.
+                for (size_t i = 0; digitsOnly && i < arg.size(); ++i)
+                {
+                    const wchar_t c = arg[i];
+                    if (c < L'0' || c > L'9')
+                    {
+                        digitsOnly = false;
+                        break;
+                    }
+                    scope = scope * 10 + static_cast<int32_t>(c - L'0');
+                }
+                if (digitsOnly)
+                {
+                    _RunSessionMenuScopeHere(sessionId, action == kSessionMenuCloseAction, scope, /*fromOtherWindow*/ true);
+                }
+                else
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[session-menu] " + ::Agentmaster::ShortId(sessionId) + L" " + action + L" refused - the scope argument \"" + arg + L"\" is not a number (nothing done)\n");
+                }
+            }
             else
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[msg] unknown remote session action: " + action + L"\n");

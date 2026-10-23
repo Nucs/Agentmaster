@@ -1948,82 +1948,190 @@ namespace winrt::TerminalApp::implementation
             menu.Items().Append(fork);
         }
 
-        // Close — the LAST group, set apart by a separator and carrying the X glyph, mirroring the WT
-        // tab's right-click "Close ▸" submenu (glyph \xE711). A SUBMENU (per the user's "Close -> Of
-        // Same Folder"):
-        //   • This Session — the plain Close: shut this tab down (FAVORITES.md: the "Close" verb that
-        //     replaced Archive/Delete) but KEEP the record (always archived) so it stays in Sessions,
-        //     resumable anytime — the conversation on disk is never deleted. Routed through _RequestArchive.
-        //   • Of Same Folder — close EVERY live managed session sharing this session's EFFECTIVE work dir
-        //     (`cwd` — the inferred dir while it infers, else the launch cwd; the SAME key the Explorer
-        //     Tree groups it under and the board band paints). _CloseSessionsInFolder shows ONE confirm
-        //     listing their titles, then the page does the cross-window batch close.
-        // Both defer one tick (the closing flyout's focus restore mustn't race the dialog).
+        // Deactivate ▸ and Close ▸ — the LAST group, set apart by a separator, in the WT tab menu's own order (Tab.cpp
+        // _CreateContextMenu: "Deactivate ▸" directly ABOVE "Close ▸" — park it vs end it). Both submenus list the tab
+        // menu's scopes in ONE order, so they line up row for row (the user's "align Close's submenu items", 2026-10-23):
+        // this tab · tabs to the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs,
+        // and Close ends with the tab menu's "★ Favorite & Close All Tabs". _MakeSessionScopeSubmenu (below) builds both.
+        // Until then this menu had no Deactivate, and its Close ▸ held only "This Session" (the plain Close, through
+        // _RequestArchive) · "Of Same Folder" · "Other of Same Folder" (through _CloseSessionsInFolder, which the two
+        // folder items still use), each with its own X / folder glyph.
         menu.Items().Append(MenuFlyoutSeparator{});
-        MenuFlyoutSubItem closeSub;
-        closeSub.Text(L"Close");
-        closeSub.Icon(glyphIcon(L"\xE711")); // Close (the X — matches the WT tab menu's "Close ▸")
-        AgentSetTip(closeSub, L"Close this session, or every session that shares its folder. Closed sessions stay in Sessions and can be resumed anytime; the conversation on disk is never deleted.");
-
-        MenuFlyoutItem closeThis;
-        closeThis.Text(L"This Session");
-        closeThis.Icon(glyphIcon(L"\xE711")); // Close (the X)
-        AgentSetTip(closeThis, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
-        closeThis.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
-            }
-            else if (auto self = weak.get())
-            {
-                self->_RequestArchive(id);
-            }
-        });
-        closeSub.Items().Append(closeThis);
-
-        // Of Same Folder — offered only when we have a folder to close (an empty effective dir would be a
-        // dead item). `cwd` is the effective work dir already captured for "Open New Session Here", so
-        // this needs no registry scan at menu-build time (the menu is rebuilt for every card each refresh
-        // — keep it cheap; the enumeration happens lazily on click in _CloseSessionsInFolder).
-        if (!cwd.empty())
+        // Where the session's tab sits in THIS window's strip — read ONCE for both submenus. A session that another
+        // window hosts has no spot (nullopt), and neither has any session while no provider is wired; a provider that
+        // throws is treated the same way, its exception logged (Rule #18), so a strip question can never cost the menu
+        // its items. Without a spot no strip item is grayed: the window that hosts the tab applies the scope.
+        std::optional<SessionTabSpot> spot;
+        if (_sessionTabSpotProvider)
         {
-            MenuFlyoutItem closeFolder;
-            closeFolder.Text(L"Of Same Folder");
-            closeFolder.Icon(glyphIcon(L"\xE8B7")); // Folder — "everything in this folder"
-            AgentSetTip(closeFolder, L"Close EVERY open session whose working directory is the same as this one \x2014 you'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted).");
-            closeFolder.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { self->_CloseSessionsInFolder(cwd); } });
-                }
-                else if (auto self = weak.get())
-                {
-                    self->_CloseSessionsInFolder(cwd);
-                }
-            });
-            closeSub.Items().Append(closeFolder);
+            try
+            {
+                spot = _sessionTabSpotProvider(id);
+            }
+            catch (...)
+            {
+                AgentLogCaughtException(L"session menu: the tab-spot provider");
+                spot.reset();
+            }
+        }
+        const bool dormant = info && IsSessionDormant(*info);
+        // Deactivate ▸ — offered exactly where the tab menu offers it (TerminalPage's tab-flyout Opening handler ->
+        // Tab::SetAgentDeactivateState): a LIVE managed session that is not ADOPTED. An adopted session's ConPTY hosts
+        // the user's own shell, which is not ours to swap for a dormant connection, and a closed session has no tab.
+        if (info && info->live && !info->external)
+        {
+            menu.Items().Append(_MakeSessionScopeSubmenu(SessionMenuVerb::Deactivate, id, cwd, dormant, spot));
+        }
+        // Close ▸ — always offered, as before: closing is the one verb every session menu has.
+        menu.Items().Append(_MakeSessionScopeSubmenu(SessionMenuVerb::Close, id, cwd, dormant, spot));
+    }
 
-            // Other of Same Folder — everything in the folder EXCEPT this session (this one stays open) —
-            // the WT tab menu's "Close other tabs" twin, scoped to the folder. Passes `id` as the exclude
-            // to _CloseSessionsInFolder; a no-op (no dialog) when this is the only session in the folder.
-            MenuFlyoutItem closeOtherFolder;
-            closeOtherFolder.Text(L"Other of Same Folder");
-            closeOtherFolder.Icon(glyphIcon(L"\xE8B7")); // Folder — "everything else in this folder"
-            AgentSetTip(closeOtherFolder, L"Close every OTHER open session whose working directory is the same as this one \x2014 this session stays open. You'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted).");
-            closeOtherFolder.Click([weak, disp, cwd, id](const IInspectable&, const RoutedEventArgs&) {
+    // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): one of the two submenus — the contract is in the header.
+    // The rows mirror the WT tab menu's (Tab.cpp _AppendDeactivateMenuItems / _AppendCloseMenuItems) in order, wording
+    // and gray-out rule. Two differences, both because a card or a tree row is not the tab: the tooltips say "this
+    // session's tab" and "the window that hosts it" (the board, the tree and the side panel can list another window's
+    // sessions), and Close's plain close sits INSIDE the submenu as "Close Tab" (the tab menu has it as its own item
+    // below the submenu), so that it pairs with "Deactivate Tab". Like the tab menu's sub-items, these carry no glyph;
+    // the header's glyph names the verb (the moon: parked and waiting; the X: ended).
+    MenuFlyoutSubItem AgentManagerContent::_MakeSessionScopeSubmenu(const SessionMenuVerb verb, const std::wstring& id, const std::wstring& cwd, const bool sessionDormant, const std::optional<SessionTabSpot>& spot)
+    {
+        const bool close = verb == SessionMenuVerb::Close;
+        const auto disp = _dispatcher;
+        const auto weak = get_weak();
+
+        MenuFlyoutSubItem sub;
+        sub.Text(close ? L"Close" : L"Deactivate");
+        FontIcon headerGlyph;
+        headerGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+        headerGlyph.Glyph(close ? L"\xE711" : L"\xE708"); // Close (the X) / QuietHours (the moon) — the WT tab menu's two headers
+        sub.Icon(headerGlyph);
+        AgentSetTip(sub, close ? L"Close this session's tab, the tabs around it in the window that hosts it, or every session that shares its folder. Closed sessions stay in Sessions and can be resumed anytime; the conversation on disk is never deleted." : L"Park session tabs in the dormant waiting-for-focus state a freshly reopened window's tabs sit in \x2014 the agent process shuts down, the tab stays where it is, and focusing or activating it resumes the conversation. Nothing asks first.");
+
+        // The strip gates of Tab::_EnableMenuItems — a tab on the left, a tab on the right, any other tab must exist —
+        // read from the spot. Without one the tab lives in another window (or nowhere yet): nothing is grayed, and the
+        // hosting window decides (a scope that reaches no tab there does nothing; its log line says parked=0 / no tab).
+        const bool hasLeft = !spot || spot->index > 0;
+        const bool hasRight = !spot || spot->index + 1 < spot->count;
+        const bool hasOther = !spot || spot->count > 1;
+
+        // One row that runs through the page (_sessionMenuScopeHandler): its label, tooltip, scope, and whether it is
+        // enabled. The click waits one dispatcher tick, like every item of this menu: the closing menu hands the
+        // keyboard back to its target first, and a dialog the item opens (a close confirm) must not lose its focus to
+        // that hand-back. The handler is read at that moment, so a wiring that changed meanwhile is the one used.
+        const auto addScopeItem = [&sub, disp, weak, id, verb](const wchar_t* text, const wchar_t* tip, const SessionMenuScope scope, const bool enabled) {
+            MenuFlyoutItem item;
+            item.Text(text);
+            AgentSetTip(item, tip);
+            item.IsEnabled(enabled);
+            item.Click([disp, weak, id, verb, scope](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id, verb, scope]() {
+                    // Contained: this is a dispatcher callback, and an exception escaping it would end the process for a
+                    // menu click (Rule #18: logged, and the click simply does nothing).
+                    try
+                    {
+                        if (const auto self = weak.get(); self && self->_sessionMenuScopeHandler)
+                        {
+                            self->_sessionMenuScopeHandler(winrt::hstring{ id }, verb, scope);
+                        }
+                    }
+                    catch (...)
+                    {
+                        AgentLogCaughtException(L"session menu: a Deactivate / Close scope item");
+                    }
+                };
                 if (disp)
                 {
-                    disp.TryEnqueue([weak, cwd, id]() { if (auto self = weak.get()) { self->_CloseSessionsInFolder(cwd, id); } });
+                    disp.TryEnqueue(act);
                 }
-                else if (auto self = weak.get())
+                else
                 {
-                    self->_CloseSessionsInFolder(cwd, id);
+                    act();
                 }
             });
-            closeSub.Items().Append(closeOtherFolder);
+            sub.Items().Append(item);
+        };
+
+        if (!close)
+        {
+            // "Deactivate Tab" is grayed while the session is already dormant (a restored tab never opened, or one
+            // parked before): there is no agent to stop, and "Activate Tab" at the top of this menu is the offered verb.
+            addScopeItem(L"Deactivate Tab", L"Shut this session's agent down but KEEP its tab exactly where it is \x2014 blank and waiting, like a freshly reopened window's tab. Focusing or activating the tab resumes the conversation. Nothing is closed or deleted.", SessionMenuScope::ThisTab, !sessionDormant);
+            addScopeItem(L"Tabs to the Left", L"Deactivate every managed session tab to the LEFT of this session's tab, in the window that hosts it \x2014 that tab and the tabs to its right keep running. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::TabsBefore, hasLeft);
+            addScopeItem(L"Tabs to the Right", L"Deactivate every managed session tab to the RIGHT of this session's tab, in the window that hosts it \x2014 that tab and the tabs to its left keep running. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::TabsAfter, hasRight);
+            addScopeItem(L"Other Tabs", L"Deactivate every OTHER managed session tab in the window that hosts this session's tab \x2014 this one keeps running. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::OtherTabs, hasOther);
+            // The two folder scopes reach EVERY window and, unlike their Close twins, ask nothing first (no Deactivate
+            // scope confirms: a park ends no conversation), so the tooltip is the only warning that other windows are
+            // reached. Left out without a folder — the same rule as Close's folder items below.
+            if (!cwd.empty())
+            {
+                addScopeItem(L"Of Same Folder", L"Deactivate every open session whose working directory is the same as this one, this one included \x2014 in EVERY window, without asking first. Nothing is closed or deleted: each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::SameFolder, true);
+                addScopeItem(L"Other of Same Folder", L"Deactivate every OTHER open session whose working directory is the same as this one \x2014 in EVERY window, without asking first. This session keeps running. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::OtherSameFolder, true);
+            }
+            addScopeItem(L"All Tabs", L"Deactivate EVERY managed session tab in the window that hosts this session's tab \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. That window lands on its Agent Manager.", SessionMenuScope::AllTabs, true);
+            return sub;
         }
 
-        menu.Items().Append(closeSub);
+        // Close Tab — the plain Close (FAVORITES.md: the verb that replaced Archive/Delete): the session's tab is shut
+        // down but its record KEPT (always archived), so it stays in Sessions, resumable anytime; the conversation on
+        // disk is never deleted. The page closes it through the tab's own close (its confirm included) in whichever
+        // window hosts it — before 2026-10-23 a session hosted in another window was left open here.
+        addScopeItem(L"Close Tab", L"Close this session's tab \x2014 it stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted). Asks first like the tab's own close, unless Confirm before closing is off in Settings; when another window hosts the tab, that window comes to the front to ask.", SessionMenuScope::ThisTab, true);
+        addScopeItem(L"Tabs to the Left", L"Close every tab to the LEFT of this session's tab, in the window that hosts it \x2014 that tab and the tabs to its right stay open. With sessions among them you are asked once for all of them; each closed session stays in Sessions, resumable anytime.", SessionMenuScope::TabsBefore, hasLeft);
+        addScopeItem(L"Tabs to the Right", L"Close every tab to the RIGHT of this session's tab, in the window that hosts it \x2014 that tab and the tabs to its left stay open. With sessions among them you are asked once for all of them; each closed session stays in Sessions, resumable anytime.", SessionMenuScope::TabsAfter, hasRight);
+        addScopeItem(L"Other Tabs", L"Close every OTHER tab in the window that hosts this session's tab \x2014 this one stays open. With sessions among them you are asked once for all of them; each closed session stays in Sessions, resumable anytime.", SessionMenuScope::OtherTabs, hasOther);
+
+        // Of Same Folder / Other of Same Folder — the folder close this menu always had, unchanged: EVERY live managed
+        // session sharing this session's EFFECTIVE work dir (`cwd` — the inferred dir while it infers, else the launch
+        // cwd; the SAME key the Explorer Tree groups it under and the board band paints), minus this one for "Other"
+        // (the tab menu's "Close other tabs" twin, scoped to the folder). _CloseSessionsInFolder hands (folder,
+        // excludeId) to the page, which shows ONE confirm listing the titles IN THIS WINDOW — the folder spans every
+        // window, so there is no one hosting window to ask in — then does the cross-window batch close; "Other" with
+        // no other session in the folder is a no-op (no dialog). Offered only with a folder (an empty effective dir
+        // would be a dead item), and `cwd` is the dir already captured for "Open New Session Here", so the menu
+        // needs no registry scan for it (the enumeration happens on click).
+        const auto addFolderCloseItem = [&sub, disp, weak, id, cwd](const wchar_t* text, const wchar_t* tip, const bool keepThisSession) {
+            MenuFlyoutItem item;
+            item.Text(text);
+            AgentSetTip(item, tip);
+            std::wstring excludeId = keepThisSession ? id : std::wstring{};
+            item.Click([disp, weak, cwd, excludeId](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, cwd, excludeId]() {
+                    // Contained, like the scope items above: a dispatcher callback must never let an exception out.
+                    try
+                    {
+                        if (const auto self = weak.get())
+                        {
+                            self->_CloseSessionsInFolder(cwd, excludeId);
+                        }
+                    }
+                    catch (...)
+                    {
+                        AgentLogCaughtException(L"session menu: a Close folder item");
+                    }
+                };
+                if (disp)
+                {
+                    disp.TryEnqueue(act);
+                }
+                else
+                {
+                    act();
+                }
+            });
+            sub.Items().Append(item);
+        };
+        if (!cwd.empty())
+        {
+            addFolderCloseItem(L"Of Same Folder", L"Close EVERY open session whose working directory is the same as this one \x2014 you'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted).", false);
+            addFolderCloseItem(L"Other of Same Folder", L"Close every OTHER open session whose working directory is the same as this one \x2014 this session stays open. You'll see the full list first and can cancel. Each stays in Sessions, resumable anytime (nothing on disk is deleted).", true);
+        }
+
+        addScopeItem(L"All Tabs", L"Close EVERY tab in the window that hosts this session's tab, this one included \x2014 that window stays open on its Agent Manager. With sessions among them you are asked once for all of them; each closed session stays in Sessions, resumable anytime.", SessionMenuScope::AllTabs, true);
+        // ★ Favorite & Close All Tabs — the tab menu's batch twin of "★ Favorite & Close": star every managed session of
+        // the hosting window, then close all of its tabs (one 2-button confirm, the favorite already chosen). The tab
+        // menu shows it only while its window hosts a managed session; this menu's session is one, so it always shows.
+        addScopeItem(L"\x2605 Favorite & Close All Tabs", L"Star every managed session in the window that hosts this session's tab (find them later in Sessions under the Favorite filter), then close all of its tabs. You are asked once first.", SessionMenuScope::FavoriteAllTabs, true);
+        return sub;
     }
 
     MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)

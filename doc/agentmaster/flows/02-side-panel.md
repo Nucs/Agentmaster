@@ -70,12 +70,31 @@ click back into the terminal; double-click jumps to a card's tab.
 4. **Jump.** *Do:* double-click B's card. *Expect:* tab B selected (and scrolled into view in the strip).
 5. **Context menu.** *Do:* right-click a card. *Expect:* the board card's session menu, anchored on the card;
    its **Tags** opens the tag panel right under the card.
+6. **Deactivate ▸ on a card** (2026-10-23, NOT BUILT). *Do:* right-click B's card (B running, in this window,
+   neither the left-most nor the right-most tab). *Expect:* **Deactivate ▸** directly above **Close ▸**, as in
+   the tab menu, holding Deactivate Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
+   Other of Same Folder · All Tabs (no glyphs); **Deactivate Tab** parks B with no confirm, its tab kept,
+   exactly like the tab menu's item. *Check:* [LOG] `[nav] session-menu deactivate this <B8>`, then
+   `[nav] deactivate-begin scope=this` / `deactivate-done … parked=1`.
+7. **Close ▸ lines up with it.** *Do:* open B's card menu's Close ▸. *Expect:* Close Tab · Tabs to the Left ·
+   Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · ★ Favorite & Close All
+   Tabs; **Tabs to the Right** asks once ("Close N tabs?") and closes only the tabs right of B's tab.
+   *Check:* [LOG] `[nav] session-menu close right <B8>`, then `close-all begin`.
 
 **Edge cases**
 - **E1 On the Agent Manager page** a card click also scrolls the tab strip to that session's tab (even a
   re-click of the selected card).
 - **E2 A shell tab focused** → nothing to follow; the current peek is kept.
 - **E3 A session in another window** (GLOBAL) → double-click brings that window to the front.
+- **E4 The tab menu's gates** (phases 6–7) → on the card of the window's left-most tab, Tabs to the Left is
+  grayed in both submenus; right-most → Tabs to the Right; a window's only tab → Other Tabs; a dormant
+  session → Deactivate Tab grayed (Activate Tab leads the menu); an adopted session → no Deactivate ▸.
+- **E5 Another window's session** (GLOBAL, phases 6–7) → no strip item grayed. Deactivate ▸ Tabs to the
+  Right parks the tabs right of that session's tab IN ITS WINDOW, which stays behind; Close ▸ Close Tab
+  brings that window to the front and asks there. *Check:* [LOG] `-> handed to the window that hosts its
+  tab`, then that window's `[nav] session-menu-remote …` and the tab menu's own lines.
+- **E6 A session whose agent exited and that no window hosts** → Close ▸ Close Tab archives it in place
+  (`… archived in place`); it leaves the list and stays in Sessions.
 
 ---
 
