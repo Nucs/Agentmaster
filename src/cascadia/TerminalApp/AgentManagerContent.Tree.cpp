@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // the rows' accessible name, AutomationId and ItemStatus (E2E_TESTING.md §6.3)
 #include "AgentCatchLog.h" // AgentLogCaughtException — the lazy menus' Opening handlers (Rule #18: never a bare catch)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
@@ -293,6 +294,15 @@ namespace winrt::TerminalApp::implementation
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
             AgentSetTitledTip(dirBtn, L"Working directory", L"A folder your sessions run in, and how many are open in it. Click to narrow the board and this tree to just its sessions; click the folder that is already scoped to collapse it and fall back to the one above it (the topmost falls back to all directories).");
+            // Agentmaster (accessibility, E2E_TESTING.md §6.3): the folder row's content is a panel (▾, the path, the
+            // count): name it by its path, and say in its item status whether it is collapsed and whether the board and
+            // the tree are scoped to it (its tint).
+            AgentSetAccessibleName(dirBtn, dir);
+            {
+                AgentItemStatus status;
+                status.Add(collapsed ? L"collapsed" : L"expanded").Add(L"scoped", PathEq(dir, _scopeDir));
+                AgentSetItemStatus(dirBtn, status.Text());
+            }
             const auto capturedDir = dir;
             const auto capturedPrevDir = prevDir; // predecessor at build time, for "collapse + select previous"
             dirBtn.Click([this, capturedDir, capturedPrevDir](const IInspectable&, const RoutedEventArgs&) {
@@ -574,6 +584,22 @@ namespace winrt::TerminalApp::implementation
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
                 rowBtn.ContextFlyout(_MakeLazySessionMenu(id, _WorkDirOf(s), rowBtn)); // built at OPEN time (perf); the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
                 AgentSetTitledTip(rowBtn, winrt::hstring{ s.title.empty() ? std::wstring{ L"(untitled)" } : s.title }, L"Click selects this session (the pane on the right follows it), double-click or Enter jumps to its live tab. F2 renames it, Del closes it, Shift+Click starts it if it hasn't started yet, and right-click has the rest.");
+                // Agentmaster (accessibility, E2E_TESTING.md §6.3): the row's content is a panel (no name of its own) and
+                // its selection is only a background tint. Name = the title, id = am.mgr.tree.row.<key>, item status = the
+                // state word the row shows, then the facts that hold. The tree rebuilds on every change, a selection
+                // included, so this status is always the current one.
+                AgentSetAccessibleName(rowBtn, s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title });
+                AgentSetAutomationId(rowBtn, AgentAutomationIdFor(L"am.mgr.tree.row.", id));
+                {
+                    AgentItemStatus status;
+                    status.Add(AgentStateWord(s.state))
+                        .Add(kAgentStatusCodex, s.kind == AgentKind::Codex)
+                        .Add(kAgentStatusNotStarted, IsSessionDormant(s))
+                        .Add(kAgentStatusDraft, !s.pendingInput.empty())
+                        .Add(kAgentStatusOtherWindow, !isLocal(s))
+                        .Add(kAgentStatusSelected, selected);
+                    AgentSetItemStatus(rowBtn, status.Text());
+                }
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
                 rowBtn.Tag(winrt::box_value(winrt::hstring{ L"t:" + id }));
@@ -714,6 +740,9 @@ namespace winrt::TerminalApp::implementation
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
             AgentSetTitledTip(dirBtn, L"Working directory", L"A folder agents outside Agentmaster are running in, and how many. Click to collapse or expand the group \x2014 unlike your own directories, an external folder doesn't scope the board (these sessions belong to no window).");
+            // Agentmaster (accessibility, E2E_TESTING.md §6.3): named by its path, collapsed or expanded (no scope here).
+            AgentSetAccessibleName(dirBtn, dir);
+            AgentSetItemStatus(dirBtn, collapsed ? L"collapsed" : L"expanded");
             const auto capturedDir = dir;
             dirBtn.Click([this, capturedDir](const IInspectable&, const RoutedEventArgs&) {
                 if (_collapsedDirs.find(capturedDir) != _collapsedDirs.end())
@@ -924,6 +953,16 @@ namespace winrt::TerminalApp::implementation
                     _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
                 });
                 AgentSetTitledTip(rowBtn, winrt::hstring{ title }, L"An agent running outside Agentmaster \x2014 found and read, never driven. Click to read its conversation in the pane on the right; right-click to adopt it into a tab here, start a session in its folder, or bring its window forward.");
+                // Agentmaster (accessibility, E2E_TESTING.md §6.3): the managed row's twin — named by its title, keyed by
+                // its conversation id once resolved (else its pid), its item status saying it is observed and selected.
+                AgentSetAccessibleName(rowBtn, title);
+                AgentSetAutomationId(rowBtn, ex.sessionId.empty() ? L"am.mgr.tree.external.pid" + std::to_wstring(ex.pid)
+                                                                  : AgentAutomationIdFor(L"am.mgr.tree.external.", ex.sessionId));
+                {
+                    AgentItemStatus status;
+                    status.Add(kAgentStatusExternal).Add(kAgentStatusCodex, ex.kind == AgentKind::Codex).Add(kAgentStatusSelected, selExt);
+                    AgentSetItemStatus(rowBtn, status.Text());
+                }
                 _treeHost.Children().Append(rowBtn);
             }
         }

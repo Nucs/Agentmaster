@@ -20,6 +20,16 @@ side panel's horizontal band.
 
 The board has no UI Automation selection: which card is selected is read from its effects (Home's face, the
 right pane, the side panel's peek).
+
+Accessibility metadata (E2E_TESTING.md §6.3; a build of 2026-10-23 or later — NOT in 0.8.0): every card, row and
+glyph button above gets an AutomationId (`am.mgr.board.card.<key>`, `am.mgr.tree.row.<key>`, `am.mgr.queue.add`,
+`am.mgr.toolbar.settings`, … — the list is in E2E_TESTING.md §6.3; <key> = the session id's first 8 characters), the
+nameless ones a NAME (a card / a row = its title, the cog = "Settings", the compose icons = "Jump to tab" / "Send now" /
+"Add to queue", ⋯ = "More actions"), and the stateful ones an ItemStatus: a card "running; unsent draft; selected", a
+tree row the same plus "in another window", a queue row "pending" / "sent; auto" / "sent; typed" / "failed" (+
+"selected"), the runner toggle its mode ("Auto", "Paused", "Paused → Auto on your next message"). The readers here use
+them when present (`Card.selected`, `ManagerPage.selected_card`, `compose_buttons`) and fall back to the 0.8.0 way
+(texts, positions, effects) when they are not.
 """
 from __future__ import annotations
 
@@ -41,6 +51,12 @@ COLUMN_OF = {"Running": "Running", "WaitingForInput": "Waiting-for-you", "NeedsA
              "Error": "Error", "Done": "Idle / Done", "Idle": "Idle / Done"}
 """sessions.json state -> the board column a managed session's card sits in."""
 LAUNCH_NAMES = ("Launch Claude", "Create & Launch Claude", "Resume session", "Launch Codex", "Create & Launch Codex")
+CARD_ID_PREFIX = "am.mgr.board.card."
+"""The AutomationId prefix of a managed board card (the session id's first 8 characters follow)."""
+TREE_ROW_ID_PREFIX = "am.mgr.tree.row."
+"""The AutomationId prefix of a managed Explorer Tree row."""
+COMPOSE_BUTTON_IDS = ("am.mgr.queue.jump", "am.mgr.queue.sendNow", "am.mgr.queue.add")
+"""The compose row's three icons by AutomationId, left to right: Jump to tab, Send now, Add to queue."""
 
 
 @dataclass
@@ -65,6 +81,45 @@ class Card:
             The title.
         """
         return self.texts[0] if self.texts else ""
+
+    @property
+    def status(self) -> str:
+        """The card's ItemStatus as read ("" on 0.8.0): the state word, then "codex", "not started", "unsent draft",
+        "cache warm", "selected" as they hold (or "external; …" for an External card).
+
+        Returns:
+            The status.
+        """
+        return self.el.item_status
+
+    def facets(self) -> list[str]:
+        """The status split into its facets.
+
+        Returns:
+            The facets ([] when the build exposes none).
+        """
+        return [f for f in self.status.split("; ") if f]
+
+    @property
+    def selected(self) -> Optional[bool]:
+        """Whether this is the board's selected card, read from its item status.
+
+        Returns:
+            True / False — or None when the build exposes no status (0.8.0: read the selection from its effects).
+        """
+        if not self.status:
+            return None
+        return "selected" in self.facets()
+
+    @property
+    def session_key(self) -> str:
+        """The session's key (its id's first 8 characters), read off the AutomationId ("" on 0.8.0).
+
+        Returns:
+            The key.
+        """
+        aid = self.el.automation_id
+        return aid[len(CARD_ID_PREFIX):] if aid.startswith(CARD_ID_PREFIX) else ""
 
     def click(self) -> None:
         """Select the card (a single click on its title band).
@@ -129,6 +184,28 @@ class TreeRow:
         if self.kind != "session":
             return ""
         return next((t for t in self.texts[1:] if t in STATE_WORDS), "")
+
+    @property
+    def status(self) -> str:
+        """The row's ItemStatus as read ("" on 0.8.0): a session row "running; unsent draft; in another window;
+        selected" as they hold; a folder row "expanded" / "collapsed" (+ "scoped").
+
+        Returns:
+            The status.
+        """
+        return self.el.item_status
+
+    @property
+    def selected(self) -> Optional[bool]:
+        """Whether this is the tree's selected session row (a folder row: whether the board and tree are scoped to it).
+
+        Returns:
+            True / False — or None when the build exposes no status (0.8.0).
+        """
+        if not self.status:
+            return None
+        facets = self.status.split("; ")
+        return ("selected" if self.kind == "session" else "scoped") in facets
 
 
 class ManagerPage:
@@ -491,6 +568,31 @@ class ManagerPage:
         raise LookupError(f"no board card {title!r}; the board: "
                           f"{ {k: [c.title for c in v[1]] for k, v in self.columns().items()} }")
 
+    def card_by_session(self, session_id: str) -> Optional[Card]:
+        """A managed card by its session — its AutomationId (titles can collide, ids cannot).
+
+        Args:
+            session_id: The session's id (or its first 8 characters).
+        Returns:
+            The card, or None (not on the board, or a build without the ids — 0.8.0).
+        """
+        key = session_id[:8]
+        return next((c for c in self.cards() if c.session_key == key), None)
+
+    def selected_card(self) -> Optional[Card]:
+        """The board's selected card, read from the cards' item status.
+
+        Returns:
+            The card, or None when no card is selected.
+        Raises:
+            LookupError: When the build exposes no item status (0.8.0) — there the selection can only be read from its
+                effects (Home's face, the right pane, the side panel's peek).
+        """
+        cards = self.cards()
+        if cards and all(c.selected is None for c in cards):
+            raise LookupError("this build exposes no card item status (0.8.0): read the selection from its effects")
+        return next((c for c in cards if c.selected), None)
+
     def wait_card(self, title: str, column: Optional[str] = None, timeout_s: float = 15.0) -> Card:
         """Wait for a card (optionally in a column).
 
@@ -627,11 +729,19 @@ class ManagerPage:
     def compose_buttons(self) -> list[uia.Element]:
         """The compose row's icon buttons LEFT of the box, left to right: [Jump to tab, Send now, Add to queue].
 
+        A build with the accessibility metadata (E2E_TESTING.md §6.3) finds them by their AutomationIds
+        (COMPOSE_BUTTON_IDS); on 0.8.0 they have no names and no ids, so their position left of the box is their
+        identity.
+
         Returns:
-            The buttons (they have no accessible names: their position is their identity).
+            The buttons.
         Raises:
             LookupError: When the compose box is not showing.
         """
+        controls = self.controls()
+        by_id = {el.automation_id: el for el in controls if el.automation_id in COMPOSE_BUTTON_IDS}
+        if len(by_id) == len(COMPOSE_BUTTON_IDS):
+            return [by_id[aid] for aid in COMPOSE_BUTTON_IDS]
         bx, by, _bw, _bh = self.compose_box().rect
         found = [el for el in self.controls()
                  if el.role == "button" and el.visible and abs(el.rect[1] - by) <= 14 and el.rect[0] < bx

@@ -340,12 +340,51 @@ Triage Board card DOES start it in place (`[nav] activate-dormant`), so the Shif
 **Expected** (and what the replacing test checks): the tab starts in place, the selection and the keyboard stay where
 they were (TAB-01 phase 4); a second Shift+Click on the running tab starts nothing and does not switch.
 
-### TAB-K3 · The quit confirmation is invisible to UI Automation
-> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0
+### TAB-K3 · The quit confirmation is invisible to UI Automation — FIXED in code 2026-10-23 (NOT BUILT into a release)
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (the driver answered it blind, with Enter). **The fix:**
+> every ContentDialog the page shows is built in code. Proved by `e2e/suites/test_accessibility.py::
+> test_the_quit_confirmation_is_readable` and `…::test_the_large_paste_warning_is_readable` (`needs_fix("TAB-K3")`).
+> What it was on 0.8.0:
 
 "Do you want to close all windows?" (Close all · Cancel), shown after **Close All Windows**, is on screen, but UI
 Automation sees an empty Popup (no title, no buttons) and a hit test at its "Close all" button returns the terminal
 behind it — a screen reader cannot read or operate it (every Agentmaster ContentDialog, e.g. "Close this window?",
 exposes its title and buttons). Keyboard works (Enter = Close all). **Expected:** the dialog's title and buttons in
 the accessibility tree.
+
+**Root cause** (read in microsoft-ui-xaml's source on 2026-10-23: `dxaml/xcp/dxaml/lib/ContentDialog_Partial.cpp`,
+`ShowAsyncImpl`, `HostDialogWithinPopup`, `SetPopupAutomationProperties`; the observation fits it, a probe on 0.8.0 is
+the open check below):
+- WinUI picks a ContentDialog's placement at its FIRST `ShowAsync` and keeps it. A dialog that is in the LIVE tree is
+  shown `TransplantedRootInPopup`: only its `LayoutRoot` moves into a popup, and that popup is itself parented inside
+  the dialog's own template (`ContainerPart`), which sits in the page (`TerminalPage.xaml`'s `Root`, row 2). A dialog
+  outside the tree is shown `EntireControlInPopup`: the whole control is the child of an unparented popup of the
+  island's popup root, named by the dialog's title.
+- The quit confirmation (`ConfirmCloseDialog`) was DECLARED in `TerminalPage.xaml` (`x:Load="False"`) and realized by
+  `FindName`, so it was in the live tree: transplanted. The empty Popup UI Automation saw at the top is most likely
+  its SMOKE layer (an unparented popup of its own, with no content — not verified). Every Agentmaster dialog is built
+  in code (`ContentDialog dialog;` … `presenter.ShowDialog(dialog)`), so it was the one dialog of the suite's flows
+  that was transplanted.
+- Six more dialogs were declared the same way and had the same placement: About, the read-only close warning, the
+  multi-line and the large paste warnings, the control notice and the link warning ("This link may lead to an unsafe
+  location…").
+
+**The fix** (TerminalPage.cpp, TerminalPage.h, TerminalPage.xaml; not in a release):
+- The seven declarations are gone from `TerminalPage.xaml` (an Agentmaster comment there names them). Each dialog is
+  built in code when it is shown — the same resource strings (`RS_(L"<Uid>/<Property>")` for what `x:Uid` applied), the
+  same buttons and default buttons, the same layout for the two with a body (the multi-line paste preview in a
+  ScrollViewer at most 100 px tall; the link and the notice as selectable text with the copy menu) — and shown through
+  the window's presenter, which gives a code-built dialog its XamlRoot and theme as before (`TerminalWindow::
+  ShowDialog`).
+- `_ShowDialogHelper` takes the dialog instead of an `x:Name`; `_ShowMultiLinePasteWarningDialog` takes the clipboard
+  preview and empties it once the dialog closed (what the paste handler did to the declared dialog's block); About is
+  built once per page and kept (`_aboutDialog`), because its constructor checks for an update.
+- The driver (`App.close(how="all")`) now waits up to 4 s to SEE the quit confirmation and presses its **Close all**;
+  on 0.8.0 it still answers blind with Enter after that wait.
+
+**Open check:** the probe `e2e/suites/probe_dialogs.py` (not collected by a full run: run it by name, `-- -v
+suites/probe_dialogs.py`; a code-built dialog, the large-paste warning, About, the quit confirmation from the command
+palette and after Close All Windows, each recorded with the island's children, hit tests, the focused element and the
+title searched in the whole window) is to be run once on 0.8.0 to confirm the cause, and again with the two tests above
+on a build of the fix.
 

@@ -235,7 +235,8 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | SP-K2 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TAB-K1 | A window close can save its Claude tabs as plain shell tabs (intermittent; an autosave after the teardown flush) | e2e suite, 2026-10-23 (seen once) |
 | TAB-K2 | A reopen whose focused tab was a shell starts the first Claude tab | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
-| TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation | e2e suite, 2026-10-23 |
+| TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation — **fixed in code 2026-10-23** (every page dialog is built in code: a declared one was shown nested in the page, where UI Automation cannot read it; TAB-10 phase 3; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
+| A11Y-K1 | Agentmaster's own surfaces say little to UI Automation: the cog, the compose icons, ⋯ and every board card and tree row have no name, nothing has a stable id, and a card's selection, a tab's selection pill, an unread ring or an unsent draft are pixels only (a screen reader cannot tell them; the suite read them from side effects) — **fixed in code 2026-10-23** (AgentAutomation.h: names, `am.*` AutomationIds, item status — [`../E2E_TESTING.md`](../E2E_TESTING.md) §6.3 "As built"; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
 | TAB-K4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) — **fixed in code 2026-10-23** (TAB-01 phase 4; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_lifecycle.py`) |
 | ROB-K1 | A reader holding `sessions.json` (no delete sharing) makes the save fail, and nothing re-saves until the next change | e2e suite, 2026-10-23 (`e2e/suites/test_robustness.py`) |
 
@@ -289,11 +290,12 @@ desktop: **49 of 49 tests pass in 37 min**; a known-defect test passes while its
 | TAB-02 | phases 1–6, E1, E3 | `test_tab_lifecycle.py::test_deactivate_scopes` |
 | TAB-03 | phases 3–5, E1, E5 (phases 1–2: TCM-09's tests) | `test_tab_lifecycle.py::test_unfavorite_and_close`, `…::test_close_of_same_folder_across_windows` |
 | TAB-04 | phase 2 (both branches) | `test_tab_lifecycle.py::test_closing_the_focused_tab_never_starts_a_dormant_one` |
-| TAB-10 | phases 1–3; TAB-K2 (TAB-K1 is named by the restart test's record check) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
+| TAB-10 | phases 1–3; TAB-K2 (TAB-K1 is named by the restart test's record check); phase 3's quit confirmation read by UI Automation (`needs_fix`, a build with TAB-K3's fix) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab`, `test_accessibility.py::test_the_quit_confirmation_is_readable` |
+| A11Y-K1 / TAB-K3 | the fixes' own checks (`needs_fix`), MGR-05 phase 2 among them (the selection on every surface and the tab's pill, read from item status) | `test_accessibility.py::test_the_selection_is_readable_on_every_surface`, `…::test_the_large_paste_warning_is_readable`, `…::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_tab_says_its_session_state` |
 | ROB-11 | phases 1–2 (phase 2 today: ROB-K1) | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
 
-Not automated yet in these areas: MGR-05 phases 2 and 5
-(the tab's selection pill is not in UI Automation; folder scope), MGR-06, SP-03, SP-07 (hundreds of sessions), SP-04
+Not automated yet in these areas: MGR-05 phase 5
+(folder scope; phase 2 waits for a build with A11Y-K1's fix — 0.8.0 shows the tab's selection pill to no reader), MGR-06, SP-03, SP-07 (hundreds of sessions), SP-04
 phase 3–4, SP-05 E1–E2, E4–E8, SP-06 phases 1–2 (splitter drags), TCM-01 phase 4 (an adopted shell claude),
 TAB-01 E1–E3, E5, E6 (the focused tab — MGR-03 phase 3 —,
 a turn cut off, an adopted session, a delivery in flight, the strip's place), TAB-02 E2, TAB-03 E2–E4 and E6, TAB-04

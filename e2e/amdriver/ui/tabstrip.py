@@ -10,6 +10,13 @@ handful of tabs a test opens every tab is present; a flow with hundreds of tabs 
 
 Every action takes a tab by its TITLE or as a `Tab` read from `items()` / `selected()`: two sessions launched in
 one folder share the folder's name as their title until one is renamed, and only the Tab object tells them apart.
+
+Accessibility metadata (E2E_TESTING.md §6.3; a build of 2026-10-23 or later — NOT in 0.8.0): a tab that hosts a managed
+session has the AutomationId `am.tab.<the session id's first 8 characters>` (find it with `by_session`), and its
+ItemStatus says what its header shows: the state word first ("running", "waiting-for-you", … or "observed" for a
+classified shell), then "not started", "unread", "unsent draft", "favorite", "cache warm", "selected on the Agent
+Manager page" (the Linked-Lenses pill, MGR-05) and "tags: a, b", joined by "; " (`Tab.facets`). On 0.8.0 both are
+empty, and every reader here returns "" / [] / False / None for them.
 """
 from __future__ import annotations
 
@@ -18,6 +25,11 @@ from typing import Optional, Union
 
 from .. import inputs, uia
 from ..waits import wait_until
+
+TAB_ID_PREFIX = "am.tab."
+"""The AutomationId prefix of a tab that hosts a managed session (the session id's first 8 characters follow)."""
+SELECTION_PILL_FACET = "selected on the Agent Manager page"
+"""The tab ItemStatus facet of the Linked-Lenses pill (AgentAutomation.h kAgentStatusSelectedOnPage)."""
 
 
 @dataclass
@@ -35,6 +47,52 @@ class Tab:
     title: str
     selected: bool
     index: int
+
+    @property
+    def status(self) -> str:
+        """The tab item's ItemStatus as read (see the module doc; "" on 0.8.0 and for a plain shell tab).
+
+        Returns:
+            The status.
+        """
+        return self.el.item_status
+
+    def facets(self) -> list[str]:
+        """The status split into its facets: the state word first, then the facts that hold.
+
+        Returns:
+            The facets ([] when the status is empty).
+        """
+        return [f for f in self.status.split("; ") if f]
+
+    @property
+    def state_word(self) -> str:
+        """The first facet: the session's state as the tree and the side panel word it ("" when unknown).
+
+        Returns:
+            The word.
+        """
+        facets = self.facets()
+        return facets[0] if facets else ""
+
+    @property
+    def pill(self) -> bool:
+        """Whether the tab wears the Agent Manager page's selection pill (its session is selected or hovered there).
+
+        Returns:
+            True while the pill shows (always False on 0.8.0, which does not expose it).
+        """
+        return SELECTION_PILL_FACET in self.facets()
+
+    @property
+    def session_key(self) -> str:
+        """The hosted session's key (its id's first 8 characters), read off the AutomationId.
+
+        Returns:
+            The key ("" for a tab that hosts no managed session, and on 0.8.0).
+        """
+        aid = self.el.automation_id
+        return aid[len(TAB_ID_PREFIX):] if aid.startswith(TAB_ID_PREFIX) else ""
 
     def click(self, modifiers: Optional[list] = None) -> None:
         """Click the tab with the real pointer (on its title, clear of the close button).
@@ -137,6 +195,25 @@ class TabStrip:
             The tab, or None.
         """
         return next((t for t in self.items() if t.title == title), None)
+
+    def by_session(self, session_id: str) -> Optional[Tab]:
+        """The tab that hosts a session, by its AutomationId `am.tab.<key>` — titles can collide, ids cannot.
+
+        Args:
+            session_id: The session's id (or just its first 8 characters).
+        Returns:
+            The tab, or None (none hosts it in this window, or the build predates the ids — 0.8.0).
+        """
+        key = session_id[:8]
+        return next((t for t in self.items() if t.session_key == key), None)
+
+    def pilled(self) -> list[Tab]:
+        """The tabs that wear the Agent Manager page's selection pill (MGR-05: the page's selected or hovered session).
+
+        Returns:
+            The tabs, left to right ([] when none — and always on 0.8.0, which does not expose the pill).
+        """
+        return [t for t in self.items() if t.pill]
 
     def get(self, title: TabRef) -> Tab:
         """A tab by its exact title, which must exist (a Tab is returned as it is).

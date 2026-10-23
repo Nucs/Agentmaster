@@ -21,6 +21,7 @@
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (the wrapped live-draft read, case 7)
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
+#include "AgentAutomation.h" // the badge buttons' accessible names and ids (E2E_TESTING.md §6.3)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the pure live-vs-remembered draft rule ("Copy Current Prompt")
 #include "AgentMaster/PendingPaste.h" // FindPasteMarkers — the cheap pure "does this prompt carry a paste placeholder?" pre-check (PENDING_INPUT.md §8e)
@@ -82,7 +83,14 @@ namespace winrt::TerminalApp::implementation
 
         // A minimal transparent icon button: no chrome at rest, the default template still gives a
         // hover highlight. IsTabStop(false) so it never pulls keyboard focus off the ConPTY.
-        const auto mkIconBtn = [](const wchar_t* glyph, const wchar_t* tip) {
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): a FontIcon (or a bare arrow glyph) gives the button no
+        // accessible name, so each one is NAMED (`name`) and gets the id am.badge.<key>.<element>, the session's key
+        // first so a test addresses one tab's badge among many.
+        //   glyph / tip - the icon and its tooltip.
+        //   name        - what a screen reader says for it ("Copy session details").
+        //   element     - the id's last part (up, down, folder, mail, copy, pencil).
+        // Returns the button. Throws what building a XAML element throws.
+        const auto mkIconBtn = [this](const wchar_t* glyph, const wchar_t* tip, std::wstring_view name, std::wstring_view element) {
             Button b{};
             b.Background(Fill(0x00, 0, 0, 0)); // transparent (alpha 0) — still hit-testable, unlike null
             b.BorderThickness(ThicknessHelper::FromUniformLength(0));
@@ -103,6 +111,8 @@ namespace winrt::TerminalApp::implementation
             fi.IsHitTestVisible(false);
             b.Content(fi);
             AgentSetTip(b, winrt::hstring{ tip });
+            AgentSetAccessibleName(b, name);
+            AgentSetAutomationId(b, AgentAutomationIdFor(L"am.badge.", _sessionId) + L"." + std::wstring{ element });
             return b;
         };
 
@@ -129,8 +139,8 @@ namespace winrt::TerminalApp::implementation
         Button downBtn{ nullptr };
         if (promptNavEligible)
         {
-            upBtn = mkIconBtn(L"\x2191", L"Go to the previous sent prompt that's off-screen (like Alt+Up)"); // ↑
-            downBtn = mkIconBtn(L"\x2193", L"Go to the next sent prompt that's off-screen (like Alt+Down)"); // ↓
+            upBtn = mkIconBtn(L"\x2191", L"Go to the previous sent prompt that's off-screen (like Alt+Up)", L"Previous prompt", L"up"); // ↑
+            downBtn = mkIconBtn(L"\x2193", L"Go to the next sent prompt that's off-screen (like Alt+Down)", L"Next prompt", L"down"); // ↓
             // Standard Unicode arrows render from a text symbol font, not the icon font (which would tofu
             // them) — same reason the ▸ summary-jump glyph uses "Segoe UI Symbol".
             if (auto ic = upBtn.Content().try_as<FontIcon>())
@@ -161,7 +171,7 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
-        Button folderBtn = mkIconBtn(L"\xE8B7", L"Open the working folder in Explorer"); // Folder
+        Button folderBtn = mkIconBtn(L"\xE8B7", L"Open the working folder in Explorer", L"Open the working folder", L"folder"); // Folder
         folderBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
@@ -186,7 +196,8 @@ namespace winrt::TerminalApp::implementation
             queueBtn = mkIconBtn(L"\xE715", // Mail — the same glyph the Manager's "Add to queue" envelope uses
                                  L"Queue this session's unsent prompt into its Prompt Queue and CLEAR it from the input box (a move).\n"
                                  L"Shift+Click to queue but KEEP it in the box (a copy).\n"
-                                 L"Enabled only while the box holds an unsent draft (the pulsing 3 dots).");
+                                 L"Enabled only while the box holds an unsent draft (the pulsing 3 dots).",
+                                 L"Queue the unsent prompt", L"mail");
             // Enabled ONLY while a draft actually exists, so a prominent toolbar button never fires a
             // silent no-op on an empty box (the "dead button" trap the pencil-icon comment records).
             // Seeded disabled; _Refresh -> _RefreshQueueButtonEnabled flips it in lockstep with the "3
@@ -205,7 +216,7 @@ namespace winrt::TerminalApp::implementation
             _queueBtn = queueBtn; // remembered so _RefreshQueueButtonEnabled can toggle it each refresh
         }
 
-        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, current prompt, launch CLI, summary, transcript)"); // Copy
+        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, current prompt, launch CLI, summary, transcript)", L"Copy session details", L"copy"); // Copy
         MenuFlyout flyout{};
         // Each menu item carries a tooltip that says exactly WHAT gets copied (the labels are terse;
         // the tip spells out the value), mirroring _CopyField's per-case behavior.
@@ -309,7 +320,7 @@ namespace winrt::TerminalApp::implementation
         // Pencil: toggle the SUMMARY PANEL (the 2nd overlay slot, below this badge). The visibility is
         // a GLOBAL setting (AppSettings::showSummaryPanel) — shared across windows + persisted — so the
         // pencil hands off to the page (_ToggleSummary -> _onToggleSummary), which flips it everywhere.
-        Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel (all tabs)"); // Edit (pencil)
+        Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel (all tabs)", L"Summary panel", L"pencil"); // Edit (pencil)
         // Render the pencil from "Segoe MDL2 Assets" rather than "Segoe Fluent Icons": at the SAME codepoint
         // (E70F) the MDL2 glyph draws the pencil WITH a line across its bottom (the line it's drawing), while
         // the Fluent variant is a plain pencil with no line. The with-line look reads as "edit/notes" far

@@ -150,7 +150,19 @@ since=mark)`), then the UI.
   design); `click_home` spaces separate clicks past it.
 - **Every tab close asks**: "Close session?" (Close · ★ Favorite & Close · Cancel) or, for a shell tab, "Close tab?"
   (Close · Cancel). The window's ✕ asks "Close this window?" (Close All Windows · Close Window · Cancel); Close All
-  Windows then asks "Do you want to close all windows?", a dialog UI Automation cannot see (Enter answers it).
+  Windows then asks "Do you want to close all windows?", a dialog UI Automation cannot see on 0.8.0 (TAB-K3: Enter
+  answers it). Builds with TAB-K3's fix show it, and every other dialog of the page, like any dialog: `App.close
+  (how="all")` waits up to 4 s to see it and presses Close all, else answers with Enter.
+- **Accessibility metadata (builds of 2026-10-23 or later, not 0.8.0 — A11Y-K1, `doc/agentmaster/E2E_TESTING.md`
+  §6.3):** AutomationIds `am.<surface>.<element>[.<key>]` (key = the session id's first 8 characters: `am.tab.<key>`,
+  `am.mgr.board.card.<key>`, `am.mgr.tree.row.<key>`, `am.mgr.queue.add`, `am.side.card.<key>` on the card's title, …),
+  names for the controls that had none (the cog "Settings", the compose icons, ⋯ "More actions", a card or a row = its
+  title, the side panel's ⌖ ⇄ and chevrons by what they do — so their 0.8.0 glyph names go: `SidePanel.button` maps
+  them), every tooltip's text as its control's help text, and ItemStatus: a tab "running; unsent draft; selected on
+  the Agent Manager page" (the pill), a card / row / side card "waiting-for-you; selected", a queue row "sent; auto".
+  The page objects read them first and fall back to the 0.8.0 way (texts, positions, side effects): `Tab.facets` /
+  `pill`, `TabStrip.by_session`, `ManagerPage.card_by_session` / `selected_card`, `Card.selected`,
+  `PanelCard.selected`, `compose_buttons`.
 - **A tooltip opens on a hand's arrival**: `hover(glide=True)` moves in steps; `am.tooltips()` lists what shows (a
   rich session card has no name — read its texts).
 - **Read the app's files with delete sharing.** The app saves `sessions.json`, `windows\<id>.json`, `settings.json` …
@@ -198,6 +210,7 @@ since=mark)`), then the UI.
 | SP-K2 | SP-04 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does, under the same input) | `test_side_panel.py::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
 | TAB-K1 | TAB-10 E2 | A window close can save its Claude tabs as plain shell tabs — seen once; the restart test names it when it recurs | `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` (its record check) |
 | TAB-K2 | TAB-10 E1 | A reopen whose focused tab was a shell starts the first restored Claude tab | `test_tab_menu.py::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
-| TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter) | — |
+| TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter on 0.8.0). **Fixed in code 2026-10-23** (not in a release): the seven dialogs declared in `TerminalPage.xaml` were shown nested in the page, where UI Automation cannot read them; all are built in code now | `test_accessibility.py::test_the_quit_confirmation_is_readable`, `…::test_the_large_paste_warning_is_readable` (`needs_fix`) |
+| A11Y-K1 | MGR-05 phase 2, every page | Glyph buttons, cards and rows had no names, nothing had a stable id, and selection / pill / unread / draft were pixels only. **Fixed in code 2026-10-23** (not in a release): names, `am.*` AutomationIds and item status (`AgentAutomation.h`) | `test_accessibility.py::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_selection_is_readable_on_every_surface`, `…::test_the_tab_says_its_session_state` (`needs_fix`) |
 | TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` without delete sharing makes the save fail; nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |

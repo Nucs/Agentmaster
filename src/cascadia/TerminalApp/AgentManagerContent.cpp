@@ -23,6 +23,7 @@
 
 #include "AgentLaunchBar.h" // the shared LAUNCH BAR — the toolbar's launch row (built in _BuildLayout, shut down in the destructor)
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // the page's AutomationIds + the names of its glyph-only buttons (E2E_TESTING.md §6.3)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
@@ -1390,12 +1391,22 @@ namespace winrt::TerminalApp::implementation
                 };
                 // The title is explicit: the button's content is a FontIcon, so there is no label for the
                 // tip panel to derive a heading from (an eye / "!" / envelope has to say its own name).
-                auto mkIconBtn = [&](const winrt::hstring& title, const winrt::hstring& tip, const IInspectable& glyph, std::function<void()> fn) {
+                // Agentmaster (accessibility, E2E_TESTING.md §6.3): for the same reason the title is also the button's
+                // accessible NAME (a FontIcon gives UI Automation none — on 0.8.0 the e2e suite told the three compose
+                // icons apart by their position), and `automationId` is its stable id.
+                //   title / tip  - the tip's heading and text (the heading doubles as the name).
+                //   glyph        - the FontIcon content.
+                //   automationId - am.mgr.queue.<element>.
+                //   fn           - the click action.
+                // Returns the button. Throws what building a XAML element throws.
+                auto mkIconBtn = [&](const winrt::hstring& title, const winrt::hstring& tip, const IInspectable& glyph, std::wstring_view automationId, std::function<void()> fn) {
                     auto btn = Button{};
                     btn.Content(glyph);
                     btn.Padding(Thickness{ 9, 6, 9, 6 });
                     btn.VerticalAlignment(VerticalAlignment::Top);
                     AgentSetTitledTip(btn, title, tip);
+                    AgentSetAccessibleName(btn, title);
+                    AgentSetAutomationId(btn, automationId);
                     btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
                     return btn;
                 };
@@ -1411,16 +1422,16 @@ namespace winrt::TerminalApp::implementation
                 iconCol.VerticalAlignment(VerticalAlignment::Top); // stay at the top as the box grows
                 iconCol.Margin(Thickness{ 0, 0, 6, 0 });
                 // Eye = Focus the session (jump to its live tab).
-                iconCol.Children().Append(mkIconBtn(L"Jump to tab", L"Switch to the selected session's live terminal tab \x2014 hopping to its window first if it lives in another one.", fluentGlyph(L"\xE7B3"), [this]() {
+                iconCol.Children().Append(mkIconBtn(L"Jump to tab", L"Switch to the selected session's live terminal tab \x2014 hopping to its window first if it lives in another one.", fluentGlyph(L"\xE7B3"), L"am.mgr.queue.jump", [this]() {
                     if (_activateHandler && !_selectedId.empty())
                     {
                         _activateHandler(winrt::hstring{ _selectedId });
                     }
                 }));
                 // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
-                iconCol.Children().Append(mkIconBtn(L"Send now", L"Type the composed prompt straight into the session, ahead of anything queued, whatever its Prompt Queue Runner mode is. Asks you to confirm first.", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
+                iconCol.Children().Append(mkIconBtn(L"Send now", L"Type the composed prompt straight into the session, ahead of anything queued, whatever its Prompt Queue Runner mode is. Asks you to confirm first.", textIconGlyph(L"!"), L"am.mgr.queue.sendNow", [this]() { _OnSendNow(); }));
                 // Envelope = Add the composed prompt to the queue.
-                iconCol.Children().Append(mkIconBtn(L"Add to queue", L"Append the composed prompt to the end of the selected session's queue. It is sent when the Prompt Queue Runner reaches it \x2014 or by Send now.", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
+                iconCol.Children().Append(mkIconBtn(L"Add to queue", L"Append the composed prompt to the end of the selected session's queue. It is sent when the Prompt Queue Runner reaches it \x2014 or by Send now.", fluentGlyph(L"\xE715"), L"am.mgr.queue.add", [this]() { _OnAddPrompt(); }));
                 Grid::SetColumn(iconCol, 0);
                 composeRow.Children().Append(iconCol);
 
@@ -1620,7 +1631,7 @@ namespace winrt::TerminalApp::implementation
                 // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
                 // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
                 // none in XAML Islands (see Gotchas).
-                auto paperBtn = mkIconBtn(L"Queue templates", L"Show or hide the templates row: save this session's queue as a reusable plan, or apply a saved one to this session (or to every session in its directory).", fluentGlyph(L"\xE8A5"), [this]() {
+                auto paperBtn = mkIconBtn(L"Queue templates", L"Show or hide the templates row: save this session's queue as a reusable plan, or apply a saved one to this session (or to every session in its directory).", fluentGlyph(L"\xE8A5"), L"am.mgr.queue.templates", [this]() {
                     if (_templatesRow)
                     {
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
@@ -1641,7 +1652,7 @@ namespace winrt::TerminalApp::implementation
                 // every time this one showed up. Beside it, column 2 stays one button tall and only its
                 // WIDTH changes: the textarea's right edge moves, its left edge (where the caret and the
                 // text live) never does, and the paper icon keeps its place at the far right.
-                _pullDraftBtn = mkIconBtn(L"Pull in the unsent prompt", L"The selected session's input box is holding an unsent prompt that differs from what is in this box \x2014 click to bring it in here (it REPLACES what you have composed; the prompt also stays in the terminal).", fluentGlyph(L"\xE896"), [this]() { _OnPullDraftClicked(); });
+                _pullDraftBtn = mkIconBtn(L"Pull in the unsent prompt", L"The selected session's input box is holding an unsent prompt that differs from what is in this box \x2014 click to bring it in here (it REPLACES what you have composed; the prompt also stays in the terminal).", fluentGlyph(L"\xE896"), L"am.mgr.queue.pullDraft", [this]() { _OnPullDraftClicked(); });
                 _pullDraftBtn.Visibility(Visibility::Collapsed); // shown only when there is something worth offering
 
                 auto rightIcons = StackPanel{};
@@ -1860,6 +1871,36 @@ namespace winrt::TerminalApp::implementation
         // resumable, marked by Favorite). Nothing archive-related is built here anymore.
         _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
         _BuildClaudeMissingOverlay(); // native-exe-only gate modal (shown when no claude.exe is detected)
+
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the page's stable AutomationIds, in ONE place
+        // so this list and the doc's list can be compared at a glance. Every control here is built above and lives as
+        // long as the page; a null one (a part some build leaves out) is skipped by the setters. NAMES only where the
+        // control has none of its own (AgentAutomation.h's rule): the cog is a FontIcon, and the two ↻ buttons read
+        // as a glyph — every other control keeps the name its content gives it (LOCAL, MOST ACTIVE, Sessions, …),
+        // which is often the VALUE a screen reader must announce and the e2e suite reads.
+        AgentSetAutomationId(_settingsBtn, L"am.mgr.toolbar.settings");
+        AgentSetAccessibleName(_settingsBtn, L"Settings");
+        AgentSetAutomationId(_sessionsBtn, L"am.mgr.toolbar.sessions");
+        AgentSetAutomationId(_keepAwakeBtn, L"am.mgr.toolbar.keepAwake");
+        AgentSetAutomationId(_pauseBtn, L"am.mgr.toolbar.pause");
+        AgentSetAutomationId(_reopenBtn, L"am.mgr.toolbar.reopen");
+        AgentSetAutomationId(_activateAllBtn, L"am.mgr.toolbar.activateAll");
+        AgentSetAutomationId(_boardScopeBtn, L"am.mgr.board.scope");
+        AgentSetAutomationId(_boardSortBtn, L"am.mgr.board.sort");
+        AgentSetAutomationId(_boardRefreshBtn, L"am.mgr.board.refresh");
+        AgentSetAccessibleName(_boardRefreshBtn, L"Refresh now");
+        AgentSetAutomationId(_clearSelBtn, L"am.mgr.board.clear");
+        AgentSetAutomationId(_showAllBtn, L"am.mgr.board.showAll");
+        AgentSetAutomationId(_treeScopeBtn, L"am.mgr.tree.scope");
+        AgentSetAutomationId(_treeSortBtn, L"am.mgr.tree.sort");
+        AgentSetAutomationId(_treeRefreshBtn, L"am.mgr.tree.refresh");
+        AgentSetAccessibleName(_treeRefreshBtn, L"Refresh now");
+        AgentSetAutomationId(_summaryTabBtn, L"am.mgr.pane.summary");
+        AgentSetAutomationId(_autoTestTabBtn, L"am.mgr.pane.queue");
+        AgentSetAutomationId(_addPromptBox, L"am.mgr.queue.compose"); // a TextBox: its NAME stays its placeholder (the suite reads it)
+        AgentSetAutomationId(_autorunnerBtn, L"am.mgr.queue.runner");
+        AgentSetAutomationId(_templateNameBox, L"am.mgr.queue.templateName");
+        AgentSetAutomationId(_templateCombo, L"am.mgr.queue.templateList");
     }
 
     // ---- Refresh / rebuild --------------------------------------------------

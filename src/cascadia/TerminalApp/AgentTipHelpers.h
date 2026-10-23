@@ -65,6 +65,7 @@
 // constructor + DependencyProperty's statics, Interop defines TypeName/xaml_typename.
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
+#include <winrt/Windows.UI.Xaml.Automation.h> // AutomationProperties — the tip text becomes the element's help text (SyncHelpTextFromTip)
 
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 
@@ -127,6 +128,47 @@ namespace winrt::TerminalApp::implementation
                 winrt::xaml_typename<winrt::Windows::UI::Xaml::FrameworkElement>(),
                 winrt::Windows::UI::Xaml::PropertyMetadata{ winrt::box_value(winrt::hstring{}) });
             return prop;
+        }
+
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): boxed true once AgentSetTip has written the element's
+        // AutomationProperties.HelpText from its tip text — the marker that lets a later AgentSetTip keep that help
+        // text in step with the tip (a card re-tipped on every rebuild, a chip whose tip follows its state) while a
+        // HelpText the element's BUILDER set itself is never overwritten. Plain property-store value; dies with the
+        // element (the TipDelayMs contract).
+        inline winrt::Windows::UI::Xaml::DependencyProperty TipOwnsHelpTextProperty()
+        {
+            static const auto prop = winrt::Windows::UI::Xaml::DependencyProperty::RegisterAttached(
+                L"AgentmasterTipOwnsHelpText",
+                winrt::xaml_typename<bool>(),
+                winrt::xaml_typename<winrt::Windows::UI::Xaml::FrameworkElement>(),
+                winrt::Windows::UI::Xaml::PropertyMetadata{ winrt::box_value(false) });
+            return prop;
+        }
+
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): make the tip text the element's UI Automation HELP TEXT —
+        // what a screen reader reads after the name ("Settings, button, Model and launch options, …") and what the e2e
+        // suite reads to tell controls apart. Written when the element has no HelpText yet (then marked as ours) and
+        // kept in step while it is ours; a HelpText its builder set is left alone. HelpText never changes the NAME, so
+        // no lookup by name (a toggle's LOCAL, a placeholder) moves. Change-gated: an equal text is not written again.
+        //   el  - the tipped element.
+        //   tip - its new tip text (non-empty: AgentSetTip returns before this for an empty one).
+        // Throws what a DependencyProperty read/write on a live UI-thread element throws (AgentSetTip's own contract).
+        inline void SyncHelpTextFromTip(const winrt::Windows::UI::Xaml::UIElement& el, const winrt::hstring& tip)
+        {
+            using winrt::Windows::UI::Xaml::Automation::AutomationProperties;
+            const bool ours = winrt::unbox_value_or<bool>(el.ReadLocalValue(TipOwnsHelpTextProperty()), false);
+            if (!ours)
+            {
+                if (el.ReadLocalValue(AutomationProperties::HelpTextProperty()) != winrt::Windows::UI::Xaml::DependencyProperty::UnsetValue())
+                {
+                    return; // the builder gave it a help text of its own: never overwrite it
+                }
+                el.SetValue(TipOwnsHelpTextProperty(), winrt::box_value(true));
+            }
+            if (AutomationProperties::GetHelpText(el) != tip)
+            {
+                AutomationProperties::SetHelpText(el, tip);
+            }
         }
 
         // LocalTooltip SCOPE marker (Agentmaster, AgentLocalTooltip.h): boxed true on a scope ROOT whose
@@ -480,6 +522,14 @@ namespace winrt::TerminalApp::implementation
     // element and wire it to the shared per-thread tip host. Re-calling on the same element just
     // UPDATES the recorded text/delay (no second handler set — the host reads the properties
     // fresh at open time, so the newest text always shows). No-op on an empty tip.
+    // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the text also becomes the element's UI Automation
+    // HELP TEXT (SyncHelpTextFromTip — unless its builder set one), so a screen reader and the e2e suite read what the
+    // tooltip says without hovering. The NAME is untouched: a nameless glyph button is named explicitly at its build
+    // site (AgentAutomation.h's NAMES rule), never from here.
+    //   el                — the element to tip.
+    //   tip               — the text; empty = no-op.
+    //   openDelayOverride — this element's open delay (else ~1/3 of the system hover time).
+    //   throws — whatever a property write on a live UI-thread element throws (callers run contained paths).
     inline void AgentSetTip(const winrt::Windows::UI::Xaml::UIElement& el,
                             const winrt::hstring& tip,
                             std::optional<std::chrono::milliseconds> openDelayOverride = std::nullopt)
@@ -494,6 +544,7 @@ namespace winrt::TerminalApp::implementation
         const bool alreadyWired =
             el.ReadLocalValue(atd::TipTextProperty()) != winrt::Windows::UI::Xaml::DependencyProperty::UnsetValue();
         el.SetValue(atd::TipTextProperty(), winrt::box_value(tip));
+        atd::SyncHelpTextFromTip(el, tip);
         if (openDelayOverride)
         {
             el.SetValue(atd::TipDelayMsProperty(), winrt::box_value(static_cast<int32_t>(openDelayOverride->count())));

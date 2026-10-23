@@ -35,6 +35,7 @@
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION match)
 
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
+#include "AgentAutomation.h" // AgentStateWord — the tab item's accessible state word (_SetTabAgentDot, E2E_TESTING.md §6.3)
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this page hosts
@@ -1355,7 +1356,7 @@ namespace winrt::TerminalApp::implementation
             // correlate), so this seed is the ONLY thing that marks a restored tab dormant on the strip.
             if (const auto s = _sessionRegistry->Get(spec.sessionId))
             {
-                _SetTabAgentDot(tab, AgentStatusColorFor(s->state), !s->started && !s->external);
+                _SetTabAgentDot(tab, AgentStatusColorFor(s->state), !s->started && !s->external, spec.sessionId, AgentStateWord(s->state));
             }
             _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
             _RefreshTabTags(spec.sessionId); // bookmark tags: show the session's bookmark badges the instant its tab appears
@@ -2455,7 +2456,7 @@ namespace winrt::TerminalApp::implementation
             _AttachClaudeOverlay(tab, handleId); // the per-tab badge (status color from the record's state)
             if (const auto s = _sessionRegistry->Get(handleId))
             {
-                _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
+                _SetTabAgentDot(tab, AgentStatusColorFor(s->state), /*dormant*/ false, handleId, AgentStateWord(s->state));
             }
             _RefreshTabTags(handleId); // bookmark tags: a managed Codex tab wears its badges too
         }

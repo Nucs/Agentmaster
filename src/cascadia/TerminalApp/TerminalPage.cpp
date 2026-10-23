@@ -1171,9 +1171,18 @@ namespace winrt::TerminalApp::implementation
     // - Show a dialog with "About" information. Displays the app's Display
     //   Name, version, getting started link, source code link, documentation link, release
     //   Notes link, send feedback link and privacy policy link.
+    // - Agentmaster (flows TAB-K3): the dialog is built in code on the first open and kept in _aboutDialog (it was
+    //   declared in TerminalPage.xaml, which kept it out of UI Automation's reach — see _ShowDialogHelper). One instance
+    //   per page, like the declared element: AboutDialog's constructor runs its update check, so a new instance per open
+    //   would check again each time. Fire and forget, as before: the result is not needed.
+    // - Throws what activating AboutDialog throws (its XAML failing to load), as the declared dialog's FindName did.
     void TerminalPage::_ShowAboutDialog()
     {
-        _ShowDialogHelper(L"AboutDialog");
+        if (!_aboutDialog)
+        {
+            _aboutDialog = winrt::TerminalApp::AboutDialog{};
+        }
+        _ShowDialogHelper(_aboutDialog);
     }
 
     winrt::hstring TerminalPage::ApplicationDisplayName()
@@ -1189,11 +1198,29 @@ namespace winrt::TerminalApp::implementation
     // Method Description:
     // - Helper to show a content dialog
     // - We only open a content dialog if there isn't one open already
-    winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowDialogHelper(const std::wstring_view& name)
+    // - Agentmaster (flows TAB-K3, 2026-10-23): EVERY ContentDialog this page shows is now built in code and passed in —
+    //   the close confirmations, the read-only close warning, both paste warnings, the link warning, the control notice
+    //   and About. None is declared in TerminalPage.xaml any more (they used to be, as x:Load elements realized by
+    //   FindName). Why: WinUI picks a ContentDialog's placement at its first ShowAsync. A dialog in the LIVE tree (a
+    //   declared one, realized into Root's row 2) is shown TransplantedRootInPopup: only its LayoutRoot moves into a popup,
+    //   and that popup is parented inside the dialog's own template, inside the page. A dialog outside the tree is shown
+    //   EntireControlInPopup: the whole control is the child of an unparented popup of the island's popup root, named by
+    //   the dialog's title (ContentDialog::SetPopupAutomationProperties). Only the second reached UI Automation: on 0.8.0
+    //   the declared quit confirmation "Do you want to close all windows?" read as an empty Popup (no title, no buttons)
+    //   and a hit test at its "Close all" button returned the terminal behind it, so a screen reader could neither read nor
+    //   operate it — while every code-built dialog ("Close tab?", "Close this window?") exposed its title and buttons
+    //   (measured by the e2e suite; the WinUI source names the two modes). A code-built dialog keeps everything else: the
+    //   presenter (TerminalWindow::ShowDialog) gives it the XamlRoot and the theme exactly as it gave the declared ones.
+    // Arguments:
+    // - dialog: the dialog to show (by value — this coroutine suspends, so it must own its reference).
+    // Return Value:
+    // - the button the user chose; None when there is no presenter, or when another dialog won the presenter's race.
+    // - Throws whatever ShowAsync throws (unchanged for the callers).
+    winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowDialogHelper(winrt::Windows::UI::Xaml::Controls::ContentDialog dialog)
     {
         if (auto presenter{ _dialogPresenter.get() })
         {
-            co_return co_await presenter.ShowDialog(FindName(name).try_as<WUX::Controls::ContentDialog>());
+            co_return co_await presenter.ShowDialog(dialog);
         }
         co_return ContentDialogResult::None;
     }
@@ -1205,10 +1232,20 @@ namespace winrt::TerminalApp::implementation
     //   writes confirmOnClose=Never — a persisted "never" is coerced to "automatic".)
     // - Only one dialog can be visible at a time. If another dialog is visible
     //   when this is called, nothing happens. See _ShowDialog for details
+    // - Agentmaster (flows TAB-K3): the dialog is BUILT IN CODE per call — a fresh ContentDialog with the strings below,
+    //   the Primary button the default (what the declaration had). It was declared in TerminalPage.xaml and realized
+    //   with FindName, and that placement kept it out of UI Automation (see _ShowDialogHelper): the quit confirmation
+    //   ("Do you want to close all windows?", ConfirmCloseDialogKind::CloseAll, shown by RequestQuit and after the
+    //   window's "Close All Windows") had no title or buttons for a screen reader or the e2e suite.
+    // Arguments:
+    // - kind: which close is being confirmed (picks the title and the Primary button's text).
+    // Return Value:
+    // - Primary = close; Close (the Cancel button) or None = keep everything open.
+    // - Throws what _ShowDialogHelper's ShowAsync throws.
     winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowConfirmCloseDialog(ConfirmCloseDialogKind kind)
     {
-        // Load the dialog (triggers x:Load) and configure its strings.
-        const auto dialog = FindName(L"ConfirmCloseDialog").as<ContentDialog>();
+        ContentDialog dialog;
+        dialog.DefaultButton(ContentDialogButton::Primary);
 
         winrt::hstring title;
         winrt::hstring primary;
@@ -1243,7 +1280,8 @@ namespace winrt::TerminalApp::implementation
         dialog.PrimaryButtonText(primary);
         dialog.CloseButtonText(RS_(L"ConfirmCloseDialog_Cancel"));
 
-        // Agentmaster: the "don't ask again" checkbox has been removed from this dialog (TerminalPage.xaml)
+        // Agentmaster: the "don't ask again" checkbox has been removed from this dialog (it was the content of the
+        // TerminalPage.xaml declaration, itself gone since TAB-K3 — the dialog built above has no content at all)
         // and with it the code path that set ConfirmOnClose=Never. That single escape hatch silently
         // disabled EVERY close confirmation — including the window-close decision prompt — which must never
         // be permanently suppressible. There is therefore no longer any writer of ConfirmOnClose::Never
@@ -1270,9 +1308,19 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Displays a dialog for warnings found while closing the terminal tab marked as read-only
+    // - Agentmaster (flows TAB-K3): built in code per call (see _ShowDialogHelper) from the strings the declared
+    //   dialog's x:Uid="CloseReadOnlyDialog" applied; the Cancel button stays the default.
+    // Return Value:
+    // - Primary = close anyway; Close (Cancel) or None = keep the tab. Throws what _ShowDialogHelper throws.
     winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowCloseReadOnlyDialog()
     {
-        return _ShowDialogHelper(L"CloseReadOnlyDialog");
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(RS_(L"CloseReadOnlyDialog/Title")));
+        dialog.Content(winrt::box_value(RS_(L"CloseReadOnlyDialog/Content")));
+        dialog.PrimaryButtonText(RS_(L"CloseReadOnlyDialog/PrimaryButtonText"));
+        dialog.CloseButtonText(RS_(L"CloseReadOnlyDialog/CloseButtonText"));
+        dialog.DefaultButton(ContentDialogButton::Close);
+        return _ShowDialogHelper(dialog);
     }
 
     // Method Description:
@@ -1283,9 +1331,55 @@ namespace winrt::TerminalApp::implementation
     //   of a command.
     // - Only one dialog can be visible at a time. If another dialog is visible
     //   when this is called, nothing happens. See _ShowDialog for details
-    winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowMultiLinePasteWarningDialog()
+    // - Agentmaster (flows TAB-K3): built in code per call (see _ShowDialogHelper) — the declared dialog's layout
+    //   rebuilt element for element: the warning, the "Clipboard contents (preview):" header 16 px below it, and the
+    //   preview in Cascadia Mono inside a ScrollViewer at most 100 px tall, 8 px below the header. The paste handler used
+    //   to fill the declared dialog's ClipboardText block before the call and empty it after; the preview now comes in as
+    //   a parameter and is emptied here once the dialog has closed, so the clipboard text does not lie around in memory
+    //   for as long as something (a UI Automation client, the focus manager) still holds the dialog. A fresh ScrollViewer
+    //   always starts at the top (the declared one had to be scrolled back by hand).
+    // Arguments:
+    // - clipboardPreview: the clipboard text to show, already shortened by the caller (WinUI cannot lay out huge text).
+    // Return Value:
+    // - Primary = paste anyway; Close (Cancel) or None = drop the paste. Throws what _ShowDialogHelper throws.
+    winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowMultiLinePasteWarningDialog(winrt::hstring clipboardPreview)
     {
-        return _ShowDialogHelper(L"MultiLinePasteDialog");
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(RS_(L"MultiLinePasteDialog/Title")));
+        dialog.PrimaryButtonText(RS_(L"MultiLinePasteDialog/PrimaryButtonText"));
+        dialog.CloseButtonText(RS_(L"MultiLinePasteDialog/CloseButtonText"));
+        dialog.DefaultButton(ContentDialogButton::Primary);
+
+        StackPanel panel;
+
+        TextBlock warning;
+        warning.Text(RS_(L"MultiLineWarningText/Text"));
+        warning.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(warning);
+
+        TextBlock header;
+        header.Text(RS_(L"ClipboardTextHeader/Text"));
+        header.Margin(ThicknessHelper::FromLengths(0, 16, 0, 0));
+        panel.Children().Append(header);
+
+        TextBlock preview;
+        // Fully qualified: inside a TerminalPage member a bare FontFamily names the page's own FontFamily property.
+        preview.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Cascadia Mono" });
+        preview.TextWrapping(TextWrapping::Wrap);
+        preview.Text(clipboardPreview);
+
+        ScrollViewer scroller;
+        scroller.MaxHeight(100);
+        scroller.Margin(ThicknessHelper::FromLengths(0, 8, 0, 0));
+        scroller.Content(preview);
+        panel.Children().Append(scroller);
+
+        dialog.Content(panel);
+
+        const auto result = co_await _ShowDialogHelper(dialog);
+        // `preview` is a local reference of its own, so this is safe even when the page went away during the wait.
+        preview.Text({});
+        co_return result;
     }
 
     // Method Description:
@@ -1294,9 +1388,19 @@ namespace winrt::TerminalApp::implementation
     //   paste it but pressed the paste shortcut by accident.
     // - Only one dialog can be visible at a time. If another dialog is visible
     //   when this is called, nothing happens. See _ShowDialog for details
+    // - Agentmaster (flows TAB-K3): built in code per call (see _ShowDialogHelper) from the strings the declared
+    //   dialog's x:Uid="LargePasteDialog" applied; Paste anyway stays the default button.
+    // Return Value:
+    // - Primary = paste anyway; Close (Cancel) or None = drop the paste. Throws what _ShowDialogHelper throws.
     winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowLargePasteWarningDialog()
     {
-        return _ShowDialogHelper(L"LargePasteDialog");
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(RS_(L"LargePasteDialog/Title")));
+        dialog.Content(winrt::box_value(RS_(L"LargePasteDialog/Content")));
+        dialog.PrimaryButtonText(RS_(L"LargePasteDialog/PrimaryButtonText"));
+        dialog.CloseButtonText(RS_(L"LargePasteDialog/CloseButtonText"));
+        dialog.DefaultButton(ContentDialogButton::Primary);
+        return _ShowDialogHelper(dialog);
     }
 
     // Method Description:
@@ -4211,8 +4315,10 @@ namespace winrt::TerminalApp::implementation
 
             if (const auto strongThis = weakThis.get())
             {
-                // We have to initialize the dialog here to be able to change the text of the text block within it
-                std::ignore = FindName(L"MultiLinePasteDialog");
+                // Agentmaster (flows TAB-K3): the warnings are built in code now (see _ShowDialogHelper), so the
+                // preview no longer has to be written into a declared dialog realized here first; it is handed to
+                // _ShowMultiLinePasteWarningDialog, which shows it in a fresh ScrollViewer (always at the top — the
+                // declared one had to be scrolled back) and empties it again once the dialog has closed.
 
                 // WinUI absolutely cannot deal with large amounts of text (at least O(n), possibly O(n^2),
                 // so we limit the string length here and add an ellipsis if necessary.
@@ -4225,23 +4331,15 @@ namespace winrt::TerminalApp::implementation
                     clipboardText = til::hstring_format(FMT_COMPILE(L"{}\n…"), view.substr(0, len));
                 }
 
-                ClipboardText().Text(std::move(clipboardText));
-
-                // The vertical offset on the scrollbar does not reset automatically, so reset it manually
-                ClipboardContentScrollViewer().ScrollToVerticalOffset(0);
-
                 auto warningResult = ContentDialogResult::Primary;
                 if (warnMultiLine)
                 {
-                    warningResult = co_await _ShowMultiLinePasteWarningDialog();
+                    warningResult = co_await _ShowMultiLinePasteWarningDialog(std::move(clipboardText));
                 }
                 else if (warnLargeText)
                 {
                     warningResult = co_await _ShowLargePasteWarningDialog();
                 }
-
-                // Clear the clipboard text so it doesn't lie around in memory
-                ClipboardText().Text({});
 
                 if (warningResult != ContentDialogResult::Primary)
                 {
@@ -4302,6 +4400,53 @@ namespace winrt::TerminalApp::implementation
     }
     CATCH_LOG();
 
+    namespace
+    {
+        // Agentmaster (flows TAB-K3): the selectable, copyable text body of a code-built dialog — what the declared
+        // UriErrorDialog's and ControlNoticeDialog's <TextBlock IsTextSelectionEnabled="True"
+        // TextWrapping="WrapWholeWords"> with a TextMenuFlyout context menu were (see TerminalPage::_ShowDialogHelper for
+        // why no dialog is declared any more). The caller appends its runs to Inlines().
+        // Returns the empty text block. Throws only what a XAML element constructor throws (out of memory).
+        TextBlock MakeSelectableDialogText()
+        {
+            TextBlock text;
+            text.IsTextSelectionEnabled(true);
+            text.TextWrapping(TextWrapping::WrapWholeWords);
+            text.ContextFlyout(winrt::Microsoft::Terminal::UI::TextMenuFlyout{});
+            return text;
+        }
+
+        // Agentmaster (flows TAB-K3): the link dialog, built in code — what the declared UriErrorDialog was: the reason,
+        // an empty line, the link in Cascadia Mono, a Cancel button that is the default, and (for an unsafe link only)
+        // "Open anyway" as the Secondary button.
+        //   reason    - the sentence above the link (why it was not opened, or why it may be unsafe).
+        //   uri       - the link itself, shown verbatim.
+        //   allowOpen - true for the unsafe-link question: adds "Open anyway" (Secondary); false = a plain notice.
+        // Returns the dialog, not yet shown. Throws only what a XAML element constructor throws.
+        ContentDialog MakeUriErrorDialog(const winrt::hstring& reason, const winrt::hstring& uri, bool allowOpen)
+        {
+            ContentDialog dialog;
+            auto text = MakeSelectableDialogText();
+            Documents::Run reasonRun;
+            reasonRun.Text(reason);
+            Documents::Run uriRun;
+            uriRun.Text(uri);
+            uriRun.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Cascadia Mono" });
+            text.Inlines().Append(reasonRun);
+            text.Inlines().Append(Documents::LineBreak{});
+            text.Inlines().Append(Documents::LineBreak{});
+            text.Inlines().Append(uriRun);
+            dialog.Content(text);
+            dialog.CloseButtonText(RS_(L"UriErrorDialog/CloseButtonText"));
+            if (allowOpen)
+            {
+                dialog.SecondaryButtonText(RS_(L"UnsafeUrlConfirmAllowAction"));
+            }
+            dialog.DefaultButton(ContentDialogButton::Close);
+            return dialog;
+        }
+    }
+
     safe_void_coroutine TerminalPage::_OpenHyperlinkHandler(const IInspectable /*sender*/, const Microsoft::Terminal::Control::OpenHyperlinkEventArgs eventArgs)
     {
         try
@@ -4316,13 +4461,9 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (auto presenter{ _dialogPresenter.get() })
                     {
-                        // FindName needs to be called first to actually load the xaml object
-                        auto unopenedUriDialog = FindName(L"UriErrorDialog").try_as<WUX::Controls::ContentDialog>();
-
-                        // Insert the reason and the URI
-                        unopenedUriDialog.SecondaryButtonText(RS_(L"UnsafeUrlConfirmAllowAction"));
-                        CouldNotOpenUriReason().Text(RS_(L"UnsafeUrlConfirmText"));
-                        UnopenedUri().Text(uriString);
+                        // Agentmaster (flows TAB-K3): built in code (MakeUriErrorDialog) instead of the declared
+                        // UriErrorDialog, whose placement kept it out of UI Automation (see _ShowDialogHelper).
+                        auto unopenedUriDialog = MakeUriErrorDialog(RS_(L"UnsafeUrlConfirmText"), uriString, true);
 
                         // Show the dialog
                         auto result = co_await presenter.ShowDialog(unopenedUriDialog);
@@ -4349,20 +4490,17 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Opens up a dialog box explaining why we could not open a URI
+    // - Agentmaster (flows TAB-K3): the dialog is built in code per call (MakeUriErrorDialog, no "Open anyway") instead
+    //   of the declared UriErrorDialog, whose placement kept it out of UI Automation (see _ShowDialogHelper).
     // Arguments:
     // - The reason (unsupported scheme, invalid uri, potentially more in the future)
     // - The uri
+    // - Throws only what building or showing a ContentDialog throws (fire and forget: the result is not awaited).
     void TerminalPage::_ShowCouldNotOpenDialog(winrt::hstring reason, winrt::hstring uri)
     {
         if (auto presenter{ _dialogPresenter.get() })
         {
-            // FindName needs to be called first to actually load the xaml object
-            auto unopenedUriDialog = FindName(L"UriErrorDialog").try_as<WUX::Controls::ContentDialog>();
-
-            // Insert the reason and the URI
-            unopenedUriDialog.SecondaryButtonText({});
-            CouldNotOpenUriReason().Text(reason);
-            UnopenedUri().Text(uri);
+            auto unopenedUriDialog = MakeUriErrorDialog(reason, uri, false);
 
             // Show the dialog
             presenter.ShowDialog(unopenedUriDialog);
@@ -4482,17 +4620,28 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (flows TAB-K3): show a terminal control's notice (a renderer or connection message, by level) in a
+    // dialog BUILT IN CODE per call — what the declared ControlNoticeDialog was: the level's title, the message as
+    // selectable, copyable text, an OK button that is the default. Built in code because the declared dialog's placement
+    // kept it out of UI Automation (see _ShowDialogHelper).
+    //   title   - the level's word (Debug / Information / Warning / Error).
+    //   message - the control's message.
+    // Fire and forget (the result is not awaited). Throws only what building or showing a ContentDialog throws.
     void TerminalPage::_ShowControlNoticeDialog(const winrt::hstring& title, const winrt::hstring& message)
     {
         if (auto presenter{ _dialogPresenter.get() })
         {
-            // FindName needs to be called first to actually load the xaml object
-            auto controlNoticeDialog = FindName(L"ControlNoticeDialog").try_as<WUX::Controls::ContentDialog>();
-
-            ControlNoticeDialog().Title(winrt::box_value(title));
+            ContentDialog controlNoticeDialog;
+            controlNoticeDialog.Title(winrt::box_value(title));
 
             // Insert the message
-            NoticeMessage().Text(message);
+            auto text = MakeSelectableDialogText();
+            Documents::Run noticeMessage;
+            noticeMessage.Text(message);
+            text.Inlines().Append(noticeMessage);
+            controlNoticeDialog.Content(text);
+            controlNoticeDialog.PrimaryButtonText(RS_(L"ControlNoticeDialog/PrimaryButtonText"));
+            controlNoticeDialog.DefaultButton(ContentDialogButton::Primary);
 
             // Show the dialog
             presenter.ShowDialog(controlNoticeDialog);

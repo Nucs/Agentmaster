@@ -22,6 +22,7 @@
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
+#include "AgentAutomation.h" // the mode button's AutomationId (E2E_TESTING.md §6.3)
 #include "AgentMaster/Scheduler.h" // kAnswersQuestionOk — row 3 marks a queue HELD by the question-guard (DELIVERY.md §8)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
@@ -433,6 +434,9 @@ namespace winrt::TerminalApp::implementation
                        L"Interrupting a turn (Esc) pauses it until your next message, then it returns\n"
                        L"to Auto by itself (\"Paused \x2192 Auto\"); setting the mode yourself cancels that.";
             AgentSetTip(b, winrt::hstring{ modeTip });
+            // Agentmaster (accessibility, E2E_TESTING.md §6.3): the button's text (the mode, "(Off globally)" while the
+            // global pause is on) is its name already; the id lets a test find one tab's mode button among many.
+            AgentSetAutomationId(b, AgentAutomationIdFor(L"am.badge.", _sessionId) + L".mode");
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())

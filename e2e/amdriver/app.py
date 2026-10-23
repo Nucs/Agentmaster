@@ -47,6 +47,12 @@ POPUP_CLASS = "Xaml_WindowedPopupClass"
 """The window class of a XAML popup: context menus, submenus, flyouts, tooltips, the + launcher card."""
 MOCK_TOKEN = "mock-token-not-a-secret"
 """The fake bearer token the mock accepts (Claude Code needs SOME credential to start without a login)."""
+QUIT_CONFIRM_TITLE = "Do you want to close all windows?"
+"""The quit confirmation's title (Close all · Cancel), shown by "Close All Windows" and by the quit action."""
+QUIT_CONFIRM_WAIT_S = 4.0
+"""How long close(how="all") waits to SEE the quit confirmation before it answers blind with Enter. A build with the
+TAB-K3 fix shows it within ~1 s; 0.8.0 never does (it is invisible to UI Automation there), so this is also how long a
+quit on 0.8.0 waits before its Enter."""
 
 _LEAKY_PREFIXES = ("AGENTMASTER_", "CLAUDE_", "ANTHROPIC_", "CCMGR_", "CODEX_")
 _LEAKY_NAMES = {"WT_SESSION", "WT_PROFILE_ID", "AM_SESSION", "AM_HARNESS"}
@@ -500,8 +506,10 @@ class App:
         Each window's ✕ asks "Close this window?" (Close All Windows · Close Window · Cancel).
         - how="window": every window is closed with "Close Window" (the app quits when no window is left);
         - how="all": the first window's "Close All Windows", then "Do you want to close all windows?" (Close all ·
-          Cancel) — that second dialog is INVISIBLE to UI Automation (flows TAB-K3), so it is answered with Enter
-          (its default button, Close all).
+          Cancel). A build with the TAB-K3 fix (2026-10-23: the page's dialogs are built in code) shows that dialog
+          to UI Automation like every other, and its "Close all" is pressed; on a release before the fix (0.8.0) it
+          never appears to UI Automation (flows TAB-K3), and after QUIT_CONFIRM_WAIT_S it is answered with Enter (its
+          default button, Close all) — the old way.
 
         Args:
             timeout_s: How long the whole quit may take.
@@ -527,9 +535,16 @@ class App:
             dialog = Dialog.wait(self, title="Close this window?", timeout_s=10)
             if how == "all":
                 dialog.press("Close All Windows")
-                time.sleep(1.0)  # the quit confirmation's open (not observable: TAB-K3)
-                win32.set_foreground(hwnds[0])
-                inputs.keys("enter")
+                try:
+                    quit_dialog = Dialog.wait(self, title=QUIT_CONFIRM_TITLE, timeout_s=QUIT_CONFIRM_WAIT_S)
+                except WaitTimeout:
+                    # 0.8.0 (TAB-K3): the confirmation is on screen but invisible to UI Automation — its default
+                    # button takes Enter.
+                    win32.set_foreground(hwnds[0])
+                    inputs.keys("enter")
+                else:
+                    # The app quits on the press, so the dialog's window goes with it: do not wait for it to close.
+                    quit_dialog.press("Close all", wait_close=False)
                 break
             dialog.press("Close Window")
             wait_until(lambda: hwnds[0] not in self.main_hwnds(), 20, what="the window to close")

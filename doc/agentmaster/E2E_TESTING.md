@@ -14,7 +14,10 @@
 > 2026-10-23, not in a release — `test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard`, flows/23). How
 > to run it and how to write a scenario:
 > [`e2e/README.md`](../../e2e/README.md). §6 (the app's testability changes: E2E mode, the read-only bridge,
-> AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead.
+> AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead —
+> except §6.3, written into the code on 2026-10-23 (NOT BUILT into a release; TAB-K3 and A11Y-K1): every page dialog
+> built in code, AutomationIds, names and item status on the Agent Manager page, the tabs, the side panel and the
+> per-tab badge, and the driver reading them with a fallback to the 0.8.0 way.
 > The spike (`tools/e2e-spike/`, 2026-10-22) stays as the record of §2.
 >
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
@@ -355,7 +358,8 @@ If per-run provisioning grows past ~3 minutes, bake an `agentmaster-e2e` golden 
 
 ## 6. Agentmaster changes for testability
 
-All NOT BUILT. Each is small, env-gated or behavior-neutral, and useful beyond tests.
+All NOT BUILT. Each is small, env-gated or behavior-neutral, and useful beyond tests. §6.3 is written into the code
+(2026-10-23, "As built" at its end); §6.1 and §6.2 are still proposals.
 
 ### 6.1 E2E mode (`AGENTMASTER_E2E=1`)
 
@@ -411,6 +415,56 @@ without the bridge.
 4. A side-panel card is a `Border`: its title `TextBlock` gets the id; a test clicks the text's rectangle.
 
 Delivered per area: Phase 3 covers the surfaces of §10 only; each later area adds its own.
+
+**As built (2026-10-23, NOT BUILT into a release; flows TAB-K3 and A11Y-K1 — the user's "Tackle this and other lack
+of observability").** One recipe, `src/cascadia/TerminalApp/AgentAutomation.h` (`AgentSetAutomationId`,
+`AgentSetAccessibleName`, `AgentSetItemStatus` — each change-gated, plain property values, nothing registered — plus
+`AgentAutomationIdFor`, `AgentStateWord` and the `AgentItemStatus` facet builder with ONE spelling per facet). Where it
+differs from the plan above, and why:
+- **Dialogs first (TAB-K3, flows/07).** The quit confirmation was invisible because it was DECLARED in
+  `TerminalPage.xaml`: WinUI shows a dialog that is in the live tree with only its layout moved into a popup nested in
+  the page (`TransplantedRootInPopup`), and only a dialog built in code becomes a window-level popup named by its title
+  (`EntireControlInPopup`). All seven declared dialogs (About, the close confirmations, the read-only close, both paste
+  warnings, the control notice, the link warning) are built in code now; `Dialog.wait` finds them like every other.
+- **Names are explicit, not taken from every titled tooltip** (item 1 changed). Many titled tooltips sit on controls
+  whose content is a WORD that is also their name and often a VALUE ("LOCAL", "MOST ACTIVE", the board scope's tip
+  title is "Board scope"), and several are set BEFORE the content, so "name it when unset" would have renamed LOCAL to
+  "Board scope" for screen readers and broken the suite's reads. So a name is set only where the control had none:
+  the cog ("Settings"), the compose icons ("Jump to tab", "Send now", "Add to queue", "Queue templates", "Pull in the
+  unsent prompt"), ⋯ ("More actions"), the ↻ buttons ("Refresh now"), a board card / tree row / queue row (its title or
+  text), the runner toggle (its label), the side panel's ⌖ ⇄ and chevrons, the badge's icon buttons. Item 1's HELP
+  TEXT half is built as planned: every `AgentSetTip` text becomes the control's help text, unless its builder set one.
+- **Ids built:** `am.mgr.toolbar.{settings,sessions,keepAwake,pause,reopen,activateAll}`,
+  `am.mgr.board.{scope,sort,refresh,clear,showAll}`, `am.mgr.board.card.<key>` + `am.mgr.board.more.<key>`,
+  `am.mgr.board.external.<key|pidN>` (+ `.more.`), `am.mgr.tree.{scope,sort,refresh}`, `am.mgr.tree.row.<key>`,
+  `am.mgr.tree.external.<key|pidN>`, `am.mgr.pane.{summary,queue}`,
+  `am.mgr.queue.{compose,jump,sendNow,add,templates,pullDraft,runner,templateName,templateList}`,
+  `am.mgr.queue.row.<promptKey>`, `am.tab.<key>` (the `TabViewItem`; cleared when the tab stops hosting a session),
+  `am.badge.<key>.{mode,up,down,folder,mail,copy,pencil}`,
+  `am.side.{launch,filter,sum,scope,sort,scrollToTab,dock,collapse,expand}`, `am.side.card.<key>` (the card's title).
+  Home keeps its XAML id `ManagerHomeButton` (an x:Name is never overridden).
+- **Item status built:** the tab — the state word, then not started, unread, unsent draft, favorite, cache warm,
+  "selected on the Agent Manager page" (the Linked-Lenses pill, MGR-05 phase 2) and "tags: …", composed by `Tab` from
+  its `TerminalTabStatus` on every change of those properties, the state word passed by `_SetTabAgentDot` with the dot
+  it paints (an observed shell reads "observed"); a board card — state, codex, not started, unsent draft, cache warm,
+  selected (an External card: external, codex, selected); a tree row — the same plus "in another window" (a folder row:
+  expanded / collapsed, scoped); a queue row — pending / sent / held / skipped / failed, auto / typed for a sent row,
+  selected; the runner toggle — its mode without the "Prompt Queue Runner: " prefix; a side panel card (on its title) —
+  state, codex, unread, unsent draft, cache warm, tags, selected, kept current by the model apply and the selection
+  restyle. The words are `AgentStateWord`'s, the tree row's and the side card's visible labels.
+- **Not done yet:** the launch bar (`am.mgr.launch.*`: its agent toggle is still nameless — the file was under another
+  session's edit), the board columns' ids, the Tags panel's buttons (+, swatches, rows, ✕ — the same), the Sessions
+  page, the settings overlay and the transcript overlay.
+- **The driver** reads all of it with a fallback to the 0.8.0 way: `Tab.facets` / `pill` / `session_key`,
+  `TabStrip.by_session` / `pilled`, `Card.selected` / `session_key`, `ManagerPage.card_by_session` / `selected_card`,
+  `compose_buttons` by id, `TreeRow.status` / `selected`, `PanelCard.status` / `selected` / `session_key`,
+  `SidePanel.button` (glyph names mapped to the new ids) and `strip_button`; `App.close(how="all")` sees the quit
+  confirmation and presses Close all (Enter after a 4 s wait on 0.8.0).
+- **Tests:** `e2e/suites/test_accessibility.py` — the quit confirmation and the large-paste warning
+  (`needs_fix("TAB-K3")`), the page's names and ids, the selection on every surface, the tab's state
+  (`needs_fix("A11Y-K1")`). Checked so far by reading and by `cl /Zs` of every TerminalApp unit; none has run on a
+  build yet. The root-cause probe `e2e/suites/probe_dialogs.py` (run by name; a full run does not collect it) records
+  what UI Automation sees of five dialogs, for one run on 0.8.0 and one on a build of the fix.
 
 ### 6.4 What does NOT change
 

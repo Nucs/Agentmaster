@@ -80,6 +80,7 @@
 #include "AgentTabOverlay.h" // the fill-hosted summary panel (SetSummaryFillHost)
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (Rule #18)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — the islands-safe hover tooltips
+#include "AgentAutomation.h" // the panel's AutomationIds, its glyph buttons' names, the cards' ItemStatus (E2E_TESTING.md §6.3)
 #include "AgentStatusColors.h" // PendingDotsColorFor / CacheWarmSparkColorFor — the status icon's contrast picks (the tab strip's rules, SIDE_PANEL.md §2g); AgentAnimationsEnabled
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
 #include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
@@ -363,6 +364,40 @@ namespace
         {
             cardBack.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x00, 0, 0, 0) });
         }
+    }
+
+    // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): a card's ITEM STATUS, the words for what its status
+    // icon, its border and its tag strip show — written on its TITLE, because the card itself (a Grid over childless
+    // Borders) has no automation peer. Called by every path that changes one of them: the model apply (state, draft,
+    // unread ring, warm cache, tags) and the selection restyle (the border). AgentAutomation.h's words in its order, so
+    // the card reads like the same session's tab and board card: "running; unsent draft; tags: release; selected".
+    // Before, the side panel showed all of it as pixels only, and the e2e suite read the selection from its effects.
+    //   view     - the card; a card with no title yet is skipped.
+    //   selected - the card is the panel's selected (followed or peeked) session.
+    // Throws what a XAML property write throws (the callers already contain that).
+    void SidePanelApplyCardItemStatus(const winrt::TerminalApp::implementation::AgentSidePanelCardView& view, bool selected)
+    {
+        namespace impl = winrt::TerminalApp::implementation;
+        if (!view.title)
+        {
+            return;
+        }
+        const auto& model = view.model;
+        std::wstring tags;
+        for (const auto& tag : model.tags)
+        {
+            tags += tags.empty() ? L"tags: " : L", ";
+            tags += tag;
+        }
+        impl::AgentItemStatus status;
+        status.Add(impl::AgentStateWord(model.state))
+            .Add(impl::kAgentStatusCodex, model.codex)
+            .Add(impl::kAgentStatusUnread, model.flashRing)
+            .Add(impl::kAgentStatusDraft, model.pending)
+            .Add(impl::kAgentStatusCacheWarm, model.cacheWarm)
+            .Add(tags)
+            .Add(impl::kAgentStatusSelected, selected);
+        impl::AgentSetItemStatus(view.title, status.Text());
     }
 
     // --- The cards' bookmark-TAG strip (the title band's top-right corner) ---------------------
@@ -1037,6 +1072,9 @@ namespace winrt::TerminalApp::implementation
         dockBtn.IsTabStop(false);
         dockBtn.Content(winrt::box_value(L"\x21C4")); // ⇄ — flip which side the panel docks on
         AgentSetTitledTip(dockBtn, L"Dock side", winrt::hstring{ L"Move the panel to the other side of the terminal (left \x21C4 right).\nSaved globally \x2014 other windows adopt it on their next launch or settings change." }, kSidePanelButtonTipDelay); // opens after 3 s of rest
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): a ⇄ reads as noise to a screen reader — say what it does.
+        AgentSetAutomationId(dockBtn, L"am.side.dock");
+        AgentSetAccessibleName(dockBtn, L"Dock side");
         dockBtn.Click([weakThis](const IInspectable&, const RoutedEventArgs&) {
             if (const auto self = weakThis.get())
             {
@@ -1274,6 +1312,23 @@ namespace winrt::TerminalApp::implementation
         _sidePanelStrip.Children().Append(_sidePanelStripBtn);
         _sidePanelStrip.Visibility(Visibility::Collapsed);
         _sidePanelHost.Children().Append(_sidePanelStrip);
+
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the panel's stable AutomationIds, in ONE place
+        // (⇄'s is set where it is built: it is a local there). NAMES only for the glyph-only buttons — ⌖ and the two
+        // chevrons read as noise to a screen reader (the e2e driver finds them by these ids, and by their glyphs on
+        // older builds); the worded buttons keep the names their content gives them (Sum, LOCAL / GLOBAL, MOST ACTIVE),
+        // and the filter box keeps its placeholder as its name. "+" was named before ("Launch a session").
+        AgentSetAutomationId(_sidePanelLaunchBtn, L"am.side.launch");
+        AgentSetAutomationId(_sidePanelSearchBox, L"am.side.filter");
+        AgentSetAutomationId(_sidePanelSumBtn, L"am.side.sum");
+        AgentSetAutomationId(_sidePanelScopeBtn, L"am.side.scope");
+        AgentSetAutomationId(_sidePanelSortBtn, L"am.side.sort");
+        AgentSetAutomationId(_sidePanelScrollToTabBtn, L"am.side.scrollToTab");
+        AgentSetAccessibleName(_sidePanelScrollToTabBtn, L"Scroll to the selected tab");
+        AgentSetAutomationId(_sidePanelCollapseBtn, L"am.side.collapse");
+        AgentSetAccessibleName(_sidePanelCollapseBtn, L"Collapse the side panel");
+        AgentSetAutomationId(_sidePanelStripBtn, L"am.side.expand");
+        AgentSetAccessibleName(_sidePanelStripBtn, L"Expand the side panel");
 
         area.Children().Append(_sidePanelSplitter);
         area.Children().Append(_sidePanelHost);
@@ -2832,6 +2887,10 @@ namespace winrt::TerminalApp::implementation
         // The band's padding is the margin of what the band shows (the band itself has no child to pad).
         v.title.Margin(ThicknessHelper::FromLengths(kSidePanelBandPadX, kSidePanelBandPadY, kSidePanelBandPadX, kSidePanelBandPadY));
         v.bandArea.Children().Append(v.title); // the untagged layout; _SidePanelApplyCardTags puts the title in [ title * ][ strip ] for a tagged session
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): a card is a Grid of Borders — no automation peer — so its
+        // TITLE carries the card's id (am.side.card.<key>) and its item status (_SidePanelApplyCardAutomation). A test
+        // finds the card by the id and clicks the title's rectangle; a screen reader reads the title, then the state.
+        AgentSetAutomationId(v.title, AgentAutomationIdFor(L"am.side.card.", id));
         body.Children().Append(v.bandArea);
 
         // State line: [ state row Auto ][ timing * ]. The row holds the status icon and the label, and the model inserts
@@ -3115,6 +3174,9 @@ namespace winrt::TerminalApp::implementation
             AgentSetTitledTip(view.card, winrt::hstring{ model.tipTitle }, winrt::hstring{ model.tipText }, kCardTipDelay);
         }
         view.model = std::move(model);
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the card's item status follows what it now shows (change-gated
+        // inside, so an apply that changed only the timing writes nothing here).
+        SidePanelApplyCardItemStatus(view, id == _sidePanelSelectedId);
     }
 
     // Give a card's band the layout its tags need. The band area holds the CHILDLESS band (its first child, drawn
@@ -3709,6 +3771,7 @@ namespace winrt::TerminalApp::implementation
                 return; // filtered out / its row not realized — nothing to paint (a card realized later is styled by its fresh apply)
             }
             SidePanelStyleCardBorder(it->second.cardBack, StateColor(it->second.model.state), sel, it->second.hovered);
+            SidePanelApplyCardItemStatus(it->second, sel); // Agentmaster (accessibility): "selected" follows the border
         };
         if (!prev.empty())
         {

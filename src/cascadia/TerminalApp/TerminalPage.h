@@ -1387,6 +1387,12 @@ namespace winrt::TerminalApp::implementation
 
         // use a weak reference to prevent circular dependency with AppLogic
         winrt::weak_ref<winrt::TerminalApp::IDialogPresenter> _dialogPresenter;
+        // Agentmaster (flows TAB-K3): this page's About dialog, BUILT IN CODE on the first "Open about dialog" and kept
+        // for the page's life — the lifetime the declared, lazily realized x:Load element had. Kept rather than rebuilt
+        // per open because AboutDialog checks for an update in its constructor: one instance = one check, as before.
+        // Code-built (never in TerminalPage.xaml) so WinUI shows it as a whole popup that UI Automation and screen
+        // readers can read (see _ShowDialogHelper). nullptr until the first open; UI thread only.
+        winrt::TerminalApp::AboutDialog _aboutDialog{ nullptr };
 
         winrt::com_ptr<AppKeyBindings> _bindings{ winrt::make_self<implementation::AppKeyBindings>() };
         winrt::com_ptr<ShortcutActionDispatch> _actionDispatch{ winrt::make_self<implementation::ShortcutActionDispatch>() };
@@ -1426,12 +1432,24 @@ namespace winrt::TerminalApp::implementation
         __declspec(noinline) SuggestionsControl _loadSuggestionsElementSlowPath();
         bool _suggestionsControlIs(winrt::Windows::UI::Xaml::Visibility visibility);
 
-        winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowDialogHelper(const std::wstring_view& name);
+        // Agentmaster (flows TAB-K3): show a dialog BUILT IN CODE through this window's presenter (it used to take the
+        // x:Name of a dialog declared in TerminalPage.xaml; no dialog is declared there any more). A dialog that is in the
+        // live tree is shown by WinUI with only its inner layout moved into a popup nested inside the page, which UI
+        // Automation does not reach; a code-built one is shown as a whole popup named by its title. The one-dialog-at-a-time
+        // rule is the presenter's (TerminalWindow::ShowDialog).
+        //   dialog - the dialog to show (by value: the coroutine keeps it alive across its suspension).
+        // Returns the button the user chose, or None when the window has no presenter or another dialog won the race.
+        // Throws whatever ShowAsync throws (the callers' contract is unchanged).
+        winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowDialogHelper(winrt::Windows::UI::Xaml::Controls::ContentDialog dialog);
 
         void _ShowAboutDialog();
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowConfirmCloseDialog(ConfirmCloseDialogKind kind);
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowCloseReadOnlyDialog();
-        winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowMultiLinePasteWarningDialog();
+        // Agentmaster (flows TAB-K3): the multi-line paste warning, built in code; it now takes the preview it shows (the
+        // declared dialog's ClipboardText block was filled by the paste handler before the call).
+        //   clipboardPreview - the (already shortened) clipboard text to preview; cleared from the dialog after it closes.
+        // Returns the button chosen (Primary = paste anyway). Throws what _ShowDialogHelper throws.
+        winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowMultiLinePasteWarningDialog(winrt::hstring clipboardPreview);
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowLargePasteWarningDialog();
 
         void _CreateNewTabFlyout();
@@ -1750,7 +1768,19 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummaryHistory(); // Agentmaster (the summary's conversation chain): ⏮ whole-conversation toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelShowHistory (RMW settings.json) + apply live to every linked overlay in this window and the side panel's
         void _SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind); // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-less "○ <kind> · unlinked" badge (pwsh / cmd / claude / codex) on a non-bound tab
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
-        void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant = false); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); dormant=true => the half-hollow "not started" variant; idempotent on unchanged color+presentation
+        // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus();
+        // dormant=true => the half-hollow "not started" variant; idempotent on unchanged color+presentation.
+        // Accessibility (E2E_TESTING.md §6.3, 2026-10-23): the SAME call tells the tab who it hosts and in which state
+        // (Tab::SetAgentAutomationSession: the TabViewItem's `am.tab.<key>` AutomationId and the first word of its
+        // ItemStatus), so what UI Automation reads can never disagree with the dot. Every argument is explicit — no
+        // default may silently clear the accessible facts.
+        //   tab       - the tab; null is ignored.
+        //   color     - the dot's color; nullopt hides the dot.
+        //   dormant   - the session is live but its claude has not started (the half-hollow dot).
+        //   sessionId - the session the tab hosts; "" for an observed-only tab or when the dot is cleared.
+        //   stateWord - AgentStateWord(state) for a managed session, L"observed" for an observed tab, "" with no dot.
+        // Never throws (CATCH_LOG — the dot is chrome).
+        void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant, std::wstring_view sessionId, std::wstring_view stateWord);
         void _SetTabPending(const TerminalApp::Tab& tab, bool on, const std::optional<winrt::Windows::UI::Color>& dotsColor = std::nullopt); // Agentmaster (PENDING_INPUT.md): show/hide the unsent-draft "3 dots" pulse below a tab's status dot via Tab.TabStatus().AgentPendingVisible, painting them dotsColor (the contrast-picked pending color) when shown; idempotent (no-ops when visibility + color are unchanged); UI thread
         winrt::Windows::UI::Color _PendingDotsColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info); // Agentmaster (PENDING_INPUT.md): contrast-pick the "3 dots" color from the tab's CURRENT effective header background (selected/unselected aware) over the session's MODE-AWARE tab color (ResolveSessionColorHex — per-dir / individual / inferred); UI thread
         void _SetTabCacheWarm(const TerminalApp::Tab& tab, bool on, const std::optional<winrt::Windows::UI::Color>& sparkColor = std::nullopt); // Agentmaster (SPARK CROWN): show/hide the cache-warm glow + rising embers around a tab's status dot via Tab.TabStatus().AgentCacheWarmVisible, painting them sparkColor when shown; idempotent; UI thread

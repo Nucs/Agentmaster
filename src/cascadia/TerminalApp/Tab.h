@@ -173,6 +173,18 @@ namespace winrt::TerminalApp::implementation
             return _tabStatus;
         }
 
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the managed session this tab hosts, as UI
+        // Automation sees it. TerminalPage::_SetTabAgentDot calls it with every dot it paints, so the two never
+        // disagree: the TabViewItem's AutomationId becomes `am.tab.<key>` (AgentAutomation.h) and its ItemStatus starts
+        // with the state word; _UpdateAgentItemStatus then appends the facets the header shows (TabStatus: not started,
+        // unread, unsent draft, favorite, cache warm, the Agent Manager page's selection pill, the tags). Before, the
+        // tab item carried only its title: the state, the pill (MGR-05) and the unread ring were pixels.
+        //   sessionId - the session the tab hosts; "" = none (a shell tab, an observed claude, a dead session): the
+        //               id is cleared, so XAML's default (none) applies.
+        //   stateWord - AgentStateWord of its state, "observed" for a classified-but-unmanaged tab, "" = no dot.
+        // Change-gated (equal values write nothing). UI thread only. Throws what a XAML property write throws.
+        void SetAgentAutomationSession(std::wstring_view sessionId, std::wstring_view stateWord);
+
         void SetDispatch(const winrt::TerminalApp::ShortcutActionDispatch& dispatch);
 
         // Agentmaster: reservedLeading = how many pinned, non-bulk-closable tabs occupy the front of
@@ -388,6 +400,18 @@ namespace winrt::TerminalApp::implementation
         std::optional<winrt::Windows::UI::Color> _suspendedTabColor{};
         winrt::TerminalApp::TabHeaderControl _headerControl{};
         winrt::TerminalApp::TerminalTabStatus _tabStatus{};
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the state word the page last gave SetAgentAutomationSession
+        // ("" = the tab shows no dot), the first facet of the TabViewItem's ItemStatus.
+        std::wstring _agentAutomationStateWord;
+        // Agentmaster (accessibility): the subscription to _tabStatus.PropertyChanged that recomposes the TabViewItem's
+        // ItemStatus whenever a facet the header shows changes (the handler holds a WEAK ref to this tab: the status
+        // object is this tab's own member, so a strong capture would be a cycle). Revoked with the tab.
+        winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _agentAutomationStatusRevoker;
+        // Agentmaster (accessibility): compose the TabViewItem's ItemStatus from _agentAutomationStateWord and the
+        // TabStatus facets (not started, unread, unsent draft, favorite, cache warm, the page's selection pill, the tags)
+        // and write it when it changed. A tab with no state word gets no status (a plain shell tab says nothing). Never
+        // throws: a failure is logged (Rule #18) and the status stays as it was.
+        void _UpdateAgentItemStatus() noexcept;
 
         winrt::TerminalApp::ColorPickupFlyout _tabColorPickup{ nullptr };
         winrt::event_token _colorSelectedToken;
