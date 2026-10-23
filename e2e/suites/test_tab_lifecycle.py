@@ -154,9 +154,9 @@ def test_deactivate_parks_the_session_and_a_click_wakes_it(am, s2, mock):
 @pytest.mark.p0
 @pytest.mark.flow("TAB-01")
 def test_a_parked_tab_starts_in_place_and_survives_a_restart(am, s2):
-    """TAB-01 phase 4 and E7: a parked tab wakes WITHOUT being selected through its menu's Activate Tab (the
-    Shift+Click twin is TAB-K4: it switches to the tab); after a restart a parked tab comes back as an ordinary
-    restored-dormant tab.
+    """TAB-01 phase 4 and E7: a parked tab wakes WITHOUT being selected through its menu's Activate Tab (its
+    Shift+Click twin on the tab: test_shift_click_on_a_parked_tab_starts_it_in_place, TAB-K4's fix); after a
+    restart a parked tab comes back as an ordinary restored-dormant tab.
 
     Args:
         am: The app.
@@ -193,18 +193,18 @@ def test_a_parked_tab_starts_in_place_and_survives_a_restart(am, s2):
 
 @pytest.mark.p2
 @pytest.mark.flow("TAB-01")
-@pytest.mark.known_defect("TAB-K4")
-def test_known_defect_shift_click_on_a_parked_tab_switches_to_it(am, s2):
-    """TAB-K4 (expected failure once fixed): Shift+Click on a parked tab — the gesture its own menu item names,
-    "Activate Tab (Shift+Click)" — SWITCHES to the tab (`[nav] tab-focus`) instead of starting it in place
-    (`[nav] activate-dormant`, the selection kept). Measured 2026-10-23 on 0.8.0 with Shift held 0.08 s, 0.4 s and
-    1 s around the click; the same injected Shift+Click on the session's Explorer Tree row or board card DOES
-    activate in place, so the Shift reaches the app. By reading: `_OnTabPointerPressed` (TabManagement.cpp) is a
-    plain PointerPressed handler on the TabViewItem, and a ListViewItem marks a left press handled itself, so the
-    Shift branch never runs (a middle press, which the item leaves alone, does reach it).
+@pytest.mark.needs_fix("TAB-K4")
+def test_shift_click_on_a_parked_tab_starts_it_in_place(am, s2):
+    """TAB-01 phase 4's gesture on the tab itself (TAB-K4's fix, 2026-10-23): Shift+Click on a parked tab — the
+    gesture its own menu item names, "Activate Tab (Shift+Click)" — starts its claude IN PLACE and leaves the selection
+    and the keyboard where they were: `[nav] activate-dormant <sid8>` and `[nav] tab-shift-click <sid8> "t1": started
+    in place, no switch (its release will not select it)`, no `[nav] tab-focus <sid8>`, t2 stays selected, and text
+    typed next lands in t2's box (the tap that would have focused t1's header never ran). A second Shift+Click on the
+    now-running tab starts nothing and still does not switch.
 
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert `activate-dormant` and
-    that t2 stays selected.
+    On 0.8.0 the Shift+Click switches to the tab instead (TAB-K4, measured 2026-10-23 with Shift held 0.08 s, 0.4 s
+    and 1 s): the handler was a plain PointerPressed handler, and the tab (a ListViewItem) marks a left press handled
+    before such a handler runs. Deselect this test there with -m "not needs_fix".
 
     Args:
         am: The app.
@@ -215,12 +215,26 @@ def test_known_defect_shift_click_on_a_parked_tab_switches_to_it(am, s2):
     mark = am.profile.hooks.mark()
     w.tabs.deactivate("t1")
     a.wait_parked(since=mark)
+    w.terminal.focus()  # the keyboard starts in t2's terminal, whatever the menu left focused
     mark = am.profile.hooks.mark()
     w.tabs.get("t1").click(modifiers=["shift"])
     a.wait_running(30)
-    w.tabs.wait_selected("t1")  # expected: t2 stays selected
-    am.profile.hooks.wait(rf"\[nav\] tab-focus {a.short}", since=mark)
-    assert not am.profile.hooks.find(rf"\[nav\] activate-dormant {a.short}", since=mark)
+    am.profile.hooks.wait(rf"\[nav\] activate-dormant {a.short}", since=mark)
+    am.profile.hooks.wait(rf"\[nav\] tab-shift-click {a.short} .*: started in place, no switch "
+                          r"\(its release will not select it\)", since=mark)
+    hold_true(lambda: w.tabs.selected().title == "t2", 1.5, what="t2 still selected after the Shift+Click")
+    assert not am.profile.hooks.find(rf"\[nav\] tab-focus {a.short}", since=mark)
+    assert any("--resume" in c and a.id in c for c in a.claude_cmdlines()), a.claude_cmdlines()
+    # The keyboard stayed with t2: no tab header took the focus.
+    w.terminal.type("still t2")
+    wait_until(lambda: (w.terminal.input_box() or None) and w.terminal.input_box().draft == "still t2", 10,
+               what="the typed text in t2's box", describe=w.terminal.input_box)
+    # Again on the running tab: nothing to start, and still no switch.
+    mark = am.profile.hooks.mark()
+    w.tabs.get("t1").click(modifiers=["shift"])
+    am.profile.hooks.wait(rf"\[nav\] tab-shift-click {a.short} .*: nothing to start", since=mark)
+    hold_true(lambda: w.tabs.selected().title == "t2", 1.0, what="t2 still selected after the second Shift+Click")
+    assert not am.profile.hooks.find(rf"\[nav\] tab-focus {a.short}", since=mark)
 
 
 # ---- TAB-02 · Deactivate's scopes ----------------------------------------------------------------------------
