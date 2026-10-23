@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import hashlib
 import json
 import msvcrt
 import os
@@ -305,13 +306,18 @@ def safe_name(name: str) -> str:
     """The folder a test's evidence lands in: amdriver.app._safe_name of its name, repeated here so the host does
     not import the driver (it needs psutil and UI Automation, which the host's Python may lack).
 
+    A name over 60 characters keeps its first 51 and 8 hex digits of a hash of the whole name, so the cases of a long
+    parametrized test land in different folders (their "[700]" ids sit at the end, which a plain cut dropped).
+
     Args:
         name: The test function's name (with its parameters, if any).
     Returns:
         Letters, digits, '-', '_' and '.' only, at most 60 characters.
     """
     out = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
-    return out[:60].strip("_") or "test"
+    if len(out) <= 60:
+        return out.strip("_") or "test"
+    return out[:51].strip("_") + "-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
 class Progress:
@@ -505,8 +511,16 @@ def provision(fleet: Fleet, desktop: str, extra: list[str]) -> None:
     Returns:
         None.
     Raises:
-        RuntimeError: When provisioning failed (its log's tail is in the message).
+        RuntimeError: When provisioning failed (its log's tail is in the message), or when the guest's agent refused
+            the clean-up or the launch.
     """
+    # The PREVIOUS provisioning's marker and log stay on the guest's C: until provision.cmd deletes the marker and
+    # truncates the log, and the first poll below can come before that: it then reads the OLD outcome — an empty
+    # marker and a log being rewritten (seen 2026-10-23: a re-provisioning with a new zip was reported failed at once,
+    # while it went on and succeeded), or worse, "0" and the old log's PROVISION line while the new provisioning still
+    # extracts the build. So both go before the launch; a missing file is no error.
+    fleet.desk(desktop, "run_command", {"command": "Remove-Item -Force -ErrorAction SilentlyContinue "
+                                                   "C:/e2e/provision.done, C:/e2e/provision.log", "timeout_s": 60})
     fleet.desk(desktop, "launch", {"command": "cmd /c Z:\\e2e\\src\\guest\\provision.cmd -Pwsh " + " ".join(extra),
                                    "cwd": "C:\\"})
     # The marker exists once provision.ps1 has exited. It may be empty: give a provision.cmd that writes the code

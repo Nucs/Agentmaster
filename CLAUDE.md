@@ -125,6 +125,7 @@
 - `TerminalPage::_RestoreWindowTabs` (run from `_OnFirstLayout` after `_RestoreClaudeSessions`, gated on a *claimed* record) walks the record's ordered tab refs and rebuilds them in place: each **Claude** ref resumes its session INTO this window (`_LaunchClaudeSession`, lazy-start safe — no eager `connection.Start()`); each **Other** ref replays its captured WT startup actions (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with its title + color + cwd.
 - Capture fills the Other ref's `actionsJson` from `BuildStartupActions(Persist)` → `WindowLayout::ToJson` in `_CaptureWindowRecord` (so `windows/<id>.json` now carries the pwsh/cmd tabs, not just Claude refs).
 - A clobber guard keeps a not-yet-laid-out window (no tabs AND no geometry, or pre-Initialized) from overwriting a good record on disk (`_FlushWindowRecord`), and the close-flush captures the final state before teardown clears `_claudeTabs` (`CloseWindow`).
+- **The close-flush is the window's LAST write** (flows TAB-K1, fixed 2026-10-23, NOT BUILT yet). The close is only POSTED to the emperor (`WM_CLOSE_TERMINAL_WINDOW`), so the page and its 750 ms autosave timer outlive the archive that empties `_claudeTabs`; an autosave a tab switch, resize or lens change had armed within 0.75 s of the close then saved every Claude tab as a shell (the e2e suite saw `[teardown-archive]` → 67 ms later `[window-save] … [sh,sh,]`; reproduced on 0.8.0 for a save due 0–~80 ms after the archive, 3 of 9 swept closes, and verified on a test build: `e2e/suites/test_workspace.py`, flows/07). Once `_windowRecordTeardownFlushed` is set, `_FlushWindowRecord` refuses and logs `[window-save] <id> late save refused`, and `_ScheduleWindowRecordSave` arms nothing. ⚠ A new teardown seam must flush BEFORE it sets the latch and archive only AFTER both.
 - A reopened (claimed-record) window also **suppresses the default startup tab** — `_OnFirstLayout` gates `ProcessStartupActions` on `!_windowRecordClaimed`, because in DefaultProfile mode a reopen's `wt -w new -s <idx>` (where `ShouldUsePersistedLayout` is off) falls back to a default `newTab` that would otherwise append a spurious pwsh tab to every reopened window and **accumulate one shell per reopen cycle** in the record; a reopened window's content comes from the re-home, not the default action.
 - The reopened window also **re-selects the tab that was focused at close** — persisted by STABLE IDENTITY (`WindowRecord::selectedSessionId` = the Claude conversation id; a shell tab, which has no cross-restart id, falls back to `selectedTabIndex`; Manager / none ⇒ both unset).
 - `_RestoreWindowTabs` resolves the focused tab's live position and applies it deterministically — a trailing `SwitchToTab` appended to the shell `ProcessStartupActions` batch (so it runs AFTER the async shells exist), or a synchronous select when there are no shells.
@@ -2071,7 +2072,11 @@ gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -f default_workf
     recover button bringing back the WHOLE window. **Enforcement that must not regress:** the
     **deterministic close/quit flush** captures the record BEFORE teardown clears `_claudeTabs`
     (`CloseWindow` / `RequestQuit`, latched by `_windowRecordTeardownFlushed`) with an idempotent
-    `~TerminalPage` catch-all for the non-initiating windows on a quit-all; the **load barrier**
+    `~TerminalPage` catch-all for the non-initiating windows on a quit-all, and that flush is the
+    window's LAST write: once latched, `_FlushWindowRecord` refuses (`[window-save] <id> late save
+    refused`) and `_ScheduleWindowRecordSave` arms nothing, because an autosave still pending at the close
+    fired after the archive and saved the Claude tabs as shells (flows TAB-K1, fixed 2026-10-23, NOT BUILT
+    yet); the **load barrier**
     (`Engine::restoreMutex`) blocks a 2nd reopened window until the fleet is loaded so it can't flush
     an EMPTY record over its workspace; **anti-clobber** refuses to overwrite a good record with a
     pre-`Initialized` / no-tabs-AND-no-geometry capture; and the **reclaimable pool** re-claims a

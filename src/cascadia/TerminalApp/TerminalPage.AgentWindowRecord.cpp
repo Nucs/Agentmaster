@@ -366,9 +366,14 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (M10): the debounced autosave trigger. No-ops until startup completes so the
     // tabs/geometry churned during _OnFirstLayout don't write a half-built record.
+    // Agentmaster (flows TAB-K1): also a no-op once the window's teardown flush has written its final record
+    // (_windowRecordTeardownFlushed): the window is closing, and the archive that follows that flush empties
+    // _claudeTabs, so any save it would arm could only record the Claude tabs as shells. The archive's own
+    // registry notifications (the lens, the side panel, the tab dots) are the triggers this stops; a save armed
+    // BEFORE the latch is refused by _FlushWindowRecord itself when its timer fires.
     void TerminalPage::_ScheduleWindowRecordSave()
     {
-        if (_startupState != StartupState::Initialized || _windowId.empty())
+        if (_startupState != StartupState::Initialized || _windowId.empty() || _windowRecordTeardownFlushed)
         {
             return;
         }
@@ -380,11 +385,36 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (M10): capture + persist synchronously. The throttled autosave funnels here, and
     // so does the close-flush (CloseWindow) so the last move/resize isn't lost past the debounce.
+    //
+    // Agentmaster (flows TAB-K1): the teardown flush is the LAST write. Every teardown seam (CloseWindow,
+    // RequestQuit, _QuitForUpdate, the Manager-only self-close, ~TerminalPage's catch-all) calls this once and
+    // then sets _windowRecordTeardownFlushed, and every one of them then archives the window's sessions, which
+    // clears _claudeTabs. A capture after that would read every Claude tab as an anonymous shell
+    // (_ClaudeSessionForTab finds no session) and save that over the good record. The autosave armed by a tab
+    // switch, a resize or a lens change just before the close did exactly that when its 750 ms debounce ended
+    // between the archive and the window's end — the close is only POSTED to the emperor (WM_CLOSE_TERMINAL_WINDOW),
+    // so the page and its timer live a little longer: on 0.8.0 the record then held [sh,sh,] and the next start (or
+    // Reopen Windows, which re-reads the record from disk) brought the sessions back as plain PowerShell tabs.
+    //
+    // So once the latch is set this refuses to write, and logs the refusal: that line is how a run tells that a
+    // late save existed and was stopped. The latch is set only after the user's final decision (a cancelled
+    // close or quit returns before it), so a window that stays open never stops saving.
+    //
+    // Returns: nothing. Throws: whatever the capture's XAML reads or the string building can throw
+    // (winrt::hresult_error, std::bad_alloc) — the refusal path only builds its log line. A failed WRITE is not
+    // an exception: SaveWindowRecord reports it as [persist-fail].
     void TerminalPage::_FlushWindowRecord()
     {
         if (_windowId.empty())
         {
             return; // engine not initialized (no Manager page) — nothing to persist
+        }
+        if (_windowRecordTeardownFlushed)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[window-save] " + _windowId +
+                                                            L" late save refused: the window's close already saved its final record; a save now would record "
+                                                            L"its archived Claude tabs as shell tabs (flows TAB-K1)\n");
+            return;
         }
         // Anti-clobber (window-grouped restore): never overwrite a good record with a not-yet-started
         // window's nothing. A transient single-instance/handoff window (e.g. a quick reopen that opens

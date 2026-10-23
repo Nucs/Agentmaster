@@ -22,6 +22,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -147,6 +148,42 @@ class LogFile:
         """
         rx = re.compile(pattern)
         return [m for m in (rx.search(line) for line in self.lines(since)) if m]
+
+    def stamped(self, pattern: str, since: int = 0) -> list[tuple[datetime, re.Match]]:
+        """Every line matching a regex, from a mark, with the moment the app wrote it — for a check that is about
+        WHEN things happened (a race's order, a debounce), not only whether they did.
+
+        The app stamps each line with its local time of day ([HH:MM:SS.mmm], AppendStateLog), the clock this
+        process reads too (the test and the app run on one machine), so a stamp compares with datetime.now(). The
+        date is today's; a stamp more than 12 h ahead of now is read as yesterday's (a log read just after
+        midnight).
+
+        Args:
+            pattern: A regex searched in each line (without its stamp).
+            since: A mark.
+        Returns:
+            (when, match) pairs in log order; a line without a stamp (a continuation line) is left out, and so is a
+            last line still being written.
+        """
+        rx = re.compile(pattern)
+        text = self.text(since)
+        if text and not text.endswith("\n"):
+            text = text[: text.rfind("\n") + 1]
+        now = datetime.now()
+        found: list[tuple[datetime, re.Match]] = []
+        for line in text.splitlines():
+            stamp = self.STAMP.match(line)
+            if not stamp:
+                continue
+            m = rx.search(line[stamp.end():])
+            if not m:
+                continue
+            clock = datetime.strptime(stamp.group(0)[1:13], "%H:%M:%S.%f").time()
+            when = datetime.combine(now.date(), clock)
+            if when - now > timedelta(hours=12):
+                when -= timedelta(days=1)
+            found.append((when, m))
+        return found
 
     def wait(self, pattern: str, since: int = 0, timeout_s: float = 15.0) -> re.Match:
         """Wait for a line matching a regex after a mark.
