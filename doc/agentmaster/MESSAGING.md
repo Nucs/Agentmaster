@@ -492,18 +492,24 @@ session handled only from the phone. (Merely viewing a topic cannot be seen: bot
   Its buttons **pick a session** (D34): one number per card (at most 10; a longer list says how many more),
   then ⊘ Clear. A pick opens a second message, the session's **action menu**: the card in full — the whole
   folder and the branch, when it ran ("11 Oct 14:02 → 16:40") and its prompts, the same quote, where it
-  stands now in words — and what to do:
+  stands now in words — and **the buttons that fit where it stands** (§21.38, the user's report of 2026-10-23:
+  a session that is open in a tab is never offered ▶ Resume, which means "open it"):
 
-| Button | Closed (on disk only) | In a tab but Idle | Listed (it has a topic) |
-|---|---|---|---|
-| [▶ Resume] | opened into a tab without taking focus (the window: D27), held in Waiting for you so its topic appears; the tab stays dormant until its first queued message starts it | woken (the tab's **Move to Waiting-for-you**); its topic appears | nothing to open: says so |
-| [▶ Resume 📌] | the same, then pinned (never idle) | the same, pinned | pinned |
-| [⑂ Fork] | a fork in a new tab (and so a new topic) — never pinned: **no fork-and-pin** (the user's rule) | the same | the same |
-| [✕ Cancel] | the menu goes | the menu goes | the menu goes |
+| Where it stands (its glyph) | The menu | What the first button does |
+|---|---|---|
+| 📦 Closed (on disk only, or no tab) | [▶ Resume] [▶ Resume 📌] · [⑂ Fork] [✕ Cancel] | opened into a tab without taking focus (the window: D27), held in Waiting for you so its topic appears; the tab stays dormant until its first queued message starts it |
+| 🌙 In a tab, deactivated (its claude is not running: the tab was deactivated, or restored and never entered), no topic | [▶ Activate] [▶ Activate 📌] · [⑂ Fork] [✕ Cancel] | its claude starts in place (the tab menu's **Activate Tab**: nothing changes on the PC's screen), and it is held in Waiting for you, so its topic appears |
+| 🌙 In a tab, deactivated, with its topic | [▶ Activate] [▶ Activate 📌] · [💬 Go to topic] · [⑂ Fork] [✕ Cancel] | its claude starts in place |
+| ⏹ In a tab whose claude exited (Done) | the same as the row above | its claude starts again in its tab, in the same conversation (the tab's restart), and it is held in Waiting for you |
+| 💤 In a tab, idle (its claude runs), no topic | [⏰ Wake] [⏰ Wake 📌] · [⑂ Fork] [✕ Cancel] | woken (the tab's **Move to Waiting-for-you**); its topic appears |
+| 💬 Listed (its claude runs, it has its topic) | [💬 Go to topic] [📌 Pin] · [⑂ Fork] [✕ Cancel] | its topic goes first in the thread list (the directory dot's way, §21.16.7) |
 
-  The state is read again at the tap, so a session that changed since the answer does what it does now.
-  A pick is stateless (it opens a fresh menu, also after a restart); the menu's actions are single-use and
-  expire (M5).
+  A 📌 twin pins the session too (never idle); an open session that is pinned already is offered none (a closed
+  one always is). ⑂ Fork makes a fork in a new tab (and so a new topic) — never pinned: **no fork-and-pin** (the
+  user's rule). ✕ Cancel deletes the menu. The state is read again at the tap, so a session that changed since
+  the answer does what it does now: ▶ Resume, ▶ Activate and ⏰ Wake all make it usable from here (a session
+  closed since the menu is resumed, one whose tab was entered at the PC since is only woken). A pick is stateless
+  (it opens a fresh menu, also after a restart); the menu's actions are single-use and expire (M5).
 - **Fleet commands in 🔎 Search:** `/idle` (the idle tabs, each with [Wake]), `/board` (counts per
   state), `/newsession <folder> [model] [-- first prompt]` (a new tab + topic), `/pauseall`,
   `/resumeall`, `/status`, `/clear`, `/help`. As built (§21.19), from ANY topic: `/search <words>` sends a search
@@ -1556,7 +1562,9 @@ picking and then a second menu asks if to Resume, Fork (no fork and pin)"* (D24 
   Resume on a closed session launches a background resume (`_requestLaunch`), on an idle tab wakes it, on a
   listed session says it is open (📌 pins it); Fork forks, never pinned; Cancel deletes the menu. The menu loses
   its buttons and keeps the choice or the outcome. The launch gets an empty title when nothing knew one, so it
-  derives one from the folder, not the short id.
+  derives one from the folder, not the short id. *(§21.38, 2026-10-23, NOT BUILT yet: the menu's buttons fit where the
+  session stands — ▶ Activate for a tab whose claude is not running, ⏰ Wake for an idle tab, 💬 Go to topic and 📌 Pin for
+  one with a topic, ▶ Resume only for a closed session.)*
 - **Not changed (open from the review):** the agent's system prompt still says "Sessions browser" and "on the
   screen", so the model writes "…are on the screen…" in Telegram; the Search topic does not prewarm the index
   before a request (the first live use on 2026-10-16 21:21 searched 3, then 13–17 sessions, while ~70 stale
@@ -5300,6 +5308,89 @@ the answer on:
 - Logs: `[nav] remote telegram restart <sid8> -> asked: the turn the user interrupted (…)`, `… /restartsession <sid8> ->
   continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
   interrupted | uninterrupted`.
+
+### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; NOT BUILT yet)
+
+> The user's report (2026-10-23, after the 🔎 Search topic's "la cook" request): "the last one about 'la cook' was supposed
+> to find a tab. The la cook session was actually open in a tab that was idle. The tab was both idle and deactivated. A.
+> since it was deactivated and had no topic (because its idle), I expected Activate button but instead I had resume, fork
+> and others but we already exist. Add Activate button and ensure in terms of logic and flow, we can do all that".
+
+**What the menu did.** `ClassifySearchPickState` knew three places: Closed, IdleTab (Idle and not pinned, so no topic) and
+Listed. It never read whether the tab's claude RUNS, so a deactivated tab, or one restored and never entered, read as an
+idle tab, and every menu offered ▶ Resume, also for a session that had a tab. Resume did adapt to the state at the tap (an
+idle tab was woken, a listed one "is open already"), but it never started a parked tab's claude, and its name says "open it".
+
+**What the logs show for that request** (production v0.8.0.0, hooks.log): `[nav] remote telegram search pick 1 a77419cf
+(idle tab)` at 09:18:30, then ▶ Resume → `remote telegram wake a77419cf`, and its topic 1.3 s later. The agent's tab list at
+09:18:10 did not mark the tab `dormant`, and its claude (pid 86368, its heartbeat file and the live process) had run since
+2026-10-22 18:48. So at that moment the tab was idle with its claude running, not parked. The change below covers both.
+
+**The states** (`SearchPickState`, MessagingModels.h; the last three appended, so the first three keep their numbers):
+
+| State | When | Glyph | The menu's line |
+|---|---|---|---|
+| Closed | not open in a tab | 📦 | "Closed: Resume opens it in a background tab, and its topic appears." |
+| IdleTab | open, its claude runs, Idle, not pinned | 💤 | "Open in a tab, idle: Wake brings its topic back." |
+| Listed | open, its claude runs, not Idle, or pinned | 💬 | "Open, with its own topic: Go to topic puts that topic first in the thread list." |
+| ParkedTab | open, never started (`started` false) and not adopted, Idle, not pinned | 🌙 | "Open in a tab, but deactivated (its Claude is not running), so it has no topic: Activate starts it there, and its topic appears." |
+| ParkedListed | the same, in any other state or pinned | 🌙 | "Open in a tab with its own topic, but deactivated (its Claude is not running): Activate starts it there." |
+| ExitedTab | open, managed, Done (its claude exited; the tab holds its shell) | ⏹ | "Open in a tab with its own topic, but its Claude has exited: Activate starts it again there, in the same conversation." |
+
+`ClassifySearchPickState` gained `started` and `external` (their defaults read as a managed tab whose claude runs), and
+`ClassifySearchPickStateOf(const SessionInfo*)` reads them from a record. The parked test comes first: a restore keeps
+Waiting for you and Needs approval, and a cut-off turn reads Error, and each still needs its claude started. An ADOPTED
+session (a claude the user typed into a shell of their own) is never parked or exited: Agentmaster hosts no control for it,
+and its tab is the user's shell, which Search must not start or restart.
+
+**The menus** (`SearchPickMenuRows`): §5.4's table — two buttons a row at most, ⑂ Fork · ✕ Cancel always last, a 📌 twin only
+for an open session that is not pinned (a closed one always has it, as before). **The actions** (`_onSearchPickAction`, on the
+state at the TAP):
+- ▶ Resume, ▶ Activate and ⏰ Wake (each with its 📌 twin) all make the session usable from here:
+  - Closed → the background resume, as before.
+  - ParkedTab / ParkedListed / ExitedTab → `_reactivate` first. It starts a parked tab in place through the window's
+    `start` action (`_ActivateDormantSession`, the tab menu's Activate Tab), and starts an exited claude again through the
+    window's restart (KeepInterrupted). It tells the two apart by the state BEFORE the wake, which is why it runs first.
+    Then an Idle or Done session is held in Waiting for you (`_wake`; a claude's SessionStart and a restart's
+    normalization both keep that state), and 📌 pins.
+  - IdleTab → `_wake`, as before. Listed → "it is open already", and 📌 pins.
+- 💬 Go to topic → `_bringTopicToFront`, the directory dot's re-post: Telegram lists a bot chat's topics by their last
+  message, and no link opens one on Android. A session whose topic left since the menu says so.
+- 📌 Pin → `_setPinned` (it also holds an Idle session in Waiting for you); a session closed since says so.
+- The token kinds are named constants (`kSearchPick*`, `IsSearchPickActionKind`, `SearchPickActionLabel`,
+  `SearchPickActionPins`); the old `pick-resume`, `pick-resume-pin`, `pick-fork` and `pick-cancel` keep their names.
+- The Search topic's /help and its intro name Activate and Wake.
+- Logs: `[nav] remote telegram search pick N <sid8> (deactivated tab | deactivated tab with a topic | claude exited | …)`,
+  `… search activate <sid8> (<state>) [woken] [pinned]`, `… search topic <sid8> -> thread N | no topic`, `… search pin
+  <sid8> -> …`, beside `_reactivate`'s own `remote telegram reactivate <sid8> -> start | restart (exited)`.
+
+**Tests** (`TestMessagingSearch`, tests_messaging_search.cpp): the classification (every state, parked before exited,
+adopted sessions, the record overload); a menu line and a log word of its own for each state, and no "Resume" in an open
+session's line; the states that have a topic; every menu (labels, the 📌 rules, Fork · Cancel last, two a row, only Closed
+offers Resume); the kinds and which of them pin; the moon on a deactivated tab's card with its menu line, and the stop glyph
+on an exited one. Checked without a build: the m5 suite on an isolated copy (HEAD + this change, a scratch profile), 9692
+checks with only the 3 known TestTaskbarBadge failures (one real-time settle check failed once under load and passed on the
+next run); `cl /Zs` with the build's recorded command lines (warnings as errors) of the 10 TerminalAppLib units that include
+the changed headers; and two negative controls, an engine unit and a PCH unit, that failed at their planted line.
+
+**Not done:**
+- Not built: neither dev nor production has it.
+- The Search agent itself has no "activate" tool. A request in words ("activate it") still reaches `mcp__tabs__resume`,
+  which only says where the open tab is; `focus:true` would bring it to the front on the PC. An in-place activation for the
+  model is a prompt change, to be measured with the eval kit (`tools/ai-search-eval/`).
+- `/idle`'s [Wake] still only wakes a deactivated idle tab; its first queued message starts it (§7.1).
+
+**Live checks owed** (each install, with its bot):
+1. Deactivate a tab at the PC, then find it in 🔎 Search. Its card shows 🌙, and its menu says "deactivated" and offers
+   ▶ Activate · ▶ Activate 📌 · ⑂ Fork · ✕ Cancel.
+2. Tap ▶ Activate. The menu says it is starting, and the tab's dot fills on the PC with no window or tab switch
+   (hooks.log `[nav] activate-dormant <sid8>`). Its topic appears within seconds, the tab reads Waiting for you, and a
+   message sent in the topic goes in.
+3. An idle tab whose claude runs offers ⏰ Wake.
+4. A session with a topic offers 💬 Go to topic, which puts that topic first in the thread list, and 📌 Pin.
+5. A tab whose claude was `/exit`ed shows ⏹, and ▶ Activate starts it again.
+6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
+   start).
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

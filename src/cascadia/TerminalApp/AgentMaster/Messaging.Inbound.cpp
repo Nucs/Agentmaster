@@ -2255,7 +2255,7 @@ namespace Agentmaster::Msg
             card.why = row.why;
             card.colorSquare = _titleSquare(s ? &*s : nullptr, row.dir); // §21.13: its tab's color, else its folder's
             card.threadId = _threadOf(row.sessionId); // §21.17: a session with a topic: its title links there
-            card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+            card.state = ClassifySearchPickStateOf(s ? &*s : nullptr); // §21.38: a deactivated tab shows 🌙, an exited one ⏹
             cards.push_back(std::move(card));
         }
         const std::wstring html = BuildSearchAnswerHtml(ev.text, cards, rows.size() - listed, WallMs());
@@ -2298,7 +2298,7 @@ namespace Agentmaster::Msg
                 card.dir = row.dir;
                 card.lastActivityMs = row.lastActivityMs;
                 card.colorSquare = _titleSquare(s ? &*s : nullptr, row.dir);
-                card.state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+                card.state = ClassifySearchPickStateOf(s ? &*s : nullptr);
                 rest.push_back(std::move(card));
             }
             for (const auto& more : BuildSearchMoreLinesHtml(rest, WallMs()))
@@ -2335,7 +2335,9 @@ namespace Agentmaster::Msg
         {
             dir = s->workingDir;
         }
-        const SearchPickState state = ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned);
+        // §21.38: where it stands decides the buttons too — a session that is open in a tab is never offered ▶ Resume ("open
+        // it"): a deactivated tab gets ▶ Activate, an idle one ⏰ Wake, one with a topic 💬 Go to topic.
+        const SearchPickState state = ClassifySearchPickStateOf(s ? &*s : nullptr);
         // §21.10: the menu repeats the card's facts in full (the whole folder, the branch, when it ran) and its quote,
         // then where the session stands now (BuildSearchPickMenuHtml). A session the answer did not list this run (a
         // pick after a restart) shows what the registry knows: no quote, the transcript's own times.
@@ -2353,14 +2355,21 @@ namespace Agentmaster::Msg
         card.threadId = _threadOf(pick.sessionId); // §21.17: a session with a topic: its title links there
         card.state = state;
         const std::wstring html = BuildSearchPickMenuHtml(card, WallMs());
-        // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need. Each acts on
-        // the session's state at the tap (_onSearchPickAction), which may differ from the line above.
+        // The actions: single-use tokens (M5) that expire, carrying what the outcome line and a launch need — the buttons that
+        // fit where the session stands (SearchPickMenuRows, §21.38). Each acts on the session's state at the tap
+        // (_onSearchPickAction), which may differ from the line above.
         const std::wstring payload = std::to_wstring(pick.number) + L"\n" + dir + L"\n" + title;
         const int64_t ttl = kTokenTtlMsFor(kSearchActionTtlHours);
-        const std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows = {
-            { { L"\x25B6 Resume", _tokenFor(L"pick-resume", pick.sessionId, payload, ttl) }, { L"\x25B6 Resume \U0001F4CC", _tokenFor(L"pick-resume-pin", pick.sessionId, payload, ttl) } },
-            { { L"\x2442 Fork", _tokenFor(L"pick-fork", pick.sessionId, payload, ttl) }, { L"\x2715 Cancel", _tokenFor(L"pick-cancel", pick.sessionId, payload, ttl) } },
-        };
+        std::vector<std::vector<std::pair<std::wstring, std::wstring>>> rows;
+        for (const auto& kinds : SearchPickMenuRows(state, s && s->pinned))
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> buttons;
+            for (const std::wstring_view kind : kinds)
+            {
+                buttons.push_back({ SearchPickActionLabel(kind), _tokenFor(std::wstring{ kind }, pick.sessionId, payload, ttl) });
+            }
+            rows.push_back(std::move(buttons));
+        }
         LogNav(L"remote telegram search pick " + std::to_wstring(pick.number) + L" " + ShortId(pick.sessionId) + L" (" + SearchPickStateWord(state) + L")");
         _reply(threadId, html, false, _buttons(rows), answerMessageId);
     }
@@ -2379,7 +2388,7 @@ namespace Agentmaster::Msg
         const auto known = _registry->GetWithoutQueue(sessionId);
         const std::wstring head = L"<b>" + TgEscapeHtml(number) + L". " +
                                   TgTitleToken(TgTitleForm::Plain, _titleSquare(known ? &*known : nullptr, dir), title.empty() ? ShortId(sessionId) : title, _threadOf(sessionId)) + L"</b>";
-        if (kind == L"pick-cancel")
+        if (kind == kSearchPickCancel)
         {
             // The menu goes; the answer above it keeps its pick buttons. A menu already gone (the user deleted it) is a
             // harmless 400.
@@ -2396,7 +2405,7 @@ namespace Agentmaster::Msg
             LogNav(L"remote telegram search pick-cancel " + ShortId(sessionId));
             return;
         }
-        if (kind == L"pick-fork")
+        if (kind == kSearchPickFork)
         {
             // Never pinned: there is no fork-and-pin (the user's rule, §21.7).
             _editText(menuMessageId, head + L"\n\x2192 \x2442 Fork", SendPriority::Final, L"", json::Value{});
@@ -2409,20 +2418,64 @@ namespace Agentmaster::Msg
             _requestLaunch(req, threadId); // it says how the fork goes (and why not, when it cannot open)
             return;
         }
-        // Resume / Resume 📌, on the session's state NOW.
-        const bool pin = kind == L"pick-resume-pin";
-        const std::wstring choice = pin ? L"\x25B6 Resume \U0001F4CC" : L"\x25B6 Resume";
+        // Every other action acts on the session's state NOW (§21.38): the menu was drawn for the state of the pick, and the
+        // session may have been entered, deactivated, closed or idled since. The outcome line repeats the tapped button.
+        const std::wstring choice = SearchPickActionLabel(kind);
+        const bool pin = SearchPickActionPins(kind);
         const auto s = _registry->Get(sessionId);
-        switch (ClassifySearchPickState(s.has_value(), s && s->live, s && !s->tabToken.empty(), s ? s->state : SessionState::Idle, s && s->pinned))
+        const SearchPickState now = ClassifySearchPickStateOf(s ? &*s : nullptr);
+        if (kind == kSearchPickTopic)
+        {
+            // 💬 Go to topic: its topic first in the thread list, the directory dot's way (§21.16.7: Telegram lists a bot chat's
+            // topics by their last message, and no link opens a bot-chat topic on Android). The thread is read now: a session
+            // that went idle past its grace since the menu was drawn has none any more.
+            const int64_t thread = _threadOf(sessionId);
+            if (thread == 0)
+            {
+                _editText(menuMessageId, head + L"\n\x2192 " + choice + L": it has no topic now (it went idle, or it closed) \x2014 pick it again for what fits now.", SendPriority::Final, L"",
+                          json::Value{});
+                LogNav(L"remote telegram search topic " + ShortId(sessionId) + L" -> no topic (" + SearchPickStateWord(now) + L")");
+                return;
+            }
+            // _bringTopicToFront carries the tap (§21.28: the button stays busy until the card's re-post made the topic first).
+            const std::wstring outcome = _bringTopicToFront(thread);
+            _editText(menuMessageId, head + L"\n\x2192 " + choice + L": " + TgEscapeHtml(outcome) + L".", SendPriority::Final, L"", json::Value{});
+            LogNav(L"remote telegram search topic " + ShortId(sessionId) + L" -> thread " + std::to_wstring(thread));
+            return;
+        }
+        if (kind == kSearchPickPin)
+        {
+            // 📌 Pin (a session with a topic): it never goes idle, so its topic stays. A session closed since the menu was
+            // drawn has nothing to pin: its pick's menu offers ▶ Resume 📌 now.
+            if (now == SearchPickState::Closed)
+            {
+                _editText(menuMessageId, head + L"\n\x2192 " + choice + L": it is closed now \x2014 pick it again to resume it.", SendPriority::Final, L"", json::Value{});
+                LogNav(L"remote telegram search pin " + ShortId(sessionId) + L" -> closed");
+                return;
+            }
+            const bool newlyPinned = s && !s->pinned;
+            if (newlyPinned)
+            {
+                _setPinned(sessionId, true); // also holds an Idle session in Waiting for you, and redraws its card
+            }
+            _editText(menuMessageId, head + L"\n\x2192 " + choice + (newlyPinned ? L": pinned \x2014 it never goes idle, so its topic stays." : L": it was pinned already."),
+                      SendPriority::Final, L"", json::Value{});
+            LogNav(L"remote telegram search pin " + ShortId(sessionId) + (newlyPinned ? L" -> pinned" : L" -> already pinned"));
+            return;
+        }
+        // ▶ Resume / ▶ Activate / ⏰ Wake (each with its 📌 twin) ask for one thing: make the session usable from here — open in
+        // a tab, its claude running, its topic listed. Which of them the menu offered followed the state of the pick; what is
+        // done follows the state NOW.
+        switch (now)
         {
         case SearchPickState::IdleTab:
-            // Its tab is open: waking it (Waiting for you) is all a resume needs, and its topic appears at the next sync.
+            // Its tab is open and its claude runs: waking it (Waiting for you) is all it needs, and its topic appears at the next sync.
             _wake(sessionId, pin);
             _editText(menuMessageId, head + L"\n\x2192 " + choice + L": woken, its topic appears in a moment.", SendPriority::Final, L"", json::Value{});
             return;
         case SearchPickState::Listed:
         {
-            // Open with its topic already: nothing to open. 📌 still pins it (never idle).
+            // Open with its topic already and its claude running: nothing to open or start. 📌 still pins it (never idle).
             const bool newlyPinned = pin && s && !s->pinned;
             if (newlyPinned)
             {
@@ -2432,9 +2485,48 @@ namespace Agentmaster::Msg
             LogNav(L"remote telegram search resume " + ShortId(sessionId) + L" -> already listed" + (newlyPinned ? L" (pinned)" : L""));
             return;
         }
+        case SearchPickState::ParkedTab:
+        case SearchPickState::ParkedListed:
+        case SearchPickState::ExitedTab:
+        {
+            // §21.38 (the user's "I expected Activate button"): the tab is there but its claude does not run. The claude FIRST:
+            // _reactivate starts a parked tab in place (the window's "start" action = the tab menu's Activate Tab, no focus
+            // change on the PC) and starts an exited claude again (the window's restart, the same conversation id). It tells a
+            // restart from a start by the state it reads, so it must read it before the wake below turns Done into Waiting for
+            // you. Its own answer is a toast for a card's button; the menu below says what happens in this menu's words.
+            (void)_reactivate(sessionId);
+            // Then the topic: an Idle (or exited) session is held in Waiting for you, as ⏰ Wake does, so its topic appears and
+            // stays — a claude's SessionStart keeps Waiting for you (NextSessionState), and so does a restart's normalization
+            // (RestoredSessionState). Any other state keeps its topic by itself; 📌 pins it.
+            const bool wakeable = s->state == SessionState::Idle || s->state == SessionState::Done;
+            const bool newlyPinned = pin && !s->pinned;
+            if (wakeable)
+            {
+                _wake(sessionId, pin);
+            }
+            else if (newlyPinned)
+            {
+                _setPinned(sessionId, true);
+            }
+            std::wstring outcome = now == SearchPickState::ExitedTab ? L": starting its Claude again in its tab, in the same conversation." :
+                                                                       L": starting its Claude in its tab (nothing changes on the PC's screen).";
+            if (now == SearchPickState::ParkedTab)
+            {
+                outcome += L" Its topic appears in a moment.";
+            }
+            if (newlyPinned)
+            {
+                outcome += L" Pinned \U0001F4CC.";
+            }
+            _editText(menuMessageId, head + L"\n\x2192 " + choice + outcome, SendPriority::Final, L"", json::Value{});
+            LogNav(L"remote telegram search activate " + ShortId(sessionId) + L" (" + SearchPickStateWord(now) + L")" + (wakeable ? L" woken" : L"") + (newlyPinned ? L" pinned" : L""));
+            return;
+        }
         case SearchPickState::Closed:
         default:
         {
+            // Not open in any tab (an Activate or Wake menu whose tab was closed since lands here too): resumed into a
+            // background tab of the most recently active window (D27).
             _editText(menuMessageId, head + L"\n\x2192 " + choice, SendPriority::Final, L"", json::Value{});
             RemoteLaunchRequest req;
             req.kind = RemoteLaunchRequest::Kind::Resume;
@@ -2801,10 +2893,10 @@ namespace Agentmaster::Msg
                 _wake(tok.sessionId, k == L"wake-pin");
                 _reply(threadId, L"Woken: its topic appears in a moment.", false);
             }
-            else if (k == L"pick-resume" || k == L"pick-resume-pin" || k == L"pick-fork" || k == L"pick-cancel")
+            else if (IsSearchPickActionKind(k))
             {
-                // A Search pick's action menu (_showSearchPick): it acts on the session's state NOW, and edits or deletes
-                // the menu it sits on.
+                // A Search pick's action menu (_showSearchPick; its buttons fit where the session stood, §21.38): it acts on the
+                // session's state NOW, and edits or deletes the menu it sits on.
                 _onSearchPickAction(k, tok.sessionId, tok.payload, threadId, messageId);
             }
             return;
@@ -5102,7 +5194,8 @@ namespace Agentmaster::Msg
         std::wstring html;
         if (searchTopic)
         {
-            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one, then Resume or Fork it. A follow-up refines the last answer.\n"
+            // §21.38: a pick's menu fits where the session stands, so the help names each first button.
+            html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one: its menu fits where the session stands \x2014 \x25B6 Resume a closed one, \x25B6 Activate a deactivated tab, \x23F0 Wake an idle one, \U0001F4AC Go to topic \x2014 or \x2442 Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
                    L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
                    // §21.19: the hyphenated spelling only inside <code>: a client makes a command LINK of "/search-tab" only up

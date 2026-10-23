@@ -105,22 +105,139 @@ void TestMessagingSearch()
         CHECK(many.size() == 2 && many[1].back() == kSearchAnswerMaxRows, "at most kSearchAnswerMaxRows picks (the answer says how many more)");
     }
 
-    // ---- 4. where a picked session stands (the row's word, the menu's line, what Resume does) ----
+    // ---- 4. where a picked session stands (the row's word, the menu's line, its buttons) ----
     {
         CHECK(ClassifySearchPickState(false, false, false, SessionState::Idle, false) == SearchPickState::Closed, "a session the registry never knew is closed");
         CHECK(ClassifySearchPickState(true, false, true, SessionState::WaitingForInput, false) == SearchPickState::Closed, "an archived session is closed");
         CHECK(ClassifySearchPickState(true, true, false, SessionState::Running, false) == SearchPickState::Closed, "a live record without a tab is closed");
-        CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, false) == SearchPickState::IdleTab, "an open, idle, unpinned tab is an idle tab (Resume wakes it)");
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, false) == SearchPickState::IdleTab, "an open, idle, unpinned tab whose claude runs is an idle tab (Wake brings its topic back)");
         CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, true) == SearchPickState::Listed, "a pinned tab never idles: it has its topic");
-        const SessionState listedStates[] = { SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error, SessionState::Done };
+        const SessionState listedStates[] = { SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error };
         for (const auto st : listedStates)
         {
-            CHECK(ClassifySearchPickState(true, true, true, st, false) == SearchPickState::Listed, "every state but Idle is listed (it has its topic)");
+            CHECK(ClassifySearchPickState(true, true, true, st, false) == SearchPickState::Listed, "every running state but Idle is listed (it has its topic)");
         }
+
+        // §21.38 (the user's report of 2026-10-23: "since it was deactivated and had no topic (because its idle), I expected
+        // Activate button but instead I had resume, fork and others but we already exist"): a tab whose claude is not running.
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, false, false, false) == SearchPickState::ParkedTab, "a deactivated (never started) Idle tab is a parked tab with no topic: Activate");
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, true, false, false) == SearchPickState::ParkedListed, "a pinned parked tab keeps its topic");
+        const SessionState parkedWithTopic[] = { SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error, SessionState::Running, SessionState::Done };
+        for (const auto st : parkedWithTopic)
+        {
+            CHECK(ClassifySearchPickState(true, true, true, st, false, false, false) == SearchPickState::ParkedListed,
+                  "a parked tab in any state but Idle has its topic and still needs its claude started (a restore keeps Waiting, a cut-off turn reads Error)");
+        }
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Done, false) == SearchPickState::ExitedTab, "a managed tab whose claude ended (Done) is an exited tab: Activate starts it again");
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Done, true) == SearchPickState::ExitedTab, "a pinned exited tab is still exited");
+        CHECK(ClassifySearchPickState(true, true, true, SessionState::Idle, false, false, true) == SearchPickState::IdleTab &&
+                  ClassifySearchPickState(true, true, true, SessionState::Done, false, false, true) == SearchPickState::Listed,
+              "an ADOPTED session (the user's own shell) is never parked or exited: its tab is never started or restarted from Search");
+        CHECK(ClassifySearchPickState(true, false, true, SessionState::Idle, false, false, false) == SearchPickState::Closed &&
+                  ClassifySearchPickState(true, true, false, SessionState::Idle, false, false, false) == SearchPickState::Closed,
+              "not open in a tab is closed, whether or not a connection started");
+        {
+            // The record overload reads the same fields.
+            SessionInfo s;
+            CHECK(ClassifySearchPickStateOf(nullptr) == SearchPickState::Closed, "no record: closed");
+            s.live = true;
+            s.tabToken = L"wt-1";
+            s.state = SessionState::Idle;
+            s.started = false;
+            CHECK(ClassifySearchPickStateOf(&s) == SearchPickState::ParkedTab, "the record of a deactivated Idle tab: parked");
+            s.started = true;
+            CHECK(ClassifySearchPickStateOf(&s) == SearchPickState::IdleTab, "the same record once its claude started: idle tab");
+            s.state = SessionState::Done;
+            CHECK(ClassifySearchPickStateOf(&s) == SearchPickState::ExitedTab, "the record of an exited claude: exited");
+            s.external = true;
+            CHECK(ClassifySearchPickStateOf(&s) == SearchPickState::Listed, "the record of an adopted session that ended: listed (its card's buttons, not Search's)");
+        }
+
+        const SearchPickState all[] = { SearchPickState::Closed, SearchPickState::IdleTab, SearchPickState::Listed, SearchPickState::ParkedTab, SearchPickState::ParkedListed, SearchPickState::ExitedTab };
         CHECK(std::wstring{ SearchPickStateWord(SearchPickState::Closed) } == L"closed" && std::wstring{ SearchPickStateWord(SearchPickState::IdleTab) } == L"idle tab" && std::wstring{ SearchPickStateWord(SearchPickState::Listed) } == L"has a topic", "the answer's row words are the old ones");
-        const std::wstring lines[] = { SearchPickStateLine(SearchPickState::Closed), SearchPickStateLine(SearchPickState::IdleTab), SearchPickStateLine(SearchPickState::Listed) };
-        CHECK(!lines[0].empty() && lines[0] != lines[1] && lines[1] != lines[2] && lines[0] != lines[2], "each state has its own menu line");
-        CHECK(lines[0].find(L"Resume") != std::wstring::npos && lines[1].find(L"Resume") != std::wstring::npos && lines[2].find(L"Resume") != std::wstring::npos, "every menu line says what Resume does there");
+        for (size_t i = 0; i < std::size(all); ++i)
+        {
+            for (size_t j = i + 1; j < std::size(all); ++j)
+            {
+                CHECK(std::wstring{ SearchPickStateLine(all[i]) } != SearchPickStateLine(all[j]) && std::wstring{ SearchPickStateWord(all[i]) } != SearchPickStateWord(all[j]),
+                      "each state has its own menu line and its own log word");
+            }
+        }
+        // Every line names the menu's first button, and only a closed session's line says Resume.
+        CHECK(std::wstring{ SearchPickStateLine(SearchPickState::Closed) }.find(L"Resume") != std::wstring::npos, "the closed line says what Resume does");
+        CHECK(std::wstring{ SearchPickStateLine(SearchPickState::IdleTab) }.find(L"Wake") != std::wstring::npos, "the idle tab's line says what Wake does");
+        CHECK(std::wstring{ SearchPickStateLine(SearchPickState::Listed) }.find(L"Go to topic") != std::wstring::npos, "a listed session's line says what Go to topic does");
+        for (const auto st : { SearchPickState::ParkedTab, SearchPickState::ParkedListed, SearchPickState::ExitedTab })
+        {
+            CHECK(std::wstring{ SearchPickStateLine(st) }.find(L"Activate") != std::wstring::npos, "a not-running tab's line says what Activate does");
+        }
+        for (const auto st : { SearchPickState::IdleTab, SearchPickState::Listed, SearchPickState::ParkedTab, SearchPickState::ParkedListed, SearchPickState::ExitedTab })
+        {
+            CHECK(std::wstring{ SearchPickStateLine(st) }.find(L"Resume") == std::wstring::npos, "an open session's line never offers Resume (\"but we already exist\")");
+        }
+        CHECK(SearchPickStateHasTopic(SearchPickState::Listed) && SearchPickStateHasTopic(SearchPickState::ParkedListed) && SearchPickStateHasTopic(SearchPickState::ExitedTab) &&
+                  !SearchPickStateHasTopic(SearchPickState::Closed) && !SearchPickStateHasTopic(SearchPickState::IdleTab) && !SearchPickStateHasTopic(SearchPickState::ParkedTab),
+              "the states that imply a topic of their own");
+
+        // The menu's buttons, per state: what fits where the session stands, Fork and Cancel always last and together.
+        const auto rowsOf = [](SearchPickState st, bool pinned) {
+            std::vector<std::vector<std::wstring>> out;
+            for (const auto& row : SearchPickMenuRows(st, pinned))
+            {
+                std::vector<std::wstring> labels;
+                for (const std::wstring_view kind : row)
+                {
+                    labels.emplace_back(SearchPickActionLabel(kind));
+                }
+                out.push_back(std::move(labels));
+            }
+            return out;
+        };
+        using Rows = std::vector<std::vector<std::wstring>>;
+        const std::vector<std::wstring> forkCancel{ L"\x2442 Fork", L"\x2715 Cancel" };
+        CHECK((rowsOf(SearchPickState::Closed, false) == Rows{ { L"\x25B6 Resume", L"\x25B6 Resume \U0001F4CC" }, forkCancel }), "closed: Resume and Resume 📌, as before");
+        CHECK((rowsOf(SearchPickState::Closed, true) == Rows{ { L"\x25B6 Resume", L"\x25B6 Resume \U0001F4CC" }, forkCancel }), "closed: Resume 📌 is kept whatever the old record says");
+        CHECK((rowsOf(SearchPickState::ParkedTab, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, forkCancel }), "deactivated, no topic: Activate and Activate 📌 (the user's request)");
+        CHECK((rowsOf(SearchPickState::ParkedListed, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, { L"\U0001F4AC Go to topic" }, forkCancel }),
+              "deactivated with a topic: Activate, then Go to topic");
+        CHECK((rowsOf(SearchPickState::ParkedListed, true) == Rows{ { L"\x25B6 Activate" }, { L"\U0001F4AC Go to topic" }, forkCancel }), "a pinned one is offered no 📌 twin");
+        CHECK((rowsOf(SearchPickState::ExitedTab, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, { L"\U0001F4AC Go to topic" }, forkCancel }),
+              "an exited claude: Activate starts it again, and its topic");
+        CHECK((rowsOf(SearchPickState::IdleTab, false) == Rows{ { L"\x23F0 Wake", L"\x23F0 Wake \U0001F4CC" }, forkCancel }), "an idle tab whose claude runs: Wake (it was \"Resume\")");
+        CHECK((rowsOf(SearchPickState::Listed, false) == Rows{ { L"\U0001F4AC Go to topic", L"\U0001F4CC Pin" }, forkCancel }), "listed: Go to topic and Pin, never a Resume that opens nothing");
+        CHECK((rowsOf(SearchPickState::Listed, true) == Rows{ { L"\U0001F4AC Go to topic" }, forkCancel }), "listed and pinned: Go to topic alone");
+        for (const auto st : all)
+        {
+            for (const bool pinned : { false, true })
+            {
+                const auto rows = SearchPickMenuRows(st, pinned);
+                bool fits = !rows.empty() && rows.back() == std::vector<std::wstring_view>{ kSearchPickFork, kSearchPickCancel };
+                bool resume = false;
+                for (const auto& row : rows)
+                {
+                    fits = fits && !row.empty() && row.size() <= 2;
+                    for (const std::wstring_view kind : row)
+                    {
+                        fits = fits && IsSearchPickActionKind(kind) && !std::wstring{ SearchPickActionLabel(kind) }.empty();
+                        resume = resume || kind == kSearchPickResume || kind == kSearchPickResumePin;
+                    }
+                }
+                CHECK(fits, "every menu: two buttons a row at most, every button a known action with a label, Fork and Cancel last");
+                CHECK(resume == (st == SearchPickState::Closed), "only a closed session's menu offers Resume");
+            }
+        }
+        // The token kinds: the pick actions, and nothing else.
+        for (const std::wstring_view kind : { kSearchPickResume, kSearchPickResumePin, kSearchPickActivate, kSearchPickActivatePin, kSearchPickWake, kSearchPickWakePin, kSearchPickTopic,
+                                              kSearchPickPin, kSearchPickFork, kSearchPickCancel })
+        {
+            CHECK(IsSearchPickActionKind(kind) && kind.substr(0, 5) == L"pick-", "a pick action's kind is a known pick-* token kind");
+        }
+        CHECK(!IsSearchPickActionKind(L"wake") && !IsSearchPickActionKind(L"pick-") && !IsSearchPickActionKind(L"pick-resumes") && !IsSearchPickActionKind(L""),
+              "other token kinds (the /idle list's wake) are no pick action");
+        CHECK(SearchPickActionPins(kSearchPickResumePin) && SearchPickActionPins(kSearchPickActivatePin) && SearchPickActionPins(kSearchPickWakePin) && SearchPickActionPins(kSearchPickPin) &&
+                  !SearchPickActionPins(kSearchPickResume) && !SearchPickActionPins(kSearchPickActivate) && !SearchPickActionPins(kSearchPickWake) && !SearchPickActionPins(kSearchPickTopic) &&
+                  !SearchPickActionPins(kSearchPickFork) && !SearchPickActionPins(kSearchPickCancel),
+              "exactly the 📌 actions pin (there is no fork-and-pin)");
     }
 
     // ---- 5. the answer as EVIDENCE CARDS (§21.10, the user's "C1" of 2026-10-17) ----
@@ -216,7 +333,24 @@ void TestMessagingSearch()
         CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(release, now)) == L"<b>1 \x00B7 Release v0.7.9</b>\nK:\\source\\Agentmaster\\ \x00B7 agentmaster\n11 Oct 14:02 \x2192 16:40 \x00B7 14 prompts\n<blockquote>You asked: \"cut v0.7.9 as a pre-release\"</blockquote>\n"
                                                 L"<i>\U0001F4E6 Closed: Resume opens it in a background tab, and its topic appears.</i>",
               "pick menu: the card's facts in full, its quote, and the state line");
-        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(bare, now)) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Resume brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
+        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(bare, now)) == L"<b>2 \x00B7 b2b2b2b2</b>\n1 prompt\n<i>\U0001F4A4 Open in a tab, idle: Wake brings its topic back.</i>", "pick menu: a session known only by its id (a pick after a restart) shows what there is");
+        // §21.38: a deactivated tab — the user's "la cook" case — reads as such on its card and in its menu, which offers Activate.
+        SearchCard parked = release;
+        parked.number = 3;
+        parked.state = SearchPickState::ParkedTab;
+        CHECK(TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"", { parked }, 0, now)).rfind(L"<b>3</b> \U0001F319 <b>Release v0.7.9</b>\n", 0) == 0, "answer: a deactivated tab's card wears the moon");
+        CHECK(TgRenderTitleTokensClassic(BuildSearchPickMenuHtml(parked, now)).find(
+                  L"\n<i>\U0001F319 Open in a tab, but deactivated (its Claude is not running), so it has no topic: Activate starts it there, and its topic appears.</i>") != std::wstring::npos,
+              "pick menu: a deactivated tab's line says what Activate does");
+        SearchCard exited = release;
+        exited.state = SearchPickState::ExitedTab;
+        CHECK(TgRenderTitleTokensClassic(BuildSearchAnswerHtml(L"", { exited }, 0, now)).rfind(L"<b>1</b> \x23F9 <b>Release v0.7.9</b>\n", 0) == 0, "answer: an exited claude's card wears the stop glyph");
+        CHECK(std::wstring{ SearchPickStateGlyph(SearchPickState::ParkedTab) } == SearchPickStateGlyph(SearchPickState::ParkedListed) &&
+                  std::wstring{ SearchPickStateGlyph(SearchPickState::ParkedTab) } != SearchPickStateGlyph(SearchPickState::IdleTab) &&
+                  std::wstring{ SearchPickStateGlyph(SearchPickState::ParkedTab) } != SearchPickStateGlyph(SearchPickState::Listed) &&
+                  std::wstring{ SearchPickStateGlyph(SearchPickState::ExitedTab) } != SearchPickStateGlyph(SearchPickState::Listed) &&
+                  std::wstring{ SearchPickStateGlyph(SearchPickState::ExitedTab) } != SearchPickStateGlyph(SearchPickState::Closed),
+              "answer: one moon for a deactivated tab, topic or not; an exited claude has a glyph of its own");
 
         // §21.13: a card and a menu name the session with its tab's color square, like every title mention ("State, then
         // color" on the card, as in the topic names); a session with no color reads as above.

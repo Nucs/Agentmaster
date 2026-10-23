@@ -1724,8 +1724,11 @@ namespace Agentmaster::Msg
         /// <summary>
         /// A PICK of a Search answer's row (§21.7): posts the ACTION MENU of that session as a reply to the answer — its
         /// title, folder and last activity as the answer listed them (else the registry's record, else the short id),
-        /// where it stands NOW, and ▶ Resume / ▶ Resume 📌 / ⑂ Fork / ✕ Cancel as single-use tokens (M5) that carry the
-        /// row number, folder and title. Silent (a menu is no final message). Poll thread.
+        /// where it stands NOW, and the buttons that fit there (§21.38, SearchPickMenuRows: ▶ Resume for a closed session,
+        /// ▶ Activate for a tab whose claude is not running, ⏰ Wake for an idle tab, 💬 Go to topic / 📌 Pin for one with a
+        /// topic; ⑂ Fork and ✕ Cancel always) as single-use tokens (M5) that carry the row number, folder and title. An
+        /// open session is never offered ▶ Resume ("open it": the user's "but we already exist"). Silent (a menu is no final
+        /// message). Poll thread.
         /// </summary>
         /// <param name="pick">The pick read from the button.</param>
         /// <param name="threadId">The Search topic.</param>
@@ -1733,16 +1736,21 @@ namespace Agentmaster::Msg
         void _showSearchPick(const SearchPick& pick, int64_t threadId, int64_t answerMessageId);
         /// <summary>
         /// Carries out a tapped action of a Search pick's menu, on the session's CURRENT state (it may have changed since
-        /// the menu): Resume opens a closed session into a background tab, wakes an idle tab, and only says so for a session
-        /// that has its topic already (with 📌 it pins it); Fork forks it into a new tab, never pinned (no fork-and-pin, the
-        /// user's rule); Cancel deletes the menu. The menu message loses its buttons and keeps the choice (or, for an action
-        /// done at once, the outcome). Poll thread.
+        /// the menu). ▶ Resume, ▶ Activate and ⏰ Wake (and their 📌 twins) all make the session usable from here, by its
+        /// state now: a closed one is opened into a background tab (D27); a tab whose claude does not run — deactivated,
+        /// restored and never entered, or exited — gets it started in place (_reactivate: no focus change on the PC; an
+        /// exited claude is started again in the same conversation), then an Idle or exited one is held in Waiting for you so
+        /// its topic appears (§21.38); an idle tab is woken; one with its topic already only says so. 💬 Go to topic puts its
+        /// topic first in the thread list (_bringTopicToFront); 📌 Pin pins it; Fork forks it into a new tab, never pinned
+        /// (no fork-and-pin, the user's rule); Cancel deletes the menu. The menu message loses its buttons and keeps the
+        /// choice and its outcome. Poll thread.
         /// </summary>
-        /// <param name="kind">The token's kind: "pick-resume", "pick-resume-pin", "pick-fork" or "pick-cancel".</param>
+        /// <param name="kind">The token's kind: one of the kSearchPick* kinds (IsSearchPickActionKind).</param>
         /// <param name="sessionId">The picked session.</param>
         /// <param name="payload">The token's payload: "&lt;row number&gt;\n&lt;folder&gt;\n&lt;title&gt;".</param>
         /// <param name="threadId">The Search topic.</param>
         /// <param name="menuMessageId">The menu message the button sits on (edited or deleted); 0 = none.</param>
+        /// <exception cref="std::bad_alloc">If a text, a token or a request cannot be allocated (the callback handler logs it, Rule #18).</exception>
         void _onSearchPickAction(const std::wstring& kind, const std::wstring& sessionId, const std::wstring& payload, int64_t threadId, int64_t menuMessageId);
         void _appNote(const std::wstring& html, bool sound);
 
