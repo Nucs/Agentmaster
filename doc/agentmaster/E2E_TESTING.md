@@ -4,6 +4,10 @@
 > (`tools/e2e-spike/`, its README) proved the model half on this workstation: a native `claude.exe`
 > runs every kind of turn instantly against a local mock whose answers are written into the prompt.
 > Every Agentmaster change listed in §6 is a proposal. Decisions for the owner are in §14.
+>
+> **What the suite must prove (2026-10-23):** [`flows/README.md`](flows/README.md) catalogs 168 end-to-end flows of the
+> features of 0.7.7 → 0.8.0 and after (behaviors, lifecycle phases, checks, edge cases, known defects), one file per
+> area. This document is the HOW; the flows are the WHAT — §10's ladder and §11's areas map onto them.
 
 **The aim, in the user's words:** "run end to end tests as complex as UI usage gets and be able to
 automate it in a suite … in a docker win11 machine with full computer use control … agentmaster and
@@ -592,7 +596,8 @@ Estimated size: ~25 tests, 20–60 s each in the fast lane → ~20 minutes per r
 
 ## 11. Coverage map for the rest of the app
 
-In a proposed order. "Needs" = infrastructure beyond §4–§8.
+In a proposed order. "Needs" = infrastructure beyond §4–§8. Each area's flows — what to drive, what to expect,
+where to check — are in [`flows/`](flows/README.md) (its *Infrastructure the flows need* table extends this one).
 
 | Area | Main documents | Needs |
 |---|---|---|
