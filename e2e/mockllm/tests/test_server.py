@@ -290,6 +290,35 @@ def test_error_times_then_success(mock):
     assert status == 200 and texts(events(raw)) == "after"
 
 
+def test_refusal_stop_details_and_next(mock):
+    """A `stop refusal` response carries stop_details on message_delta (streamed) and on the message (whole); the
+    request after it (Claude Code's own retry) gets the step after `next`.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On missing details or a wrong response choice.
+    """
+    port, client, _ = mock
+    prompt = 'refuse [[mock say "no"; stop refusal bio "Blocked."; next; reply "retried"]]'
+    _, raw = post(port, request(prompt))
+    delta = events(raw)[-2][1]["delta"]
+    assert delta["stop_reason"] == "refusal"
+    assert delta["stop_details"] == {"type": "refusal", "category": "bio", "explanation": "Blocked."}
+    refused = {"role": "assistant", "content": [{"type": "text", "text": "no"}]}
+    nudge = {"role": "user", "content": [{"type": "text", "text": "continuing once with that noted"}]}
+    _, raw = post(port, request(prompt, [refused, nudge]))
+    assert texts(events(raw)) == "retried"
+    assert [e["k"] for e in client.requests(kind="main")] == [0, 1]
+    status, raw = post(port, request(prompt, stream=False))
+    msg = json.loads(raw)
+    assert status == 200 and msg["stop_reason"] == "refusal" and msg["stop_details"]["category"] == "bio"
+    _, raw = post(port, request('[[mock reply "plain"]]'))
+    assert "stop_details" not in events(raw)[-2][1]["delta"]
+
+
 def test_turn_floor_holds_the_final_response(mock):
     """The final response of a turn is not sent before the floor (300 ms here) since the turn's first request.
 
@@ -353,6 +382,40 @@ def test_hold_fail_before_start_is_an_http_error(mock):
     client.fail("g2", status=529, message="busy")
     status, raw = post(port, request('[[mock hold g2; reply "never"]]'))
     assert status == 529 and json.loads(raw)["error"]["message"] == "busy"
+
+
+def test_hold_fail_mid_stream_ends_the_stream_with_an_error_event(mock):
+    """A gate failed after the stream started sends an `error` event, then ends the response normally (the last
+    chunk; no message_delta / message_stop) — the API's way, which Claude Code reads as a server error mid-response.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On a missing error event, a message_stop, or a cut instead of an end.
+    """
+    port, client, _ = mock
+    result = {}
+
+    def run():
+        """Send the held request (on a thread: it blocks until the gate is failed).
+
+        Returns:
+            None.
+        """
+        result["status"], result["raw"] = post(port, request('[[mock say "half"; hold g3; reply "never"]]'))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    client.wait_holding("g3", timeout_s=5)
+    client.fail("g3", status=529, etype="overloaded_error", message="Overloaded")
+    thread.join(5)
+    evts = events(result["raw"])
+    names = [n for n, _ in evts]
+    assert result["status"] == 200 and texts(evts) == "half"
+    assert names[-1] == "error" and evts[-1][1]["error"] == {"type": "overloaded_error", "message": "Overloaded"}
+    assert "message_stop" not in names and "message_delta" not in names
 
 
 def test_drop_cuts_the_connection(mock):

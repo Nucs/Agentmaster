@@ -39,6 +39,17 @@
 > `needs_fix` test fails on its defect (runs `nf-080`, `nf-080b`), and the known-defect tests of the open defects
 > (SP-K2, TCM-K1, ROB-K1, TAB-K5, A11Y-K2) pass on both builds. [`flows/README.md`](flows/README.md), *Checked both ways*.
 >
+> **Session state through Claude Code's own events (2026-10-23):** `e2e/suites/test_session_state.py` (29 tests,
+> flows/05 STA-01–STA-16) watches a session's side-panel state word every 150 ms (`e2e/amdriver/timeline.py`) through
+> each event Claude Code 2.1.291 produces — measured first with the mock in three probe rounds, the events chosen from a
+> survey of the owner's 7,044 transcripts and the installed scanner.logs (flows/05 "Claude Code's events, measured").
+> The mock gained `next` and `stop refusal` (§4.3). With the smoke test, **30 of 30 pass on 0.8.0 in 20.5 min** (run
+> `sta-final2`, desktop am-e2e-state on a busy PC: every PowerShell hook took 10–22 s, so the tests assert the states'
+> order, not hook latency). Four new 0.8.0 defects, each with a known-defect test: STA-K1 (a killed claude reads
+> Running for good — a stale `busy` heartbeat), STA-K2 (Esc before any output reads Running ~30 s), STA-K3 (a manual
+> /compact reads Running ~30 s after it ended), STA-K4 (a blocking Stop hook leaves the session Waiting while Claude
+> Code continues the turn).
+>
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
 > lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part
@@ -268,6 +279,8 @@ that message — stateless, so a retried request gets the same answer.
 | `error <status> <type> "<msg>" [times=N]` | answer with an HTTP error; with `times=N` only the first N attempts fail, then the step proceeds |
 | `drop [after=N]` | cut the connection after N events (no `message_stop`) |
 | `stop <reason>` | override the stop reason (`max_tokens`, `refusal`, `pause_turn`) |
+| `stop refusal [<category>] ["<explanation>"]` | a refusal with the API's `stop_details` `{type: refusal, category, explanation}` on `message_delta` (defaults: `cyber` and a fixed explanation) — Claude Code 2.1.291 reads them there to word its "… safeguards flagged this message" error |
+| `next` | end this response without a tool call (`end_turn`, or the `stop` given); the steps after it answer the NEXT request of the same turn — the ones Claude Code sends by itself: the continuation after `max_tokens`, a refusal's one retry (and its fallback-model retry), the turn a blocking Stop hook continues |
 | `usage in=<n> out=<n> cache_read=<n>` | the usage of this response (context displays, auto-compaction thresholds) |
 | `title "<t>"` | the title the `title` side request returns for this session |
 | shorthands | `ask "<question>" <opt1>,<opt2>` (AskUserQuestion), `bash "<cmd>"`, `write <path> "<text>"`, `edit <path> "<old>" "<new>"`, `read <path>`, `agent "<subagent prompt>"` |
@@ -288,7 +301,20 @@ fix the parser [[mock reply "done"]]
 [[mock say "half"; drop]]                               (connection lost mid-response -> Error)
 [[mock error 529 overloaded_error "Overloaded" times=2; reply "after retries"]]
 [[mock agent "[[mock bash \"echo sub\"; reply \"sub done\"]]"; reply "parent done"]]
+[[mock say "partial"; stop max_tokens; next; hold g; reply "the rest"]]      (Claude Code continues by itself)
+[[mock say "no"; stop refusal; next; reply "answered after the retry"]]     (its one retry answers)
+[[mock error 400 invalid_request_error "prompt is too long: 250001 tokens > 200000 maximum" times=1; reply "ok"]]
+                                                        (Claude Code compacts, then the turn is sent again)
 ```
+
+What Claude Code 2.1.291 does with each event, measured with these scripts (flows/05 "Claude Code's events,
+measured"): a refusal gets ONE retry (`informational` "… continuing once with that noted"), then a retry on a fallback
+model, then `model_refusal_no_fallback` and an API error; `max_tokens` and `model_context_window_exceeded` continue in
+the same turn; a 529 is retried three times, a 500 / 429 / 401 up to 15 times with backoff (`CLAUDE_CODE_MAX_RETRIES`
+does not change these); an error event mid-stream is not retried; a prompt too long is compacted and sent again. ⚠
+EVERY Agent call runs asynchronously on 2.1.291 (its tool result is "Async agent launched successfully", even with
+`run_in_background: false`): the parent's turn ends at once and the agent's completion comes back as a
+`<task-notification>` turn of its own, which the mock answers past the script's end ("mock: script done").
 
 ### 4.4 Turn duration — the 2-second floor
 
@@ -306,7 +332,7 @@ step), open gates, and the request log. A loopback-only control API:
 | Call | Effect |
 |---|---|
 | `POST /_mock/gate/<name>/release` | a held stream continues |
-| `POST /_mock/gate/<name>/fail` (`{"status":…}` or `{"drop":true}`) | a held stream ends with an error or a cut |
+| `POST /_mock/gate/<name>/fail` (`{"status":…}` or `{"drop":true}`) | a held stream ends with an error or a cut: before any output an HTTP error status; after some output an `error` event and then the response's normal end, as the API's (Claude Code 2.1.291: "API Error: Server error mid-response", no retry — cutting the socket right after the event raced its read and sometimes gave "Connection lost mid-response" instead) |
 | `GET /_mock/requests?session=<id>&since=<seq>` | the classified request log (also a JSONL file) |
 | `GET /_mock/sessions` | sessions seen, with their request counts and open gates |
 | `POST /_mock/reset` | a fresh state between tests |
