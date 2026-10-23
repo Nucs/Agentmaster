@@ -17,7 +17,8 @@ Written 2026-10-23 from: the per-version changelogs of the four releases
 (9245a890f, 381c6c715, 57a40dd30, 0502c9380, 3b042ea32), every spec document under `doc/agentmaster/`, the project
 CLAUDE.md, and the code wherever a document and the code disagreed (the disagreements are listed at the end).
 The catalog started as a design; the section **The suite that runs these flows** below records the implemented
-subset (40 tests reported green on 2026-10-23). Other flows remain specifications, not claims of automated coverage.
+subset (67 tests on 2026-10-23, all green on a test build with that day's fixes). Other flows remain specifications,
+not claims of automated coverage.
 The shared reliability guard and dedicated crash/corruption/leak scenarios are separately planned in
 [E2E_RELIABILITY.md](../E2E_RELIABILITY.md); its G/C/L/R scenario IDs do not add implemented flows to this table.
 
@@ -31,7 +32,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface (STA) | 11 | 6 / 5 / 0 | 30 | 31 | — |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
-| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 (3 fixed in code) |
+| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 (3 fixed in code; TAB-K2 reclassified as a feature) |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /commands, the screen (TGC) | 6 | 4 / 2 / 0 | 25 | 25 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
@@ -46,9 +47,9 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [19-install-update-profiles.md](19-install-update-profiles.md) | Install, update, uninstall, profiles (INS) | 10 | 4 / 5 / 1 | 38 | 20 | — |
 | [20-robustness.md](20-robustness.md) | Freezes, crashes, leaks, hostile environments (ROB) | 11 | 3 / 3 / 5 | 28 | 8 | 1 |
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
-| [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
+| [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **181** | **76 / 75 / 25** (+6 NOT BUILT) | **≈ 664** | **≈ 545** | **24** (6 fixed in code) |
+| **Total** | | **181** | **76 / 75 / 25** (+6 NOT BUILT) | **≈ 664** | **≈ 545** | **24** (7 fixed in code) |
 
 ---
 
@@ -229,18 +230,34 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | TRN-K2 | A ▸ jump in the side panel's peek mode scrolls a hidden tab | read, 2026-10-05 |
 | DSP-K1 | A portable / per-user install shows no session toast; its clicks would do nothing | probe, 2026-09-27 |
 | CLI-K1 | The dev alias's CLI crashes on every real verb (Debug build, Control Flow Guard) | measured, CLI.md §11 |
-| CLI-K2 | An unpackaged release CLI reads the DEV profile (fixed in code by 3b042ea32, not built) | measured, CLI.md §11 |
-| MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch — **fixed in code 2026-10-23** (MGR-07; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
-| SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) — **fixed in code 2026-10-23** (SP-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
+| CLI-K2 | An unpackaged release CLI reads the DEV profile — **fixed in code** by 3b042ea32, verified on the test build 0.8.1.1 (run `fixall-0811`; not in a release) | measured, CLI.md §11 |
+| MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; MGR-07; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
+| SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; SP-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
-| TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) — **fixed in code 2026-10-23** (TCM-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
+| TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; TCM-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | SP-K2 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
-| TAB-K1 | A window close can save its Claude tabs as plain shell tabs (an autosave still pending at the close fired after the teardown archive) — **fixed in code 2026-10-23** (TAB-10 E2, E3; not in a release) | e2e suite, 2026-10-23 (seen once, then reproduced: 3 of 9 closes on 0.8.0, `e2e/suites/test_workspace.py`) |
-| TAB-K2 | A reopen whose focused tab was a shell starts the first Claude tab | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
-| TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation — **fixed in code 2026-10-23** (every page dialog is built in code: a declared one was shown nested in the page, where UI Automation cannot read it; TAB-10 phase 3; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
-| A11Y-K1 | Agentmaster's own surfaces say little to UI Automation: the cog, the compose icons, ⋯ and every board card and tree row have no name, nothing has a stable id, and a card's selection, a tab's selection pill, an unread ring or an unsent draft are pixels only (a screen reader cannot tell them; the suite read them from side effects) — **fixed in code 2026-10-23** (AgentAutomation.h: names, `am.*` AutomationIds, item status — [`../E2E_TESTING.md`](../E2E_TESTING.md) §6.3 "As built"; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
+| TAB-K1 | A window close can save its Claude tabs as plain shell tabs (an autosave still pending at the close fired after the teardown archive) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`: 9 of 9; TAB-10 E2, E3; not in a release) | e2e suite, 2026-10-23 (seen once, then reproduced on 0.8.0: 3 of 9 closes in the first sweep, 6 of 9 in run `nf-080`; `e2e/suites/test_workspace.py`) |
+| TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (runs `fixall-0811`, `fixall-0811b`; every page dialog is built in code: a declared one was shown nested in the page, not as a window-level popup, so the driver — and a screen reader looking for the window's dialog — did not find it; TAB-10 phase 3; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
+| A11Y-K1 | Agentmaster's own surfaces say little to UI Automation: the cog, the compose icons, ⋯ and every board card and tree row have no name, nothing has a stable id, and a card's selection, a tab's selection pill, an unread ring or an unsent draft are pixels only (a screen reader cannot tell them; the suite read them from side effects) — **fixed in code 2026-10-23** (AgentAutomation.h: names, `am.*` AutomationIds, item status — [`../E2E_TESTING.md`](../E2E_TESTING.md) §6.3 "As built"; verified on the test build 0.8.1.1, run `fixall-0811`; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
+| A11Y-K2 | UI Automation's hit test (ElementFromPoint — a screen reader's mouse and touch exploration) passes through every ContentDialog to the terminal behind it, a dialog built in code included; the tree walk and the keyboard reach the dialog | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`, `probe_dialogs.py`) |
 | TAB-K4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; TAB-01 phase 4; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_lifecycle.py`) |
+| TAB-K5 | A reopen with a shell tab in the window starts the last Claude tab even when another Claude tab was focused (TAB-K2's mechanism; with a SHELL focused it is a feature) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | ROB-K1 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured 2026-10-23: the app's replace fails while any handle is open), and nothing re-saves until the next change | e2e suite, 2026-10-23 (`e2e/suites/test_robustness.py`) |
+
+**Checked both ways (2026-10-23).** Every defect fixed in code (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3, A11Y-K1,
+TAB-K4, CLI-K2) has a `needs_fix` test that asserts the CORRECT behavior, and each was run on both builds. On 0.8.0
+every one fails on its defect (runs `nf-080`, `nf-080b`; TAB-K1's sweep on 6 of its 9 moments — the defect is a race,
+which is why it is a sweep). On the test build 0.8.1.1 — a purged Release build whose `src/` equals HEAD 1f4c68678,
+zipped and run only in a claude-fleet desktop, never installed on this PC — every one passes (runs `fixall-0811`,
+`fixall-0811b`). The open defects the suite found (SP-K2, TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
+asserts TODAY's wrong behavior; each passes on both builds, so none of the fixes touched them. The defects found by
+reading or measuring (PQR-K1–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet.
+
+**Reclassified.** TAB-K2 — a reopen whose focused tab was a shell starts a Claude tab: the LAST restored one ("the
+first" as filed, measured with one Claude tab) — is a FEATURE, not a defect (the user's decision of 2026-10-23, the
+day the suite filed it): TAB-10 E1 expects it, and
+`e2e/suites/test_tab_menu.py::test_a_shell_focused_reopen_starts_the_last_claude_tab` proves it
+([07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) *Reclassified: not defects*).
 
 ## Where the documents disagree with the code (found while writing)
 
@@ -264,12 +281,20 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 The executable suite is [`e2e/`](../../../e2e/README.md) (the scripted model, the driver and its page objects, the
 fixtures, the guest runner, the host orchestrator). Each test is marked with its flow (`@pytest.mark.flow("…")`).
 Status on 2026-10-23 against the published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11
-desktop: **49 of 49 tests pass in 37 min**; a known-defect test passes while its defect exists. A `needs_fix` test
-proves a fix that no release holds yet, so it fails on 0.8.0 by design (deselect those tests there with
-`-m "not needs_fix"`). A TEST build of 8932908db with MGR-K1's and SP-K1's fixes passed all 41 tests of the suites
-of 3773f7149, its three new `needs_fix` tests included, and all 28 tests of the tab life cycle, robustness and tab
-menu suites of f710660e0 (the Deactivate scopes test on a rerun, once its own shell count stopped counting a hook
-forwarder; [`../E2E_TESTING.md`](../E2E_TESTING.md) status).
+desktop: **49 of 49 tests pass in 37 min** (the suite of f710660e0); a known-defect test passes while its defect
+exists. A `needs_fix` test proves a fix that no release holds yet, so it fails on 0.8.0 by design (deselect those
+tests there with `-m "not needs_fix"`). A TEST build of 8932908db with MGR-K1's and SP-K1's fixes passed all 41
+tests of the suites of 3773f7149, its three new `needs_fix` tests included, and all 28 tests of the tab life cycle,
+robustness and tab menu suites of f710660e0 (the Deactivate scopes test on a rerun, once its own shell count stopped
+counting a hook forwarder; [`../E2E_TESTING.md`](../E2E_TESTING.md) status).
+
+**Later the same day the suite had 67 tests**, and all 67 pass on the test build 0.8.1.1 — a purged Release build
+whose `src/` equals HEAD 1f4c68678, so it holds every fix of 2026-10-23 (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3,
+A11Y-K1, TAB-K4, CLI-K2) — in a claude-fleet desktop: run `fixall-0811` (65 tests in 63 min: 63 passed; the two
+failures were test versions since corrected — the quit test's hit-test check, now A11Y-K2's own test, and a TAB-K2
+test that expected the FIRST Claude tab to start) and run `fixall-0811b` (the corrected two, A11Y-K2's and TAB-K5's
+new known-defect tests and the dialog probe: 5 of 5). On 0.8.0 every `needs_fix` test fails on its defect (runs
+`nf-080`, `nf-080b`) and the new tests pass (`nf-080b`, `nf-080c`): the defects table above, *Checked both ways*.
 
 | Flow | Automated | Tests (`e2e/suites/`) |
 |---|---|---|
@@ -298,10 +323,11 @@ forwarder; [`../E2E_TESTING.md`](../E2E_TESTING.md) status).
 | TAB-02 | phases 1–6, E1, E3 | `test_tab_lifecycle.py::test_deactivate_scopes` |
 | TAB-03 | phases 3–5, E1, E5 (phases 1–2: TCM-09's tests) | `test_tab_lifecycle.py::test_unfavorite_and_close`, `…::test_close_of_same_folder_across_windows` |
 | TAB-04 | phase 2 (both branches) | `test_tab_lifecycle.py::test_closing_the_focused_tab_never_starts_a_dormant_one` |
-| TAB-10 | phases 1–3; TAB-K2 (TAB-K1 is named by the restart test's record check); phase 3's quit confirmation read by UI Automation (`needs_fix`, a build with TAB-K3's fix) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab`, `test_accessibility.py::test_the_quit_confirmation_is_readable` |
+| TAB-10 | phases 1–3, E1 (TAB-K2, a feature since 2026-10-23), E4 (TAB-K5; TAB-K1 is named by the restart test's record check); phase 3's quit confirmation read by UI Automation (`needs_fix`, a build with TAB-K3's fix) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_a_shell_focused_reopen_starts_the_last_claude_tab`, `…::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` (E4, TAB-K5), `test_accessibility.py::test_the_quit_confirmation_is_readable` |
 | TAB-10 E2, E3 / TAB-K1 | the fix's own checks (`needs_fix`): Close Window right after a tab switch, swept over 5 moments, and on one of two windows over 4 | `test_workspace.py::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs`, `…::test_closing_one_of_two_windows_keeps_its_claude_tab` |
-| A11Y-K1 / TAB-K3 | the fixes' own checks (`needs_fix`), MGR-05 phase 2 among them (the selection on every surface and the tab's pill, read from item status) | `test_accessibility.py::test_the_selection_is_readable_on_every_surface`, `…::test_the_large_paste_warning_is_readable`, `…::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_tab_says_its_session_state` |
+| A11Y-K1 / TAB-K3 | the fixes' own checks (`needs_fix`), MGR-05 phase 2 among them (the selection on every surface and the tab's pill, read from item status) | `test_accessibility.py::test_the_selection_is_readable_on_every_surface`, `…::test_the_large_paste_warning_is_readable`, `…::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_tab_says_its_session_state`, `…::test_known_defect_a_hit_test_passes_through_a_dialog` (A11Y-K2) |
 | ROB-11 | phases 1–2 (phase 2 today: ROB-K1) | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
+| CLI-02 | CLI-K2's fix (`needs_fix`): the release CLI beside an unpackaged install, from a plain shell, reads the install's own profile | `test_cli.py::test_a_plain_shell_reads_the_installs_own_profile` |
 
 Not automated yet in these areas: MGR-05 phase 5
 (folder scope; phase 2 waits for a build with A11Y-K1's fix — 0.8.0 shows the tab's selection pill to no reader), MGR-06, SP-03, SP-07 (hundreds of sessions), SP-04

@@ -536,7 +536,12 @@ def provision(fleet: Fleet, desktop: str, extra: list[str]) -> None:
     tail = log_text[-1500:]
     if not ok:
         raise RuntimeError(f"provisioning failed ({how}):\n{tail}")
-    log(f"provisioned ({how}): " + tail.strip().splitlines()[-1][:300])
+    # The marker decided success; the log line is only the report. A log read that came back blank (seen
+    # 2026-10-23: exit 0, then an IndexError here that ended the run and, with --delete-after, the desktop) must not
+    # fail a provisioning that succeeded.
+    last = next((line for line in reversed(tail.splitlines()) if line.strip()), "")
+    log(f"provisioned ({how}): " + (last.strip()[:300] or f"(the log read back {len(log_text)} characters, none "
+                                                            f"printable)"))
 
 
 def provision_outcome(marker: str, log_text: str) -> tuple[bool, str]:

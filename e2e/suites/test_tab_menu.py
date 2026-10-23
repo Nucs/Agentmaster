@@ -544,7 +544,8 @@ def test_restart_restores_the_renamed_tab_dormant(am, s2):
 
     Args:
         am: The app.
-        s2: F-S2 (t2 selected: the window reopens to a Claude tab — with a SHELL tab focused, TAB-K2 applies).
+        s2: F-S2 (t2 selected: the window reopens to a Claude tab — with a SHELL tab focused, the last Claude tab
+            starts too: TAB-10 E1, TAB-K2, a feature).
     """
     a, b = s2
     w = am.window
@@ -574,21 +575,25 @@ def test_restart_restores_the_renamed_tab_dormant(am, s2):
 
 @pytest.mark.p1
 @pytest.mark.flow("TAB-10")
-@pytest.mark.known_defect("TAB-K2")
-def test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab(am, s1):
-    """TAB-K2 (expected failure once fixed): when a SHELL tab was the focused tab at the quit, the reopened window
-    starts the first restored Claude tab's claude although the window reopens to the shell (measured 2026-10-23 on
-    0.8.0: t1's claude.exe running 5 s after the reopen, the shell selected, t1 Waiting — not a busy tab the restore
-    wake would start). By reading: Claude tabs are re-homed first and the shell's selection is applied only after the
-    shells exist (a trailing SwitchToTab in their startup batch), so until then the first Claude tab is the selected,
-    SHOWN tab, and a shown terminal starts.
+def test_a_shell_focused_reopen_starts_the_last_claude_tab(am, s2):
+    """TAB-10 E1 — TAB-K2, a FEATURE (the user's decision of 2026-10-23; the suite had filed it as a known defect that
+    morning): when a SHELL tab was the focused tab at the quit, the reopened window selects the shell AND starts the
+    LAST restored Claude tab, and only that one. The window restore opens every Claude ref first, in record order,
+    each new tab selecting itself, and selects the focused tab by a SwitchToTab at the END of the shells' startup batch
+    (the shells are created asynchronously); in between, the last Claude tab is the selected, SHOWN tab, and a shown
+    terminal starts (TerminalPage::_RestoreWindowTabs). Every other Claude tab stays dormant (no claude.exe, its menu
+    leads with Activate) until it is entered or activated — t1 is Waiting, so the restore wake (INT-04) leaves it
+    alone too.
 
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert t1 stays dormant.
+    Measured on 0.8.0: with the shell and t1 only, t1's claude.exe running 5 s after the reopen (the known-defect test
+    this replaces — "the FIRST Claude tab", which one Claude tab cannot tell from the last); with the shell, t1 and t2,
+    t2's claude (`[nav] tab-focus <t2>` at the reopen, run nf-080).
 
     Args:
         am: The app.
-        s1: F-S (the strip: the shell, t1).
+        s2: F-S2 (the strip: the shell, t1, t2).
     """
+    a, b = s2
     w = am.window
     w.tabs.select(SHELL)
     time.sleep(2)  # past the window record's autosave debounce
@@ -597,7 +602,44 @@ def test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab(am, s1)
     am.start()
     w = am.window
     w.tabs.wait_selected(SHELL, timeout_s=30)
-    wait_until(lambda: s1.claude_pids(), 15, what="t1's claude (expected: NOT started)")
+    b.wait_running(30)  # the last Claude tab starts with the window
+    hold_true(lambda: not a.claude_pids(), 3.0, what="the first Claude tab stays dormant")
+    assert w.tabs.selected().title == SHELL
+    assert w.tabs.context_menu("t1").names()[0] == "Activate Tab (Shift+Click)"
+    Menu.dismiss_all(am)
+
+
+@pytest.mark.p2
+@pytest.mark.flow("TAB-10")
+@pytest.mark.known_defect("TAB-K5")
+def test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab(am, s2):
+    """TAB-K5 (expected failure once fixed): with a shell tab in the strip, a reopen whose focused tab was a Claude tab
+    other than the LAST one starts the focused tab AND the last Claude tab. It is TAB-K2's mechanism (that one, with a
+    SHELL focused, is a feature): the window restore opens every Claude ref first, each new tab selecting itself, and
+    selects the focused tab only by a SwitchToTab at the end of the shells' asynchronous startup batch, so the last
+    Claude tab is the shown tab in between, and a shown terminal starts. Without a shell tab the focused tab is
+    selected at once and only it starts. Measured on 0.8.0 (2026-10-23, run nf-080b, a probe): after the reopen the
+    strip read t1, t2, the shell, t1 selected, and both claudes ran.
+
+    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert t2 stays dormant. (If the
+    user rules it the same feature as TAB-K2, it becomes that feature's test instead.)
+
+    Args:
+        am: The app.
+        s2: F-S2 (the strip: the shell, t1, t2).
+    """
+    a, b = s2
+    w = am.window
+    w.tabs.select("t1")
+    time.sleep(2)  # past the window record's autosave debounce
+    am.close()
+    am.kill()
+    am.start()
+    w = am.window
+    w.tabs.wait_selected("t1", timeout_s=30)
+    a.wait_running(30)  # the focused tab starts, as it should
+    b.wait_running(15)  # TAB-K5: the last Claude tab starts too (expected: dormant)
+    assert w.tabs.selected().title == "t1"
 
 
 @pytest.mark.p1
