@@ -104,7 +104,11 @@ folders), `s1` (F-S: a session launched through the Agent Manager's launch row, 
 share its name); a git folder first: `am.iso.git_folder("t1", branch="feature/x")`. A second window:
 `am.new_window()` (Ctrl+Shift+N, one shell tab) or `w.tabs.move_to_new_window("t1")`. A restart (F-RS):
 `am.close()` (the ✕ → Close Window; `how="all"` for Close All Windows), read `am.profile.window_records()` if the
-test checks the save, then `am.kill(); am.start()` — or `am.restart()`.
+test checks the save, then `am.kill(); am.start()` — or `am.restart()`. Two markers set the app up BEFORE it starts:
+`@pytest.mark.claude_env(NAME="value")` (more environment for the app and every claude it starts, e.g.
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW="100000"`) and `@pytest.mark.am_settings(key=value)` (Settings-cog values written into
+settings.json, e.g. `skipPermissions=False`). Claude Code's own settings (a user hook, `disableAllHooks`) need no
+restart: `am.claude.seed(settings={...})` before `am.launch(...)` — each claude reads them when it starts.
 
 **The page objects** (`am.window` is the first window; `am.windows()` all of them):
 
@@ -119,6 +123,7 @@ test checks the save, then `am.kill(); am.start()` — or `am.restart()`.
 | `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name, title=…)`, `new_window()`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
 | `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `running()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)`, `wait_running()`, `wait_parked(since=mark)` |
+| `StateTimeline` (`amdriver.timeline`) | a session's side-panel state word sampled every 150 ms in the background: `states()` (the sequence a user saw), `changes()` (with times), `current()`, `seen(state)`, `describe()`; `engine_events` / `engine_story(profile, id, hooks_mark, scanner_mark)` (the hook lines and scanner reconciliations behind it), `transcript_kinds(lines)` | `with StateTimeline(window, title) as tl:` … `tl.wait(state)`, `tl.wait_seen(state)`, `tl.hold(state, s)` (nothing else sampled meanwhile) |
 
 **The oracles** — prefer one the app does not control (flows/README.md "Oracles"): the mock
 (`mock.prompts()`, `mock.requests(session=…)`: what reached the model, with `n_msgs`), the transcript
@@ -142,6 +147,17 @@ since=mark)`), then the UI.
   the structure, then add a page object method — never pixel positions.
 
 ## What the driver knows (measured in the test desktop, 0.8.0, 2026-10-23)
+
+- **Read a session's state from the UI, not from sessions.json.** The file lags the registry by up to ~1 s (a test
+  that read it right after an Error read "Running"), and a read that collides with a save makes the save fail (ROB-K1).
+  The side panel's state word (`StateTimeline`, `side_panel.card(title).state`), the board column and the tree row are
+  read through UI Automation and cost the app nothing.
+- **Hooks can be slow or lost on a busy PC.** On a desktop of a loaded PC every PowerShell hook forwarder took 10–22 s;
+  Claude Code cancels a hook at its timeout (`hook_cancelled` in the transcript) and the scanner carries the state a
+  few seconds later. Wait for states (up to ~2 min), never for a hook's latency.
+- **Claude Code 2.1.291 runs every Agent call in the background**, even with `run_in_background: false`: the `agent`
+  shorthand ends the parent's turn at once, and the agent's completion comes back as a `<task-notification>` turn,
+  which the mock answers past the script's end ("mock: script done").
 
 - **A click is a hand's click.** The pointer rests ~150 ms on the target before the press, and the button is HELD
   ~60 ms. A press on arrival races the target's hover work, and a down and an up sent together are both queued
@@ -225,6 +241,10 @@ since=mark)`), then the UI.
 | TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab. Verified on the test build 0.8.1.1 (run `fixall-0811`: passed) | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
 | TAB-K5 | TAB-10 E4 | With a shell tab in the window, a reopen whose focused tab was a Claude tab other than the last one starts the last Claude tab too (TAB-K2's mechanism) | `test_tab_menu.py::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` |
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
+| STA-K1 | STA-11 E3, STA-01 phase 5 | A claude that ends without its SessionEnd never reads Done; killed mid-turn (or within ~2 s after a turn) the session reads Running for good — its last `busy` heartbeat outlives the process, and the scanner's "work outlived the turn" rule trusts it | `test_session_state.py::test_known_defect_a_killed_claude_keeps_reading_running` |
+| STA-K2 | STA-12 E1 | Esc before any output: Claude Code puts the prompt back in the box and writes nothing; the session reads Running ~30 s more (the presence-idle release) | `test_session_state.py::test_known_defect_esc_before_any_output_reads_running_for_half_a_minute` |
+| STA-K3 | STA-06 phase 1 | A manual `/compact` reads Running ~30 s after it ended: PostCompact sets Waiting, and 2 ms later the still-`busy` heartbeat promotes Running again | `test_session_state.py::test_known_defect_compact_reads_running_half_a_minute_after_it_ended` |
+| STA-K4 | STA-13 phase 2 | A Stop hook that blocks: Claude Code continues the same turn, but the session reads Waiting for you (our Stop hook already ran) until the busy heartbeat outlives the turn by 20 s | `test_session_state.py::test_known_defect_a_blocking_stop_hook_reads_waiting_while_claude_continues` |
 
 TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
 filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a

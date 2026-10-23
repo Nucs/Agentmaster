@@ -379,9 +379,13 @@ class Handler(BaseHTTPRequestHandler):
             elif el.kind == "tool_use":
                 content.append({"type": "tool_use", "id": "toolu_mock_" + uuid.uuid4().hex[:16], "name": el.name,
                                 "input": el.input})
-        self._json(200, {"id": "msg_mock_" + uuid.uuid4().hex[:16], "type": "message", "role": "assistant",
-                         "model": body.get("model", "claude-mock-1"), "content": content,
-                         "stop_reason": resp.stop, "stop_sequence": None, "usage": _usage(resp)})
+        message = {"id": "msg_mock_" + uuid.uuid4().hex[:16], "type": "message", "role": "assistant",
+                   "model": body.get("model", "claude-mock-1"), "content": content,
+                   "stop_reason": resp.stop, "stop_sequence": None, "usage": _usage(resp)}
+        if resp.stop_details is not None:
+            # A refusal's category and explanation, as on the streamed message_delta.
+            message["stop_details"] = resp.stop_details
+        self._json(200, message)
 
 
 def _usage(resp: Response) -> dict:
@@ -571,10 +575,16 @@ class Stream:
                             self.h._json(outcome["status"], Handler._api_error(outcome["status"], outcome["type"],
                                                                                outcome["message"]))
                             return
-                        # Mid-stream: the API's own way to fail a started stream.
+                        # Mid-stream: the API's own way to fail a started stream — an `error` event, then the
+                        # response ENDS (the last chunk), as the API's does. Cutting the socket right after the event
+                        # instead raced Claude Code's read: it then saw "Connection lost mid-response" or "Server
+                        # error mid-response" depending on which arrived first (measured 2026-10-23).
                         self.event("error", {"type": "error", "error": {"type": outcome["type"],
                                                                         "message": outcome["message"]}}, count=False)
-                        raise Cut()
+                        self.h.wfile.write(b"0\r\n\r\n")
+                        self.h.wfile.flush()
+                        self.h.close_connection = True
+                        return
                     continue
                 if el.kind == "drop":
                     if el.after <= 0:
@@ -585,8 +595,12 @@ class Stream:
                     continue
                 self._block(index, el)
                 index += 1
-            self.event("message_delta", {"type": "message_delta",
-                                         "delta": {"stop_reason": self.resp.stop, "stop_sequence": None},
+            delta = {"stop_reason": self.resp.stop, "stop_sequence": None}
+            if self.resp.stop_details is not None:
+                # Where the API sends a refusal's category and explanation (Claude Code 2.1.291 reads
+                # message_delta.delta.stop_details into the message it builds).
+                delta["stop_details"] = self.resp.stop_details
+            self.event("message_delta", {"type": "message_delta", "delta": delta,
                                          "usage": {"output_tokens": _usage(self.resp)["output_tokens"]}})
             self.event("message_stop", {"type": "message_stop"})
             self.h.wfile.write(b"0\r\n\r\n")

@@ -240,6 +240,49 @@ class TestPlan:
         assert r.stop == "max_tokens"
         assert r.usage == {"input_tokens": 5000, "cache_read_input_tokens": 40000}
 
+    def test_stop_refusal_carries_stop_details(self):
+        """`stop refusal` adds the API's stop_details (defaults, or the scripted category and explanation); other
+        stop reasons carry none and take no further argument.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On wrong details.
+        """
+        bare = plan('say "no"; stop refusal').responses[0]
+        assert bare.stop == "refusal"
+        assert bare.stop_details == {"type": "refusal", "category": "cyber",
+                                     "explanation": "This request was blocked by the mock model's scripted refusal."}
+        told = plan('say "no"; stop refusal bio "Not this one."').responses[0]
+        assert told.stop_details == {"type": "refusal", "category": "bio", "explanation": "Not this one."}
+        assert plan('say "x"; stop max_tokens').responses[0].stop_details is None
+        with pytest.raises(ScriptError, match="no further argument"):
+            plan('say "x"; stop max_tokens bio')
+        with pytest.raises(ScriptError, match="at most a category"):
+            plan('say "x"; stop refusal bio "a" "b"')
+
+    def test_next_ends_a_response_without_a_tool(self):
+        """`next` closes the response (keeping a `stop` override); the steps after it answer the next request; a
+        pending expect / error stays with the response that follows; after a tool call it changes nothing.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On a wrong grouping.
+        """
+        p = plan('say "partial"; stop max_tokens; next; hold g; reply "rest"')
+        assert [kinds(r) for r in p.responses] == [["text"], ["hold", "text"]]
+        assert p.responses[0].stop == "max_tokens" and p.responses[0].final
+        assert p.responses[1].stop == "end_turn" and p.responses[1].final
+        q = plan('say "no"; stop refusal; next; say "no again"; stop refusal; next; reply "never"')
+        assert [r.stop for r in q.responses] == ["refusal", "refusal", "end_turn"]
+        r = plan('reply "first stop"; say "unreached"')
+        assert len(r.responses) == 1  # reply still ends the script: `next` is what continues a finished turn
+        s = plan('say "first stop"; next; error 529 overloaded_error "busy" times=1; next; reply "continued"')
+        assert len(s.responses) == 2 and s.responses[1].fail == (529, "overloaded_error", "busy", 1)
+        t = plan('bash "echo"; next; reply "done"')
+        assert [kinds(x) for x in t.responses] == [["tool_use"], ["text"]]
+
     def test_bare_number_delay_is_milliseconds(self):
         """A bare number of milliseconds (the spike's form) is accepted.
 

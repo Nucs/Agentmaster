@@ -21,6 +21,14 @@ Steps (separated by ``;``; arguments are JSON values or bare words):
                                         of the NEXT response fail, then it is served (a retried request)
     drop [after=N]                      cut the connection (after N more SSE events of this response)
     stop <reason>                       override this response's stop_reason (max_tokens, refusal, ...)
+    stop refusal [<category>] ["<explanation>"]
+                                        a refusal with the API's stop_details {type: refusal, category,
+                                        explanation} (defaults: "cyber" and a fixed explanation), which
+                                        Claude Code reads off message_delta to word its refusal message
+    next                                end this response here (end_turn unless a `stop` changed it); the
+                                        following steps answer the NEXT request of the turn — for the turns
+                                        Claude Code continues by itself (after max_tokens, a refusal's retry,
+                                        a Stop hook that blocks)
     usage in=<n> out=<n> cache_read=<n> cache_write=<n>
                                         this response's usage numbers (context displays)
     title "<t>"                         what the session-title side request answers for this session
@@ -48,8 +56,13 @@ from typing import Any, Callable, Optional
 #: The words a script may use as step names; anything else is a ScriptError (fails loudly, never guessed).
 STEP_NAMES = frozenset({
     "say", "think", "tool", "tools", "reply", "stream", "delay", "hold", "error", "drop", "stop", "usage",
-    "title", "fast", "expect", "use", "ask", "bash", "write", "edit", "read", "agent",
+    "title", "fast", "expect", "use", "ask", "bash", "write", "edit", "read", "agent", "next",
 })
+
+#: The refusal category a bare `stop refusal` reports (the one this PC's own refusals carried: cyber).
+DEFAULT_REFUSAL_CATEGORY = "cyber"
+#: The refusal explanation a `stop refusal` without one reports (Claude Code shows it; never parses it).
+DEFAULT_REFUSAL_EXPLANATION = "This request was blocked by the mock model's scripted refusal."
 
 #: The opening marker of a script inside a message's text.
 OPEN = "[[mock"
@@ -97,6 +110,8 @@ class Response:
         expect: A regex the tool result arriving WITH this response's request must match ("" = none).
         final: True when this response ends the turn (end_turn / a stop override other than tool_use);
             the server applies the turn floor to it.
+        stop_details: The API's structured stop details sent with the stop reason ({"type": "refusal",
+            "category": ..., "explanation": ...} for `stop refusal`), or None (the key is then left out).
     """
 
     elements: list = field(default_factory=list)
@@ -105,6 +120,7 @@ class Response:
     usage: dict = field(default_factory=dict)
     expect: str = ""
     final: bool = True
+    stop_details: Optional[dict] = None
 
 
 @dataclass
@@ -471,6 +487,15 @@ def _group(steps: list, src: str) -> Plan:
                 close("end_turn", True)
             pending_fail = (status, etype, message, n)
             continue
+        if name == "next":
+            # The END of a response without a tool call: what Claude Code continues by itself (a max_tokens
+            # recovery, a refusal's retry, a Stop hook's block) is the next request of the same turn, and gets
+            # the steps that follow. It is handled before start_if_new, so a pending `expect` / `error times=N`
+            # stays with the response that follows; on an empty response (right after a tool call) it changes
+            # nothing.
+            if cur.elements or cur.fail or cur.expect:
+                close("end_turn", True)
+            continue
         start_if_new()
         if name in ("say", "think"):
             cur.elements.append(Element("text" if name == "say" else "thinking", text=_text_arg(name, pos),
@@ -489,6 +514,17 @@ def _group(steps: list, src: str) -> Plan:
                 raise ScriptError(f"step 'drop': after must be a number, not {after!r}") from None
         elif name == "stop":
             cur.stop = _text_arg(name, pos)
+            if cur.stop == "refusal":
+                # The API sends a refusal's category and explanation with the stop reason (stop_details on
+                # message_delta); Claude Code words its "safeguards flagged this message" text from them.
+                category = _text_arg(name, pos, 1) if len(pos) > 1 else DEFAULT_REFUSAL_CATEGORY
+                explanation = _text_arg(name, pos, 2) if len(pos) > 2 else DEFAULT_REFUSAL_EXPLANATION
+                if len(pos) > 3:
+                    raise ScriptError("step 'stop refusal' takes at most a category and an explanation")
+                cur.stop_details = {"type": "refusal", "category": category, "explanation": explanation}
+            elif len(pos) > 1:
+                # Only a refusal carries details: an extra argument elsewhere is a typo, never ignored.
+                raise ScriptError(f"step 'stop {cur.stop}' takes no further argument (only 'stop refusal' has details)")
         elif name == "usage":
             mapping = {"in": "input_tokens", "out": "output_tokens", "cache_read": "cache_read_input_tokens",
                        "cache_write": "cache_creation_input_tokens"}

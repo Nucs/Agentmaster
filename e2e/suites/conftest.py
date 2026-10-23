@@ -116,20 +116,30 @@ def _dump_files() -> set[str]:
 def iso(request) -> Isolation:
     """The test's folders (profile, Claude config, work folders, evidence), emptied and seeded.
 
+    A test marked `@pytest.mark.claude_env(NAME="value", ...)` gets those variables in the app's environment, so every
+    claude.exe the app starts inherits them (e.g. CLAUDE_CODE_MAX_RETRIES="1" makes an API error final after one retry).
+
     Args:
-        request: pytest's request (the test's name names the folders).
+        request: pytest's request (the test's name names the folders; its claude_env marker adds variables).
     Returns:
         The Isolation.
     """
-    return Isolation(name=request.node.name).prepare()
+    iso = Isolation(name=request.node.name)
+    marker = request.node.get_closest_marker("claude_env")
+    if marker is not None:
+        iso.extra_env.update({k: str(v) for k, v in marker.kwargs.items()})
+    return iso.prepare()
 
 
 @pytest.fixture
 def am(request, iso, mock):
     """A running Agentmaster for this test.
 
+    A test marked `@pytest.mark.am_settings(key=value, ...)` starts the app with those Settings-cog values already in
+    its settings.json (the app reads the file at start; e.g. skipPermissions=False for a permission prompt).
+
     Args:
-        request: pytest's request.
+        request: pytest's request (its am_settings marker seeds settings.json before the start).
         iso: The test's folders.
         mock: The scripted model.
     Yields:
@@ -140,6 +150,9 @@ def am(request, iso, mock):
     _end_strays()
     dumps_before = _dump_files()
     app = App(iso, mock=mock)
+    marker = request.node.get_closest_marker("am_settings")
+    if marker is not None:
+        app.profile.write_settings(dict(marker.kwargs))
     app.start()
     yield app
     failed = any(getattr(getattr(request.node, f"rep_{when}", None), "failed", False) for when in ("setup", "call"))
