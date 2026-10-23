@@ -1899,7 +1899,26 @@ namespace winrt::TerminalApp::implementation
         // Throws winrt::hresult_error when the window's dispatcher refuses the work (a closing window),
         // and std::bad_alloc.
         void _PromptForModel(std::function<void(winrt::hstring)> onPicked, const std::wstring& seed = {});
+        // Close the "Specify a model" prompt (commit, Cancel, Escape, a backdrop press) and release its card. When the
+        // prompt held the keyboard, give it back (TCM-K2): to _specifyModelReturnFocus, else to the current tab
+        // (_ReturnKeyboardAfterPanel). A commit runs this BEFORE its launch, so a launch that opens its tab in front
+        // takes the keyboard after it. Idempotent (a closed prompt moves no focus). UI thread only.
+        // Throws what Popup::IsOpen / Child throw (winrt::hresult_error), as before; the focus step never throws.
         void _HideSpecifyModel();
+        // Agentmaster (TCM-K2): give the keyboard back after a Root()-parented panel that held it closed (the Tags
+        // panel, the "Specify a model" prompt). The panel's own close removed the focused element, and the focus
+        // manager has moved the focus to whatever it found next (AgentPanelFocus.h, fact 3), so this puts it where it
+        // was before the panel opened. Call it only when AgentPanelHoldsKeyboard said yes BEFORE the close: else a
+        // press or a tab switch already gave the focus a new home, and this would take it away.
+        //   target    - the Control that held the keyboard when the panel opened (AgentCaptureFocusReturn); when it is
+        //               empty, gone, or cannot take the focus (it left the tree), the current tab gets the keyboard
+        //               instead (_FocusCurrentTab(true): its terminal, or the Agent Manager page while that is up).
+        //   panelName - what closed, for the one [focus] line this writes to hooks.log.
+        // Synchronous on purpose: after an Escape key-up the next key must already find the terminal, and inside a
+        // press handler the focus must be set before the press's own work (a menu that the press opens takes the
+        // keyboard after this, a tab switch moves it to the new tab after this). UI thread only.
+        // Exceptions: none (a failure is logged, and the keyboard stays where the focus manager put it).
+        void _ReturnKeyboardAfterPanel(const winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control>& target, std::wstring_view panelName) noexcept;
         std::function<void(std::function<void(winrt::hstring)>)> _ModelSpecifyOpener(); // ONE opener, shared by every model submenu this page builds or feeds
         // Agentmaster (PRESETS, HARNESSES.md §8.2): the "Add presets…" opener every model submenu this page builds or
         // feeds passes to AgentFillModelPickItems (the Sessions page's row menu + detail split buttons, the WT tab
@@ -1922,8 +1941,13 @@ namespace winrt::TerminalApp::implementation
         void _RandomizeTagEditorColor(); // roll a fresh random (non-explicit) pre-pick — on every panel open and after every added tag; always moves off the current pick
         void _ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag); // add/remove one tag on a session (SessionStore) + refresh its tab badges + re-render the panel list; an untag first registers the tag (tags.json) so losing its last carrier can't vanish it
         void _RemoveGlobalTag(const std::wstring& tag); // the tag-list row's ✕ (0-carrier rows only): explicitly delete the tag from the durable registry — the ONE tag-removal path (a carried tag stays alive via the derived union; the color entry is kept)
-        void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch). It first ends the panel's tooltips: an open one closes, and one that still waits out its 3 s rest (kTagPanelTipDelay) is cancelled, so it cannot open on the next open of the panel. Idempotent; the tooltip step never throws
+        void _CloseTagEditorPopup(); // dismiss the panel (the Escape key-UP / outside press / tab switch). It first ends the panel's tooltips: an open one closes, and one that still waits out its 3 s rest (kTagPanelTipDelay) is cancelled, so it cannot open on the next open of the panel. When the panel held the keyboard it gives it back (TCM-K2: _ReturnKeyboardAfterPanel to _tagEditorReturnFocus, else the current tab). Idempotent; the tooltip and focus steps never throw
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _specifyModelPopup{ nullptr }; // the "Specify a model..." prompt — built once, parented into Root(); its CHILD is rebuilt per open (fresh MRU + this invocation's callback)
+        // Agentmaster (TCM-K2): the Control that held the keyboard when the "Specify a model" prompt opened (captured
+        // right before the prompt focuses its box, AgentCaptureFocusReturn), where _HideSpecifyModel gives the keyboard
+        // back. Empty = the current tab gets it (the prompt came from a tab's menu, or nothing usable held the focus).
+        // Weak: the target may be closed or rebuilt while the prompt is up. Cleared by every close.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control> _specifyModelReturnFocus;
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tags panel (bookmark tags) — built once, parented into Root()
         winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary, and the root below which _CloseTagEditorPopup ends the panel's tooltips)
         winrt::Windows::UI::Xaml::Controls::TextBox _tagEditorBox{ nullptr }; // row 1: the focusable "name the tag" box
@@ -1936,6 +1960,18 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _tagEditorCount{ nullptr }; // the dim "K of N tags" footer
         std::wstring _tagEditorSessionId; // the session the open panel edits
         bool _tagEditorOutsideHooked{ false }; // the Root() outside-press dismissal handler is registered (once)
+        // Agentmaster (TCM-K2): the Control that held the keyboard when the Tags panel opened (captured right before the
+        // panel focuses its name box, AgentCaptureFocusReturn), where _CloseTagEditorPopup gives the keyboard back when
+        // the panel held it. Empty = the current tab gets it: the panel came from a TAB's menu (GH#5750's rule — after
+        // a tab menu the keyboard belongs to the terminal), or nothing usable held the focus. Weak: a board card can be
+        // rebuilt, a Sessions row re-rendered, while the panel is up. Kept across an open while open; cleared by every close.
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control> _tagEditorReturnFocus;
+        // Agentmaster (TCM-K2): an Escape key went DOWN inside the open panel, so its key-UP closes the panel. Closing on
+        // the key-down handed the rest of the keystroke to whatever got the keyboard next, and once the keyboard goes back
+        // to the terminal that is claude (an ESC interrupts a running turn). Set by the card's key-down hook, consumed by
+        // its key-up hook, disarmed by any other key-down and by every open and close, so a key-up whose key-down
+        // happened elsewhere (before the panel opened) never closes it.
+        bool _tagEditorEscArmed{ false };
         std::vector<::Agentmaster::GlobalTagInfo> _tagEditorUniverse; // the global tag universe CACHED at open/toggle — the per-keystroke cap check must not re-scan the session-store dir
         // Agentmaster (tags perf, 2026-10-10): is _tagEditorUniverse the REAL universe? False while the
         // panel shows "Loading tags…" — the session store was cold when the list was last built, so it

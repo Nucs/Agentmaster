@@ -182,7 +182,12 @@ and the board's.
    `session-store\<id>.json` holds `"favorite"`. Unfavorite reverses all three.
 5. **Tags.** *Expect:* the Tags panel opens under the tab: a name box (with the keyboard focus), the color
    swatches, the tag list; a typed name + Enter adds the tag (`N of M tags`, the session store's `tags`); Esc
-   closes it. Today the focus stays in the terminal (TCM-K2).
+   closes it on the key-up and reaches nothing else — a running turn goes on — and the keyboard goes back to the
+   terminal. *Check:* [UIA] the focused element is the edit `tag name` from ~one tick after the open and stays it
+   past the menu's close; after Esc, a `TermControl`; [LOG] `[focus] tab menu closed while the keyboard is in an open
+   popup (Windows.UI.Xaml.Controls.TextBox): no hand-back to the terminal` and `[focus] the Tags panel closed: the
+   keyboard went back to …`. On 0.8.0 the focus stayed in the terminal (TCM-K2, fixed in code 2026-10-23, NOT BUILT
+   into a release).
 
 ---
 
@@ -297,9 +302,12 @@ the tab and the session no longer share one title (CLAUDE.md Rule #11). `_SyncCl
 the managed name when the override is emptied; the cause of the miss is not identified yet. **Expected:** the tab
 reads `alpha` again.
 
-### TCM-K2 · Tags from the tab menu leaves the keyboard in the terminal
-> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_menu.py`
-> `test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal`)
+### TCM-K2 · Tags from the tab menu leaves the keyboard in the terminal — FIXED in code 2026-10-23 (NOT BUILT into a release)
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
+> `e2e/suites/test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard`, marked `needs_fix("TCM-K2")`).
+> **The fix:** the tab menu's `Closed` hand-back stands aside while the keyboard is inside an open popup; the Tags
+> panel closes on the Escape KEY-UP and gives the keyboard back when it closes; the "Specify a model" prompt that the
+> tab menu's model submenus open gives it back the same way (`AgentPanelFocus.h`, `Tab.cpp`). What it was on 0.8.0:
 
 Tab menu → **Tags**: the panel opens, but the focused element stays the terminal (UI Automation, polled 1.5 s):
 a typed tag name lands in Claude's input box as an unsent draft, and **Esc goes to claude** — it would interrupt a
@@ -307,3 +315,37 @@ running turn — while the panel stays open. The panel works once clicked into (
 **Cause (by reading):** the tab menu's `Closed` handler raises `RequestFocusActiveControl` (Windows Terminal's
 GH#5750: "toss the focus back to our control" after a menu) unless a RENAME is in progress — the Tags panel's own
 focus is taken back. **Expected:** the panel's name box has the focus; Esc closes the panel and reaches nothing else.
+
+**How it happened, from the WinUI source** (microsoft-ui-xaml, read 2026-10-23):
+- `MenuFlyoutItem::Invoke` raises Click FIRST and closes the menu after it. The menu's popup closes in that same call
+  and gives the focus back to what had it before the menu opened (`CPopup::Close`, its light-dismiss branch).
+- The Tags handler opens the panel one dispatcher tick later and focuses its box one tick after that: the box had the
+  keyboard within a few milliseconds.
+- The menu's `Closed` EVENT comes much later: `FlyoutBase` raises it from its presenter's `Unloaded`, after the close
+  animation (`FlyoutBase::OnPresenterUnloaded`). Its GH#5750 hand-back (`_FocusCurrentTab`) then focused the
+  terminal and took the keyboard out of the box. The same happened to the "Specify a model" prompt that a tab menu's
+  New Session Here ▸ / Fork session ▸ opens.
+
+**The fix, in three parts:**
+1. **`Tab.cpp`, the menu's `Closed`:** the hand-back is skipped while the keyboard is inside an open popup
+   (`AgentFocusInOpenPopup`: the focused element lies under the Child of a popup that `GetOpenPopupsForXamlRoot` lists).
+   An Esc that dismisses the menu leaves the focus on the tab or the terminal, never in a popup, so GH#5750's own case
+   still gets the hand-back. The color picker is not affected: its Flyout opens only after the menu's `Closed` (WinUI
+   stages a flyout that opens while another one closes). One `[focus] tab menu closed while the keyboard is in an open
+   popup (<class>): no hand-back to the terminal` line per such close.
+2. **The Tags panel closes on the Escape KEY-UP** (a key-down inside the panel arms it, any other key-down disarms;
+   both hooks `handledEventsToo` on the card). On the key-down, the rest of the keystroke — its ESC character — went to
+   whatever got the keyboard next, which is claude once the keyboard goes back to the terminal; by the key-up the
+   character has gone to the panel's own box (the Specify prompt's rule; upstream's tab renamer closes on key-up too).
+3. **The panel gives the keyboard back when it closes while holding it.** It is a plain Popup: closing it with the
+   focus inside only removes the focused box, and the focus manager then moves the focus to the next focusable
+   element it finds (`CFocusManager::SetFocusOnNextFocusableElement`) — anywhere in the window. `_CloseTagEditorPopup`
+   and `_HideSpecifyModel` now ask `AgentPanelHoldsKeyboard` BEFORE the close and then call `_ReturnKeyboardAfterPanel`:
+   the Control that held the keyboard when the panel opened (`AgentCaptureFocusReturn`, read right before the box takes
+   it — the terminal, a board card, a Sessions row), else the current tab. A tab header counts as "the current tab":
+   after a tab's menu the keyboard belongs to the terminal (GH#5750's rule). A close the panel did not hold the
+   keyboard for moves no focus (an outside press already focused what it hit; a tab switch already focused the new
+   tab). One `[focus] <panel> closed: the keyboard went back to …` line per such close.
+
+⚠ `TerminalPage` gained data members (`_tagEditorReturnFocus`, `_tagEditorEscArmed`, `_specifyModelReturnFocus`):
+the next build must purge.

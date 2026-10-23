@@ -36,6 +36,7 @@
 
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentManagerContent.h" // push the External census / RefreshNow
+#include "AgentPanelFocus.h" // Agentmaster (TCM-K2): who holds the keyboard while the Tags panel is up, and where it goes when the panel closes
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot); TagColorFor (bookmark tags)
 #include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tags panel's controls (AgentSetTip with kTagPanelTipDelay; AgentCloseTipsIn ends them when the panel closes)
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
@@ -1128,10 +1129,20 @@ namespace winrt::TerminalApp::implementation
     }
 
     // The shared open: place + show the panel for `sid` at root-relative (x, y). DEFERRED one
-    // dispatcher tick: every caller sits inside a closing context flyout's click, whose Closed
-    // handler tosses focus back to its target — that refocus must land BEFORE the panel opens +
-    // focuses its name box, or it would steal the box's focus. The color picker is re-randomized
-    // on every open (the "prepicked random" pre-pick).
+    // dispatcher tick: every caller sits inside a closing context flyout's click, and the menu's
+    // popup closes right after that click and returns the focus to where it was before the menu —
+    // that refocus must land BEFORE the panel opens + focuses its name box, or it would steal the
+    // box's focus. The color picker is re-randomized on every open (the "prepicked random" pre-pick).
+    // Agentmaster (TCM-K2): the deferral alone never covered the TAB's menu. Its Closed EVENT (upstream's
+    // GH#5750 hand-back to the terminal) comes after the menu's close animation, well after both ticks
+    // here, and it took the keyboard back out of the name box; Tab.cpp's handler now stands aside while
+    // the keyboard is in an open popup (AgentPanelFocus.h). The second tick also records where the
+    // keyboard was (_tagEditorReturnFocus), so the panel can give it back when it closes.
+    // Parameters: sid - the session the panel edits ("" does nothing); x, y - the root-relative anchor
+    //   (the card is clamped so it never hangs past the window's right edge).
+    // Returns at once; the panel opens on a later dispatcher tick. UI thread only.
+    // Exceptions: throws what Dispatcher().RunAsync throws (winrt::hresult_error for a closing window);
+    //   the ticks' own work is the panel build's (_EnsureTagEditorPopup) and contained where noted.
     void TerminalPage::_OpenTagEditorAt(const std::wstring& sid, double x, double y)
     {
         if (sid.empty())
@@ -1171,14 +1182,27 @@ namespace winrt::TerminalApp::implementation
             page->_RandomizeTagEditorColor(); // fresh random pre-pick each open
             page->_RebuildTagEditorList();
             page->_UpdateTagEditorAddState();
+            // Agentmaster (TCM-K2): an open while the panel is already up keeps the keyboard's return target
+            // of the FIRST open (the panel itself is no place to go back to); a fresh open captures a new one
+            // in the next tick. An Escape that went down before this open must not close the new panel.
+            const bool wasOpen = page->_tagEditorPopup.IsOpen();
+            page->_tagEditorEscArmed = false;
             page->_tagEditorPopup.IsOpen(true);
             // Focus the name box one tick AFTER the open — on the FIRST open the popup's child has
             // only just been realized, and a same-tick Focus on a not-yet-laid-out TextBox can no-op.
-            page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak]() {
+            page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak, wasOpen]() {
                 if (const auto p = weak.get())
                 {
                     if (p->_tagEditorPopup && p->_tagEditorPopup.IsOpen() && p->_tagEditorBox)
                     {
+                        // Agentmaster (TCM-K2): where the keyboard is right before the box takes it — the
+                        // terminal, a board card, a Sessions row; a tab header answers "the current tab"
+                        // (AgentCaptureFocusReturn's rule). Read now, not at the click: the menu's popup has
+                        // closed since then and returned the focus to where it was before the menu.
+                        if (!wasOpen)
+                        {
+                            p->_tagEditorReturnFocus = AgentCaptureFocusReturn(p->Root().XamlRoot(), p->_tagEditorCard, p->_tabView);
+                        }
                         p->_tagEditorBox.Focus(FocusState::Programmatic);
                     }
                 }
@@ -1261,8 +1285,11 @@ namespace winrt::TerminalApp::implementation
             }
             else if (e.Key() == VirtualKey::Escape)
             {
+                // Agentmaster (TCM-K2): swallow the key-down only. The card's key-down hook (handledEventsToo,
+                // below) arms the close and its key-up hook closes the panel: closing here, on the key-down,
+                // would hand the rest of the keystroke to the element that gets the keyboard next, and the close
+                // gives the keyboard back to the terminal.
                 e.Handled(true);
-                page->_CloseTagEditorPopup();
             }
         });
         Grid::SetColumn(_tagEditorBox, 0);
@@ -1356,18 +1383,55 @@ namespace winrt::TerminalApp::implementation
         _tagEditorCard.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
         _tagEditorCard.Padding(Thickness{ 10, 8, 10, 8 });
         _tagEditorCard.Child(body);
-        // Esc anywhere in the card (a focused row button, the list, ...) closes; the box's own
-        // KeyDown above already handles it while typing (both are idempotent).
-        _tagEditorCard.KeyDown([weak = get_weak()](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
-            if (e.Key() == VirtualKey::Escape)
-            {
+        // Esc anywhere in the card (the name box, a focused row button, the list, ...) closes the panel, on the
+        // KEY-UP. Agentmaster (TCM-K2): it closed on the key-down before. The close now gives the keyboard back
+        // (to the terminal, after a tab's menu), and Windows delivers the rest of an Escape keystroke — its ESC
+        // character — after the key-down: closing on the key-down handed that ESC to claude, which reads it as
+        // an interrupt of a running turn. By the key-up the character has gone to the panel's own box, which
+        // ignores it (the Specify prompt's rule, AgentModelPrompt.h; upstream's tab renamer closes on key-up
+        // for the same reason).
+        // Both hooks are handledEventsToo: the name box marks its Escape (and Enter) key-down Handled, and a key
+        // the box or a row button handles must still disarm. The pair acts only on an Escape whose key-DOWN it
+        // saw itself, so a key-up whose key-down happened before the panel opened never closes it.
+        _tagEditorCard.AddHandler(
+            UIElement::KeyDownEvent(),
+            winrt::box_value(WUX::Input::KeyEventHandler{ [weak = get_weak()](const IInspectable&, const WUX::Input::KeyRoutedEventArgs& e) {
+                const auto page = weak.get();
+                if (!page)
+                {
+                    return;
+                }
+                // Any other key-down disarms: the next key-up must belong to the key that went down last.
+                page->_tagEditorEscArmed = e.Key() == VirtualKey::Escape;
+                if (page->_tagEditorEscArmed)
+                {
+                    e.Handled(true);
+                }
+            } }),
+            true /* handledEventsToo */);
+        _tagEditorCard.AddHandler(
+            UIElement::KeyUpEvent(),
+            winrt::box_value(WUX::Input::KeyEventHandler{ [weak = get_weak()](const IInspectable&, const WUX::Input::KeyRoutedEventArgs& e) {
+                const auto page = weak.get();
+                if (!page || e.Key() != VirtualKey::Escape || !page->_tagEditorEscArmed)
+                {
+                    return; // not an Escape, or its key-down was not seen inside the open panel
+                }
+                page->_tagEditorEscArmed = false;
+                // Set before acting: the close removes the focused element synchronously.
                 e.Handled(true);
-                if (const auto page = weak.get())
+                try
                 {
                     page->_CloseTagEditorPopup();
                 }
-            }
-        });
+                catch (...)
+                {
+                    // An exception escaping a XAML event handler can fail the whole app. Nothing to recover:
+                    // the panel stays open, and a press outside it (or a tab switch) still closes it.
+                    ::Agentmaster::AgentLogCaughtException(L"Tags panel: close on the Escape key-up");
+                }
+            } }),
+            true /* handledEventsToo */);
 
         _tagEditorPopup = Windows::UI::Xaml::Controls::Primitives::Popup{};
         _tagEditorPopup.Child(_tagEditorCard);
@@ -2090,16 +2154,25 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Dismiss the panel (Esc / a press outside the card / a tab switch). Idempotent: on a panel that is
-    // closed, or was never built, it only clears the session id. So the call that every tab selection
-    // makes (_ApplyAgentTabSelection) costs two checks.
+    // Dismiss the panel (the Escape key-up / a press outside the card / a tab switch). Idempotent: on a
+    // panel that is closed, or was never built, it only clears the session id and the Escape arm. So the
+    // call that every tab selection makes (_ApplyAgentTabSelection) costs a few checks.
     // The panel's tooltips end with the panel: an open tooltip closes now, and a tooltip that still
     // waits out its rest (kTagPanelTipDelay, 3 s) is cancelled. The comment in the body says why.
+    // Agentmaster (TCM-K2): the keyboard goes back when the panel held it. The panel is a plain Popup:
+    // closing it with the focus inside only removes the focused box, and the focus manager then moves the
+    // focus to whatever it finds next in the window (AgentPanelFocus.h, fact 3), so Escape left the
+    // keyboard somewhere arbitrary. It now goes to where it was before the panel opened
+    // (_tagEditorReturnFocus), or to the current tab. A close the panel did NOT hold the keyboard for
+    // moves no focus: an outside press already focused what it hit (the terminal, a button), and a tab
+    // switch already focused the new tab.
     // Parameters: none. Returns: nothing. UI thread only.
-    // Exceptions: the tooltip step never throws (a failure is logged, and the panel closes all the
-    // same). Popup::IsOpen is not guarded here, as before: what it throws goes to the caller.
+    // Exceptions: the tooltip and keyboard steps never throw (a failure is logged, and the panel closes
+    // all the same). Popup::IsOpen is not guarded here, as before: what it throws goes to the caller.
     void TerminalPage::_CloseTagEditorPopup()
     {
+        // An Escape held across the close must not act on its release in a later panel.
+        _tagEditorEscArmed = false;
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {
             // End the panel's tooltips BEFORE the panel leaves the tree. A tooltip here opens only after
@@ -2132,9 +2205,46 @@ namespace winrt::TerminalApp::implementation
             {
                 ::Agentmaster::AgentLogCaughtException(L"_CloseTagEditorPopup: end the panel's tooltips");
             }
+            // Agentmaster (TCM-K2): asked BEFORE the close — the close moves the focus at once, and the answer
+            // is lost after it. noexcept: a failure answers "no" (logged), and the close moves no focus.
+            const bool heldKeyboard = AgentPanelHoldsKeyboard(Root().XamlRoot(), _tagEditorCard);
             _tagEditorPopup.IsOpen(false);
+            if (heldKeyboard)
+            {
+                _ReturnKeyboardAfterPanel(_tagEditorReturnFocus, L"the Tags panel"); // noexcept
+            }
         }
+        _tagEditorReturnFocus = nullptr; // the next open captures its own target
         _tagEditorSessionId.clear();
+    }
+
+    // Agentmaster (TCM-K2): give the keyboard back after a Root()-parented panel that held it closed. The
+    // declaration (TerminalPage.h) has the contract; this is the body.
+    // The target is used only when it can take the focus NOW (Control::Focus answers false for an element
+    // that left the live tree — a recycled board card, the content of a tab that is no longer on screen);
+    // else the current tab gets the keyboard, the place GH#5750 sends it after a tab menu too. One [focus]
+    // line in hooks.log names where it went, so a "my keys went somewhere else" report can be read back.
+    void TerminalPage::_ReturnKeyboardAfterPanel(const winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::Control>& target, std::wstring_view panelName) noexcept
+    {
+        try
+        {
+            if (const auto control = target.get())
+            {
+                if (control.Focus(FocusState::Programmatic))
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[focus] " + std::wstring{ panelName } + L" closed: the keyboard went back to the element it came from (" + std::wstring{ winrt::get_class_name(control) } + L")\n");
+                    return;
+                }
+            }
+            // No usable target: the current tab (its terminal), or the Agent Manager page while it is on screen.
+            _FocusCurrentTab(true);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[focus] " + std::wstring{ panelName } + (_managerPageVisible ? L" closed: the keyboard went back to the Agent Manager page\n" : L" closed: the keyboard went back to the current tab\n"));
+        }
+        catch (...)
+        {
+            // The keyboard stays where the focus manager put it at the close; a click puts it anywhere.
+            ::Agentmaster::AgentLogCaughtException(L"_ReturnKeyboardAfterPanel");
+        }
     }
 
     // ==================================================================================
