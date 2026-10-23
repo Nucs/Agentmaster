@@ -14,7 +14,7 @@ steps and its checks are the test's assertions.
 
 Written 2026-10-23 from: the per-version changelogs of the four releases
 (`.claude/skills/release-version/am_release_080_notes.draft.md` holds them all), the commits after `v0.8.0`
-(9245a890f, 381c6c715, 57a40dd30, 0502c9380), every spec document under `doc/agentmaster/`, the project
+(9245a890f, 381c6c715, 57a40dd30, 0502c9380, 3b042ea32), every spec document under `doc/agentmaster/`, the project
 CLAUDE.md, and the code wherever a document and the code disagreed (the disagreements are listed at the end).
 Nothing here has been run yet: the suite does not exist.
 
@@ -192,8 +192,9 @@ Fixes: three UI-freeze classes (*ROB-06*, ROB-10, MGR-06) · the tab-drag crash 
 
 **After 0.8.0 (NOT BUILT into a release)** — interrupted turns: Restart's question, the fork question and its stop
 watch, their Telegram versions (INT-05–INT-07; 381c6c715) · a Search pick's menu by the session's state: Activate,
-Wake, Go to topic (TGS-05; 0502c9380) · the installer's edge cases (INS-01 E3–E6; 9245a890f — the script on the
-branch; the app's embedded copy not built).
+Wake, Go to topic (TGS-05; 0502c9380) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
+release CLI on the right profile (CLI-02 phase 3, CLI-K2; 3b042ea32) · the installer's edge cases (INS-01 E3–E6;
+9245a890f — the script on the branch; the app's embedded copy not built).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -220,7 +221,7 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | TRN-K2 | A ▸ jump in the side panel's peek mode scrolls a hidden tab | read, 2026-10-05 |
 | DSP-K1 | A portable / per-user install shows no session toast; its clicks would do nothing | probe, 2026-09-27 |
 | CLI-K1 | The dev alias's CLI crashes on every real verb (Debug build, Control Flow Guard) | measured, CLI.md §11 |
-| CLI-K2 | An unpackaged release CLI reads the DEV profile | measured, CLI.md §11 |
+| CLI-K2 | An unpackaged release CLI reads the DEV profile (fixed in code by 3b042ea32, not built) | measured, CLI.md §11 |
 
 ## Where the documents disagree with the code (found while writing)
 
