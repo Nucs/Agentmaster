@@ -89,6 +89,59 @@ namespace winrt::TerminalApp::implementation
         void SetRevealSessionTabHandler(std::function<void(winrt::hstring)> handler);
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> Close (shut down, keep the record so it stays resumable in Sessions; FAVORITES.md)
         void SetCloseFolderHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (folder, excludeId) -> "Close ▸ Of Same Folder" / "Other of Same Folder": close every live managed session whose effective work dir == folder, SKIPPING excludeId when non-empty (the content shows the ONE confirm listing titles; the page does the cross-window batch)
+        // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the WT tab menu's two submenus, mirrored on the board
+        // card, the tree row and the side-panel card): WHICH tabs one item of those submenus reaches, always counted from
+        // the menu's session and its tab. The values ARE the WT tab menu's own scope codes (Tab.h kDeactivateScope*; the
+        // page's wiring static_asserts each one), so a card item and the same item on the session's own tab can never
+        // name different tabs. The strip scopes act in the window that HOSTS the session's tab, which need not be the
+        // window the menu was opened in: the board, the tree and the side panel can list every window's sessions.
+        enum class SessionMenuScope : int32_t
+        {
+            ThisTab = 0, // the session's own tab
+            OtherTabs = 1, // every OTHER tab of the hosting window; the session's own tab is kept
+            AllTabs = 2, // every tab of the hosting window, the session's own included
+            TabsBefore = 3, // the tabs LEFT of the session's tab in the hosting window's strip; it and the tabs right of it are kept
+            TabsAfter = 4, // the tabs RIGHT of it; it and the tabs left of it are kept
+            SameFolder = 5, // every live session whose effective work dir is this session's, in EVERY window, this one included
+            OtherSameFolder = 6, // the same folder batch minus this session, which is kept
+            FavoriteAllTabs = 7, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin
+        };
+        // Agentmaster: the verb of a SessionMenuScope item — what happens to the tabs it reaches. Deactivate PARKS them
+        // (the agent shuts down, the tab keeps its place and resumes the conversation when it is focused or activated;
+        // nothing asks first, so a turn in flight is cut off). Close ENDS them through the usual close, which asks first
+        // where the tab menu's close asks (every closed session stays resumable in Sessions).
+        enum class SessionMenuVerb : int32_t
+        {
+            Deactivate = 0,
+            Close = 1,
+        };
+        // Agentmaster: where a session's tab sits in THIS window's tab strip. The session menu grays its strip items from
+        // it exactly as the WT tab menu grays its own (Tab::_EnableMenuItems): "Tabs to the Left" on the left-most tab,
+        // "Tabs to the Right" on the right-most one, "Other Tabs" on a window's only tab. A session hosted in ANOTHER
+        // window has no spot here, and its strip items then stay enabled — that window applies them, and a scope with no
+        // tab in it does nothing (its hooks.log line says so).
+        struct SessionTabSpot
+        {
+            uint32_t index{ 0 }; // the tab's index in the strip (0 == the left-most tab)
+            uint32_t count{ 0 }; // how many tabs the strip holds, this one included (>= 1 for a spot that exists)
+        };
+        // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): install the page's action behind every item of the two
+        // submenus EXCEPT Close's two folder items, which keep the folder close this content already confirms and
+        // forwards (SetCloseFolderHandler) — so those two behave exactly as before.
+        //   handler — (sessionId, verb, scope): the page runs that item as the session's own tab menu would, in the window
+        //             that hosts the tab (TerminalPage::_RunSessionMenuScope). Called on the UI thread, one dispatcher tick
+        //             after the click (the closing menu's focus hand-back lands first). It must not throw: the item's
+        //             dispatcher callback logs an escaping exception and drops it. Unwired => the items do nothing.
+        //             Replaces any previous handler.
+        // Returns nothing; throws nothing (a std::function move).
+        void SetSessionMenuScopeHandler(std::function<void(winrt::hstring, SessionMenuVerb, SessionMenuScope)> handler);
+        // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): install the page's answer to "where does this session's tab
+        // sit in THIS window's strip?" — read once each time a session menu opens, to gray the strip items like the tab menu.
+        //   provider — (sessionId) -> the tab's SessionTabSpot, or nullopt when this window does not host the tab. A throw
+        //              is caught and logged by the menu, which then treats the tab as hosted elsewhere (every strip item
+        //              enabled). Unwired => the same. Replaces any previous provider.
+        // Returns nothing; throws nothing (a std::function move).
+        void SetSessionTabSpotProvider(std::function<std::optional<SessionTabSpot>(const std::wstring&)> provider);
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
@@ -942,6 +995,24 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazySessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr);
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeLazyExternalMenu(const ::Agentmaster::ExternalClaudeRow& ex);
         void _PopulateSessionMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor);
+        // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the WT tab menu's two submenus): build ONE of the two
+        // for _PopulateSessionMenu. Both list the tab menu's scopes in ONE order, so they line up row for row: this tab ·
+        // tabs to the left · tabs to the right · other tabs · of same folder · other of same folder · all tabs (Close ends
+        // with the tab menu's "★ Favorite & Close All Tabs"). Items are grayed by the tab menu's own rules: "Deactivate
+        // Tab" while the session is dormant, the strip items by `spot`. Every click runs one dispatcher tick later through
+        // _sessionMenuScopeHandler — except Close's two folder items, which keep _CloseSessionsInFolder (the existing
+        // confirm-then-cross-window folder close).
+        //   verb           — which submenu: Deactivate (park, never asks) or Close (end, asks where the tab menu asks).
+        //   id             — the menu's session.
+        //   cwd            — its effective work dir (inferred, else the launch cwd); the two folder items are left out when
+        //                    it is empty, since there is no folder to match.
+        //   sessionDormant — its agent has not started (a restored or parked tab): grays "Deactivate Tab", which would
+        //                    have nothing to stop. Ignored for Close.
+        //   spot           — where its tab sits in THIS window's strip, or nullopt when another window hosts it (then no
+        //                    strip item is grayed: the hosting window applies the scope).
+        // Returns the submenu, never null. Throws winrt::hresult_error when XAML refuses to build an element; the lazy
+        // menu's Opening handler contains it (an empty menu rather than a dead card).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _MakeSessionScopeSubmenu(SessionMenuVerb verb, const std::wstring& id, const std::wstring& cwd, bool sessionDormant, const std::optional<SessionTabSpot>& spot);
         void _PopulateExternalTreeMenu(winrt::Windows::UI::Xaml::Controls::MenuFlyout& menu, const ::Agentmaster::ExternalClaudeRow& ex);
         // Agentmaster (transcript overlay): append the EXTERNAL menu's "Show Transcript" (after "Copy Session
         // Id") — the external's conversation in the page's reading view. Disabled, with a tip saying why,
@@ -976,6 +1047,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _revealSessionTabHandler; // Agentmaster (tab-strip reveal): a managed card/row single-click -> the page scrolls that session's tab into view, even on a re-click of the already-selected card (null until the page wires it)
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring, winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder"): (folder, excludeId) -> the page closes every live managed session in that folder (cross-window) SKIPPING excludeId, the content having already shown the one confirm
+        std::function<void(winrt::hstring, SessionMenuVerb, SessionMenuScope)> _sessionMenuScopeHandler; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId, verb, scope) -> the page runs that item as the session's own tab menu would, in the window hosting the tab (SetSessionMenuScopeHandler); null until wired — the items then do nothing
+        std::function<std::optional<SessionTabSpot>(const std::wstring&)> _sessionTabSpotProvider; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId) -> where its tab sits in THIS window's strip, nullopt when another window hosts it — grays the strip items like the tab menu (SetSessionTabSpotProvider); null => nothing grayed
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)

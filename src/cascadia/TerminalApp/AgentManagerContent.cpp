@@ -341,6 +341,21 @@ namespace winrt::TerminalApp::implementation
     {
         _closeFolderHandler = std::move(handler);
     }
+    // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): store the page's action for the two submenus' items (see
+    // the header). A session menu reads it when an item is CLICKED, so a handler installed after a menu opened still
+    // serves that menu. handler: (sessionId, verb, scope); replaces any previous one. Returns nothing; throws nothing.
+    void AgentManagerContent::SetSessionMenuScopeHandler(std::function<void(winrt::hstring, SessionMenuVerb, SessionMenuScope)> handler)
+    {
+        _sessionMenuScopeHandler = std::move(handler);
+    }
+    // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): store the page's "where is this session's tab in THIS
+    // window's strip" answer (see the header). Read only while a session menu OPENS, so installing it repaints nothing.
+    // provider: (sessionId) -> the spot, nullopt when another window hosts the tab; replaces any previous one.
+    // Returns nothing; throws nothing.
+    void AgentManagerContent::SetSessionTabSpotProvider(std::function<std::optional<SessionTabSpot>(const std::wstring&)> provider)
+    {
+        _sessionTabSpotProvider = std::move(provider);
+    }
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
         _restoreHandler = std::move(handler);

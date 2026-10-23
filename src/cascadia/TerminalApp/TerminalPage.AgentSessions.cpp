@@ -3985,6 +3985,199 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
+    // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): the hooks.log word of a scope code — see TerminalPage.h. The
+    // switch over every code is also the proof that kSessionMenuScopeFavoriteAllTabs collides with none of Tab's codes: a
+    // duplicate case value would not compile (C2196).
+    const wchar_t* TerminalPage::_SessionMenuScopeWord(const int32_t scope, const bool close) noexcept
+    {
+        switch (scope)
+        {
+        case implementation::Tab::kDeactivateScopeThisTab:
+            return L"this";
+        case implementation::Tab::kDeactivateScopeOtherTabs:
+            return L"others";
+        case implementation::Tab::kDeactivateScopeAllTabs:
+            return L"all";
+        case implementation::Tab::kDeactivateScopeTabsBefore:
+            return L"left";
+        case implementation::Tab::kDeactivateScopeTabsAfter:
+            return L"right";
+        case implementation::Tab::kDeactivateScopeSameFolder:
+            return L"folder";
+        case implementation::Tab::kDeactivateScopeOtherSameFolder:
+            return L"folder-others";
+        case kSessionMenuScopeFavoriteAllTabs:
+            return close ? L"favorite-all" : nullptr; // Close only: no item parks and stars
+        default:
+            return nullptr;
+        }
+    }
+
+    // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — AgentManagerContent::_MakeSessionScopeSubmenu): the router —
+    // see TerminalPage.h for the contract. The card / row menu was opened in THIS window, but the session's tab may live in
+    // another one, and every scope is counted from that tab, in its window: the work runs where the tab is.
+    void TerminalPage::_RunSessionMenuScope(const std::wstring& sessionId, const bool close, const int32_t scope)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        const std::wstring verbWord = close ? L"close" : L"deactivate";
+        const wchar_t* const scopeWord = _SessionMenuScopeWord(scope, close);
+        if (!scopeWord)
+        {
+            // A code no item of this verb raises: refused, never guessed — a guess could park or close tabs the user never
+            // chose, and a refusal costs one retry.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[session-menu] " + ::Agentmaster::ShortId(sessionId) + L" " + verbWord + L" refused - unknown scope code " + std::to_wstring(scope) + L" (nothing done)\n");
+            return;
+        }
+        // Nav audit BEGIN: which item of which session's card / row menu. The tab menu's own lines follow (deactivate-begin /
+        // -done, close-begin / -done, close-all …) — here, or in the hosting window after the hand-off line below.
+        const std::wstring what = verbWord + L" " + scopeWord + L" " + ::Agentmaster::ShortId(sessionId);
+        ::Agentmaster::LogNav(L"session-menu " + what);
+        if (_RunSessionMenuScopeHere(sessionId, close, scope, /*fromOtherWindow*/ false))
+        {
+            return; // this window hosts the tab: done here
+        }
+        // Not hosted here. Close Tab of a session that NO window can still host keeps the old "This Session" cleanup: its
+        // agent has exited and it is not a dormant tab, so the fan-out below would reach nobody — archive the record in
+        // place (_ArchiveClaudeSession's dead branch: live=false, the injector and submitters dropped, persisted). A RUNNING
+        // agent, or a DORMANT tab (a restored or parked tab has no process, pid 0, yet its tab exists in some window), is
+        // never archived from here: that would mark closed (live=false) a session whose tab is still open elsewhere. Every
+        // other scope needs the tab's window anyway.
+        if (close && scope == implementation::Tab::kDeactivateScopeThisTab && _sessionRegistry)
+        {
+            const auto info = _sessionRegistry->GetWithoutQueue(sessionId);
+            const bool agentRuns = info && info->pid != 0 && ::Agentmaster::ProcessAlive(info->pid);
+            const bool dormantTab = info && info->live && !info->started && !info->external;
+            if (!agentRuns && !dormantTab)
+            {
+                ::Agentmaster::LogNav(L"session-menu " + what + L" -> its agent has exited and no window hosts its tab: archived in place");
+                _ArchiveClaudeSession(winrt::hstring{ sessionId });
+                return;
+            }
+        }
+        // Hand it to the window that hosts the tab: the session-action fan-out reaches every window, each hops to its own UI
+        // thread, and only the host acts (_RemoteSessionAction -> _RunSessionMenuScopeHere). Fire-and-forget: with no host
+        // anywhere (a session still binding) nothing happens, which is what the old menu did for such a session too.
+        ::Agentmaster::LogNav(L"session-menu " + what + L" -> handed to the window that hosts its tab");
+        ::Agentmaster::RequestSessionActionInWindows(sessionId, close ? kSessionMenuCloseAction : kSessionMenuDeactivateAction, std::to_wstring(scope), {});
+    }
+
+    // Agentmaster (session menu): the hosting window's half — see TerminalPage.h. Each scope makes exactly the call the
+    // session's own tab menu makes for the same item (TerminalPage.cpp's tab event registrations, AppActionHandlers.cpp's
+    // CloseTabsAfter / CloseOtherTabs), so the two menus can never act differently on one tab.
+    bool TerminalPage::_RunSessionMenuScopeHere(const std::wstring& sessionId, const bool close, const int32_t scope, const bool fromOtherWindow)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return false; // not hosted here (another window's tab, or no tab anywhere) — the caller hands it on, a sink just misses
+        }
+        const std::wstring verbWord = close ? L"close" : L"deactivate";
+        const wchar_t* const scopeWord = _SessionMenuScopeWord(scope, close);
+        if (!scopeWord)
+        {
+            // A malformed request from another window (the router already refuses its own): nothing done, and true so that
+            // the tab's own window is the last to be asked.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[session-menu] " + ::Agentmaster::ShortId(sessionId) + L" " + verbWord + L" refused - unknown scope code " + std::to_wstring(scope) + L" (nothing done)\n");
+            return true;
+        }
+        if (fromOtherWindow)
+        {
+            ::Agentmaster::LogNav(L"session-menu-remote " + verbWord + L" " + scopeWord + L" " + ::Agentmaster::ShortId(sessionId) + L" (asked from another window's card or row menu)");
+        }
+
+        if (!close)
+        {
+            // Deactivate ▸ — the tab menu's own dispatcher with this tab as the anchor (the scope codes ARE its codes), so
+            // every rule it keeps holds here too: the focused tab leaves the screen for the Agent Manager page before its
+            // control is swapped, the strip stays where it was, the folder scopes reach every window, and adopted /
+            // already dormant / mid-delivery tabs are skipped and logged. Nothing asks first, so no window comes forward.
+            _DeactivateTabsFromMenu(tab, scope);
+            return true;
+        }
+
+        // Close ▸ from ANOTHER window: every Close scope may ask first (the tab's close confirm, the batch confirm, the
+        // folder list), and the dialog shows in THIS window, which can sit behind the one the user clicked in — so bring it
+        // to the front, with the restore / foreground / SwitchToThisWindow recipe of _FocusClaudeSessionTab. The process
+        // owns the foreground (the click happened in its other window), so SetForegroundWindow may hand it over. The tab is
+        // NOT selected: a selection would start a dormant tab, and the scope does not ask for one.
+        if (fromOtherWindow && _hostingHwnd)
+        {
+            const HWND hwnd = *_hostingHwnd;
+            if (::IsIconic(hwnd))
+            {
+                ::ShowWindow(hwnd, SW_RESTORE);
+            }
+            ::SetForegroundWindow(hwnd);
+            if (::GetForegroundWindow() != hwnd)
+            {
+                ::SwitchToThisWindow(hwnd, TRUE); // belt-and-braces when the shell denies the hand-off
+            }
+        }
+        switch (scope)
+        {
+        case implementation::Tab::kDeactivateScopeThisTab:
+            // The tab's own close (its X / "Close Tab"): the Close · ★ Favorite & Close · Cancel confirm when the cog asks
+            // for one, then the archive bookkeeping that keeps the session resumable in Sessions.
+            _HandleCloseTabRequested(tab);
+            break;
+        case implementation::Tab::kDeactivateScopeTabsBefore:
+            _CloseTabsBefore(tab); // "Close tabs to the left": [0, index) through _RemoveTabs (left-most => nothing)
+            break;
+        case implementation::Tab::kDeactivateScopeTabsAfter:
+        case implementation::Tab::kDeactivateScopeOtherTabs:
+        {
+            // "Close tabs to the right" / "Close other tabs": the snapshots the CloseTabsAfter / CloseOtherTabs actions
+            // take, by the tab's index NOW (the strip may have changed since the menu opened). A snapshot, because
+            // _RemoveTabs is asynchronous; an empty one returns before any dialog.
+            uint32_t index = 0;
+            if (!_tabs.IndexOf(tab, index))
+            {
+                // The tab is mapped but no longer in the strip (it is being torn out or moved this very moment):
+                // nothing is to its right or beside it here.
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[session-menu] " + ::Agentmaster::ShortId(sessionId) + L" close " + scopeWord + L": the tab is not in this window's strip right now (nothing closed)\n");
+                break;
+            }
+            std::vector<winrt::TerminalApp::Tab> tabsToRemove;
+            if (scope == implementation::Tab::kDeactivateScopeOtherTabs && index > 0)
+            {
+                std::copy(begin(_tabs), begin(_tabs) + index, std::back_inserter(tabsToRemove));
+            }
+            if (index + 1 < _tabs.Size())
+            {
+                std::copy(begin(_tabs) + index + 1, end(_tabs), std::back_inserter(tabsToRemove));
+            }
+            _RemoveTabs(tabsToRemove);
+            break;
+        }
+        case implementation::Tab::kDeactivateScopeAllTabs:
+            _CloseAllTabs(/*favoriteFirst*/ false); // "Close all tabs": the window stays open on its Agent Manager page
+            break;
+        case kSessionMenuScopeFavoriteAllTabs:
+            _CloseAllTabs(/*favoriteFirst*/ true); // "★ Favorite & close all tabs": star every managed session first
+            break;
+        case implementation::Tab::kDeactivateScopeSameFolder:
+        case implementation::Tab::kDeactivateScopeOtherSameFolder:
+        {
+            // "Of Same Folder" / "Other of Same Folder": the folder resolved NOW from the registry, as the tab menu's own
+            // handlers resolve it (the effective work dir — inferred, else the launch cwd), then the one shared confirm +
+            // cross-window close. The card / row menu sends its two folder items another way (the content's
+            // _CloseSessionsInFolder); this branch serves any request that names them. An empty folder closes nothing.
+            const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::optional<::Agentmaster::SessionInfo>{};
+            const std::wstring folder = info ? ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, *info) : std::wstring{};
+            const std::wstring excludeId = (scope == implementation::Tab::kDeactivateScopeOtherSameFolder) ? sessionId : std::wstring{};
+            _ConfirmAndCloseClaudeSessionsInFolder(winrt::hstring{ folder }, winrt::hstring{ excludeId });
+            break;
+        }
+        default:
+            break; // unreachable: _SessionMenuScopeWord refused every other code above
+        }
+        return true;
+    }
+
     // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork
     // session" (_DuplicateTab) AND the Triage Board / Explorer-tree "Fork session" menu, so the two can
     // never drift. Branches the conversation into a NEW, independent session (the source's transcript is

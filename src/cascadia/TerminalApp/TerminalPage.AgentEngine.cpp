@@ -2123,6 +2123,45 @@ namespace winrt::TerminalApp::implementation
                 self->_ConfirmAndCloseClaudeSessionsInFolder(folder, excludeId);
             }
         });
+        // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the board card / tree row / side-panel card twins of the WT
+        // tab menu's two submenus): every item but Close's two folder ones (SetCloseFolderHandler above) runs as the
+        // session's own tab menu would, in the window that hosts its tab (_RunSessionMenuScope: here, or handed to that
+        // window). The content's scope values ARE the tab menu's codes — asserted here, so the two menus can never name
+        // different tabs for one item — and FavoriteAllTabs is the page's one extra code.
+        using SessionMenuScope = implementation::AgentManagerContent::SessionMenuScope;
+        using SessionMenuVerb = implementation::AgentManagerContent::SessionMenuVerb;
+        static_assert(static_cast<int32_t>(SessionMenuScope::ThisTab) == implementation::Tab::kDeactivateScopeThisTab, "the session menu's ThisTab must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::OtherTabs) == implementation::Tab::kDeactivateScopeOtherTabs, "the session menu's OtherTabs must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::AllTabs) == implementation::Tab::kDeactivateScopeAllTabs, "the session menu's AllTabs must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::TabsBefore) == implementation::Tab::kDeactivateScopeTabsBefore, "the session menu's TabsBefore must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::TabsAfter) == implementation::Tab::kDeactivateScopeTabsAfter, "the session menu's TabsAfter must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::SameFolder) == implementation::Tab::kDeactivateScopeSameFolder, "the session menu's SameFolder must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::OtherSameFolder) == implementation::Tab::kDeactivateScopeOtherSameFolder, "the session menu's OtherSameFolder must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::FavoriteAllTabs) == kSessionMenuScopeFavoriteAllTabs, "the session menu's FavoriteAllTabs must be the page's code");
+        content->SetSessionMenuScopeHandler([weakThis](winrt::hstring id, SessionMenuVerb verb, SessionMenuScope scope) {
+            if (auto self = weakThis.get())
+            {
+                self->_RunSessionMenuScope(std::wstring{ id }, verb == SessionMenuVerb::Close, static_cast<int32_t>(scope));
+            }
+        });
+        // Where a session's tab sits in THIS window's strip (nullopt: another window hosts it, or no tab yet) — the content
+        // grays the menu's strip items from it exactly as the tab menu grays its own (Tab::_EnableMenuItems). Read on the UI
+        // thread each time a session menu opens; _claudeTabs + the strip are this window's own. A dead page answers nullopt.
+        content->SetSessionTabSpotProvider([weakThis](const std::wstring& id) -> std::optional<implementation::AgentManagerContent::SessionTabSpot> {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return std::nullopt;
+            }
+            const auto it = self->_claudeTabs.find(id);
+            const auto tab = (it != self->_claudeTabs.end()) ? it->second.get() : nullptr;
+            uint32_t index = 0;
+            if (!tab || !self->_tabs.IndexOf(tab, index))
+            {
+                return std::nullopt; // not hosted here, or the tab is mid-move and out of the strip this instant
+            }
+            return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size() };
+        });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
