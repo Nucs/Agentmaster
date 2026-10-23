@@ -9,10 +9,12 @@ import time
 import pytest
 
 from amdriver import inputs
-from amdriver.session import wait_until_no_claude
+from amdriver.session import wait_new_session, wait_until_no_claude
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
+NOTHING_SELECTED = ["Select a Claude session to see its summary."]
+"""The right pane's text while the page's lens has no session selected (AgentManagerContent.AutoTesting.cpp)."""
 
 
 @pytest.mark.p0
@@ -199,29 +201,101 @@ def test_board_follows_the_session_state(am, s1):
 # ---- known defects ----------------------------------------------------------------------------------
 
 
-@pytest.mark.p1
-@pytest.mark.flow("MGR-05")
-@pytest.mark.known_defect("MGR-K1")
-def test_known_defect_a_launched_session_is_not_selected_on_the_page(am, s1):
-    """MGR-K1 (expected failure once fixed): a session launched from the page is selected in its new tab, but the
-    page's lens does not select it — Home offers no way back and the right pane asks for a selection — until the
-    user switches tabs. Measured on 0.8.0 (2026-10-23): no `[nav] tab-focus` line follows the launch, because the
-    launch selects the new tab before the tab is mapped to its session (`_SyncManagerSelectionToTab` finds no id).
+@pytest.mark.p0
+@pytest.mark.flow("MGR-07")
+@pytest.mark.needs_fix("MGR-K1")
+def test_a_launch_from_the_page_stays_on_the_page(am, s1, mock):
+    """MGR-07 phases 1–4 (MGR-K1's fix, 2026-10-23 — the user's "make selected but do not go to the tab"): a session
+    launched from the page's launch row opens its tab BEHIND the page, starts its claude there and is selected on the
+    page, as if its card had been clicked — Home turns into "Jump back to t2", the right pane leaves its "select a
+    session" hint — and nothing goes to the tab; Home then jumps to it, where Claude Code's box waits.
 
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: drop this test and let
-    test_linked_lenses cover the launched session too.
+    On 0.8.0 (MGR-K1) the launch switched to the new tab and the page kept no selection of it.
 
     Args:
         am: The app.
-        s1: F-S (launched from the page; its tab never switched to).
+        s1: F-S (t1 on screen; the launch row starts from the page).
+        mock: The scripted model (t2's first turn).
     """
     w = am.window
-    assert w.tabs.selected().title == "t1"
     page = w.manager.open()
-    time.sleep(1.0)
-    assert page.home_name() == "Agent Manager"  # expected: "Jump back to t1"
-    assert page.right_pane_texts() == ["Select a Claude session to see its summary."]  # expected: t1's summary
-    assert not am.profile.hooks.find(rf"\[nav\] tab-focus {s1.short}")
+    mark = am.profile.hooks.mark()
+    page.launch(str(am.iso.folder("t2")))  # one click on Launch, its hover menu open (the driver rests on it)
+    new = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
+    am.profile.hooks.wait(rf"\[nav\] manager-page launch {new.short} \(new session\): started in place, selected on the page",
+                          since=mark, timeout_s=20)
+    # 1. The page stayed: its title, no tab selected, and the new tab in the strip behind it.
+    assert page.showing() and w.title == "Agent Manager"
+    assert w.tabs.selected() is None
+    assert "t2" in w.tabs.titles()
+    # 2. The new session is the page's selection: Home's way back names it, the right pane is about it.
+    wait_until(lambda: page.home_name() == "Jump back to t2", 10, what="Home's way back to t2",
+               describe=page.home_name)
+    wait_until(lambda: page.right_pane_texts() not in ([], NOTHING_SELECTED), 10, what="t2 shown in the right pane",
+               describe=page.right_pane_texts)
+    # 3. Its claude started behind the page, and nothing went to the tab — not even later.
+    wait_until(new.claude_pids, 30, what="t2's claude, started in place behind the page")
+    hold_true(lambda: page.showing() and w.tabs.selected() is None, 2.0, what="the page staying on screen")
+    assert not am.profile.hooks.find(rf"\[nav\] tab-focus {new.short}", since=mark)
+    # 4. Home leads to it; the started claude's box is there, and it works.
+    page.click_home()
+    w.tabs.wait_selected("t2")
+    page.wait_hidden()
+    am.profile.hooks.wait(rf"\[nav\] home-button jump-back -> {new.short}", since=mark)
+    w.terminal.wait_input_box()
+    new.ask('second ready [[mock reply "ok"]]')
+
+
+@pytest.mark.p1
+@pytest.mark.flow("MGR-07")
+@pytest.mark.needs_fix("MGR-K1")
+def test_a_plus_card_launch_follows_where_the_user_looks(am, s1, mock):
+    """MGR-07 phases 5–6: the side panel's + card launches the page's way. Over the PAGE the new session stays behind
+    it and is selected there (the row's behavior); over a TAB its tab opens in front and the page's lens follows it,
+    so the page opened later offers the way back to it (MGR-K1's other half: on 0.8.0 the lens kept the previous tab's
+    session, because the launch selected the new tab before the tab was mapped to its session).
+
+    Launch is pressed with Enter (focused, on the key-up): this test is about where the launch goes; one CLICK with
+    the presets menu open is SP-05's test_plus_card_launch_takes_one_click_with_its_menu_open.
+
+    Args:
+        am: The app.
+        s1: F-S (t1).
+        mock: The scripted model.
+    """
+    w = am.window
+    page = w.manager
+    panel = w.side_panel
+    # 5. Over the page.
+    page.open()
+    mark = am.profile.hooks.mark()
+    card = panel.open_launcher()
+    card.type_folder(str(am.iso.folder("t3")))
+    card.launch_button().focus()
+    inputs.keys("enter")
+    t3 = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
+    am.profile.hooks.wait(rf"\[nav\] manager-page launch {t3.short} \(plus-card\): started in place, selected on the page",
+                          since=mark, timeout_s=20)
+    wait_until(lambda: not card.is_open(), 5, what="the card closes after the launch")
+    assert page.showing() and w.tabs.selected() is None
+    wait_until(lambda: page.home_name() == "Jump back to t3", 10, what="Home's way back to t3",
+               describe=page.home_name)
+    wait_until(t3.claude_pids, 30, what="t3's claude, started in place behind the page")
+    # 6. Over a tab: t1 in front, then a launch from the card selects its new tab, and the lens follows it.
+    s1.select()
+    page.wait_hidden()
+    mark = am.profile.hooks.mark()
+    card = panel.open_launcher()
+    card.type_folder(str(am.iso.folder("t4")))
+    card.launch_button().focus()
+    inputs.keys("enter")
+    t4 = wait_new_session(am, mark, pattern=r"\[nav\] open-new claude done new=([0-9a-f]{8})", mock=mock)
+    w.tabs.wait_selected("t4")
+    am.profile.hooks.wait(rf"\[nav\] tab-focus {t4.short}", since=mark, timeout_s=10)
+    assert not am.profile.hooks.find(rf"\[nav\] manager-page launch {t4.short}", since=mark)
+    page.open()
+    wait_until(lambda: page.home_name() == "Jump back to t4", 10, what="Home's way back to the launched t4",
+               describe=page.home_name)
 
 
 # ---- batch 2: restart, panes ---------------------------------------------------------------------------------

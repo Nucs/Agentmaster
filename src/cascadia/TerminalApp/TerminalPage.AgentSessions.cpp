@@ -1361,6 +1361,10 @@ namespace winrt::TerminalApp::implementation
             _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
             _RefreshTabTags(spec.sessionId); // bookmark tags: show the session's bookmark badges the instant its tab appears
             _TrackSessionStarted(spec.sessionId); // Agentmaster (eager-init): flip SessionInfo::started true the instant this control initializes (focused tab => no half-hollow flash)
+            // Agentmaster (MGR-K1): the tab is mapped and wired — tell a page launch which session it opened, or give a tab
+            // this launch selected the Linked-Lenses sync the tab-switch funnel ran too early for. LAST, so the lens push
+            // reads a finished tab (title pinned, dot seeded).
+            _NoteLaunchedSessionTab(tab, spec.sessionId);
         }
 
         // [refork] = a restore that re-materialized a never-messaged fork from its source into the same
@@ -2459,6 +2463,7 @@ namespace winrt::TerminalApp::implementation
                 _SetTabAgentDot(tab, AgentStatusColorFor(s->state), /*dormant*/ false, handleId, AgentStateWord(s->state));
             }
             _RefreshTabTags(handleId); // bookmark tags: a managed Codex tab wears its badges too
+            _NoteLaunchedSessionTab(tab, handleId); // Agentmaster (MGR-K1): the _LaunchClaudeSession twin — a page launch's id, or the lens sync
         }
 
         const std::wstring tag = !forkUuid.empty() ? L"[codex-fork] " : (!resumeUuid.empty() ? L"[codex-resume] " : (restored ? L"[codex-restore-fresh] " : L"[codex-spawn] "));

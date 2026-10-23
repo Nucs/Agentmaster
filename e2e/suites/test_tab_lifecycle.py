@@ -46,14 +46,35 @@ def _queue(session) -> list[dict]:
 
 
 def _shell_count(am) -> int:
-    """How many Windows PowerShell processes the app runs (the default shell tabs; managed sessions run in pwsh.exe).
+    """How many default shell TABS the app runs: Windows PowerShell processes the GUI started ITSELF (managed sessions
+    run in pwsh.exe). A tab's shell is ConPTY's client, which the terminal creates with the pseudoconsole attribute, so
+    its parent is the GUI — never the OpenConsole.exe started beside it (the evidence's processes.txt lists the GUI's
+    children in psutil's order: each OpenConsole.exe and its tab's shell side by side, the claudes after them).
+
+    ⚠ Only those: every hook forwarder is a Windows PowerShell too (exec-form hooks, HOOKS.md), started by claude.exe and
+    alive for a moment. Counted, a forwarder running at one count and not at the other made test_deactivate_scopes'
+    E3 check read "1 == 2" (2026-10-23, run fix3: a [Notification] hook of t3 at the first count). A first fix that
+    asked for an OpenConsole.exe parent counted no shell at all (run fix5: "assert 0 >= 1").
 
     Args:
         am: The app.
     Returns:
         The count.
     """
-    return sum(1 for p in am.children() if _pname(p) == "powershell.exe")
+    def started_by_the_gui(p) -> bool:
+        """Whether the GUI itself started a process (a tab's shell) — False when it is gone or unreadable.
+
+        Args:
+            p: A psutil process.
+        Returns:
+            True for a tab's shell.
+        """
+        try:
+            return p.ppid() == am.pid
+        except Exception:  # noqa: BLE001 - a process gone between listing and reading, or the GUI gone
+            return False
+
+    return sum(1 for p in am.children() if _pname(p) == "powershell.exe" and started_by_the_gui(p))
 
 
 def _pname(p) -> str:

@@ -185,7 +185,8 @@ the latest state: a save is never torn, and one that cannot complete at once is 
 
 **Edge cases**
 - **E1 A reader that grants delete sharing** (the suite's own reads, `amdriver.win32.read_bytes_shared`) → the save
-  goes through while it reads.
+  goes through while it reads. Today it does not (ROB-K1, measured 2026-10-23): the app's replace fails while ANY
+  handle holds the file.
 
 ---
 
@@ -195,11 +196,23 @@ the latest state: a save is never torn, and one that cannot complete at once is 
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_robustness.py`
 > `test_known_defect_a_reader_holding_sessions_json_loses_the_save`)
 
-While another process holds `sessions.json` open without FILE_SHARE_DELETE, every save fails — `[persist-fail]
-…\sessions.json (atomic replace failed — state NOT saved)` — and once the reader lets go nothing re-saves until the
-next registry change: a turn that ended during the hold still reads "Running" on disk (in the first sighting, a
-minute later; an app quit or crash in that window keeps the stale state). Found because the suite's own polling with
-`open()` made the app's saves fail at random. **By reading:** `WriteAllUtf8` (Persistence.cpp) makes ONE
-`MoveFileExW(REPLACE_EXISTING)` attempt — it needs delete access on the target — logs, and returns false; the caller
-does not retry or keep the state dirty. The same holds for every file written through it. **Expected:** a short
-retry, and a failed save left pending so the next tick writes it (ROB-11 phase 2).
+While another process holds `sessions.json` open (with or without FILE_SHARE_DELETE), every save fails —
+`[persist-fail] …\sessions.json (atomic replace failed — state NOT saved)` — and once the reader lets go nothing
+re-saves until the next registry change: a turn that ended during the hold still reads "Running" on disk (in the
+first sighting, a minute later; an app quit or crash in that window keeps the stale state). Found because the suite's
+own polling with `open()` made the app's saves fail at random. **By reading:** `WriteAllUtf8` (Persistence.cpp) makes
+ONE `MoveFileExW(REPLACE_EXISTING)` attempt, logs, and returns false; the caller does not retry or keep the state
+dirty. The same holds for every file written through it.
+
+**Measured (2026-10-23, Windows 11 26200, NTFS, on C: and Q:; a probe that holds a scratch file open, then replaces it
+the app's way):** `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` returns ERROR_ACCESS_DENIED (5) while ANY handle
+holds the target — one that grants read + write + delete sharing (the suite's `read_bytes_shared`), read + write
+(Python's `open()`), or read + delete. So the suite's shared reads still make a save fail when a read overlaps it: in
+run fix4 (2026-10-23) the Deactivate scopes test polled `sessions.json` every 0.2 s for a tab rename to reach the
+disk, the save 0.41 s after the rename failed, and the wait timed out. A POSIX-semantics replace
+(`SetFileInformationByHandle(FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS)`
+on the temp file's own handle, opened with DELETE access) goes through a reader that grants delete sharing, and fails
+with ERROR_SHARING_VIOLATION (32) against one that does not.
+
+**Expected:** the POSIX replace first, a short retry of the replace on 5 or 32, and a save that still fails left
+pending so the next tick writes it (ROB-11 phase 2).

@@ -2038,11 +2038,17 @@ namespace winrt::TerminalApp::implementation
         _agentManagerContent = winrt::make_weak(content.as<winrt::TerminalApp::IPaneContent>());
 
         const auto weakThis = get_weak();
+        // MGR-K1 (2026-10-23): every launch the content asks for — the launch row's Launch, a board / tree / External row's
+        // "Open New Session Here ▸", the side panel card menu's — goes through _LaunchFromManagerPage: with the page on
+        // screen the new tab opens behind it and the page selects the session; with a tab on screen (the side panel's card
+        // menu over a tab) it opens in front, as before.
         content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title, winrt::hstring model) {
             if (auto self = weakThis.get())
             {
                 // model rides the launch-model picker ("Open New Session Here ▸ <model>"); "" = Default.
-                self->_SpawnClaudeSession(dir, title, static_cast<uint32_t>(-1), model);
+                self->_LaunchFromManagerPage(L"new session", [&]() {
+                    return self->_SpawnClaudeSession(dir, title, static_cast<uint32_t>(-1), model);
+                });
             }
         });
         content->SetActivateHandler([weakThis](winrt::hstring id) {
@@ -2174,7 +2180,18 @@ namespace winrt::TerminalApp::implementation
         content->SetResumeSessionHandler([weakThis](winrt::hstring id, winrt::hstring dir, winrt::hstring title) {
             if (auto self = weakThis.get())
             {
-                self->_ResumeSessionFromDisk(std::wstring{ id }, std::wstring{ dir }, std::wstring{ title });
+                const std::wstring sid{ id };
+                // An OPEN session is no launch (MGR-K1): "Resume session" on an id that is live — in this window or another
+                // — jumps to its tab, as it always did. Only a closed / unknown conversation opens a NEW tab, and that one
+                // is a page launch (kept behind the page, selected on it).
+                if (const auto existing = self->_sessionRegistry ? self->_sessionRegistry->GetWithoutQueue(sid) : std::nullopt; existing && existing->live)
+                {
+                    self->_ResumeSessionFromDisk(sid, std::wstring{ dir }, std::wstring{ title });
+                    return;
+                }
+                self->_LaunchFromManagerPage(L"resume", [&]() {
+                    return self->_ResumeSessionFromDisk(sid, std::wstring{ dir }, std::wstring{ title });
+                });
             }
         });
         content->SetForkSessionHandler([weakThis](winrt::hstring id, winrt::hstring dir, winrt::hstring title) {
@@ -2186,6 +2203,7 @@ namespace winrt::TerminalApp::implementation
                 request.dir = std::wstring{ dir };
                 request.title = std::wstring{ title };
                 request.origin = L"launch-bar";
+                request.fromManagerPage = true; // MGR-K1: decided when the fork runs (_LaunchForkRequest)
                 self->_ForkAskingAboutRunningTurn(std::move(request));
             }
         });
@@ -2212,6 +2230,7 @@ namespace winrt::TerminalApp::implementation
                 request.managed = true;
                 request.model = std::wstring{ model };
                 request.origin = L"board";
+                request.fromManagerPage = true; // MGR-K1: decided when the fork runs (_LaunchForkRequest) — a card menu over a tab forks in front
                 self->_ForkAskingAboutRunningTurn(std::move(request));
             }
         });
@@ -2264,7 +2283,12 @@ namespace winrt::TerminalApp::implementation
         content->SetAdoptExternalHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool fork) {
             if (auto self = weakThis.get())
             {
-                self->_AdoptExternalClaude(pid, cwd, fork);
+                // MGR-K1: an Adopt opens a new managed tab, so it is a page launch too (the seam returns no id: the
+                // launch records it, _NoteLaunchedSessionTab).
+                self->_LaunchFromManagerPage(fork ? L"adopt (fork)" : L"adopt", [&]() {
+                    self->_AdoptExternalClaude(pid, cwd, fork);
+                    return std::wstring{};
+                });
             }
         });
         // Agentmaster (Codex-launch): the EXTERNAL-codex menu — Adopt (bring its rollout under
@@ -2274,14 +2298,19 @@ namespace winrt::TerminalApp::implementation
         content->SetCodexLaunchHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool adopt, bool fork) {
             if (auto self = weakThis.get())
             {
-                if (adopt)
-                {
-                    self->_AdoptExternalCodex(pid, cwd, fork);
-                }
-                else
-                {
-                    self->_SpawnCodexSession(cwd, winrt::hstring{});
-                }
+                // MGR-K1: a Codex launch or adopt from the page is a page launch like a Claude one (its seams return no id:
+                // _LaunchCodexSession records it through _NoteLaunchedSessionTab).
+                self->_LaunchFromManagerPage(adopt ? (fork ? L"adopt codex (fork)" : L"adopt codex") : L"new codex session", [&]() {
+                    if (adopt)
+                    {
+                        self->_AdoptExternalCodex(pid, cwd, fork);
+                    }
+                    else
+                    {
+                        self->_SpawnCodexSession(cwd, winrt::hstring{});
+                    }
+                    return std::wstring{};
+                });
             }
         });
         // Agentmaster: the Explorer Tree's refresh button — force the Fleet Observer to re-survey NOW
@@ -2691,6 +2720,127 @@ namespace winrt::TerminalApp::implementation
         // away, then picked its tab) — a tab selection is always an explicit "show me this one". Deferred
         // + coalesced inside; a card already fully on screen never moves; a no-op with the toggle OFF.
         _SidePanelRevealTabCard(id);
+    }
+
+    // Agentmaster (MGR-K1, 2026-10-23) — see TerminalPage.h for the contract. The page stays on screen for a launch the user
+    // started on it, and the new session is selected there one tick later (_FinishManagerPageLaunch).
+    std::wstring TerminalPage::_LaunchFromManagerPage(const std::wstring& origin, const std::function<std::wstring()>& launch)
+    {
+        // A plain launch when the page is not what the user looks at: a tab on screen (the side panel's card menu, the "+"
+        // card over a tab) opens the new tab in front as before, and a Sessions page over the Manager keeps ITS rules (it
+        // decides itself whether an open stays in the background).
+        if (!_managerPageVisible || _sessionsPageVisible.load(std::memory_order_relaxed))
+        {
+            return launch();
+        }
+        // Saved, not assumed false: a page launch could in principle run inside another open that set them.
+        const bool previousBackground = _openClaudeTabInBackground;
+        const bool previousInFlight = _managerPageLaunchInFlight;
+        std::wstring previousOpened = std::move(_managerPageLaunchOpened);
+        _openClaudeTabInBackground = true; // _InitializeTab leaves the strip's selection — and so the page — where it is
+        _managerPageLaunchInFlight = true;
+        _managerPageLaunchOpened.clear();
+        std::wstring opened;
+        {
+            // Restored however the launch ends, a throw included, so no later launch (from a tab) inherits the background
+            // flag or the latch.
+            auto restore = wil::scope_exit([&]() {
+                _openClaudeTabInBackground = previousBackground;
+                _managerPageLaunchInFlight = previousInFlight;
+                _managerPageLaunchOpened = std::move(previousOpened);
+            });
+            opened = launch();
+            if (opened.empty())
+            {
+                // An Adopt or a Codex launch reports no id: the one its new tab was mapped to (_NoteLaunchedSessionTab).
+                opened = _managerPageLaunchOpened;
+            }
+        }
+        if (opened.empty())
+        {
+            // A gate (no native claude.exe), a refused preset, a cancelled dialog, a failed pane: the seams said why.
+            ::Agentmaster::LogNav(L"manager-page launch (" + origin + L"): no tab opened");
+            return {};
+        }
+        _FinishManagerPageLaunch(opened, origin);
+        return opened;
+    }
+
+    // Agentmaster (MGR-K1) — see TerminalPage.h.
+    void TerminalPage::_FinishManagerPageLaunch(const std::wstring& sessionId, const std::wstring& origin)
+    {
+        try
+        {
+            // LOW priority: after the input, layout and Normal-priority work the launch queued (the tab's settle, the launch
+            // bar's box clear and re-validation, the side panel card's close) — starting the claude and moving the page's
+            // selection from inside that work would interleave with it.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis = get_weak(), sessionId, origin]() {
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return; // the window closed in between: nothing to start or select
+                }
+                try
+                {
+                    // 1. Start it in place: a launch runs although its tab is not shown. False when this window hosts no such
+                    //    dormant tab — the user entered the tab during the tick (its first layout started it) or it closed.
+                    const bool started = self->_ActivateDormantSession(sessionId);
+                    // 2. Select it on the page, the card click's path: the lens push re-pills the tab, turns Home into the
+                    //    jump-back arrow naming it, and moves the side panel's selection; then its card scrolls into view
+                    //    (a no-op until the board's next rebuild has the card, which SelectSession's refresh queues).
+                    bool selected = false;
+                    if (self->_managerPageVisible && self->_managerPage)
+                    {
+                        self->_managerPage->SelectSession(winrt::hstring{ sessionId });
+                        self->_managerPage->BringSelectedIntoView();
+                        selected = std::wstring{ self->_managerPage->SelectedSessionId() } == sessionId;
+                    }
+                    ::Agentmaster::LogNav(L"manager-page launch " + ::Agentmaster::ShortId(sessionId) + L" (" + origin + L"): " +
+                                          (started ? std::wstring{ L"started in place" } : std::wstring{ L"not started by the page (already starting, or no tab here)" }) + L", " +
+                                          (selected ? std::wstring{ L"selected on the page" } : std::wstring{ L"the page was left" }));
+                }
+                catch (...)
+                {
+                    // The tab exists either way and starts when the user enters it; only the start / the selection was lost.
+                    ::Agentmaster::AgentLogCaughtException(L"_FinishManagerPageLaunch (tick)");
+                }
+            });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_FinishManagerPageLaunch");
+        }
+    }
+
+    // Agentmaster (MGR-K1) — see TerminalPage.h.
+    void TerminalPage::_NoteLaunchedSessionTab(const TerminalApp::Tab& tab, const std::wstring& sessionId)
+    {
+        try
+        {
+            if (!tab || sessionId.empty())
+            {
+                return;
+            }
+            if (_managerPageLaunchInFlight)
+            {
+                _managerPageLaunchOpened = sessionId; // _LaunchFromManagerPage starts and selects it one tick later
+                return;
+            }
+            // Only a launch that SELECTED its new tab owes the lens a sync: a background open (bulk open, Telegram, the AI
+            // search's tools) leaves the selection where it was, and so does a launch while the page shows.
+            if (_openClaudeTabInBackground || _managerPageVisible)
+            {
+                return;
+            }
+            if (const auto focused = _GetFocusedTab(); focused && focused == tab)
+            {
+                _SyncManagerSelectionToTab(tab); // gated on a finished startup: a window restore's tabs never reach the lens here
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_NoteLaunchedSessionTab");
+        }
     }
 
     // Agentmaster: EVERY Agentmaster reaction to what just came on screen, in the order the tab-switch

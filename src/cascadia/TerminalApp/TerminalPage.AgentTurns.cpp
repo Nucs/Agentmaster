@@ -475,18 +475,30 @@ namespace winrt::TerminalApp::implementation
     // See TerminalPage.h.
     std::wstring TerminalPage::_LaunchForkRequest(const ForkLaunchRequest& request, ::Agentmaster::ForkTurnChoice forkTurn)
     {
-        // The Sessions page's row menu opens its fork in the BACKGROUND (the list stays open for more): the flag is read by the
-        // ONE launch below. Restored to what it was (an outer caller's value), not cleared.
-        const bool previousBackground = _openClaudeTabInBackground;
-        _openClaudeTabInBackground = request.background;
-        auto restore = wil::scope_exit([this, previousBackground]() { _openClaudeTabInBackground = previousBackground; });
-        if (request.managed)
+        const auto run = [&]() -> std::wstring {
+            // The Sessions page's row menu opens its fork in the BACKGROUND (the list stays open for more): the flag is read by
+            // the ONE launch below. OR-ed with what it was, not overwritten — a page launch (below) set it already, and a
+            // plain `request.background` (false) must not bring the page's new tab to the front. Restored to what it was (an
+            // outer caller's value), not cleared.
+            const bool previousBackground = _openClaudeTabInBackground;
+            _openClaudeTabInBackground = previousBackground || request.background;
+            auto restore = wil::scope_exit([this, previousBackground]() { _openClaudeTabInBackground = previousBackground; });
+            if (request.managed)
+            {
+                std::wstring forkedId;
+                _ForkManagedSessionById(request.sourceId, request.insertPosition, request.model, &forkedId, forkTurn);
+                return forkedId;
+            }
+            return _ForkSessionFromDisk(request.sourceId, request.dir, request.title, request.model, request.insertPosition, forkTurn);
+        };
+        // MGR-K1 (2026-10-23): a fork started on the Agent Manager page is a page launch — decided NOW, when the fork runs
+        // (after the fork question, if one was asked): with the page still on screen, the fork opens behind it, starts in
+        // place and is selected there; with a tab on screen it opens in front, as before.
+        if (request.fromManagerPage)
         {
-            std::wstring forkedId;
-            _ForkManagedSessionById(request.sourceId, request.insertPosition, request.model, &forkedId, forkTurn);
-            return forkedId;
+            return _LaunchFromManagerPage(L"fork (" + request.origin + L")", run);
         }
-        return _ForkSessionFromDisk(request.sourceId, request.dir, request.title, request.model, request.insertPosition, forkTurn);
+        return run();
     }
 
     // ===== the FORK STOP WATCH ===================================================================================

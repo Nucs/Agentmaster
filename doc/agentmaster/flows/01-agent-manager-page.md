@@ -16,8 +16,12 @@ to Windows Terminal. 0.7.10: Home turns into the **jump-back** arrow on the page
        ▲                                              │
        │  any tab click · jump-back arrow · nextTab   │  Home's face:
        │  (first tab) · prevTab (last tab) · a new    │   a session THIS window hosts is selected → ↶ "Jump back to <title>"
-       │  tab / launch · card double-click · toast    │   otherwise → ⌂ "Agent Manager" (a click does nothing)
+       │  tab / a launch from a TAB · card double-    │   otherwise → ⌂ "Agent Manager" (a click does nothing)
+       │  click · toast                               │
        └──────────────────────────────────────────────┘
+                                                      ⟲ a launch made ON the page (its launch row, a board / tree /
+                                                        External row menu, the side panel's + card) keeps the page and
+                                                        selects the new session there (MGR-07)
 
   automatic shows: the last tab closed · a close whose remaining tabs are all dormant · Deactivate of the
   focused tab · a zero-tab window at start · a window reopened while it was on the page
@@ -53,7 +57,8 @@ tab click returns to that tab; while the page shows, no tab is selected and tab 
   cycle never lands back on the page.
 - **E2 Selecting the tab MUX still holds selected** (the one the page hid) → leaves the page (the funnel's
   blind spot is covered).
-- **E3 A new tab** (Ctrl+Shift+T / a launch) → leaves the page onto it.
+- **E3 A new tab** (Ctrl+Shift+T, a launch from a tab's menu) → leaves the page onto it. A launch made ON the page
+  stays on the page instead (MGR-07, since MGR-K1's fix of 2026-10-23).
 - **E4 Opening Settings** (Ctrl+,) → leaves the page.
 - **E5 A second window** → each window has its own page and its own lens selection.
 - **E6 Split pane on the page** → nothing (no pane is focused); an `agentManager` pane request is refused.
@@ -169,11 +174,61 @@ cost; the page never stops answering clicks.
 
 ---
 
+### MGR-07 · A launch from the page stays on the page
+
+> **Since** MGR-K1's fix, 2026-10-23 (NOT BUILT into a release yet) · **P0** · **Needs** F-S, mock · **Spec** CLAUDE.md
+> *Agent Manager page*; `TerminalPage.AgentEngine.cpp` (`_LaunchFromManagerPage`, `_FinishManagerPageLaunch`,
+> `_NoteLaunchedSessionTab`)
+
+**Promise.** A session launched while the user looks at the page — from its launch row (Launch, Resume, Fork), a
+board / tree / External row's menu (Open New Session Here, Fork session, Adopt, a Codex launch), or the side panel's
+**+** card while the page shows — opens its tab BEHIND the page, starts its claude there and is SELECTED on the
+page, as if its card had been clicked: the board card and tree row, the right pane, the tab's pill, the side panel's
+card, and Home's ↶ `Jump back to <title>`. Nothing goes to the tab until the user does (Home, the tab, a card
+double-click). A launch from a TAB still opens in front, and the page's lens follows that new tab. (The user's
+request of 2026-10-23: "make selected but do not go to the tab as if user clicked it and now is supposed to look
+at it".)
+
+**Phases**
+1. **Launch from the row.** *Do:* on the page, type a folder, click **Launch Claude** once (its presets menu open).
+   *Expect:* the page stays (window title `Agent Manager`, no tab selected); the new tab appears in the strip.
+   *Check:* [LOG] `[nav] open-new claude dir=… [bg]` … `done new=<sid8>`, then `[nav] manager-page launch <sid8>
+   (new session): started in place, selected on the page`.
+2. **Selected on the page.** *Expect:* Home reads `Jump back to <title>`; the right pane leaves "Select a Claude
+   session to see its summary."; the side panel selects its card. *Check:* [UI] Home's name; the right pane's texts.
+3. **Started behind the page.** *Expect:* its claude runs although its tab never showed; no `[nav] tab-focus <sid8>`
+   until the user goes there. *Check:* [OS] the session's claude.exe; [LOG] no `tab-focus`; `activate-dormant <sid8>`.
+4. **Go to it.** *Do:* click Home. *Expect:* the new tab, Claude Code's box ready. *Check:* [LOG] `[nav] home-button
+   jump-back -> <sid8>`.
+5. **The + card over the page.** *Do:* open the page, **+**, a folder, Launch. *Expect:* as phases 1–3, origin
+   `plus-card`; the card closes.
+6. **A launch from a tab.** *Do:* on a tab, **+**, a folder, Launch (or a tab menu's New Session Here). *Expect:* the
+   new tab opens in front; the page's lens follows it: open the page → Home reads `Jump back to <the new title>`.
+   *Check:* [LOG] `[nav] tab-focus <sid8>` for the new session; no `manager-page launch` line.
+
+**Edge cases**
+- **E1 Resume of an OPEN session** (its id in the row's box, live in this window or another) → no launch: it jumps to
+  its tab, as before.
+- **E2 A fork asking its question** (the source mid-turn) → decided when the fork RUNS: still on the page → behind it;
+  the user left the page meanwhile → in front.
+- **E3 The user leaves the page during the one tick** before the selection → the claude still starts; the page's
+  selection is left alone (`… the page was left` in the log line).
+- **E4 A refused launch** (no claude.exe, a preset without its key) → `[nav] manager-page launch (<origin>): no tab
+  opened`; the page unchanged.
+- **E5 A Codex launch / an Adopt** (their seams return no id) → the id comes from the tab's mapping; the same result.
+- **E6 The Sessions page over the Manager** → its own rules apply (a launch there is no page launch).
+
+---
+
 ## Known defects (expected failures until fixed)
 
-### MGR-K1 · A session launched from the page is not selected on the page
-> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_manager_page.py`
-> `test_known_defect_a_launched_session_is_not_selected_on_the_page`)
+### MGR-K1 · A session launched from the page is not selected on the page — FIXED in code 2026-10-23 (NOT BUILT into a release)
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
+> `e2e/suites/test_manager_page.py::test_a_launch_from_the_page_stays_on_the_page` and
+> `…::test_a_plus_card_launch_follows_where_the_user_looks`, MGR-07). **The fix:** a launch made on the page no longer
+> goes to its tab at all — it stays behind the page, starts in place and is selected there (MGR-07, the user's choice);
+> a launch from a tab, which still selects its new tab, now runs the Linked-Lenses sync once the tab is mapped
+> (`_NoteLaunchedSessionTab`). What it was on 0.8.0:
 
 Launching from the page's launch row opens and selects the new session's tab (the side panel follows it), but the
 page's lens does not: **Home** → ⌂ `Agent Manager` (no way back to the tab you just came from) and the right pane

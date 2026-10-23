@@ -1,9 +1,9 @@
 """Durability under a hostile environment (doc/agentmaster/flows/20-robustness.md, ROB).
 
-The suite's own reads of the app's files go through a handle that grants FILE_SHARE_DELETE
-(amdriver.win32.read_bytes_shared); the test below holds sessions.json the way an ordinary reader does — Python's
-open(), MSVC's std::ifstream, so also the `agentmaster` CLI's own read by the reading of its code — and shows what
-the app's save does meanwhile.
+The suite's own reads of the app's files go through amdriver.win32.read_bytes_shared, a handle held only for the read
+(its FILE_SHARE_DELETE does not let the app's replace through: measured 2026-10-23, flows/20 ROB-K1); the test below
+holds sessions.json the way an ordinary reader does — Python's open(), MSVC's std::ifstream, so also the `agentmaster`
+CLI's own read by the reading of its code — and shows what the app's save does meanwhile.
 """
 import time
 
@@ -16,15 +16,17 @@ from amdriver.waits import hold_true
 @pytest.mark.flow("ROB-11")
 @pytest.mark.known_defect("ROB-K1")
 def test_known_defect_a_reader_holding_sessions_json_loses_the_save(am, s1, mock):
-    """ROB-K1 (expected failure once fixed): while another process holds sessions.json open without
-    FILE_SHARE_DELETE, every save fails — `[persist-fail] …\\sessions.json (atomic replace failed — state NOT
-    saved)` — and once the reader lets go NOTHING saves again until the next change: the turn that ended is still
-    "Running" on disk. Found 2026-10-23 on 0.8.0 when the suite itself polled the file with open() (a finished
-    turn stayed Running on disk for a minute). By reading: WriteAllUtf8 (Persistence.cpp) makes one
-    MoveFileExW(REPLACE_EXISTING) attempt, which needs DELETE access on the target, logs, and returns.
+    """ROB-K1 (expected failure once fixed): while another process holds sessions.json open (here without
+    FILE_SHARE_DELETE; a reader that grants it fails the save too, measured 2026-10-23), every save fails —
+    `[persist-fail] …\\sessions.json (atomic replace failed — state NOT saved)` — and once the reader lets go NOTHING
+    saves again until the next change: the turn that ended is still "Running" on disk. Found 2026-10-23 on 0.8.0 when
+    the suite itself polled the file with open() (a finished turn stayed Running on disk for a minute). By reading:
+    WriteAllUtf8 (Persistence.cpp) makes one MoveFileExW(REPLACE_EXISTING) attempt, which fails while any handle holds
+    the target, logs, and returns.
 
     The test asserts TODAY's behavior; when it starts failing, the defect is fixed (a retry, or a re-save of the
-    dirty state): assert the record reads WaitingForInput within a few seconds of the release.
+    dirty state; a POSIX-semantics replace alone does not pass THIS reader, which grants no delete sharing): assert
+    the record reads WaitingForInput within a few seconds of the release.
 
     Args:
         am: The app.

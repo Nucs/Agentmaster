@@ -151,11 +151,18 @@ switch closes it; no keystroke leaks into the terminal.
    *Check:* the terminal received no ESC (Claude did not interrupt / no stray input).
 4. **Launch.** *Do:* + again, pick a recent folder, click **Launch Claude** once. *Expect:* one new session
    (a tab), the card closes. *Check:* [ENG] exactly one new session.
+5. **One click with the presets menu open** (SP-K1's fix, 2026-10-23). *Do:* + over a tab, type a folder, rest on
+   **Launch Claude** until its presets menu shows, click ONCE. *Expect:* one new session in front, the card closed.
+   *Check:* [LOG] `[launchbar] Launch clicked while its hover menu was up: …` (`its release on Launch completed the
+   click` or `the release watch completed the click`); no `a second Launch click … was ignored`. Over the PAGE the
+   launch stays behind it (MGR-07 phase 5).
 
 **Edge cases**
 - **E1 A session id typed** in the box (found on disk) → green underline, **Resume session** + **Fork**.
 - **E2 Launch's preset hover menu open** (pointer resting on Launch) → ONE click launches (not a
-  double-click); a double-click launches once.
+  double-click); a double-click launches once. (On 0.8.0 the + card needed two clicks: SP-K1, phase 5.)
+- **E2b The + card over the Agent Manager page** → the launch keeps the page and selects the new session there
+  (MGR-07 phase 5); over a tab it opens in front.
 - **E3 Enter** → in the BOX it only commits the path (the folder list closes, nothing launches — the Agent
   Manager page's Enter); on the focused **Launch** button it launches, on the KEY-UP, so no CR reaches the terminal
   (`TerminalPage.AgentSidePanel.cpp`, the card's PreviewKeyDown/Up). Corrected 2026-10-23 by the e2e suite: this
@@ -245,9 +252,18 @@ rising embers) while the server cache is warm.
 
 ## Known defects (expected failures until fixed)
 
-### SP-K1 · In the + card, Launch needs a second click while its presets menu is open
-> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_side_panel.py`
-> `test_known_defect_plus_card_launch_needs_a_second_click`)
+### SP-K1 · In the + card, Launch needs a second click while its presets menu is open — FIXED in code 2026-10-23 (NOT BUILT into a release)
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
+> `e2e/suites/test_side_panel.py::test_plus_card_launch_takes_one_click_with_its_menu_open`, SP-05 phase 5).
+> **The fix** (`AgentLaunchBar`, the bar both hosts share): the press that closes the menu is also recognized from the
+> pointer MESSAGE being processed (`GetPointerInfo` — a busy UI thread may process the press after the physical
+> release), and a release WATCH completes an armed press whose release never reached Launch: it polls the physical
+> button and, once it is up, judges the press and release points with the last pointer position seen on Launch.
+> Every arm, completion and decline is a `[launchbar]` line in hooks.log, so a click that still fails says why.
+> **The cause, measured with the test build on 2026-10-23** (e2e run fix1): the press is armed in both hosts, but in the
+> card the release never reaches Launch — `… the menu took the press and no release reached Launch; the release watch
+> completed the click` — while on the page it does (`… its release on Launch completed the click`). What it was on
+> 0.8.0:
 
 With the pointer resting on the + card's **Launch Claude**, its presets hover menu opens (Default · Specify… · the
 launch models · Add presets…); one click — a held one, like a hand's — only closes that menu, the card stays open,

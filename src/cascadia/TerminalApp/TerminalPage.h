@@ -1098,6 +1098,15 @@ namespace winrt::TerminalApp::implementation
         // open" path. _InitializeTab skips the SelectedItem switch; _ResumeSessionFromDisk /
         // _ForkSessionFromDisk skip _HideSessionsPage. Set around ONE open, reset right after.
         bool _openClaudeTabInBackground{ false };
+        // Agentmaster (MGR-K1, 2026-10-23): true while _LaunchFromManagerPage runs ONE synchronous launch the user started
+        // on the Agent Manager page. While it is set, _NoteLaunchedSessionTab records the id of the tab the launch opened in
+        // _managerPageLaunchOpened — the seams behind an Adopt or a Codex launch return no id, and the page must know which
+        // session to start and select. Saved and restored around the launch (a scope guard: a throwing launch never leaves
+        // it set, so a later launch from a tab is never mistaken for a page launch). UI thread only.
+        bool _managerPageLaunchInFlight{ false };
+        // The session the page launch above opened; "" until a seam maps a new tab. Only meaningful while
+        // _managerPageLaunchInFlight is set (cleared at the start of every page launch).
+        std::wstring _managerPageLaunchOpened;
         // Agentmaster (native-exe-only policy): true while the page-level "Claude not found" dialog
         // (_PromptClaudeMissing) is up, so a burst of not-found gates — e.g. a bulk Restore looping over
         // checked Claude sessions — collapses to a SINGLE dialog instead of stacking one per session.
@@ -2274,6 +2283,44 @@ namespace winrt::TerminalApp::implementation
         void _ReconcileManagedCodex(const std::wstring& sessionId, const ::Agentmaster::TabActivityRow& act); // fill codexSessionId + map the C2 turn-state onto a managed Codex record (UI-lane, per probe)
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
         void _SyncManagerSelectionToTab(const TerminalApp::Tab& tab); // Agentmaster (Linked Lenses): on a tab switch, select that tab's managed session in the Manager lens, so opening the Manager page shows the session you were just in (no-op pre-startup / null tab / non-session tab)
+        // Agentmaster (MGR-K1, 2026-10-23 — the user's "make selected but do not go to the tab as if user clicked it"): run
+        // ONE launch the user started on the Agent Manager page. While the page is on screen (and no Sessions page covers it),
+        // the new tab opens in the BACKGROUND (_openClaudeTabInBackground for that one launch), so the page stays where the
+        // user is looking, and _FinishManagerPageLaunch then starts its claude in place and SELECTS the session on the page:
+        // its board card, its tree row and Summary, the side panel's card, the tab's pill, and Home's "Jump back to <title>"
+        // — exactly what a click on its card does. Off the page (a tab on screen) the launch runs unchanged: its tab opens in
+        // front, as before. Before 2026-10-23 a page launch switched to the new tab and the page never selected it, so Home
+        // offered no way back to the tab until the user switched tabs once.
+        //   origin - what launched, for the [nav] line ("launch-bar", "board menu", "plus-card", "fork (board)", …).
+        //   launch - the launch itself. Returns the id of the session whose tab it opened; "" when it opened none, or when its
+        //            seam reports no id (Adopt, Codex) — then the id _NoteLaunchedSessionTab recorded during the launch is used.
+        // Returns the opened session's id ("" = no tab opened: a gate, a refused preset, a cancelled question, a failure).
+        // Throws what `launch` throws; the background flag and the in-flight latch are restored before the exception leaves.
+        std::wstring _LaunchFromManagerPage(const std::wstring& origin, const std::function<std::wstring()>& launch);
+        // The page half of a page launch, ONE low-priority dispatcher tick later — after the launch's own layout settle and
+        // the launch bar's follow-ups (a resume or fork clears the box), so nothing below races them:
+        //   1. start the new tab's claude IN PLACE (_ActivateDormantSession — the "Activate Tab" path: no focus change, the
+        //      tab content's size, SetStarted) — a launch must start even though its tab is not shown;
+        //   2. while the page is still on screen, select the session there (AgentManagerContent::SelectSession, the card
+        //      click's path, whose lens push re-pills the tab, flips Home to the jump-back arrow and moves the side panel's
+        //      selection) and scroll its card into view (BringSelectedIntoView). A user who left the page during that tick
+        //      keeps the page's earlier selection (the tab-switch funnel already selected what they went to).
+        // Logs `[nav] manager-page launch <sid8> (<origin>): started in place | not started here, selected on the page | the
+        // page was left` — the e2e suite's oracle for this flow (flows/01 MGR-07).
+        //   sessionId - the session the launch opened; origin - as passed to _LaunchFromManagerPage.
+        // Never throws: a failure is logged (Rule #18); the tab exists either way and starts when the user enters it.
+        void _FinishManagerPageLaunch(const std::wstring& sessionId, const std::wstring& origin);
+        // Called by _LaunchClaudeSession and _LaunchCodexSession once the new tab is mapped to its session (_claudeTabs) and
+        // wired (title, color, badge, dot): inside a page launch (_managerPageLaunchInFlight) it records the session for
+        // _LaunchFromManagerPage; otherwise, when the new tab is this window's SELECTED tab — a launch from a tab's menu, from
+        // the "+" card over a tab, a Sessions-page resume, Ctrl+Shift+D — it runs the Linked-Lenses sync
+        // (_SyncManagerSelectionToTab) that the tab-switch funnel could not run: _InitializeTab selected the tab BEFORE it was
+        // mapped, so the funnel found no session, the Agent Manager kept its previous selection, and Home later offered no
+        // way back to the new tab (MGR-K1, measured on 0.8.0). A background open and a window restore change nothing here
+        // (the tab is not the selected one; the sync is gated on a finished startup).
+        //   tab - the new tab; sessionId - its session (a Claude id or a managed Codex handle).
+        // Never throws: a failed sync is logged (Rule #18) and leaves the lens as it was.
+        void _NoteLaunchedSessionTab(const TerminalApp::Tab& tab, const std::wstring& sessionId);
         void _BringManagerSelectionIntoView(); // Agentmaster (Linked Lenses): on showing the Agent Manager page, scroll the selected board card / tree row into view — the selection followed tab switches while the page was hidden, so it can be off-screen (no-op pre-startup)
         // Agentmaster (the SLOW TAB SWITCH stopwatch — TabManagement.cpp _OnTabSelectionChanged): the
         // three lap instants _ApplyAgentTabSelection stamps, so the funnel's [tab-switch-slow] breakdown
@@ -2424,6 +2471,11 @@ namespace winrt::TerminalApp::implementation
             std::wstring model; // the launch-model pick ("" = Default)
             uint32_t insertPosition{ static_cast<uint32_t>(-1) }; // the strip slot (-1 = the end)
             bool background{ false }; // _openClaudeTabInBackground for the open (the Sessions page's row menu)
+            // Started on the Agent Manager page — its launch row's Fork, a board / tree / side-panel card menu's Fork session,
+            // the side panel's "+" card (MGR-K1, 2026-10-23). The fork then runs through _LaunchFromManagerPage, which decides
+            // when the fork RUNS (after the fork question, when one was asked): with the page still on screen the fork opens in
+            // the background, starts in place and is selected on the page; with a tab on screen it opens in front, as before.
+            bool fromManagerPage{ false };
             std::wstring origin; // the call site, for the [nav] line ("tab-menu", "board", "sessions-row", …)
         };
         // What the fork question shows (built by _ForkTurnQuestionFor).

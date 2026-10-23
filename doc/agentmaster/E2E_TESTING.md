@@ -20,6 +20,18 @@
 > per-tab badge, and the driver reading them with a fallback to the 0.8.0 way.
 > The spike (`tools/e2e-spike/`, 2026-10-22) stays as the record of §2.
 >
+> **The first fixes checked by the suite (2026-10-23, NOT BUILT into a release):** MGR-K1 (a launch on the Agent
+> Manager page stays on the page and selects the new session there; flows/01 MGR-07) and SP-K1 (one click on the + card's
+> Launch while its presets menu is open; flows/02 SP-05 phase 5) are fixed in code. A TEST build of 8932908db with the two
+> fixes (a purged Release build, packaged as a portable zip stamped 0.8.1.0 so the copy meets no update question;
+> never installed on the PC) passed, in its own claude-fleet desktop, 41 of 41 tests of the suites of 3773f7149 — the three
+> new `needs_fix` tests included — and 27 of 28 of the tab life cycle, robustness and tab menu suites of f710660e0 in
+> one run. The 28th, the Deactivate scopes test, failed on its own shell count (it counted a hook forwarder, a Windows
+> PowerShell that claude.exe starts, as a shell tab); counting only the PowerShells the GUI itself starts, it passed on a
+> rerun. A rerun in between lost a save to ROB-K1, caused by the test's own poll of `sessions.json` (flows/20: the
+> app's replace fails while ANY handle holds the file, delete sharing or not). A `needs_fix` test proves a fix that no
+> release holds yet, so it fails on 0.8.0 by design: deselect those tests there with `-m "not needs_fix"`.
+>
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
 > lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part

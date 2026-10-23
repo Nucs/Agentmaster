@@ -88,6 +88,64 @@ namespace winrt::TerminalApp::implementation
         // hover menu — which does not reopen while a press is armed — comes back soon after a press that went elsewhere.
         constexpr uint64_t kLaunchEatenPressMaxMs = 3000;
 
+        // The RELEASE WATCH (SP-K1, 2026-10-23; _OnLaunchReleaseWatchTick): how often it polls the physical primary button
+        // while a press is armed, in ms — fine enough to answer a click within a frame or two, and a timer that runs only
+        // from an arm until its release (a few hundred ms per click on Launch while its menu is up).
+        constexpr int64_t kLaunchReleaseWatchIntervalMs = 15;
+        // How many consecutive "up" reads the watch waits for before it judges the press itself. Input outranks a timer
+        // tick in the dispatcher, so by the second up-read the XAML release had its chance to complete (or decline) the
+        // click through _OnLaunchButtonReleased, which consumes the arm — the watch then finds nothing to do.
+        constexpr uint32_t kLaunchReleaseWatchUpReads = 2;
+        // A press and a release closer than this, in screen pixels, are ONE point: a click that did not move. A release
+        // that XAML routed to Launch then proves the press was on Launch too, and a press at the last pointer sample on
+        // Launch is on it — no coordinate mapping needed (the mapping is the fallback for a pointer that moved).
+        constexpr LONG kLaunchClickSlackPx = 4;
+        // The slack of the mapped test, in DIPs: the pointer sample's message point and the cursor read of a later press
+        // can be a pixel apart, and a click on Launch's very edge must still count.
+        constexpr double kLaunchClickSlackDips = 1.0;
+
+        // The facts of the pointer message this UI thread is processing for `pointerId` — GetPointerInfo answers for the
+        // pointer message the thread retrieved last, which is the one XAML is dispatching while its event handler runs.
+        // The app calls EnableMouseInPointer (WindowsTerminal/main.cpp), so the mouse arrives as pointer messages too.
+        //   pointerId       - the pointer's id (XAML's PointerRoutedEventArgs.Pointer().PointerId(); 0 = unknown).
+        //   location        - receives the message's screen point (ptPixelLocation) when the call succeeds.
+        //   primaryWentDown - receives true when this message is the primary ("first") button going down.
+        //   returns         - true when GetPointerInfo answered (false: no id, or no pointer message for it).
+        // Never throws.
+        bool LaunchBarPointerMessage(uint32_t pointerId, POINT& location, bool& primaryWentDown) noexcept
+        {
+            primaryWentDown = false;
+            if (pointerId == 0)
+            {
+                return false;
+            }
+            POINTER_INFO info{};
+            if (!::GetPointerInfo(pointerId, &info))
+            {
+                return false;
+            }
+            location = info.ptPixelLocation;
+            primaryWentDown = info.ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_DOWN;
+            return true;
+        }
+
+        // Are two screen points one point for a click (within kLaunchClickSlackPx on both axes)?
+        //   a, b    - the points, in screen pixels.
+        //   returns - true when neither axis differs by more than the slack.
+        bool LaunchBarSamePoint(POINT a, POINT b) noexcept
+        {
+            const LONG dx = a.x > b.x ? a.x - b.x : b.x - a.x;
+            const LONG dy = a.y > b.y ? a.y - b.y : b.y - a.y;
+            return dx <= kLaunchClickSlackPx && dy <= kLaunchClickSlackPx;
+        }
+
+        // The primary mouse button's virtual key: SM_SWAPBUTTON says whether the right button is primary.
+        //   returns - VK_LBUTTON, or VK_RBUTTON for a swapped mouse.
+        int LaunchBarPrimaryButtonKey() noexcept
+        {
+            return ::GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON;
+        }
+
         // COM identity of two projected objects (their IUnknown), null-safe. GettingFocus names the new focus as a
         // DependencyObject and the box is a TextBox: two projections of one object are equal only by identity.
         //   a, b    — the objects to compare (either may be null).
@@ -427,9 +485,16 @@ namespace winrt::TerminalApp::implementation
         });
         _launchBtn.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs& e) {
             const auto self = weak.lock();
-            if (!self || self->_launchMenu)
+            if (!self)
             {
-                return; // the bar is gone, or its menu is still up (the pointer came back from it): nothing to stack
+                return; // the bar is gone
+            }
+            // FIRST, menu or not: where the pointer is on Launch, for the release watch (SP-K1). The menu opened below takes
+            // the pointer's later moves (its light dismiss), so this sample is the one a click on Launch is judged by.
+            self->_NoteLaunchPointerOnButton(e); // noexcept
+            if (self->_launchMenu)
+            {
+                return; // its menu is still up (the pointer came back from it): nothing to stack
             }
             // Hover or contact? A failed read takes the contact path — the old hold, which can only delay the menu,
             // never flash it over a tap.
@@ -467,6 +532,18 @@ namespace winrt::TerminalApp::implementation
                 if (const auto self = weak.lock())
                 {
                     self->_OnLaunchButtonReleased(e); // noexcept: a failure is logged inside
+                }
+            } }),
+            true /* handledEventsToo */);
+        // The pointer's moves on Launch keep the release watch's sample current (SP-K1) — until the hover menu opens, after
+        // which its light dismiss takes the moves. handledEventsToo, in case ButtonBase marks a move handled; weak capture
+        // as above.
+        _launchBtn.AddHandler(
+            UIElement::PointerMovedEvent(),
+            winrt::box_value(PointerEventHandler{ [weak](const IInspectable&, const PointerRoutedEventArgs& e) {
+                if (const auto self = weak.lock())
+                {
+                    self->_NoteLaunchPointerOnButton(e); // noexcept
                 }
             } }),
             true /* handledEventsToo */);
@@ -561,6 +638,10 @@ namespace winrt::TerminalApp::implementation
         // This IS the click: drop an eaten press that still waits for its release — completed later it would launch a
         // second time — and any arm our own close above could leave. AFTER the close, so its Closing cannot re-arm.
         _launchEatenPressTick = 0;
+        if (_launchReleaseWatch)
+        {
+            _launchReleaseWatch.Stop(); // nothing armed is left to watch (its own tick would stop it a tick later)
+        }
         // The second click of a double-click is no second launch. Before 2026-10-19 the hover menu ate Launch's first
         // click, so users double-click it out of habit, and with the first click completed the second could land on a
         // Launch button that is still on screen (the Agent Manager page until the new tab is selected). The interval is
@@ -718,6 +799,17 @@ namespace winrt::TerminalApp::implementation
                 _launchHoverTimer.Stop(); // PRESETS: the Launch button's hover-intent delay (its Tick holds only a weak ref)
             }
             CATCH_LOG(); // a teardown off the UI thread throws RPC_E_WRONG_THREAD here — never let it escape a destructor
+        }
+        // SP-K1: the release watch must not complete a click through a host that is going away. Dropping the arm first makes
+        // a tick that still runs (Stop failed off the UI thread) stop itself without acting.
+        _launchEatenPressTick = 0;
+        if (_launchReleaseWatch)
+        {
+            try
+            {
+                _launchReleaseWatch.Stop();
+            }
+            CATCH_LOG(); // the same off-thread teardown exposure as the hover timer above
         }
         // An open Launch hover menu must not outlive the bar either (a pick would launch through a host that is going
         // away). Noexcept and guarded inside, for the same off-thread teardown exposure.
@@ -979,24 +1071,34 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // armed already (Closing, then the belt in Closed): keep the press point
             }
-            // Was this close a PRESS? Read the PHYSICAL primary button: GetAsyncKeyState reads physical buttons, and
-            // SM_SWAPBUTTON says which one is primary. Deliberately not GetKeyState: that reads the thread's message-time
-            // state, which the island's pointer input may never update — a stale "down" would arm every close, and an
-            // armed press keeps the hover menu from reopening. The cost: a press the UI thread processes only after the
-            // physical release (a busy thread) reads "up" and stays eaten, as before this fix.
-            const int primary = ::GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON;
-            if ((::GetAsyncKeyState(primary) & 0x8000) == 0)
+            // Was this close a PRESS? Two readings, either one is enough:
+            //  - the PHYSICAL primary button is down (GetAsyncKeyState reads physical buttons; LaunchBarPrimaryButtonKey
+            //    follows SM_SWAPBUTTON). Deliberately not GetKeyState: that reads the thread's message-time state, which
+            //    the island's pointer input never updates — a stale "down" would arm every close, and an armed press keeps
+            //    the hover menu from reopening;
+            //  - the pointer MESSAGE being processed is the primary button going down (GetPointerInfo, for the pointer last
+            //    seen on Launch). This one also holds when the UI thread processes the press only after the physical
+            //    release — a busy thread, where the first reading says "up" and the press stayed eaten before SP-K1.
+            //    It carries the press's own screen point, too.
+            const bool physicallyDown = (::GetAsyncKeyState(LaunchBarPrimaryButtonKey()) & 0x8000) != 0;
+            POINT messagePoint{};
+            bool messageIsPress = false;
+            LaunchBarPointerMessage(_launchPointerId, messagePoint, messageIsPress);
+            if (!physicallyDown && !messageIsPress)
             {
                 return; // a menu pick, Esc, the pointer moving away, ClickLaunch's own close: nothing was eaten
             }
-            POINT cursor{};
-            if (!::GetCursorPos(&cursor))
+            POINT press = messagePoint;
+            if (!messageIsPress && !::GetCursorPos(&press))
             {
                 return; // no press point to check the release against: the press stays eaten
             }
-            _launchEatenPressX = cursor.x;
-            _launchEatenPressY = cursor.y;
+            _launchEatenPressX = press.x;
+            _launchEatenPressY = press.y;
+            _launchEatenPressReleasedAtArm = !physicallyDown;
             _launchEatenPressTick = ::GetTickCount64();
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] the Launch hover menu closed on a press at (" + std::to_wstring(press.x) + L", " + std::to_wstring(press.y) + L") px: armed for its release (" + (physicallyDown ? std::wstring{ L"the button is down" } : std::wstring{ L"the button was already up: the press was processed late" }) + (messageIsPress ? L", point from the press message" : L", point from the cursor") + L")\n");
+            _StartLaunchReleaseWatch(); // noexcept
         }
         catch (...)
         {
@@ -1021,6 +1123,7 @@ namespace winrt::TerminalApp::implementation
             if (!_launchBtn.IsEnabled())
             {
                 _launchEatenPressTick = 0; // the box turned red between press and release: a disabled button never clicks
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] an armed press was released on Launch while Launch was disabled: no click\n");
                 return;
             }
             const auto point = e.GetCurrentPoint(_launchBtn);
@@ -1029,31 +1132,42 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            // Where was the PRESS, in Launch's own coordinates? The release point moved back by how far the cursor
-            // travelled since the press: screen pixels converted to DIPs with the island's rasterization scale. So no
-            // window or island position is needed, only the cursor's delta. A press that began elsewhere (the box, a row of
-            // the menu) and was dragged onto Launch is no click on it, exactly as for a plain Button.
-            POINT now{};
-            if (!::GetCursorPos(&now))
+            // The release's screen point: its own pointer message's (exact, even when the thread processes it late), else
+            // the cursor now.
+            POINT release{};
+            bool releaseIsPress = false; // unused: a release message is never a "down"
+            if (!LaunchBarPointerMessage(e.Pointer().PointerId(), release, releaseIsPress) && !::GetCursorPos(&release))
             {
-                return;
+                return; // no release point: the release watch judges the armed press with the cursor instead
             }
-            double scale = 1.0;
-            if (const auto xamlRoot = _launchBtn.XamlRoot())
-            {
-                scale = xamlRoot.RasterizationScale();
-            }
-            if (!(scale > 0.0))
-            {
-                scale = 1.0; // never divide by an unset or broken scale
-            }
-            const auto at = point.Position();
-            const double pressX = static_cast<double>(at.X) + static_cast<double>(_launchEatenPressX - now.x) / scale;
-            const double pressY = static_cast<double>(at.Y) + static_cast<double>(_launchEatenPressY - now.y) / scale;
-            const bool pressOnLaunch = pressX >= 0.0 && pressY >= 0.0 && pressX <= _launchBtn.ActualWidth() && pressY <= _launchBtn.ActualHeight();
-            _launchEatenPressTick = 0; // one press, one release: consumed whatever the answer
+            const POINT press{ _launchEatenPressX, _launchEatenPressY };
+            // Where was the PRESS? A click that did not move needs no mapping: XAML routed this release to Launch, so its
+            // point is on Launch, and a press at the same point was too. A pointer that moved: the release point moved back
+            // by how far it travelled since the press — screen pixels converted to DIPs with the island's rasterization
+            // scale, so no window or island position is needed. A press that began elsewhere (the box, a row of the menu)
+            // and was dragged onto Launch is no click on it, exactly as for a plain Button.
+            bool pressOnLaunch = LaunchBarSamePoint(press, release);
             if (!pressOnLaunch)
             {
+                double scale = 1.0;
+                if (const auto xamlRoot = _launchBtn.XamlRoot())
+                {
+                    scale = xamlRoot.RasterizationScale();
+                }
+                if (!(scale > 0.0))
+                {
+                    scale = 1.0; // never divide by an unset or broken scale
+                }
+                const auto at = point.Position();
+                const double pressX = static_cast<double>(at.X) + static_cast<double>(press.x - release.x) / scale;
+                const double pressY = static_cast<double>(at.Y) + static_cast<double>(press.y - release.y) / scale;
+                pressOnLaunch = pressX >= -kLaunchClickSlackDips && pressY >= -kLaunchClickSlackDips &&
+                                pressX <= _launchBtn.ActualWidth() + kLaunchClickSlackDips && pressY <= _launchBtn.ActualHeight() + kLaunchClickSlackDips;
+            }
+            _launchEatenPressTick = 0; // one press, one release: consumed whatever the answer (the watch then stops)
+            if (!pressOnLaunch)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] an armed press was released on Launch but began off it (press (" + std::to_wstring(press.x) + L", " + std::to_wstring(press.y) + L") px, release (" + std::to_wstring(release.x) + L", " + std::to_wstring(release.y) + L") px): no click\n");
                 return;
             }
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] Launch clicked while its hover menu was up: the menu took the press, its release on Launch completed the click\n");
@@ -1066,6 +1180,174 @@ namespace winrt::TerminalApp::implementation
             // A launch that threw past its host's own containment, or a failed read: recorded (Rule #18), never thrown into
             // XAML's pointer routing. The user's next click on Launch works normally (the menu is closed by now).
             ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: complete the Launch click that the hover menu ate");
+        }
+    }
+
+    void AgentLaunchBar::_NoteLaunchPointerOnButton(const PointerRoutedEventArgs& e) noexcept
+    {
+        try
+        {
+            if (!_launchBtn || _shutDown)
+            {
+                return;
+            }
+            const uint32_t id = e.Pointer().PointerId();
+            POINT screen{};
+            bool isPress = false; // a press on Launch is the button's own (its Click follows): only the point matters here
+            if (!LaunchBarPointerMessage(id, screen, isPress) && !::GetCursorPos(&screen))
+            {
+                return; // keep the previous sample: a stale one is still better than none for a resting pointer
+            }
+            _launchPointerSampleLocal = e.GetCurrentPoint(_launchBtn).Position();
+            _launchPointerSampleScreen = screen;
+            _launchPointerId = id;
+            _launchPointerSampleValid = true;
+        }
+        catch (...)
+        {
+            // A failed read keeps the previous sample; the XAML release path does not need one. Recorded (Rule #18).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: sample the pointer on Launch");
+        }
+    }
+
+    void AgentLaunchBar::_StartLaunchReleaseWatch() noexcept
+    {
+        try
+        {
+            if (_shutDown)
+            {
+                return;
+            }
+            if (!_launchReleaseWatch)
+            {
+                _launchReleaseWatch = DispatcherTimer{};
+                _launchReleaseWatch.Interval(std::chrono::milliseconds{ kLaunchReleaseWatchIntervalMs });
+                // Weak, like every handler of the bar; a tick that finds the bar gone stops its own timer (a running
+                // DispatcherTimer is kept alive by the dispatcher, not by the bar).
+                _launchReleaseWatch.Tick([weak = weak_from_this()](const IInspectable& sender, const IInspectable&) {
+                    if (const auto self = weak.lock())
+                    {
+                        self->_OnLaunchReleaseWatchTick(); // noexcept
+                    }
+                    else if (const auto t = sender.try_as<DispatcherTimer>())
+                    {
+                        t.Stop();
+                    }
+                });
+            }
+            _launchReleaseWatchUps = 0;
+            _launchReleaseWatch.Start(); // restarts the interval when it was running already
+        }
+        catch (...)
+        {
+            // Without the watch, a release that reaches Launch still completes the click (_OnLaunchButtonReleased).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: start the Launch release watch");
+        }
+    }
+
+    void AgentLaunchBar::_OnLaunchReleaseWatchTick() noexcept
+    {
+        try
+        {
+            if (_shutDown || !_LaunchEatenPressPending())
+            {
+                if (_launchEatenPressTick != 0 && !_shutDown)
+                {
+                    // Aged out: a press held longer than kLaunchEatenPressMaxMs, or a release no tick saw. No click.
+                    _launchEatenPressTick = 0;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] an armed press on the Launch hover menu aged out before its release: no click\n");
+                }
+                if (_launchReleaseWatch)
+                {
+                    _launchReleaseWatch.Stop(); // consumed (a click, the XAML release's verdict) or expired: nothing to watch
+                }
+                return;
+            }
+            const bool down = (::GetAsyncKeyState(LaunchBarPrimaryButtonKey()) & 0x8000) != 0;
+            if (down)
+            {
+                // Still held — or, for a press armed after its release (a busy thread), a NEW press: either way the
+                // release to judge has not come yet.
+                _launchReleaseWatchUps = 0;
+                return;
+            }
+            if (++_launchReleaseWatchUps < kLaunchReleaseWatchUpReads)
+            {
+                return; // give the XAML release (input outranks this timer) its chance to complete the click first
+            }
+            // Up for good, and the arm is still here: no release reached Launch (it went to the light-dismiss layer, to
+            // another popup, or to nothing). Judge the click from the screen points.
+            _launchReleaseWatch.Stop();
+            _launchEatenPressTick = 0; // one press, one verdict
+            POINT release{};
+            if (!::GetCursorPos(&release))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] the release watch could not read the cursor: no click\n");
+                return;
+            }
+            const POINT press{ _launchEatenPressX, _launchEatenPressY };
+            if (!_launchBtn || !_launchBtn.IsLoaded() || !_launchBtn.IsEnabled() || _launchBtn.Visibility() != Visibility::Visible)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] the release watch found Launch disabled, hidden or off screen: no click\n");
+                return;
+            }
+            const bool pressOnLaunch = _LaunchScreenPointOnButton(press);
+            const bool releaseOnLaunch = _LaunchScreenPointOnButton(release);
+            if (!pressOnLaunch || !releaseOnLaunch)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] the release watch saw a press at (" + std::to_wstring(press.x) + L", " + std::to_wstring(press.y) + L") px released at (" + std::to_wstring(release.x) + L", " + std::to_wstring(release.y) + L") px: " + (pressOnLaunch ? std::wstring{ L"released off Launch" } : std::wstring{ L"pressed off Launch" }) + L", no click\n");
+                return;
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launchbar] Launch clicked while its hover menu was up: the menu took the press and no release reached Launch; the release watch completed the click\n");
+            // What the button's Click would have run: the hover menu closed, the Default launch, the host's follow-up.
+            ClickLaunch();
+        }
+        catch (...)
+        {
+            // A launch that threw past its host's own containment, or a failed read: recorded (Rule #18), never thrown into
+            // the dispatcher. The user's next click on Launch works normally (the menu is closed by now).
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: the Launch release watch");
+        }
+    }
+
+    bool AgentLaunchBar::_LaunchScreenPointOnButton(POINT p) const noexcept
+    {
+        try
+        {
+            if (!_launchPointerSampleValid || !_launchBtn)
+            {
+                return false;
+            }
+            // The pointer rested where it was last seen on Launch: that point is on it, with no mapping at all.
+            if (LaunchBarSamePoint(p, _launchPointerSampleScreen))
+            {
+                return true;
+            }
+            const double width = _launchBtn.ActualWidth();
+            const double height = _launchBtn.ActualHeight();
+            if (!(width > 0.0) || !(height > 0.0))
+            {
+                return false; // not measured (off the live tree): nothing to test against
+            }
+            double scale = 1.0;
+            if (const auto xamlRoot = _launchBtn.XamlRoot())
+            {
+                scale = xamlRoot.RasterizationScale();
+            }
+            if (!(scale > 0.0))
+            {
+                scale = 1.0; // never divide by an unset or broken scale
+            }
+            // The sample ties one screen pixel to one point of Launch; the button does not move while its menu is up, so a
+            // screen delta from the sample, in DIPs, is the same delta on the button.
+            const double x = static_cast<double>(_launchPointerSampleLocal.X) + static_cast<double>(p.x - _launchPointerSampleScreen.x) / scale;
+            const double y = static_cast<double>(_launchPointerSampleLocal.Y) + static_cast<double>(p.y - _launchPointerSampleScreen.y) / scale;
+            return x >= -kLaunchClickSlackDips && y >= -kLaunchClickSlackDips && x <= width + kLaunchClickSlackDips && y <= height + kLaunchClickSlackDips;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"AgentLaunchBar: is a screen point on Launch");
+            return false;
         }
     }
 
