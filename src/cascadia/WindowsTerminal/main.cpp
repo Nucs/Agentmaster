@@ -1,11 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+// Modifications (c) 2026 Eli Belash (Agentmaster), licensed under AGPL-3.0-or-later. See LICENSE.
 
 #include "pch.h"
 #include "WindowEmperor.h"
 #include "resource.h"
 #include "../types/inc/User32Utils.hpp"
 #include <WilErrorReporting.h>
+// Agentmaster (doc/agentmaster/CLI.md §2a): the rule that tells a CLI call (`agentmaster show <id>`) from a launch,
+// shared with the console launcher shim (wt/shim.cpp). Header-only, plain Win32.
+#include "../TerminalApp/AgentMaster/CliDispatch.h"
 
 using namespace winrt;
 using namespace winrt::Windows::UI;
@@ -100,6 +104,19 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int nCmdShow)
     // application. Unfortunately, that state is heritable. In short, if you start WT using cmd in
     // a weird way, ^C stops working _inside_ the terminal. Mad.
     SetConsoleCtrlHandler(NULL, FALSE);
+
+    // Agentmaster (CliDispatch.h; doc/agentmaster/CLI.md §2a): in an UNPACKAGED install (per-user, for all users, a
+    // portable folder on PATH) the name `agentmaster` finds THIS exe, so `agentmaster show <id>` arrives here instead of
+    // at the package alias's console launcher. Answer it first, before the architecture check, COM, the single-instance
+    // hand-off, the install question and the profile: the agentmaster-cli.exe beside this exe runs on the caller's
+    // handles or console, and the app is never started for a CLI call. Started before 2026-10-23, it was a SECOND app
+    // on the user's profile ("profile in use"). After the Ctrl+C reset above, so the CLI inherits a working Ctrl+C.
+    if (const auto cliExitCode = ::Agentmaster::CliDispatch::TryRunCliCall())
+    {
+        // TerminateProcess, like every early exit of this exe: nothing of the app was set up that must shut down.
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(*cliExitCode));
+        __assume(false);
+    }
 
     // Block the user from starting if they launched the incorrect architecture version of the project.
     // This should only be applicable to developer versions. The package installation process

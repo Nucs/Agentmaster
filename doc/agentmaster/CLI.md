@@ -23,7 +23,9 @@ Three facts decide the architecture:
 1. **The app exe is GUI-subsystem.** `Agentmaster.exe` (the GUI binary — the alias target's forward; named `WindowsTerminal.exe` pre-rename) cannot write
    to the caller's stdout — the shell does not wait on a GUI child, so any `AttachConsole` output
    races the next prompt. This is *why* `wt.exe` never returns query output. A queryable CLI must be
-   a **console-subsystem** binary.
+   a **console-subsystem** binary. (Since 2026-10-23, NOT BUILT, the app exe still answers a CLI
+   call that reaches it, by starting that console CLI on the caller's handles: §2a. Callers that
+   wait for a GUI program get the full answer there.)
 2. **Single-instance handoff is one-way.** `acquireMutexOrAttemptHandoff` (`WindowEmperor.cpp`) sends
    `WM_COPYDATA` then `TerminateProcess`es — there is **no response channel** back to the caller.
 3. **State is split.** The live `SessionRegistry` + `ProcessObserver` tables are in-process only —
@@ -61,6 +63,51 @@ The forward path stays **byte-for-byte** the default for everything that is not 
 launch path, single-instance handoff, and defterm are preserved. The launcher delegates verbs to a
 separate **`agentmaster-cli.exe`** (console; links only the pure-C++ `AgentMaster/*.cpp`) so engine
 deps never load on a plain window launch.
+
+Since 2026-10-23 the rule above (the verbs, the CLI-only flags, the argv[0] split) lives in ONE
+header-only file, `AgentMaster/CliDispatch.h`, which the shim and the app exe both include (§2a):
+add a new verb there, and both route it.
+
+## 2a. The app exe answers a CLI call too (unpackaged installs; 2026-10-23, NOT BUILT)
+
+**The incident (2026-10-23).** Two `agentmaster show a77419cf` calls from a Claude session put two
+"Agentmaster — profile in use" dialogs on the user's screen. An install of v0.8.0 for all users was
+in `C:\Program Files\Agentmaster` (made 2026-10-22), and its folder is on the machine PATH, which
+Windows searches before the user PATH that holds the package's `agentmaster` alias. So `agentmaster`
+found `Agentmaster.exe`, the app itself. An unpackaged copy has a single-instance identity of its own
+(the exe-path hash in `WindowEmperor::HandleCommandlineArgs`), so it did not hand the command line to
+the running package: it started a SECOND app on the user's profile, which stopped at the
+profile-in-use warning. A Yes would have run two instances on one profile, and the app would then
+have read `show a77419cf` as a new tab's command line. Every unpackaged install whose folder is on
+PATH behaves the same: the per-user install (`~\.agentmaster\bin`), the one for all users, and a
+portable folder someone added (PROFILES.md §2b).
+
+**The fix.** `wWinMain` (`WindowsTerminal/main.cpp`) first calls `CliDispatch::TryRunCliCall`,
+before the architecture check, COM, the single-instance hand-off, the install question and the
+profile. A CLI call (§2's rule, from the shared header) runs the `agentmaster-cli.exe` beside the
+exe with the caller's arguments unchanged, waits, and exits with its exit code. The app is never
+started for a CLI call: when the CLI cannot be started, one line on the caller's error handle says
+why, and the exit code is 1 (the shim's value). Any other command line starts the app as before;
+`--help` and `--version` first still do (§11).
+
+Where the CLI's output goes (`PlanCliLaunch`; the app exe owns no console of its own):
+
+| The caller | The CLI's output | Creation flags |
+|---|---|---|
+| passed standard handles and has a console (bash, Python, Node, a redirect or a pipe in a terminal) | the caller's handles | none: the shared console |
+| passed handles and has no console (pythonw, a scheduled task) | the caller's handles | `CREATE_NO_WINDOW` |
+| has a console and passed no handles (cmd.exe, PowerShell's own console) | that console, through inheritable `CONIN$` / `CONOUT$` | none |
+| neither (the Run box, a shortcut) | a console window of the CLI's own, closed when it ends, like the package's launcher started the same way | `CREATE_NEW_CONSOLE` |
+
+**Who waits** (measured 2026-10-23 with a GUI-subsystem stand-in built on the header and a fake
+CLI that exits 42). bash (Git Bash, Claude Code's Bash tool), Python's `subprocess`, Node and
+`cmd /c` wait for the GUI exe and get the output and the exit code, also through a redirect, with
+quoted arguments kept. An interactive cmd.exe does not wait, and PowerShell waits only when the
+output is piped on: `& agentmaster show x | Out-String` waits, while a plain call and
+`$o = & agentmaster show x` return at once with no output and no `$LASTEXITCODE` (the CLI still runs
+and writes to the console). In those shells type **`agentmaster-cli <verb>`**, the console CLI in
+the same folder on PATH. The table's last row was not run live: it would open a window on the
+user's screen.
 
 ## 3. Data sources: read from state that already exists
 
@@ -240,13 +287,19 @@ by a precedence ladder (highest first) — **so in normal use you never pass a f
    even from a release-hosted shell.)
 3. **Inherited `AGENTMASTER_PROFILE` env (UNPACKAGED)** — an unpackaged build run *inside* an
    Agentmaster tab inherits the app's exported profile, so it auto-targets that instance.
-4. **Compile-time brand (UNPACKAGED)** — `-DAGENTMASTER_DEV`: an unpackaged CLI that inherits no
-   `AGENTMASTER_PROFILE` defaults to `~/.agentmaster-dev`. (Verified: `env -u AGENTMASTER_PROFILE`
-   → dev.) ⚠ The brand was meant for the dev build only ("the binary targets its build type"), but
-   `agentmaster-cli.vcxproj` defines it for EVERY configuration and no build file turns it off, so
-   the RELEASE binary carries it too. That only matters without package identity, which is how a
-   portable copy runs: see §11.
-5. **Per-identity default** (`ResolveProfileDir` fallback — `~/.agentmaster`).
+4. **Compile-time brand (UNPACKAGED, dev identity only)** — `-DAGENTMASTER_DEV`: an unpackaged
+   dev-identity CLI that inherits no `AGENTMASTER_PROFILE` defaults to `~/.agentmaster-dev`.
+   (Verified: `env -u AGENTMASTER_PROFILE` → dev.) Since 2026-10-23 (NOT BUILT)
+   `agentmaster-cli.vcxproj` defines it only when `AgentmasterPackageIdentity` is not `Release`.
+   Until then EVERY build carried it, so the release CLI of a portable copy, of the per-user install
+   and of the install for all users read `~/.agentmaster-dev` (§11). Checked by evaluating the
+   project without building it (`msbuild -getItem:ClCompile`): none of its 17 units gets the
+   define with `/p:AgentmasterPackageIdentity=Release`, all 17 do without it. The property is a
+   global one on the command line (`release.yml`, `Build-Agentmaster.ps1 -ReleaseIdentity`), so the
+   package build passes it on to this referenced project.
+5. **`ResolveProfileDir`, as the app beside it resolves it** — the exe folder's `profile.path`, a
+   portable's `<exedir>\profile`, the home map, else the per-identity default (`~/.agentmaster`).
+   The CLI ships beside the app exe in every layout, so it reads the app's profile.
 
 All resolution is **headless-safe** (never shows UI). So: shipped → automatic by the **alias's
 identity**; unpackaged dev build → automatic by brand; an unpackaged run in a tab → by inherited env.
@@ -278,6 +331,8 @@ beats none).
   `TerminalAppLib`** — and links `ole32 user32 oleaut32` (the `tests/` harness link set). Added to
   `CascadiaPackage` so it ships beside `Agentmaster.exe`.
 - **Launcher** — `wt/shim.cpp` flips to console subsystem + the verb dispatch in §2.
+- **The CLI-call rule** — `AgentMaster/CliDispatch.h` (header-only, plain Win32): included by the
+  launcher (§2) and the app exe's `main.cpp` (§2a); `TestCliDispatch` in the m5 harness covers it.
 - **Emperor** — the `--am-restore` / `--am-archive` commandline intercept (§4).
 - **Standalone validation** — like the engine tests, `agentmaster-cli` compiles + runs via a `cl`
   one-liner (`AgentMaster/cli/_compile.bat`) for fast iteration without the package build.
@@ -315,6 +370,8 @@ beats none).
   invisibility invariant (Rule #13). Control acts only through the app's own seams.
 - **The forward (GUI-launch) path of the alias shim is unchanged** for every non-verb commandline —
   defterm (`-Embedding`), reopen (`-w -s`), and bare launch must all behave exactly as before.
+- **A CLI call never starts the app**, from the shim or from the app exe itself (§2a), also when the
+  CLI cannot be started; every other command line reaches the app exactly as before.
 - **One profile, resolved once, headless-safe** (Rule #15) — the CLI reads through
   `AgentmasterStateDir()`; it never shows UI and never re-homes state.
 
@@ -404,7 +461,9 @@ on both installs. Each item says how it is known: **measured** (run on the live 
     profile). The skill's `am_inspect.py --dev` fails for the same reason (`tabs --json exited
     3221226505`); run it as `AGENTMASTER_PROFILE=<dev profile> am_inspect.py --cli <a release
     agentmaster-cli.exe>`.
-- **A release CLI without package identity reads the DEV profile.** (measured)
+- **A release CLI without package identity reads the DEV profile.** (measured; FIXED in code
+  2026-10-23, NOT BUILT: the brand is now defined only for the dev identity, §7 step 4; until a
+  release-identity build with it is installed, the text below holds)
   `agentmaster-cli.vcxproj` defines `AGENTMASTER_DEV` for every configuration (§7, step 4). So an
   unpackaged release binary that inherits no `AGENTMASTER_PROFILE` sets that variable to
   `~/.agentmaster-dev` itself, and the profile resolver reads the variable before a portable
@@ -426,7 +485,14 @@ on both installs. Each item says how it is known: **measured** (run on the live 
   parser treats an unknown word as the command line of a NEW TAB. So `--profile <dir>` first (a
   new-tab option there), `--window <w>` first (the parser's window target), `--archived` first,
   a mistyped verb and a verb in capitals (the match is exact) all act on the user's running app
-  and print nothing. Put the verb first, always.
+  and print nothing. Put the verb first, always. Since 2026-10-23 (NOT BUILT) the app exe applies
+  the same rule to a command line that reaches it directly (§2a).
+- **An unpackaged install's `agentmaster` was the app itself.** (measured 2026-10-23; FIXED in code,
+  NOT BUILT) Where an unpackaged install's folder is on PATH, `agentmaster <verb>` ran
+  `Agentmaster.exe <verb>`: a second app on the user's profile, stopped by "profile in use" while
+  the package ran (§2a has the incident and the fix). Until a build with the fix is in that folder,
+  type `agentmaster-cli <verb>` there, or the CLI's full path; `type -a agentmaster` (bash) or
+  `where agentmaster` (cmd) shows which file the name finds.
 - **`show` reads only the last 512 KiB for the conversation.** (measured) `conversation`,
   `lastUserPrompt` and `lastAssistantReply` come from the text blocks inside that window. A long
   turn made of tool calls leaves none there: the studying session's own `show --self` had 0
@@ -462,11 +528,11 @@ on both installs. Each item says how it is known: **measured** (run on the live 
   pane Prompt Queue since 2026-10-09 and called it Auto Testing before, and the JSON key is
   `autoTesting`) and the tail `CONVERSATION (last N turns)` (read; N counts text blocks). The CLI also
   prints the mode as `Off` / `Full`, the stored words; the app shows Paused / Auto.
-- **Two comments in the source are wrong.** (read) The precedence comment above the profile
-  block in `agentcli.cpp` `wmain` puts the inherited variable before the package identity; the
-  code under it, and §7, do the reverse for a packaged build. The comment in
-  `agentmaster-cli.vcxproj` says that the release package build turns the dev brand off; no
-  build file does.
+- **Two comments in the source were wrong.** (read; both FIXED 2026-10-23) The precedence comment
+  above the profile block in `agentcli.cpp` `wmain` put the inherited variable before the package
+  identity; the code under it, and §7, do the reverse for a packaged build. The comment in
+  `agentmaster-cli.vcxproj` said that the release package build turns the dev brand off; no build
+  file did, and since 2026-10-23 the project file itself does (§7 step 4).
 - **No test covers `agentcli.cpp`.** (read) The m5 harness covers the engine units that it
   links. Its own code (argument parsing, ref resolution, `DeriveState`, the JSON builders) has
   no test.
