@@ -167,7 +167,7 @@ number). The spike mock is one stdlib-only Python file (~520 lines with its docu
   2 stage artifacts into Q:\claude-desktops\…\persist  ═══► Z:\e2e\ (SMB share)
   3 provision (run_command → provision.ps1)           │   C:\e2e\  Agentmaster portable build, claude.exe,
   4 start the run (launch → run-suite.cmd)            │            Git + PowerShell 7, Python venv
-  5 poll Z:\e2e\out\<run>\status.json                 │
+  5 wait on Z:\e2e\out (change notification)          │
   6 collect the report + evidence, delete the desktop │   pytest runner (in the signed-in session)
                                                       │     ├─ amdriver: UIA (comtypes) + SendInput
  artifacts: Q:\agentmaster-e2e\runs\<stamp>\          │     ├─ mockllm  127.0.0.1:8787  ◄── claude.exe ×N
@@ -182,7 +182,7 @@ number). The spike mock is one stdlib-only Python file (~520 lines with its docu
 reach the mock, the test bridge (a local named pipe) or UI Automation events directly; every host call
 through the fleet is an HTTP round trip (~0.1–0.5 s; a screenshot ~0.5 s). Inside the guest a UIA read is
 milliseconds, waits can subscribe to events, and logs are local files. The host only prepares, starts,
-polls and collects.
+waits and collects — and its wait is a change notification of the persist folder, not a poll (§8.2).
 
 ⚠ **Start the runner with the agent's `launch` tool (or a one-shot scheduled task), never `run_command`:**
 `run_command` waits for every process in its job, and the runner starts Agentmaster, which starts
@@ -497,16 +497,29 @@ profile's `sessions.json` and `windows/*.json`, crash dumps (the `debug-dumps` s
 workdirs, `App.start`, ambient checks + teardown), `session` (a managed claude launched THROUGH THE UI and
 ready), `mock` (reset, gates, log). Markers: area (`pqr`, `lifecycle`, …), level (`L0`–`L5`), lane
 (`fast`, `realtime`), `known_defect` (xfail with the defect's id: green while the defect exists, fails when
-it is fixed so the marker is removed). Output: JUnit XML + an HTML report + `status.json`
-(progress, for the host to poll).
+it is fixed so the marker is removed). Output: JUnit XML + an HTML report + `status.json` + one progress line
+per finished test (`<run>.progress.jsonl`), which the host waits on (§8.2).
 
 ### 8.2 On the host
 
 `e2e/orchestrator/run.py --suite pqr --build <portable folder | ci:<run id>> --claude pinned|latest`:
 reuse or create the desktop → reset → stage `Z:\e2e` (build, cache, suites) → `run_command provision.ps1`
-→ `launch run-suite.cmd` → poll `status.json` → copy `Z:\e2e\out\<run>` to
+→ `launch run-suite.cmd` → wait for `status.json` → copy `Z:\e2e\out\<run>` to
 `Q:\agentmaster-e2e\runs\<stamp>\` → delete the desktop. It talks to the fleet with the repo's stdlib MCP
 client (`K:\source\claude-desktops\fleet\mcp_client.py`, token read into a variable — never printed).
+
+**As built, the wait is not a poll** (`e2e/host/e2e_run.py`, 2026-10-23). `Z:\e2e\out` is a folder of the host's
+own disk (the desktop's persist folder): every guest write reaches it as an ordinary NTFS write, so the host blocks
+on that folder's change notification (`FindFirstChangeNotificationW`) and wakes the moment the guest writes —
+nothing runs between two writes, and no log is read. The guest's pytest appends one line per finished test to
+`<run>.progress.jsonl` (`e2e/guest/progress.py`); the host prints each as it arrives and ends with a summary: the
+counts, every failed test with the first line of its failure and its evidence folder (`summary.txt` in the results
+folder). `--attach <run>` joins a run already started (the guest's runner outlives the host's process), and
+`--wait-max <s>` bounds one wait (exit 97: still running). A one-minute belt reads the files anyway in case a
+notification never came. Measured: a guest write woke the host within 10 ms of the file's own timestamp, and a
+run's summary was printed in the same second as its last test. A Claude session starts a run with the Bash tool's
+`run_in_background` and is woken by its completion; it never waits with `sleep` and a read of the status or the
+log (`e2e/README.md`, "Waiting for a run").
 
 **Builds:** a local Release build obeys the Development Rules (the user's go; Q: only; the build mutex). The
 CI workflow can instead produce the portable folder per commit (an extra step in `ci.yml`), so testing a
