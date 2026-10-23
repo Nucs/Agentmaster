@@ -225,12 +225,16 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 ## Where the documents disagree with the code (found while writing)
 
 - **The Waiting-for-you timeout's default** is **4320 minutes (3 days)** in `SessionModels.h`
-  (`waitingForYouTimeoutMinutes{ 4320 }`), and the cog's slider runs to 7 days; CLAUDE.md says "a 1m–3d slider … default
-  60 = 1h". The flows use the code's default (STA-01).
+  (`waitingForYouTimeoutMinutes{ 4320 }`), and the cog's slider runs to 7 days; CLAUDE.md said "a 1m–3d slider … default
+  60 = 1h" (corrected in b4fb6b941). The flows use the code's default (STA-01).
 - **The queue history's origin pill** reads **`auto`** (blue) for a prompt the runner sent, not `flight`
-  (`AgentManagerContent.AutoTesting.cpp`); CLAUDE.md and a comment there still say "flight".
-- **MESSAGING.md §21.22, §21.23 and §21.25** still carry "NOT BUILT yet" in their headings although 0.8.0 shipped them
-  (the status note at the top of MESSAGING.md says to read such markers as older than the builds).
+  (`AgentManagerContent.AutoTesting.cpp`); CLAUDE.md said "flight" (corrected in b4fb6b941), and a comment there still
+  does.
+- **MESSAGING.md §21.19, §21.20, §21.22, §21.23 and §21.25, and SESSIONS.md §9.15** still carry "NOT BUILT yet" in their
+  headings although 0.8.0 shipped them (the status note at the top of MESSAGING.md says to read such markers as older
+  than the builds; §21.19 / §21.20 / §9.15 were found by the 2026-10-23 Search study in the project catalog).
+- **MESSAGING.md §21.20 says the shared session index is read when the bot starts;** the code reads it at the first
+  Search request of a run (the bridge is made lazily) — production's first request of 2026-10-23 waited 31 s (TGS-01 E4).
 - **NOTIFICATIONS.md §9.7** still says the preview frame is "NOT BUILT; never run against a real Agentmaster window";
   it shipped in 0.7.9 (production 0.6.8.19).
 - **SESSIONS.md §1**'s toolbar line names an "Archived" button that FAVORITES.md removed.
