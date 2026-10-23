@@ -1725,10 +1725,10 @@ namespace Agentmaster::Msg
         /// A PICK of a Search answer's row (§21.7): posts the ACTION MENU of that session as a reply to the answer — its
         /// title, folder and last activity as the answer listed them (else the registry's record, else the short id),
         /// where it stands NOW, and the buttons that fit there (§21.38, SearchPickMenuRows: ▶ Resume for a closed session,
-        /// ▶ Activate for a tab whose claude is not running, ⏰ Wake for an idle tab, 💬 Go to topic / 📌 Pin for one with a
-        /// topic; ⑂ Fork and ✕ Cancel always) as single-use tokens (M5) that carry the row number, folder and title. An
-        /// open session is never offered ▶ Resume ("open it": the user's "but we already exist"). Silent (a menu is no final
-        /// message). Poll thread.
+        /// ▶ Activate for a tab whose claude is not running, ⏰ Wake for an idle tab, 💬 Go to topic for one with a topic;
+        /// ⑂ Fork and ✕ Cancel always; no 📌 variant, the user's "Remove the pin overloads") as single-use tokens (M5) that
+        /// carry the row number, folder and title. An open session is never offered ▶ Resume ("open it": the user's "but we
+        /// already exist"). Silent (a menu is no final message). Poll thread.
         /// </summary>
         /// <param name="pick">The pick read from the button.</param>
         /// <param name="threadId">The Search topic.</param>
@@ -1736,14 +1736,14 @@ namespace Agentmaster::Msg
         void _showSearchPick(const SearchPick& pick, int64_t threadId, int64_t answerMessageId);
         /// <summary>
         /// Carries out a tapped action of a Search pick's menu, on the session's CURRENT state (it may have changed since
-        /// the menu). ▶ Resume, ▶ Activate and ⏰ Wake (and their 📌 twins) all make the session usable from here, by its
-        /// state now: a closed one is opened into a background tab (D27); a tab whose claude does not run — deactivated,
-        /// restored and never entered, or exited — gets it started in place (_reactivate: no focus change on the PC; an
-        /// exited claude is started again in the same conversation), then an Idle or exited one is held in Waiting for you so
-        /// its topic appears (§21.38); an idle tab is woken; one with its topic already only says so. 💬 Go to topic puts its
-        /// topic first in the thread list (_bringTopicToFront); 📌 Pin pins it; Fork forks it into a new tab, never pinned
-        /// (no fork-and-pin, the user's rule); Cancel deletes the menu. The menu message loses its buttons and keeps the
-        /// choice and its outcome. Poll thread.
+        /// the menu). ▶ Resume, ▶ Activate and ⏰ Wake all make the session usable from here, by its state now: a closed one
+        /// is opened into a background tab (D27); a tab whose claude does not run — deactivated, restored and never entered,
+        /// or exited — gets it started in place (_reactivate: no focus change on the PC; an exited claude is started again in
+        /// the same conversation), then an Idle or exited one is held in Waiting for you so its topic appears (§21.38); an
+        /// idle tab is woken; one with its topic already only says so. None of them pins (a session is pinned in its own
+        /// topic). 💬 Go to topic puts its topic first in the thread list (_bringTopicToFront); Fork forks it into a new tab,
+        /// never pinned (no fork-and-pin, the user's rule); Cancel deletes the menu. The menu message loses its buttons and
+        /// keeps the choice and its outcome. Poll thread.
         /// </summary>
         /// <param name="kind">The token's kind: one of the kSearchPick* kinds (IsSearchPickActionKind).</param>
         /// <param name="sessionId">The picked session.</param>

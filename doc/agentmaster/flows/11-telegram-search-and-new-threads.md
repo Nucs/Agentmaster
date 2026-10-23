@@ -17,7 +17,7 @@ deletes the thread.
 
 ```text
  🔎 Search:  request ─► the agent's plan line ─► tool calls ─► answer (≤ 10 evidence cards + the rest as lines, ⊘ Clear)
-                                                                 └─ tap a session ─► [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel]   (NOT BUILT: by state — Activate / Wake / Go to topic, TGS-05)
+                                                                 └─ tap a session ─► [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel]   (NOT BUILT: by state — Activate / Wake / Go to topic, no 📌 button, TGS-05)
                                                                                        └─► a tab on the PC ─► its topic appears
 
  a NEW thread (user-made) ─► FOLDER ─(missing: CREATE?)─► MODEL (optional) ─► WINDOW ─► 🚀 launch ─► bind: the thread IS the session's topic
@@ -37,10 +37,11 @@ deletes the thread.
    …") while it works; then the answer: a descriptive reply and the likely next step, ≤ 10 evidence cards (each: the
    session's title chip, a quote of the evidence), the rest as one-line rows; ⊘ Clear.
 2. **Pick.** *Do:* tap a CLOSED session's number (📦). *Expect:* the menu [▶ Resume] [▶ Resume 📌] [⑂ Fork] [✕ Cancel].
-   (An open session's menu: TGS-05, NOT BUILT; 0.8.0 offers this same menu for every session.)
+   (An open session's menu: TGS-05, NOT BUILT; 0.8.0 offers this same menu for every session. Once TGS-05 is built the
+   closed menu is [▶ Resume] / [⑂ Fork] [✕ Cancel]: no 📌 button, the user's "Remove the pin overloads".)
 3. **Resume.** *Expect:* the session opens as a tab on the PC (background unless asked); it is held in Waiting for
    you; its topic appears; the bot ANSWERS which session opened (or why nothing did).
-4. **Resume 📌** → the same, pinned (its topic never idles).
+4. **Resume 📌** (0.8.0 only; gone once TGS-05 is built) → the same, pinned (its topic never idles).
 5. **Fork** → a fork opens (beside its source when the source is open); its own topic.
 
 **Edge cases**
@@ -148,29 +149,30 @@ or exited one is ACTIVATED in its own tab, an idle one is woken, one with a topi
 that already has a tab.
 
 **Phases** (one sub-case per state; the Search request's script `show`s that session)
-1. **Closed** (📦) → [▶ Resume · ▶ Resume 📌] / [⑂ Fork · ✕ Cancel]; Resume opens it in a background tab (TGS-01).
+1. **Closed** (📦) → [▶ Resume] / [⑂ Fork · ✕ Cancel]; Resume opens it in a background tab (TGS-01).
 2. **Deactivated, idle, no topic** (🌙, ParkedTab: Deactivate it at the PC first) → the line says "deactivated (its Claude is
-   not running), so it has no topic"; [▶ Activate · ▶ Activate 📌] / [⑂ Fork · ✕ Cancel]. *Do:* ▶ Activate. *Expect:* the tab's
+   not running), so it has no topic"; [▶ Activate] / [⑂ Fork · ✕ Cancel]. *Do:* ▶ Activate. *Expect:* the tab's
    claude starts IN PLACE on the PC with no window or tab switch (the dot fills); the session held in Waiting for you; its
    topic appears within seconds; a message sent there goes in. *Check:* [LOG] `[nav] remote telegram search pick N <sid8>
    (deactivated tab)`, `… search activate <sid8> (…) woken`, `remote telegram reactivate <sid8> -> start`,
    `[nav] activate-dormant <sid8>`.
-3. **Deactivated with a topic** (🌙, ParkedListed: pinned, or parked in Waiting / Needs approval / Error) → [▶ Activate · ▶ Activate
-   📌] / [💬 Go to topic] / [⑂ Fork · ✕ Cancel].
+3. **Deactivated with a topic** (🌙, ParkedListed: pinned, or parked in Waiting / Needs approval / Error) → [▶ Activate · 💬 Go to
+   topic] / [⑂ Fork · ✕ Cancel].
 4. **Claude exited** (⏹, ExitedTab: `/exit` in the tab) → the same menu as 3; ▶ Activate starts claude again in the same
    conversation through the window's restart (interrupted turns kept interrupted). *Check:* [LOG] `reactivate <sid8> ->
    restart (exited)`.
-5. **Idle, claude running** (💤, IdleTab) → [⏰ Wake · ⏰ Wake 📌] / [⑂ Fork · ✕ Cancel]; Wake brings its topic back.
-6. **Listed** (💬, a topic exists) → [💬 Go to topic · 📌 Pin] / [⑂ Fork · ✕ Cancel]; Go to topic puts that topic FIRST in the
-   thread list (a re-post); 📌 Pin pins it.
+5. **Idle, claude running** (💤, IdleTab) → [⏰ Wake] / [⑂ Fork · ✕ Cancel]; Wake brings its topic back.
+6. **Listed** (💬, a topic exists) → [💬 Go to topic] / [⑂ Fork · ✕ Cancel]; Go to topic puts that topic FIRST in the
+   thread list (a re-post).
 
 **Edge cases**
-- **E1 A pinned open session** → no 📌 twin in its menu.
+- **E1 Pinning** → no menu has a 📌 button (the user's "Remove the pin overloads", 2026-10-23); a session is pinned in its own
+  topic (`/pin`, the card's 📌 Pin). A pinned session still reads as having its topic (Listed / ParkedListed).
 - **E2 The state changed between the menu and the tap** (the deactivated tab entered at the PC, then ▶ Activate) → acts on the
   state AT THE TAP: "woken", no second start.
 - **E3 An ADOPTED session** (a claude typed into the user's own shell) → never "deactivated" or "exited"; Search never starts or
   restarts it.
-- **E4 A session closed since the menu** → Go to topic / Pin say so.
+- **E4 A session closed since the menu** → Go to topic says it has no topic now; ▶ Activate / ⏰ Wake resume it into a tab.
 - **E5 The topic left since the menu** → Go to topic says so.
 - **E6 Every menu** → at most two buttons a row, ⑂ Fork · ✕ Cancel last, "Resume" only for a closed session.
 - **E7 A request in words ("activate it")** → the agent has no activate tool: `mcp__tabs__resume` says where the open tab is

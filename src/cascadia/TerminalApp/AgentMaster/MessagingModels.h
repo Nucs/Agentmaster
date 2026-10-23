@@ -4002,7 +4002,7 @@ namespace Agentmaster::Msg
     {
         Closed, // not open in any tab (archived, never managed, or a live record without a tab): ▶ Resume opens it into a background tab
         IdleTab, // open in a tab whose claude runs, Idle and not pinned, so it has no topic: ⏰ Wake holds it in Waiting for you, and its topic appears
-        Listed, // open in a tab whose claude runs, not Idle (or pinned, which never idles): it has its own topic already (💬 Go to topic, 📌 Pin)
+        Listed, // open in a tab whose claude runs, not Idle (or pinned, which never idles): it has its own topic already (💬 Go to topic)
         ParkedTab, // open in a tab whose claude does NOT run (deactivated, or restored and never entered), Idle and not pinned, so it has no topic: ▶ Activate starts it there, and its topic appears
         ParkedListed, // the same not-running tab, with its own topic (not Idle, or pinned): ▶ Activate starts it there
         ExitedTab, // open in a tab whose claude ENDED (Done: the tab holds the shell the claude ran in), with its own topic: ▶ Activate starts the conversation again there
@@ -4123,34 +4123,30 @@ namespace Agentmaster::Msg
     // ▶ Resume, ▶ Activate and ⏰ Wake all ask for one thing — "make this session usable from here" — so whichever of them
     // was tapped, the session ends up open, its claude running and its topic listed (a session closed since the menu was
     // drawn is resumed into a background tab; one entered at the PC meanwhile is only woken).
+    // NO 📌 variants (the user's "Remove the pin overloads", 2026-10-23): ▶ Resume 📌 (since §21.7), ▶ Activate 📌, ⏰ Wake 📌
+    // and 📌 Pin are gone from this menu; a session is pinned in its own topic (/pin, the card's 📌 Pin), and /idle's
+    // Wake 📌 is not this menu.
     /// <summary>▶ Resume (a closed session): opened into a background tab of the most recently active window (D27).</summary>
     inline constexpr std::wstring_view kSearchPickResume = L"pick-resume";
-    /// <summary>▶ Resume 📌: the same, then pinned (never idle).</summary>
-    inline constexpr std::wstring_view kSearchPickResumePin = L"pick-resume-pin";
     /// <summary>▶ Activate (a tab whose claude is not running): its claude is started in place (the tab menu's Activate Tab: no focus change on the PC; an exited one is started again), and an Idle or exited session is held in Waiting for you, so its topic appears.</summary>
     inline constexpr std::wstring_view kSearchPickActivate = L"pick-activate";
-    /// <summary>▶ Activate 📌: the same, then pinned.</summary>
-    inline constexpr std::wstring_view kSearchPickActivatePin = L"pick-activate-pin";
     /// <summary>⏰ Wake (an idle tab whose claude runs): held in Waiting for you (the tab's Move to Waiting-for-you), so its topic appears.</summary>
     inline constexpr std::wstring_view kSearchPickWake = L"pick-wake";
-    /// <summary>⏰ Wake 📌: the same, then pinned.</summary>
-    inline constexpr std::wstring_view kSearchPickWakePin = L"pick-wake-pin";
     /// <summary>💬 Go to topic (a session with a topic): its topic is put first in the thread list (the directory dot's way, §21.16.7).</summary>
     inline constexpr std::wstring_view kSearchPickTopic = L"pick-topic";
-    /// <summary>📌 Pin (a session with a topic, not pinned): it never goes idle, so its topic stays.</summary>
-    inline constexpr std::wstring_view kSearchPickPin = L"pick-pin";
     /// <summary>⑂ Fork: a fork in a new background tab (never pinned: no fork-and-pin, D34).</summary>
     inline constexpr std::wstring_view kSearchPickFork = L"pick-fork";
     /// <summary>✕ Cancel: the menu is deleted.</summary>
     inline constexpr std::wstring_view kSearchPickCancel = L"pick-cancel";
 
     /// <summary>Whether a token kind is one of a Search pick menu's actions (the kSearchPick* kinds), which _onSearchPickAction carries out.</summary>
+    /// <remarks>A pinning kind of a build before the pin variants were removed ("pick-resume-pin" …) is no action any more; its tokens
+    /// lived in memory only, so none outlives the restart that brings this build.</remarks>
     /// <param name="kind">A token's kind.</param>
     /// <returns>True for a pick menu's action.</returns>
     inline bool IsSearchPickActionKind(std::wstring_view kind) noexcept
     {
-        for (const std::wstring_view k : { kSearchPickResume, kSearchPickResumePin, kSearchPickActivate, kSearchPickActivatePin, kSearchPickWake, kSearchPickWakePin,
-                                           kSearchPickTopic, kSearchPickPin, kSearchPickFork, kSearchPickCancel })
+        for (const std::wstring_view k : { kSearchPickResume, kSearchPickActivate, kSearchPickWake, kSearchPickTopic, kSearchPickFork, kSearchPickCancel })
         {
             if (kind == k)
             {
@@ -4158,14 +4154,6 @@ namespace Agentmaster::Msg
             }
         }
         return false;
-    }
-
-    /// <summary>Whether a pick action asks to PIN the session (▶ Resume 📌, ▶ Activate 📌, ⏰ Wake 📌, 📌 Pin).</summary>
-    /// <param name="kind">A pick action's kind.</param>
-    /// <returns>True for the pinning kinds.</returns>
-    inline bool SearchPickActionPins(std::wstring_view kind) noexcept
-    {
-        return kind == kSearchPickResumePin || kind == kSearchPickActivatePin || kind == kSearchPickWakePin || kind == kSearchPickPin;
     }
 
     /// <summary>The label of a pick action's button, as the menu shows it and as the menu's outcome line repeats it.</summary>
@@ -4177,33 +4165,17 @@ namespace Agentmaster::Msg
         {
             return L"\x25B6 Resume";
         }
-        if (kind == kSearchPickResumePin)
-        {
-            return L"\x25B6 Resume \U0001F4CC";
-        }
         if (kind == kSearchPickActivate)
         {
             return L"\x25B6 Activate";
-        }
-        if (kind == kSearchPickActivatePin)
-        {
-            return L"\x25B6 Activate \U0001F4CC";
         }
         if (kind == kSearchPickWake)
         {
             return L"\x23F0 Wake";
         }
-        if (kind == kSearchPickWakePin)
-        {
-            return L"\x23F0 Wake \U0001F4CC";
-        }
         if (kind == kSearchPickTopic)
         {
             return L"\U0001F4AC Go to topic";
-        }
-        if (kind == kSearchPickPin)
-        {
-            return L"\U0001F4CC Pin";
         }
         if (kind == kSearchPickFork)
         {
@@ -4219,59 +4191,41 @@ namespace Agentmaster::Msg
     /// <summary>
     /// A pick menu's buttons for where the session stands (§21.38), as rows of action kinds (the labels are
     /// SearchPickActionLabel's). Two buttons a row at most, so a phone shows every label whole:
-    ///   Closed        ▶ Resume · ▶ Resume 📌 / ⑂ Fork · ✕ Cancel            (as before §21.38)
-    ///   ParkedTab     ▶ Activate · ▶ Activate 📌 / ⑂ Fork · ✕ Cancel
-    ///   ParkedListed  ▶ Activate · ▶ Activate 📌 / 💬 Go to topic / ⑂ Fork · ✕ Cancel
-    ///   ExitedTab     ▶ Activate · ▶ Activate 📌 / 💬 Go to topic / ⑂ Fork · ✕ Cancel
-    ///   IdleTab       ⏰ Wake · ⏰ Wake 📌 / ⑂ Fork · ✕ Cancel
-    ///   Listed        💬 Go to topic · 📌 Pin / ⑂ Fork · ✕ Cancel
-    /// An open session that is pinned already is never offered a 📌 variant (its topic stays anyway); a closed session keeps
-    /// ▶ Resume 📌 whatever its record says, as before §21.38 (the pin of a session that was closed belongs to its last run).
-    /// ⑂ Fork and ✕ Cancel close every menu, in the same place, so they never move under the thumb.
+    ///   Closed        ▶ Resume / ⑂ Fork · ✕ Cancel
+    ///   ParkedTab     ▶ Activate / ⑂ Fork · ✕ Cancel
+    ///   ParkedListed  ▶ Activate · 💬 Go to topic / ⑂ Fork · ✕ Cancel
+    ///   ExitedTab     ▶ Activate · 💬 Go to topic / ⑂ Fork · ✕ Cancel
+    ///   IdleTab       ⏰ Wake / ⑂ Fork · ✕ Cancel
+    ///   Listed        💬 Go to topic / ⑂ Fork · ✕ Cancel
+    /// One button makes the session usable from here, 💬 Go to topic sits beside it when the session has a topic, and
+    /// ⑂ Fork · ✕ Cancel close every menu, in the same place, so they never move under the thumb. No button pins: the user's
+    /// "Remove the pin overloads" (2026-10-23) took the 📌 variants away (a session is pinned in its own topic).
     /// </summary>
     /// <param name="state">Where the session stands (ClassifySearchPickState).</param>
-    /// <param name="pinned">SessionInfo::pinned.</param>
     /// <returns>The rows of action kinds, top to bottom; never empty.</returns>
     /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
-    inline std::vector<std::vector<std::wstring_view>> SearchPickMenuRows(SearchPickState state, bool pinned)
+    inline std::vector<std::vector<std::wstring_view>> SearchPickMenuRows(SearchPickState state)
     {
         std::vector<std::vector<std::wstring_view>> rows;
-        // The first row: the action that makes the session usable from here, and its pinning twin when a pin would add something.
-        const auto primary = [&rows](std::wstring_view plain, std::wstring_view withPin, bool offerPin) {
-            std::vector<std::wstring_view> row{ plain };
-            if (offerPin)
-            {
-                row.push_back(withPin);
-            }
-            rows.push_back(std::move(row));
-        };
         switch (state)
         {
         case SearchPickState::ParkedTab:
-            primary(kSearchPickActivate, kSearchPickActivatePin, !pinned);
+            rows.push_back({ kSearchPickActivate });
             break;
         case SearchPickState::ParkedListed:
         case SearchPickState::ExitedTab:
-            primary(kSearchPickActivate, kSearchPickActivatePin, !pinned);
-            rows.push_back({ kSearchPickTopic });
+            rows.push_back({ kSearchPickActivate, kSearchPickTopic });
             break;
         case SearchPickState::IdleTab:
-            primary(kSearchPickWake, kSearchPickWakePin, !pinned);
+            rows.push_back({ kSearchPickWake });
             break;
         case SearchPickState::Listed:
-        {
-            // Nothing to open or start: its topic is the place to go, and a pin keeps it there.
-            std::vector<std::wstring_view> row{ kSearchPickTopic };
-            if (!pinned)
-            {
-                row.push_back(kSearchPickPin);
-            }
-            rows.push_back(std::move(row));
+            // Nothing to open or start: its topic is the place to go.
+            rows.push_back({ kSearchPickTopic });
             break;
-        }
         case SearchPickState::Closed:
         default:
-            primary(kSearchPickResume, kSearchPickResumePin, true);
+            rows.push_back({ kSearchPickResume });
             break;
         }
         rows.push_back({ kSearchPickFork, kSearchPickCancel });
