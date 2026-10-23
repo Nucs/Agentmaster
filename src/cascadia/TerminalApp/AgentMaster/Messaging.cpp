@@ -3413,7 +3413,7 @@ namespace Agentmaster::Msg
             }
             _log(L"[msg] topic created: Search (thread " + std::to_wstring(thread) + L")");
             _sendText(thread,
-                      L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it. Tap a result's number to pick it, then Resume or Fork it into a tab.\n\n"
+                      L"<b>\U0001F50E Search</b> \x2014 ask for a session in plain words (\x201Cthe session where I fixed the tab drag crash\x201D) and the Sessions page's search agent finds it. Tap a result's number to pick it: Resume a closed one into a tab, Activate a deactivated tab where it is, Wake an idle one, or Fork it.\n\n"
                       L"This is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n\n"
                       L"Fleet commands: /idle (idle tabs), /board (counts), /newsession &lt;folder&gt;, /pauseall, /resumeall, /status, /help.\n\n"
                       L"Pin this topic at the top of the list (Telegram has no way for a bot to do it).",

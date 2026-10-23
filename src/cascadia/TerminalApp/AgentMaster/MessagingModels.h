@@ -3867,8 +3867,9 @@ namespace Agentmaster::Msg
     }
 
     // A Search answer lists its sessions as numbered rows with ONE PICK button per row (the user's rule, §21.7): a pick
-    // opens a second message, the ACTION MENU of that session (▶ Resume, ▶ Resume 📌, ⑂ Fork — no fork-and-pin — and
-    // ✕ Cancel). A pick's callback data is "p:<row number>:<session id>": STATELESS on purpose, unlike the single-use
+    // opens a second message, the ACTION MENU of that session (▶ Resume / ▶ Activate / ⏰ Wake / 💬 Go to topic, as fits
+    // where it stands — SearchPickMenuRows, §21.38 —, ⑂ Fork — no fork-and-pin — and ✕ Cancel). A pick's callback data
+    // is "p:<row number>:<session id>": STATELESS on purpose, unlike the single-use
     // action tokens (M5). A pick does nothing but open the menu, so it may be tapped again, and an answer's picks still
     // work after the bot or the app restarted, like the conversation they belong to. Telegram caps callback data at 64
     // bytes; a Claude session id (36 characters) makes 41 at most.
@@ -3989,35 +3990,87 @@ namespace Agentmaster::Msg
     }
 
     // Where a session that a Search answer listed stands NOW. It is read when the answer is posted (the row's word) and
-    // again at every tap (the menu's line, and what its Resume does): never cached, because a session changes state
-    // between an answer and a tap (M5).
+    // again at every tap (the menu's line, its buttons, and what each of them does): never cached, because a session
+    // changes state between an answer and a tap (M5).
+    // §21.38 (the user's report of 2026-10-23: "since it was deactivated and had no topic (because its idle), I expected
+    // Activate button but instead I had resume, fork and others but we already exist"): a session that is open in a tab is
+    // never offered ▶ Resume, which means "open it". What its menu offers follows from whether the tab's CLAUDE runs (a
+    // deactivated tab, or one restored and never entered, holds a never-started connection; a claude that ended leaves the
+    // shell it ran in) and whether the session has a topic. The last three values were appended, so the first three keep
+    // their numbers.
     enum class SearchPickState
     {
-        Closed, // not open in any tab (archived, never managed, or a live record without a tab): Resume opens it into a background tab
-        IdleTab, // open in a tab but Idle and not pinned, so it has no topic: Resume wakes it (Waiting for you) and its topic appears
-        Listed, // open in a tab and not Idle (or pinned, which never idles): it has its own topic already, Resume has nothing to open
+        Closed, // not open in any tab (archived, never managed, or a live record without a tab): ▶ Resume opens it into a background tab
+        IdleTab, // open in a tab whose claude runs, Idle and not pinned, so it has no topic: ⏰ Wake holds it in Waiting for you, and its topic appears
+        Listed, // open in a tab whose claude runs, not Idle (or pinned, which never idles): it has its own topic already (💬 Go to topic, 📌 Pin)
+        ParkedTab, // open in a tab whose claude does NOT run (deactivated, or restored and never entered), Idle and not pinned, so it has no topic: ▶ Activate starts it there, and its topic appears
+        ParkedListed, // the same not-running tab, with its own topic (not Idle, or pinned): ▶ Activate starts it there
+        ExitedTab, // open in a tab whose claude ENDED (Done: the tab holds the shell the claude ran in), with its own topic: ▶ Activate starts the conversation again there
     };
 
     /// <summary>
-    /// Classifies where a picked session stands, the split the answer's words have always used: a live session with a
-    /// tab is IdleTab when its state is Idle and it is not pinned (§5.3), else Listed; anything else is Closed.
+    /// Classifies where a picked session stands. Not open in a tab is Closed. An open tab whose claude does not run is
+    /// ParkedTab or ParkedListed: a deactivated tab, or one restored and never entered (SessionInfo::started false; the test
+    /// SessionIsReactivatable and the card's ▶ Reactivate use). An open managed tab whose claude ended is ExitedTab
+    /// (SessionInfo::state Done). Any other open tab is IdleTab when its state is Idle and it is not pinned (§5.3: it has no
+    /// topic, the split the answer's words have always used), else Listed.
     /// </summary>
+    /// <remarks>
+    /// An ADOPTED session (external: a claude the user typed into a shell of their own) is never parked or exited here:
+    /// Agentmaster hosts no control of its own for it (`started` is meaningless and left false), and the tab is the user's
+    /// own shell, which an activation or a restart must not take over. Such a tab is IdleTab or Listed, as before §21.38.
+    /// The parked test comes first: a parked tab can hold any triage state (a restore keeps Waiting for you and Needs
+    /// approval, a cut-off turn reads Error), and starting its claude is what it needs whatever that state is.
+    /// The defaults of `started` and `external` read as "a managed tab whose claude runs", the only kind of open tab the
+    /// classification knew before §21.38.
+    /// </remarks>
     /// <param name="known">Whether the registry knows the session (a session never opened in Agentmaster is not known).</param>
     /// <param name="live">SessionInfo::live.</param>
     /// <param name="hasTab">Whether the record names a tab (a non-empty SessionInfo::tabToken).</param>
     /// <param name="state">SessionInfo::state.</param>
     /// <param name="pinned">SessionInfo::pinned.</param>
+    /// <param name="started">SessionInfo::started: the tab's connection was started (false = a deactivated tab, or one restored and never entered).</param>
+    /// <param name="external">SessionInfo::external: the session was adopted from a claude the user started by hand.</param>
     /// <returns>The state.</returns>
-    inline SearchPickState ClassifySearchPickState(bool known, bool live, bool hasTab, SessionState state, bool pinned) noexcept
+    inline SearchPickState ClassifySearchPickState(bool known, bool live, bool hasTab, SessionState state, bool pinned, bool started = true, bool external = false) noexcept
     {
         if (!known || !live || !hasTab)
         {
             return SearchPickState::Closed;
         }
-        return state == SessionState::Idle && !pinned ? SearchPickState::IdleTab : SearchPickState::Listed;
+        const bool noTopic = state == SessionState::Idle && !pinned;
+        if (!started && !external)
+        {
+            return noTopic ? SearchPickState::ParkedTab : SearchPickState::ParkedListed;
+        }
+        if (state == SessionState::Done && !external)
+        {
+            return SearchPickState::ExitedTab;
+        }
+        return noTopic ? SearchPickState::IdleTab : SearchPickState::Listed;
     }
 
-    /// <summary>The word an answer's row shows for a state ("closed", "idle tab", "has a topic").</summary>
+    /// <summary>Classifies where a picked session stands from its registry record (ClassifySearchPickState over its fields).</summary>
+    /// <param name="s">The session's record; null = the registry does not know it (it is Closed).</param>
+    /// <returns>The state.</returns>
+    inline SearchPickState ClassifySearchPickStateOf(const SessionInfo* s) noexcept
+    {
+        if (s == nullptr)
+        {
+            return SearchPickState::Closed;
+        }
+        return ClassifySearchPickState(true, s->live, !s->tabToken.empty(), s->state, s->pinned, s->started, s->external);
+    }
+
+    /// <summary>Whether a session in this state has its own topic, so its menu can offer 💬 Go to topic (Listed, ParkedListed, ExitedTab).</summary>
+    /// <param name="state">The state.</param>
+    /// <returns>True when the state implies a topic of its own.</returns>
+    inline bool SearchPickStateHasTopic(SearchPickState state) noexcept
+    {
+        return state == SearchPickState::Listed || state == SearchPickState::ParkedListed || state == SearchPickState::ExitedTab;
+    }
+
+    /// <summary>The word the log line of a pick names a state by ("closed", "idle tab", "has a topic", "deactivated tab", …).</summary>
     /// <param name="state">The state.</param>
     /// <returns>A static string; never null.</returns>
     inline const wchar_t* SearchPickStateWord(SearchPickState state) noexcept
@@ -4028,13 +4081,19 @@ namespace Agentmaster::Msg
             return L"idle tab";
         case SearchPickState::Listed:
             return L"has a topic";
+        case SearchPickState::ParkedTab:
+            return L"deactivated tab";
+        case SearchPickState::ParkedListed:
+            return L"deactivated tab with a topic";
+        case SearchPickState::ExitedTab:
+            return L"claude exited";
         case SearchPickState::Closed:
         default:
             return L"closed";
         }
     }
 
-    /// <summary>The action menu's line for a state: where the session is and what its Resume does there.</summary>
+    /// <summary>The action menu's line for a state: where the session is, and what the menu's first button does there.</summary>
     /// <param name="state">The state.</param>
     /// <returns>A static string; never null.</returns>
     inline const wchar_t* SearchPickStateLine(SearchPickState state) noexcept
@@ -4042,13 +4101,181 @@ namespace Agentmaster::Msg
         switch (state)
         {
         case SearchPickState::IdleTab:
-            return L"Open in a tab, idle: Resume brings its topic back.";
+            return L"Open in a tab, idle: Wake brings its topic back.";
         case SearchPickState::Listed:
-            return L"Open, with its own topic: Resume has nothing to open.";
+            return L"Open, with its own topic: Go to topic puts that topic first in the thread list.";
+        case SearchPickState::ParkedTab:
+            return L"Open in a tab, but deactivated (its Claude is not running), so it has no topic: Activate starts it there, and its topic appears.";
+        case SearchPickState::ParkedListed:
+            return L"Open in a tab with its own topic, but deactivated (its Claude is not running): Activate starts it there.";
+        case SearchPickState::ExitedTab:
+            return L"Open in a tab with its own topic, but its Claude has exited: Activate starts it again there, in the same conversation.";
         case SearchPickState::Closed:
         default:
             return L"Closed: Resume opens it in a background tab, and its topic appears.";
         }
+    }
+
+    // ===== a pick's ACTION MENU: its buttons follow where the session stands (§21.38) ==================================
+    //
+    // The kinds of the menu's single-use tokens (MessagingService::_tokenFor). Each one is carried out on the session's
+    // state at the TAP (MessagingService::_onSearchPickAction), which may differ from the state the menu was drawn for:
+    // ▶ Resume, ▶ Activate and ⏰ Wake all ask for one thing — "make this session usable from here" — so whichever of them
+    // was tapped, the session ends up open, its claude running and its topic listed (a session closed since the menu was
+    // drawn is resumed into a background tab; one entered at the PC meanwhile is only woken).
+    /// <summary>▶ Resume (a closed session): opened into a background tab of the most recently active window (D27).</summary>
+    inline constexpr std::wstring_view kSearchPickResume = L"pick-resume";
+    /// <summary>▶ Resume 📌: the same, then pinned (never idle).</summary>
+    inline constexpr std::wstring_view kSearchPickResumePin = L"pick-resume-pin";
+    /// <summary>▶ Activate (a tab whose claude is not running): its claude is started in place (the tab menu's Activate Tab: no focus change on the PC; an exited one is started again), and an Idle or exited session is held in Waiting for you, so its topic appears.</summary>
+    inline constexpr std::wstring_view kSearchPickActivate = L"pick-activate";
+    /// <summary>▶ Activate 📌: the same, then pinned.</summary>
+    inline constexpr std::wstring_view kSearchPickActivatePin = L"pick-activate-pin";
+    /// <summary>⏰ Wake (an idle tab whose claude runs): held in Waiting for you (the tab's Move to Waiting-for-you), so its topic appears.</summary>
+    inline constexpr std::wstring_view kSearchPickWake = L"pick-wake";
+    /// <summary>⏰ Wake 📌: the same, then pinned.</summary>
+    inline constexpr std::wstring_view kSearchPickWakePin = L"pick-wake-pin";
+    /// <summary>💬 Go to topic (a session with a topic): its topic is put first in the thread list (the directory dot's way, §21.16.7).</summary>
+    inline constexpr std::wstring_view kSearchPickTopic = L"pick-topic";
+    /// <summary>📌 Pin (a session with a topic, not pinned): it never goes idle, so its topic stays.</summary>
+    inline constexpr std::wstring_view kSearchPickPin = L"pick-pin";
+    /// <summary>⑂ Fork: a fork in a new background tab (never pinned: no fork-and-pin, D34).</summary>
+    inline constexpr std::wstring_view kSearchPickFork = L"pick-fork";
+    /// <summary>✕ Cancel: the menu is deleted.</summary>
+    inline constexpr std::wstring_view kSearchPickCancel = L"pick-cancel";
+
+    /// <summary>Whether a token kind is one of a Search pick menu's actions (the kSearchPick* kinds), which _onSearchPickAction carries out.</summary>
+    /// <param name="kind">A token's kind.</param>
+    /// <returns>True for a pick menu's action.</returns>
+    inline bool IsSearchPickActionKind(std::wstring_view kind) noexcept
+    {
+        for (const std::wstring_view k : { kSearchPickResume, kSearchPickResumePin, kSearchPickActivate, kSearchPickActivatePin, kSearchPickWake, kSearchPickWakePin,
+                                           kSearchPickTopic, kSearchPickPin, kSearchPickFork, kSearchPickCancel })
+        {
+            if (kind == k)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Whether a pick action asks to PIN the session (▶ Resume 📌, ▶ Activate 📌, ⏰ Wake 📌, 📌 Pin).</summary>
+    /// <param name="kind">A pick action's kind.</param>
+    /// <returns>True for the pinning kinds.</returns>
+    inline bool SearchPickActionPins(std::wstring_view kind) noexcept
+    {
+        return kind == kSearchPickResumePin || kind == kSearchPickActivatePin || kind == kSearchPickWakePin || kind == kSearchPickPin;
+    }
+
+    /// <summary>The label of a pick action's button, as the menu shows it and as the menu's outcome line repeats it.</summary>
+    /// <param name="kind">A pick action's kind.</param>
+    /// <returns>A static string; never null ("" for an unknown kind).</returns>
+    inline const wchar_t* SearchPickActionLabel(std::wstring_view kind) noexcept
+    {
+        if (kind == kSearchPickResume)
+        {
+            return L"\x25B6 Resume";
+        }
+        if (kind == kSearchPickResumePin)
+        {
+            return L"\x25B6 Resume \U0001F4CC";
+        }
+        if (kind == kSearchPickActivate)
+        {
+            return L"\x25B6 Activate";
+        }
+        if (kind == kSearchPickActivatePin)
+        {
+            return L"\x25B6 Activate \U0001F4CC";
+        }
+        if (kind == kSearchPickWake)
+        {
+            return L"\x23F0 Wake";
+        }
+        if (kind == kSearchPickWakePin)
+        {
+            return L"\x23F0 Wake \U0001F4CC";
+        }
+        if (kind == kSearchPickTopic)
+        {
+            return L"\U0001F4AC Go to topic";
+        }
+        if (kind == kSearchPickPin)
+        {
+            return L"\U0001F4CC Pin";
+        }
+        if (kind == kSearchPickFork)
+        {
+            return L"\x2442 Fork";
+        }
+        if (kind == kSearchPickCancel)
+        {
+            return L"\x2715 Cancel";
+        }
+        return L"";
+    }
+
+    /// <summary>
+    /// A pick menu's buttons for where the session stands (§21.38), as rows of action kinds (the labels are
+    /// SearchPickActionLabel's). Two buttons a row at most, so a phone shows every label whole:
+    ///   Closed        ▶ Resume · ▶ Resume 📌 / ⑂ Fork · ✕ Cancel            (as before §21.38)
+    ///   ParkedTab     ▶ Activate · ▶ Activate 📌 / ⑂ Fork · ✕ Cancel
+    ///   ParkedListed  ▶ Activate · ▶ Activate 📌 / 💬 Go to topic / ⑂ Fork · ✕ Cancel
+    ///   ExitedTab     ▶ Activate · ▶ Activate 📌 / 💬 Go to topic / ⑂ Fork · ✕ Cancel
+    ///   IdleTab       ⏰ Wake · ⏰ Wake 📌 / ⑂ Fork · ✕ Cancel
+    ///   Listed        💬 Go to topic · 📌 Pin / ⑂ Fork · ✕ Cancel
+    /// An open session that is pinned already is never offered a 📌 variant (its topic stays anyway); a closed session keeps
+    /// ▶ Resume 📌 whatever its record says, as before §21.38 (the pin of a session that was closed belongs to its last run).
+    /// ⑂ Fork and ✕ Cancel close every menu, in the same place, so they never move under the thumb.
+    /// </summary>
+    /// <param name="state">Where the session stands (ClassifySearchPickState).</param>
+    /// <param name="pinned">SessionInfo::pinned.</param>
+    /// <returns>The rows of action kinds, top to bottom; never empty.</returns>
+    /// <exception cref="std::bad_alloc">If the rows cannot be allocated.</exception>
+    inline std::vector<std::vector<std::wstring_view>> SearchPickMenuRows(SearchPickState state, bool pinned)
+    {
+        std::vector<std::vector<std::wstring_view>> rows;
+        // The first row: the action that makes the session usable from here, and its pinning twin when a pin would add something.
+        const auto primary = [&rows](std::wstring_view plain, std::wstring_view withPin, bool offerPin) {
+            std::vector<std::wstring_view> row{ plain };
+            if (offerPin)
+            {
+                row.push_back(withPin);
+            }
+            rows.push_back(std::move(row));
+        };
+        switch (state)
+        {
+        case SearchPickState::ParkedTab:
+            primary(kSearchPickActivate, kSearchPickActivatePin, !pinned);
+            break;
+        case SearchPickState::ParkedListed:
+        case SearchPickState::ExitedTab:
+            primary(kSearchPickActivate, kSearchPickActivatePin, !pinned);
+            rows.push_back({ kSearchPickTopic });
+            break;
+        case SearchPickState::IdleTab:
+            primary(kSearchPickWake, kSearchPickWakePin, !pinned);
+            break;
+        case SearchPickState::Listed:
+        {
+            // Nothing to open or start: its topic is the place to go, and a pin keeps it there.
+            std::vector<std::wstring_view> row{ kSearchPickTopic };
+            if (!pinned)
+            {
+                row.push_back(kSearchPickPin);
+            }
+            rows.push_back(std::move(row));
+            break;
+        }
+        case SearchPickState::Closed:
+        default:
+            primary(kSearchPickResume, kSearchPickResumePin, true);
+            break;
+        }
+        rows.push_back({ kSearchPickFork, kSearchPickCancel });
+        return rows;
     }
 
     // ===== the Search answer as EVIDENCE CARDS (§21.10, the user's choice "C1" of 2026-10-17) =============
@@ -4057,8 +4284,8 @@ namespace Agentmaster::Msg
     // pick button), a glyph for where it stands, its title; a line with its folder, the day it was last active and
     // how many prompts it had; and ONE QUOTE — the model's `why`, the evidence it saw when it read the session
     // (SESSIONS.md §9.12). A pick (the number) opens the session's menu: the whole folder and branch, when it ran,
-    // the same quote, where it stands now, then Resume / Resume 📌 / Fork / Cancel. Both texts are built here, pure,
-    // so the m5 suite pins them (TestMessagingSearch).
+    // the same quote, where it stands now, then the buttons that fit there (SearchPickMenuRows, §21.38). The texts are
+    // built here, pure, so the m5 suite pins them (TestMessagingSearch).
 
     /// <summary>One session as the Search answer shows it (a card), and as its pick menu does.</summary>
     struct SearchCard
@@ -4083,7 +4310,9 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// The glyph a card and the pick menu show for where the session stands: 📦 closed, 💤 an idle tab, 💬 a topic of
-    /// its own. The menu's line (SearchPickStateLine) says in words what each means for Resume.
+    /// its own, 🌙 a deactivated tab (its claude is not running; the moon of the PC's Deactivate menu), with a topic or
+    /// not — a card's title links to the topic when there is one — and ⏹ a tab whose claude exited. The menu's line
+    /// (SearchPickStateLine) says in words what each means for the menu's first button.
     /// </summary>
     /// <param name="state">The state.</param>
     /// <returns>A static string; never null.</returns>
@@ -4095,6 +4324,11 @@ namespace Agentmaster::Msg
             return L"\U0001F4A4";
         case SearchPickState::Listed:
             return L"\U0001F4AC";
+        case SearchPickState::ParkedTab:
+        case SearchPickState::ParkedListed:
+            return L"\U0001F319";
+        case SearchPickState::ExitedTab:
+            return L"\x23F9";
         case SearchPickState::Closed:
         default:
             return L"\U0001F4E6";
@@ -4324,7 +4558,7 @@ namespace Agentmaster::Msg
     /// <summary>
     /// A picked session's action menu (§21.10): "<b>1 · title</b>", the whole folder and the branch, when it ran and how
     /// many prompts it had, the model's why as one quote, and where it stands now (glyph + SearchPickStateLine). The
-    /// buttons (Resume / Resume 📌 / Fork / Cancel) are the caller's. The title is a title token (§21.15): "🟦 title" inside the
+    /// buttons are the caller's (SearchPickMenuRows: what fits where the session stands, §21.38). The title is a title token (§21.15): "🟦 title" inside the
     /// bold head in a classic menu, a chip after "1 ·" in a rich one.
     /// </summary>
     /// <param name="card">The session, as the answer listed it (or as the registry knows it).</param>
