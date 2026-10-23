@@ -12,6 +12,13 @@ window's content element (after the page's, when the page shows):
                 its numbered prompts
 The + card is an in-window Popup holding '●' 'Claude', the folder box and 'Launch Claude'; its folder list is a
 second Popup whose rows include 'Browse…' and section headers ('RECENT', 'SUBFOLDERS OF …', 'MATCHES …').
+
+Accessibility metadata (E2E_TESTING.md §6.3; a build of 2026-10-23 or later — NOT in 0.8.0): the header's controls
+have AutomationIds (am.side.launch / filter / sum / scope / sort / scrollToTab / dock / collapse, the strip's
+am.side.expand), and the glyph-only ones NAMES instead of their glyphs (⌖ "Scroll to the selected tab", ⇄ "Dock side",
+the chevrons "Collapse the side panel" / "Expand the side panel"); `button` and `strip_button` find them by id first and
+by their 0.8.0 glyphs second. A card's TITLE text carries am.side.card.<key> and the card's ItemStatus (the state word,
+then "codex", "unread", "unsent draft", "cache warm", "tags: …", "selected" as they hold).
 """
 from __future__ import annotations
 
@@ -26,6 +33,14 @@ from .manager import STATE_WORDS
 
 PLUS_NAME = "Launch a session"
 COUNT_RE = re.compile(r"^(\d+)(?: of (\d+))? sessions? (in this window|across all windows)")
+GLYPH_IDS = {"⌖": "am.side.scrollToTab", "⇄": "am.side.dock", "«": "am.side.collapse",
+             "»": "am.side.collapse"}
+"""The header's glyph buttons as 0.8.0 names them (⌖ ⇄ « ») -> their AutomationIds on a build with the metadata, where
+they are named by what they do instead. The header's collapse chevron points toward the docked edge (« docked left)."""
+CARD_ID_PREFIX = "am.side.card."
+"""The AutomationId prefix of a card's title text (the session id's first 8 characters follow)."""
+STRIP_ID = "am.side.expand"
+"""The collapsed strip's chevron (» docked left, « docked right) by AutomationId."""
 
 
 @dataclass
@@ -43,6 +58,36 @@ class PanelCard:
     title: str
     state: str
     texts: list = field(default_factory=list)
+
+    @property
+    def status(self) -> str:
+        """The card's ItemStatus, read off its title text ("" on 0.8.0).
+
+        Returns:
+            The status.
+        """
+        return self.title_el.item_status
+
+    @property
+    def selected(self) -> Optional[bool]:
+        """Whether this is the panel's selected (followed or peeked) card.
+
+        Returns:
+            True / False — or None when the build exposes no status (0.8.0: read the summary's title instead).
+        """
+        if not self.status:
+            return None
+        return "selected" in self.status.split("; ")
+
+    @property
+    def session_key(self) -> str:
+        """The session's key (its id's first 8 characters), read off the title's AutomationId ("" on 0.8.0).
+
+        Returns:
+            The key.
+        """
+        aid = self.title_el.automation_id
+        return aid[len(CARD_ID_PREFIX):] if aid.startswith(CARD_ID_PREFIX) else ""
 
     def click(self) -> None:
         """Click the card (peek: the summary shows this session; the tab stays).
@@ -169,14 +214,23 @@ class SidePanel:
     def button(self, name: str) -> uia.Element:
         """A header button by its name ('Sum', 'LOCAL', '⌖', '⇄', '«' ...).
 
+        A glyph name (GLYPH_IDS) is looked up by its AutomationId first: a build with the accessibility metadata names
+        those buttons by what they do ("Dock side"), and only 0.8.0 still names them by their glyphs.
+
         Args:
-            name: The exact name.
+            name: The exact name (a glyph as 0.8.0 names it, or the button's word).
         Returns:
             The element.
         Raises:
             LookupError: When there is none.
         """
-        for k in self.controls():
+        controls = self.controls()
+        aid = GLYPH_IDS.get(name)
+        if aid is not None:
+            for k in controls:
+                if k.role == "button" and k.automation_id == aid:
+                    return k
+        for k in controls:
             if k.role == "button" and k.name == name:
                 return k
         raise LookupError(f"the side panel has no button {name!r}; it has "
@@ -275,16 +329,30 @@ class SidePanel:
         self.button("«").click()
         wait_until(self.collapsed, 5.0, what="the panel collapsed")
 
+    def strip_button(self) -> Optional[uia.Element]:
+        """The collapsed strip's chevron: by its AutomationId (STRIP_ID), else — 0.8.0 — by its glyph (» while docked
+        left; the header's own chevron is gone while collapsed, so the glyph is unambiguous then).
+
+        Returns:
+            The button, or None while the panel is expanded.
+        """
+        kids = self.window.content_children()
+        by_id = next((k for k in kids if k.role == "button" and k.automation_id == STRIP_ID), None)
+        if by_id is not None:
+            return by_id
+        if self.plus(kids) is not None:
+            return None  # expanded: a chevron in the content is the header's own collapse button
+        return next((k for k in kids if k.role == "button" and k.name in ("»", "«")), None)
+
     def expand(self) -> None:
-        """Click the collapsed strip's » and wait for the panel.
+        """Click the collapsed strip's chevron and wait for the panel.
 
         Returns:
             None.
         Raises:
-            WaitTimeout: When there is no » or the panel stayed collapsed.
+            WaitTimeout: When there is no chevron or the panel stayed collapsed.
         """
-        chevron = wait_until(lambda: next((k for k in self.window.content_children()
-                                           if k.role == "button" and k.name == "»"), None), 5.0, what="the » button")
+        chevron = wait_until(self.strip_button, 5.0, what="the collapsed strip's chevron")
         chevron.click()
         wait_until(lambda: not self.collapsed(), 5.0, what="the panel expanded")
 

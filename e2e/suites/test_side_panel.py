@@ -206,8 +206,9 @@ def test_collapse_and_dock(am, s1):
     assert panel.dock_side() == "left"
     panel.button("«").click()
     wait_until(panel.collapsed, 5, what="the panel collapsed")
-    expand = wait_until(lambda: next((k for k in w.content_children() if k.role == "button" and k.name == "»"), None),
-                        5, what="the » button")
+    # The strip's chevron: » on 0.8.0, "Expand the side panel" (am.side.expand) on a build with the accessibility
+    # metadata — SidePanel.strip_button finds either.
+    expand = wait_until(panel.strip_button, 5, what="the collapsed strip's chevron")
     expand.click()
     wait_until(lambda: not panel.collapsed(), 5, what="the panel back")
     panel.button("⇄").click()

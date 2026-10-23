@@ -11,6 +11,8 @@
 #include "AgentCopyActions.h" // Agentmaster: kTranscriptCopyMenu — the shared Copy ▸ Transcript submenu (its levels, tooltips and codes)
 #include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
 #include "AgentPanelFocus.h" // Agentmaster (TCM-K2): AgentFocusInOpenPopup — the context menu's Closed hand-back stands aside for a panel a menu item opened
+#include "AgentAutomation.h" // Agentmaster (accessibility, E2E_TESTING.md §6.3): the tab item's AutomationId + ItemStatus (SetAgentAutomationSession)
+#include "AgentCatchLog.h" // Agentmaster: AgentLogCaughtException — _UpdateAgentItemStatus never lets an exception out of a XAML event handler
 #include "Utils.h"
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -141,10 +143,92 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): keep the TabViewItem's ItemStatus in step with what the
+        // header SHOWS — every facet it composes (_UpdateAgentItemStatus) is a TabStatus property the page sets, so one
+        // subscription follows them all. Filtered by name: the brushes, the progress ring and the bell change nothing
+        // a status says. A WEAK capture — _tabStatus is this tab's own member, so a strong one would be a cycle.
+        _agentAutomationStatusRevoker = _tabStatus.PropertyChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
+            if (const auto tab{ weakThis.get() })
+            {
+                const auto n = args.PropertyName();
+                if (n.empty() || n == L"AgentStatusHalfVisible" || n == L"AgentFlashRingVisible" || n == L"AgentPendingVisible" ||
+                    n == L"AgentFavoriteVisible" || n == L"AgentFavoriteStarVisible" || n == L"AgentCacheWarmVisible" ||
+                    n == L"AgentSelectionVisible" || n == L"AgentTagsSpec")
+                {
+                    tab->_UpdateAgentItemStatus();
+                }
+            }
+        });
+
         _UpdateHeaderControlMaxWidth();
 
         // Use our header control as the TabViewItem's header
         TabViewItem().Header(_headerControl);
+    }
+
+    // Agentmaster (accessibility, E2E_TESTING.md §6.3): see Tab.h. The id first (an empty session clears it), then the
+    // state word, then one recompose of the item status.
+    void Tab::SetAgentAutomationSession(std::wstring_view sessionId, std::wstring_view stateWord)
+    {
+        const auto item = TabViewItem();
+        if (!item)
+        {
+            return;
+        }
+        AgentSetAutomationId(item, sessionId.empty() ? std::wstring{} : AgentAutomationIdFor(L"am.tab.", sessionId));
+        if (_agentAutomationStateWord != stateWord)
+        {
+            _agentAutomationStateWord.assign(stateWord);
+        }
+        _UpdateAgentItemStatus();
+    }
+
+    // Agentmaster (accessibility, E2E_TESTING.md §6.3): see Tab.h. The facets in the AgentAutomation.h order — the state
+    // word, then what the header's status icon and pill show — and last the tag names read back from the spec the page
+    // wrote ("name\t#AARRGGBB" lines, the badges' own input), so a status reads "running; unsent draft; selected on the
+    // Agent Manager page; tags: release, hotfix".
+    void Tab::_UpdateAgentItemStatus() noexcept
+    {
+        try
+        {
+            const auto item = TabViewItem();
+            if (!item || !_tabStatus)
+            {
+                return;
+            }
+            AgentItemStatus status;
+            if (!_agentAutomationStateWord.empty())
+            {
+                status.Add(_agentAutomationStateWord)
+                    .Add(kAgentStatusNotStarted, _tabStatus.AgentStatusHalfVisible())
+                    .Add(kAgentStatusUnread, _tabStatus.AgentFlashRingVisible())
+                    .Add(kAgentStatusDraft, _tabStatus.AgentPendingVisible())
+                    .Add(kAgentStatusFavorite, _tabStatus.AgentFavoriteVisible() || _tabStatus.AgentFavoriteStarVisible())
+                    .Add(kAgentStatusCacheWarm, _tabStatus.AgentCacheWarmVisible())
+                    .Add(kAgentStatusSelectedOnPage, _tabStatus.AgentSelectionVisible());
+                const std::wstring spec{ _tabStatus.AgentTagsSpec() };
+                std::wstring tags;
+                size_t lineStart = 0;
+                while (lineStart < spec.size())
+                {
+                    const size_t lineEnd = (std::min)(spec.find(L'\n', lineStart), spec.size());
+                    const std::wstring_view line{ spec.data() + lineStart, lineEnd - lineStart };
+                    const auto name = line.substr(0, (std::min)(line.find(L'\t'), line.size())); // the name before its color
+                    if (!name.empty())
+                    {
+                        tags += tags.empty() ? L"tags: " : L", ";
+                        tags += name;
+                    }
+                    lineStart = lineEnd + 1;
+                }
+                status.Add(tags);
+            }
+            AgentSetItemStatus(item, status.Text());
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"Tab::_UpdateAgentItemStatus");
+        }
     }
 
     // Method Description:

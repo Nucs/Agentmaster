@@ -34,6 +34,7 @@
 
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION keys)
 
+#include "AgentAutomation.h" // AgentStateWord — the tab item's accessible state word (_SetTabAgentDot, E2E_TESTING.md §6.3)
 #include "AgentCatchLog.h" // AgentLogCaughtException — full-detail swallowed-exception forensics (type/hr/msg + throw stacks)
 #include "AgentManagerContent.h" // push the External census / RefreshNow
 #include "AgentPanelFocus.h" // Agentmaster (TCM-K2): who holds the keyboard while the Tags panel is up, and where it goes when the panel closes
@@ -726,7 +727,10 @@ namespace winrt::TerminalApp::implementation
     // Independent of AppSettings.showTabOverlay (that toggle is the in-terminal HUD). Idempotent on
     // an unchanged color (a new SolidColorBrush per call would re-raise the INPC binding every
     // observer tick), so the per-tick badge path can re-assert it for free. UI thread only.
-    void TerminalPage::_SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant)
+    // Agentmaster (accessibility, E2E_TESTING.md §6.3): the accessible facts go FIRST, before the dot's own
+    // short-circuit below — a re-asserted unchanged dot must still carry a changed state word (two states can share
+    // a color: an observed tab's gray and Idle's). Change-gated inside, so the per-tick re-assert stays free.
+    void TerminalPage::_SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant, std::wstring_view sessionId, std::wstring_view stateWord)
     {
         if (!tab)
         {
@@ -734,6 +738,10 @@ namespace winrt::TerminalApp::implementation
         }
         try
         {
+            if (const auto impl = winrt::get_self<Tab>(tab))
+            {
+                impl->SetAgentAutomationSession(color ? sessionId : std::wstring_view{}, color ? stateWord : std::wstring_view{});
+            }
             const auto status = tab.TabStatus();
             if (!status)
             {
@@ -2690,7 +2698,7 @@ namespace winrt::TerminalApp::implementation
         }
         if (const auto tab = it->second.get())
         {
-            _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt, dormant);
+            _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt, dormant, sessionId, AgentStateWord(state));
             _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
             _EvaluateAgentNotification(sessionId, tab, state, live); // Windows toast on the Running -> X edge (the cog's Notifications tab)
             // LAZY tab tooltip (the CPU fix): a LIVE session's card is built on hover, not per notify —
@@ -8048,7 +8056,7 @@ namespace winrt::TerminalApp::implementation
         // independent of the in-terminal HUD toggle. Re-asserted every probe tick; _SetTabAgentDot
         // is idempotent on the unchanged color. (A tab that becomes managed gets its state-colored
         // dot from the bind tail, which runs after this badge is dropped.)
-        _SetTabAgentDot(tab, winrt::Windows::UI::ColorHelper::FromArgb(0x70, 0x80, 0x80, 0x80));
+        _SetTabAgentDot(tab, winrt::Windows::UI::ColorHelper::FromArgb(0x70, 0x80, 0x80, 0x80), /*dormant*/ false, /*sessionId*/ {}, L"observed"); // UI Automation reads "observed" (no session yet)
         // Tab tooltip: the unmanaged/observe twin of the managed session tooltip — "○ <kind> · unlinked"
         // over the tab's OWN title (kept, so we never regress the default tooltip's title for shell tabs).
         // Tab-strip chrome like the dot, so set BEFORE the in-terminal HUD gate below. Idempotent on the
@@ -8466,7 +8474,7 @@ namespace winrt::TerminalApp::implementation
         // the liveness tick reconciles started from ConnectionState() within one cadence.
         if (const auto s = _sessionRegistry->Get(id))
         {
-            _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state), !s->started && !s->external);
+            _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state), !s->started && !s->external, id, AgentStateWord(s->state));
         }
         _TrackSessionStarted(id); // Agentmaster (eager-init): clear the dormant flag once this control's connection starts
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
@@ -8671,7 +8679,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (const auto t = deadIt->second.get())
                 {
-                    _SetTabAgentDot(t, std::nullopt);
+                    _SetTabAgentDot(t, std::nullopt, /*dormant*/ false, /*sessionId*/ {}, /*stateWord*/ {}); // the dot AND its accessible facts go
                     if (const auto ti = _GetTabImpl(t))
                     {
                         ti->ClearAgentToolTip(); // revert the dead tab to the default tooltip

@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // the queue rows' and the runner toggle's accessible name, AutomationId and ItemStatus (E2E_TESTING.md §6.3)
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (the wrapped live-draft read)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentMaster/PendingInput.h" // PickCurrentPromptText — the live-vs-remembered draft rule ("pull in the unsent prompt")
@@ -248,6 +249,38 @@ namespace winrt::TerminalApp::implementation
                               showOrigin ?
                                   winrt::hstring{ L"A message this session has already received, oldest first \x2014 whether Agentmaster sent it or you typed it. The row trims long text; right-click to copy the whole prompt." } :
                                   winrt::hstring{ L"A prompt waiting its turn. Click to select it; right-click to copy it, move it up or down the order, or drop it from the queue. The next one still pending is what the Prompt Queue Runner sends." });
+            // Agentmaster (accessibility, E2E_TESTING.md §6.3): the row's content is a panel (glyph, text, chip), so its
+            // name is the prompt's text as the row shows it; its id carries the prompt's key; its item status says what
+            // the glyph and the chip say — the status word ("pending", "sent", "failed", …), who sent it (auto / typed,
+            // for a sent row), and whether it is the selected row. The pane rebuilds on every change, so this is current.
+            AgentSetAccessibleName(rowBtn, p.label.empty() ? std::wstring_view{ p.text } : std::wstring_view{ p.label });
+            AgentSetAutomationId(rowBtn, AgentAutomationIdFor(L"am.mgr.queue.row.", p.id));
+            {
+                std::wstring_view statusWord = L"pending";
+                switch (p.status)
+                {
+                case PromptStatus::Sent:
+                    statusWord = L"sent";
+                    break;
+                case PromptStatus::Held:
+                    statusWord = L"held";
+                    break;
+                case PromptStatus::Skipped:
+                    statusWord = L"skipped";
+                    break;
+                case PromptStatus::Failed:
+                    statusWord = L"failed";
+                    break;
+                case PromptStatus::Pending:
+                default:
+                    break;
+                }
+                AgentItemStatus status;
+                status.Add(statusWord)
+                    .Add(p.origin == PromptOrigin::Typed ? std::wstring_view{ L"typed" } : std::wstring_view{ L"auto" }, showOrigin)
+                    .Add(kAgentStatusSelected, selected);
+                AgentSetItemStatus(rowBtn, status.Text());
+            }
             _planListHost.Children().Append(rowBtn);
         };
 
@@ -1484,6 +1517,13 @@ namespace winrt::TerminalApp::implementation
         row.Children().Append(Text(label, 11, false, enabled ? 0.95 : 0.5));
         _autorunnerBtn.Content(row);
         _autorunnerBtn.IsEnabled(enabled);
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the content is a panel (the dot + the label), which gives
+        // UI Automation no name: the label IS the name, and the item status is the mode alone — "Auto", "Paused", or
+        // "Paused → Auto on your next message" (the interrupt hold) — so a reader need not parse the label.
+        AgentSetAccessibleName(_autorunnerBtn, label);
+        const std::wstring_view labelView{ label };
+        constexpr std::wstring_view kRunnerLabelPrefix{ L"Prompt Queue Runner: " };
+        AgentSetItemStatus(_autorunnerBtn, labelView.substr(0, kRunnerLabelPrefix.size()) == kRunnerLabelPrefix ? labelView.substr(kRunnerLabelPrefix.size()) : labelView);
     }
 
     // Agentmaster: select the bottom-right pane's [Summary | Prompt Queue] tab. The choice is a GLOBAL app

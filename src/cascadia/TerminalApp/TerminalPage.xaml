@@ -106,80 +106,16 @@
             just this weird hole that appeared in Row 0.
         -->
 
-        <local:AboutDialog x:Name="AboutDialog"
-                           Grid.Row="2"
-                           x:Load="False" />
-
-        <!-- Agentmaster: the "don't ask again" (DontAskAgainCheckBox) content was removed. Checking it set
-             ConfirmOnClose=Never, which silently disabled EVERY close confirmation (including the
-             window-close decision prompt). Close prompts must never be permanently suppressible, so this
-             dialog now shows only its title + Close/Cancel buttons. -->
-        <ContentDialog x:Name="ConfirmCloseDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Primary" />
-
-        <ContentDialog x:Name="CloseReadOnlyDialog"
-                       x:Uid="CloseReadOnlyDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Close" />
-
-        <ContentDialog x:Name="MultiLinePasteDialog"
-                       x:Uid="MultiLinePasteDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Primary">
-            <StackPanel>
-                <TextBlock x:Uid="MultiLineWarningText"
-                           TextWrapping="Wrap" />
-                <TextBlock x:Uid="ClipboardTextHeader"
-                           Margin="0,16,0,0" />
-                <ScrollViewer x:Name="ClipboardContentScrollViewer"
-                              MaxHeight="100"
-                              Margin="0,8,0,0">
-                    <TextBlock x:Name="ClipboardText"
-                               FontFamily="Cascadia Mono"
-                               TextWrapping="Wrap" />
-                </ScrollViewer>
-            </StackPanel>
-        </ContentDialog>
-
-        <ContentDialog x:Name="LargePasteDialog"
-                       x:Uid="LargePasteDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Primary" />
-
-        <ContentDialog x:Name="ControlNoticeDialog"
-                       x:Uid="ControlNoticeDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Primary">
-            <TextBlock IsTextSelectionEnabled="True"
-                       TextWrapping="WrapWholeWords">
-                <TextBlock.ContextFlyout>
-                    <mtu:TextMenuFlyout />
-                </TextBlock.ContextFlyout>
-                <Run x:Name="NoticeMessage" />
-            </TextBlock>
-        </ContentDialog>
-
-        <ContentDialog x:Name="UriErrorDialog"
-                       x:Uid="UriErrorDialog"
-                       Grid.Row="2"
-                       x:Load="False"
-                       DefaultButton="Close">
-            <TextBlock IsTextSelectionEnabled="True"
-                       TextWrapping="WrapWholeWords">
-                <TextBlock.ContextFlyout>
-                    <mtu:TextMenuFlyout />
-                </TextBlock.ContextFlyout>
-                <Run x:Name="CouldNotOpenUriReason" /> <LineBreak /> <LineBreak />
-                <Run x:Name="UnopenedUri"
-                     FontFamily="Cascadia Mono" />
-            </TextBlock>
-        </ContentDialog>
+        <!--
+            Agentmaster (flows TAB-K3, 2026-10-23): the page's ContentDialogs (AboutDialog, ConfirmCloseDialog,
+            CloseReadOnlyDialog, MultiLinePasteDialog, LargePasteDialog, ControlNoticeDialog, UriErrorDialog) are no
+            longer declared here: each is built in code when it is shown (TerminalPage::_ShowDialogHelper has the
+            whole story). A dialog in the live tree is shown by WinUI with only its inner layout moved into a popup
+            nested inside this page, and UI Automation could not read it: the quit confirmation "Do you want to close
+            all windows?" had no title and no buttons for a screen reader. A code-built dialog is shown as a whole
+            popup named by its title, like every other Agentmaster dialog. The resource strings their x:Uid applied
+            are read in code (RS_(L"<Uid>/<Property>")), so the text is unchanged in every language.
+        -->
 
         <local:CommandPalette x:Name="CommandPaletteElement"
                               Grid.Row="2"

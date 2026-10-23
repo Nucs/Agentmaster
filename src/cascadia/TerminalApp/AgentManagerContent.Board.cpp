@@ -22,6 +22,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentAutomation.h" // the cards' accessible name, AutomationId and ItemStatus (E2E_TESTING.md §6.3)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor (the cog's color pickers) + ResolveTagDisplayColor (the card's bookmark ribbons)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
@@ -559,6 +560,9 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
         AgentSetTitledTip(dotsBtn, L"More", L"This session's actions \x2014 jump to its tab, rename, tag, fork, restart, close, copy its details, or start a new session in its folder. Exactly what right-clicking the card gives you.", kCardTipDelay);
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): a FontIcon gives the button no name of its own.
+        AgentSetAccessibleName(dotsBtn, L"More actions");
+        AgentSetAutomationId(dotsBtn, AgentAutomationIdFor(L"am.mgr.board.more.", s.id));
         dotsBtn.Flyout(_MakeLazySessionMenu(s.id, _WorkDirOf(s), dotsBtn)); // a click opens the session menu (built at OPEN time — perf; the button anchors its Tags panel); Open-New-Here targets the effective work dir
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -774,6 +778,25 @@ namespace winrt::TerminalApp::implementation
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
         card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
         _boardCardsById[s.id] = card;
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3, 2026-10-23): the card's content is a panel, so UI Automation
+        // had no name for it, and what it shows besides text was pixels — its selection (the 2 px ring), a dormant
+        // session (the half-hollow dot), an unsent draft (the 3 dots), the warm cache (the ⚡). So: name = the session's
+        // full title, id = am.mgr.board.card.<key>, item status = the state word (= its column), then the facts that
+        // hold. The board rebuilds its cards on every change — a selection included — so this build-time status is
+        // always the current one.
+        AgentSetAccessibleName(card, fullTitle);
+        AgentSetAutomationId(card, AgentAutomationIdFor(L"am.mgr.board.card.", s.id));
+        {
+            const auto warmIt = _cardWarmShown.find(s.id); // written by this very build (the ⚡ block above)
+            AgentItemStatus status;
+            status.Add(AgentStateWord(s.state))
+                .Add(kAgentStatusCodex, s.kind == AgentKind::Codex)
+                .Add(kAgentStatusNotStarted, IsSessionDormant(s))
+                .Add(kAgentStatusDraft, !s.pendingInput.empty())
+                .Add(kAgentStatusCacheWarm, warmIt != _cardWarmShown.end() && warmIt->second)
+                .Add(kAgentStatusSelected, selected);
+            AgentSetItemStatus(card, status.Text());
+        }
         return card;
     }
 
@@ -1939,6 +1962,11 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st);
         }
         AgentSetTitledTip(dotsBtn, L"More", L"What you can do with a session you don't own \x2014 adopt its conversation into a tab here, start a new session in its folder, or bring its window to the front. Exactly what right-clicking the card gives you.", kCardTipDelay);
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the managed card's twin. An external is keyed by its
+        // conversation id once resolved, else by its pid (a never-prompted external has no id yet).
+        const std::wstring externalKey = ex.sessionId.empty() ? L"pid" + std::to_wstring(ex.pid) : AgentAutomationKey(ex.sessionId);
+        AgentSetAccessibleName(dotsBtn, L"More actions");
+        AgentSetAutomationId(dotsBtn, L"am.mgr.board.external.more." + externalKey);
         dotsBtn.Flyout(_MakeLazyExternalMenu(ex)); // a click opens the external menu (built at OPEN time — perf)
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -1977,6 +2005,15 @@ namespace winrt::TerminalApp::implementation
             cardTip += ex.recap;
         }
         AgentSetTitledTip(card, winrt::hstring{ exTitle }, winrt::hstring{ cardTip }, kCardTipDelay);
+        // Agentmaster (accessibility, E2E_TESTING.md §6.3): the card's name (its content is a panel), its id, and an item
+        // status that says it is observed (never driven) and whether it is the selected external.
+        AgentSetAccessibleName(card, exTitle);
+        AgentSetAutomationId(card, L"am.mgr.board.external." + externalKey);
+        {
+            AgentItemStatus status;
+            status.Add(kAgentStatusExternal).Add(kAgentStatusCodex, ex.kind == AgentKind::Codex).Add(kAgentStatusSelected, selected);
+            AgentSetItemStatus(card, status.Text());
+        }
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
