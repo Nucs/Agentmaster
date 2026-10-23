@@ -8,7 +8,8 @@
 > **Owner decisions applied (2026-10-23): keep two documents (D0).** This document and
 > [E2E_CRASH_GUARD.md](E2E_CRASH_GUARD.md) describe one implementation. The owner's D1–D17 correspond to that
 > document's CG-D1–CG-D17; its §13 is the decision record, mirrored in §11 here. They are no longer unanswered
-> recommendations. D15 remains unanswered; numerical resource and retention settings remain open as noted there.
+> recommendations. D15 is now settled: fully disable Defender inside the test VM. Numerical resource and retention
+> settings remain open as noted there.
 >
 > The user's requirement: “memory corruption, memory leaks and crashes as part of special scenarios suite” and
 > “Crashes and memory corruption and sudden shut downs must be handled by every single test (single code running
@@ -398,8 +399,10 @@ failure is not misattributed. Full page heap is not suitable for a 700-active-ta
 
 D10 does not approve a compulsory 12–16 GB guest. Begin with small workloads on the configured VM, check headroom,
 and report a capacity block if an instrumented case cannot fit; do not enlarge the VM or add machine stress by
-implication. D15 is unanswered: preserve Defender's existing settings. If a tool is blocked, report that unmet
-prerequisite; do not automatically add exclusions or turn Defender off.
+implication. D15 now requires guest provisioning to **fully disable Microsoft Defender Antivirus inside the
+disposable test VM**. Exclusions alone are insufficient. Verify the effective disabled state before fault canaries
+and tests, record it in the run manifest, and qualify the method on the actual guest image. If that state cannot be
+established, fail readiness; a provisioner's return code alone is insufficient. Host protection is unchanged.
 
 A helper proves the tool works on its allocator; it does **not** prove coverage of every heap in Agentmaster.
 Inventory NT/segment/custom heaps and instrumented modules. Qualification must show where settings change heap
@@ -737,7 +740,7 @@ normal authorization rules.
 
 | Phase | Deliverable and main seams | Exit condition |
 |---|---|---|
-| 0 — contracts and qualification | Shared `e2e/guard/` schemas; capability manifest; helper fault inventory; simple configurable resource caps; D0–D17 decision record | Startup, all phases/generations, late evidence and missing observation have non-silent results; D15 and numeric settings explicitly unresolved |
+| 0 — contracts and qualification | Shared `e2e/guard/` schemas; capability manifest; helper fault inventory; simple configurable resource caps; D0–D17 decision record; guest-only Defender disablement | Startup, all phases/generations, late evidence and missing observation have non-silent results; D15's effective state verified; numeric resource/retention settings remain open |
 | 1 — universal guard and attempt isolation | Guard/Sentinel/Watchdog contract; fresh pytest worker plus separate mock per attempt; retained jobs/handles; `App` lifecycle integration; bounded workers | G-01, G-04–G-08 and G-12 pass; G-09 proves worker/mock failure isolation; simulated G-10 failures nonzero; every test has guard.json; all owned survivors fail |
 | 2 — evidence and native diagnostics | Qualified event/dump collectors, guest pack/status, bounded host salvage; consume matching public PDBs; retention with chosen settings | G-02/G-03 and real collector/export G-09/G-10 variants pass; guest loss tested by protocol simulation only; failed export still ends VM lifetime; failed required canary prevents qualified success |
 | 3 — real lifecycle regression | C-01–C-04, R-01–R-04 and current feature tests through same guard; repeat stressed sequences | No unexpected fault/exit/orphan and complete observation on at least 10 independent runs of each initial stress case; existing behavioral defects separately visible |
@@ -752,8 +755,8 @@ Helper unit/protocol tests run on suitable hosts; desktop qualification remains 
 These phases are acceptance groupings for the companion's G0–G9 work breakdown, not a second implementation queue.
 Per-attempt isolation and supervisor-owned handles must be designed before the plugin; a temporary pytest-owned
 kill-on-close design cannot meet D6/D7. Strict policy, failed-canary gating and final VM shutdown are required from
-the first integrated guarded run. Retention values and any Defender change must be resolved only when needed;
-neither is permission to keep the VM running.
+the first integrated guarded run. D15's guest-only Defender disablement is a readiness requirement; exact retention
+values still need to be chosen. Neither a provisioning nor evidence failure is permission to keep the VM running.
 
 ### Boundaries for the scenario implementer
 
@@ -796,6 +799,7 @@ The owner answered on 2026-10-23. D0–D17 below mirror the decision record in
 [E2E_CRASH_GUARD.md §13](E2E_CRASH_GUARD.md#13-owner-decisions-and-remaining-choices); D1–D17 there use the `CG-` prefix.
 The quoted answer is kept separate from its implementation interpretation. These are planning decisions, not a
 request to build/install now or a claim that the implementation already exists.
+The follow-up D15 answer is incorporated below and supersedes its previous unanswered status.
 
 | Decision | Owner answer | Applied contract / remaining choice |
 |---|---|---|
@@ -814,11 +818,11 @@ request to build/install now or a claim that the implementation already exists.
 | D12 / CG-D12 | “tests usually dont do repeated actions enough times to detect significant leaks. we have dedicated tests for leaks” | Ordinary tests provide lightweight safety/context only; leak verdicts require dedicated repeated workloads |
 | D13 / CG-D13 | “Add retention” | Retention required; age/size/dump caps open. 30 days / 20 dumps remain proposals |
 | D14 / CG-D14 | “Yes” | Keep guard.json for every passing test as well as failures |
-| D15 / CG-D15 | No answer | **Open.** Leave Defender unchanged; no implicit exclusion or disablement |
+| D15 / CG-D15 | “inside the VM disable the defender completely” | Fully disable Microsoft Defender Antivirus in the disposable test VM, verify before testing and record the effective state; exclusions alone do not satisfy it. Host protection stays unchanged |
 | D16 / CG-D16 | “fail means test fail” | Failed required canary is failed and run nonzero; dependent tests cannot pass unguarded. Unaffected continuation must preserve failure |
 | D17 / CG-D17 | “don't keep, vm launches with the tests and turns off with them” | VM lifetime follows the run, always shutdown after bounded export/salvage, no live keep-on-failure |
 
-Still open: Defender (D15), exact lightweight resource ceilings (D11), retention age/size/dump values (D13).
+Still open: exact lightweight resource ceilings (D11) and retention age/size/dump values (D13). D15 is settled.
 Per-test isolation and D10's retained process-crash/deferred machine-fault split are explicit design interpretations
 of the owner's words. Tool/lane qualification and measured leak sensitivity remain engineering work. Do not
 silently restore the rejected machine work, generic budget machinery, warning policies or live-VM retention while
