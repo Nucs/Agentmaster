@@ -825,9 +825,11 @@ The host creates `Z:\e2e\out\<run>\` and its `tests\` before the run. Python in 
 - **No crash UI and no JIT debugger:**
   - `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\DontShowUI = 1`;
   - no `AeDebug` `Debugger` with `Auto = 1`.
-- **Defender: OPEN (CG-D15 was unanswered).** The previous recommendation was guest-only exclusions for `C:\e2e`
-  and the venv. Do not provision exclusions or disable Defender without a decision. If the existing policy blocks a
-  required canary, report its failure and block affected tests; do not silently weaken protection.
+- **Defender fully disabled inside the disposable test VM (CG-D15, decided).** Guest provisioning disables
+  Microsoft Defender Antivirus completely for the test environment; directory exclusions alone do not satisfy
+  this decision. The Sentinel verifies the effective disabled state before fault canaries/tests and records it
+  in the run manifest. Qualify the method on the actual guest image; if the requested state cannot be established,
+  fail readiness rather than claiming it succeeded. This changes only the guest, never the host PC's protection.
 - **No surprise reboots or relaunches:**
   - Windows Update paused for the run;
   - "restart apps after sign-in" off, so that a reboot never relaunches the app behind the suite's back (§3.1).
@@ -1598,6 +1600,7 @@ with subcode 57. It needs two things:
 - **UI Automation:** the timeouts in the guest.
 - **The host and the VM:**
   - QEMU's monitor is reachable for an E2E desktop;
+  - guest-only Defender disablement is effective, verified and recorded before the fault canaries (CG-D15);
   - incremental evidence reaches the host and can be read without the guest;
   - bounded final capture and VM stop run on every exit path, including capture errors and cancellation;
   - forced pause/reset/reboot checks are deferred by CG-D10.
@@ -1625,8 +1628,10 @@ with subcode 57. It needs two things:
   resets the app, and the next preflight checks that the machine is clean.
 - **WMI can drop events under load.** The job is the authority for the test's tree; WMI is only for what lies outside
   it.
-- **Defender may block the fault toolkit's injection.** CG-D15 is unanswered; no exclusion or disablement is
-  authorized. A blocked canary makes affected coverage unavailable and the run nonzero.
+- **Guest protection state must match CG-D15.** Verify complete Defender Antivirus disablement in the test VM;
+  a provisioner reporting success without the effective state is a readiness failure. Fault canaries must still
+  pass; any remaining toolkit block is a failed prerequisite, not a reason to mark tests green. Host settings stay
+  outside the provisioning target.
 - **Page heap needs memory.** Bound the active lane to the existing VM envelope; the proposed larger VM was declined.
 - **ASan may not build or run** with C++/WinRT and XAML Islands: feasibility first.
 - **A canary also exercises the product's crash path.** Expected incidents are labeled as such, so reports never mix
@@ -1644,6 +1649,7 @@ recommendations throughout this plan and its companion [E2E_RELIABILITY.md](E2E_
 stays open; a qualified answer is not blanket approval of the recommendation's numbers or mechanism. This is the
 canonical decision record, mirrored by the companion plan; there is one `e2e/guard/` implementation and one
 `guard.json`/verdict contract, not separate implementations for the two documents.
+The follow-up answer to CG-D15 is now incorporated: Defender must be fully disabled inside the test VM.
 
 | Id | Owner answer | Status and resulting requirement |
 |---|---|---|
@@ -1662,12 +1668,12 @@ canonical decision record, mirrored by the companion plan; there is one `e2e/gua
 | CG-D12 | "tests usually dont do repeated actions enough times to detect significant leaks. we have dedicated tests for leaks" | **Decided.** Leak verdicts belong to dedicated repeated-action lanes. Ordinary tests retain lightweight diagnostics and safety limits, with no single-test leak claim. |
 | CG-D13 | "Add retention" | **Requirement accepted; numbers open.** Add bounded artifact retention and cleanup on Q:, with manifests and deletion records. Thirty days and twenty full dumps per run remain proposals, not adopted values (§7.4). |
 | CG-D14 | "Yes" | **Decided.** Save `guard.json` for passing tests as well as failures, including monitor health and resource peaks. |
-| CG-D15 | No answer | **OPEN.** Exclusions versus the current Defender configuration is undecided. Do not provision exclusions or disable Defender. |
+| CG-D15 | "inside the VM disable the defender completely" | **Decided.** Fully disable Microsoft Defender Antivirus in the disposable test VM, verify the effective state before testing and record it. Exclusions alone are insufficient; do not change host protection (§6.4). |
 | CG-D16 | "fail means test fail" | **Decided.** A required-canary failure is a failed test and makes the suite nonzero; tests needing that detector are blocked or fail. No successful UNGUARDED result. Unaffected diagnostic continuation does not erase the failure. |
 | CG-D17 | "don't keep, vm launches with the tests and turns off with them." | **Decided.** Start VM with the run; bounded export then unconditional stop in host `finally`, including failure/cancellation/export-error paths. No live `--keep-on-failure`. Preserve offline evidence under retention; follow normal disposable VM deletion policy. |
 
-**Remaining owner choices:** CG-D15's Defender policy, CG-D11's numerical safety limits/any later calibration, and
-CG-D13's retention duration/dump caps. These stay explicitly open rather than inheriting the original defaults.
+**Remaining owner choices:** CG-D11's numerical safety limits/any later calibration and CG-D13's retention
+duration/dump caps. These stay explicitly open rather than inheriting the original defaults. CG-D15 is settled.
 Detailed implementation choices for per-attempt isolation and lane sizing must satisfy the accepted contract and
 do not reopen the decisions above. The repository's build/deploy/install permission rule remains in force.
 
