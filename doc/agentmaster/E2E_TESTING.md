@@ -8,11 +8,11 @@
 > context menu (TCM, [`flows/23-tab-context-menu.md`](flows/23-tab-context-menu.md)) and the tab life cycle (TAB-01–04:
 > park, wake, Deactivate's scopes, Close of a folder across windows, closing onto dormant tabs) — run against the
 > published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop: 49 tests,
-> 49 green in 37 min. On its first day the suite found ten defects of 0.8.0 — MGR-K1, SP-K1, SP-K2,
-> TCM-K1, TCM-K2, TAB-K1 (fixed in code that day), TAB-K2, TAB-K3, TAB-K4, ROB-K1 — kept as known-defect tests where they
-> reproduce, and replaced by a `needs_fix` test that proves the fix once a defect is fixed in code (TCM-K2: fixed
-> 2026-10-23, not in a release — `test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard`, flows/23). How
-> to run it and how to write a scenario:
+> 49 green in 37 min. On its first day the suite found twelve defects of 0.8.0 — MGR-K1, SP-K1, SP-K2,
+> TCM-K1, TCM-K2, TAB-K1, TAB-K3, TAB-K4, TAB-K5, A11Y-K1, A11Y-K2, ROB-K1 (and TAB-K2, which the user ruled a FEATURE
+> the same day, flows/07) — kept as known-defect tests where they reproduce, and replaced by a `needs_fix` test that
+> proves the fix once a defect is fixed in code (seven of them were, that day). How to run it and how to write a
+> scenario:
 > [`e2e/README.md`](../../e2e/README.md). §6 (the app's testability changes: E2E mode, the read-only bridge,
 > AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead —
 > except §6.3, written into the code on 2026-10-23 (NOT BUILT into a release; TAB-K3 and A11Y-K1): every page dialog
@@ -31,6 +31,13 @@
 > rerun. A rerun in between lost a save to ROB-K1, caused by the test's own poll of `sessions.json` (flows/20: the
 > app's replace fails while ANY handle holds the file, delete sharing or not). A `needs_fix` test proves a fix that no
 > release holds yet, so it fails on 0.8.0 by design: deselect those tests there with `-m "not needs_fix"`.
+>
+> **Every fix checked both ways (2026-10-23, NOT BUILT into a release):** with MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3,
+> A11Y-K1, TAB-K4 and CLI-K2 fixed in code, the suite had 67 tests. A test build 0.8.1.1 — a purged Release build whose
+> `src/` equals HEAD 1f4c68678, zipped and run only in a claude-fleet desktop — passed all 67 (runs `fixall-0811`, 63 of
+> 65 with two test versions since corrected, and `fixall-0811b`, 5 of 5 with the dialog probe). On 0.8.0 every
+> `needs_fix` test fails on its defect (runs `nf-080`, `nf-080b`), and the known-defect tests of the open defects
+> (SP-K2, TCM-K1, ROB-K1, TAB-K5, A11Y-K2) pass on both builds. [`flows/README.md`](flows/README.md), *Checked both ways*.
 >
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
@@ -474,9 +481,12 @@ differs from the plan above, and why:
   confirmation and presses Close all (Enter after a 4 s wait on 0.8.0).
 - **Tests:** `e2e/suites/test_accessibility.py` — the quit confirmation and the large-paste warning
   (`needs_fix("TAB-K3")`), the page's names and ids, the selection on every surface, the tab's state
-  (`needs_fix("A11Y-K1")`). Checked so far by reading and by `cl /Zs` of every TerminalApp unit; none has run on a
-  build yet. The root-cause probe `e2e/suites/probe_dialogs.py` (run by name; a full run does not collect it) records
-  what UI Automation sees of five dialogs, for one run on 0.8.0 and one on a build of the fix.
+  (`needs_fix("A11Y-K1")`). All pass on the test build 0.8.1.1 (runs `fixall-0811`, `fixall-0811b`) and fail on
+  0.8.0 (runs `nf-080`, `nf-080b`). The root-cause probe `e2e/suites/probe_dialogs.py` (run by name; a full run does
+  not collect it) records what UI Automation sees of five dialogs: on 0.8.0 the four declared ones are not
+  window-level popups (a Popup named by the title is found only by a whole-window search), on 0.8.1.1 each is one,
+  with its buttons (flows/07 TAB-K3). On both builds every hit test at a dialog lands on the terminal behind it, a
+  code-built dialog included: A11Y-K2, open (`test_known_defect_a_hit_test_passes_through_a_dialog`).
 
 ### 6.4 What does NOT change
 

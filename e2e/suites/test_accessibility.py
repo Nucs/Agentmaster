@@ -1,9 +1,11 @@
 """What UI Automation can read of Agentmaster: its dialogs, names, ids and item status (flows TAB-K3 and A11Y-K1;
 doc/agentmaster/E2E_TESTING.md §6.3).
 
-Every test here proves a FIX that no published release holds yet (`needs_fix`): on 0.8.0 the quit confirmation is
-invisible to UI Automation (TAB-K3), and the Agent Manager's cards, rows and glyph buttons have no names, ids or
-status (A11Y-K1). Deselect them there with `-m "not needs_fix"`.
+Every test here but one proves a FIX that no published release holds yet (`needs_fix`): on 0.8.0 the quit
+confirmation is invisible to UI Automation (TAB-K3), and the Agent Manager's cards, rows and glyph buttons have no
+names, ids or status (A11Y-K1). Deselect them there with `-m "not needs_fix"`. The one known-defect test,
+test_known_defect_a_hit_test_passes_through_a_dialog, shows a gap no build has fixed: UI Automation's hit test
+passes through every dialog to the terminal behind it (A11Y-K2).
 
 What the fixed build exposes (AgentAutomation.h is the one recipe):
 - every ContentDialog the page shows is a window-level Popup named by its title (they are built in code now), so
@@ -13,6 +15,8 @@ What the fixed build exposes (AgentAutomation.h is the one recipe):
 - ItemStatus for what was pixels only: a card "waiting-for-you; selected", a tab "running; unsent draft; selected on
   the Agent Manager page" (the Linked-Lenses pill, MGR-05 phase 2), a side panel card the same as its title's status.
 """
+import time
+
 import pytest
 
 from amdriver import inputs, uia, win32
@@ -31,9 +35,11 @@ so the multi-line warning stays out of it."""
 @pytest.mark.flow("TAB-10")
 @pytest.mark.needs_fix("TAB-K3")
 def test_the_quit_confirmation_is_readable(am, s1):
-    """TAB-K3: after "Close All Windows", "Do you want to close all windows?" is a dialog UI Automation reads — its
-    title, its two buttons, and a hit test at "Close all" that lands on the button (0.8.0: an empty Popup, and the
-    hit test returned the terminal behind it); Cancel keeps the app and its window.
+    """TAB-K3: after "Close All Windows", "Do you want to close all windows?" is a dialog UI Automation reads — found
+    by its title, with its two buttons (0.8.0: an empty Popup, no title, no buttons); Cancel keeps the app and its
+    window. A hit test at its "Close all" still lands on the terminal behind it, as for EVERY dialog of the app, a
+    code-built one included: A11Y-K2, test_known_defect_a_hit_test_passes_through_a_dialog (this test asserted the
+    hit test until a build with the fix showed it, 2026-10-23, run fixall-0811).
 
     Args:
         am: The app.
@@ -46,14 +52,46 @@ def test_the_quit_confirmation_is_readable(am, s1):
     Dialog.wait(am, title="Close this window?", timeout_s=10).press("Close All Windows")
     quit_dialog = Dialog.wait(am, title=QUIT_CONFIRM_TITLE, timeout_s=10)
     assert quit_dialog.buttons() == ["Close all", "Cancel"], quit_dialog.buttons()
-    close_all = quit_dialog.element().find(role="button", name="Close all")
-    assert close_all is not None
-    hit = wait_until(lambda: uia.at_point(*close_all.center), 5, what="a hit test at the Close all button")
-    assert hit.name == "Close all", f"the hit test found {hit.line()} (0.8.0: the terminal behind the dialog)"
+    assert quit_dialog.element().find(role="button", name="Close all") is not None
     quit_dialog.press("Cancel")
     am.profile.hooks.wait(r"\[nav\] quit cancelled", since=mark, timeout_s=10)
     assert am.alive()
     w.tabs.wait_tab("t1")
+
+
+@pytest.mark.p2
+@pytest.mark.flow("TCM-09")
+@pytest.mark.known_defect("A11Y-K2")
+def test_known_defect_a_hit_test_passes_through_a_dialog(am):
+    """A11Y-K2 (expected failure once fixed): UI Automation's hit test — IUIAutomation::ElementFromPoint, what a screen
+    reader's mouse and touch exploration ask — at a button of an open ContentDialog returns the terminal BEHIND the
+    dialog, also for a dialog built in code that the tree walk reads on every build: the shell tab's "Close tab?" (found
+    by its title, with its buttons). Seen 2026-10-23: 12 of 12 hit points over the window's middle on the
+    TermControl for "Close tab?" on 0.8.0 (suites/probe_dialogs.py, run nf-080b), and "Close all" of the quit
+    confirmation on a build with TAB-K3's fix (run fixall-0811). The keyboard is in the dialog meanwhile (UI
+    Automation's focused element is its button). Cause not investigated: a popup of the XAML island that the island's
+    hit test does not reach is the likely place.
+
+    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert the hit test returns the
+    dialog's button.
+
+    Args:
+        am: The app (its shell tab).
+    """
+    w = am.window
+    w.focus()
+    w.tabs.wait_tab(SHELL)
+    w.tabs.close(SHELL, answer=None)
+    dialog = Dialog.wait(am, title="Close tab?", timeout_s=10)
+    assert dialog.buttons() == ["Close", "Cancel"], dialog.buttons()
+    cancel = dialog.element().find(role="button", name="Cancel")
+    assert cancel is not None
+    time.sleep(1.0)  # past the dialog's open transition, so the hit test below meets the dialog fully shown
+    hit = uia.at_point(*cancel.center)
+    assert hit is not None and hit.class_name == "TermControl", \
+        f"the hit test found {hit.line() if hit else None} — A11Y-K2 fixed? (expected today: the terminal)"
+    dialog.press("Cancel")
+    w.tabs.wait_tab(SHELL)
 
 
 @pytest.mark.p2

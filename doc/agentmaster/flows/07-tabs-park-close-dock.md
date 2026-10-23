@@ -238,7 +238,8 @@ be scrolled away from the selected tab.
 
 **Promise.** However the window is closed — its ✕ with **Close Window** or **Close All Windows** — the next start
 reopens the same tabs: every Claude tab as its SESSION (resumed when entered), every shell tab as a shell, the tab
-that was focused selected, and only that tab (and a busy one, INT-04) started.
+that was focused selected, and only that tab started — plus a busy one (INT-04) and, when the focused tab was a
+SHELL, the last Claude tab (E1, by design).
 
 **Phases**
 1. **Close Window.** *Do:* F-S2, rename t1 `alpha`, select t2; the window's ✕ → "Close this window?" (Close All
@@ -251,14 +252,19 @@ that was focused selected, and only that tab (and a busy one, INT-04) started.
    Cancel) → Close all. *Expect:* the same record and the same reopen.
 
 **Edge cases**
-- **E1 A shell tab focused at the quit** → the reopen selects the shell, and NO Claude tab starts (today the first
-  Claude tab starts: TAB-K2).
+- **E1 A shell tab focused at the quit** → the reopen selects the shell, and the LAST restored Claude tab (the
+  right-most of the Claude tabs, which lead the reopened strip) starts with the window; every other Claude tab stays
+  dormant (no claude.exe, Activate first in its menu). A feature, not a defect (the user's decision of 2026-10-23;
+  filed that morning as TAB-K2, see *Reclassified* below). [LOG] `[nav] tab-focus <last Claude tab>` at the reopen,
+  then `[rehome] … select=… of … refs` names the shell; [OS] one claude.exe, the last Claude tab's.
 - **E2 A tab switch, a rename or a resize just before the close** → the record still holds the Claude refs, and
   nothing writes it after the close's own save (TAB-K1: on 0.8.0 the autosave such a change armed could fire after
   the close archived the sessions and save every Claude tab as a shell; fixed in code 2026-10-23).
 - **E3 Several windows** → **Close Window** on one keeps its record for **Reopen Windows (N)**, also with a tab switch
   just before the close (E2); the next start reopens the windows that were open at the quit ("Reopen your N previous
   Agentmaster windows?", Yes / No).
+- **E4 A Claude tab focused that is not the last Claude tab, with a shell tab in the window** → only the focused tab
+  starts. Today the last Claude tab starts too (TAB-K5, E1's mechanism; E1 with a SHELL focused is a feature).
 
 ---
 
@@ -323,17 +329,6 @@ test_a_parked_tab_starts_in_place_and_survives_a_restart` (12 of 12). Three case
 the last window's close with the save due 8 ms after the archive, and the closes of one of two windows with it due
 42 and 108 ms after — and each logged `late save refused` (67, 74 and 119 ms after the archive) with the refs intact.
 
-### TAB-K2 · A reopen whose focused tab was a shell starts the first Claude tab
-> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_menu.py`
-> `test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab`)
-
-The shell focused at the quit (strip: the shell, t1 Waiting): the reopened window selects the shell correctly
-(`[rehome] … select=1 of 2 refs`), but t1's claude.exe is running 5 s later — a Waiting session the restore wake
-would not start. With a CLAUDE tab focused at the quit only that tab starts (checked: t1, t2 dormant, t3 started).
-**By reading:** the Claude refs are re-homed first and a shell's selection is applied by a trailing `SwitchToTab` in
-the shells' startup batch, after the shells exist; until then the first Claude tab is the selected, SHOWN tab, and a
-shown terminal starts. **Expected:** only the focused tab (and busy ones, INT-04) start (TAB-10 E1).
-
 ### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place — FIXED in code 2026-10-23, verified on a test build (NOT BUILT into a release)
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
 > `e2e/suites/test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place`, `needs_fix`). **The fix:**
@@ -392,21 +387,26 @@ Triage Board card DOES start it in place (`[nav] activate-dormant`), so the Shif
 **Expected** (and what the replacing test checks): the tab starts in place, the selection and the keyboard stay where
 they were (TAB-01 phase 4); a second Shift+Click on the running tab starts nothing and does not switch.
 
-### TAB-K3 · The quit confirmation is invisible to UI Automation — FIXED in code 2026-10-23 (NOT BUILT into a release)
+### TAB-K3 · The quit confirmation is invisible to UI Automation — FIXED in code 2026-10-23, verified on a test build (NOT BUILT into a release)
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (the driver answered it blind, with Enter). **The fix:**
-> every ContentDialog the page shows is built in code. Proved by `e2e/suites/test_accessibility.py::
+> every ContentDialog the page shows is built in code (8e8480089). Proved by `e2e/suites/test_accessibility.py::
 > test_the_quit_confirmation_is_readable` and `…::test_the_large_paste_warning_is_readable` (`needs_fix("TAB-K3")`).
-> What it was on 0.8.0:
+> **Verified** on the test build 0.8.1.1 (a purged Release build whose `src/` equals HEAD 1f4c68678; never installed on
+> this PC): both tests pass (runs `fixall-0811` and `fixall-0811b`, 2026-10-23); on 0.8.0 both fail as designed, the
+> dialog never found (runs `nf-080`, `nf-080b`). What it was on 0.8.0:
 
-"Do you want to close all windows?" (Close all · Cancel), shown after **Close All Windows**, is on screen, but UI
-Automation sees an empty Popup (no title, no buttons) and a hit test at its "Close all" button returns the terminal
-behind it — a screen reader cannot read or operate it (every Agentmaster ContentDialog, e.g. "Close this window?",
-exposes its title and buttons). Keyboard works (Enter = Close all). **Expected:** the dialog's title and buttons in
-the accessibility tree.
+"Do you want to close all windows?" (Close all · Cancel), shown after **Close All Windows**, is on screen, but the
+window-level popups UI Automation lists hold only an empty Popup (no title, no buttons): the dialog itself — a Popup
+named by its title, with its buttons — is found only by a search of the whole window, nested away from where every
+code-built dialog sits, so the driver (and a screen reader looking for the window's dialog) does not find it. Every
+Agentmaster ContentDialog, e.g. "Close this window?", is a window-level popup with its title and buttons. Keyboard
+works (Enter = Close all; the keyboard focus is on its button). **Expected:** the dialog a window-level popup, found by
+its title, with its buttons. A hit test at its "Close all" returns the terminal behind it, but so does a hit test at
+EVERY dialog of the app, a code-built one included, on 0.8.0 and on the fix's build alike: a gap of its own, A11Y-K2
+(open; `test_accessibility.py::test_known_defect_a_hit_test_passes_through_a_dialog`).
 
 **Root cause** (read in microsoft-ui-xaml's source on 2026-10-23: `dxaml/xcp/dxaml/lib/ContentDialog_Partial.cpp`,
-`ShowAsyncImpl`, `HostDialogWithinPopup`, `SetPopupAutomationProperties`; the observation fits it, a probe on 0.8.0 is
-the open check below):
+`ShowAsyncImpl`, `HostDialogWithinPopup`, `SetPopupAutomationProperties`; confirmed by the probe below):
 - WinUI picks a ContentDialog's placement at its FIRST `ShowAsync` and keeps it. A dialog that is in the LIVE tree is
   shown `TransplantedRootInPopup`: only its `LayoutRoot` moves into a popup, and that popup is itself parented inside
   the dialog's own template (`ContainerPart`), which sits in the page (`TerminalPage.xaml`'s `Root`, row 2). A dialog
@@ -414,7 +414,8 @@ the open check below):
   island's popup root, named by the dialog's title.
 - The quit confirmation (`ConfirmCloseDialog`) was DECLARED in `TerminalPage.xaml` (`x:Load="False"`) and realized by
   `FindName`, so it was in the live tree: transplanted. The empty Popup UI Automation saw at the top is most likely
-  its SMOKE layer (an unparented popup of its own, with no content — not verified). Every Agentmaster dialog is built
+  its SMOKE layer (an unparented popup of its own, with no content): the probe found one beside EVERY dialog, the
+  code-built "Close tab?" included, on both builds (not verified further). Every Agentmaster dialog is built
   in code (`ContentDialog dialog;` … `presenter.ShowDialog(dialog)`), so it was the one dialog of the suite's flows
   that was transplanted.
 - Six more dialogs were declared the same way and had the same placement: About, the read-only close warning, the
@@ -434,9 +435,54 @@ the open check below):
 - The driver (`App.close(how="all")`) now waits up to 4 s to SEE the quit confirmation and presses its **Close all**;
   on 0.8.0 it still answers blind with Enter after that wait.
 
-**Open check:** the probe `e2e/suites/probe_dialogs.py` (not collected by a full run: run it by name, `-- -v
-suites/probe_dialogs.py`; a code-built dialog, the large-paste warning, About, the quit confirmation from the command
-palette and after Close All Windows, each recorded with the island's children, hit tests, the focused element and the
-title searched in the whole window) is to be run once on 0.8.0 to confirm the cause, and again with the two tests above
-on a build of the fix.
+**The probe** `e2e/suites/probe_dialogs.py` (not collected by a full run: run it by name, `-- -v
+suites/probe_dialogs.py`) opens five dialogs — a code-built one ("Close tab?"), the large-paste warning, About, the quit
+confirmation from the command palette and after Close All Windows — and records for each the island's popups, 12 hit
+tests over the window's middle, the focused element and the title searched in the whole window (its `notes.json` in
+the test's evidence folder). Run on 2026-10-23:
+
+| | 0.8.0 (run `nf-080b`) | the test build 0.8.1.1 (run `fixall-0811b`) |
+|---|---|---|
+| "Close tab?" (built in code on both) | a window-level popup named by its title, its buttons | the same |
+| The four declared dialogs | NOT a window-level popup (only the empty Popup is there); a Popup named by the title, with 3 children, found only by the whole-window search | each a window-level popup named by its title, found with its buttons: Paste anyway · Cancel, Send feedback · OK, Close all · Cancel (twice) |
+| The keyboard focus | in the dialog (its default button; About: its first link) | the same |
+| Hit tests | 60 of 60 on the TermControl behind the dialog | 60 of 60 on the TermControl: A11Y-K2 |
+
+So the cause is confirmed (a declared dialog is shown nested, not as the island's popup) and the fix does what it
+should; the hit test is another gap, the same for every dialog (A11Y-K2).
+
+### TAB-K5 · A reopen with a shell tab starts the last Claude tab even when another Claude tab was focused
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (a probe, run nf-080b), while checking TAB-K2's shape;
+> `e2e/suites/test_tab_menu.py::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` (passes on
+> 0.8.0, run `nf-080c`, and on the test build 0.8.1.1 with every fix of 2026-10-23, run `fixall-0811b`: still there).
+
+The strip at the quit: the shell, t1, t2 (both Waiting), t1 focused. After the reopen the strip reads t1, t2, the
+shell, t1 is selected and started — and t2's claude.exe runs too, a Waiting session the restore wake does not start.
+Without a shell tab in the window only the focused tab starts. **Cause** (`TerminalPage::_RestoreWindowTabs`, the same
+as TAB-K2's): pass 1 opens every Claude ref in record order, each new tab selecting itself; with shells in the record
+the focused tab is selected by a `SwitchToTab` at the END of the shells' asynchronous startup batch (the shells would
+otherwise take the selection from it); in between the last Claude tab is the selected, SHOWN tab, and a shown terminal
+starts. **Expected:** only the focused tab starts (TAB-10's promise, E4). **The user's call:** TAB-K2 — the same
+mechanism with a SHELL focused — was ruled a feature on 2026-10-23; if this one is the same feature, it moves to
+*Reclassified* and its test becomes the feature's test.
+
+## Reclassified: not defects
+
+### TAB-K2 · A reopen whose focused tab was a shell starts a Claude tab (the last one) — a FEATURE, not a defect
+> Filed by the e2e suite on 2026-10-23 against 0.8.0 as a known defect (P1) — "starts the first Claude tab" — and
+> **reclassified the same day by the user: "Mark this a feature, not a bug."** TAB-10 E1 expects it;
+> `e2e/suites/test_tab_menu.py::test_a_shell_focused_reopen_starts_the_last_claude_tab` proves it (it replaced the
+> known-defect test `test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab`). It passes on 0.8.0 (run
+> `nf-080b`) and on the test build 0.8.1.1 (run `fixall-0811b`); a first version that expected the FIRST Claude tab
+> failed on both (runs `nf-080`, `fixall-0811`: the reopen logged `[nav] tab-focus <t2>`, and t2's claude ran
+> `--resume`, t1's did not).
+
+With a shell focused at the quit, the reopened window selects the shell (`[rehome] … select=… of … refs`), and the
+claude.exe of the LAST restored Claude tab starts with it, although a Waiting session is not one the restore wake
+(INT-04) starts; every other Claude tab stays dormant. **"First" was a misnomer:** it was measured with the shell and
+one Claude tab, which is the first and the last; with the shell, t1 and t2 (run nf-080, 0.8.0, 2026-10-23) the reopen
+logged `[nav] tab-focus <t2>` and t2's claude started, t1's did not. **How** (`TerminalPage::_RestoreWindowTabs`): pass
+1 opens every Claude ref in record order, each new tab selecting itself; a SHELL's selection is applied by a
+`SwitchToTab` at the end of the shells' asynchronous startup batch, after the shells exist; until then the last Claude
+tab is the selected, SHOWN tab, and a shown terminal starts.
 

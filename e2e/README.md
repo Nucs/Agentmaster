@@ -137,7 +137,7 @@ since=mark)`), then the UI.
   replaced by the real assertion. Add the defect to its flow file's "Known defects".
 - The test that replaces it proves the FIX. Until a published release holds the fix, mark it `needs_fix("<ID>")`:
   it passes against a build of the branch and fails on the older release, where a run deselects it with
-  `-m "not needs_fix"` (MGR-K1, SP-K1, TCM-K2, TAB-K4, TAB-K3 and A11Y-K1 since 2026-10-23).
+  `-m "not needs_fix"` (MGR-K1, SP-K1, TCM-K2, TAB-K4, TAB-K3, A11Y-K1 and CLI-K2 since 2026-10-23).
 - A new surface: open it in a probe, `python -m amdriver dump --out Z:\e2e\out\dumps\<name>.txt`, read the names and
   the structure, then add a page object method — never pixel positions.
 
@@ -219,8 +219,20 @@ since=mark)`), then the UI.
 | TCM-K2 | TCM-05 phase 5 | Tags from the tab menu leaves the keyboard in the terminal: a typed name lands in Claude's box, Esc reaches claude. **Fixed in code 2026-10-23** (not in a release): the tab menu's late Closed no longer pulls the keyboard out of an open popup, and the panel closes on the Esc key-up and gives the keyboard back to the terminal | `test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard` (`needs_fix`) |
 | SP-K2 | SP-04 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does, under the same input) | `test_side_panel.py::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
 | TAB-K1 | TAB-10 E2, E3 | A window close can save its Claude tabs as plain shell tabs: an autosave still pending at the close fired after the close archived the sessions (seen once, then reproduced on 0.8.0 by a sweep of the close's moment: 3 of 9 closes). **Fixed in code 2026-10-23** (not in a release): once the close has saved, nothing writes the record again, and a late save logs `[window-save] <id> late save refused` (a test build: 9 of 9, three late saves refused) | `test_workspace.py::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs`, `…::test_closing_one_of_two_windows_keeps_its_claude_tab` (`needs_fix`); `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` (its record check) |
-| TAB-K2 | TAB-10 E1 | A reopen whose focused tab was a shell starts the first restored Claude tab | `test_tab_menu.py::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
-| TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter on 0.8.0). **Fixed in code 2026-10-23** (not in a release): the seven dialogs declared in `TerminalPage.xaml` were shown nested in the page, where UI Automation cannot read them; all are built in code now | `test_accessibility.py::test_the_quit_confirmation_is_readable`, `…::test_the_large_paste_warning_is_readable` (`needs_fix`) |
+| TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter on 0.8.0). **Fixed in code 2026-10-23** (not in a release): the seven dialogs declared in `TerminalPage.xaml` were shown nested in the page, not as window-level popups, so `Dialog.wait` (and a screen reader looking for the window's dialog) did not find them — a search of the whole window does (`probe_dialogs.py`); all are built in code now | `test_accessibility.py::test_the_quit_confirmation_is_readable`, `…::test_the_large_paste_warning_is_readable` (`needs_fix`) |
 | A11Y-K1 | MGR-05 phase 2, every page | Glyph buttons, cards and rows had no names, nothing had a stable id, and selection / pill / unread / draft were pixels only. **Fixed in code 2026-10-23** (not in a release): names, `am.*` AutomationIds and item status (`AgentAutomation.h`) | `test_accessibility.py::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_selection_is_readable_on_every_surface`, `…::test_the_tab_says_its_session_state` (`needs_fix`) |
+| A11Y-K2 | every dialog | UI Automation's hit test at a dialog's button returns the terminal behind the dialog, a code-built one ("Close tab?") included; the tree walk and the keyboard reach it | `test_accessibility.py::test_known_defect_a_hit_test_passes_through_a_dialog` |
 | TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab. Verified on the test build 0.8.1.1 (run `fixall-0811`: passed) | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
+| TAB-K5 | TAB-10 E4 | With a shell tab in the window, a reopen whose focused tab was a Claude tab other than the last one starts the last Claude tab too (TAB-K2's mechanism) | `test_tab_menu.py::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` |
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
+
+TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
+filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a
+FEATURE: `test_tab_menu.py::test_a_shell_focused_reopen_starts_the_last_claude_tab` proves it (the last Claude tab
+starts, the first stays dormant).
+
+**Checked both ways (2026-10-23).** Each `needs_fix` test fails on 0.8.0 on its defect (runs `nf-080`, `nf-080b`;
+TAB-K1's sweep on 6 of its 9 moments) and passes on the test build 0.8.1.1, a purged Release build whose `src/` equals
+HEAD 1f4c68678 (runs `fixall-0811`, `fixall-0811b`: every test of these suites passes there, 67 of 67). Each
+known-defect test passes on both builds: SP-K2, TCM-K1, ROB-K1, TAB-K5 and A11Y-K2 are still there. Results:
+`Q:\agentmaster-e2e\runs\<run>\`.

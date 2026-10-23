@@ -67,7 +67,9 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
   `AGENTMASTER_DEV` for every configuration; CLI.md §11) — so a per-user install's `agentmaster-cli.exe` run from a plain
   shell answers from `~/.agentmaster-dev`, and creates it. Expected: the install's own profile. Fixed in code by
   3b042ea32 (the define now only for a non-Release identity; NOT BUILT): the marker comes off with the first release
-  build that holds it.
+  build that holds it. Proved by `e2e/suites/test_cli.py::test_a_plain_shell_reads_the_installs_own_profile`
+  (`needs_fix("CLI-K2")`: the guest's install folder, `sessions --json` with no `AGENTMASTER_PROFILE`, the envelope's
+  `profile` is `%USERPROFILE%\.agentmaster`, never `.agentmaster-dev`).
 
 ---
 
