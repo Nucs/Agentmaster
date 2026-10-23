@@ -31,12 +31,18 @@
 // count * stride tall whatever is realized), the median stride (an outlier cannot move it), and a seeded scroll
 // simulation over random lists, strides and viewports: the visible rows always have cards, the realized range stays
 // bounded, and a scroll of one row per step re-plans only every few rows.
+//
+// TestStatusIconMotion pins WHEN the status icon's three motions may run (AgentMaster/StatusIconMotion.h, SIDE_PANEL.md
+// section 2g) - the tab header's rule, which the side panel's card icon now shares: the named cases the rule exists for
+// (a collapsed panel, a card scrolled away, Windows' animation effects off, a dormant tab's remembered draft, the ring as
+// an alert), then all 128 combinations of the seven inputs against an independent statement of each motion's gates.
 
 #include "m5_tests.h"
 
 #include "../KeyedListDiff.h"
 #include "../PointerCardPlacement.h" // the "+" launcher card's tooltip-like placement (TestPointerCardPlacement)
 #include "../SessionTimingText.h" // the cards' and rows' "created 4d1h, active 2m4s ago" (TestSessionTimingText)
+#include "../StatusIconMotion.h" // the status icon's motion rule, shared by the tab header and the card icon (TestStatusIconMotion)
 #include "../VirtualListWindow.h" // the virtualized card list's realized rows (TestVirtualListWindow)
 
 #include <algorithm>
@@ -888,5 +894,141 @@ void TestVirtualListWindow()
         }
         CHECK(uncovered == 0, "row-by-row: every visible row always has its card");
         CHECK(tooEager == 0, "row-by-row: a scroll of one row per step re-plans at most once per 4 rows");
+    }
+}
+
+void TestStatusIconMotion()
+{
+    std::wprintf(L"Status icon motion (StatusIconMotion.h, SIDE_PANEL.md section 2g):\n");
+
+    // Everything shown, on a started tab, in the live tree of a shown host, animations on: all three motions run - the
+    // steady state of a card whose session has a draft, a warm cache and an unread turn.
+    StatusIconMotionInputs all{};
+    all.inLiveTree = true;
+    all.hostShown = true;
+    all.animationsEnabled = true;
+    all.pendingShown = true;
+    all.pendingMayPulse = true;
+    all.cacheWarmShown = true;
+    all.flashRingShown = true;
+    {
+        const auto m = DecideStatusIconMotion(all);
+        CHECK(m.pendingPulse && m.cacheWarmCrown && m.flashRingBlink, "motion: everything shown in a visible icon - all three motions run");
+    }
+
+    // Nothing shown: nothing moves, however visible the icon is.
+    {
+        StatusIconMotionInputs none = all;
+        none.pendingShown = false;
+        none.cacheWarmShown = false;
+        none.flashRingShown = false;
+        const auto m = DecideStatusIconMotion(none);
+        CHECK(!m.pendingPulse && !m.cacheWarmCrown && !m.flashRingBlink, "motion: a hidden indicator never moves");
+    }
+
+    // Out of the live tree (a card scrolled out of the realized rows, a header the strip virtualized away): nothing moves,
+    // the alert included - the compositor must not animate an element nobody can see.
+    {
+        StatusIconMotionInputs gone = all;
+        gone.inLiveTree = false;
+        const auto m = DecideStatusIconMotion(gone);
+        CHECK(!m.pendingPulse && !m.cacheWarmCrown && !m.flashRingBlink, "motion: out of the live tree - nothing moves, the ring included");
+    }
+
+    // A collapsed side panel: its cards stay LOADED (only the content collapses), so the host gate is what stops them.
+    {
+        StatusIconMotionInputs collapsed = all;
+        collapsed.hostShown = false;
+        const auto m = DecideStatusIconMotion(collapsed);
+        CHECK(!m.pendingPulse && !m.cacheWarmCrown && !m.flashRingBlink, "motion: a hidden host (a collapsed panel) - nothing moves, though the icon is loaded");
+    }
+
+    // Windows' "Animation effects" off: the two DECORATIVE motions stand still, the ALERT keeps blinking (the timer blink
+    // it replaced ran whatever the setting said, and a steady ring would read as "nothing new").
+    {
+        StatusIconMotionInputs still = all;
+        still.animationsEnabled = false;
+        const auto m = DecideStatusIconMotion(still);
+        CHECK(!m.pendingPulse, "motion: animations off - the 3 dots stand still (still shown)");
+        CHECK(!m.cacheWarmCrown, "motion: animations off - the crown stands still (the steady glow, no embers)");
+        CHECK(m.flashRingBlink, "motion: animations off - the flash ring STILL blinks (an alert, not a decoration)");
+    }
+
+    // A dormant tab (window-restored or deactivated, its claude not started): its REMEMBERED draft shows still dots, while
+    // its crown and its ring move as on any tab (a manual Mark Unread flashes a dormant tab too).
+    {
+        StatusIconMotionInputs dormant = all;
+        dormant.pendingMayPulse = false;
+        const auto m = DecideStatusIconMotion(dormant);
+        CHECK(!m.pendingPulse, "motion: a dormant tab's remembered draft - still dots");
+        CHECK(m.cacheWarmCrown && m.flashRingBlink, "motion: a dormant tab - the crown and the ring are unaffected by dormancy");
+    }
+
+    // The three motions are independent: each depends only on its own "shown" flag (and the shared gates).
+    {
+        StatusIconMotionInputs ringOnly = all;
+        ringOnly.pendingShown = false;
+        ringOnly.cacheWarmShown = false;
+        const auto m = DecideStatusIconMotion(ringOnly);
+        CHECK(!m.pendingPulse && !m.cacheWarmCrown && m.flashRingBlink, "motion: only the ring shown - only the ring blinks");
+        StatusIconMotionInputs crownOnly = all;
+        crownOnly.pendingShown = false;
+        crownOnly.flashRingShown = false;
+        const auto c = DecideStatusIconMotion(crownOnly);
+        CHECK(!c.pendingPulse && c.cacheWarmCrown && !c.flashRingBlink, "motion: only the crown shown - only the crown moves");
+    }
+
+    // Exhaustive: every combination of the seven inputs against an independent statement of each motion's gates (written
+    // as the conditions the tab header's _Update*Animation methods test, one by one, not as the function's expressions).
+    {
+        size_t cases = 0;
+        size_t failures = 0;
+        for (unsigned bits = 0; bits < 128; ++bits)
+        {
+            StatusIconMotionInputs in{};
+            in.inLiveTree = (bits & 1u) != 0;
+            in.hostShown = (bits & 2u) != 0;
+            in.animationsEnabled = (bits & 4u) != 0;
+            in.pendingShown = (bits & 8u) != 0;
+            in.pendingMayPulse = (bits & 16u) != 0;
+            in.cacheWarmShown = (bits & 32u) != 0;
+            in.flashRingShown = (bits & 64u) != 0;
+            const auto m = DecideStatusIconMotion(in);
+            // _UpdatePendingAnimation: AgentPendingVisible && !AgentStatusHalfVisible (not dormant) && IsLoaded() && AgentAnimationsEnabled()
+            bool pulse = in.pendingShown;
+            pulse = pulse && in.pendingMayPulse;
+            pulse = pulse && in.inLiveTree && in.hostShown;
+            pulse = pulse && in.animationsEnabled;
+            // _UpdateCacheWarmAnimation: AgentCacheWarmVisible && IsLoaded() && AgentAnimationsEnabled()
+            bool crown = in.cacheWarmShown;
+            crown = crown && in.inLiveTree && in.hostShown;
+            crown = crown && in.animationsEnabled;
+            // _UpdateFlashRingAnimation: AgentFlashRingVisible && IsLoaded() - no animation switch, no dormancy
+            bool blink = in.flashRingShown;
+            blink = blink && in.inLiveTree && in.hostShown;
+            ++cases;
+            if (m.pendingPulse != pulse || m.cacheWarmCrown != crown || m.flashRingBlink != blink)
+            {
+                ++failures;
+                std::wprintf(L"    inputs 0x%02X: pulse %d/%d crown %d/%d blink %d/%d (got/expected)\n",
+                             bits,
+                             m.pendingPulse ? 1 : 0,
+                             pulse ? 1 : 0,
+                             m.cacheWarmCrown ? 1 : 0,
+                             crown ? 1 : 0,
+                             m.flashRingBlink ? 1 : 0,
+                             blink ? 1 : 0);
+            }
+        }
+        CHECK(cases == 128 && failures == 0, "motion: all 128 input combinations match the tab header's gates, one motion at a time");
+    }
+
+    // constexpr: the rule can be evaluated at compile time (a pure function of its inputs, nothing else).
+    {
+        constexpr StatusIconMotionInputs kAlertOnly{ true, true, false, false, false, false, true };
+        constexpr StatusIconMotion kAlertMotion = DecideStatusIconMotion(kAlertOnly);
+        static_assert(kAlertMotion.flashRingBlink && !kAlertMotion.pendingPulse && !kAlertMotion.cacheWarmCrown,
+                      "the flash ring blinks with animations off; nothing else is shown");
+        CHECK(kAlertMotion.flashRingBlink, "motion: the rule is constexpr (evaluated at compile time)");
     }
 }

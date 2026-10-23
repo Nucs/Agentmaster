@@ -148,8 +148,9 @@ the panel:
   restore/resume is NOT stamped: it keeps its persisted anchor, and its transcript orders it.
 - **A card**: title on a band painted the session's `ResolveSessionColorHex` color
   (WCAG-contrast text), the session's **bookmark-tag ribbons in the band's top-right corner**
-  (§2b), state dot + `StateLabel` in the shared `AgentStatusColors` palette, a
-  teal `codex` pill, the pending-draft `BuildPendingDots` cluster, the timing line, and a dim
+  (§2b), the **tab strip's status icon** (§2g — the state dot with the tab's unsent-draft 3 dots,
+  red flash ring and cache-warm spark crown) + `StateLabel` in the shared `AgentStatusColors` palette, a
+  teal `codex` pill, the timing line, and a dim
   `leaf / branch` line.
 - **The timing line** (2026-10-05) reads `created 4d1h, active 2m4s ago` — the same text as the
   Triage Board's cards and the Explorer tree's rows, from one pure formatter
@@ -302,16 +303,17 @@ built every card again: ~466 cards and ~940 composition nodes in the release's b
 twice a second while sessions changed, and once more every 30 s to move the "ago" texts.
 
 - **A model per row.** `SidePanelCardModelFor` computes everything a card shows from its live
-  session — the title, the band color and ink, the state, the codex pill, the draft dots (with their
-  color and whether they pulse), the timing text, the dir line, the tags with their RESOLVED colors,
+  session — the title, the band color and ink, the state, the codex pill, the status icon's
+  indicators (§2g: the draft dots with their color and whether they pulse, the flash ring, the
+  spark crown with its color), the timing text, the dir line, the tags with their RESOLVED colors,
   the tooltip — into a plain `AgentSidePanelCardModel` (`TerminalPage.h`). Since §2f only the rows near
   the viewport have cards, but EVERY listed row keeps its model (`_sidePanelRowIds` /
   `_sidePanelRowModels`), so a row that a scroll realizes shows its current model at once. A card keeps
   the model it shows (`AgentSidePanelCardView::model`).
 - **Only the differences are written.** `_SidePanelApplyCardModel` compares the new model with the one
   the card shows, value by value, and writes only what changed. An optional part (the codex pill, the
-  draft dots, the timing text, the band's tag strip) is added or removed only when its presence
-  changes. In the steady state (one session changed its state) the update writes one dot, one label
+  timing text, the band's tag strip) is added or removed only when its presence
+  changes; the status icon's indicators (§2g) are never added or removed, only shown or hidden. In the steady state (one session changed its state) the update writes one dot, one label
   and one border; a session that changed nothing costs its card nothing.
 - **A card is built once per session.** `_SidePanelCreateCardView` builds the skeleton (band, title,
   state row, dir line) and wires the handlers once; the first model is applied with `fresh` (every
@@ -748,6 +750,98 @@ flight (inertia, a thumb drag) is never disturbed.
     UI thread's frame walk (`stacksnap sample` + `uiclass.py`) far below ~250 ms/s.
   - No `[sidepanel] … out of step` line in hooks.log.
 
+### 2g. The status icon is the tab's — the 3 dots, the red flash ring, the spark crown (2026-10-23, NOT BUILT yet)
+
+The user's request: "The status icon in sidemenu should be supporting what tab supports: 3 dots when text present in
+text editor of the claude code of the tab, red circle when tab is unread flashing, fire when tab is cached. All these
+exist in tabs and simply needs to be copied to 100% to the sidemenu".
+
+**What a card shows now.** The card's state dot is the tab strip's own status icon (TabHeaderControl.xaml's
+`HeaderAgentStatusDotWrap`), rebuilt in code by `AgentStatusGlyph`: an 18 × 22 DIP icon — the 10 DIP dot with its 1 DIP
+black stroke in an 18 DIP cell, over a 4 DIP band — with the tab's three indicators around the dot:
+
+| Indicator | Shape (the XAML twin) | Shown when | Motion |
+|---|---|---|---|
+| **3 dots** | three 2.5 DIP dots, 1.5 apart, in the band under the dot (`HeaderPendingDots`) | the session has an unsent draft | the staggered opacity wave (`AgentDotsPulse`) — only once the session's tab has STARTED (a dormant tab's remembered draft stands still) and with Windows' animation effects on |
+| **red flash ring** | a 13 DIP ellipse behind the dot, ~1.5 DIP of it showing around the black stroke (`HeaderAgentStatusFlashRing`), in the cog's "status flashing color" | the session is UNREAD: its tab's ring flashes (the automatic "left Running while you weren't looking" flash, or a Mark Unread) | the 600 ms on / 600 ms off blink on the UI thread's ONE shared clock (`AgentLockstepBlink`) — so a card's ring blinks in lockstep with its tab's ring, in every window; an ALERT: it ignores the animation switch and dormancy |
+| **fire** (spark crown) | a two-disc amber glow behind the dot (16 DIP at 0.5, 12.5 DIP at 0.55, the grid at 0.45 — `HeaderCacheWarmGlow`) and three embers rising off it (the 18 DIP `HeaderCacheWarmSparks` canvas) | `ServerCacheStillWarm` holds: the session is at rest and its last real API turn is younger than the server cache's lifetime (`serverCacheMinutes`, 0 → 5) | the glow's breath (`AgentMakeCacheWarmGlow` — the SAME recipe the tab header now builds its own from) and the rising embers (`AgentEmberSparks`), with Windows' animation effects on; off, the steady glow alone |
+
+Before: an 8 DIP dot with no stroke, no ring, no crown, and the draft dots a separate `BuildPendingDots` cluster
+(4 DIP dots) after the label. The board card keeps that cluster; only the side panel changed.
+
+**Same facts as the tab, read the way the side panel can read them.**
+
+| Indicator | The tab reads | The card reads | When the card follows |
+|---|---|---|---|
+| 3 dots | `SessionInfo::pendingInput` (the debounced draft, `_ScanPendingInput`) | the same field (`SnapshotLiveForCards` keeps it) | the list update the draft's appear / clear notify triggers (500 ms min gap, else the next ~2.5 s tick) |
+| flash ring | its window's `_flashingSessions ∪ _manualUnreadSessions` | the process-wide UNREAD CENSUS — every window publishes exactly that set (`PublishWindowUnreadSessions`), and `CurrentUnreadSessionIds` returns their union, sorted, so a GLOBAL list rings for other windows' tabs too | at once: the census's count sink hops into EVERY window, and the hop now also re-rings that window's cards (`_SidePanelNoteUnreadChanged`); a change that keeps the count (no sink hears it) is caught by the periodic tick |
+| fire | `ServerCacheStillWarm(info, cacheMin, now)`, polled every ~2.5 s (`_ScanCacheWarmTabs`) — warmth ENDS on a clock, which nothing pushes | the same predicate at every list update, and on every periodic tick for the REALIZED cards with a fresh lean read each (`GetWithoutQueue`) — the tab's poll, same cadence, right after it in the same liveness probe | the same tick as the tab's crown; a row a scroll realizes shows the value of the last list update until the next tick |
+
+Both clock- and census-driven indicators are re-derived IN PLACE by `_SidePanelRefreshIndicators`: the stored row model
+and its card are patched, only the cards whose value moved are written, and no snapshot, sort or reorder runs. A full
+list update recomputes all three from scratch.
+
+**Colors.** A tab picks its dots' and its fire's color against its rendered tab color; a card's dot sits on the card
+body, so the card picks against the body (`kSidePanelCardBodyColor`, #333333, the same constant `cardBack` is painted
+with) with the tab's own rules: `PendingDotsColorFor` gives the configured LIGHT dots color (what the cards already
+used), `CacheWarmSparkColorFor` the bright amber. The ring is painted with the window's ONE flash-ring brush, the very
+instance its tabs' rings use, so a cog Save that changes the "status flashing color" re-colors the cards' rings in
+place, with no update.
+
+**Layout.** The icon is the state row's first child. A −4 DIP margin on both sides keeps the 10 DIP dot exactly where
+the old dot's left edge was (aligned with the title's first letter) and the label 5 DIPs from it; the overhang stays
+inside the card, and XAML adds no layout clip for it. The icon is top-aligned, and the label, the codex pill and the
+timing text take the 4 DIP band as a bottom margin, so they center on the DOT, not on the whole icon. The state line's
+top gap went from 3 to 1 DIP (the icon's cell holds 4 DIPs of air above the dot — the room the glow and the embers
+use), so the dot stays ~5 DIPs under the title band and every card grows by ~6.7 DIPs (the band is FIXED, so a draft
+appearing never moves anything — the tab's rule). The default stride before the first measurement went from 60 to 66
+DIPs. The icon is not hit-testable: a press on it lands on the card's background and selects the card.
+
+**Motions, and what they cost.** All composition (UI_THREAD.md §10a #1, §10i): no XAML frame and no UI-thread work per
+blink or breath. When a motion may run is ONE rule, `AgentMaster/StatusIconMotion.h` (`DecideStatusIconMotion`), the one
+TabHeaderControl's `_Update*Animation` methods apply — a change there is a change here, and the reverse. Every motion
+also needs the icon in the live tree AND its host shown: a card scrolled out of the realized rows is gone, and a
+COLLAPSED panel only collapses its content (the cards stay loaded), so the collapse toggle tells every realized card's
+icon (`SetHostShown`) and nothing moves inside a collapsed panel. A card that leaves the list (§2f's Remove, a reset) is
+shut down first (`AgentStatusGlyph::Shutdown`): its motions stop, and its ring gives back its hold on the shared blink
+clock at once rather than at its glyph's destruction. A quiet card adds nothing to the frame walk (§2f's rule): the
+anchors ask for the compositor only while the UI thread has none cached (a tab header always asked first), so no card
+element gets a hand-out visual; the ring and the glow animate through XAML's own facade path, only while they run; and
+the ember host gets its child visual on the card's first warm moment and is collapsed whenever the crown is.
+
+**Not carried over** (the user named three indicators): the favorite crown / star and the dormant half-hollow dot of the
+tab (a dormant session's card keeps the full dot, and its draft dots stand still as on the tab), and the tab dot's own
+explanatory tooltip (a card has one tooltip for everything on it).
+
+**Code.** `AgentStatusGlyph.{h,cpp}` (the icon: elements, brushes, the four motions, Loaded / Unloaded, `SetHostShown`,
+`Shutdown` — each constant names its XAML twin, and TabHeaderControl.xaml points back), `AgentMaster/StatusIconMotion.h`
+(the motion rule, pure), `AgentAmbientAnimation.{h,cpp}` (`AgentMakeCacheWarmGlow` + the shared `kAgentCacheWarmGlow*`
+constants; `TabHeaderControl.cpp` builds its crown from them too), `AgentMaster/Engine.{h,cpp}` (`UnreadSessionUnion`,
+`CurrentUnreadSessionIds`), `TerminalPage.h` (the model's `flashRing` / `cacheWarm` / `cacheWarmArgb` /
+`animationsEnabled`, the view's `glyph`), `TerminalPage.AgentSidePanel.cpp` (`SidePanelCardModelFor`'s indicators, the
+icon in `_SidePanelCreateCardView`, its setters in `_SidePanelApplyCardModel`, `_SidePanelRefreshIndicators`,
+`_SidePanelNoteUnreadChanged`, the collapse gate, the shutdowns), `TerminalPage.AgentEngine.cpp` (the census-sink hop).
+
+**Tested** (no build): `TestStatusIconMotion` (`tests/tests_sidepanel.cpp`: the named cases — a collapsed panel, a card
+out of the tree, animation effects off, a dormant draft, the ring as an alert — and all 128 input combinations against
+the tab header's conditions written one by one), `TestUnreadCensus` (`tests/tests_taskbar.cpp`: the union as a sorted
+list, the census set read under the lock, a same-count change visible in the set though no sink is called). `cl /Zs`
+with the last Debug build's recorded command lines over every TerminalAppLib unit plus the new one, with two negative
+controls (an unknown member planted in the glyph and in `_SidePanelRefreshIndicators` failed at exactly those lines).
+
+**Check after the build:**
+- A card's dot is the tab's: 10 DIP with a black stroke, the label beside it centered on it, the timing text on the
+  same line; cards a little taller, the list scrolls and realizes cards as before (no blank band, no jump).
+- Type into a session's box without sending: the 3 dots appear under its card's dot within ~2.5 s, pulsing; on a
+  dormant (never-entered) restored tab with a remembered draft they stand still; sent, they disappear.
+- Let a background session finish a turn: its tab's ring and its card's ring blink TOGETHER, in every window whose list
+  shows it (LOCAL and GLOBAL); visit the tab: both stop at once. Mark Unread from the tab menu: the card rings too.
+- After a turn ends the card's crown glows with rising embers, and goes out on the same tick as its tab's crown
+  (`serverCacheMinutes`, 5 by default). Windows "Animation effects" off: still dots, a steady glow, the ring still blinks.
+- Change the "status flashing color" in the cog: the cards' rings take it at once.
+- Collapse the panel while cards ring / glow / pulse, expand it: they move again; no `[exc] status glyph …`,
+  `[exc] _SidePanelRefreshIndicators` or `[sidepanel] … out of step` line in hooks.log.
+
 ## 3. BOTTOM — the selected session's summary (a fill-hosted AgentTabOverlay)
 
 The bottom area hosts a REAL `AgentTabOverlay` whose summary panel is switched into the new
@@ -892,6 +986,11 @@ below).
   dropped, or replaced by a reset) is ignored.
 - The periodic tick is a terminate-netted `fire_and_forget` over an awaitable Impl
   (`resume_foreground` first), the `_ScanCacheWarmTabs` idiom.
+- The status icon (§2g): its motions are composition animations (no per-frame UI-thread work), run only
+  while the icon is loaded and the panel is not collapsed, and stop before a card leaves the list
+  (`Shutdown`); its handlers hold the icon weakly (no element -> handler -> icon -> element cycle); its
+  per-tick refresh reads the census once (sorted, binary-searched per row) and one lean record per
+  REALIZED card, and writes only the cards whose ring or crown changed — never a snapshot or a re-sort.
 - Tooltips via `AgentSetTip`/`AgentSetTitledTip` only (the per-element ToolTip leak rule) — with ONE
   exception: the rich card of the **Sum** OFF mode (§2d), a `ToolTip` attached to the card for its
   life through `AgentSessionToolTipHost`, the tab tooltip's own crash-hardened lifecycle. It is shut
@@ -945,3 +1044,12 @@ below).
   `TerminalPage.AgentSidePanel.cpp` (`_SidePanelSyncRealizedCards`, the scroll / measure / reveal passes,
   the spacers, the card's two layers), `TerminalPage.h` (the rows, the spacers, the realized range, the
   stride, the card view's `cardBack` / `bandArea`), `tests/tests_sidepanel.cpp` (`TestVirtualListWindow`).
+  The status icon (§2g): `AgentStatusGlyph.{h,cpp}` (the icon, new TU), `AgentMaster/StatusIconMotion.h`
+  (the motion rule, pure), `AgentAmbientAnimation.{h,cpp}` (`AgentMakeCacheWarmGlow` + the shared glow
+  constants, also used by `TabHeaderControl.cpp`), `TabHeaderControl.xaml` (a comment naming the code twin),
+  `AgentMaster/Engine.{h,cpp}` (`UnreadSessionUnion` / `CurrentUnreadSessionIds`),
+  `TerminalPage.AgentSidePanel.cpp` (the model's indicators, `_SidePanelRefreshIndicators`,
+  `_SidePanelNoteUnreadChanged`, the collapse gate, the shutdowns), `TerminalPage.AgentEngine.cpp` (the
+  census-sink hop), `TerminalPage.h` (the model / view fields, the two declarations), `TerminalAppLib.vcxproj`
+  (the new TU + headers), `tests/tests_sidepanel.cpp` (`TestStatusIconMotion`), `tests/tests_taskbar.cpp`
+  (`TestUnreadCensus`'s set checks).

@@ -8,7 +8,8 @@ per-window LOCAL / GLOBAL) over the summary of the session you are in; card clic
 selected tab's card; **Sum** hides the summary and shows a rich card beside the panel on hover; **+** opens the
 launch row in a card at the click; per-window splitters; « collapses. 0.8.0: the card list is virtualized and
 a card costs no composition node; the **+** card opens with its folder list ready; one click on Launch
-while its preset menu is open.
+while its preset menu is open. After 0.8.0 (NOT BUILT): each card's dot is the tab strip's status icon — the
+draft's three dots under it, the red unread ring, the cache-warm spark crown (SP-08).
 
 ## Lifecycle model
 
@@ -37,7 +38,8 @@ folder color, draft dots, timing and tags; GLOBAL widens one window's list to ev
    of 3 sessions in this window`; window 2: C.
 2. **Card content.** *Expect per card:* the title on a band in the session's folder color (black or white text
    by contrast), the state dot + word, the timing line `created …, active … ago` (ends in `…` on a narrow
-   panel), `leaf / branch`, tag ribbons in the band's top-right corner, three dots while a draft exists.
+   panel), `leaf / branch`, tag ribbons in the band's top-right corner, three dots while a draft exists (since
+   SP-08, NOT BUILT: under the dot, in the tab's status icon).
 3. **State follows.** *Do:* run a turn in A. *Expect:* A's dot and word follow STA-01 within a scan tick.
 4. **GLOBAL.** *Do:* window 1's LOCAL → GLOBAL. *Expect:* A, B, C; count `… across all windows`; window 2
    stays LOCAL (no leak).
@@ -181,6 +183,44 @@ switch closes it; no keystroke leaks into the terminal.
    measure it (`tools/leakhunt/xamltree.py`) at 100 and at 300 sessions — the two should differ by
    about one viewport's worth of realized cards, not by 200 cards' nodes. (Production's reference:
    ~700 tabs in two GLOBAL panels walked 3,634 nodes before the fix, 81% of them cards; UI_THREAD.md §13.)
+
+---
+
+### SP-08 · A card's status icon is the tab's
+
+> **Since** after 0.8.0 (NOT BUILT) · **P1** · **Needs** F-S2, F-W2, mock, keys · **Spec** SIDE_PANEL.md §2g
+
+**Promise.** Every card's state dot is the tab strip's own status icon, showing what the tab shows at the same
+time: three dots under it while the session's input box holds an unsent draft, the red ring blinking around it
+while the tab is unread (in step with the tab's ring, in every window's list), and the spark crown (an amber glow and
+rising embers) while the server cache is warm.
+
+**Phases**
+1. **The dot.** *Expect:* each card's dot is the tab's: 10 DIP with a thin black outline, its state word beside it
+   on the same line, the timing text on that line too.
+2. **Draft.** *Do:* type into session A's box without sending. *Expect:* within a scan tick, three dots under A's card
+   dot AND under A's tab dot, both pulsing. *Do:* send it. *Expect:* both clear.
+3. **Unread.** *Do:* A on a background tab; let a turn end. *Expect:* A's tab and A's card both show the red ring,
+   blinking together. *Do:* select tab A. *Expect:* both rings stop at once. *Check:* [LOG] `[unread] 0 -> 1`, then
+   `1 -> 0`.
+4. **Mark Unread.** *Do:* A's tab menu → Mark Unread. *Expect:* the card rings too, until the tab is visited.
+5. **Cache warm.** *Do:* let a turn end. *Expect:* A's card shows the glow and the embers while A's tab does; both go
+   out on the same tick once the cache lifetime (`serverCacheMinutes`, 5 by default — shorten it in the cog) has
+   passed since the last API turn.
+6. **GLOBAL.** *Do:* window 1's panel GLOBAL; a draft, a ring and a warm cache on a session of window 2. *Expect:*
+   window 1's card for it shows all three, the ring blinking with window 2's tab.
+
+**Edge cases**
+- **E1 A dormant tab with a remembered draft** (restored, never entered) → still dots on its card, as on its tab; the
+  card keeps a full dot (the tab's half-hollow dot is not carried over).
+- **E2 Windows "Animation effects" off** → still dots and a steady glow without embers on cards AND tabs; the ring
+  still blinks.
+- **E3 Collapsed panel** → nothing moves while collapsed; on expand the indicators show their current state and move.
+- **E4 The cog's "status flashing color" changed** → the cards' rings take the new color at once (one shared brush
+  per window, the tabs' own).
+- **E5 Cards scrolled out of view and back** (the virtualized list) → a card shows the current indicators within a
+  tick; no ring left on a session whose tab was visited meanwhile.
+- **E6 A Codex session** → no draft dots and no crown (both are Claude-only, as on its tab); its ring follows its tab's.
 
 ---
 

@@ -1755,6 +1755,11 @@ namespace winrt::TerminalApp::implementation
         // button whose overlay is "the last one received"). The hop carries no value on purpose: _ApplyTaskbarUnreadCount
         // re-reads the census, so hops landing out of order can't regress the badge. The seed right after covers a
         // window opened while others already hold unread sessions. Detached in ~TerminalPage (Rule #10).
+        // The SAME hop re-rings the side panel's cards (SIDE_PANEL.md §2g): a card's status icon shows the red flash ring
+        // whenever its session's tab rings, in ANY window (a GLOBAL list shows other windows' sessions, whose flash state
+        // only their own pages know) — and this sink is the one signal every window hears for every window's change. It
+        // re-reads the census's SET (not the count), so out-of-order hops converge too; a change that keeps the count,
+        // which no sink hears, is caught by the side panel's periodic tick.
         {
             const auto weakThis = get_weak();
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
@@ -1763,6 +1768,7 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weakThis.get())
                     {
                         self->_ApplyTaskbarUnreadCount();
+                        self->_SidePanelNoteUnreadChanged(); // never throws; a no-op until the panel is built
                     }
                 });
             });

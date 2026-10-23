@@ -5,6 +5,8 @@
 // decorative motions (the unsent-draft "3 dots" pulse on tab headers and on board / side-panel cards, and the
 // spark crown's glow breath + rising embers on tab headers) and the unread FLASH RING's blink on tab headers
 // run as Windows.UI.Composition animations, never as XAML storyboards or as a timer that flips a XAML property.
+// Since SIDE_PANEL.md §2g the side panel's cards carry the tab's whole status icon (AgentStatusGlyph), so the
+// crown and the ring's blink run on those cards too — through these same classes, with the same parameters.
 //
 // WHY: XAML draws a frame on EVERY display refresh while ANY storyboard runs, and each frame walks the
 // window's whole composition tree on the UI thread. On the 555-tab release (0.6.8.15, measured 2026-10-04,
@@ -202,6 +204,29 @@ namespace winrt::TerminalApp::implementation
         // One loop per dot, each with its own stagger.
         std::array<AgentOpacityLoop, 3> _dots{};
     };
+
+    // The spark crown's GLOW BREATH (the cache-warm hint): the glow grid's Opacity runs 0.45 -> 0.62 -> 0.28 -> 0.45 over
+    // 2.8 s — the storyboard's 0.28 <-> 0.62 breath (1.4 s each way), begun and ended on the glow's still 0.45, so a
+    // stopped crown lands on its still look. Shared by the tab header (TabHeaderControl's constructor) and the side
+    // panel's card icon (AgentStatusGlyph, SIDE_PANEL.md §2g) so the two crowns cannot drift apart.
+    // ⚠ The still value is ALSO the glow element's static Opacity: TabHeaderControl.xaml's HeaderCacheWarmGlow
+    // Opacity="0.45" and AgentStatusGlyph's code twin. Change all three together, or a stopped crown jumps (XAML writes
+    // the loop's last key frame back into UIElement.Opacity on a stop, AgentOpacityLoop::Stop).
+    inline constexpr float kAgentCacheWarmGlowStill = 0.45f;
+    inline constexpr std::array<AgentLoopKeyFrame, 4> kAgentCacheWarmGlowKeyFrames{ { { 0.0f, kAgentCacheWarmGlowStill },
+                                                                                      { 0.25f, 0.62f },
+                                                                                      { 0.75f, 0.28f },
+                                                                                      { 1.0f, kAgentCacheWarmGlowStill } } };
+    inline constexpr std::chrono::milliseconds kAgentCacheWarmGlowCycle{ 2800 };
+
+    // Build the spark crown's glow breath (kAgentCacheWarmGlowKeyFrames over kAgentCacheWarmGlowCycle, no delay) — the
+    // ONE recipe both crowns use, so a tab header and a side-panel card breathe identically.
+    //   anchor  - the element that supplies the compositor while the thread has none cached (the sparks canvas, as the
+    //             tab header does); never `glow` itself. Held WEAKLY (see AgentOpacityLoop's constructor).
+    //   glow    - the glow grid whose Opacity breathes; its static Opacity must be kAgentCacheWarmGlowStill.
+    //   returns - the loop, NOT started; nothing composition-side exists until its first Start().
+    //   throws  - std::bad_alloc only (the key-frame list is copied into the loop).
+    AgentOpacityLoop AgentMakeCacheWarmGlow(const winrt::Windows::UI::Xaml::UIElement& anchor, winrt::Windows::UI::Xaml::UIElement glow);
 
     // The flash ring's beat: on for this long, then off for this long — the SAME 600 ms at which the per-window
     // DispatcherTimer it replaces toggled the ring's Visibility (TerminalPage::_OnAgentFlashTick).

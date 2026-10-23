@@ -75,6 +75,7 @@ namespace winrt::TerminalApp::implementation
     class AgentTabOverlay; // Agentmaster: the per-tab "link badge" overlay (TAB_OVERLAY.md)
     class AgentTranscriptOverlay; // Agentmaster: the window-level transcript reading view ("Show Transcript"); complete in the TUs that include AgentTranscriptOverlay.h (the ctor / dtor TUs + TerminalPage.AgentTranscript.cpp)
     class AgentLaunchBar; // Agentmaster: the shared LAUNCH BAR (the Agent Manager's launch row) the side panel's "+" launcher card hosts; complete in the TUs that include AgentLaunchBar.h (TerminalPage.AgentSidePanel.cpp builds it, TerminalPage.AgentEngine.cpp's destructor shuts it down)
+    class AgentStatusGlyph; // Agentmaster (SIDE_PANEL.md §2g): the tab strip's status icon built in code — every side-panel card's dot with the tab's 3 dots, flash ring and spark crown; complete only in TerminalPage.AgentSidePanel.cpp (the one TU that builds and drives it), held by AgentSidePanelCardView through a shared_ptr, which a TU may destroy without the complete type
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
     inline constexpr std::wstring_view TabletInputServiceKey{ L"TabletInputService" };
@@ -151,9 +152,14 @@ namespace winrt::TerminalApp::implementation
         bool darkInk{ false }; // the band is light enough for dark title ink (also the "+N" tag count's ink)
         ::Agentmaster::SessionState state{ ::Agentmaster::SessionState::Idle }; // the dot, the label, the border color
         bool codex{ false }; // the teal `codex` pill (a managed Codex session)
-        bool pending{ false }; // an unsent draft: the 3-dot cluster
+        // The STATUS ICON's three indicators — the tab header's, on the card's dot (SIDE_PANEL.md §2g, AgentStatusGlyph):
+        bool pending{ false }; // an unsent draft: the 3 dots in the band under the dot
         bool pendingAnimated{ false }; // the dots pulse (a started/external session, Windows animations on) rather than stand still
-        uint32_t pendingArgb{ 0 }; // the dots' color, 0xAARRGGBB (the light half of the configured pair; 0 without a draft)
+        uint32_t pendingArgb{ 0 }; // the dots' color, 0xAARRGGBB (PendingDotsColorFor over the card body: the light half of the configured pair; 0 without a draft)
+        bool flashRing{ false }; // the session is UNREAD — its tab's red ring flashes (the process-wide unread census, CurrentUnreadSessionIds): the same ring blinks around the card's dot
+        bool cacheWarm{ false }; // the spark crown: ServerCacheStillWarm holds (at rest, last real API turn younger than the cache's lifetime)
+        uint32_t cacheWarmArgb{ 0 }; // the crown's fire color, 0xAARRGGBB (CacheWarmSparkColorFor over the card body; 0 when cold)
+        bool animationsEnabled{ true }; // Windows' "Animation effects" at this update: a change re-decides the icon's motions (the crown's has no other model field that would move)
         std::wstring timing; // the "created 4d1h, active 2m4s ago" line (FormatSessionTiming; "" = no timing text yet)
         std::wstring dirLine; // "<leaf>[ / <branch>]"
         std::vector<std::wstring> tags; // the bookmark tags, in the order they were added
@@ -166,7 +172,9 @@ namespace winrt::TerminalApp::implementation
     // the model they show right now. Created by TerminalPage::_SidePanelCreateCardView when its row is
     // REALIZED (SIDE_PANEL.md §2f: only the rows near the viewport have cards) and kept until the row leaves
     // the realized range or the list; an update never rebuilds a card, it adds or drops only the optional
-    // parts (the codex pill, the pending dots, the timing text, the tag strip) whose presence changed.
+    // parts (the codex pill, the timing text, the tag strip) whose presence changed. The status icon's
+    // indicators (the 3 dots, the flash ring, the spark crown — SIDE_PANEL.md §2g) are never added or
+    // dropped: the glyph holds them all and an update only shows or hides them.
     // ⚠ The ROUNDED shapes are CHILDLESS (UI_THREAD.md §10h / §14): XAML gives an element with a non-zero
     // CornerRadius AND children its own composition node, and every frame of the window walks every node.
     // So the card's rounded background + border (`cardBack`) and the band's rounded color (`band`) are
@@ -186,11 +194,15 @@ namespace winrt::TerminalApp::implementation
         // active 2m4s ago" line (twice the length of the old "-7h5m/7h6m/2m4s") was cut off mid-letter at the card's edge on
         // a narrow panel. In the star column it gets the width that is left and ends in "…" instead.
         winrt::Windows::UI::Xaml::Controls::Grid stateLine{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::StackPanel stateRow{ nullptr }; // [dot][label][codex pill?][pending dots?] — the state line's Auto column
-        winrt::Windows::UI::Xaml::Shapes::Ellipse stateDot{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel stateRow{ nullptr }; // [status icon][label][codex pill?] — the state line's Auto column
+        // The STATUS ICON (SIDE_PANEL.md §2g): the tab header's 18 x 22 icon — the 10 DIP dot with its black stroke, the
+        // unsent-draft 3 dots in the band under it, the unread flash ring behind it, the cache-warm glow + embers around
+        // it — with the tab's composition motions. Its root is the state row's first child. Created with the card,
+        // shut down (Shutdown) BEFORE the card leaves the list (an update's Remove, a reset), so its motions stop and
+        // the flash ring gives back its hold on the UI thread's shared blink clock. Never null on a built card.
+        std::shared_ptr<AgentStatusGlyph> glyph;
         winrt::Windows::UI::Xaml::Controls::TextBlock stateText{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock codexPill{ nullptr }; // null unless a Codex session
-        winrt::Windows::UI::Xaml::Controls::StackPanel pendingDots{ nullptr }; // null without an unsent draft
         winrt::Windows::UI::Xaml::Controls::TextBlock timing{ nullptr }; // the state line's star column; null until the session has a creation time
         winrt::Windows::UI::Xaml::Controls::TextBlock dirLine{ nullptr };
         AgentSidePanelCardModel model; // what the elements show now — the left side of every comparison
@@ -2656,6 +2668,26 @@ namespace winrt::TerminalApp::implementation
         void _SidePanelScheduleRebuild(bool force); // coalesced rebuild: force==true rebuilds now (user action); otherwise a rebuild within the min-gap only marks _sidePanelDirty (the periodic tick catches up) — and a COLLAPSED panel always defers (no pixels to show)
         void _SidePanelNoteRegistryChange(); // the registry batch-drain hook (UI thread): a session changed somewhere -> schedule a non-forced rebuild
         void _SidePanelNoteTagsChanged(); // a bookmark tag changed from THIS window (the Tags panel's _ToggleSessionTag / _CommitTagEditorAdd, through the deferred _RunTagSurfacesRefresh since 2026-10-10): rebuild the cards NOW so their top-right ribbons follow (tags live in the SessionStore — no registry drain will report it); collapsed -> only marks dirty. Never throws (a failed rebuild is logged + left dirty for the periodic retry)
+        // Agentmaster (SIDE_PANEL.md §2g): the process-wide unread census changed its count — some window's tab started or
+        // stopped flashing (a turn left Running unwatched, a visit, a Mark Unread, a window activation). Called from this
+        // window's census-sink hop (TerminalPage.AgentEngine.cpp), so EVERY window's panel hears every window's change —
+        // a GLOBAL list shows other windows' sessions, whose flash state lives in their own pages. Re-derives every row's
+        // flash ring from the census in place (_SidePanelRefreshIndicators(false)): no snapshot, no re-sort, only the
+        // cards whose ring changed are written. No-op before the panel is built. UI thread. Never throws.
+        void _SidePanelNoteUnreadChanged();
+        // Agentmaster (SIDE_PANEL.md §2g): re-derive the two status-icon indicators that change WITHOUT a registry notify,
+        // and write only the cards whose value moved — no snapshot of the fleet, no re-sort, no reorder:
+        //   - the FLASH RING of every row, from the process-wide unread census (CurrentUnreadSessionIds): a tab visit,
+        //     a Mark Unread or another window's flash bookkeeping changes it with no registry change;
+        //   - with `rereadCacheWarm`, the SPARK CROWN of the REALIZED rows, from a fresh lean read of each
+        //     (GetWithoutQueue -> ServerCacheStillWarm): warmth ENDS on a clock, which nothing pushes — the same poll
+        //     the tab strip runs (_ScanCacheWarmTabs) on the same ~2.5 s tick. Rows without a card keep the value of the
+        //     last list update (every update recomputes all rows; a row a scroll realizes is re-read on the next tick).
+        // Both patch the stored row model AND its realized card, so a row realized later shows the patched value.
+        // `rereadCacheWarm`: true from the periodic tick, false from the unread notification. No-op before the panel is
+        // built, while a realize pass runs (it is marked dirty instead) or with no rows. UI thread only. Never throws: a
+        // failure is logged (Rule #18) and the list reset + marked dirty, like every other card-list edit.
+        void _SidePanelRefreshIndicators(bool rereadCacheWarm);
         winrt::fire_and_forget _SidePanelPeriodicTick(); // liveness-probe rider (SCANNER thread; self-marshals like _ScanCacheWarmTabs — a terminate-netted fire_and_forget over the awaitable Impl): run the deferred dirty rebuild + the ~30s in-place timing-text refresh (no rebuild churn for a clock tick)
         winrt::Windows::Foundation::IAsyncAction _SidePanelPeriodicTickImpl(); // the awaitable body (resume_foreground first) so an exception propagates to _SidePanelPeriodicTick's catch instead of std::terminate
         void _SidePanelSelectSession(const std::wstring& id, bool driveManagerLens); // select a card (highlight + bind the summary below); driveManagerLens==true (a card click) also drives AgentManagerContent::SelectSession so the Manager lens follows — false for calls that ORIGINATE from the lens/tab funnel (re-entrancy guard: an already-selected id is a no-op)

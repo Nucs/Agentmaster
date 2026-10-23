@@ -171,6 +171,7 @@
     <ClInclude Include="AgentManagerContent.h" />
     <ClInclude Include="AgentAmbientAnimation.h" />
     <ClInclude Include="AgentSessionToolTip.h" />
+    <ClInclude Include="AgentStatusGlyph.h" />
     <ClInclude Include="AgentLaunchBar.h" />
     <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
@@ -245,6 +246,7 @@
     <ClInclude Include="AgentMaster\Splash.h" />
     <ClInclude Include="AgentMaster\TaskbarBadge.h" />
     <ClInclude Include="AgentMaster\PointerCardPlacement.h" />
+    <ClInclude Include="AgentMaster\StatusIconMotion.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -424,6 +426,9 @@
     <!-- Agentmaster: the rich session tooltip's lifecycle (one framework-managed ToolTip per owner), shared by the tab
          header and the side panel's session cards (moved out of Tab.cpp; HANDOVER_tab-tooltip.md, SIDE_PANEL.md §2d). -->
     <ClCompile Include="AgentSessionToolTip.cpp" />
+    <!-- Agentmaster: the tab strip's STATUS ICON built in code (the dot with its 3 dots, flash ring and spark crown) — every
+         side-panel card's state dot (SIDE_PANEL.md §2g), the code twin of TabHeaderControl.xaml's HeaderAgentStatusDotWrap. -->
+    <ClCompile Include="AgentStatusGlyph.cpp" />
     <!-- Agentmaster: the shared LAUNCH BAR (agent toggle, cwd box + its path-picker drop-down, Launch / Fork) — the Agent
          Manager's launch row moved out of AgentManagerContent.Launch.cpp so the side panel's "+" launcher card runs the
          same code (SIDE_PANEL.md §2e). -->

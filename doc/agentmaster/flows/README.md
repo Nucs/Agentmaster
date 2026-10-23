@@ -26,7 +26,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 6 | 3 / 2 / 1 | 23 | 16 | 1 |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 7 | 3 / 3 / 1 | 29 | 19 | 2 |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 35 | 25 | 2 |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface (STA) | 11 | 6 / 5 / 0 | 30 | 31 | — |
@@ -48,7 +48,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 |
-| **Total** | | **178** | **75 / 75 / 24** (+4 NOT BUILT) | **≈ 649** | **≈ 530** | **22** |
+| **Total** | | **179** | **75 / 75 / 24** (+5 NOT BUILT) | **≈ 655** | **≈ 536** | **22** |
 
 ---
 
@@ -198,7 +198,8 @@ Fixes: three UI-freeze classes (*ROB-06*, ROB-10, MGR-06) · the tab-drag crash 
 watch, their Telegram versions (INT-05–INT-07; 381c6c715) · a Search pick's menu by the session's state: Activate,
 Wake, Go to topic (TGS-05; 0502c9380) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
 release CLI on the right profile (CLI-02 phase 3, CLI-K2; 3b042ea32) · the installer's edge cases (INS-01 E3–E6;
-9245a890f — the script on the branch; the app's embedded copy not built).
+9245a890f — the script on the branch; the app's embedded copy not built) · a side-panel card's dot is the tab strip's
+status icon: the draft's three dots, the red unread ring, the cache-warm spark crown (SP-08; SIDE_PANEL.md §2g).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

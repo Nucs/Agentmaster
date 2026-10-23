@@ -153,6 +153,12 @@
               expression on the ring's Opacity that follows the UI thread's one shared clock
               (TabHeaderControl::_UpdateFlashRingAnimation / AgentLockstepBlink), so every flashing ring
               blinks in lockstep, 600ms on / 600ms off as before. IsHitTestVisible=False: decorative.  -->
+        <!--  Agentmaster (SIDE_PANEL.md §2g): this wrap has a CODE twin — AgentStatusGlyph (AgentStatusGlyph.cpp), the
+              status icon of every side-panel session card. It builds the same glow / flash ring / dot / sparks canvas /
+              pending-dots band with the same sizes, order and opacities, and runs the same composition animations
+              (the glow's breath is the shared AgentMakeCacheWarmGlow; the motion gates are AgentMaster/StatusIconMotion.h,
+              the rule TabHeaderControl's _Update*Animation methods apply). It leaves out the favorite star / crown and the
+              dormant half-dot. A change to an element below (a size, the order, a static Opacity) is a change there too.  -->
         <Grid x:Name="HeaderAgentStatusDotWrap"
               Width="18"
               Margin="0,1,0,-1"

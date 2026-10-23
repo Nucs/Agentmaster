@@ -8,6 +8,8 @@
 //   * AgentAmbientThread                     — the per-UI-thread state (cached compositor, blink clock);
 //   * AgentCompositorOf / AgentMakeScalarLoop — the cached compositor lookup and the linear forever-loop builder;
 //   * AgentOpacityLoop                       — one XAML element's Opacity, through UIElement::StartAnimation;
+//   * AgentMakeCacheWarmGlow                 — the spark crown's glow breath, the one recipe of the tab's and the
+//                                              side-panel card's crowns;
 //   * AgentDotsPulse                         — the three staggered dot loops of an unsent-draft cluster;
 //   * AgentLockstepBlink                     — the flash ring's blink, every ring following ONE shared clock;
 //   * AgentEmberSparks                       — the spark crown's rising embers, as composition visuals.
@@ -293,6 +295,18 @@ namespace winrt::TerminalApp::implementation
         // and XAML then writes that same value back into UIElement.Opacity (no change). A loop that already
         // ended (XAML cancelled it, or Stop ran twice) answers S_FALSE, which is not an error.
         _element.StopAnimation(_animation);
+    }
+
+    AgentOpacityLoop AgentMakeCacheWarmGlow(const winrt::Windows::UI::Xaml::UIElement& anchor, winrt::Windows::UI::Xaml::UIElement glow)
+    {
+        // The shared constants (AgentAmbientAnimation.h), copied into the loop's own key-frame list: the loop keeps
+        // them until its first Start() builds the composition animation. No delay — the crown breathes from its first
+        // frame, as the storyboard it replaces did.
+        return AgentOpacityLoop{ anchor,
+                                 std::move(glow),
+                                 std::vector<AgentLoopKeyFrame>(kAgentCacheWarmGlowKeyFrames.begin(), kAgentCacheWarmGlowKeyFrames.end()),
+                                 kAgentCacheWarmGlowCycle,
+                                 std::chrono::milliseconds{ 0 } };
     }
 
     AgentDotsPulse::AgentDotsPulse(const winrt::Windows::UI::Xaml::UIElement& anchor, const std::array<winrt::Windows::UI::Xaml::UIElement, 3>& dots)
