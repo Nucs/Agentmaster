@@ -22,8 +22,8 @@ Nothing here has been run yet: the suite does not exist.
 
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
-| [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 6 | 3 / 2 / 1 | 23 | 16 | — |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 7 | 3 / 3 / 1 | 29 | 19 | — |
+| [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 6 | 3 / 2 / 1 | 23 | 16 | 1 |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 7 | 3 / 3 / 1 | 29 | 19 | 1 |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface (STA) | 11 | 6 / 5 / 0 | 30 | 31 | — |
@@ -44,7 +44,8 @@ Nothing here has been run yet: the suite does not exist.
 | [20-robustness.md](20-robustness.md) | Freezes, crashes, leaks, hostile environments (ROB) | 10 | 3 / 3 / 4 | 26 | 7 | — |
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
-| **Total** | | **168** | **69 / 71 / 24** (+4 NOT BUILT) | **≈ 610** | **≈ 500** | **14** |
+| [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 1 |
+| **Total** | | **177** | **74 / 75 / 24** (+4 NOT BUILT) | **≈ 646** | **≈ 527** | **17** |
 
 ---
 
@@ -141,7 +142,7 @@ Beyond E2E_TESTING.md's Phases 1–3 (the mock, the desktop and runner, the test
 | A **fake GitHub releases API** (and asset downloads) | INS-06, updater edge cases | NOT BUILT. `Updater.h` `kApiHost = L"api.github.com"`; the installer's asset allowlist wants `https://github.com/<repo>/releases/download/…`, so a fake must answer both hosts (hosts file + trusted certificate). Until then: real releases with copies stamped older (PROFILES.md §2c's method). |
 | The **MSIX package** build | DSP-02 (toasts), INS-08, F-PKG | `mkmsix.ps1` exists (install QA). |
 | **Several accounts** and the **secure desktop** | INS-03, INS-04, INS-05, ROB-04 | `tools\install-qa` (accounts, `qm.py` for UAC through QEMU's monitor). |
-| A **clipboard** oracle | TRN-03, DRF-03, TRN-05, SES | an in-guest helper reading `CF_UNICODETEXT`. |
+| A **clipboard** oracle | TRN-03, DRF-03, TRN-05, SES, TCM-04 | BUILT: `e2e/amdriver/win32.py` (`clipboard_text`, `set_clipboard_text`). |
 | **Pixel sampling** | DSP-01 (rings, disc, frame), MGR-02 (glyph) | screenshot crops; the taskbar flyout and Alt+Tab need input that opens them. |
 | **Fault injection** (a startup that blocks; a stalled UI dispatcher; the TUI's input held) | ROB-09, ROB-10, PQR-11 E3 | NOT BUILT; env-gated like the test bridge, never in a normal run. |
 | **Read-only probes** of a live process | DSP-04, ROB-07 | `tools\threadcensus.cs`, `tools\renderwait.cs`, `tools\cpuhunt`, `tools\leakhunt\xamltree.py` (all exist; never `livesample.exe` on a run under test — it suspends threads). |
@@ -222,6 +223,9 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | DSP-K1 | A portable / per-user install shows no session toast; its clicks would do nothing | probe, 2026-09-27 |
 | CLI-K1 | The dev alias's CLI crashes on every real verb (Debug build, Control Flow Guard) | measured, CLI.md §11 |
 | CLI-K2 | An unpackaged release CLI reads the DEV profile (fixed in code by 3b042ea32, not built) | measured, CLI.md §11 |
+| MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
+| SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
+| TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 
 ## Where the documents disagree with the code (found while writing)
 

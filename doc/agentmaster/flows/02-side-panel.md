@@ -135,7 +135,10 @@ switch closes it; no keystroke leaks into the terminal.
 - **E1 A session id typed** in the box (found on disk) → green underline, **Resume session** + **Fork**.
 - **E2 Launch's preset hover menu open** (pointer resting on Launch) → ONE click launches (not a
   double-click); a double-click launches once.
-- **E3 Enter in the box** → launches on the KEY-UP; no CR reaches the terminal.
+- **E3 Enter** → in the BOX it only commits the path (the folder list closes, nothing launches — the Agent
+  Manager page's Enter); on the focused **Launch** button it launches, on the KEY-UP, so no CR reaches the terminal
+  (`TerminalPage.AgentSidePanel.cpp`, the card's PreviewKeyDown/Up). Corrected 2026-10-23 by the e2e suite: this
+  line first said Enter in the box launches.
 - **E4 Card near the window's right/bottom edge** → opens leftward/upward.
 - **E5 Window resized while open** → re-placed on the next tick; the list re-anchors.
 - **E6 A tab switch / collapse / dock flip** → closes the card.
@@ -178,3 +181,24 @@ switch closes it; no keystroke leaks into the terminal.
    measure it (`tools/leakhunt/xamltree.py`) at 100 and at 300 sessions — the two should differ by
    about one viewport's worth of realized cards, not by 200 cards' nodes. (Production's reference:
    ~700 tabs in two GLOBAL panels walked 3,634 nodes before the fix, 81% of them cards; UI_THREAD.md §13.)
+
+---
+
+## Known defects (expected failures until fixed)
+
+### SP-K1 · In the + card, Launch needs a second click while its presets menu is open
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_side_panel.py`
+> `test_known_defect_plus_card_launch_needs_a_second_click`)
+
+With the pointer resting on the + card's **Launch Claude**, its presets hover menu opens (Default · Specify… · the
+launch models · Add presets…); one click — a held one, like a hand's — only closes that menu, the card stays open,
+and nothing launches; a second click launches. The Agent Manager page's own launch row launches with ONE click in the
+same situation (0.8.0's fix, CLAUDE.md Gotchas *A light-dismiss flyout eats the press that dismisses it*), so the
+fix does not reach the + card (its Launch sits inside a Popup). **Repro:** + → type a folder → rest on Launch until
+the menu shows → click once. **Expected:** one session launched, the card closed (SP-05 E2).
+
+**Related, measured the same day (not a defect for a person):** a press and release delivered together (an
+automation's zero-length click) is lost on the page's Launch too, because the fix reads the button's LIVE state
+(`GetAsyncKeyState`) when the menu closes and finds it already released. A fast tap on a busy UI thread could meet
+the same race.
+
