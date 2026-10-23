@@ -166,3 +166,20 @@ cost; the page never stops answering clicks.
    (at most one a minute when a rebuild takes ≥ 1 s); the Error / External columns appear and vanish with
    their content.
 3. **Hidden page.** *Expect:* while a tab shows, the board does not rebuild (one catch-up on the next show).
+
+---
+
+## Known defects (expected failures until fixed)
+
+### MGR-K1 · A session launched from the page is not selected on the page
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_manager_page.py`
+> `test_known_defect_a_launched_session_is_not_selected_on_the_page`)
+
+Launching from the page's launch row opens and selects the new session's tab (the side panel follows it), but the
+page's lens does not: **Home** → ⌂ `Agent Manager` (no way back to the tab you just came from) and the right pane
+reads "Select a Claude session to see its summary." until the user switches tabs once; hooks.log has no `[nav]
+tab-focus <sid8>` after the launch. **Cause (by reading):** the launch selects the new tab through the selection
+funnel BEFORE `_claudeTabs` maps the tab to its session, so `_SyncManagerSelectionToTab` finds no session id and
+returns. **Repro:** F-S (launched from the page; never switch tabs) → Home. **Expected:** ↶ `Jump back to t1` and
+t1's summary — as after any tab switch (MGR-02, MGR-05 phase 1).
+

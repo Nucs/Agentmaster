@@ -1,11 +1,18 @@
 # End-to-end UI testing — Agentmaster driven like a user, Claude Code on a scripted model
 
-> **Status (2026-10-22): DESIGN + a feasibility spike. Nothing in this document is built.** The spike
-> (`tools/e2e-spike/`, its README) proved the model half on this workstation: a native `claude.exe`
-> runs every kind of turn instantly against a local mock whose answers are written into the prompt.
-> Every Agentmaster change listed in §6 is a proposal. Decisions for the owner are in §14.
+> **Status (2026-10-23): the first suites RUN.** Phases 1 and 2 (§12) are built for three areas, with NO change to
+> the app: the scripted model (`e2e/mockllm/`, §4, its unit tests), the guest's provisioning and runner (`e2e/guest/`),
+> the driver (`e2e/amdriver/`, §7: real input, UI Automation, the app's process and profile files, the terminal, page
+> objects for the tab strip, menus, dialogs, the Agent Manager page and the side panel, failure evidence), the host
+> orchestrator (`e2e/host/e2e_run.py`), and suites for the Agent Manager page (MGR), the side panel (SP) and the tab's
+> context menu (TCM, [`flows/23-tab-context-menu.md`](flows/23-tab-context-menu.md)) — run against the published 0.8.0
+> portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop. On its first day the suite found three
+> defects of 0.8.0, kept as known-defect tests (MGR-K1, SP-K1, TCM-K1). How to run it and how to write a scenario:
+> [`e2e/README.md`](../../e2e/README.md). §6 (the app's testability changes: E2E mode, the read-only bridge,
+> AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead.
+> The spike (`tools/e2e-spike/`, 2026-10-22) stays as the record of §2.
 >
-> **What the suite must prove (2026-10-23):** [`flows/README.md`](flows/README.md) catalogs 168 end-to-end flows of the
+> **What the suite must prove (2026-10-23):** [`flows/README.md`](flows/README.md) catalogs the end-to-end flows of the
 > features of 0.7.7 → 0.8.0 and after (behaviors, lifecycle phases, checks, edge cases, known defects), one file per
 > area. This document is the HOW; the flows are the WHAT — §10's ladder and §11's areas map onto them.
 
@@ -625,8 +632,8 @@ where to check — are in [`flows/`](flows/README.md) (its *Infrastructure the f
 | Phase | Deliverables | Done when |
 |---|---|---|
 | 0 — spike | `tools/e2e-spike/` (this document's §2) | DONE 2026-10-22 on this workstation |
-| 1 — the mock | `e2e/mockllm/`: §4 complete, unit tests of the parser and the SSE output, the contract lane (claude.exe + mock, no Agentmaster) | the contract lane passes on 2.1.291 and on latest, in a test desktop |
-| 2 — the machine and the chain, no app change | `e2e/guest/provision.ps1`, `e2e/orchestrator/run.py`, `amdriver` lifecycle + UIA + terminal, PQR-00/01 using names and `sessions.json` | one command runs PQR-00/01 end to end in a fresh desktop and leaves a report on Q: |
+| 1 — the mock | `e2e/mockllm/`: §4 complete, unit tests of the parser and the SSE output, the contract lane (claude.exe + mock, no Agentmaster) | DONE 2026-10-23 for 2.1.291 (the unit tests; every suite test runs claude.exe on it); the latest lane not run yet |
+| 2 — the machine and the chain, no app change | `e2e/guest/provision.ps1`, `e2e/host/e2e_run.py`, `amdriver` lifecycle + UIA + terminal + page objects, the first suites using names and `sessions.json` | DONE 2026-10-23 with the MGR / SP / TCM suites instead of PQR-00/01 (the user's choice of areas); PQR-00/01 next |
 | 3 — testability in the app | §6.1–§6.3 for the §10 surfaces; one Release build (the user's go) | the bridge answers; the §10 controls are found by id; m5 green |
 | 4 — the first suite | §10 L0–L5 + K1–K3; ambient checks; fast + realtime lanes | 10 consecutive fast runs green except the known defects, < 30 min each |
 | 5 — breadth | §11 area by area; the e2e golden image; the CI build artifact; the explorer runs | per area: its ladder green; the latest lane nightly |
@@ -684,6 +691,9 @@ Measured on 2.1.291 (`tools/e2e-spike/spike_env.py` `seed_config`); re-check on 
 ⚠ `ANTHROPIC_API_KEY` raises Claude Code's "use this API key?" question; use `ANTHROPIC_AUTH_TOKEN`.
 
 ## Appendix B — what a test looks like
+
+> The design's sketch, written before the driver existed. The real API and a real test: [`e2e/README.md`](../../e2e/README.md)
+> ("Writing a scenario") and `e2e/suites/`.
 
 ```python
 @pytest.mark.pqr
