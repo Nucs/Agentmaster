@@ -112,11 +112,10 @@ namespace winrt::TerminalApp::implementation
         //     replace). Not XAML elements: XAML follows a moving element on every frame for hit-testing.
         // The canvas is the anchor for both (the glow Grid itself never gets a hand-out visual). Nothing
         // composition-side is created here: the loop and the ember visuals are built on the first start.
-        _cacheWarmGlow = AgentOpacityLoop{ HeaderCacheWarmSparks(),
-                                           HeaderCacheWarmGlow(),
-                                           { { 0.0f, 0.45f }, { 0.25f, 0.62f }, { 0.75f, 0.28f }, { 1.0f, 0.45f } },
-                                           std::chrono::milliseconds{ 2800 },
-                                           std::chrono::milliseconds{ 0 } };
+        // The breath's key frames and cycle above are the shared kAgentCacheWarmGlow* constants
+        // (AgentAmbientAnimation.h), built by AgentMakeCacheWarmGlow: the side panel's card icon
+        // (AgentStatusGlyph, SIDE_PANEL.md §2g) builds its crown from the same recipe, so the two cannot drift.
+        _cacheWarmGlow = AgentMakeCacheWarmGlow(HeaderCacheWarmSparks(), HeaderCacheWarmGlow());
         _cacheWarmEmbers = AgentEmberSparks{ HeaderCacheWarmSparks() };
 
         // Agentmaster (tab status-dot RED FLASH RING, UI_THREAD.md §10i): set up the ring's blink, wired (like

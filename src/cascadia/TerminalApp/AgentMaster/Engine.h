@@ -975,6 +975,29 @@ namespace Agentmaster
     uint32_t CurrentUnreadCount() noexcept;
 
     /// <summary>
+    /// Agentmaster (side panel status icon, SIDE_PANEL.md §2g): the union of the windows' published unread sets as a
+    /// SORTED, deduplicated id list — the sessions whose tab's red flash ring is up right now, whichever window hosts the
+    /// tab. Pure; exported for the harness. CountDistinctUnreadSessions is this list's size.
+    /// </summary>
+    /// <param name="unreadByWindow">windowId -> that window's unread session ids (any order, duplicates tolerated).</param>
+    /// <returns>The ids, sorted ascending (std::wstring's operator&lt;), each once; empty ids are left out.</returns>
+    /// <exception cref="std::bad_alloc">If the list cannot be allocated.</exception>
+    std::vector<std::wstring> UnreadSessionUnion(const std::map<std::wstring, std::vector<std::wstring>>& unreadByWindow);
+
+    /// <summary>
+    /// Agentmaster (side panel status icon, SIDE_PANEL.md §2g): WHICH sessions the census counts as unread right now (the
+    /// union above, read under the census lock). The side panel's cards ring for exactly these — a card in a GLOBAL list
+    /// shows another window's session, whose flash state only that window's page holds, and every page publishes it here.
+    /// Read it at apply time, like the count: the census sinks carry only a count.
+    /// </summary>
+    /// <returns>The sorted, deduplicated unread session ids; empty when nothing is unread.</returns>
+    /// <remarks>
+    /// Never throws: an allocation failure is logged (Rule #18) and answers EMPTY — the cards then show no ring until the
+    /// next read, the honest degradation for a cosmetic copy of the tab's alert (the tab's own ring is unaffected).
+    /// </remarks>
+    std::vector<std::wstring> CurrentUnreadSessionIds() noexcept;
+
+    /// <summary>
     /// Agentmaster (taskbar unread badge): register THIS window's count sink, the registry-token pattern of the other
     /// window sinks. Every census change is fanned out to EVERY sink (the source window included: its own taskbar
     /// button needs the new number too).
@@ -1024,6 +1047,7 @@ namespace Agentmaster
     // The taskbar unread census on a LOCAL Engine (tests_taskbar.cpp): same contracts as the SharedEngine() forms above.
     void PublishWindowUnreadSessionsIn(Engine& e, const std::wstring& windowId, std::vector<std::wstring> sessionIds) noexcept;
     uint32_t CurrentUnreadCountIn(Engine& e) noexcept;
+    std::vector<std::wstring> CurrentUnreadSessionIdsIn(Engine& e) noexcept;
     uint64_t RegisterUnreadCountHandlerIn(Engine& e, const std::wstring& windowId, std::function<void(uint32_t count)> handler);
     void UnregisterUnreadCountHandlerIn(Engine& e, uint64_t token) noexcept;
     // The AI search's window-tool fan-outs on a LOCAL Engine (tests_tabtools.cpp): same contracts as the SharedEngine()

@@ -315,6 +315,17 @@ void TestUnreadCensus()
         CHECK(Agentmaster::CountDistinctUnreadSessions(m) == 3, "union: disjoint windows add up");
         m[L"{b}"] = { L"s2", L"s3", L"s3", L"" };
         CHECK(Agentmaster::CountDistinctUnreadSessions(m) == 3, "union: a session in two windows (a moving tab) counts once; duplicates + empty ids ignored");
+        // SIDE_PANEL.md §2g: the same union as a LIST — the side panel's cards ring for exactly these ids, and they look
+        // each one up with a binary search, so the list must come back sorted and deduplicated.
+        CHECK((Agentmaster::UnreadSessionUnion(m) == std::vector<std::wstring>{ L"s1", L"s2", L"s3" }),
+              "union list: sorted, each id once, empty ids left out (a session in two windows is listed once)");
+        CHECK(Agentmaster::UnreadSessionUnion(m).size() == Agentmaster::CountDistinctUnreadSessions(m), "union list: its size IS the taskbar count");
+        m.clear();
+        m[L"{z}"] = { L"zeta", L"alpha" };
+        m[L"{y}"] = { L"mid" };
+        CHECK((Agentmaster::UnreadSessionUnion(m) == std::vector<std::wstring>{ L"alpha", L"mid", L"zeta" }),
+              "union list: sorted across windows, whatever order the windows and their sets came in");
+        CHECK(Agentmaster::UnreadSessionUnion({}).empty(), "union list: no windows => empty");
     }
 
     // --- publish / fan-out on a LOCAL engine ---
@@ -338,8 +349,14 @@ void TestUnreadCensus()
         const size_t before = seenA.size();
         Agentmaster::PublishWindowUnreadSessionsIn(e, L"{win-b}", { L"s3" });
         CHECK(seenA.size() == before, "fan-out: re-publishing the same set is silent");
+        CHECK((Agentmaster::CurrentUnreadSessionIdsIn(e) == std::vector<std::wstring>{ L"s1", L"s2", L"s3" }),
+              "census set: the ids behind the count, every window's, sorted (what the side panel's cards ring for)");
         Agentmaster::PublishWindowUnreadSessionsIn(e, L"{win-b}", { L"s4" });
         CHECK(seenA.size() == before && Agentmaster::CurrentUnreadCountIn(e) == 3, "fan-out: a different set with the SAME count (one read, one new) repaints nothing");
+        // ...but the SET moved, and a reader of the set sees it at once — the change the side panel's periodic tick
+        // catches for its cards, since no sink hears it (SIDE_PANEL.md §2g).
+        CHECK((Agentmaster::CurrentUnreadSessionIdsIn(e) == std::vector<std::wstring>{ L"s1", L"s2", L"s4" }),
+              "census set: a same-count change (s3 read, s4 new) is visible in the set though no sink was called");
 
         Agentmaster::PublishWindowUnreadSessionsIn(e, L"{win-b}", { L"s4", L"s1", L"s1", L"" });
         CHECK(Agentmaster::CurrentUnreadCountIn(e) == 3, "census: a session published by two windows counts once; duplicates + empties normalized away");
@@ -355,6 +372,7 @@ void TestUnreadCensus()
         const size_t aBefore = seenA.size();
         Agentmaster::PublishWindowUnreadSessionsIn(e, L"{win-b}", {});
         CHECK(seenA.size() == aBefore && seenB.back() == 0, "sink: an unregistered sink is no longer called; the count returns to 0");
+        CHECK(Agentmaster::CurrentUnreadSessionIdsIn(e).empty(), "census set: every window withdrawn => no session rings");
         Agentmaster::UnregisterUnreadCountHandlerIn(e, tokenA); // stale
         Agentmaster::UnregisterUnreadCountHandlerIn(e, 0); // zero
         CHECK(Agentmaster::CurrentUnreadCountIn(e) == 0, "sink: stale / zero token unregisters are no-ops");

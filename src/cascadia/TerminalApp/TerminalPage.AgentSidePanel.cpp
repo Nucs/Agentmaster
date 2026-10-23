@@ -60,9 +60,11 @@
 //
 // This file implements TerminalPage methods (same class, separate TU — the TabManagement.cpp
 // pattern). It reuses AgentManagerContent.Internal.h (the board's ~48 anonymous-namespace helpers:
-// StateColor/StateLabel/Text/Fill/TimingText/BuildPendingDots/MakeSortKey/SortKeyLess/
+// StateColor/StateLabel/Text/Fill/TimingText/MakeSortKey/SortKeyLess/
 // PointerStillWithin/HexToColor/PreferDarkTextOn/ApplyCursor/...) so the cards speak the exact
-// visual + sort language of the Triage Board. NOTE: that header requires the SAME file-scope
+// visual + sort language of the Triage Board — except the card's STATUS ICON, which speaks the TAB
+// STRIP's (AgentStatusGlyph, SIDE_PANEL.md §2g: the board's BuildPendingDots cluster is no longer
+// used here; the draft dots ride the icon, under its dot). NOTE: that header requires the SAME file-scope
 // using-directives the AgentManagerContent TUs replicate (narrow Color/ColorHelper/Colors
 // using-DECLARATIONS — a `using namespace winrt::Windows::UI;` would pull the nested Text
 // namespace over the Text() helper), which is why the using block below mirrors
@@ -74,12 +76,13 @@
 #include "AgentManagerContent.h" // CycleBoardSort / BuildSessionMenuFor / SelectSession (the Linked-Lenses delegation targets) + LaunchBoxText / SetLaunchBoxText / LaunchRecentDirs (the "+" launcher mirrors its box)
 #include "AgentLaunchBar.h" // the "+" launcher card's launch row — the Agent Manager's own launch bar, Claude only (SIDE_PANEL.md §2e)
 #include "AgentSessionToolTip.h" // the cards' rich session tooltip host ("Sum" off — the tab tooltip's lifecycle, shared)
+#include "AgentStatusGlyph.h" // every card's STATUS ICON — the tab's dot with its 3 dots, flash ring and spark crown (SIDE_PANEL.md §2g)
 #include "AgentTabOverlay.h" // the fill-hosted summary panel (SetSummaryFillHost)
 #include "AgentCatchLog.h" // AgentLogCaughtException — swallowed-exception forensics (Rule #18)
 #include "AgentTipHelpers.h" // AgentSetTip / AgentSetTitledTip — the islands-safe hover tooltips
-#include "AgentStatusColors.h" // ParseArgbHexColor — the pending-dots color pair
+#include "AgentStatusColors.h" // PendingDotsColorFor / CacheWarmSparkColorFor — the status icon's contrast picks (the tab strip's rules, SIDE_PANEL.md §2g); AgentAnimationsEnabled
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / LogNav / ShortId
-#include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live
+#include "AgentMaster/Engine.h" // BroadcastSettingsChanged — the ⌖ scroll-to-tab toggle reaches every OTHER open window live; CurrentUnreadSessionIds — which cards' status icons ring (SIDE_PANEL.md §2g)
 #include "AgentMaster/KeyedListDiff.h" // PlanKeyedListOps / ApplyKeyedListOp — the card list's fewest removes / inserts / moves (SIDE_PANEL.md §2c)
 #include "AgentMaster/VirtualListWindow.h" // PlanRealizedRows / RowsAroundRow / SpacersFor / MedianRowHeight — which rows of the card list have cards (SIDE_PANEL.md §2f)
 #include "AgentMaster/PointerCardPlacement.h" // PlacePointerCard — the "+" launcher card opens at the click, toward the window's center (SIDE_PANEL.md §2e)
@@ -168,11 +171,30 @@ namespace
     // [title][tag strip] grid while tagged) — the band itself is childless, so it has no padding of its own.
     constexpr double kSidePanelBandPadX = 6.0;
     constexpr double kSidePanelBandPadY = 2.0;
+    // The card's body color (#333333): its CHILDLESS background's fill, and so the background the state line — and on it
+    // the status icon's 3 dots and spark crown (SIDE_PANEL.md §2g) — sit on. One place, so the indicators' contrast picks
+    // (PendingDotsColorFor / CacheWarmSparkColorFor, the tab strip's own rules) always judge the color the card really has:
+    // a tab picks against its rendered tab color, a card against this.
+    constexpr Color kSidePanelCardBodyColor{ 0xFF, 0x33, 0x33, 0x33 };
+    // The state line's gap above it (DIPs). 1, not the 3 it had before the status icon (§2g): the icon's 18 DIP cell
+    // already holds 4 DIPs of air above its 10 DIP dot (the room the glow and the rising embers use), so the dot keeps
+    // about the distance from the title band it had (5 DIPs, was ~5.6), and the card grows by ~6.7 DIPs instead of ~8.7.
+    constexpr double kSidePanelStateLineTopPx = 1.0;
+    // How far the status icon's root reaches past its slot on the LEFT and the RIGHT (a negative margin, DIPs): the
+    // 18 DIP cell is 8 DIPs wider than the 10 DIP dot, so the dot's left edge stays aligned with the title's first letter
+    // (both 6 DIPs in) and the label keeps its 5 DIP gap from the dot. The overhang stays inside the card (the state
+    // line is 6 DIPs in), and nothing clips it: a negative margin only shrinks the slot, and XAML adds no layout clip
+    // while the element's arranged size equals its unclipped desired size.
+    constexpr double kSidePanelStatusIconOverhangPx = 4.0;
+    // The status icon's pending band under its glyph cell (DIPs, AgentStatusGlyph's 4 DIP row): the label, the codex pill
+    // and the timing text take it as a bottom margin, so their centers line up with the DOT's center (the middle of the
+    // 18 DIP cell), not with the middle of the 22 DIP icon.
+    constexpr double kSidePanelStatusIconBandPx = 4.0;
     // The row height the list computes with before any card was measured: a card plus its vertical margins at 100%
-    // text size (the 12px title line + its 2px pads, the 10px state line + its 3px gap, the 10px dir line + its 4px
-    // gap, the 1px border twice, the 2px margins twice: ~59.6 DIPs). Only the first plan of a window uses it; the
-    // pass queued after the first layout measures the real cards (_SidePanelSyncRealizedCards).
-    constexpr double kSidePanelCardDefaultStride = 60.0;
+    // text size (the 12px title line + its 2px pads, the 22px status icon line + its 1px gap, the 10px dir line + its 4px
+    // gap, the 1px border twice, the 2px margins twice: ~66.3 DIPs; ~59.6 before the status icon of §2g). Only the first
+    // plan of a window uses it; the pass queued after the first layout measures the real cards (_SidePanelSyncRealizedCards).
+    constexpr double kSidePanelCardDefaultStride = 66.0;
     // _SidePanelSyncRealizedCards' anchorRow when the plan follows the viewport (no row to realize around).
     constexpr size_t kSidePanelNoAnchorRow = SIZE_MAX;
     // The header's ICON buttons (⌖ scroll-to-tab, ⇄ dock flip, «/» collapse) and the collapsed strip's chevron:
@@ -417,6 +439,39 @@ namespace
         }
     }
 
+    // The status icon's inputs that are the same for every card of one list update (SIDE_PANEL.md §2g), read ONCE per
+    // update — the census lock, the settings and the clock are never touched per card.
+    struct SidePanelIndicatorInputs
+    {
+        std::vector<std::wstring> unreadIds; // the process-wide unread census (CurrentUnreadSessionIds): sorted + deduped, binary-searched per card
+        uint32_t cacheMinutes{ 5 }; // the server cache's lifetime (AppSettings::serverCacheMinutes, 0 -> 5 — the tab strip's and the board's normalization)
+        int64_t nowMs{ 0 }; // the registry's clock (system-clock ms) the warmth is judged at
+        uint32_t cacheWarmArgb{ 0 }; // the crown's fire color over the card body, 0xAARRGGBB (CacheWarmSparkColorFor)
+    };
+
+    // The cache-warm crown's color on a card: the tab strip's fire pair (CacheWarmSparkColorFor) picked against the card
+    // body — the bright amber, since the body is dark. The tab picks against its own rendered tab color; the card's dot
+    // sits on the body, never on the band.
+    //   returns — the color, packed 0xAARRGGBB. Never throws.
+    uint32_t SidePanelCacheWarmArgb() noexcept
+    {
+        return SidePanelPackArgb(winrt::TerminalApp::implementation::CacheWarmSparkColorFor(kSidePanelCardBodyColor));
+    }
+
+    // Read the per-update indicator inputs (see SidePanelIndicatorInputs).
+    //   settings — this window's settings copy (serverCacheMinutes).
+    //   returns  — the inputs.
+    //   throws   — std::bad_alloc only (the census copy); CurrentUnreadSessionIds itself never throws.
+    SidePanelIndicatorInputs SidePanelReadIndicatorInputs(const ::Agentmaster::AppSettings& settings)
+    {
+        SidePanelIndicatorInputs in;
+        in.unreadIds = ::Agentmaster::CurrentUnreadSessionIds();
+        in.cacheMinutes = settings.serverCacheMinutes ? settings.serverCacheMinutes : 5;
+        in.nowMs = NowMs();
+        in.cacheWarmArgb = SidePanelCacheWarmArgb();
+        return in;
+    }
+
     // Everything ONE card shows, computed from its live session (the lean SnapshotLiveForCards copy) and
     // this update's shared lookups — a plain record that _SidePanelApplyCardModel compares, value by value,
     // with the one the card shows now.
@@ -426,8 +481,11 @@ namespace
     //   tags              — the session's bookmark tags in add order (the card's tag cache).
     //   tagColors         — this tags epoch's LoadAllTagColors() (empty when no rendered card is tagged).
     //   dirColors         — this update's LoadDirColorIndex() snapshot.
-    //   pendingArgb       — the pending dots' color, 0xAARRGGBB (the configured LIGHT color: card bodies are dark).
+    //   pendingArgb       — the pending dots' color, 0xAARRGGBB (PendingDotsColorFor over the card body: the
+    //                       configured LIGHT color, since card bodies are dark).
     //   animationsEnabled — Windows' "Animation effects" (AgentAnimationsEnabled), read once per update.
+    //   indicators        — the status icon's per-update inputs (the unread census, the cache lifetime, the clock,
+    //                       the crown's color — SIDE_PANEL.md §2g).
     //   returns           — the model.
     //   throws            — std::bad_alloc on allocation failure only.
     winrt::TerminalApp::implementation::AgentSidePanelCardModel SidePanelCardModelFor(const ::Agentmaster::SessionInfo& s,
@@ -436,7 +494,8 @@ namespace
                                                                                       const std::map<std::wstring, std::wstring>& tagColors,
                                                                                       const ::Agentmaster::DirColorIndex& dirColors,
                                                                                       uint32_t pendingArgb,
-                                                                                      bool animationsEnabled)
+                                                                                      bool animationsEnabled,
+                                                                                      const SidePanelIndicatorInputs& indicators)
     {
         winrt::TerminalApp::implementation::AgentSidePanelCardModel m;
         m.title = s.title.empty() ? s.id : s.title;
@@ -455,11 +514,25 @@ namespace
         {
             // RENDERING.md §4c: still dots for a session whose tab has not started (a dormant tab's
             // remembered draft), as on its tab; an external session (no control of ours) keeps the pulse.
-            // Windows' animation switch is folded in HERE (not only inside BuildPendingDots) so that turning
-            // it on or off changes the model, and the dots of every card are rebuilt in the new mode.
+            // Windows' animation switch is folded in HERE (not only inside the status icon's own motion
+            // decision) so that turning it on or off changes the model, and every card re-decides its dots.
             m.pendingAnimated = (s.started || s.external) && animationsEnabled;
             m.pendingArgb = pendingArgb;
         }
+        // The status icon's other two indicators (SIDE_PANEL.md §2g), from the SAME facts the tab strip reads:
+        //   - the FLASH RING: the session is in the process-wide unread census — exactly the sessions whose tab's ring
+        //     flashes in its hosting window (the automatic "left Running while you weren't looking" flash, or a manual
+        //     Mark Unread), whichever window hosts it, so a GLOBAL list rings for other windows' tabs too;
+        //   - the SPARK CROWN: ServerCacheStillWarm, the one predicate behind the tab's crown and the board card's ⚡
+        //     (live + Claude + at rest + a real API turn younger than the cache's lifetime) — so the three surfaces can
+        //     never disagree about a session's warmth at the same instant.
+        m.flashRing = std::binary_search(indicators.unreadIds.begin(), indicators.unreadIds.end(), s.id);
+        m.cacheWarm = ::Agentmaster::ServerCacheStillWarm(s, indicators.cacheMinutes, indicators.nowMs);
+        if (m.cacheWarm)
+        {
+            m.cacheWarmArgb = indicators.cacheWarmArgb;
+        }
+        m.animationsEnabled = animationsEnabled;
         const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
         m.timing = FormatSessionTiming(s.convCreatedUnixMs, last);
         // The dir line: "<leaf>[ / <branch>]", dim — the card's place at a glance (the full path rides the tooltip).
@@ -1528,6 +1601,16 @@ namespace winrt::TerminalApp::implementation
             _SidePanelCloseLaunchCard(L"panel collapsed");
         }
         _SidePanelApplyLayout();
+        // The cards' status icons (SIDE_PANEL.md §2g): a collapse only COLLAPSES the panel's content, so the cards stay
+        // loaded — and without this their pulses, crowns and ring blinks would keep the compositor animating for nobody.
+        // An expand lets them move again (each icon re-decides from its own flags). Never throws (SetHostShown is noexcept).
+        for (const auto& [cardId, view] : _sidePanelCardViews)
+        {
+            if (view.glyph)
+            {
+                view.glyph->SetHostShown(!_sidePanelCollapsed);
+            }
+        }
         if (!_sidePanelCollapsed && _sidePanelDirty)
         {
             _SidePanelRebuildCards(); // the deferred catch-up — the list is visible again
@@ -1933,6 +2016,112 @@ namespace winrt::TerminalApp::implementation
         _SidePanelScheduleRebuild(/*force*/ false);
     }
 
+    // The unread census moved its count (this window's census-sink hop — see the declaration): re-derive every row's
+    // flash ring in place. Not the throttled list update: a flash is an ALERT, and the tab's ring shows at once, so the
+    // card's must not wait out the 500 ms min gap and the next periodic tick (~2.5 s) behind it. The patch reads the
+    // census once and writes only the cards whose ring changed, so it is cheap enough to run on every count change.
+    // A collapsed panel is patched too (the rows' models must stay current for the expand); its icons just do not move.
+    void TerminalPage::_SidePanelNoteUnreadChanged()
+    {
+        _SidePanelRefreshIndicators(/*rereadCacheWarm*/ false);
+    }
+
+    void TerminalPage::_SidePanelRefreshIndicators(bool rereadCacheWarm)
+    {
+        if (!_sidePanelBuilt || _sidePanelRowIds.empty())
+        {
+            return; // nothing listed yet: the first list update computes every indicator itself
+        }
+        if (_sidePanelRealizing)
+        {
+            // Never under a realize pass (it walks the rows and the card map this patch writes): fold into the next
+            // update instead. Nothing a pass does reaches here synchronously today; this is the belt.
+            _sidePanelDirty = true;
+            return;
+        }
+        try
+        {
+            const size_t count = _sidePanelRowIds.size();
+            if (_sidePanelRowModels.size() != count)
+            {
+                return; // belt: the rows are written as a parallel pair (one move each), so this never happens
+            }
+            // Every row whose model changed, so only their cards are written, once each.
+            std::vector<size_t> changed;
+
+            // 1. The FLASH RING of every row: membership in the census union — the sessions whose tab's ring is flashing,
+            //    in whichever window hosts it (each page publishes its own set; the census unions them). Sorted, so one
+            //    binary search per row; a few hundred rows cost microseconds.
+            const auto unread = ::Agentmaster::CurrentUnreadSessionIds();
+            for (size_t row = 0; row < count; ++row)
+            {
+                auto& model = _sidePanelRowModels[row];
+                const bool ring = std::binary_search(unread.begin(), unread.end(), _sidePanelRowIds[row]);
+                if (model.flashRing != ring)
+                {
+                    model.flashRing = ring;
+                    changed.push_back(row);
+                }
+            }
+
+            // 2. The SPARK CROWN of the REALIZED rows — the cards on screen — from a fresh lean read of each: the tab
+            //    strip's own poll (_ScanCacheWarmTabsImpl: GetWithoutQueue + ServerCacheStillWarm, the same 0 -> 5
+            //    minutes normalization), so a card's crown lights and goes out on the same tick as its tab's. A row
+            //    without a card keeps the value of the last list update; it is re-read here once a scroll realizes it.
+            if (rereadCacheWarm && _sessionRegistry)
+            {
+                const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+                const int64_t now = NowMs();
+                const uint32_t warmArgb = SidePanelCacheWarmArgb();
+                const size_t last = std::min(_sidePanelRealizedLast, count);
+                for (size_t row = _sidePanelRealizedFirst; row < last; ++row)
+                {
+                    // Without the prompt queue (UI_THREAD.md §10a #4): ServerCacheStillWarm reads the state, the turn
+                    // stamps and the kind, never the queue — the costliest part of a Get.
+                    const auto info = _sessionRegistry->GetWithoutQueue(_sidePanelRowIds[row]);
+                    // A session that left the registry between the last update and now reads cold; the next list update
+                    // drops its row anyway.
+                    const bool warm = info && ::Agentmaster::ServerCacheStillWarm(*info, cacheMin, now);
+                    auto& model = _sidePanelRowModels[row];
+                    const uint32_t argb = warm ? warmArgb : 0u;
+                    if (model.cacheWarm != warm || model.cacheWarmArgb != argb)
+                    {
+                        model.cacheWarm = warm;
+                        model.cacheWarmArgb = argb;
+                        changed.push_back(row);
+                    }
+                }
+                // A row whose ring AND crown both changed was pushed by both passes: sort + unique, so each card is
+                // written once.
+                std::sort(changed.begin(), changed.end());
+                changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+            }
+
+            // 3. Write the changed rows that have cards. A realized card shows exactly its row's model (the list update and
+            //    every realize pass write it), so handing it the patched row model writes only the patched indicators.
+            for (const size_t row : changed)
+            {
+                if (row < _sidePanelRealizedFirst || row >= _sidePanelRealizedLast)
+                {
+                    continue; // no card: a scroll that realizes the row builds its card from the patched model
+                }
+                const auto& id = _sidePanelRowIds[row];
+                if (const auto it = _sidePanelCardViews.find(id); it != _sidePanelCardViews.end())
+                {
+                    _SidePanelApplyCardModel(it->second, _sidePanelRowModels[row], id, /*fresh*/ false); // a copy: the row keeps its model
+                }
+            }
+        }
+        catch (...)
+        {
+            // A refused XAML write or an allocation failure: the same recovery as every other card-list edit — the list
+            // starts over from empty on the next tick, so a half-patched card never outlives this call.
+            ::Agentmaster::AgentLogCaughtException(L"_SidePanelRefreshIndicators");
+            _SidePanelResetCards();
+            _sidePanelDirty = true;
+        }
+    }
+
     // Liveness-probe rider (SCANNER thread): terminate-netted fire_and_forget over the awaitable
     // Impl, exactly like _ScanCacheWarmTabs — an exception escaping a fire_and_forget is
     // std::terminate, so the body lives in an IAsyncAction whose throw lands in this catch.
@@ -1955,7 +2144,9 @@ namespace winrt::TerminalApp::implementation
     // notify), (3) after ~30s without any list update, refresh the cards' timing texts through the same
     // in-place update — which writes only the texts whose value moved (SIDE_PANEL.md §2c), never a rebuild
     // just to move an "ago" string (the Manager lens lesson), and reads the lean card snapshot instead of a
-    // full registry copy per card.
+    // full registry copy per card, (4) on every other tick, re-derive the status icons' spark crown (the realized
+    // cards, a fresh lean read each — warmth ends on a clock) and flash ring (every row, from the unread census) in
+    // place, without a list update (SIDE_PANEL.md §2g, _SidePanelRefreshIndicators).
     winrt::Windows::Foundation::IAsyncAction TerminalPage::_SidePanelPeriodicTickImpl()
     {
         auto strongThis{ get_strong() };
@@ -1992,6 +2183,12 @@ namespace winrt::TerminalApp::implementation
         }
         if (::GetTickCount64() < _sidePanelNextTimingMs)
         {
+            // No list update this tick, so the status icons' two indicators that change with no registry notify are
+            // re-derived in place (SIDE_PANEL.md §2g): the spark crown of the realized cards — warmth ENDS on a clock,
+            // and this tick is the tab strip's own ~2.5 s cache-warm poll's cadence (_ScanCacheWarmTabs runs in the
+            // same liveness probe, just before) — and every row's flash ring against the unread census (the belt for a
+            // census change that kept its count, which no sink hears). Writes only the cards whose value moved.
+            _SidePanelRefreshIndicators(/*rereadCacheWarm*/ true);
             co_return;
         }
         // ~30 quiet seconds: the timing texts age, so run the in-place update — it rewrites only the cards
@@ -2166,10 +2363,14 @@ namespace winrt::TerminalApp::implementation
 
             // One model per ROW — realized or not: a scroll realizes a row from its stored model, so every row's must
             // be current. The shared inputs are read ONCE per update: the dir-colors snapshot every row's band color
-            // resolves against, the dots' color, and Windows' animation switch.
+            // resolves against, the dots' color, Windows' animation switch, and the status icon's inputs (the unread
+            // census, the cache lifetime, the clock — SIDE_PANEL.md §2g).
             const auto dirColors = ::Agentmaster::LoadDirColorIndex();
-            const uint32_t pendingArgb = SidePanelPackArgb(ParseArgbHexColor(_appSettings.pendingDotsLightColor, Color{ 0xFF, 0xE0, 0xA9, 0x2B }));
+            // The tab strip's own rule (PendingDotsColorFor) judged against the card BODY, where the icon's dots sit: a
+            // dark body, so the configured LIGHT color (the same value the cards used before the rule was applied here).
+            const uint32_t pendingArgb = SidePanelPackArgb(PendingDotsColorFor(kSidePanelCardBodyColor, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor));
             const bool animationsEnabled = AgentAnimationsEnabled();
+            const SidePanelIndicatorInputs indicators = SidePanelReadIndicatorInputs(_appSettings);
             std::vector<std::wstring> order; // the new row order, as session ids (the realized range is a window over it)
             std::vector<AgentSidePanelCardModel> models; // parallel to `order`
             // Parallel to `order` too: each row's lean session (pointers into `snap`, alive for this whole update)
@@ -2190,7 +2391,7 @@ namespace winrt::TerminalApp::implementation
                     continue;
                 }
                 order.push_back(row.session->id);
-                models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled));
+                models.push_back(SidePanelCardModelFor(*row.session, mode, _sidePanelTagsById[row.session->id], _sidePanelTagColors, dirColors, pendingArgb, animationsEnabled, indicators));
                 sessions.push_back(row.session);
             }
 
@@ -2385,6 +2586,14 @@ namespace winrt::TerminalApp::implementation
                     // host is gone (the event is deferred), and a ToolTip left attached to a dropped element is the
                     // islands leak class (AgentTipHelpers.h). Never throws.
                     _SidePanelDropCardToolTip(leaving->second, op.key);
+                    // Stop its status icon's motions for the same reason (SIDE_PANEL.md §2g): the icon's own Unloaded
+                    // stop is deferred too, and by then the view — and with it the glyph — is gone, so a flashing card's
+                    // ring would keep its hold on the UI thread's shared blink clock until the glyph's destructor gave
+                    // it back. Never throws.
+                    if (leaving->second.glyph)
+                    {
+                        leaving->second.glyph->Shutdown();
+                    }
                 }
                 _sidePanelCardViews.erase(op.key);
                 break;
@@ -2522,10 +2731,16 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_SidePanelResetCards()
     {
         // Every card's rich tooltip is detached first (the "Sum" off mode attaches one per card): a ToolTip left
-        // attached to a dropped element is the islands leak class. _SidePanelDropCardToolTip never throws.
+        // attached to a dropped element is the islands leak class. _SidePanelDropCardToolTip never throws. And every
+        // card's status icon stops its motions (SIDE_PANEL.md §2g) — a flashing card's ring gives back its hold on the
+        // shared blink clock now, not whenever its glyph is destroyed. Shutdown never throws.
         for (auto& [id, view] : _sidePanelCardViews)
         {
             _SidePanelDropCardToolTip(view, id);
+            if (view.glyph)
+            {
+                view.glyph->Shutdown();
+            }
         }
         // The maps first: clearing them cannot fail, so the page's view of the list is consistently "empty"
         // even when the panel below refuses its Clear.
@@ -2558,12 +2773,15 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Build ONE card's skeleton — the Triage-Board card's visual language re-hosted for a narrow vertical
-    // list: a title on a band, then a state line (a row with the dot + label in the shared AgentStatusColors
-    // palette, followed by whatever optional parts the model adds — the teal `codex` pill, the pending-draft
-    // dots — and, in the line's star column, the "created 4d1h, active 2m4s ago" timing text), then a dim
+    // list: a title on a band, then a state line (a row with the STATUS ICON + label in the shared AgentStatusColors
+    // palette — the icon is the tab strip's own, with its 3 dots, flash ring and spark crown, SIDE_PANEL.md §2g —
+    // followed by the optional part the model adds — the teal `codex` pill — and, in the line's star column, the
+    // "created 4d1h, active 2m4s ago" timing text), then a dim
     // dir/branch line. Every card has these elements; their VALUES — texts, brushes,
-    // the band's tag strip, the optional parts — come from _SidePanelApplyCardModel, so a card is built once
-    // per session and from then on only edited.
+    // the band's tag strip, the optional parts, which of the icon's indicators show — come from
+    // _SidePanelApplyCardModel, so a card is built once per session and from then on only edited.
+    // The card's status icon must be shut down before the card leaves the list (_SidePanelSyncRealizedCards' Remove,
+    // _SidePanelResetCards): it stops its motions and gives back the flash ring's hold on the shared blink clock.
     // Interactions: click = select (Linked Lenses), double-click = activate (jump to the tab, cross-window),
     // right-click = the SHARED lazy session menu (AgentManagerContent::BuildSessionMenuFor — zero drift from
     // the board's), anchored on this card so its Tags item opens the tag panel right under it.
@@ -2586,7 +2804,10 @@ namespace winrt::TerminalApp::implementation
         v.card = Grid{};
         v.card.Margin(ThicknessHelper::FromLengths(kSidePanelCardMarginX, kSidePanelCardMarginY, kSidePanelCardMarginX, kSidePanelCardMarginY));
         v.cardBack = Border{};
-        v.cardBack.Background(Fill(0xFF, 0x33, 0x33, 0x33)); // also what makes the whole card hit-testable (the Grid has no background)
+        // The body color is ALSO what the status icon's contrast picks judge (kSidePanelCardBodyColor), and the fill is
+        // what makes the whole card hit-testable (the Grid has no background — and the status icon is not hit-testable,
+        // so a press on the dot lands here and selects the card like any other press on it).
+        v.cardBack.Background(SolidColorBrush{ kSidePanelCardBodyColor });
         v.cardBack.CornerRadius(CornerRadiusHelper::FromUniformRadius(kSidePanelCardCornerRadius));
         v.cardBack.BorderThickness(ThicknessHelper::FromUniformLength(kSidePanelCardBorderPx)); // constant width — hover/selection recolor, never reflow
         v.card.Children().Append(v.cardBack); // first: drawn behind the content
@@ -2613,12 +2834,12 @@ namespace winrt::TerminalApp::implementation
         v.bandArea.Children().Append(v.title); // the untagged layout; _SidePanelApplyCardTags puts the title in [ title * ][ strip ] for a tagged session
         body.Children().Append(v.bandArea);
 
-        // State line: [ state row Auto ][ timing * ]. The row holds the dot and the label, and the model inserts the
-        // codex pill and the draft dots after them; the timing text goes in the star column (added by the model too),
+        // State line: [ state row Auto ][ timing * ]. The row holds the status icon and the label, and the model inserts
+        // the codex pill after them; the timing text goes in the star column (added by the model too),
         // so on a narrow panel it is the part that gives way, ending in "…" (Text's CharacterEllipsis) — in the row's
         // StackPanel it was offered unlimited width and got cut off mid-letter at the card's edge instead.
         v.stateLine = Grid{};
-        v.stateLine.Margin(ThicknessHelper::FromLengths(6, 3, 6, 0));
+        v.stateLine.Margin(ThicknessHelper::FromLengths(6, kSidePanelStateLineTopPx, 6, 0));
         {
             ColumnDefinition rowCol{};
             rowCol.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
@@ -2630,12 +2851,23 @@ namespace winrt::TerminalApp::implementation
         v.stateRow = StackPanel{};
         v.stateRow.Orientation(Orientation::Horizontal);
         v.stateRow.Spacing(5);
-        v.stateDot = winrt::Windows::UI::Xaml::Shapes::Ellipse{};
-        v.stateDot.Width(8);
-        v.stateDot.Height(8);
-        v.stateDot.VerticalAlignment(VerticalAlignment::Center);
-        v.stateRow.Children().Append(v.stateDot);
+        // The STATUS ICON (SIDE_PANEL.md §2g): the tab strip's own icon — the 10 DIP dot with its black stroke, and around
+        // it the tab's three indicators (the unsent-draft 3 dots under it, the unread flash ring behind it, the cache-warm
+        // glow + rising embers) with the tab's composition motions. It replaces the plain 8 DIP dot and the separate draft
+        // dots cluster this row held before. Top-aligned: the row is the icon's 22 DIP tall, and the label / pill / timing
+        // center on the DOT through their kSidePanelStatusIconBandPx bottom margin. The horizontal overhang keeps the dot
+        // where the old one sat (see kSidePanelStatusIconOverhangPx). A collapsed panel holds still from the start (the
+        // host gate; _SidePanelToggleCollapsed flips it for the realized cards).
+        v.glyph = AgentStatusGlyph::Create();
+        {
+            const auto icon = v.glyph->Root();
+            icon.VerticalAlignment(VerticalAlignment::Top);
+            icon.Margin(ThicknessHelper::FromLengths(-kSidePanelStatusIconOverhangPx, 0, -kSidePanelStatusIconOverhangPx, 0));
+            v.stateRow.Children().Append(icon);
+        }
+        v.glyph->SetHostShown(!_sidePanelCollapsed);
         v.stateText = Text(L"", 10, false, 0.9);
+        v.stateText.Margin(ThicknessHelper::FromLengths(0, 0, 0, kSidePanelStatusIconBandPx)); // centered on the dot, not the whole icon
         v.stateRow.Children().Append(v.stateText);
         Grid::SetColumn(v.stateRow, 0);
         v.stateLine.Children().Append(v.stateRow);
@@ -2752,9 +2984,12 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Write `model` into a card IN PLACE: every value that differs from the one the card shows now (its
-    // view.model) is written — a text, a brush, the border — and an optional part (the codex pill, the pending
-    // dots, the timing text, the band's tag strip) is added or dropped only when its presence changes. A value
-    // that did not change is never touched, so an update that changed nothing for this card costs it nothing.
+    // view.model) is written — a text, a brush, the border — and an optional part (the codex pill, the timing
+    // text, the band's tag strip) is added or dropped only when its presence changes. The status icon's three
+    // indicators (the 3 dots, the flash ring, the spark crown — SIDE_PANEL.md §2g) are shown or hidden through
+    // its setters, which also start or stop their motions. A value that did not change is never touched, so an
+    // update that changed nothing for this card costs it nothing. Also the in-place indicator patch's writer
+    // (_SidePanelRefreshIndicators), which hands a row model that differs from the card's only in the patched fields.
     // `view`: the card (its elements + the model they show).
     // `model`: what it must show; moved into view.model at the end.
     // `id`: the card's session — the selection check of its border.
@@ -2786,43 +3021,54 @@ namespace winrt::TerminalApp::implementation
         if (fresh || model.state != shown.state)
         {
             const Color stateColor = StateColor(model.state);
-            view.stateDot.Fill(SolidColorBrush{ stateColor });
+            view.glyph->SetStateColor(stateColor);
             view.stateText.Text(StateLabel(model.state));
             view.stateText.Foreground(SolidColorBrush{ stateColor });
             SidePanelStyleCardBorder(view.cardBack, stateColor, id == _sidePanelSelectedId, view.hovered);
         }
-        // The state row's optional parts, always in this order after the dot and the label:
-        // [codex pill][pending dots]. An insert index is derived from the parts in front of it. The timing text is the
-        // state LINE's star column (after the row), not a row part.
+        // The state row's optional part, after the status icon and the label: [codex pill]. The timing text is the state
+        // LINE's star column (after the row), not a row part.
         if (model.codex && !view.codexPill)
         {
             view.codexPill = Text(L"codex", 9, true, 0.9);
             view.codexPill.Foreground(Fill(0xFF, 0x2E, 0xB8, 0xA8)); // the External/Codex teal pill color family
-            view.stateRow.Children().InsertAt(2, view.codexPill); // right after the dot and the label
+            view.codexPill.Margin(ThicknessHelper::FromLengths(0, 0, 0, kSidePanelStatusIconBandPx)); // centered on the dot, like the label
+            view.stateRow.Children().InsertAt(2, view.codexPill); // right after the status icon and the label
         }
         else if (!model.codex && view.codexPill)
         {
             SidePanelRemoveChild(view.stateRow, view.codexPill);
             view.codexPill = nullptr;
         }
+        // The STATUS ICON's three indicators (SIDE_PANEL.md §2g) — never added or dropped, only shown or hidden: the glyph
+        // holds every element, and each setter starts / stops its own motion (the tab header's rule, StatusIconMotion.h).
+        // The unsent-draft 3 dots, under the dot: shown with a draft, pulsing once the session's tab has started.
         if (fresh || model.pending != shown.pending || model.pendingAnimated != shown.pendingAnimated || model.pendingArgb != shown.pendingArgb)
         {
-            // Replaced whole — it changes rarely (a draft appears or goes, a dormant tab starts, the dots' color
-            // or Windows' animation switch changes), and a cluster is three ellipses plus its pulse, so a new
-            // one is simpler than retuning the old. The old cluster's Unloaded stops its pulse.
-            if (view.pendingDots)
+            view.glyph->SetPending(model.pending, SidePanelUnpackArgb(model.pendingArgb), model.pendingAnimated);
+        }
+        // The unread FLASH RING, behind the dot: painted with THIS window's one flash-ring brush, the very instance its
+        // tabs' rings use — a settings change re-colors it in place (_RefreshFlashRingBrush), so the cards follow with no
+        // update of their own. Built here if no tab of the window has flashed yet (the tab path's _SetTabFlashRing order:
+        // brush first, then the ring shows). Its blink follows the UI thread's shared clock: in lockstep with the tabs'.
+        if (fresh || model.flashRing != shown.flashRing)
+        {
+            if (model.flashRing)
             {
-                SidePanelRemoveChild(view.stateRow, view.pendingDots);
-                view.pendingDots = nullptr;
+                _EnsureFlashRingBrush();
             }
-            if (model.pending)
-            {
-                // The unsent-draft indicator — the same BuildPendingDots cluster the board card shows, in the
-                // user's configured LIGHT color (card bodies are always dark here).
-                view.pendingDots = BuildPendingDots(4.0, SidePanelUnpackArgb(model.pendingArgb), model.pendingAnimated);
-                const uint32_t dotsIndex = view.codexPill ? 3u : 2u; // after the dot, the label and the pill (when there is one)
-                view.stateRow.Children().InsertAt(dotsIndex, view.pendingDots);
-            }
+            view.glyph->SetFlashRing(model.flashRing, _flashRingBrush);
+        }
+        // The cache-warm SPARK CROWN, around the dot: the glow behind it and the embers rising off it, in the tab's fire.
+        if (fresh || model.cacheWarm != shown.cacheWarm || model.cacheWarmArgb != shown.cacheWarmArgb)
+        {
+            view.glyph->SetCacheWarm(model.cacheWarm, SidePanelUnpackArgb(model.cacheWarmArgb));
+        }
+        // Windows' animation switch moved since this card's last model: re-decide every motion (the crown has no model
+        // field of its own that would carry the change; the dots' pendingAnimated above already re-decided theirs).
+        if (!fresh && model.animationsEnabled != shown.animationsEnabled)
+        {
+            view.glyph->RefreshMotion();
         }
         if (model.timing.empty())
         {
@@ -2839,7 +3085,9 @@ namespace winrt::TerminalApp::implementation
             // the card shows ONE tooltip, the rich session card (a tab header's model), so the explanatory
             // floating tip is not attached here; _SidePanelApplyCardTipMode adds it when the summary comes back.
             view.timing = Text(winrt::hstring{ model.timing }, 10, false, 0.45);
-            view.timing.Margin(ThicknessHelper::FromLengths(5, 0, 0, 0)); // the gap the row's own Spacing(5) gives its parts
+            // Left: the gap the row's own Spacing(5) gives its parts. Bottom: the status icon's pending band, so the text
+            // centers on the dot like the label beside it (the line is the icon's 22 DIPs tall — SIDE_PANEL.md §2g).
+            view.timing.Margin(ThicknessHelper::FromLengths(5, 0, 0, kSidePanelStatusIconBandPx));
             if (!_sidePanelSummaryHidden)
             {
                 AgentSetTitledTip(view.timing, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });

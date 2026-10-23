@@ -2583,6 +2583,50 @@ namespace Agentmaster
         return e.unreadCount;
     }
 
+    std::vector<std::wstring> UnreadSessionUnion(const std::map<std::wstring, std::vector<std::wstring>>& unreadByWindow)
+    {
+        // The same flatten + sort + unique as CountDistinctUnreadSessions (kept beside it, not merged into it), returning
+        // the ids themselves: the side panel binary-searches this list once per card, so it must come back SORTED.
+        std::vector<std::wstring> all;
+        for (const auto& [windowId, ids] : unreadByWindow)
+        {
+            (void)windowId;
+            for (const auto& id : ids)
+            {
+                if (!id.empty())
+                {
+                    all.push_back(id);
+                }
+            }
+        }
+        std::sort(all.begin(), all.end());
+        all.erase(std::unique(all.begin(), all.end()), all.end());
+        return all;
+    }
+
+    std::vector<std::wstring> CurrentUnreadSessionIds() noexcept
+    {
+        return CurrentUnreadSessionIdsIn(SharedEngine());
+    }
+
+    std::vector<std::wstring> CurrentUnreadSessionIdsIn(Engine& e) noexcept
+    {
+        try
+        {
+            // Under the census lock: a publish replaces one window's set wholesale, so the union is read consistent. The
+            // sets are tiny (the unread tabs of each window), so the copy costs microseconds while the lock is held.
+            std::lock_guard<std::mutex> lk(e.unreadMutex);
+            return UnreadSessionUnion(e.unreadByWindow);
+        }
+        catch (...)
+        {
+            // noexcept by contract (a UI-thread reader patching card rings): an allocation failure answers "nothing
+            // unread", which only hides the cards' copies of the ring until the next read — never the tabs' own rings.
+            LogSwallowedException(L"CurrentUnreadSessionIds");
+            return {};
+        }
+    }
+
     uint64_t RegisterUnreadCountHandler(const std::wstring& windowId, std::function<void(uint32_t count)> handler)
     {
         return RegisterUnreadCountHandlerIn(SharedEngine(), windowId, std::move(handler));
