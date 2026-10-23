@@ -10,6 +10,7 @@
 #include "TabHeaderControl.h" // Agentmaster (bookmark tags): get_self — the badge-hover til::events aren't projected
 #include "AgentCopyActions.h" // Agentmaster: kTranscriptCopyMenu — the shared Copy ▸ Transcript submenu (its levels, tooltips and codes)
 #include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
+#include "AgentPanelFocus.h" // Agentmaster (TCM-K2): AgentFocusInOpenPopup — the context menu's Closed hand-back stands aside for a panel a menu item opened
 #include "Utils.h"
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -2615,7 +2616,8 @@ namespace winrt::TerminalApp::implementation
 
         // GH#5750 - When the context menu is dismissed with ESC, toss the focus
         // back to our control.
-        contextMenuFlyout.Closed([weakThis](auto&&, auto&&) {
+        // Agentmaster (TCM-K2): the handler also reads `sender` (the menu itself), for its XamlRoot.
+        contextMenuFlyout.Closed([weakThis](auto&& sender, auto&&) {
             if (auto tab{ weakThis.get() })
             {
                 // GH#10112 - if we're opening the tab renamer, don't
@@ -2628,6 +2630,39 @@ namespace winrt::TerminalApp::implementation
                 if (!tab->_headerControl.InRename() &&
                     (terminalControl == nullptr || !terminalControl.SearchBoxEditInFocus()))
                 {
+                    // Agentmaster (TCM-K2, flows/23-tab-context-menu.md): ... AND the keyboard is not inside an open
+                    // popup. Closed comes AFTER the menu's close animation (WinUI raises it from the presenter's
+                    // Unloaded), long after the item's Click ran. A Click that opened a panel of its own (Tags, the
+                    // "Specify a model" prompt, a confirm dialog) has by then focused that panel, and this hand-back
+                    // used to pull the keyboard out of it into the terminal: the tag name the user typed went into
+                    // Claude's input box, and Escape went to claude, where it interrupts a running turn. A dismissal
+                    // with Esc (GH#5750's case) leaves the focus on the tab or the terminal, never in a popup, so it
+                    // still gets the hand-back. The color picker is not affected either: its Flyout opens only after
+                    // this Closed (WinUI stages a flyout that opens while another one closes). AgentPanelFocus.h has
+                    // the WinUI facts.
+                    winrt::Windows::UI::Xaml::XamlRoot root{ nullptr };
+                    try
+                    {
+                        // The tab item's root; the menu's own one if the item has left the strip meanwhile (a far tab
+                        // is derealized). One window has one XamlRoot, so either answers for the same window.
+                        root = tab->TabViewItem().XamlRoot();
+                        if (!root)
+                        {
+                            if (const auto menu = sender.template try_as<WUX::Controls::Primitives::FlyoutBase>())
+                            {
+                                root = menu.XamlRoot();
+                            }
+                        }
+                    }
+                    CATCH_LOG(); // no root: AgentFocusInOpenPopup answers false, and the hand-back runs as upstream's
+                    winrt::hstring focusedClass;
+                    if (AgentFocusInOpenPopup(root, &focusedClass))
+                    {
+                        // One line per such close (a menu action that opened a panel): the record of WHY the keyboard
+                        // stayed out of the terminal, for the next "my keys went to the wrong place" report.
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[focus] tab menu closed while the keyboard is in an open popup (" + std::wstring{ focusedClass } + L"): no hand-back to the terminal\n");
+                        return;
+                    }
                     tab->RequestFocusActiveControl.raise();
                 }
             }

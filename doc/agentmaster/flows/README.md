@@ -47,7 +47,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [20-robustness.md](20-robustness.md) | Freezes, crashes, leaks, hostile environments (ROB) | 11 | 3 / 3 / 5 | 28 | 8 | 1 |
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
-| [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 |
+| [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | **Total** | | **180** | **75 / 75 / 25** (+5 NOT BUILT) | **≈ 657** | **≈ 538** | **24** |
 
 ---
@@ -230,7 +230,7 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
 | SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
-| TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
+| TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) — **fixed in code 2026-10-23** (TCM-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | SP-K2 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TAB-K1 | A window close can save its Claude tabs as plain shell tabs (intermittent; an autosave after the teardown flush) | e2e suite, 2026-10-23 (seen once) |
 | TAB-K2 | A reopen whose focused tab was a shell starts the first Claude tab | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
@@ -279,7 +279,7 @@ desktop: **49 of 49 tests pass in 37 min**; a known-defect test passes while its
 | TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
 | TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |
 | TCM-04 | phases 1–7 | `…::test_copy_puts_the_sessions_facts_on_the_clipboard` |
-| TCM-05 | phases 1–4; TCM-K2 | `…::test_show_transcript_mark_unread_favorite`, `…::test_open_in_explorer_opens_the_folder`, `…::test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal` |
+| TCM-05 | phases 1–5 (phase 5: `needs_fix`, a build with TCM-K2's fix) | `…::test_show_transcript_mark_unread_favorite`, `…::test_open_in_explorer_opens_the_folder`, `…::test_tags_from_the_tab_menu_take_the_keyboard` |
 | TCM-06 | phases 1–3 | `…::test_move_tab_reorders_the_strip`, `…::test_move_tab_to_new_window` |
 | TCM-07 | phases 1–4, E1 | `…::test_fork_session_branches_the_conversation`, `…::test_new_session_here_starts_a_fresh_session`, `…::test_fork_on_a_model_and_on_a_specified_model` |
 | TCM-08 | phases 1–2 | `…::test_restart_session_resumes_the_same_conversation` |
@@ -294,7 +294,7 @@ desktop: **49 of 49 tests pass in 37 min**; a known-defect test passes while its
 Not automated yet in these areas: MGR-05 phases 2 and 5
 (the tab's selection pill is not in UI Automation; folder scope), MGR-06, SP-03, SP-07 (hundreds of sessions), SP-04
 phase 3–4, SP-05 E1–E2, E4–E8, SP-06 phases 1–2 (splitter drags), TCM-01 phase 4 (an adopted shell claude),
-TCM-05 phase 5 (the panel's own focus — today TCM-K2), TAB-01 E1–E3, E5, E6 (the focused tab — MGR-03 phase 3 —,
+TAB-01 E1–E3, E5, E6 (the focused tab — MGR-03 phase 3 —,
 a turn cut off, an adopted session, a delivery in flight, the strip's place), TAB-02 E2, TAB-03 E2–E4 and E6, TAB-04
 phase 3 (MRU mode), TAB-05–TAB-09, the edge cases not listed above.
 

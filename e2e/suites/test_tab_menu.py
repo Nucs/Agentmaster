@@ -13,7 +13,7 @@ from amdriver import inputs, uia, win32
 from amdriver.session import wait_new_session, wait_until_no_claude
 from amdriver.ui.dialogs import Dialog
 from amdriver.ui.menus import Menu
-from amdriver.waits import wait_until
+from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
 """The default tab of a fresh window in the guest (Windows PowerShell; the guest's user is an administrator)."""
@@ -664,36 +664,81 @@ def test_fork_on_a_model_and_on_a_specified_model(am, s1, mock):
     assert not am.profile.hooks.find(r"fork-managed-begin", since=mark)
 
 
+def _focus_is_tag_box() -> bool:
+    """Whether the keyboard focus is in the Tags panel's name box.
+
+    Returns:
+        True when the focused element is the edit named 'tag name'.
+    """
+    focused = uia.focused()
+    return focused is not None and focused.role == "edit" and focused.name == "tag name"
+
+
+def _focus_is_terminal() -> bool:
+    """Whether the keyboard focus is in a terminal.
+
+    Returns:
+        True when the focused element is a TermControl.
+    """
+    focused = uia.focused()
+    return focused is not None and focused.class_name == "TermControl"
+
+
 @pytest.mark.p1
 @pytest.mark.flow("TCM-05")
-@pytest.mark.known_defect("TCM-K2")
-def test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal(am, s1):
-    """TCM-K2 (expected failure once fixed): Tags chosen from the TAB's menu opens the Tags panel, but the keyboard
-    focus stays in the terminal — typed text lands in Claude's input box and Esc goes to claude (a running turn
-    would be interrupted) instead of closing the panel. Measured on 0.8.0 (2026-10-23). The panel itself works once
-    clicked into: a tag is added and stored (that half is asserted as correct behavior).
+@pytest.mark.needs_fix("TCM-K2")
+def test_tags_from_the_tab_menu_take_the_keyboard(am, s1):
+    """TCM-05 phase 5 (TCM-K2's fix, 2026-10-23): Tags chosen from the TAB's menu opens the Tags panel with the
+    keyboard in its 'tag name' box, and keeps it there past the menu's close: typed text goes into the box, never
+    into Claude's input box, and Esc closes the panel and reaches nothing else — a running turn goes on. The keyboard
+    then goes back to the terminal. On 0.8.0 the tab menu's late Closed handed the keyboard back to the terminal
+    after the panel had focused its box: the typed text landed in Claude's box and Esc went to claude (TCM-K2).
 
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert the box has the focus,
-    the typed name goes into it, and Esc closes the panel.
+    The turn is HELD at a mock gate while the panel is up: an ESC that reached claude would abort its request, and the
+    gate would lose its waiter. hooks.log says where the keyboard went at the close ("[focus] the Tags panel closed:
+    …"), printed for the record.
 
     Args:
         am: The app.
         s1: F-S.
     """
     w = am.window
+    s1.ask('tag while working [[mock say "working"; hold gt; reply "done"]]', wait="sent")
+    am.mock.wait_holding("gt", timeout_s=30)
+    s1.wait_state("Running", timeout_s=15)
+    mark = am.profile.hooks.mark()
     w.tabs.context_menu("t1").choose("Tags")
     panel = w.tags.wait_open()
-    time.sleep(0.8)  # the panel's own focus would have landed by now
-    focused = uia.focused()
-    assert focused is not None and focused.class_name == "TermControl", focused  # expected: the 'tag name' box
+    wait_until(_focus_is_tag_box, 5, what="the keyboard in the panel's 'tag name' box", describe=uia.focused)
+    # The tab menu's Closed comes after its close animation, well after the panel took the keyboard; it was the
+    # hand-back that pulled the keyboard out of the box (TCM-K2). Past it, the box must still hold the keyboard.
+    hold_true(_focus_is_tag_box, 1.5, what="the keyboard stays in the panel's box past the tab menu's close",
+              describe=uia.focused)
     inputs.type_text("zz")
-    wait_until(lambda: (w.terminal.input_box() or None) and w.terminal.input_box().draft == "zz", 5,
-               what="the typed text in Claude's box (expected: in the panel's box)")
+    wait_until(lambda: panel.box().value == "zz", 5, what="the typed text in the panel's box",
+               describe=lambda: panel.box().value)
+    box = w.terminal.input_box()
+    assert box is None or "zz" not in box.draft, box  # nothing reached Claude's input box
     inputs.keys("esc")
-    time.sleep(1.0)
-    assert panel.is_open()  # expected: Esc closes the panel
-    # The panel works once clicked into.
-    panel.add("e2e-tag")
+    wait_until(lambda: not panel.is_open(), 5, what="Esc closes the Tags panel")
+    wait_until(_focus_is_terminal, 5, what="the keyboard back in the terminal", describe=uia.focused)
+    hold_true(lambda: am.mock.gates().get("gt", {}).get("waiting", 0) > 0 and s1.state == "Running", 2.0,
+              what="the held turn still running (no ESC reached claude)",
+              describe=lambda: (am.mock.gates().get("gt"), s1.state))
+    focus_line = am.profile.hooks.find(r"\[focus\] the Tags panel closed: (.*)", since=mark)
+    print("TCM-05 phase 5: " + (focus_line[0].group(1) if focus_line else "no [focus] line in hooks.log"))
+    am.mock.release("gt")
+    s1.wait_state("WaitingForInput", timeout_s=30)
+    # The panel still adds and stores a tag, from the keyboard alone now: no click into the box first.
+    w.tabs.context_menu("t1").choose("Tags")
+    panel = w.tags.wait_open()
+    wait_until(_focus_is_tag_box, 5, what="the keyboard in the panel's box again", describe=uia.focused)
+    inputs.type_text("e2e-tag")
+    inputs.keys("enter")
+    wait_until(lambda: "e2e-tag" in panel.texts(), 5, what="tag 'e2e-tag' in the panel", describe=panel.texts)
     assert panel.count()[0] == 1
     wait_until(lambda: "e2e-tag" in json.dumps(am.profile.session_store(s1.id)), 10, what="the tag stored",
                describe=lambda: am.profile.session_store(s1.id))
+    inputs.keys("esc")
+    wait_until(lambda: not panel.is_open(), 5, what="Esc closes the panel again")
+    assert s1.state == "WaitingForInput"  # nothing the panel's keys did reached claude

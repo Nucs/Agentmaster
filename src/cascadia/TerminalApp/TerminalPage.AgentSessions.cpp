@@ -38,6 +38,7 @@
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentModelPrompt.h" // AgentBuildSpecifyModelCard — the shared "Specify a model..." prompt this page hosts
+#include "AgentPanelFocus.h" // Agentmaster (TCM-K2): where the keyboard goes back to when the "Specify a model" prompt closes
 #include "AgentMaster/ApiErrorRewind.h" // the API-ERROR REWIND before a resume (HOOKS.md "API-error turns")
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/CommandWatch.h" // IsSaneWatchPath — the /handover action's path re-assert (COMMANDS.md)
@@ -4778,12 +4779,24 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 host.Children().Append(built.card);
+                // Agentmaster (TCM-K2): an open while the prompt is up keeps the keyboard's return target of the
+                // first open (the prompt itself is no place to go back to).
+                const bool wasOpen = page->_specifyModelPopup.IsOpen();
                 page->_specifyModelPopup.Child(host);
                 page->_specifyModelPopup.IsOpen(true);
                 // Focus the box one tick AFTER the open — on a first open the child has only just
                 // been realized and a same-tick Focus on an unlaid-out control no-ops.
                 auto box = built.box;
-                page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [box]() {
+                page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak, box, host, wasOpen]() {
+                    // Agentmaster (TCM-K2): where the keyboard is right before the box takes it — the terminal, a
+                    // Sessions row; a tab header answers "the current tab" (AgentCaptureFocusReturn's rule) —
+                    // so _HideSpecifyModel can give it back. Read now, not at the click: the menu's popup has
+                    // closed since then and returned the focus to where it was before the menu. Skipped when
+                    // the prompt has closed meanwhile (a commit or cancel faster than this tick).
+                    if (const auto p = weak.get(); p && !wasOpen && p->_specifyModelPopup && p->_specifyModelPopup.IsOpen())
+                    {
+                        p->_specifyModelReturnFocus = AgentCaptureFocusReturn(p->Root().XamlRoot(), host, p->_tabView);
+                    }
                     if (box)
                     {
                         box.Focus(FocusState::Programmatic);
@@ -4797,13 +4810,26 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // The declaration (TerminalPage.h) has the contract. Agentmaster (TCM-K2): the keyboard step. The prompt is a
+    // plain Popup, so closing it with the focus in its box only removes the box, and the focus manager moves the
+    // focus to whatever it finds next in the window (AgentPanelFocus.h, fact 3): after a Cancel or an Escape from
+    // a tab's menu, the keyboard was left somewhere arbitrary. It now goes back to where it was before the prompt
+    // opened (_specifyModelReturnFocus), or to the current tab.
     void TerminalPage::_HideSpecifyModel()
     {
         if (_specifyModelPopup)
         {
+            // Asked BEFORE the close (the close moves the focus at once) and only for an OPEN prompt: on a closed
+            // one, "nothing holds the focus" would read as "the prompt held it". noexcept: a failure answers no.
+            const bool heldKeyboard = _specifyModelPopup.IsOpen() && AgentPanelHoldsKeyboard(Root().XamlRoot(), _specifyModelPopup.Child());
             _specifyModelPopup.IsOpen(false);
             _specifyModelPopup.Child(nullptr); // release the card (and its captured callback)
+            if (heldKeyboard)
+            {
+                _ReturnKeyboardAfterPanel(_specifyModelReturnFocus, L"the Specify a model prompt"); // noexcept
+            }
         }
+        _specifyModelReturnFocus = nullptr; // the next open captures its own target
     }
 
     // ONE opener for every model submenu this page builds (the Sessions browser) or feeds (the WT
