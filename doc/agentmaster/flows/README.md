@@ -16,7 +16,10 @@ Written 2026-10-23 from: the per-version changelogs of the four releases
 (`.claude/skills/release-version/am_release_080_notes.draft.md` holds them all), the commits after `v0.8.0`
 (9245a890f, 381c6c715, 57a40dd30, 0502c9380, 3b042ea32), every spec document under `doc/agentmaster/`, the project
 CLAUDE.md, and the code wherever a document and the code disagreed (the disagreements are listed at the end).
-Nothing here has been run yet: the suite does not exist.
+The catalog started as a design; the section **The suite that runs these flows** below records the implemented
+subset (40 tests reported green on 2026-10-23). Other flows remain specifications, not claims of automated coverage.
+The shared reliability guard and dedicated crash/corruption/leak scenarios are separately planned in
+[E2E_RELIABILITY.md](../E2E_RELIABILITY.md); its G/C/L/R scenario IDs do not add implemented flows to this table.
 
 ## Contents
 
