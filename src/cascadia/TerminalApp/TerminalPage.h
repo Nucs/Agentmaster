@@ -1346,13 +1346,27 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab must
         // ACTIVATE the session in place WITHOUT switching to it. A MUX TabViewItem drives its selection
-        // on pointer-RELEASE (after our press handler), so the switch can't be cancelled at press time;
-        // _OnTabPointerPressed instead ARMS a one-shot veto here and _OnTabSelectionChanged snaps the
+        // on pointer-RELEASE (after our press handler), so the switch can't be cancelled at press time.
+        // Since TAB-K4 (2026-10-23) the press keeps that release from selecting the tab at all
+        // (_tabShiftActivatePress below); this one-shot veto is the FALLBACK for a press whose release
+        // swallow could not be armed: _OnTabPointerPressed ARMS it and _OnTabSelectionChanged snaps the
         // selection back to _tabSelectRevertTo before any content-swap side effects run.
         // _revertingTabSelection guards the revert's own re-entrant SelectionChanged.
         bool _suppressTabSelectForActivate{ false };
         bool _revertingTabSelection{ false };
         winrt::Windows::Foundation::IInspectable _tabSelectRevertTo{ nullptr };
+        // Agentmaster (TAB-K4, 2026-10-23): the Shift+Click press in flight on a managed session tab, the press
+        // _OnTabPointerPressed turned into "activate in place". While it is engaged, a one-shot PointerReleased handler
+        // sits on the pressed tab's template root and marks the press's release handled, so the item skips the selection
+        // tap it queued at the press: no selection, no focus moved onto the tab header, no strip scroll
+        // (_ArmTabShiftActivateRelease). Engaged by the press; reset, which revokes the handler, by that release and by
+        // every later tab press. UI thread only.
+        struct TabShiftActivatePress
+        {
+            uint32_t pointerId{ 0 }; // the pressing pointer; a release of any other pointer passes untouched
+            winrt::Windows::UI::Xaml::UIElement::PointerReleased_revoker releaseRevoker; // removes the one-shot handler (on reset, or the page's destruction)
+        };
+        std::optional<TabShiftActivatePress> _tabShiftActivatePress;
 
         bool _activated{ false };
         bool _visible{ true };
@@ -2993,6 +3007,11 @@ namespace winrt::TerminalApp::implementation
         PointerExited_revoker _tabItemMiddleClickPointerExited;
         PointerCaptureLost_revoker _tabItemMiddleClickPointerCaptureLost;
         void _OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& eventArgs);
+        // Agentmaster (TAB-K4): arm the one-shot handler that keeps a Shift+Click press's release from selecting its tab
+        // (see _tabShiftActivatePress). routeChild = the pressed tab's template root; pointerId = the pressing pointer.
+        // Returns false (nothing armed — the caller arms the selection veto) for a null routeChild or a failed
+        // registration. Never throws (a failure is logged, Rule #18).
+        bool _ArmTabShiftActivateRelease(const winrt::Windows::UI::Xaml::UIElement& routeChild, uint32_t pointerId) noexcept;
         safe_void_coroutine _OnTabPointerReleasedCloseTab(IInspectable sender);
 
         void _OnTabSelectionChanged(const IInspectable& sender, const Windows::UI::Xaml::Controls::SelectionChangedEventArgs& eventArgs);

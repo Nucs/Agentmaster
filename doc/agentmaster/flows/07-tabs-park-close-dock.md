@@ -45,9 +45,12 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
    (PQR-10); the tab is NOT turned into a plain shell, NOT archived (wait 30 s, census still has it).
 3. **Wake.** *Do:* click the tab. *Expect:* the conversation resumes (`claude --resume` same id); the draft is
    typed back (DRF-06); the queue continues after settle (Auto).
-4. **Activate without switching.** *Do:* park again; tab menu → **Activate Tab (Shift+Click)** (or Shift+click
-   the tab — today that SWITCHES to it: TAB-K4). *Expect:* it starts in place (`claude --resume`, `[nav]
-   activate-dormant <sid8>`) without being selected.
+4. **Activate without switching.** *Do:* park again; tab menu → **Activate Tab (Shift+Click)**, or Shift+Click
+   the tab (on 0.8.0 that switches to it: TAB-K4, fixed in code 2026-10-23). *Expect:* it starts in place
+   (`claude --resume`, `[nav] activate-dormant <sid8>`) without being selected; the Shift+Click also logs `[nav]
+   tab-shift-click <sid8> "<title>": started in place, no switch (its release will not select it)`, no `[nav]
+   tab-focus`, and the keyboard stays in the tab you were on. A Shift+Click on a session tab that already runs
+   starts nothing (`…: nothing to start …`) and does not switch either.
 
 **Edge cases**
 - **E1 The focused tab** → the Agent Manager page shows first (MGR-03).
@@ -283,19 +286,59 @@ would not start. With a CLAUDE tab focused at the quit only that tab starts (che
 the shells' startup batch, after the shells exist; until then the first Claude tab is the selected, SHOWN tab, and a
 shown terminal starts. **Expected:** only the focused tab (and busy ones, INT-04) start (TAB-10 E1).
 
-### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place
-> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_lifecycle.py`
-> `test_known_defect_shift_click_on_a_parked_tab_switches_to_it`)
+### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place — FIXED in code 2026-10-23 (NOT BUILT into a release)
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
+> `e2e/suites/test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place`, `needs_fix`). **The fix:**
+> the tab's press handler receives the left press, and the Shift+Click keeps its release from selecting the tab.
+> What it was on 0.8.0:
 
 The tab menu names the gesture — "Activate Tab (Shift+Click)", tooltip "You can also Shift+Click the tab to do this" —
 but a Shift+Click on a parked (or restored-dormant) tab SELECTS it: `[nav] tab-focus <sid8>`, the page or the tab you
 were on is left, and the claude starts as a side effect of the switch; no `[nav] activate-dormant` is logged. Measured
 with Shift held 0.08 s, 0.4 s and 1 s around the click. The same Shift+Click on the session's Explorer Tree row or
-Triage Board card DOES start it in place (`[nav] activate-dormant`), so the Shift reaches the app. **By reading:**
-`_OnTabPointerPressed` (TabManagement.cpp) is attached with a plain `PointerPressed` handler, and a ListViewItem marks
-a LEFT press handled in its own pointer handling, so the Shift branch never runs (a middle press, which the item does
-not handle, reaches it: middle-click close works). **Expected:** the tab starts in place and the selection stays
-(TAB-01 phase 4); a handler registered with handledEventsToo would see the press.
+Triage Board card DOES start it in place (`[nav] activate-dormant`), so the Shift reaches the app.
+
+**Root cause** (read in microsoft-ui-xaml's source on 2026-10-23: WinUI 2.8's `TabViewItem.cpp`, the system XAML's
+`ListViewBaseItem_Partial.cpp`, `ListViewBase_Partial_Interaction.cpp`, `Selector_Partial.cpp` and `eventmgr.cpp`):
+- `_OnTabPointerPressed` (TabManagement.cpp) was attached with a plain `PointerPressed` handler
+  (`tabViewItem.PointerPressed(...)`, upstream's line), and a plain handler is skipped for an event already marked
+  handled.
+- XAML raises an element's class handler before the handlers added to that element (`CEventManager::Raise`:
+  `RaiseControlEvents`, then the element's own handler list). A TabViewItem's class handler is
+  `TabViewItem::OnPointerPressed` → `ListViewBaseItem::OnPointerPressed`, which queues the selection tap for a mouse or
+  pen LEFT press (`EnqueuePendingTapInteractionForPointerId`) and marks the press handled. So the handler never ran
+  for a left press on a tab, and its Shift branch — start the session in place and veto the selection — was dead code
+  since it was written. Right and middle presses, which the item leaves unhandled, did reach it: middle-click close
+  works through the same handler.
+- The same blind spot hid two more of the handler's steps: leaving the Agent Manager page onto the tab MUX holds
+  selected under it (a left press on that header), and a left press's clear of the middle-click marker — after a
+  middle press released off the tab, the next X click was read as a middle click and refused while "Close tab with
+  middle-mouse click" is off.
+- The selection itself happens on the RELEASE: `ListViewBaseItem::OnPointerReleased` → `DoTapInteraction` →
+  `OnItemPrimaryInteractionGesture` → `OnSelectItemPrimary` focuses the item, then selects it — unless the release
+  reaches the item already handled.
+
+**The fix** (TabManagement.cpp, TerminalPage.h; not in a release):
+- The handler is registered with handledEventsToo (`AddHandler(PointerPressedEvent, …, true)`), so it receives every
+  press. A press that an inner control took — the close button (a ButtonBase) or the rename box (a TextBox) — is told
+  apart by walking the press's OriginalSource up to the tab (`ResolveTabPressTarget`) and runs no tab gesture; a middle
+  press that arrives handled keeps the old behavior (nothing).
+- A Shift+Click on a managed session tab other than the selected one arms a ONE-SHOT PointerReleased handler on the
+  tab's template root (`_ArmTabShiftActivateRelease`): every release inside the tab bubbles through it before the
+  item's class handler runs, and it marks the press's release handled, so the item skips its tap — no selection, no
+  keyboard focus moved onto the tab header, no scroll of the strip. The tab's own Tapped handler (GH#3609) then hands
+  the keyboard back to the tab you are on. The armed state (`_tabShiftActivatePress`) is reset by that release and by
+  every later tab press, which revokes the handler.
+- The one-shot selection veto of the old design (`_suppressTabSelectForActivate`: `_OnTabSelectionChanged` snaps the
+  selection back) stays as the fallback for a press whose template root could not be found or armed. Reverting there
+  would still scroll the previously selected tab into view (the selection's own ScrollIntoView), which the release
+  swallow avoids.
+- Logged: `[nav] tab-shift-click <sid8> "<title>": started in place | nothing to start (running, or not startable
+  here), no switch (its release will not select it | the selection veto reverts it (fallback) | it is the selected tab
+  already)`, beside `_ActivateDormantSession`'s own `[nav] activate-dormant <sid8>`.
+
+**Expected** (and what the replacing test checks): the tab starts in place, the selection and the keyboard stay where
+they were (TAB-01 phase 4); a second Shift+Click on the running tab starts nothing and does not switch.
 
 ### TAB-K3 · The quit confirmation is invisible to UI Automation
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0

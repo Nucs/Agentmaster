@@ -157,9 +157,10 @@ since=mark)`), then the UI.
   by replacing them; a plain `open()` handle (read + write sharing, no delete) makes such a save FAIL —
   `[persist-fail] … atomic replace failed` — and nothing retries it (ROB-K1). Every read in `amdriver` goes through
   `win32.read_bytes_shared`; a test that holds a file with `open()` does it on purpose.
-- **Shift+Click on a TAB switches to it** (TAB-K4), with Shift held as long as you like; the tree row's and the board
-  card's Shift+Click do start a parked session in place. Wake a parked tab in place with `tabs.activate(tab)` (its
-  menu's Activate Tab) or `manager.activate_all()`.
+- **Shift+Click on a TAB switches to it on 0.8.0** (TAB-K4), with Shift held as long as you like; builds with TAB-K4's
+  fix start the session in place and keep the selection (`[nav] tab-shift-click <sid8> …: started in place, no
+  switch`). The tree row's and the board card's Shift+Click start a parked session in place on both. To wake a parked
+  tab in place on either build, use `tabs.activate(tab)` (its menu's Activate Tab) or `manager.activate_all()`.
 - **Activate All Tabs (N)** asks "Activate dormant tabs" (This window (N) · All windows (M) · Cancel) when another
   window has dormant tabs too; with this window's only, it starts them at once, ~500 ms apart.
 - **Close ▸ Of Same Folder / Other of Same Folder** asks "Close N [other] sessions in this folder?" (Close All ·
@@ -198,5 +199,5 @@ since=mark)`), then the UI.
 | TAB-K1 | TAB-10 E2 | A window close can save its Claude tabs as plain shell tabs — seen once; the restart test names it when it recurs | `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` (its record check) |
 | TAB-K2 | TAB-10 E1 | A reopen whose focused tab was a shell starts the first restored Claude tab | `test_tab_menu.py::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
 | TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter) | — |
-| TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) | `test_tab_lifecycle.py::test_known_defect_shift_click_on_a_parked_tab_switches_to_it` |
+| TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture). **Fixed in code 2026-10-23** (not in a release): the tab's press handler never received a left press (the tab, a ListViewItem, takes it first); it now does, and the Shift+Click keeps its release from selecting the tab | `test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place` (`needs_fix`) |
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` without delete sharing makes the save fail; nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |

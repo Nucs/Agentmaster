@@ -31,6 +31,7 @@
 #include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close All" batch branch)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentManagerContent.h" // the Manager content type (its SetLensVisible call moved with the funnel's other Agentmaster steps into _ApplyAgentTabSelection, TerminalPage.AgentEngine.cpp)
+#include "AgentCatchLog.h" // Agentmaster (TAB-K4): AgentLogCaughtException — the tab-press resolver and the Shift+Click release swallow log what they contain (Rule #18)
 
 #include <shlobj.h>
 
@@ -57,6 +58,68 @@ namespace winrt
     namespace MUX = Microsoft::UI::Xaml;
     namespace WUX = Windows::UI::Xaml;
     using IInspectable = Windows::Foundation::IInspectable;
+}
+
+namespace
+{
+    // Agentmaster (TAB-K4, 2026-10-23): what a press on a tab header landed on, read from the visual tree between the
+    // press's OriginalSource and the TabViewItem. _OnTabPointerPressed is registered with handledEventsToo (see
+    // _InitializeTab), so it also receives the presses an inner control already took; this tells those apart from a
+    // press on the tab itself, and finds the element a Shift+Click's release swallow is armed on.
+    struct TabPressTarget
+    {
+        // True when an interactive control inside the tab owns the press: a ButtonBase (the tab's close button) or a
+        // TextBox (the rename box). Such a press is that control's: no tab gesture (Shift+Click's activate in place,
+        // leaving the Agent Manager page onto the tab) may run for it. Shift+Click in the rename box extends its text
+        // selection.
+        bool onInnerControl{ false };
+        // The TabViewItem's own visual child on the press's route: its template root (MUX 2.8's "LayoutRoot" Grid), the
+        // element every pointer event from inside the tab bubbles through just before the item's own class handlers
+        // run. Null when the walk never reached the item from below (the press hit the item itself, or no element of
+        // it), and on an inner-control press, which stops the walk.
+        winrt::WUX::UIElement routeChild{ nullptr };
+    };
+
+    // Agentmaster (TAB-K4): walk from a tab press's OriginalSource up the visual tree to the pressed TabViewItem and
+    // report what the press landed on. The walk stops at the item, at the first ButtonBase or TextBox (an inner
+    // control owns the press), or at the top of the tree.
+    // Parameters:
+    //   originalSource - the press's PointerRoutedEventArgs::OriginalSource, the deepest element hit (null tolerated).
+    //   tabItem - the TabViewItem the handler is attached to (the event's sender); compared by COM identity.
+    // Returns: the target. A default TabPressTarget (not on an inner control, no route child) when the source is null
+    //   or not a DependencyObject, when the walk ended without meeting the item, or when it failed.
+    // Never throws: a failed visual-tree read is logged (Rule #18) and answers the default target, with which a
+    //   Shift+Click falls back to the selection veto instead of a release swallow.
+    TabPressTarget ResolveTabPressTarget(const winrt::IInspectable& originalSource, const winrt::IInspectable& tabItem) noexcept
+    {
+        TabPressTarget target;
+        try
+        {
+            winrt::WUX::DependencyObject below{ nullptr }; // the node the walk came from: the item's child once it meets the item
+            auto node = originalSource.try_as<winrt::WUX::DependencyObject>();
+            while (node)
+            {
+                if (node == tabItem)
+                {
+                    target.routeChild = below ? below.try_as<winrt::WUX::UIElement>() : nullptr;
+                    break;
+                }
+                if (node.try_as<winrt::WUX::Controls::Primitives::ButtonBase>() || node.try_as<winrt::WUX::Controls::TextBox>())
+                {
+                    target.onInnerControl = true;
+                    break;
+                }
+                below = node;
+                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
+            }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"ResolveTabPressTarget (TAB-K4)");
+            target = TabPressTarget{};
+        }
+        return target;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -206,7 +269,19 @@ namespace winrt::TerminalApp::implementation
         // Set this tab's icon to the icon from the content
         _UpdateTabIcon(*newTabImpl);
 
-        tabViewItem.PointerPressed({ this, &TerminalPage::_OnTabPointerPressed });
+        // Agentmaster (TAB-K4, 2026-10-23): registered with handledEventsToo. A MUX TabViewItem is a ListViewItem, and its
+        // own class handler (ListViewBaseItem::OnPointerPressed, which XAML runs BEFORE the handlers added to the same
+        // element) queues the selection tap for a mouse/pen LEFT press and marks the press handled. A plain
+        // `PointerPressed` handler is skipped for a handled event, so this handler never saw a left press on a tab: its
+        // Shift+Click "activate in place" branch never ran (Shift+Click on a parked tab switched to it like a plain
+        // click — TAB-K4, measured on 0.8.0 by the e2e suite), and neither did the Agent Manager page's "a press on the
+        // tab MUX holds selected under the page" branch or a left press's clear of the middle-click marker. Right and
+        // middle presses, which the item leaves unhandled, always arrived: that is why middle-click close worked through
+        // this very handler. The handler tells a press an inner control took (the close button, the rename box) from a
+        // press on the tab, and keeps the old behavior for a middle press something below already handled.
+        tabViewItem.AddHandler(winrt::WUX::UIElement::PointerPressedEvent(),
+                               winrt::box_value(winrt::WUX::Input::PointerEventHandler{ this, &TerminalPage::_OnTabPointerPressed }),
+                               true /* handledEventsToo */);
 
         // When the tab requests close, try to close it (prompt for approval, if required)
         newTabImpl->CloseRequested([weakTab, weakThis{ get_weak() }](auto&& /*s*/, auto&& /*e*/) {
@@ -1591,9 +1666,31 @@ namespace winrt::TerminalApp::implementation
         _UpdateReservedTabTitleLines();
     }
 
+    // Method Description:
+    // - The tab header's PointerPressed handler. Agentmaster: registered with handledEventsToo on every TabViewItem
+    //   (_InitializeTab), so it receives EVERY press on a tab, the left presses the item itself already took included
+    //   (TAB-K4). It runs, in order: the Shift+Click "Activate Tab" gesture on a managed session tab (start the session
+    //   in place and keep the selection where it is), the Agent Manager page's "show me the tab MUX holds selected under
+    //   the page", the clear of the middle-click marker for any non-middle press, and the middle-click close bookkeeping
+    //   (upstream's manual close hook for a tab whose close button is hidden).
+    // Arguments:
+    // - sender: the TabViewItem the handler is attached to.
+    // - e: the press. Read: the pointer's buttons, device and id, the modifier keys, OriginalSource, Handled. Written:
+    //   Handled (true for a Shift+Click on a session tab, and for a middle press the manual close hook captures).
+    // Return Value:
+    // - <none>
+    // Exceptions:
+    // - whatever a WinRT/XAML read here throws reaches XAML (upstream behavior: the handler has no guard of its own).
+    //   The press resolver and the Shift+Click release swallow contain their own failures (logged, Rule #18).
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
     {
         const auto pointerProps = e.GetCurrentPoint(nullptr).Properties();
+        // Agentmaster (TAB-K4): handledEventsToo hands this handler presses something below already took: the item
+        // itself (every mouse/pen left press on the tab), the close button, the rename box. Note which, before this
+        // handler marks anything, and what the press landed on, so each step below acts only on the presses it always
+        // meant.
+        const bool handledOnEntry = e.Handled();
+        const auto pressTarget = ResolveTabPressTarget(e.OriginalSource(), sender);
 
         // Agentmaster (Shift+Click background-activate): defensively clear any one-shot select-veto left
         // over from a prior press. In the normal case the press's own SelectionChanged already consumed
@@ -1601,6 +1698,10 @@ namespace winrt::TerminalApp::implementation
         // could otherwise leave it armed onto this press. A fresh Shift+Click re-arms it below.
         _suppressTabSelectForActivate = false;
         _tabSelectRevertTo = nullptr;
+        // Agentmaster (TAB-K4): likewise drop a Shift+Click's release swallow whose release never reached its tab
+        // (released off the tab, or taken by the reorder drag's capture). The reset revokes its one-shot handler, so
+        // it can never take the release of THIS press.
+        _tabShiftActivatePress.reset();
 
         // Agentmaster (eager-init): Shift+Left-Click a managed agent-session tab = "Activate Tab" ONLY —
         // ACTIVATE without switching. If the session is DORMANT this starts its claude IN PLACE (a
@@ -1617,13 +1718,19 @@ namespace winrt::TerminalApp::implementation
         // CoreWindow::GetForCurrentThread() can be null (see AgentManagerContent::ShiftHeld), which would
         // silently drop the gesture and let the tab switch. The event args carry the true modifier state.
         //
-        // Suppressing the switch: a MUX TabViewItem (a ListViewItem) drives its selection on its OWN
-        // pointer-RELEASE, and the TabView re-captures the pointer internally AFTER this bubbling
-        // PointerPressed handler runs (see the middle-click note below) — so neither e.Handled(true) nor a
-        // press-time CapturePointer steal reliably stops the release-driven selection (the reason this used
-        // to still switch). Instead we ARM a one-shot veto that _OnTabSelectionChanged uses to snap the
-        // selection back to the previously-focused tab BEFORE any content-swap side effects run.
-        if (pointerProps.IsLeftButtonPressed())
+        // Suppressing the switch: a MUX TabViewItem (a ListViewItem) selects itself on its OWN pointer-RELEASE.
+        // Its class handler queued a tap at the press (ListViewBaseItem::OnPointerPressed) and performs it on the
+        // release (OnPointerReleased -> DoTapInteraction: focus the item, then select it) unless that release
+        // arrives already handled. Marking the PRESS handled cannot stop it: the item handled the press itself,
+        // before this handler ran. So (TAB-K4, 2026-10-23) the press arms a one-shot handler on the tab's template
+        // root (_ArmTabShiftActivateRelease), which every release inside the tab bubbles through before the item's
+        // class handler, and that handler marks the release handled: the item skips its tap — no selection, no
+        // keyboard focus moved onto the tab header, no scroll of the strip — and the tab's own Tapped handler
+        // (Tab::_MakeTabViewItem, GH#3609) hands the keyboard back to the tab you are on. The one-shot select-veto
+        // (_suppressTabSelectForActivate: _OnTabSelectionChanged snaps the selection back) remains the FALLBACK for
+        // a press whose route child could not be found or armed.
+        // A press an inner control took (the close button, the rename box) is never this gesture.
+        if (pointerProps.IsLeftButtonPressed() && !pressTarget.onInnerControl)
         {
             const bool shiftHeld = WI_IsFlagSet(e.KeyModifiers(), winrt::Windows::System::VirtualKeyModifiers::Shift);
             if (shiftHeld)
@@ -1632,15 +1739,30 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
                     {
-                        _ActivateDormantSession(sid); // wake it if dormant; a no-op if already running / not hosted here
-                        // Arm the veto only when the press would actually CHANGE the selection (a different
-                        // tab). Clicking the already-selected session tab raises no SelectionChanged, so
-                        // arming there would leave the flag stranded onto the next click.
+                        // Wake it if dormant (that logs `[nav] activate-dormant <sid8>`); a no-op if already running
+                        // or not hosted here.
+                        const bool started = _ActivateDormantSession(sid);
+                        // Keep the selection only when the press would actually CHANGE it (a different tab).
+                        // Clicking the already-selected session tab selects nothing new, so arming there would leave
+                        // a release swallow (or the veto) stranded onto the next click.
+                        const wchar_t* kept = L"it is the selected tab already";
                         if (_tabView.SelectedItem() != sender)
                         {
-                            _tabSelectRevertTo = _tabView.SelectedItem();
-                            _suppressTabSelectForActivate = true;
+                            if (_ArmTabShiftActivateRelease(pressTarget.routeChild, e.Pointer().PointerId()))
+                            {
+                                kept = L"its release will not select it";
+                            }
+                            else
+                            {
+                                _tabSelectRevertTo = _tabView.SelectedItem();
+                                _suppressTabSelectForActivate = true;
+                                kept = L"the selection veto reverts it (fallback)";
+                            }
                         }
+                        // The gesture's own line: what the e2e suite reads for TAB-01's Shift+Click (flows/07).
+                        ::Agentmaster::LogNav(L"tab-shift-click " + _DescribeTabForLog(tab) +
+                                              (started ? L": started in place" : L": nothing to start (running, or not startable here)") +
+                                              L", no switch (" + kept + L")");
                         _middleClickClosePending = false;
                         e.Handled(true);
                         return; // Shift+Click a managed session tab NEVER switches — activate only
@@ -1654,7 +1776,9 @@ namespace winrt::TerminalApp::implementation
         // MUX's own release-driven selection -> SelectionChanged -> the funnel, which leaves the page. The one
         // it can't: the header MUX kept (or re-acquired) as selected under the page — clicking it changes
         // nothing, raises nothing, and the page would stay up. Leave the page onto it here instead.
-        if (pointerProps.IsLeftButtonPressed() && _managerPageVisible && _tabView.SelectedItem() == sender)
+        // (TAB-K4: this branch, too, runs only since the handler sees handled presses: the item takes every left press
+        // first. A press on an inner control, the close button above all, never leaves the page.)
+        if (pointerProps.IsLeftButtonPressed() && !pressTarget.onInnerControl && _managerPageVisible && _tabView.SelectedItem() == sender)
         {
             if (const auto tab = _GetTabByTabViewItem(sender))
             {
@@ -1665,8 +1789,18 @@ namespace winrt::TerminalApp::implementation
         if (!pointerProps.IsMiddleButtonPressed())
         {
             // Agentmaster: a left/right press clears the middle-click marker so a subsequent X-button
-            // close on this tab isn't mistaken for a middle click (see _OnTabCloseRequested).
+            // close on this tab isn't mistaken for a middle click (see _OnTabCloseRequested). (TAB-K4: a left press on
+            // the tab or on its close button, both handled below this handler, reaches this clear only since the
+            // handler sees handled presses. Before, a middle press released off the tab left the marker set, and the
+            // next X click was read as a middle click — and refused while "Close tab with middle-mouse click" is off.)
             _middleClickClosePending = false;
+            return;
+        }
+
+        // Agentmaster (TAB-K4): a middle press something below already took (an inner control) is no middle-click
+        // close, exactly as before the handler received handled presses at all.
+        if (handledOnEntry)
+        {
             return;
         }
 
@@ -1718,6 +1852,71 @@ namespace winrt::TerminalApp::implementation
             e.Handled(true);
         });
         e.Handled(true);
+    }
+
+    // Method Description:
+    // - Agentmaster (TAB-K4, 2026-10-23): keep a Shift+Click press on a managed session tab from selecting that tab. The
+    //   item queued a selection tap at the press (ListViewBaseItem::OnPointerPressed) and performs it on the release
+    //   unless the release reaches the item already handled. This arms a ONE-SHOT PointerReleased handler on the tab's
+    //   template root — `routeChild`, the item's own visual child on the press's route, which every release inside the
+    //   tab bubbles through before the item's class handler runs — that marks the press's release handled and then
+    //   removes itself (_tabShiftActivatePress.reset()). The item then skips its tap: no selection, no focus moved onto
+    //   the tab header, no scroll. A release of another pointer passes untouched. A press whose release never reaches
+    //   the tab (released off it, or captured by the reorder drag) leaves the handler armed until the next tab press
+    //   resets it; a release over the tab that no press of the tab started (a drag from elsewhere) finds no tap to skip.
+    // Arguments:
+    // - routeChild: the pressed tab's template root (TabPressTarget::routeChild); null = nothing to arm on.
+    // - pointerId: the pressing pointer's id (PointerRoutedEventArgs::Pointer().PointerId()).
+    // Return Value:
+    // - true when the handler is armed; false when routeChild is null or the registration failed — the caller then arms
+    //   the selection veto (_suppressTabSelectForActivate) instead.
+    // Exceptions:
+    // - never throws: a failed registration is logged (Rule #18) and answers false. The handler contains its own
+    //   failures the same way, since an exception leaving a XAML event handler reaches XAML as a failed HRESULT.
+    bool TerminalPage::_ArmTabShiftActivateRelease(const winrt::WUX::UIElement& routeChild, const uint32_t pointerId) noexcept
+    {
+        if (!routeChild)
+        {
+            return false;
+        }
+        try
+        {
+            _tabShiftActivatePress.emplace();
+            _tabShiftActivatePress->pointerId = pointerId;
+            _tabShiftActivatePress->releaseRevoker = routeChild.PointerReleased(winrt::auto_revoke, [weakThis{ get_weak() }](const IInspectable& /*sender*/, const winrt::WUX::Input::PointerRoutedEventArgs& args) {
+                try
+                {
+                    const auto page = weakThis.get();
+                    // A stale registration cannot run (every reset revokes its handler); the check costs nothing.
+                    if (!page || !page->_tabShiftActivatePress)
+                    {
+                        return;
+                    }
+                    if (args.Pointer().PointerId() != page->_tabShiftActivatePress->pointerId)
+                    {
+                        return; // another pointer's release (a second touch): not this press's
+                    }
+                    // Handled BEFORE the item's class handler reads the release: ListViewBaseItem::OnPointerReleased
+                    // then skips the tap it queued at the press (no focus, no selection) and drops it.
+                    args.Handled(true);
+                    // One-shot: the reset destroys the revoker, which removes this very handler. XAML raises a copy of
+                    // the handler list, so the removal mid-raise is safe (the AgentLaunchBar re-anchor hook does the
+                    // same); nothing below touches the captures.
+                    page->_tabShiftActivatePress.reset();
+                }
+                catch (...)
+                {
+                    ::Agentmaster::AgentLogCaughtException(L"the Shift+Click release swallow (TAB-K4)");
+                }
+            });
+            return true;
+        }
+        catch (...)
+        {
+            ::Agentmaster::AgentLogCaughtException(L"_ArmTabShiftActivateRelease (TAB-K4)");
+            _tabShiftActivatePress.reset();
+            return false;
+        }
     }
 
     safe_void_coroutine TerminalPage::_OnTabPointerReleasedCloseTab(IInspectable sender)
@@ -1886,11 +2085,15 @@ namespace winrt::TerminalApp::implementation
         if (!_rearranging && !_removing && !_movingTab)
         {
             // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab
-            // ACTIVATES the session in place and must NOT switch to it. The MUX TabViewItem selected
-            // itself on pointer-release regardless of the press handler, so deterministically REVERT the
+            // ACTIVATES the session in place and must NOT switch to it. The MUX TabViewItem selects
+            // itself on pointer-release regardless of the press handler. Since TAB-K4 (2026-10-23) the press
+            // keeps that release from selecting the tab at all (_ArmTabShiftActivateRelease); this veto is the
+            // FALLBACK for a press whose release swallow could not be armed: deterministically REVERT the
             // selection to the tab focused before the press — BEFORE _UpdatedSelectedTab swaps the tab
             // content. Consumed one-shot; the guarded revert's re-entrant SelectionChanged early-returns
-            // above, and the old tab's content was never detached, so the revert needs no re-attach.
+            // above, and the old tab's content was never detached, so the revert needs no re-attach. The tap
+            // that selected the tab had focused its header; the tab's own Tapped handler (GH#3609) then hands
+            // the keyboard back to the tab you are on.
             if (_suppressTabSelectForActivate)
             {
                 _suppressTabSelectForActivate = false;

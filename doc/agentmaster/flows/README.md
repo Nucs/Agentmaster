@@ -31,7 +31,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface (STA) | 11 | 6 / 5 / 0 | 30 | 31 | — |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
-| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 |
+| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 (1 fixed in code) |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /commands, the screen (TGC) | 6 | 4 / 2 / 0 | 25 | 25 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
@@ -48,7 +48,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **180** | **75 / 75 / 25** (+5 NOT BUILT) | **≈ 657** | **≈ 538** | **24** |
+| **Total** | | **180** | **75 / 75 / 25** (+5 NOT BUILT) | **≈ 657** | **≈ 538** | **24** (2 fixed in code) |
 
 ---
 
@@ -199,7 +199,8 @@ watch, their Telegram versions (INT-05–INT-07; 381c6c715) · a Search pick's m
 Wake, Go to topic (TGS-05; 0502c9380) · `agentmaster <verb>` answered by an unpackaged install's own exe, and the
 release CLI on the right profile (CLI-02 phase 3, CLI-K2; 3b042ea32) · the installer's edge cases (INS-01 E3–E6;
 9245a890f — the script on the branch; the app's embedded copy not built) · a side-panel card's dot is the tab strip's
-status icon: the draft's three dots, the red unread ring, the cache-warm spark crown (SP-08; SIDE_PANEL.md §2g).
+status icon: the draft's three dots, the red unread ring, the cache-warm spark crown (SP-08; SIDE_PANEL.md §2g) · a
+Shift+Click on a tab starts its session in place and keeps the selection (TAB-01 phase 4; TAB-K4).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
@@ -235,7 +236,7 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | TAB-K1 | A window close can save its Claude tabs as plain shell tabs (intermittent; an autosave after the teardown flush) | e2e suite, 2026-10-23 (seen once) |
 | TAB-K2 | A reopen whose focused tab was a shell starts the first Claude tab | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation | e2e suite, 2026-10-23 |
-| TAB-K4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_lifecycle.py`) |
+| TAB-K4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) — **fixed in code 2026-10-23** (TAB-01 phase 4; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_lifecycle.py`) |
 | ROB-K1 | A reader holding `sessions.json` (no delete sharing) makes the save fail, and nothing re-saves until the next change | e2e suite, 2026-10-23 (`e2e/suites/test_robustness.py`) |
 
 ## Where the documents disagree with the code (found while writing)
@@ -284,7 +285,7 @@ desktop: **49 of 49 tests pass in 37 min**; a known-defect test passes while its
 | TCM-07 | phases 1–4, E1 | `…::test_fork_session_branches_the_conversation`, `…::test_new_session_here_starts_a_fresh_session`, `…::test_fork_on_a_model_and_on_a_specified_model` |
 | TCM-08 | phases 1–2 | `…::test_restart_session_resumes_the_same_conversation` |
 | TCM-09 | phases 1–5 | `…::test_close_tab_asks_and_keeps_the_session`, `…::test_close_other_tabs_asks_once`, `…::test_triage_item_follows_the_state` |
-| TAB-01 | phases 1–4, E4, E7, E8 (E8 in the scopes test); TAB-K4 | `test_tab_lifecycle.py::test_deactivate_parks_the_session_and_a_click_wakes_it`, `…::test_a_parked_tab_starts_in_place_and_survives_a_restart`, `…::test_known_defect_shift_click_on_a_parked_tab_switches_to_it` |
+| TAB-01 | phases 1–4, E4, E7, E8 (E8 in the scopes test; phase 4's Shift+Click on the tab: `needs_fix`, a build with TAB-K4's fix) | `test_tab_lifecycle.py::test_deactivate_parks_the_session_and_a_click_wakes_it`, `…::test_a_parked_tab_starts_in_place_and_survives_a_restart`, `…::test_shift_click_on_a_parked_tab_starts_it_in_place` |
 | TAB-02 | phases 1–6, E1, E3 | `test_tab_lifecycle.py::test_deactivate_scopes` |
 | TAB-03 | phases 3–5, E1, E5 (phases 1–2: TCM-09's tests) | `test_tab_lifecycle.py::test_unfavorite_and_close`, `…::test_close_of_same_folder_across_windows` |
 | TAB-04 | phase 2 (both branches) | `test_tab_lifecycle.py::test_closing_the_focused_tab_never_starts_a_dormant_one` |
