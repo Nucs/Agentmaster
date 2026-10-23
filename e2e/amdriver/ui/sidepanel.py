@@ -264,6 +264,30 @@ class SidePanel:
         """
         return self.plus() is None
 
+    def collapse(self) -> None:
+        """Click « and wait for the strip.
+
+        Returns:
+            None.
+        Raises:
+            WaitTimeout: When the panel stayed expanded.
+        """
+        self.button("«").click()
+        wait_until(self.collapsed, 5.0, what="the panel collapsed")
+
+    def expand(self) -> None:
+        """Click the collapsed strip's » and wait for the panel.
+
+        Returns:
+            None.
+        Raises:
+            WaitTimeout: When there is no » or the panel stayed collapsed.
+        """
+        chevron = wait_until(lambda: next((k for k in self.window.content_children()
+                                           if k.role == "button" and k.name == "»"), None), 5.0, what="the » button")
+        chevron.click()
+        wait_until(lambda: not self.collapsed(), 5.0, what="the panel expanded")
+
     # ---- the cards --------------------------------------------------------------------------------
 
     def cards(self) -> list[PanelCard]:

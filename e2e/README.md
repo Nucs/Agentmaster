@@ -16,7 +16,7 @@ Claude Code it starts talks to a **scripted model** whose answers are written in
 ## Running it
 
 ```text
-# a new desktop, provisioned, the whole suite, deleted afterwards (~25 min for the 30 tests of 2026-10-23)
+# a new desktop, provisioned, the whole suite, deleted afterwards (the 40 tests of 2026-10-23: ~25 min + provisioning)
 python e2e/host/e2e_run.py --desktop am-e2e-1 --create --provision --delete-after -- -v
 
 # an existing, provisioned desktop: one area, or the P0 flows only
@@ -54,7 +54,8 @@ def test_home_turns_into_the_way_back(am, s2):
 **Fixtures** (`suites/conftest.py`): `am` (the App), `mock` (the MockClient, reset per test), `iso` (the test's
 folders), `s1` (F-S: a session launched through the Agent Manager's launch row, its first turn done), `s2` (F-S2:
 `s1` plus a session in `t2`). More sessions: `am.launch("t3")`; a git folder first: `am.iso.git_folder("t1",
-branch="feature/x")`.
+branch="feature/x")`. A restart (F-RS): `am.close()` (the ✕ → Close Window; `how="all"` for Close All Windows),
+read `am.profile.window_records()` if the test checks the save, then `am.kill(); am.start()` — or `am.restart()`.
 
 **The page objects** (`am.window` is the first window; `am.windows()` all of them):
 
@@ -65,6 +66,8 @@ branch="feature/x")`.
 | `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`; a Card: `click`, `double_click`, `right_click` |
 | `window.side_panel` | `cards()` / `card(title)` (title, state word), `titles()`, `count_line()`, `scope()`, `sum_on()`, `dock_side()`, `collapsed()`, `summary_title()` / `summary_texts()` | `button(name).click()` ('Sum', 'LOCAL', '⌖', '⇄', '«'), `toggle_scope()`, `set_sum(on)`, `open_launcher()` → LauncherCard (`box`, `folder_list`, `type_folder`, `launch`) |
 | `window.terminal` | `text()`, `lines()`, `input_box()` (Claude's box and its draft) | `focus()`, `type(text)`, `submit(prompt)`, `wait_input_box()`, `wait_text(regex)` |
+| `window.tags` / `window.specify` (`amdriver.ui.popups`) | the Tags panel: `texts()`, `count()` ('N of M tags'); the Specify card: `value()` | `wait_open()`; Tags: `add(name)`; Specify: `use(model)`, `press('Cancel')` |
+| `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name)`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
 | `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)` |
 
@@ -97,7 +100,14 @@ since=mark)`), then the UI.
 - **Home ignores a click within the double-click time** of a click that opened the page or jumped back (by
   design); `click_home` spaces separate clicks past it.
 - **Every tab close asks**: "Close session?" (Close · ★ Favorite & Close · Cancel) or, for a shell tab, "Close tab?"
-  (Close · Cancel). The window's ✕ asks "Close this window?" (Close All Windows · Close Window · Cancel).
+  (Close · Cancel). The window's ✕ asks "Close this window?" (Close All Windows · Close Window · Cancel); Close All
+  Windows then asks "Do you want to close all windows?", a dialog UI Automation cannot see (Enter answers it).
+- **A tooltip opens on a hand's arrival**: `hover(glide=True)` moves in steps; `am.tooltips()` lists what shows (a
+  rich session card has no name — read its texts).
+- **The tab menu's Move tab to new window** logs `[nav] move-out <sid8>`; the drag gesture's tear-out logs
+  `tab-send-to-window … win=-1`.
+- **A reopened window re-homes its Claude tabs first, its shells after** (PERSISTENCE.md §13.5), and selects the tab
+  that was focused at the quit (by session id; a shell by position).
 - **One Agentmaster per exe path**: a second start hands its command line to the running one; the suite ends the
   previous test's app first. **Ending it** kills the GUI only; the ConPTY hosts end their shells and claudes.
 - **Where things are in UI Automation**: tab items named by their titles under `#TabListView`, Home
@@ -119,3 +129,8 @@ since=mark)`), then the UI.
 | MGR-K1 | MGR-05 | A session launched from the Agent Manager page is not selected on the page: Home offers no way back and the right pane asks for a selection, until a tab switch | `test_manager_page.py::test_known_defect_a_launched_session_is_not_selected_on_the_page` |
 | SP-K1 | SP-05 E2 | In the + card, one click on Launch while its presets menu is open does not launch (a second click does); the page's own Launch takes one | `test_side_panel.py::test_known_defect_plus_card_launch_needs_a_second_click` |
 | TCM-K1 | TCM-03 E1 | A blank tab rename is refused for the session, but the tab then shows Claude Code's own terminal title (`✳ …`) | `test_tab_menu.py::test_known_defect_blank_rename_shows_claudes_own_title` |
+| TCM-K2 | TCM-05 | Tags from the tab menu leaves the keyboard in the terminal: a typed name lands in Claude's box, Esc reaches claude | `test_tab_menu.py::test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal` |
+| SP-K2 | SP-04 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does, under the same input) | `test_side_panel.py::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
+| TAB-K1 | TAB-10 E2 | A window close can save its Claude tabs as plain shell tabs — seen once; the restart test names it when it recurs | `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` (its record check) |
+| TAB-K2 | TAB-10 E1 | A reopen whose focused tab was a shell starts the first restored Claude tab | `test_tab_menu.py::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
+| TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter) | — |

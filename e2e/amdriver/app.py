@@ -34,7 +34,7 @@ from typing import Optional
 
 import psutil
 
-from . import uia, win32
+from . import inputs, uia, win32
 from .claude import ClaudeConfig
 from .profile import Profile
 from .waits import Abort, WaitTimeout, wait_until
@@ -335,10 +335,10 @@ class App:
             return self.main_hwnds()
 
         wait_until(first_window, timeout_s, what="Agentmaster's first window")
+        self._first_hwnd = self.main_hwnds()[0]
         if maximize:
-            hwnd = self.main_hwnds()[0]
-            win32.maximize(hwnd)
-            win32.set_foreground(hwnd)
+            win32.maximize(self._first_hwnd)
+            win32.set_foreground(self._first_hwnd)
         return self
 
     def main_hwnds(self) -> list[int]:
@@ -362,7 +362,8 @@ class App:
 
     @property
     def window(self):
-        """The app's only (or topmost) window.
+        """The window the app started with, while it lives (else the topmost one). A test that opens more windows
+        reaches them through windows() or Session.window().
 
         Returns:
             The MainWindow.
@@ -370,8 +371,9 @@ class App:
             WaitTimeout: When the app has no window within 10 s.
         """
         from .ui.window import MainWindow
-        hwnd = wait_until(lambda: self.main_hwnds() and self.main_hwnds()[0], 10.0, what="an Agentmaster window")
-        return MainWindow(self, hwnd)
+        hwnds = wait_until(self.main_hwnds, 10.0, what="an Agentmaster window")
+        first = getattr(self, "_first_hwnd", 0)
+        return MainWindow(self, first if first in hwnds else hwnds[0])
 
     def launch(self, name: str = "t1", prompt: Optional[str] = 'ready [[mock reply "ready"]]',
                timeout_s: float = 60.0):
@@ -400,6 +402,19 @@ class App:
             Their elements.
         """
         return uia.windows_of(self.pid, POPUP_CLASS) if self.alive() else []
+
+    def tooltips(self) -> list[uia.Element]:
+        """The tooltips the app shows now (each in a popup window).
+
+        Returns:
+            The `tool tip` elements (a rich session card has no name: read its texts).
+        """
+        out = []
+        for p in self.popups():
+            tip = p.find(role="tool tip", max_depth=4)
+            if tip is not None and tip.rect[2] > 0:
+                out.append(tip)
+        return out
 
     def children(self) -> list[psutil.Process]:
         """Every process the GUI started, recursively (ConPTY hosts, shells, claudes, their tools).
@@ -450,21 +465,28 @@ class App:
         psutil.wait_procs(alive, timeout=10)
         return KillReport(not alive, leftovers, time.monotonic() - start)
 
-    def close(self, timeout_s: float = 60.0) -> None:
+    def close(self, timeout_s: float = 60.0, how: str = "window") -> None:
         """Quit the app through its windows' ✕, the way a user ends a session (the close flush runs: window
         records saved, sessions archived) — the path a restart test (F-RS) needs.
 
-        Each window's ✕ asks "Close this window?" (Close All Windows / Close Window / Cancel); the last window
-        is closed with "Close Window" (the app quits when no window is left).
+        Each window's ✕ asks "Close this window?" (Close All Windows · Close Window · Cancel).
+        - how="window": every window is closed with "Close Window" (the app quits when no window is left);
+        - how="all": the first window's "Close All Windows", then "Do you want to close all windows?" (Close all ·
+          Cancel) — that second dialog is INVISIBLE to UI Automation (flows TAB-K3), so it is answered with Enter
+          (its default button, Close all).
 
         Args:
             timeout_s: How long the whole quit may take.
+            how: "window" or "all".
         Returns:
             None.
         Raises:
+            ValueError: On another `how`.
             WaitTimeout: When the process does not end.
         """
         from .ui.dialogs import Dialog
+        if how not in ("window", "all"):
+            raise ValueError(f"how must be 'window' or 'all', not {how!r}")
         self.ended_by_test = True
         end = time.monotonic() + timeout_s
         while self.alive() and time.monotonic() < end:
@@ -475,10 +497,19 @@ class App:
             win32.set_foreground(hwnds[0])
             win32.post_close(hwnds[0])
             dialog = Dialog.wait(self, title="Close this window?", timeout_s=10)
+            if how == "all":
+                dialog.press("Close All Windows")
+                time.sleep(1.0)  # the quit confirmation's open (not observable: TAB-K3)
+                win32.set_foreground(hwnds[0])
+                inputs.keys("enter")
+                break
             dialog.press("Close Window")
             wait_until(lambda: hwnds[0] not in self.main_hwnds(), 20, what="the window to close")
         if self.alive():
-            self.proc.wait(timeout=max(1.0, end - time.monotonic()))
+            try:
+                self.proc.wait(timeout=max(1.0, end - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
         if self.alive():
             raise WaitTimeout("Agentmaster did not quit after its last window closed")
 

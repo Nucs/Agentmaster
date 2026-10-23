@@ -661,9 +661,33 @@ def make_server(port: int, state: MockState, scenarios_dir: Optional[str] = None
             return f.read()
 
     handler = type("BoundHandler", (Handler,), {"state": state, "scenarios": staticmethod(load) if scenarios_dir else None})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _QuietServer((host, port), handler)
     server.daemon_threads = True
     return server
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """The HTTP server, minus the traceback socketserver prints when a client drops its connection.
+
+    Every test ends its app by killing the GUI, and each claude.exe it ran drops its kept-alive connection to the
+    mock mid-read: an expected end, not an error worth a 20-line traceback in the run's log. Any other handler
+    error is still printed.
+    """
+
+    def handle_error(self, request, client_address) -> None:
+        """Ignore a dropped connection; report anything else as socketserver does.
+
+        Args:
+            request: The client socket.
+            client_address: The client's address.
+        Returns:
+            None.
+        """
+        import sys
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve_in_thread(state: MockState, port: int = 0, scenarios_dir: Optional[str] = None) -> tuple[ThreadingHTTPServer, threading.Thread]:

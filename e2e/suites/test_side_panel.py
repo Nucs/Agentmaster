@@ -11,7 +11,7 @@ import pytest
 from amdriver import inputs
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
-from amdriver.waits import wait_until
+from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
 
@@ -214,3 +214,54 @@ def test_collapse_and_dock(am, s1):
     wait_until(lambda: panel.dock_side() == "right", 5, what="docked right", describe=panel.dock_side)
     panel.button("⇄").click()
     wait_until(lambda: panel.dock_side() == "left", 5, what="docked left again", describe=panel.dock_side)
+
+
+# ---- batch 2: restart, the hover card -----------------------------------------------------------------------
+
+
+@pytest.mark.p1
+@pytest.mark.flow("SP-06")
+def test_panel_state_survives_a_restart(am, s1):
+    """SP-06 phase 5 (F-RS): Sum off, GLOBAL and collapsed come back after a restart.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    panel = am.window.side_panel
+    panel.set_sum(False)
+    assert panel.toggle_scope() == "GLOBAL"
+    panel.collapse()
+    time.sleep(1.5)  # the window record's debounced save
+    am.restart()
+    panel = am.window.side_panel
+    wait_until(panel.collapsed, 30, what="the panel collapsed after the restart")
+    panel.expand()
+    assert not panel.sum_on() and panel.scope() == "GLOBAL"
+
+
+@pytest.mark.p1
+@pytest.mark.flow("SP-04")
+@pytest.mark.known_defect("SP-K2")
+def test_known_defect_sum_off_card_hover_opens_no_rich_card(am, s1):
+    """SP-K2 (expected failure once fixed): with Sum off, resting the pointer on a side-panel card opens NO rich
+    session card, while the same hover on the session's TAB opens one (the control half of this test). Measured on
+    0.8.0 in the test desktop (2026-10-23): nothing for 9 s, polled every 0.3 s; hooks.log says "cards show the rich
+    session tooltip".
+
+    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert the card beside the panel.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    w = am.window
+    # Control: the tab header's rich card opens under the same input.
+    w.tabs.get("t1").el.hover(glide=True, offset=(30, 16))
+    wait_until(am.tooltips, 8, what="the tab's rich card (the control half)")
+    inputs.glide(1200, 700)
+    wait_until(lambda: not am.tooltips(), 5, what="the tab's card closed")
+    w.side_panel.set_sum(False)
+    card = w.side_panel.card("t1")
+    card.title_el.hover(glide=True, offset=(40, 8))
+    hold_true(lambda: not am.tooltips(), 8.0, what="no rich card over the side-panel card (expected: one)")

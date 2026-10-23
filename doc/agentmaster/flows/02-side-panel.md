@@ -100,7 +100,7 @@ click back into the terminal; double-click jumps to a card's tab.
    the panel.
 2. **Hover.** *Do:* rest the pointer on a card. *Expect:* the session's rich card (the tab header's hover
    card) opens BESIDE the panel (right of it when docked left), vertically centered on the card; its summary
-   wheel-scrolls.
+   wheel-scrolls. Not observed in the test desktop on 0.8.0 (SP-K2).
 3. **Leave.** *Expect:* the card closes; it never covers the panel's own controls.
 4. **Persist.** *Expect:* per window; the last change seeds new windows.
 
@@ -202,3 +202,13 @@ automation's zero-length click) is lost on the page's Launch too, because the fi
 (`GetAsyncKeyState`) when the menu closes and finds it already released. A fast tap on a busy UI thread could meet
 the same race.
 
+### SP-K2 · With Sum off, a card's hover opens no rich card
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_side_panel.py`
+> `test_known_defect_sum_off_card_hover_opens_no_rich_card`)
+
+**Sum** off (hooks.log: `[nav] sidepanel summary -> hidden (cards show the rich session tooltip)`), then the pointer
+glides onto a card and rests: no tooltip opens in 9 s (every popup window of the app polled every 0.3 s). The same
+glide onto the session's TAB opens its rich card at once (the test's control half), so the input reaches XAML's
+tooltip service. **Not yet known:** whether the card's `AgentSessionToolTipHost` is never attached in the virtualized
+list (`_SidePanelArmCardToolTip` runs from `_SidePanelApplyCardTipMode`), or attached and then closed by the card's
+suppressed floating tip. **Expected:** the rich card beside the panel (SP-04 phase 2).

@@ -4,11 +4,12 @@ Every test right-clicks a tab and works the menu the way a user does: hover a �
 The checks read the menu itself (UI Automation: what is shown, what is enabled), the engine's record
 (sessions.json, the session store), the log's [nav] trail, the clipboard, the processes and the mock.
 """
+import json
 import time
 
 import pytest
 
-from amdriver import inputs, win32
+from amdriver import inputs, uia, win32
 from amdriver.session import wait_new_session, wait_until_no_claude
 from amdriver.ui.dialogs import Dialog
 from amdriver.ui.menus import Menu
@@ -527,3 +528,172 @@ def test_close_other_tabs_asks_once(am, s2):
     dlg.press("Close All")
     wait_until(lambda: w.tabs.titles() == [SHELL], 15, what="only the shell left", describe=w.tabs.titles)
     assert Dialog.find(am) is None  # one question, not one per session
+
+
+# ---- batch 2: restart, a second window, models, Tags ---------------------------------------------------------
+
+
+@pytest.mark.p0
+@pytest.mark.flow("TCM-03")
+def test_restart_restores_the_renamed_tab_dormant(am, s2):
+    """TCM-03 phase 2 + TCM-01 phase 3 after a restart (F-RS: the window's ✕ → Close Window, then a new start):
+    the window record keeps both Claude tabs; the renamed tab comes back titled `alpha` and DORMANT (the window
+    reopens to t2, so t1's claude is not started, and its menu leads with Activate); Shift+Click starts it on the
+    same conversation.
+
+    Args:
+        am: The app.
+        s2: F-S2 (t2 selected: the window reopens to a Claude tab — with a SHELL tab focused, TAB-K2 applies).
+    """
+    a, b = s2
+    w = am.window
+    w.tabs.rename("t1", "alpha")
+    am.profile.wait_session(lambda s: s.id == a.id and s.title == "alpha", 10, what="the renamed title on disk")
+    b.select()
+    am.close()
+    kinds = [(t.get("kind"), (t.get("sessionId") or "")[:8]) for r in am.profile.window_records()
+             for t in r.get("window", {}).get("tabs", [])]
+    assert ("Claude", a.short) in kinds and ("Claude", b.short) in kinds, \
+        f"TAB-K1 reproduced? the close saved the Claude tabs as: {kinds}"
+    am.kill()
+    am.start()
+    w = am.window
+    w.tabs.wait_tab("alpha", timeout_s=30)
+    w.tabs.wait_selected("t2", timeout_s=30)
+    wait_until(lambda: b.claude_pids(), 30, what="the focused tab's claude (t2) started at the reopen")
+    time.sleep(3)  # a wrongly woken tab would have started its claude by now
+    assert not a.claude_pids()
+    menu = w.tabs.context_menu("alpha")
+    assert menu.names()[0] == "Activate Tab (Shift+Click)"
+    menu.close()
+    w.tabs.get("alpha").click(modifiers=["shift"])
+    wait_until(lambda: any("--resume" in c for c in a.claude_cmdlines()), 30,
+               what="the activated tab's claude resuming the conversation", describe=a.claude_cmdlines)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TAB-10")
+@pytest.mark.known_defect("TAB-K2")
+def test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab(am, s1):
+    """TAB-K2 (expected failure once fixed): when a SHELL tab was the focused tab at the quit, the reopened window
+    starts the first restored Claude tab's claude although the window reopens to the shell (measured 2026-10-23 on
+    0.8.0: t1's claude.exe running 5 s after the reopen, the shell selected, t1 Waiting — not a busy tab the restore
+    wake would start). By reading: Claude tabs are re-homed first and the shell's selection is applied only after the
+    shells exist (a trailing SwitchToTab in their startup batch), so until then the first Claude tab is the selected,
+    SHOWN tab, and a shown terminal starts.
+
+    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert t1 stays dormant.
+
+    Args:
+        am: The app.
+        s1: F-S (the strip: the shell, t1).
+    """
+    w = am.window
+    w.tabs.select(SHELL)
+    time.sleep(2)  # past the window record's autosave debounce
+    am.close()
+    am.kill()
+    am.start()
+    w = am.window
+    w.tabs.wait_selected(SHELL, timeout_s=30)
+    wait_until(lambda: s1.claude_pids(), 15, what="t1's claude (expected: NOT started)")
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TCM-06")
+def test_move_tab_to_new_window(am, s1):
+    """TCM-06 phase 3: Move tab ▸ Move tab to new window — a second window holds the tab, the claude keeps
+    running, and each window's LOCAL side panel lists its own sessions.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    w1 = am.window
+    pids = s1.claude_pids()
+    mark = am.profile.hooks.mark()
+    w1.tabs.context_menu("t1").choose_path("Move tab", "Move tab to new window")
+    w2 = wait_until(lambda: next((w for w in am.windows() if w.hwnd != w1.hwnd), None), 20, what="a second window")
+    w2.tabs.wait_tab("t1")
+    w1.tabs.wait_gone("t1")
+    assert s1.claude_pids() == pids  # the session moved, its claude did not restart
+    am.profile.hooks.wait(rf"\[nav\] move-out {s1.short} \(tab moved to another window\)", since=mark)
+    wait_until(lambda: w1.side_panel.count_line() == "0 sessions in this window", 10, what="window 1 lists none",
+               describe=w1.side_panel.count_line)
+    wait_until(lambda: w2.side_panel.count_line() == "1 session in this window", 10, what="window 2 lists t1",
+               describe=w2.side_panel.count_line)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TCM-07")
+def test_fork_on_a_model_and_on_a_specified_model(am, s1, mock):
+    """TCM-07 phases 3–4: Fork session ▸ Sonnet runs the fork on --model sonnet; Specify… launches a typed id,
+    which reaches the model; the next Specify… opens pre-filled with it, and Cancel launches nothing.
+
+    Args:
+        am: The app.
+        s1: F-S.
+        mock: The scripted model.
+    """
+    w = am.window
+    mark = am.profile.hooks.mark()
+    w.tabs.context_menu("t1").choose_path("Fork session", "Sonnet")
+    fork = wait_new_session(am, mark, pattern=r"\[nav\] fork-managed-done new=([0-9a-f]{8})", mock=mock)
+    wait_until(lambda: any("--model sonnet" in c for c in fork.claude_cmdlines()), 30,
+               what="the fork's claude on --model sonnet", describe=fork.claude_cmdlines)
+    # Specify… a model id.
+    mark = am.profile.hooks.mark()
+    w.tabs.context_menu("t1").submenu("Fork session").choose("Specify…")
+    w.specify.wait_open().use("claude-mock-1")
+    fork2 = wait_new_session(am, mark, pattern=r"\[nav\] fork-managed-done new=([0-9a-f]{8})", mock=mock)
+    wait_until(lambda: any("--model claude-mock-1" in c for c in fork2.claude_cmdlines()), 30,
+               what="the second fork's claude on --model claude-mock-1", describe=fork2.claude_cmdlines)
+    w.tabs.wait_selected(fork2.title)
+    w.terminal.wait_input_box()
+    seq = mock.last_seq()
+    fork2.ask('model check [[mock reply "m"]]')
+    first = [e for e in mock.requests(session=fork2.id, since=seq, kind="main")][0]
+    assert first["model"] == "claude-mock-1", first
+    # The next Specify… opens pre-filled; Cancel launches nothing.
+    mark = am.profile.hooks.mark()
+    w.tabs.context_menu("t1").submenu("Fork session").choose("Specify…")
+    card = w.specify.wait_open()
+    assert card.value() == "claude-mock-1"
+    card.press("Cancel")
+    time.sleep(1.5)  # a wrong launch would have logged by now
+    assert not am.profile.hooks.find(r"fork-managed-begin", since=mark)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TCM-05")
+@pytest.mark.known_defect("TCM-K2")
+def test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal(am, s1):
+    """TCM-K2 (expected failure once fixed): Tags chosen from the TAB's menu opens the Tags panel, but the keyboard
+    focus stays in the terminal — typed text lands in Claude's input box and Esc goes to claude (a running turn
+    would be interrupted) instead of closing the panel. Measured on 0.8.0 (2026-10-23). The panel itself works once
+    clicked into: a tag is added and stored (that half is asserted as correct behavior).
+
+    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert the box has the focus,
+    the typed name goes into it, and Esc closes the panel.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    w = am.window
+    w.tabs.context_menu("t1").choose("Tags")
+    panel = w.tags.wait_open()
+    time.sleep(0.8)  # the panel's own focus would have landed by now
+    focused = uia.focused()
+    assert focused is not None and focused.class_name == "TermControl", focused  # expected: the 'tag name' box
+    inputs.type_text("zz")
+    wait_until(lambda: (w.terminal.input_box() or None) and w.terminal.input_box().draft == "zz", 5,
+               what="the typed text in Claude's box (expected: in the panel's box)")
+    inputs.keys("esc")
+    time.sleep(1.0)
+    assert panel.is_open()  # expected: Esc closes the panel
+    # The panel works once clicked into.
+    panel.add("e2e-tag")
+    assert panel.count()[0] == 1
+    wait_until(lambda: "e2e-tag" in json.dumps(am.profile.session_store(s1.id)), 10, what="the tag stored",
+               describe=lambda: am.profile.session_store(s1.id))

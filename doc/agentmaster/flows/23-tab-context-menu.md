@@ -180,7 +180,9 @@ and the board's.
    window whose title is the folder's name; [LOG] `[nav] open-path`.
 4. **Favorite.** *Expect:* the menu item reads "Unfavorite" at the next open; the tab wears the favorite crown;
    `session-store\<id>.json` holds `"favorite"`. Unfavorite reverses all three.
-5. **Tags.** *Expect:* the Tags panel opens under the tab: a name box, the color swatches, the tag list.
+5. **Tags.** *Expect:* the Tags panel opens under the tab: a name box (with the keyboard focus), the color
+   swatches, the tag list; a typed name + Enter adds the tag (`N of M tags`, the session store's `tags`); Esc
+   closes it. Today the focus stays in the terminal (TCM-K2).
 
 ---
 
@@ -193,8 +195,9 @@ and the board's.
    tab-move <ident> idx=2 -> 0`.
 2. **Move right / left / to end** → one step / the end, each logged.
 3. **Move tab to new window** → a second window opens holding the tab; the session's claude keeps running (same pid);
-   the first window's LOCAL side panel no longer lists it, the second's does. *Check:* [LOG] `[nav]
-   tab-send-to-window <ident> win=-1`, `[move-out]`.
+   the first window's LOCAL side panel no longer lists it, the second's does. *Check:* [LOG] `[move-out] <id>
+   (Claude tab leaving this window; …)` and `[nav] move-out <sid8> (tab moved to another window)` (the gesture's tear-out
+   logs `tab-send-to-window … win=-1` instead).
 
 **Edge cases**
 - **E1 The moved tab was selected** → it stays selected, its neighbor is NOT marked read (TAB-08).
@@ -294,3 +297,13 @@ the tab and the session no longer share one title (CLAUDE.md Rule #11). `_SyncCl
 the managed name when the override is emptied; the cause of the miss is not identified yet. **Expected:** the tab
 reads `alpha` again.
 
+### TCM-K2 · Tags from the tab menu leaves the keyboard in the terminal
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_menu.py`
+> `test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal`)
+
+Tab menu → **Tags**: the panel opens, but the focused element stays the terminal (UI Automation, polled 1.5 s):
+a typed tag name lands in Claude's input box as an unsent draft, and **Esc goes to claude** — it would interrupt a
+running turn — while the panel stays open. The panel works once clicked into (a name + Enter adds and stores the tag).
+**Cause (by reading):** the tab menu's `Closed` handler raises `RequestFocusActiveControl` (Windows Terminal's
+GH#5750: "toss the focus back to our control" after a menu) unless a RENAME is in progress — the Tags panel's own
+focus is taken back. **Expected:** the panel's name box has the focus; Esc closes the panel and reaches nothing else.

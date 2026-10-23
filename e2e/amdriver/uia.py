@@ -558,9 +558,12 @@ class Element:
         """
         self.click(count=2)
 
-    def hover(self) -> None:
+    def hover(self, glide: bool = False, offset: Optional[tuple[int, int]] = None) -> None:
         """Move the pointer onto it.
 
+        Args:
+            glide: Arrive in small steps (a hand's move) instead of one jump.
+            offset: (dx, dy) from the top-left corner instead of the center.
         Returns:
             None.
         Raises:
@@ -568,7 +571,11 @@ class Element:
         """
         if not self.visible:
             raise RuntimeError(f"cannot hover {self.line()}: not on screen")
-        inputs.move(*self.center)
+        x, y = self.center if offset is None else (self.rect[0] + offset[0], self.rect[1] + offset[1])
+        if glide:
+            inputs.glide(x, y)
+        else:
+            inputs.move(x, y)
 
 
 def windows_of(pid: int, cls: Optional[str] = None, visible_only: bool = True) -> list[Element]:
@@ -592,6 +599,24 @@ def windows_of(pid: int, cls: Optional[str] = None, visible_only: bool = True) -
         except comtypes.COMError:
             continue  # closed between the enumeration and the read
     return out
+
+
+def at_point(x: int, y: int) -> Optional[Element]:
+    """The element under a screen point (UI Automation's hit test — it can reach content the raw-view walk does not
+    list, such as a dialog whose popup reports no children).
+
+    Args:
+        x: Screen x.
+        y: Screen y.
+    Returns:
+        The element, or None.
+    """
+    c = _Client.get()
+    try:
+        point = U.tagPOINT(x, y)
+        return Element.wrap(c.uia.ElementFromPointBuildCache(point, c.cache))
+    except comtypes.COMError:
+        return None
 
 
 def focused() -> Optional[Element]:

@@ -183,6 +183,26 @@ class MainWindow:
         """
         return Terminal(self)
 
+    @property
+    def tags(self):
+        """The Tags panel (open it from a session menu's Tags).
+
+        Returns:
+            A TagsPanel.
+        """
+        from .popups import TagsPanel
+        return TagsPanel(self)
+
+    @property
+    def specify(self):
+        """The "Specify a model" card (open it from a model menu's Specify…).
+
+        Returns:
+            A SpecifyModelCard.
+        """
+        from .popups import SpecifyModelCard
+        return SpecifyModelCard(self)
+
     def home(self) -> uia.Element:
         """The Home button (its name is its face: "Agent Manager" or "Jump back to <title>").
 
