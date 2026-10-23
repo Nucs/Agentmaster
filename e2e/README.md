@@ -5,6 +5,11 @@ Claude Code it starts talks to a **scripted model** whose answers are written in
 [`doc/agentmaster/E2E_TESTING.md`](../doc/agentmaster/E2E_TESTING.md); WHAT the suite must prove is the flow catalog,
 [`doc/agentmaster/flows/`](../doc/agentmaster/flows/README.md). This folder is the code.
 
+The proposed shared crash/corruption guard and dedicated memory/lifecycle/failure suite are in
+[`E2E_RELIABILITY.md`](../doc/agentmaster/E2E_RELIABILITY.md) (2026-10-23, **plan only**). It audits the current
+fixture's limited crash checks and specifies the supervisor, expected exits, retained evidence and leak methodology;
+these capabilities are not yet implemented by this README update.
+
 | Folder | What it is |
 |---|---|
 | [`mockllm/`](mockllm) | The scripted model: an Anthropic Messages API on `127.0.0.1:8787` that plays `[[mock …]]` scripts (say, think, tool calls, holds, errors, drops), classifies Claude Code's side requests, logs every request, and has a control API (`/_mock/*`). Its unit tests run anywhere: `python -m pytest mockllm/tests`. |

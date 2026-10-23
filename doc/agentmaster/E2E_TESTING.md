@@ -13,6 +13,11 @@
 > AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead.
 > The spike (`tools/e2e-spike/`, 2026-10-22) stays as the record of §2.
 >
+> **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
+> guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
+> lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part
+> of that extension was implemented or run by writing the plan.
+>
 > **What the suite must prove (2026-10-23):** [`flows/README.md`](flows/README.md) catalogs the end-to-end flows of the
 > features of 0.7.7 → 0.8.0 and after (behaviors, lifecycle phases, checks, edge cases, known defects), one file per
 > area. This document is the HOW; the flows are the WHAT — §10's ladder and §11's areas map onto them.
@@ -55,8 +60,9 @@ to tell a usage defect from noise.
 then the rest of the app area by area (§11).
 
 **Out of scope (v1):** the Telegram bot, Codex, the installers and the updater (each needs a fake of
-its own service — §11 lists them), performance and memory measurements (separate tools exist:
-`tools/cpuhunt`, `tools/leakhunt`).
+its own service — §11 lists them), and broad performance benchmarking. Memory/resource measurements and dedicated
+failure scenarios are now planned in [E2E_RELIABILITY.md](E2E_RELIABILITY.md), following the owner's 2026-10-23
+request; existing `tools/leakhunt` components are inputs to that work, not an implemented automated leak gate.
 
 **Principles** (each one is a lesson of this codebase or of the spike):
 
@@ -461,6 +467,12 @@ Agentmaster journals pastes, PENDING_INPUT.md §2c).
 | screenshots | the screen, sampled at UIA rectangles | the few visuals with no text form (a dot colour, the flash ring); no full-image goldens in v1 |
 
 ### 7.6 Ambient checks after every test
+
+**Design, only partly implemented.** The current `am` fixture checks GUI survival and new dump filenames before
+cleanup. The complete setup-through-teardown guard, external supervisor, expected-exit contracts and reliable
+evidence export are specified in [E2E_RELIABILITY.md](E2E_RELIABILITY.md). That plan extends these checks to every
+desktop test and keeps unexpected native faults fatal even in a known-defect test; it also defines narrow expected
+faults for recovery scenarios. Absence of a dump is not proof that no process failed.
 
 Each one fails the test (or warns, per a policy file) even when the test's own assertions passed:
 new crash dumps or WER `Application Error` events; `[exc]` / `[wil]` / `[persist-fail]` / `[launch-fail]` /
