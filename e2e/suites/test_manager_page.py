@@ -222,3 +222,61 @@ def test_known_defect_a_launched_session_is_not_selected_on_the_page(am, s1):
     assert page.home_name() == "Agent Manager"  # expected: "Jump back to t1"
     assert page.right_pane_texts() == ["Select a Claude session to see its summary."]  # expected: t1's summary
     assert not am.profile.hooks.find(rf"\[nav\] tab-focus {s1.short}")
+
+
+# ---- batch 2: restart, panes ---------------------------------------------------------------------------------
+
+
+@pytest.mark.p0
+@pytest.mark.flow("MGR-03")
+def test_a_page_only_last_window_is_not_reopened(am, s1):
+    """MGR-03 phase 2 (the restart half): the last window, emptied to its page, is not reopened as an empty window —
+    the next start opens a fresh default window.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    w = am.window
+    w.tabs.close(SHELL)
+    w.tabs.close("t1")
+    w.manager.wait_showing()
+    am.restart()
+    w = am.window
+    wait_until(lambda: w.tabs.titles() == [SHELL], 30, what="a fresh default window with one shell tab",
+               describe=w.tabs.titles)
+    assert not w.manager.showing()
+
+
+@pytest.mark.p1
+@pytest.mark.flow("MGR-04")
+def test_alt_left_and_ctrl_home_are_windows_terminals(am, s1):
+    """MGR-04 phases 1–2: in a split shell tab Alt+Left moves the focus to the left pane, and Ctrl+Home reaches the
+    shell — neither opens the Agent Manager page.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    w = am.window
+    w.tabs.select(SHELL)
+    w.tabs.context_menu(SHELL).choose("Split tab")
+
+    def panes():
+        """The window's visible terminals, left to right.
+
+        Returns:
+            The TermControl elements.
+        """
+        return sorted((e for e in w.content().find_all(cls="TermControl", max_depth=8) if e.visible),
+                      key=lambda e: e.rect[0])
+
+    wait_until(lambda: len(panes()) == 2, 15, what="two panes", describe=lambda: [p.rect for p in panes()])
+    left, right = panes()
+    inputs.click(right.rect[0] + 40, right.rect[1] + right.rect[3] - 40)
+    wait_until(lambda: panes()[1].has_focus, 5, what="the right pane focused")
+    inputs.keys("alt+left")
+    wait_until(lambda: panes()[0].has_focus, 5, what="Alt+Left focusing the left pane")
+    assert not w.manager.showing()
+    inputs.keys("ctrl+home")
+    hold_true(lambda: not w.manager.showing(), 1.5, what="Ctrl+Home not opening the page")

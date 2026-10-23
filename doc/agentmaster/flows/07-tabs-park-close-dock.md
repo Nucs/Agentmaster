@@ -216,3 +216,70 @@ be scrolled away from the selected tab.
 3. **Recolor a session** → every live tab in that folder recolors and the color persists (Rule #12,
    `dir-colors.json`); [LOG] `[nav] tab-color dir=… -> #hex`.
 4. **Remove colors mode** (cog → Tab coloring) → the item is disabled on every tab.
+
+---
+
+### TAB-10 · Quitting keeps the workspace
+
+> **Since** ≤ 0.7.7 (the regression base: CLAUDE.md Rule #16, PERSISTENCE.md §13.5) · **P0** · **Needs** F-S2, F-RS
+> · **Spec** `TerminalPage::CloseWindow` / `RequestQuit` (the close flush), `_RestoreWindowTabs`
+
+**Promise.** However the window is closed — its ✕ with **Close Window** or **Close All Windows** — the next start
+reopens the same tabs: every Claude tab as its SESSION (resumed when entered), every shell tab as a shell, the tab
+that was focused selected, and only that tab (and a busy one, INT-04) started.
+
+**Phases**
+1. **Close Window.** *Do:* F-S2, rename t1 `alpha`, select t2; the window's ✕ → "Close this window?" (Close All
+   Windows · Close Window · Cancel) → **Close Window**. *Expect:* the app quits (the last window); `windows\<id>.json`
+   holds the shell and BOTH Claude refs (kind `Claude`, the session ids), `selectedSessionId` = t2.
+2. **Reopen.** *Do:* start again. *Expect:* the tabs `alpha`, `t2` and the shell (Claude tabs first — the known
+   interleave limit, PERSISTENCE.md §13.5); t2 selected and started; `alpha` dormant (no claude.exe, Activate first in
+   its menu); entering it resumes the conversation.
+3. **Close All Windows.** *Do:* the ✕ → **Close All Windows** → "Do you want to close all windows?" (Close all ·
+   Cancel) → Close all. *Expect:* the same record and the same reopen.
+
+**Edge cases**
+- **E1 A shell tab focused at the quit** → the reopen selects the shell, and NO Claude tab starts (today the first
+  Claude tab starts: TAB-K2).
+- **E2 A tab switch, a rename or a resize just before the close** → the record still holds the Claude refs (TAB-K1:
+  seen degraded once).
+- **E3 Several windows** → **Close Window** on one keeps its record for **Reopen Windows (N)**; the next start reopens
+  the windows that were open at the quit ("Reopen your N previous Agentmaster windows?", Yes / No).
+
+---
+
+## Known defects (expected failures until fixed)
+
+### TAB-K1 · A close can save the window's Claude tabs as plain shell tabs (intermittent)
+> **P0** · Seen once by the e2e suite on 2026-10-23 against 0.8.0 (run5, the restart test; 5 later attempts kept the
+> refs) · evidence: the test's hooks.log and `windows\<id>.json`
+
+After **Close Window** the record held `[Other, Other]` for a shell and a Claude tab (the Claude tab as an anonymous
+shell with a `renameTab "alpha"` action), so the next start reopened it as a PowerShell tab titled `alpha`; the
+session itself was kept (sessions.json, resumable from Sessions). hooks.log: `[nav] window-close confirmed` →
+`[teardown-archive] <id>` → **67 ms later** `[window-save] … tabs=2 [sh,sh,]`. **By reading:** `CloseWindow` flushes
+the record and sets `_windowRecordTeardownFlushed` before `_ArchiveWindowSessionsOnTeardown`, but
+`_FlushWindowRecord` — also the body of the throttled autosave (`_saveWindowRecordThrottled`) — never checks that
+latch, so an autosave that fires after the archive captures the archived tabs as Other refs and overwrites the close
+flush. **Expected:** nothing overwrites the record after the teardown flush (TAB-10 E2).
+
+### TAB-K2 · A reopen whose focused tab was a shell starts the first Claude tab
+> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_menu.py`
+> `test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab`)
+
+The shell focused at the quit (strip: the shell, t1 Waiting): the reopened window selects the shell correctly
+(`[rehome] … select=1 of 2 refs`), but t1's claude.exe is running 5 s later — a Waiting session the restore wake
+would not start. With a CLAUDE tab focused at the quit only that tab starts (checked: t1, t2 dormant, t3 started).
+**By reading:** the Claude refs are re-homed first and a shell's selection is applied by a trailing `SwitchToTab` in
+the shells' startup batch, after the shells exist; until then the first Claude tab is the selected, SHOWN tab, and a
+shown terminal starts. **Expected:** only the focused tab (and busy ones, INT-04) start (TAB-10 E1).
+
+### TAB-K3 · The quit confirmation is invisible to UI Automation
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0
+
+"Do you want to close all windows?" (Close all · Cancel), shown after **Close All Windows**, is on screen, but UI
+Automation sees an empty Popup (no title, no buttons) and a hit test at its "Close all" button returns the terminal
+behind it — a screen reader cannot read or operate it (every Agentmaster ContentDialog, e.g. "Close this window?",
+exposes its title and buttons). Keyboard works (Enter = Close all). **Expected:** the dialog's title and buttons in
+the accessibility tree.
+

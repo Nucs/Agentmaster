@@ -204,6 +204,27 @@ def click(x: int, y: int, button: str = "left", count: int = 1, modifiers: list[
             _send([_key(vk, _scan(vk), _flags_for(vk, True)) for vk in reversed(mods)])
 
 
+def glide(x: int, y: int, steps: int = 12, step_s: float = 0.03) -> None:
+    """Move the pointer to a position in small steps, the way a hand moves it (hover effects that start on the
+    pointer's ENTRY and run on its moves — tooltips, hover menus — see a real arrival).
+
+    Args:
+        x: Screen x.
+        y: Screen y.
+        steps: How many moves.
+        step_s: The pause between moves.
+    Returns:
+        None.
+    Raises:
+        ValueError: When the point is outside the screen.
+        RuntimeError: When the pointer did not arrive.
+    """
+    x0, y0 = cursor()
+    for i in range(1, steps + 1):
+        move(round(x0 + (x - x0) * i / steps), round(y0 + (y - y0) * i / steps))
+        time.sleep(step_s)
+
+
 def drag(points: list[tuple[int, int]], button: str = "left", step_px: int = 12, step_s: float = 0.008,
          hold_s: float = 0.0) -> None:
     """Press at the first point, glide through the others, release at the last.

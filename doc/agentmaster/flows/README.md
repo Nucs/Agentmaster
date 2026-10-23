@@ -23,12 +23,12 @@ Nothing here has been run yet: the suite does not exist.
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 6 | 3 / 2 / 1 | 23 | 16 | 1 |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 7 | 3 / 3 / 1 | 29 | 19 | 1 |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 7 | 3 / 3 / 1 | 29 | 19 | 2 |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface (STA) | 11 | 6 / 5 / 0 | 30 | 31 | — |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
-| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip (TAB) | 9 | 4 / 2 / 3 | 36 | 23 | — |
+| [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 26 | 3 |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
 | [09-telegram-card-and-control.md](09-telegram-card-and-control.md) | Telegram: the card, prompts, /steer, /commands, the screen (TGC) | 6 | 4 / 2 / 0 | 25 | 25 | 2 |
 | [10-telegram-questions-and-menus.md](10-telegram-questions-and-menus.md) | Telegram: question cards, /add-dir menu cards (TGQ) | 6 | 3 / 3 / 0 | 24 | 21 | — |
@@ -44,8 +44,8 @@ Nothing here has been run yet: the suite does not exist.
 | [20-robustness.md](20-robustness.md) | Freezes, crashes, leaks, hostile environments (ROB) | 10 | 3 / 3 / 4 | 26 | 7 | — |
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 |
-| [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 1 |
-| **Total** | | **177** | **74 / 75 / 24** (+4 NOT BUILT) | **≈ 646** | **≈ 527** | **17** |
+| [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 |
+| **Total** | | **178** | **75 / 75 / 24** (+4 NOT BUILT) | **≈ 649** | **≈ 530** | **22** |
 
 ---
 
@@ -226,6 +226,11 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | MGR-K1 | A session launched from the Agent Manager page is not selected on the page (Home offers no way back) until a tab switch | e2e suite, 2026-10-23 (`e2e/suites/test_manager_page.py`) |
 | SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
+| TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
+| SP-K2 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
+| TAB-K1 | A window close can save its Claude tabs as plain shell tabs (intermittent; an autosave after the teardown flush) | e2e suite, 2026-10-23 (seen once) |
+| TAB-K2 | A reopen whose focused tab was a shell starts the first Claude tab | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
+| TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation | e2e suite, 2026-10-23 |
 
 ## Where the documents disagree with the code (found while writing)
 
@@ -243,6 +248,42 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 - **NOTIFICATIONS.md §9.7** still says the preview frame is "NOT BUILT; never run against a real Agentmaster window";
   it shipped in 0.7.9 (production 0.6.8.19).
 - **SESSIONS.md §1**'s toolbar line names an "Archived" button that FAVORITES.md removed.
+
+## The suite that runs these flows
+
+The executable suite is [`e2e/`](../../../e2e/README.md) (the scripted model, the driver and its page objects, the
+fixtures, the guest runner, the host orchestrator). Each test is marked with its flow (`@pytest.mark.flow("…")`).
+Status on 2026-10-23 against the published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11
+desktop: **40 of 40 tests pass in 24 min**; a known-defect test passes while its defect exists.
+
+| Flow | Automated | Tests (`e2e/suites/`) |
+|---|---|---|
+| F-S | the fixture on every surface | `test_smoke.py` |
+| MGR-01 | phases 1–3, E1 | `test_manager_page.py::test_open_the_page_and_leave_it` |
+| MGR-02 | phases 1–4, E1 | `…::test_home_turns_into_the_way_back`, `…::test_double_click_home_opens_the_page_and_stays` |
+| MGR-03 | phase 2 (and its restart), phase 3 | `…::test_closing_the_last_tab_keeps_the_window_on_its_page`, `…::test_a_page_only_last_window_is_not_reopened`, `…::test_deactivating_the_focused_tab_shows_the_page_first` |
+| MGR-04 | phases 1–2 | `…::test_alt_left_and_ctrl_home_are_windows_terminals` |
+| MGR-05 | phases 1, 3, 4; the board follows the state; MGR-K1 | `…::test_linked_lenses`, `…::test_board_follows_the_session_state`, `…::test_known_defect_a_launched_session_is_not_selected_on_the_page` |
+| SP-01 | phases 1, 3, 4 | `test_side_panel.py::test_panel_lists_this_windows_sessions` |
+| SP-02 | phases 1–5 | `…::test_follow_peek_and_jump`, `…::test_card_context_menu` |
+| SP-04 | phase 1; SP-K2 | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
+| SP-05 | phases 1, 3, 4, E3; SP-K1 | `…::test_plus_launcher_card`, `…::test_known_defect_plus_card_launch_needs_a_second_click` |
+| SP-06 | phases 3–5 | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
+| TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
+| TCM-02 | phases 1–3 | `…::test_position_decides_what_is_enabled` |
+| TCM-03 | phases 1–2, E2, E3; TCM-K1 | `…::test_rename_renames_the_session_everywhere`, `…::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_blank_rename_shows_claudes_own_title` |
+| TCM-04 | phases 1–7 | `…::test_copy_puts_the_sessions_facts_on_the_clipboard` |
+| TCM-05 | phases 1–4; TCM-K2 | `…::test_show_transcript_mark_unread_favorite`, `…::test_open_in_explorer_opens_the_folder`, `…::test_known_defect_tags_from_the_tab_menu_leave_the_keys_in_the_terminal` |
+| TCM-06 | phases 1–3 | `…::test_move_tab_reorders_the_strip`, `…::test_move_tab_to_new_window` |
+| TCM-07 | phases 1–4, E1 | `…::test_fork_session_branches_the_conversation`, `…::test_new_session_here_starts_a_fresh_session`, `…::test_fork_on_a_model_and_on_a_specified_model` |
+| TCM-08 | phases 1–2 | `…::test_restart_session_resumes_the_same_conversation` |
+| TCM-09 | phases 1–5 | `…::test_close_tab_asks_and_keeps_the_session`, `…::test_close_other_tabs_asks_once`, `…::test_triage_item_follows_the_state` |
+| TAB-10 | phases 1–3; TAB-K2 (TAB-K1 is named by the restart test's record check) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
+
+Not automated yet in these areas: MGR-03 phases 1 and 4 (a second window; dormant neighbors), MGR-05 phases 2 and 5
+(the tab's selection pill is not in UI Automation; folder scope), MGR-06, SP-03, SP-07 (hundreds of sessions), SP-04
+phase 3–4, SP-05 E1–E2, E4–E8, SP-06 phases 1–2 (splitter drags), TCM-01 phase 4 (an adopted shell claude),
+TCM-05 phase 5 (the panel's own focus — today TCM-K2), the edge cases not listed above.
 
 ## Adding a flow
 

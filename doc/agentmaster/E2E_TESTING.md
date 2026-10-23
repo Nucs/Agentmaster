@@ -6,8 +6,9 @@
 > objects for the tab strip, menus, dialogs, the Agent Manager page and the side panel, failure evidence), the host
 > orchestrator (`e2e/host/e2e_run.py`), and suites for the Agent Manager page (MGR), the side panel (SP) and the tab's
 > context menu (TCM, [`flows/23-tab-context-menu.md`](flows/23-tab-context-menu.md)) — run against the published 0.8.0
-> portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop. On its first day the suite found three
-> defects of 0.8.0, kept as known-defect tests (MGR-K1, SP-K1, TCM-K1). How to run it and how to write a scenario:
+> portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop: 40 tests, all green in 24 min (run7).
+> On its first day the suite found eight defects of 0.8.0 — MGR-K1, SP-K1, SP-K2, TCM-K1, TCM-K2, TAB-K1 (seen
+> once), TAB-K2, TAB-K3 — kept as known-defect tests where they reproduce. How to run it and how to write a scenario:
 > [`e2e/README.md`](../../e2e/README.md). §6 (the app's testability changes: E2E mode, the read-only bridge,
 > AutomationIds) is still a proposal — the suite reads UI Automation names, `sessions.json` and the logs instead.
 > The spike (`tools/e2e-spike/`, 2026-10-22) stays as the record of §2.

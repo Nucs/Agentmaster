@@ -140,6 +140,23 @@ class Session:
                 continue
         return out
 
+    def claude_cmdlines(self) -> list[str]:
+        """The command lines of the session's claude.exe processes (how Agentmaster started it: --resume /
+        --session-id / --fork-session / --model …).
+
+        Returns:
+            The command lines.
+        """
+        out = []
+        for p in self.app.claude_processes():
+            try:
+                line = " ".join(p.cmdline())
+            except Exception:  # noqa: BLE001 - a process gone between listing and reading
+                continue
+            if self.id in line:
+                out.append(line)
+        return out
+
     def ask(self, prompt: str, wait: str = "turn", timeout_s: float = 60.0) -> None:
         """Type a prompt into the session's terminal and confirm it.
 
