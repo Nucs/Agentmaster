@@ -84,6 +84,19 @@ tools. The build tree's copies (`bin\x64\<Config>\<Project>\`, a junction to `Q:
 since 2026-10-19 — every build writes to Q:) belong to the LAST build and are overwritten by the next
 one, so they match a crashed instance only when nothing was built since its layout.
 
+**Prove the match instead of comparing dates** (2026-10-23, `doc/agentmaster/SYMBOLS.md`): `pwsh -File
+tools\Export-AgentmasterSymbols.ps1 -BinaryFolder <the crashed install's folder> -PdbSearchPath <folder(s) with
+PDBs>` reads each binary's debug record and reports its PDB as Matched / Mismatch / Missing by the GUID + age the
+debugger itself checks — a Mismatch PDB symbolizes garbage. Where the PDB of a crashed build comes from:
+- **A published release** (e.g. production's MSIX install, `C:\Program Files\WindowsApps\Agentmaster_<ver>_…`, or
+  a downloaded zip): from the release-symbols change on, every release has `Agentmaster_<ver>_<arch>_symbols.zip`
+  (the FULL PDBs, Source-Linked) — download the one of the crashed version and pass its folder as `<bindir>`.
+  The portable zip itself carries only PUBLIC PDBs (function names, no line numbers, no types). v0.8.0 and every
+  earlier release have no PDBs anywhere: their dumps resolve to `Module+RVA` only.
+- **A dev (Debug) slot**: its PDBs are FASTLINK — types and line tables stay in the object files, which the next
+  Debug build rewrites. Symbolize a dev crash before the next dev build, or expect names only (DIA reports
+  `isFastLinkPDB`; `mspdbcmf /CHECK <pdb>` too).
+
 ## 3. Read the exception — `dumpexc`
 
 ```bash

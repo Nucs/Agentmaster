@@ -3,7 +3,10 @@
 # A build-only PR gate: it compiles + links the app (Terminal\CascadiaPackage, x64 Release) so a
 # pull request can't merge code that doesn't build. It does NOT package, sign, version-stamp, or
 # release anything — that is release.yml's job (tag/dispatch only). Release config here mirrors the
-# release build, so a green CI strongly predicts a green release.
+# release build, so a green CI strongly predicts a green release: that includes the release SYMBOLS
+# (doc/agentmaster/SYMBOLS.md) - the same /SOURCELINK + /PDBSTRIPPED links, the same srcsrv indexing,
+# and the same checks that every binary we build has its full, indexed PDB and its public PDB
+# (nothing is uploaded).
 #
 # Same runner caveat as release.yml: windows-2022 must carry the VS2022 "Desktop development with
 # C++" + "Universal Windows Platform development" workloads and a recent Windows SDK; vcpkg builds
@@ -92,6 +95,18 @@ jobs:
           }
           msbuild OpenConsole.slnx /t:Restore /m /p:Configuration=Release /p:Platform=x64
 
+      # Agentmaster: the release symbols' inputs, exactly as release.yml makes them (see the comments there).
+      - name: Prepare the release symbols (Source Link map + public PDB folder)
+        shell: pwsh
+        run: |
+          $map = Join-Path $env:RUNNER_TEMP 'agentmaster-sourcelink.json'
+          $pub = Join-Path $env:RUNNER_TEMP 'agentmaster-public-pdbs'
+          .\tools\New-AgentmasterSourceLink.ps1 -RepoRoot $env:GITHUB_WORKSPACE -Repository $env:GITHUB_REPOSITORY `
+            -Commit $env:GITHUB_SHA -OutFile $map
+          New-Item -ItemType Directory -Force $pub | Out-Null
+          "AM_SOURCELINK=$map"  >> $env:GITHUB_ENV
+          "AM_PUBLIC_PDBS=$pub" >> $env:GITHUB_ENV
+
       - name: Build CascadiaPackage (x64 Release)
         shell: pwsh
         run: |
@@ -100,11 +115,31 @@ jobs:
             /p:Platform=x64 `
             /p:WindowsTerminalBranding=Dev `
             /p:AppxPackageSigningEnabled=false `
+            "/p:AgentmasterSourceLinkFile=$env:AM_SOURCELINK" `
+            "/p:AgentmasterPublicPdbDir=$env:AM_PUBLIC_PDBS" `
+            /p:AppxSymbolPackageEnabled=false `
             /t:Terminal\CascadiaPackage `
             /bl:msbuild-ci.binlog
+
+      # Agentmaster: the release's symbol checks, without the zips. Fails when a binary we build lacks its full PDB
+      # (or that PDB lacks the Source Link map or the srcsrv stream naming this commit), or lacks its public PDB.
+      - name: Check the release symbols
+        shell: pwsh
+        run: |
+          $layout = 'src\cascadia\CascadiaPackage\bin\x64\Release'
+          .\build\scripts\Index-Pdbs.ps1 -SearchDir $layout -SourceRoot $env:GITHUB_WORKSPACE -CommitId $env:GITHUB_SHA `
+            -Organization $env:GITHUB_REPOSITORY_OWNER -Repo "${{ github.event.repository.name }}" *> index-pdbs-ci.log
+          .\tools\Export-AgentmasterSymbols.ps1 -BinaryFolder $layout -PdbSearchPath $layout `
+            -RequireUnder $env:GITHUB_WORKSPACE -RequireSourceLink $env:GITHUB_SHA -RequireSourceServer
+          .\tools\Export-AgentmasterSymbols.ps1 -BinaryFolder $layout -PdbSearchPath $env:AM_PUBLIC_PDBS `
+            -RequireUnder $env:GITHUB_WORKSPACE
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: binlog-ci
-          path: msbuild-ci.binlog
+          # + the srcsrv indexer's log (Agentmaster), for a failed symbols check.
+          path: |
+            msbuild-ci.binlog
+            index-pdbs-ci.log
+          if-no-files-found: warn

@@ -114,6 +114,50 @@
     </ClCompile>
   </ItemDefinitionGroup>
 
+  <!--
+    Agentmaster: RELEASE SYMBOLS (doc/agentmaster/SYMBOLS.md). Agentmaster is open source, so a release ships the
+    PDB of every binary it builds. Two link outputs serve that, each switched on by a property that only the
+    GitHub workflows pass. A local build (tools\Build-Agentmaster.ps1, Visual Studio) sets neither: its links,
+    binaries and PDBs stay byte-for-byte what they were - a PDB beside every binary in bin\ and in the layout
+    (full in Release, FASTLINK in Debug - see GenerateDebugInformation in common.build.pre.props).
+
+      AgentmasterSourceLinkFile = a Source Link map (JSON, tools\New-AgentmasterSourceLink.ps1)
+        -> link /SOURCELINK:<file>. The map lands in the module's PDB (named stream "sourcelink$1") and turns each
+           recorded source path into a raw.githubusercontent.com URL at the built commit, so Visual Studio and
+           WinDbg download the exact source of a crash. Read at link time: the file must exist before the build.
+
+      AgentmasterPublicPdbDir = a folder
+        -> link /PDBSTRIPPED:<folder>$(TargetName).pdb (the Link task's StripPrivateSymbols). The same link also
+           writes a PUBLIC copy of the PDB: the name and address of every function (static ones and lambdas
+           included), no types, no line numbers, no locals - about 8% of the full size (measured on
+           agentmaster-cli: 0.89 of 11.6 MB). It has the full PDB's GUID and age, so it matches the binary; the
+           release puts it beside each binary in the portable zips (tools\Export-AgentmasterSymbols.ps1).
+           The file is named like the full PDB ($(TargetName).pdb, the name no project overrides - see
+           ProgramDatabaseFile in common.build.pre.props), because a debugger looks a PDB up by the name the
+           binary records. Two projects with one TargetName would overwrite each other's copy; the export
+           script's GUID check would then refuse the loser instead of shipping a wrong PDB.
+
+    Static libraries never link, so neither switch touches them; their debug information reaches the final
+    module's PDB through the link that consumes them.
+  -->
+  <ItemDefinitionGroup Condition="'$(AgentmasterSourceLinkFile)' != ''">
+    <Link>
+      <AdditionalOptions>%(AdditionalOptions) /SOURCELINK:"$(AgentmasterSourceLinkFile)"</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(AgentmasterPublicPdbDir)' != ''">
+    <Link>
+      <StripPrivateSymbols>$([MSBuild]::EnsureTrailingSlash('$(AgentmasterPublicPdbDir)'))$(TargetName).pdb</StripPrivateSymbols>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- The linker writes the public PDB but does not create its folder; parallel projects may race to create it,
+       which MakeDir tolerates. -->
+  <Target Name="AgentmasterMakePublicPdbDir"
+          BeforeTargets="Link"
+          Condition="'$(AgentmasterPublicPdbDir)' != '' and '$(ConfigurationType)' != 'StaticLibrary'">
+    <MakeDir Directories="$(AgentmasterPublicPdbDir)" />
+  </Target>
+
   <!-- For C++ projects, bring in the vcpkg targets at the end -->
   <Import Project="$(VcpkgRoot)/scripts/buildsystems/msbuild/vcpkg.targets" Condition="'$(MSBuildProjectExtension)'=='.vcxproj'" />
 </Project>
