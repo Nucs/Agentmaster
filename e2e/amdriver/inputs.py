@@ -159,6 +159,8 @@ the press), while a human's click lands after the hover settled."""
 HOLD_S = 0.06
 """How long a click holds the button down (a finger's press; a double-click's two presses still fit well
 inside the system's double-click time)."""
+MODIFIER_LEAD_S = 0.08
+"""How long a modifier key (Shift for Shift+Click) is held before the button goes down and after it comes up."""
 
 
 def click(x: int, y: int, button: str = "left", count: int = 1, modifiers: list[str] | None = None,
@@ -188,6 +190,10 @@ def click(x: int, y: int, button: str = "left", count: int = 1, modifiers: list[
         time.sleep(dwell_s)
     if mods:
         _send([_key(vk, _scan(vk), _flags_for(vk, False)) for vk in mods])
+        # A hand holds a modifier BEFORE it presses the button (and keeps it past the release); a key and a press
+        # sent back to back is not what any user does. (A tab's Shift+Click switching to the tab is NOT a timing
+        # matter: it does so with Shift held a full second around the click — flows TAB-K4.)
+        time.sleep(MODIFIER_LEAD_S)
     try:
         for i in range(count):
             # The button is HELD between its down and up events, like a finger: a down and an up sent in
@@ -201,6 +207,7 @@ def click(x: int, y: int, button: str = "left", count: int = 1, modifiers: list[
                 time.sleep(gap_s)
     finally:
         if mods:
+            time.sleep(MODIFIER_LEAD_S)
             _send([_key(vk, _scan(vk), _flags_for(vk, True)) for vk in reversed(mods)])
 
 

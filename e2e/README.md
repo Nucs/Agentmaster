@@ -21,7 +21,7 @@ these capabilities are not yet implemented by this README update.
 ## Running it
 
 ```text
-# a new desktop, provisioned, the whole suite, deleted afterwards (the 40 tests of 2026-10-23: ~25 min + provisioning)
+# a new desktop, provisioned, the whole suite, deleted afterwards (the 49 tests of 2026-10-23: ~37 min + provisioning)
 python e2e/host/e2e_run.py --desktop am-e2e-1 --create --provision --delete-after -- -v
 
 # an existing, provisioned desktop: one area, or the P0 flows only
@@ -58,23 +58,26 @@ def test_home_turns_into_the_way_back(am, s2):
 
 **Fixtures** (`suites/conftest.py`): `am` (the App), `mock` (the MockClient, reset per test), `iso` (the test's
 folders), `s1` (F-S: a session launched through the Agent Manager's launch row, its first turn done), `s2` (F-S2:
-`s1` plus a session in `t2`). More sessions: `am.launch("t3")`; a git folder first: `am.iso.git_folder("t1",
-branch="feature/x")`. A restart (F-RS): `am.close()` (the ✕ → Close Window; `how="all"` for Close All Windows),
-read `am.profile.window_records()` if the test checks the save, then `am.kill(); am.start()` — or `am.restart()`.
+`s1` plus a session in `t2`). More sessions: `am.launch("t3")`; a second session in the SAME folder:
+`am.launch("fa", title="A2")` (the new tab is renamed before its first turn — two sessions of one folder otherwise
+share its name); a git folder first: `am.iso.git_folder("t1", branch="feature/x")`. A second window:
+`am.new_window()` (Ctrl+Shift+N, one shell tab) or `w.tabs.move_to_new_window("t1")`. A restart (F-RS):
+`am.close()` (the ✕ → Close Window; `how="all"` for Close All Windows), read `am.profile.window_records()` if the
+test checks the save, then `am.kill(); am.start()` — or `am.restart()`.
 
 **The page objects** (`am.window` is the first window; `am.windows()` all of them):
 
 | Object | Reads | Does |
 |---|---|---|
-| `window.tabs` | `titles()`, `items()` (title, selected, index), `selected()`, `find(title)`, `rename_box()` | `select(title)`, `context_menu(title)` → Menu, `rename(title, new)`, `close(title, answer)`, `wait_tab / wait_gone / wait_selected` |
+| `window.tabs` | `titles()`, `items()` (title, selected, index), `selected()`, `find(title)`, `rename_box()` | `select(tab)`, `context_menu(tab)` → Menu, `rename(tab, new)`, `close(tab, answer)`, `deactivate(tab, scope)` (Deactivate ▸ …), `activate(tab)` (Activate Tab), `move_to_new_window(tab)` → MainWindow, `wait_tab / wait_gone / wait_selected`; a tab is a title or a `Tab` from `items()` |
 | `Menu` (`amdriver.ui.menus`) | `names()`, `items()` (name, enabled, is_sub, expanded), `has`, `enabled` | `choose(name)`, `submenu(name)` → Menu, `choose_path("Close", "Close other tabs")`, `close()`; `Menu.open_menus(app)`, `Menu.dismiss_all(app)` |
-| `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`; a Card: `click`, `double_click`, `right_click` |
+| `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`, `queue_prompt(text)` (the compose row's Add to queue), `activate_all(scope)` (Activate All Tabs (N); `dormant_count()`); a Card: `click`, `double_click`, `right_click` |
 | `window.side_panel` | `cards()` / `card(title)` (title, state word), `titles()`, `count_line()`, `scope()`, `sum_on()`, `dock_side()`, `collapsed()`, `summary_title()` / `summary_texts()` | `button(name).click()` ('Sum', 'LOCAL', '⌖', '⇄', '«'), `toggle_scope()`, `set_sum(on)`, `open_launcher()` → LauncherCard (`box`, `folder_list`, `type_folder`, `launch`) |
 | `window.terminal` | `text()`, `lines()`, `input_box()` (Claude's box and its draft) | `focus()`, `type(text)`, `submit(prompt)`, `wait_input_box()`, `wait_text(regex)` |
 | `window.tags` / `window.specify` (`amdriver.ui.popups`) | the Tags panel: `texts()`, `count()` ('N of M tags'); the Specify card: `value()` | `wait_open()`; Tags: `add(name)`; Specify: `use(model)`, `press('Cancel')` |
-| `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name)`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
+| `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name, title=…)`, `new_window()`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
-| `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)` |
+| `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `running()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)`, `wait_running()`, `wait_parked(since=mark)` |
 
 **The oracles** — prefer one the app does not control (flows/README.md "Oracles"): the mock
 (`mock.prompts()`, `mock.requests(session=…)`: what reached the model, with `n_msgs`), the transcript
@@ -109,6 +112,21 @@ since=mark)`), then the UI.
   Windows then asks "Do you want to close all windows?", a dialog UI Automation cannot see (Enter answers it).
 - **A tooltip opens on a hand's arrival**: `hover(glide=True)` moves in steps; `am.tooltips()` lists what shows (a
   rich session card has no name — read its texts).
+- **Read the app's files with delete sharing.** The app saves `sessions.json`, `windows\<id>.json`, `settings.json` …
+  by replacing them; a plain `open()` handle (read + write sharing, no delete) makes such a save FAIL —
+  `[persist-fail] … atomic replace failed` — and nothing retries it (ROB-K1). Every read in `amdriver` goes through
+  `win32.read_bytes_shared`; a test that holds a file with `open()` does it on purpose.
+- **Shift+Click on a TAB switches to it** (TAB-K4), with Shift held as long as you like; the tree row's and the board
+  card's Shift+Click do start a parked session in place. Wake a parked tab in place with `tabs.activate(tab)` (its
+  menu's Activate Tab) or `manager.activate_all()`.
+- **Activate All Tabs (N)** asks "Activate dormant tabs" (This window (N) · All windows (M) · Cancel) when another
+  window has dormant tabs too; with this window's only, it starts them at once, ~500 ms apart.
+- **Close ▸ Of Same Folder / Other of Same Folder** asks "Close N [other] sessions in this folder?" (Close All ·
+  Cancel), the titles as bullets; **Deactivate ▸** asks nothing, in any scope.
+- **A window left without a tab closes itself** (`[manager-only] self-close window {…}`) unless it is the last one.
+- **The Prompt Queue's compose box** is named by its placeholder; a pointer or keyboard focus on the EMPTY box pulls
+  the session's unsent draft in, so `queue_prompt` sets the text through UI Automation and clicks the envelope (the
+  third icon left of the box).
 - **The tab menu's Move tab to new window** logs `[nav] move-out <sid8>`; the drag gesture's tear-out logs
   `tab-send-to-window … win=-1`.
 - **A reopened window re-homes its Claude tabs first, its shells after** (PERSISTENCE.md §13.5), and selects the tab
@@ -139,3 +157,5 @@ since=mark)`), then the UI.
 | TAB-K1 | TAB-10 E2 | A window close can save its Claude tabs as plain shell tabs — seen once; the restart test names it when it recurs | `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` (its record check) |
 | TAB-K2 | TAB-10 E1 | A reopen whose focused tab was a shell starts the first restored Claude tab | `test_tab_menu.py::test_known_defect_a_shell_focused_reopen_starts_the_first_claude_tab` |
 | TAB-K3 | TAB-10 | The quit confirmation is invisible to UI Automation (the driver presses Enter) | — |
+| TAB-K4 | TAB-01 phase 4 | Shift+Click on a parked tab switches to it instead of starting it in place (its menu item names the gesture) | `test_tab_lifecycle.py::test_known_defect_shift_click_on_a_parked_tab_switches_to_it` |
+| ROB-K1 | ROB-11 | A reader holding `sessions.json` without delete sharing makes the save fail; nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |

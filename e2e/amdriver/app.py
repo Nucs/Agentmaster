@@ -376,7 +376,7 @@ class App:
         return MainWindow(self, first if first in hwnds else hwnds[0])
 
     def launch(self, name: str = "t1", prompt: Optional[str] = 'ready [[mock reply "ready"]]',
-               timeout_s: float = 60.0):
+               timeout_s: float = 60.0, title: Optional[str] = None):
         """Launch a managed Claude session in the test's folder `name` and (by default) run a first turn —
         fixture F-S of the flow catalog: a session Waiting for you, with a transcript.
 
@@ -384,16 +384,44 @@ class App:
             name: The working folder's name under the test's work folder; it becomes the session's title.
             prompt: The first prompt (None = launch only: the session stays Idle with no transcript).
             timeout_s: How long the launch and the turn may take.
+            title: Rename the new tab to this right after the launch (the tab menu's Rename): a second session in
+                the same folder would otherwise share the folder's name with the first, and title-keyed page
+                objects could not tell them apart. Renamed BEFORE the first turn, so the title is unique by then.
         Returns:
             The Session.
         Raises:
-            WaitTimeout / MockError: When the launch or the first turn did not complete.
+            WaitTimeout / MockError: When the launch, the rename or the first turn did not complete.
         """
         from .session import launch_session
         session = launch_session(self, self.iso.folder(name), self.mock, timeout_s=timeout_s)
+        if title is not None:
+            window = self.window
+            new_tab = wait_until(window.tabs.selected, 10.0, what="the launched tab selected")
+            window.tabs.rename(new_tab, title)
+            self.profile.wait_session(lambda s: s.id == session.id and s.title == title, 10.0,
+                                      what=f"the launched session renamed {title!r} on disk")
         if prompt is not None:
             session.ask(prompt, timeout_s=timeout_s)
         return session
+
+    def new_window(self, timeout_s: float = 20.0):
+        """Open a second window the way a user does from the keyboard: Ctrl+Shift+N in the first window (Windows
+        Terminal's newWindow binding). A new window starts with one default shell tab.
+
+        Args:
+            timeout_s: How long the window may take.
+        Returns:
+            The new MainWindow.
+        Raises:
+            WaitTimeout: When no new window appeared.
+        """
+        from .ui.window import MainWindow
+        before = set(self.main_hwnds())
+        self.window.focus()
+        inputs.keys("ctrl+shift+n")
+        hwnd = wait_until(lambda: next((h for h in self.main_hwnds() if h not in before), None), timeout_s,
+                          what="a new Agentmaster window")
+        return MainWindow(self, hwnd)
 
     def popups(self) -> list[uia.Element]:
         """The app's open popup windows (menus, flyouts, tooltips, the + card), topmost first.

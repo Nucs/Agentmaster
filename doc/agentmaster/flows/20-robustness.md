@@ -165,3 +165,41 @@ in the VM; the pre-warm is covered by the m5 `TestStartupGuard`.
 **Phases**
 1. **Wedge.** *Expect:* `[ui-stall]` lines; the watchdog force-pumps the queue; clicks work again.
 2. **Unhealable.** *Expect:* a clean self-restart with the workspace restored (windows, tabs, the selected tab).
+
+---
+
+### ROB-11 · A save survives a reader
+
+> **Since** ≤ 0.7.7 (the regression base: CLAUDE.md Rule #16, `WriteAllUtf8`) · **P2** · **Needs** F-S · **Spec**
+> Persistence.cpp `WriteAllUtf8` (a temp file + `MoveFileExW(REPLACE_EXISTING)`)
+
+**Promise.** The app's state files (`sessions.json`, `windows\<id>.json`, `settings.json`, …) always end up holding
+the latest state: a save is never torn, and one that cannot complete at once is completed as soon as it can.
+
+**Phases**
+1. **A reader holds the file.** *Do:* F-S; another process opens `sessions.json` for reading the ordinary way (read
+   and write sharing, NO delete sharing — Python's `open()`, MSVC's `std::ifstream`, so also the `agentmaster` CLI's
+   own read, by the reading of its code) and keeps it open while a turn ends. *Expect:* the file is never torn.
+2. **The reader lets go.** *Expect:* within a few seconds the file holds the ended turn (WaitingForInput, its turn
+   end) — today it does not until the next change (ROB-K1).
+
+**Edge cases**
+- **E1 A reader that grants delete sharing** (the suite's own reads, `amdriver.win32.read_bytes_shared`) → the save
+  goes through while it reads.
+
+---
+
+## Known defects (expected failures until fixed)
+
+### ROB-K1 · A reader holding sessions.json makes the save fail, and nothing saves again until the next change
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_robustness.py`
+> `test_known_defect_a_reader_holding_sessions_json_loses_the_save`)
+
+While another process holds `sessions.json` open without FILE_SHARE_DELETE, every save fails — `[persist-fail]
+…\sessions.json (atomic replace failed — state NOT saved)` — and once the reader lets go nothing re-saves until the
+next registry change: a turn that ended during the hold still reads "Running" on disk (in the first sighting, a
+minute later; an app quit or crash in that window keeps the stale state). Found because the suite's own polling with
+`open()` made the app's saves fail at random. **By reading:** `WriteAllUtf8` (Persistence.cpp) makes ONE
+`MoveFileExW(REPLACE_EXISTING)` attempt — it needs delete access on the target — logs, and returns false; the caller
+does not retry or keep the state dirty. The same holds for every file written through it. **Expected:** a short
+retry, and a failed save left pending so the next tick writes it (ROB-11 phase 2).

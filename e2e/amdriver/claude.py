@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .waits import wait_until
+from .win32 import read_bytes_shared
 
 CLAUDE_JSON_SEED = {
     "hasCompletedOnboarding": True,
@@ -79,7 +80,7 @@ class ClaudeConfig:
             The parsed object (empty when missing or torn).
         """
         try:
-            return json.loads((self.dir / ".claude.json").read_text(encoding="utf-8"))
+            return json.loads(read_bytes_shared(self.dir / ".claude.json").decode("utf-8"))
         except (FileNotFoundError, ValueError):
             return {}
 
@@ -107,7 +108,7 @@ class ClaudeConfig:
         if path is None:
             return []
         out = []
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in read_bytes_shared(path).decode("utf-8", errors="replace").splitlines():
             try:
                 out.append(json.loads(line))
             except ValueError:

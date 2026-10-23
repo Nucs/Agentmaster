@@ -120,6 +120,17 @@ GlobalAlloc = _sig(kernel32, "GlobalAlloc", wintypes.HGLOBAL, wintypes.UINT, cty
 GlobalLock = _sig(kernel32, "GlobalLock", wintypes.LPVOID, wintypes.HGLOBAL)
 GlobalUnlock = _sig(kernel32, "GlobalUnlock", wintypes.BOOL, wintypes.HGLOBAL)
 GlobalFree = _sig(kernel32, "GlobalFree", wintypes.HGLOBAL, wintypes.HGLOBAL)
+CreateFileW = _sig(kernel32, "CreateFileW", wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+CloseHandle = _sig(kernel32, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
+
+GENERIC_READ = 0x80000000
+FILE_SHARE_ALL = 0x1 | 0x2 | 0x4
+"""FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE."""
+OPEN_EXISTING = 3
+FILE_ATTRIBUTE_NORMAL = 0x80
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND = 2, 3
 
 
 def last_error(what: str) -> OSError:
@@ -355,3 +366,38 @@ def double_click_ms() -> int:
         Milliseconds.
     """
     return int(GetDoubleClickTime())
+
+
+def read_bytes_shared(path) -> bytes:
+    """Read a whole file while letting its writer REPLACE it meanwhile (the handle grants FILE_SHARE_DELETE).
+
+    ⚠ Why the suite never reads the app's state files with Python's open(): its handle grants read and write
+    sharing but NOT delete, and Agentmaster saves sessions.json, windows\\<id>.json, settings.json … with a temp
+    file + MoveFileExW(REPLACE_EXISTING), which needs DELETE on the target — a save that lands while such a
+    handle is open FAILS (`[persist-fail] … atomic replace failed — state NOT saved`) and is not retried until the
+    next change (measured 2026-10-23: a finished turn stayed "Running" on disk for a minute while the suite
+    polled; flows ROB-K1). A test that WANTS that failure holds the file with open() on purpose.
+
+    Args:
+        path: The file.
+    Returns:
+        Its bytes.
+    Raises:
+        FileNotFoundError: When the file (or its folder) does not exist.
+        OSError: On any other open or read failure.
+    """
+    import msvcrt
+    import os
+    handle = CreateFileW(str(path), GENERIC_READ, FILE_SHARE_ALL, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+    if handle is None or handle == INVALID_HANDLE_VALUE:
+        code = ctypes.get_last_error()
+        if code in (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND):
+            raise FileNotFoundError(code, "no such file", str(path))
+        raise OSError(code, f"CreateFileW failed: {ctypes.FormatError(code).strip()} ({code})", str(path))
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except OSError:
+        CloseHandle(handle)
+        raise
+    with os.fdopen(fd, "rb") as f:  # closes the fd, and with it the handle
+        return f.read()

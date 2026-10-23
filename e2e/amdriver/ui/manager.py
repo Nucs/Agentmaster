@@ -267,6 +267,76 @@ class ManagerPage:
         """
         return any(el.name == name for el in self.controls())
 
+    def activate_all_button(self) -> Optional[uia.Element]:
+        """The toolbar's "Activate All Tabs (N)" button — shown only while THIS window holds dormant managed tabs
+        (restored or parked ones whose claude has not started).
+
+        Returns:
+            The button, or None when the window has no dormant tab.
+        """
+        return next((el for el in self.controls()
+                     if el.role == "button" and el.name.startswith("Activate All Tabs")), None)
+
+    def dormant_count(self) -> int:
+        """The N of "Activate All Tabs (N)": this window's dormant managed tabs, as the page counts them.
+
+        Returns:
+            N (0 when the button is not shown).
+        """
+        btn = self.activate_all_button()
+        if btn is None:
+            return 0
+        digits = "".join(c for c in btn.name if c.isdigit())
+        return int(digits) if digits else 0
+
+    def activate_all(self, scope: str = "this") -> int:
+        """Wake dormant managed tabs in place with the toolbar's "Activate All Tabs (N)" (the page starts them one
+        by one, ~500 ms apart, at most 4 per 10 s; none of them is selected and the page stays).
+
+        Measured (0.8.0): while OTHER windows hold dormant tabs too, the click first asks — a dialog "Activate
+        dormant tabs" ("This window: N • All windows: M.") with the buttons "This window (N)", "All windows (M)",
+        "Cancel"; with dormant tabs in this window only, it starts them at once (`[activate-all] window {…} drip-start
+        …`).
+
+        Args:
+            scope: "this" (this window's tabs) or "all" (every window's) — the dialog's answer when it asks.
+        Returns:
+            The N the button showed before the click.
+        Raises:
+            LookupError: When the button is not shown (no dormant tab), or the dialog lacks the scope's button.
+            ValueError: On another scope.
+        """
+        from .dialogs import Dialog
+        if scope not in ("this", "all"):
+            raise ValueError(f"scope must be 'this' or 'all', not {scope!r}")
+        self.open()
+        btn = self.activate_all_button()
+        if btn is None:
+            raise LookupError("the page shows no 'Activate All Tabs (N)' button (this window has no dormant tab)")
+        count = self.dormant_count()
+        mark = self.window.app.profile.hooks.mark()
+        self.window.focus()
+        btn.click()
+
+        def started_or_asked():
+            """One poll: the drip started, or the choice dialog asks.
+
+            Returns:
+                "started", the Dialog, or None.
+            """
+            if self.window.app.profile.hooks.find(r"\[activate-all\] window \{[^}]*\} drip-start", since=mark):
+                return "started"
+            return Dialog.find_in(self.window, title="Activate dormant tabs")
+
+        outcome = wait_until(started_or_asked, 10.0, what="Activate All Tabs to start, or to ask which windows")
+        if outcome != "started":
+            prefix = "This window" if scope == "this" else "All windows"
+            names = [n for n in outcome.buttons() if n.startswith(prefix)]
+            if not names:
+                raise LookupError(f"the dialog has no {prefix!r} button: {outcome.buttons()}")
+            outcome.press(names[0])
+        return count
+
     def _after(self, marker: str, role: str, controls: Optional[list] = None) -> Optional[uia.Element]:
         """The first control of a role after a marker text (the page's sections follow their headers).
 
@@ -532,3 +602,56 @@ class ManagerPage:
         """
         view = self._after("Prompt Queue", "pane")
         return view.texts(max_depth=8) if view is not None else []
+
+    # ---- the Prompt Queue tab's compose row -------------------------------------------------------
+
+    COMPOSE_NAMES = ("queue a prompt for the selected session…", "click to pull in this session's unsent prompt…")
+    """The compose box's accessible name is its placeholder: the first while the selected session has no unsent
+    draft, the second while it has one (a pointer or keyboard focus on the EMPTY box then pulls the draft in)."""
+
+    def compose_box(self) -> uia.Element:
+        """The Prompt Queue tab's compose box (measured 0.8.0: an edit of class TextBox below the queue's list, with
+        three nameless icon buttons on its left — Jump to tab, Send now, Add to queue — and the pull-draft and
+        templates buttons on its right).
+
+        Returns:
+            The edit.
+        Raises:
+            LookupError: When the Prompt Queue tab is not showing (show_tab("Prompt Queue") first).
+        """
+        for el in self.controls():
+            if el.role == "edit" and el.class_name == "TextBox" and el.name in self.COMPOSE_NAMES:
+                return el
+        raise LookupError("no compose box: is the Prompt Queue tab showing with a session selected?")
+
+    def compose_buttons(self) -> list[uia.Element]:
+        """The compose row's icon buttons LEFT of the box, left to right: [Jump to tab, Send now, Add to queue].
+
+        Returns:
+            The buttons (they have no accessible names: their position is their identity).
+        Raises:
+            LookupError: When the compose box is not showing.
+        """
+        bx, by, _bw, _bh = self.compose_box().rect
+        found = [el for el in self.controls()
+                 if el.role == "button" and el.visible and abs(el.rect[1] - by) <= 14 and el.rect[0] < bx
+                 and bx - el.rect[0] < 260]
+        return sorted(found, key=lambda el: el.rect[0])
+
+    def queue_prompt(self, text: str) -> None:
+        """Append a prompt to the selected session's queue: the compose box's text set through UI Automation (no
+        focus, so no unsent draft is pulled into it), then the envelope (Add to queue).
+
+        Args:
+            text: The prompt (a mock script inside `[[mock …]]` is sent to the model as it is).
+        Returns:
+            None.
+        Raises:
+            LookupError: When the Prompt Queue tab or its buttons are not showing.
+        """
+        box = self.compose_box()
+        box.set_value(text)
+        buttons = self.compose_buttons()
+        if len(buttons) != 3:
+            raise LookupError(f"expected the 3 compose icons left of the box, found {[b.line() for b in buttons]}")
+        buttons[2].click()

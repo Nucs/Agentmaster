@@ -538,8 +538,8 @@ def test_close_other_tabs_asks_once(am, s2):
 def test_restart_restores_the_renamed_tab_dormant(am, s2):
     """TCM-03 phase 2 + TCM-01 phase 3 after a restart (F-RS: the window's ✕ → Close Window, then a new start):
     the window record keeps both Claude tabs; the renamed tab comes back titled `alpha` and DORMANT (the window
-    reopens to t2, so t1's claude is not started, and its menu leads with Activate); Shift+Click starts it on the
-    same conversation.
+    reopens to t2, so t1's claude is not started, and its menu leads with Activate); that Activate Tab starts it on
+    the same conversation, in place (t2 stays selected; its Shift+Click twin switches instead — TAB-K4).
 
     Args:
         am: The app.
@@ -565,10 +565,10 @@ def test_restart_restores_the_renamed_tab_dormant(am, s2):
     assert not a.claude_pids()
     menu = w.tabs.context_menu("alpha")
     assert menu.names()[0] == "Activate Tab (Shift+Click)"
-    menu.close()
-    w.tabs.get("alpha").click(modifiers=["shift"])
+    menu.choose("Activate Tab (Shift+Click)")
     wait_until(lambda: any("--resume" in c for c in a.claude_cmdlines()), 30,
                what="the activated tab's claude resuming the conversation", describe=a.claude_cmdlines)
+    assert w.tabs.selected().title == "t2"
 
 
 @pytest.mark.p1

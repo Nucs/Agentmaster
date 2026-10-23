@@ -45,8 +45,9 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
    (PQR-10); the tab is NOT turned into a plain shell, NOT archived (wait 30 s, census still has it).
 3. **Wake.** *Do:* click the tab. *Expect:* the conversation resumes (`claude --resume` same id); the draft is
    typed back (DRF-06); the queue continues after settle (Auto).
-4. **Activate without switching.** *Do:* park again; tab menu → **Activate Tab** (or Shift+click the tab).
-   *Expect:* it starts in place without being selected.
+4. **Activate without switching.** *Do:* park again; tab menu → **Activate Tab (Shift+Click)** (or Shift+click
+   the tab — today that SWITCHES to it: TAB-K4). *Expect:* it starts in place (`claude --resume`, `[nav]
+   activate-dormant <sid8>`) without being selected.
 
 **Edge cases**
 - **E1 The focused tab** → the Agent Manager page shows first (MGR-03).
@@ -58,6 +59,10 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
 - **E6 The right-clicked tab was on screen** → still on screen after the park (the strip does not jump);
   [LOG] `[strip] deactivate: …` offsets.
 - **E7 App restart** → a parked tab reopens as an ordinary restored-dormant tab.
+- **E8 "Activate All Tabs (N)"** (the page's toolbar, shown while the window holds dormant tabs) → this window's
+  dormant tabs start in place, ~500 ms apart, none selected (`[activate-all] window {…} drip-start …`). While another
+  window holds dormant tabs too it asks first: "Activate dormant tabs" — "This window: N • All windows: M." —
+  **This window (N)** · **All windows (M)** · **Cancel**.
 
 ---
 
@@ -99,13 +104,17 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
 3. **Unfavorite & Close.** *Do:* a starred session's ✕. *Expect:* the secondary button reads **☆ Unfavorite &
    Close**.
 4. **Of Same Folder.** *Do:* tab menu → Close ▸ **Of Same Folder** (3 sessions in the folder, one in window
-   2). *Expect:* ONE confirm listing their titles (≤ 20 + "…and N more"); accept → all three closed
-   (window 2's through its own window).
-5. **Other of Same Folder** → the same minus this one.
+   2). *Expect:* ONE confirm, "Close 3 sessions in this folder?", naming the folder and listing their titles as
+   bullets (≤ 20 + "…and N more"), **Close All** · **Cancel**; Close All → all three closed (window 2's through its own
+   window; a window left without a tab then closes itself, MGR-03). *Check:* [LOG] `[nav] close-folder begin
+   dir=<folder> sessions=3` … `close-folder done`, one `[archive] <id>` per session.
+5. **Other of Same Folder** → the same minus this one: "Close 2 other sessions in this folder?", `except=<sid8>`
+   in the log lines.
 
 **Edge cases**
-- **E1 Cancel** → nothing closes.
-- **E2 Window ✕ with managed tabs** → one batch dialog **Close All · ★ Favorite & Close All · Cancel All**.
+- **E1 Cancel** → nothing closes (`[nav] close-folder cancelled dir=<folder>`).
+- **E2 A batch of managed tabs** (Close ▸ Close other tabs / Close all tabs) → ONE dialog **Close All · ★ Favorite &
+  Close All · Cancel All** (TCM-09). The window's ✕ asks "Close this window?" instead (TAB-10).
 - **E3 Only shell tabs in a batch** → no dialog.
 - **E4 Confirm before closing OFF** (cog) → no dialog.
 - **E5 A closed session's transcript** is untouched on disk.
@@ -273,6 +282,20 @@ would not start. With a CLAUDE tab focused at the quit only that tab starts (che
 **By reading:** the Claude refs are re-homed first and a shell's selection is applied by a trailing `SwitchToTab` in
 the shells' startup batch, after the shells exist; until then the first Claude tab is the selected, SHOWN tab, and a
 shown terminal starts. **Expected:** only the focused tab (and busy ones, INT-04) start (TAB-10 E1).
+
+### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_lifecycle.py`
+> `test_known_defect_shift_click_on_a_parked_tab_switches_to_it`)
+
+The tab menu names the gesture — "Activate Tab (Shift+Click)", tooltip "You can also Shift+Click the tab to do this" —
+but a Shift+Click on a parked (or restored-dormant) tab SELECTS it: `[nav] tab-focus <sid8>`, the page or the tab you
+were on is left, and the claude starts as a side effect of the switch; no `[nav] activate-dormant` is logged. Measured
+with Shift held 0.08 s, 0.4 s and 1 s around the click. The same Shift+Click on the session's Explorer Tree row or
+Triage Board card DOES start it in place (`[nav] activate-dormant`), so the Shift reaches the app. **By reading:**
+`_OnTabPointerPressed` (TabManagement.cpp) is attached with a plain `PointerPressed` handler, and a ListViewItem marks
+a LEFT press handled in its own pointer handling, so the Shift branch never runs (a middle press, which the item does
+not handle, reaches it: middle-click close works). **Expected:** the tab starts in place and the selection stays
+(TAB-01 phase 4); a handler registered with handledEventsToo would see the press.
 
 ### TAB-K3 · The quit confirmation is invisible to UI Automation
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0
