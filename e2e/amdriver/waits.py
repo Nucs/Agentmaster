@@ -66,7 +66,8 @@ def wait_until(fn: Callable[[], T], timeout_s: float = 10.0, interval_s: float =
     raise WaitTimeout(f"timed out after {timeout_s:.1f} s waiting for {what or fn!r}{cause}{seen}")
 
 
-def hold_true(fn: Callable[[], Any], duration_s: float, interval_s: float = 0.2, what: str = "") -> None:
+def hold_true(fn: Callable[[], Any], duration_s: float, interval_s: float = 0.2, what: str = "",
+              describe: Optional[Callable[[], Any]] = None) -> None:
     """Check that a condition STAYS true for a while (the negative twin of wait_until: "nothing happens").
 
     Args:
@@ -74,6 +75,7 @@ def hold_true(fn: Callable[[], Any], duration_s: float, interval_s: float = 0.2,
         duration_s: How long it must hold.
         interval_s: The pause between checks.
         what: A description for the failure message.
+        describe: Called on a failure to add "what was seen" to the message (e.g. which sessions run).
     Returns:
         None.
     Raises:
@@ -86,5 +88,12 @@ def hold_true(fn: Callable[[], Any], duration_s: float, interval_s: float = 0.2,
         except Exception as error:  # noqa: BLE001 - a read error breaks the "holds" claim too
             raise AssertionError(f"{what or fn!r} stopped holding: {type(error).__name__}: {error}") from error
         if not ok:
-            raise AssertionError(f"{what or fn!r} stopped holding after {duration_s - (end - time.monotonic()):.1f} s")
+            seen = ""
+            if describe is not None:
+                try:
+                    seen = f"; seen: {describe()!r}"
+                except Exception as error:  # noqa: BLE001 - a failing description must not hide the failure
+                    seen = f"; (describe failed: {error})"
+            raise AssertionError(f"{what or fn!r} stopped holding after "
+                                 f"{duration_s - (end - time.monotonic()):.1f} s{seen}")
         time.sleep(interval_s)

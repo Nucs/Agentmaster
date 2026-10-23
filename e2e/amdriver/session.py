@@ -157,6 +157,42 @@ class Session:
                 out.append(line)
         return out
 
+    def running(self) -> bool:
+        """Whether the session's claude.exe runs now (a parked or restored-dormant tab has none).
+
+        Returns:
+            True while a claude of this session runs.
+        """
+        return bool(self.claude_pids())
+
+    def wait_running(self, timeout_s: float = 30.0) -> list[int]:
+        """Wait for the session's claude to start (a wake: the tab entered, Activate, Activate All).
+
+        Args:
+            timeout_s: How long.
+        Returns:
+            Its pids.
+        Raises:
+            WaitTimeout: When no claude started.
+        """
+        return wait_until(self.claude_pids, timeout_s, what=f"session {self.short}'s claude to start")
+
+    def wait_parked(self, since: int = 0, timeout_s: float = 30.0) -> None:
+        """Wait until the session is PARKED: the engine logged `[deactivate] <sid8> claude parked dormant …` after
+        the mark, and its claude has exited (CTRL_CLOSE through the old ConPTY: ~1–2.5 s, at most 5 s).
+
+        Args:
+            since: A hooks.log mark taken before the Deactivate.
+            timeout_s: How long.
+        Returns:
+            None.
+        Raises:
+            WaitTimeout: When the park was not logged or the claude stayed.
+        """
+        self.app.profile.hooks.wait(rf"\[deactivate\] {self.short} claude parked dormant", since=since,
+                                    timeout_s=timeout_s)
+        wait_until(lambda: not self.claude_pids(), timeout_s, what=f"session {self.short}'s claude to exit")
+
     def ask(self, prompt: str, wait: str = "turn", timeout_s: float = 60.0) -> None:
         """Type a prompt into the session's terminal and confirm it.
 

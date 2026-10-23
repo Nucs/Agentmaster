@@ -11,6 +11,10 @@ read-only test bridge exists (E2E_TESTING.md §6.2):
 
 A log is read from a MARK (a byte offset taken before the action), so a check sees only what the action
 caused and never an earlier test's or an earlier phase's line.
+
+⚠ Every file here is read through win32.read_bytes_shared (a handle that grants FILE_SHARE_DELETE): the app saves
+its JSON files by replacing them (a temp file + MoveFileExW), and a save that meets a plain open() handle FAILS
+and is not retried (flows ROB-K1) — a polling test would otherwise change what it measures.
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .waits import wait_until
+from .win32 import read_bytes_shared
 
 STATES = ("Idle", "Running", "WaitingForInput", "NeedsApproval", "Error", "Done")
 """SessionState's persisted names (Persistence.cpp)."""
@@ -114,9 +119,7 @@ class LogFile:
             The text (UTF-8; a broken byte is replaced). Empty when the log does not exist.
         """
         try:
-            with open(self.path, "rb") as f:
-                f.seek(since)
-                return f.read().decode("utf-8", errors="replace")
+            return read_bytes_shared(self.path)[since:].decode("utf-8", errors="replace")
         except FileNotFoundError:
             return ""
 
@@ -196,15 +199,18 @@ class Profile:
         Returns:
             The parsed value.
         Raises:
-            ValueError: When the file stays unparseable for ~1 s (a real corruption, which is a finding).
+            ValueError: When the file stays unparseable or unopenable for ~1 s (a real corruption, which is a
+                finding).
         """
         last: Optional[Exception] = None
         for _ in range(10):
             try:
-                return json.loads(path.read_text(encoding="utf-8-sig"))
+                return json.loads(read_bytes_shared(path).decode("utf-8-sig"))
             except FileNotFoundError:
                 return default
-            except (ValueError, PermissionError) as error:
+            except (ValueError, OSError) as error:
+                # A torn read, or an open that met the replace itself (a delete-pending target answers
+                # ERROR_ACCESS_DENIED for an instant): read again.
                 last = error
                 time.sleep(0.1)
         raise ValueError(f"{path} stays unreadable: {last}")
@@ -287,7 +293,7 @@ class Profile:
         path = self.dir / "open-windows.json"
         if not path.exists():
             return []
-        return re.findall(r"\{[0-9A-Fa-f-]{36}\}", path.read_text(encoding="utf-8", errors="replace"))
+        return re.findall(r"\{[0-9A-Fa-f-]{36}\}", read_bytes_shared(path).decode("utf-8", errors="replace"))
 
     def settings(self) -> dict:
         """The Settings cog's values.

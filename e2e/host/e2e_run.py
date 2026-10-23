@@ -137,26 +137,47 @@ def stage(persist: Path) -> None:
     (persist / "e2e" / "cache").mkdir(parents=True, exist_ok=True)
 
 
-def wait_guest_file(fleet: Fleet, desktop: str, path: str, deadline_s: float) -> str:
-    """Poll a file in the guest until it exists.
+def file_body(answer: str) -> str:
+    """The file's own text from a read_file answer, which starts with a "bytes a-b of n" line.
+
+    Args:
+        answer: The agent's answer.
+    Returns:
+        The text after that line (the whole answer when it has no such line).
+    """
+    first, _, rest = answer.partition("\n")
+    return rest if first.startswith("bytes ") else answer
+
+
+def wait_guest_file(fleet: Fleet, desktop: str, path: str, deadline_s: float, nonempty: bool = False) -> str:
+    """Poll a file in the guest until it exists (and, when asked, holds text).
+
+    ⚠ `echo %ERRORLEVEL%> file` in cmd CREATES the file before it writes the number: a read in between finds an
+    empty file (seen 2026-10-23: "provisioning failed (exit bytes 0-0 of 0)" after a provisioning that had
+    succeeded). A marker file whose content matters must be waited for with nonempty=True.
 
     Args:
         fleet: The fleet.
         desktop: The desktop.
         path: The guest path.
         deadline_s: How long.
+        nonempty: Keep polling while the file exists but is still empty.
     Returns:
-        The file's text.
+        The file's text (without the agent's "bytes a-b of n" line).
     Raises:
-        TimeoutError: When it never appeared.
+        TimeoutError: When it never appeared (or stayed empty).
     """
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
         try:
-            return fleet.desk(desktop, "read_file", {"path": path})
+            body = file_body(fleet.desk(desktop, "read_file", {"path": path}))
         except RuntimeError:
             time.sleep(10)
-    raise TimeoutError(f"{path} did not appear in {deadline_s:.0f} s")
+            continue
+        if body.strip() or not nonempty:
+            return body
+        time.sleep(2)
+    raise TimeoutError(f"{path} did not appear{' with content' if nonempty else ''} in {deadline_s:.0f} s")
 
 
 def provision(fleet: Fleet, desktop: str, extra: list[str]) -> None:
@@ -173,8 +194,8 @@ def provision(fleet: Fleet, desktop: str, extra: list[str]) -> None:
     """
     fleet.desk(desktop, "launch", {"command": "cmd /c Z:\\e2e\\src\\guest\\provision.cmd -Pwsh " + " ".join(extra),
                                    "cwd": "C:\\"})
-    code = wait_guest_file(fleet, desktop, "C:/e2e/provision.done", 1800).strip()
-    tail = fleet.desk(desktop, "read_file", {"path": "C:/e2e/provision.log"})[-1500:]
+    code = wait_guest_file(fleet, desktop, "C:/e2e/provision.done", 1800, nonempty=True).strip()
+    tail = file_body(fleet.desk(desktop, "read_file", {"path": "C:/e2e/provision.log"}))[-1500:]
     if code.splitlines()[-1].strip() != "0":
         raise RuntimeError(f"provisioning failed (exit {code}):\n{tail}")
     log("provisioned: " + tail.strip().splitlines()[-1][:300])

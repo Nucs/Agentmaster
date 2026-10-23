@@ -7,11 +7,14 @@ title), `#CloseButton` "Close Tab"]]. While a tab is renamed, its title text is 
 
 ⚠ The strip VIRTUALIZES (CLAUDE.md Gotchas): a tab scrolled far out of view is not in the tree at all. With the
 handful of tabs a test opens every tab is present; a flow with hundreds of tabs must reveal a tab first.
+
+Every action takes a tab by its TITLE or as a `Tab` read from `items()` / `selected()`: two sessions launched in
+one folder share the folder's name as their title until one is renamed, and only the Tab object tells them apart.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 from .. import inputs, uia
 from ..waits import wait_until
@@ -69,6 +72,10 @@ class Tab:
         if el is None:
             raise LookupError(f"tab {self.title!r} has no close button")
         return el
+
+
+TabRef = Union["Tab", str]
+"""A tab named by its title, or a Tab read from the strip (needed when two tabs share a title)."""
 
 
 class TabStrip:
@@ -131,20 +138,33 @@ class TabStrip:
         """
         return next((t for t in self.items() if t.title == title), None)
 
-    def get(self, title: str) -> Tab:
-        """A tab by its exact title, which must exist.
+    def get(self, title: TabRef) -> Tab:
+        """A tab by its exact title, which must exist (a Tab is returned as it is).
 
         Args:
-            title: The title.
+            title: The title, or a Tab already read.
         Returns:
             The tab.
         Raises:
             LookupError: When there is no such tab (the message lists the titles).
         """
+        if isinstance(title, Tab):
+            return title
         tab = self.find(title)
         if tab is None:
             raise LookupError(f"no tab {title!r}; the tabs: {self.titles()}")
         return tab
+
+    @staticmethod
+    def _label(tab: TabRef) -> str:
+        """A tab's title for messages and title-keyed waits.
+
+        Args:
+            tab: The title or the Tab.
+        Returns:
+            The title.
+        """
+        return tab.title if isinstance(tab, Tab) else tab
 
     def selected(self) -> Optional[Tab]:
         """The selected tab.
@@ -195,11 +215,11 @@ class TabStrip:
                           timeout_s, what=f"tab {title!r} selected",
                           describe=lambda: (self.selected().title if self.selected() else None))
 
-    def select(self, title: str) -> Tab:
+    def select(self, title: TabRef) -> Tab:
         """Click a tab and wait until it is selected.
 
         Args:
-            title: The exact title.
+            title: The exact title (or a Tab: then the wait accepts any selected tab of that title).
         Returns:
             The tab.
         Raises:
@@ -208,13 +228,13 @@ class TabStrip:
         """
         self.window.focus()
         self.get(title).click()
-        return self.wait_selected(title)
+        return self.wait_selected(self._label(title))
 
-    def context_menu(self, title: str):
+    def context_menu(self, title: TabRef):
         """Right-click a tab and return its context menu.
 
         Args:
-            title: The exact title.
+            title: The exact title, or a Tab.
         Returns:
             The open Menu.
         Raises:
@@ -227,15 +247,16 @@ class TabStrip:
         self.get(title).right_click()
         return Menu.wait_new(self.window.app, before)
 
-    def close(self, title: str, answer: Optional[str] = "Close", timeout_s: float = 20.0) -> None:
+    def close(self, title: TabRef, answer: Optional[str] = "Close", timeout_s: float = 20.0) -> None:
         """Close a tab with its ✕ and answer the confirmation.
 
-        Every tab asks first (0.8.0): a session tab "Close session?" (Close · ★ Favorite & Close · Cancel), a
-        shell tab "Close tab?" (Close · Cancel).
+        Every tab asks first (0.8.0): a session tab "Close session?" (Close · ★ Favorite & Close · Cancel — or
+        ☆ Unfavorite & Close for a starred session), a shell tab "Close tab?" (Close · Cancel).
 
         Args:
-            title: The tab.
-            answer: The button to press ("Close", "★ Favorite & Close", "Cancel"); None leaves the dialog open.
+            title: The tab (its title, or a Tab when titles repeat).
+            answer: The button to press ("Close", "★ Favorite & Close", "☆ Unfavorite & Close", "Cancel"); None
+                leaves the dialog open.
             timeout_s: How long the tab may take to leave the strip (not waited for with "Cancel" / None).
         Returns:
             None.
@@ -245,12 +266,76 @@ class TabStrip:
         """
         from .dialogs import Dialog
         self.window.focus()
+        count = len(self.items())
         self.get(title).close_button().click()
         if answer is None:
             return
         Dialog.wait(self.window.app, title_re=r"^Close (session|tab)\?$").press(answer)
-        if answer != "Cancel":
+        if answer == "Cancel":
+            return
+        if isinstance(title, Tab):
+            wait_until(lambda: len(self.items()) < count, timeout_s, what=f"tab {title.title!r} gone",
+                       describe=self.titles)
+        else:
             self.wait_gone(title, timeout_s)
+
+    # ---- park, wake, move -------------------------------------------------------------------------
+
+    def deactivate(self, title: TabRef, scope: str = "Deactivate Tab") -> None:
+        """Park sessions with the tab menu's Deactivate ▸ (no confirmation by design).
+
+        Args:
+            title: The tab whose menu is used (the anchor of the scope).
+            scope: The submenu item: "Deactivate Tab", "Tabs to the Left", "Tabs to the Right", "Other Tabs",
+                "Of Same Folder", "Other of Same Folder", "All Tabs".
+        Returns:
+            None.
+        Raises:
+            LookupError: When the tab or the item is missing (a shell tab has no Deactivate ▸).
+            WaitTimeout: When the menu did not open.
+        """
+        self.context_menu(title).choose_path("Deactivate", scope)
+
+    def activate(self, title: TabRef) -> None:
+        """Start a parked (dormant) tab in place, without selecting it: its menu's first item, "Activate Tab
+        (Shift+Click)" — shown only on a dormant tab.
+
+        Args:
+            title: The tab.
+        Returns:
+            None.
+        Raises:
+            LookupError: When the item is missing (the tab is not dormant).
+        """
+        self.context_menu(title).choose("Activate Tab (Shift+Click)")
+
+    def move_to_new_window(self, title: TabRef, timeout_s: float = 20.0):
+        """Move a tab into a window of its own (Move tab ▸ Move tab to new window).
+
+        Args:
+            title: The tab.
+            timeout_s: How long the new window may take.
+        Returns:
+            The new MainWindow (holding the tab).
+        Raises:
+            WaitTimeout: When no new window held the tab.
+        """
+        label = self._label(title)
+        before = set(self.window.app.main_hwnds())
+        self.context_menu(title).choose_path("Move tab", "Move tab to new window")
+
+        def moved():
+            """One poll: a window that did not exist before and holds the tab.
+
+            Returns:
+                The MainWindow, or None.
+            """
+            for w in self.window.app.windows():
+                if w.hwnd not in before and w.tabs.find(label) is not None:
+                    return w
+            return None
+
+        return wait_until(moved, timeout_s, what=f"a new window holding {label!r}")
 
     def rename_box(self) -> Optional[uia.Element]:
         """The inline rename box of the tab being renamed.
@@ -260,7 +345,7 @@ class TabStrip:
         """
         return self.element().find(aid="HeaderRenamerTextBox", max_depth=4)
 
-    def rename(self, title: str, new_title: str, how: str = "menu", commit_key: str = "shift+enter") -> None:
+    def rename(self, title: TabRef, new_title: str, how: str = "menu", commit_key: str = "shift+enter") -> None:
         """Rename a tab the way a user does: open the inline box, replace the text, commit.
 
         ⚠ The default commit mode (AppSettings::tabRenameCommitMode = ClickAwayOrShiftEnter) commits on
@@ -268,7 +353,7 @@ class TabStrip:
         Enter mode commits on Enter.
 
         Args:
-            title: The tab's current title.
+            title: The tab's current title, or a Tab (when two tabs share the title).
             new_title: The new title.
             how: "menu" (Rename tab (F2) in the context menu) or "f2" (select the tab, press F2).
             commit_key: The key that commits ("shift+enter" in the default mode; "enter" in the Enter mode).
