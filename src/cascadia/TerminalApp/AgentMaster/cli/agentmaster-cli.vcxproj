@@ -86,10 +86,16 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <!-- This IS the dev CLI build; an unpackaged run (no inherited AGENTMASTER_PROFILE) then
-           defaults to ~/.agentmaster-dev. The release-identity package build overrides this off
-           via the wapproj. -->
-      <PreprocessorDefinitions>AGENTMASTER_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- The DEV brand: an unpackaged run of a dev build (no package identity, no inherited
+           AGENTMASTER_PROFILE, e.g. Q:\agentmaster-layouts\Debug\agentmaster-cli.exe run by path)
+           defaults to ~/.agentmaster-dev. Only for the dev identity: a build of the RELEASE identity
+           (/p:AgentmasterPackageIdentity=Release - release.yml, Build-Agentmaster.ps1 -ReleaseIdentity)
+           ships in the portable zips, the per-user install and the install for all users, where the
+           CLI runs unpackaged and must read the profile the app beside it uses (ResolveProfileDir:
+           the folder's profile.path, else ~/.agentmaster). Until 2026-10-23 every build carried the
+           brand, so those copies' CLI read ~/.agentmaster-dev (CLI.md section 11). A global property:
+           the solution build hands it to this project too. -->
+      <PreprocessorDefinitions Condition="'$(AgentmasterPackageIdentity)'!='Release'">AGENTMASTER_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

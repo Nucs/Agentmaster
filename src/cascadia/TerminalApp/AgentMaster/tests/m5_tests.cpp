@@ -101,6 +101,7 @@ int wmain()
     TestCmdPathLimit();
     TestStartupGuard(); // the startup-deadlock fix (StartupGuard.h, tests_spawn_sched.cpp)
     TestPortableInstall();
+    TestCliDispatch(); // CLI.md §2a — `agentmaster <verb>` answered by the CLI whichever exe the name finds (tests_spawn_sched.cpp)
     TestTranscriptScan();
     TestCurrentModel();
     TestBlockedAndInterruptedStates();

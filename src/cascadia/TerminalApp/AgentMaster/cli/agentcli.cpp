@@ -1859,16 +1859,22 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // Profile targeting MUST happen before any state read (ResolveProfileDir caches once).
-    // Precedence (highest first):
+    // Precedence (highest first; CLI.md §7):
     //   1. --profile <dir> / --instance dev|release        (explicit override)
-    //   2. inherited AGENTMASTER_PROFILE env                (an agent INSIDE an app tab targets
+    //   2. MSIX package identity                            (a packaged dev exe -> dev profile,
+    //                                                        release -> release; any inherited
+    //                                                        AGENTMASTER_PROFILE is CLEARED, then
+    //                                                        ResolveProfileDir decides by identity)
+    //   3. inherited AGENTMASTER_PROFILE env (unpackaged)   (an agent INSIDE an app tab targets
     //                                                        its own instance automatically)
-    //   3. MSIX package identity                            (a packaged dev exe -> dev profile,
-    //                                                        release -> release; handled by
-    //                                                        ResolveProfileDir, so do nothing)
-    //   4. compile-time brand (AGENTMASTER_DEV)             (an UNPACKAGED dev build run OUTSIDE
-    //                                                        any app defaults to ~/.agentmaster-dev)
-    //   5. the per-identity default (~/.agentmaster)        (ResolveProfileDir fallback)
+    //   4. compile-time brand (AGENTMASTER_DEV)             (an UNPACKAGED DEV-identity build run
+    //                                                        OUTSIDE any app defaults to
+    //                                                        ~/.agentmaster-dev; a release-identity
+    //                                                        build has no brand since 2026-10-23)
+    //   5. ResolveProfileDir as the app resolves it         (the exe folder's profile.path, a
+    //                                                        portable's own profile, the home map,
+    //                                                        else ~/.agentmaster: the profile of the
+    //                                                        app installed beside this CLI)
     if (!profileOverride.empty())
     {
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", profileOverride.c_str());

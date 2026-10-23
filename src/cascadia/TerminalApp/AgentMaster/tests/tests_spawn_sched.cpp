@@ -25,6 +25,7 @@
 #include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
 #include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
 #include "../StartupGuard.h" // the startup-deadlock fix - known-folder pre-warm + startup-hang watchdog (TestStartupGuard)
+#include "../CliDispatch.h" // the CLI-call rule shared by the launcher shim and the app exe (TestCliDispatch, CLI.md §2a)
 
 #include <sddl.h> // ConvertStringSecurityDescriptorToSecurityDescriptorW - TestPortableInstall's real unwritable folder
 #include <fstream> // TestHookInvocation reads the materialized settings file back
@@ -6345,5 +6346,96 @@ void TestHookInvocation()
                   "materialize: an unreadable launcher keeps shell form, with the SessionEnd + per-hook timeouts");
         }
         std::filesystem::remove_all(dir, ec);
+    }
+}
+
+// Agentmaster (CLI.md §2a — the "profile in use" dialogs of 2026-10-23): `agentmaster show <id>` typed where the name
+// finds an UNPACKAGED install's Agentmaster.exe (that day the all-users copy in Program Files, first on the machine PATH)
+// started a second app on the user's profile instead of the CLI. CliDispatch.h is now the ONE rule the console launcher
+// shim and the app exe's wWinMain share. This covers the pure rule and the launch plan; TryRunCliCall's real launch (a
+// GUI-subsystem exe starting the CLI from bash, Python, cmd.exe and PowerShell) was checked end to end outside the suite.
+void TestCliDispatch()
+{
+    std::wprintf(L"CLI dispatch (the CLI-call rule shared by the launcher shim and the app exe):\n");
+    using namespace ::Agentmaster::CliDispatch;
+
+    // --- the verbs and the CLI-only flags: every one routes, and only exact matches do ---
+    for (const auto verb : kCliVerbs)
+    {
+        CHECK(IsCliVerb(verb) && IsCliInvocation(verb), "verbs: every CLI verb alone is a CLI call");
+    }
+    for (const auto flag : kCliOnlyFlags)
+    {
+        CHECK(IsCliOnlyFlag(flag) && IsCliInvocation(flag), "flags: every CLI-only flag alone is a CLI call");
+    }
+    CHECK(!IsCliVerb(L"Show") && !IsCliVerb(L"SHOW") && !IsCliVerb(L"shows") && !IsCliVerb(L"sho") && !IsCliVerb(L""),
+          "verbs: an exact match only (capitals, a longer or shorter word, empty)");
+    CHECK(!IsCliOnlyFlag(L"--profile") && !IsCliOnlyFlag(L"--window") && !IsCliOnlyFlag(L"--version") && !IsCliOnlyFlag(L"--help") &&
+              !IsCliOnlyFlag(L"--archived") && !IsCliOnlyFlag(L"-w"),
+          "flags: the CLI's other flags and the app's flags do not route (CLI.md section 11)");
+
+    // --- CommandlineTail: the C runtime's lpCmdLine rule ---
+    CHECK(CommandlineTail(LR"("C:\Program Files\Agentmaster\Agentmaster.exe" show a77419cf)") == L"show a77419cf",
+          "tail: a quoted exe path (the 2026-10-23 incident's command line)");
+    CHECK(CommandlineTail(L"agentmaster show a77419cf --json") == L"show a77419cf --json", "tail: a bare program name");
+    CHECK(CommandlineTail(L"agentmaster\tshow x") == L"show x", "tail: a tab ends argv[0] too");
+    CHECK(CommandlineTail(L"agentmaster    show  x") == L"show  x", "tail: the blanks before the tail go, the blanks inside it stay");
+    CHECK(CommandlineTail(LR"("C:\a b\Agentmaster.exe")").empty() && CommandlineTail(L"Agentmaster.exe").empty() && CommandlineTail(L"").empty(),
+          "tail: no arguments gives an empty tail");
+    CHECK(CommandlineTail(LR"("C:\a b\Agentmaster.exe"   )").empty(), "tail: trailing blanks only gives an empty tail");
+    CHECK(CommandlineTail(LR"(C:\a"b c"d\x.exe show)") == L"show", "tail: quotes inside argv[0] toggle, as in the C runtime");
+    CHECK(CommandlineTail(LR"("C:\x\Agentmaster.exe"show)").empty(), "tail: text glued to argv[0]'s closing quote still belongs to argv[0]");
+    CHECK(CommandlineTail(LR"("C:\x\Agentmaster.exe" show "My title" --json)") == LR"(show "My title" --json)",
+          "tail: the quoting after argv[0] is passed on as typed");
+
+    // --- FirstToken ---
+    CHECK(FirstToken(L"show x") == L"show" && FirstToken(L"show\tx") == L"show" && FirstToken(L"show") == L"show" && FirstToken(L"").empty(),
+          "first token: ends at a space or a tab; the whole tail when alone; empty for empty");
+
+    // --- IsCliInvocation: what goes to the CLI and what stays the app's ---
+    CHECK(IsCliInvocation(CommandlineTail(LR"("C:\Program Files\Agentmaster\Agentmaster.exe" show a77419cf)")),
+          "route: the incident's command line is a CLI call");
+    CHECK(IsCliInvocation(L"--instance dev show x") && IsCliInvocation(L"--json sessions") && IsCliInvocation(L"tabs --json") &&
+              IsCliInvocation(L"sessdb status"),
+          "route: the verb-first and the CLI-flag-first forms are CLI calls");
+    CHECK(!IsCliInvocation(L"") && !IsCliInvocation(L"-w new -s 0") && !IsCliInvocation(L"-w -1 -s 2") && !IsCliInvocation(L"-Embedding") &&
+              !IsCliInvocation(L"-ToastActivated -Embedding"),
+          "route: a bare launch, the window reopen, a defterm activation and a toast click stay the app's");
+    CHECK(!IsCliInvocation(L"--register-user") && !IsCliInvocation(L"--uninstall-portable") && !IsCliInvocation(LR"(nt -d C:\)") &&
+              !IsCliInvocation(L"-d . pwsh"),
+          "route: the install flags and Windows Terminal's own command lines stay the app's");
+    CHECK(!IsCliInvocation(L"Show x") && !IsCliInvocation(L"\"show\" x") && !IsCliInvocation(LR"(--profile C:\p show x)") && !IsCliInvocation(L"--version"),
+          "route: a capitalised or quoted verb, a leading --profile and --version stay the app's (CLI.md section 11)");
+
+    // --- the CLI's path and command line ---
+    CHECK(CliExePathBeside(LR"(C:\Program Files\Agentmaster\Agentmaster.exe)") == LR"(C:\Program Files\Agentmaster\agentmaster-cli.exe)",
+          "cli path: the agentmaster-cli.exe beside the app exe");
+    CHECK(CliExePathBeside(L"Q:/agentmaster-layouts/Release/wtd.exe") == L"Q:/agentmaster-layouts/Release/agentmaster-cli.exe",
+          "cli path: forward slashes work too");
+    CHECK(CliExePathBeside(L"Agentmaster.exe") == L"agentmaster-cli.exe" && CliExePathBeside(L"") == L"agentmaster-cli.exe",
+          "cli path: no folder gives the bare name (TryRunCliCall refuses an unknown exe path before it gets here)");
+    CHECK(BuildCliCommandLine(L"show a77419cf --json") == L"agentmaster-cli show a77419cf --json",
+          "command line: the launcher shim's argv[0], then the tail as typed");
+
+    // --- PlanCliLaunch: where the CLI's output goes when the GUI-subsystem app exe starts it ---
+    {
+        const auto handlesAndConsole = PlanCliLaunch(true, true);
+        CHECK(handlesAndConsole.output == CliOutput::CallerHandles && handlesAndConsole.creationFlags == 0,
+              "plan: handles + a console (bash, Python in a terminal): the caller's handles, the shared console");
+        const auto handlesOnly = PlanCliLaunch(true, false);
+        CHECK(handlesOnly.output == CliOutput::CallerHandles && handlesOnly.creationFlags == static_cast<DWORD>(CREATE_NO_WINDOW),
+              "plan: handles without a console (pythonw, a task): the caller's handles and no window flash");
+        const auto consoleOnly = PlanCliLaunch(false, true);
+        CHECK(consoleOnly.output == CliOutput::CallerConsole && consoleOnly.creationFlags == 0,
+              "plan: a console without handles (cmd.exe, PowerShell): the caller's console");
+        const auto neither = PlanCliLaunch(false, false);
+        CHECK(neither.output == CliOutput::OwnConsole && neither.creationFlags == static_cast<DWORD>(CREATE_NEW_CONSOLE),
+              "plan: neither (the Run box, a shortcut): a console window of the CLI's own");
+    }
+
+    // --- TryRunCliCall on a command line that is not a CLI call answers "start the app" and launches nothing ---
+    if (!IsCliInvocation(CommandlineTail(::GetCommandLineW())))
+    {
+        CHECK(!TryRunCliCall().has_value(), "try: this harness's own command line (no CLI verb) is not answered");
     }
 }
