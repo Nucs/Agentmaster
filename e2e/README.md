@@ -15,8 +15,8 @@ these capabilities are not yet implemented by this README update.
 | [`mockllm/`](mockllm) | The scripted model: an Anthropic Messages API on `127.0.0.1:8787` that plays `[[mock …]]` scripts (say, think, tool calls, holds, errors, drops), classifies Claude Code's side requests, logs every request, and has a control API (`/_mock/*`). Its unit tests run anywhere: `python -m pytest mockllm/tests`. |
 | [`amdriver/`](amdriver) | The driver: real input (`inputs`), UI Automation (`uia`), waits, the app's process (`app`), its profile's files and logs (`profile`), Claude Code's config and transcripts (`claude`), a tab's terminal (`terminal`), sessions (`session`), page objects (`ui/`), and failure evidence (`evidence`). `python -m amdriver dump --out FILE` writes what UI Automation sees of a running Agentmaster. |
 | [`suites/`](suites) | The tests (pytest), one file per flow area, and the fixtures (`conftest.py`). |
-| [`guest/`](guest) | What runs in the test desktop: `provision.ps1` (Agentmaster, `claude.exe` 2.1.291, Git, PowerShell 7, the Python venv, hosts, environment, crash dumps) and `run_suite.py` (copy the suite to C:, run pytest, zip the results onto the share). |
-| [`host/`](host) | `e2e_run.py`: stage the suite into a desktop, provision, run, collect the results to `Q:\agentmaster-e2e\runs\<run>\`. |
+| [`guest/`](guest) | What runs in the test desktop: `provision.ps1` (Agentmaster, `claude.exe` 2.1.291, Git, PowerShell 7, the Python venv, hosts, environment, crash dumps), `run_suite.py` (copy the suite to C:, run pytest, zip the results onto the share) and `progress.py` (a pytest plugin: one line per finished test, for the host). |
+| [`host/`](host) | `e2e_run.py`: stage the suite into a desktop, provision, run, wait (a change notification, no polling), collect the results to `Q:\agentmaster-e2e\runs\<run>\` and sum them up. |
 
 ## Running it
 
@@ -27,11 +27,52 @@ python e2e/host/e2e_run.py --desktop am-e2e-1 --create --provision --delete-afte
 # an existing, provisioned desktop: one area, or the P0 flows only
 python e2e/host/e2e_run.py --desktop am-e2e-1 -- -v suites/test_tab_menu.py
 python e2e/host/e2e_run.py --desktop am-e2e-1 -- -v -m p0
+
+# rejoin a run already started (its orchestrator ended, or another session started it); or wait 270 s at most
+python e2e/host/e2e_run.py --desktop am-e2e-1 --attach g1full
+python e2e/host/e2e_run.py --desktop am-e2e-1 --attach g1full --wait-max 270
 ```
 
-The results folder holds `pytest.log`, `junit.xml`, the mock's request log and, for every failed test, its
-evidence: `screen.png`, `uia.txt` (every window of the app), `terminal-<n>.txt`, the profile's logs and records,
-`mock.json`, `processes.txt`. A test that passes leaves nothing.
+The results folder holds `summary.txt` (the run's end, below), `pytest.log`, `junit.xml`, the mock's request log
+and, for every failed test, its evidence: `screen.png`, `uia.txt` (every window of the app), `terminal-<n>.txt`, the
+profile's logs and records, `mock.json`, `processes.txt`. A test that passes leaves nothing.
+
+### Waiting for a run
+
+**The wait costs nothing, and nobody reads a log.** The guest writes into `Z:\e2e\out`, which is a folder of this
+PC's disk (the desktop's persist folder), so `e2e_run.py` blocks on that folder's change notification
+(`FindFirstChangeNotificationW`) and wakes the moment the guest writes there — no sleep interval, no polling of
+`status.json`. The guest's pytest appends one line per finished test to `<run>.progress.jsonl` (`guest/progress.py`,
+loaded by `run_suite.py` with `-p guest.progress`); the host prints each line as it arrives, then the summary — the
+counts, every failed test with the first line of its failure and its evidence folder:
+
+```text
+[16:22:40] 13/49 FAIL  test_tab_lifecycle.py::test_unfavorite_and_close  40 s — AssertionError: …
+[16:58:31] done: exit 1 — 49 tests: 48 passed, 1 failed, 0 errors, 0 skipped, 36.8 min
+  FAIL  test_tab_lifecycle.py::test_unfavorite_and_close (40 s): AssertionError: …
+        evidence: Q:\agentmaster-e2e\runs\<run>\tests\test_unfavorite_and_close
+  results: Q:\agentmaster-e2e\runs\<run> (pytest.log, junit.xml, summary.txt)
+```
+
+- **From a Claude session:** start the run with the Bash tool's `run_in_background` — plain stdout, no `> file`
+  redirection — and go on working: the tool's completion notification brings the summary. Never wait with `sleep`
+  and a read of `status.json` or `pytest.log`. A call that must block only briefly (inside a prompt-cache window) is
+  `--attach <run> --wait-max 270`, repeated while it exits 97.
+- `--attach <run>` joins a run already started: no create, stage, provision or launch, and no fleet token. It
+  prints one catch-up line (`so far 23/49 finished: 22 passed, 1 failed (…)`), then the live lines, collects and
+  sums up. The guest's runner outlives the host's process, so a run whose orchestrator was stopped is never lost.
+- `--wait-max <s>` stops one wait after that long and exits **97** (the run goes on; attach again). `--progress
+  failures` prints only the failing tests' lines, `--progress none` none.
+- Exit codes: pytest's; **97** still running; **98** the orchestration failed (also a runner that writes no status
+  within 180 s of its launch).
+- A one-minute belt (`BELT_S`) reads the files anyway, in case a notification never came.
+- Measured 2026-10-23: a write in the guest woke the host's wait within 10 ms of the file's own timestamp; a run
+  printed "running" 3 s after its launch, each test's line the moment it finished, and its summary in the same
+  second as its last test.
+- Provisioning still polls its marker on the guest's C: (`C:\e2e\provision.done`, which no notification of this PC
+  can see). An empty marker is not a write caught midway: `echo %ERRORLEVEL%> file` with a code of 0–9 reads
+  `echo 0> file`, a redirection of handle 0, so cmd creates the file EMPTY. The host then decides by
+  `provision.ps1`'s last log line (`PROVISION {…}`, no step `FAILED`).
 
 ⚠ A Windows desktop takes 4–6 GB and several cores of the PC the user games on: delete it when done
 (`--delete-after`, or the fleet's `delete_desktop`). The fleet token is read from the cluster into a variable and

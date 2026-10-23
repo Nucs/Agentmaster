@@ -9,15 +9,19 @@ What it does:
 1. copies the suite from the persist share (Z:\\e2e\\src, staged by the host) to the guest's own disk
    (C:\\e2e\\src) and runs it from there (the share is slow, and Python cannot create folders on it);
 2. empties C:\\e2e\\out\\tests (the per-test evidence of the last run);
-3. runs pytest with a JUnit report, its output in pytest.log;
+3. runs pytest with a JUnit report, its output in pytest.log, and the progress plugin (guest/progress.py), which
+   appends one line per finished test to Z:\\e2e\\out\\<run-name>.progress.jsonl;
 4. zips pytest.log, junit.xml, the mock's request log and every test's evidence folder into
    Z:\\e2e\\out\\<run-name>.zip, and writes Z:\\e2e\\out\\<run-name>.status.json — {"state": "running"} at the
-   start, {"state": "done", "exit": N, "tests": …, "failures": …, "errors": …, "skipped": …} at the end —
-   which the host polls.
+   start, {"state": "done", "exit": N, "tests": …, "failures": …, "errors": …, "skipped": …} at the end.
+
+The host does not poll: Z:\\e2e\\out is a folder of the host's disk, and its e2e_run.py wakes on that folder's change
+notification at each of these writes.
 """
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,15 +38,28 @@ OUT = Path(r"C:\e2e\out")
 
 
 def write_status(run: str, status: dict) -> None:
-    """Write the run's status file on the share (the host polls it).
+    """Write the run's status file on the share (the host wakes on the write and reads it).
+
+    The host reads the file the moment a change wakes it, so this write can meet the host's open: it is tried
+    again for up to ~10 s before it gives up — the final status is what ends the host's wait.
 
     Args:
         run: The run's name.
         status: The status object.
     Returns:
         None.
+    Raises:
+        OSError: When every try failed.
     """
-    (SHARE_OUT / f"{run}.status.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+    text = json.dumps(status, indent=2)
+    for attempt in range(10):
+        try:
+            (SHARE_OUT / f"{run}.status.json").write_text(text, encoding="utf-8")
+            return
+        except OSError:
+            if attempt == 9:
+                raise
+            time.sleep(1)  # a pause before the retry, not a wait for a condition
 
 
 def copy_source() -> None:
@@ -121,10 +138,15 @@ def main(argv: list[str]) -> int:
         (OUT / "tests").mkdir(parents=True, exist_ok=True)
         for name in ("pytest.log", "junit.xml", "mock-requests.jsonl"):
             (OUT / name).unlink(missing_ok=True)
+        progress = SHARE_OUT / f"{run}.progress.jsonl"
+        progress.unlink(missing_ok=True)
+        # `-p guest.progress` imports C:\e2e\src\guest\progress.py: `python -m` puts the working folder (the suite's
+        # copy) first on sys.path, and `guest` is a namespace package there.
+        env = dict(os.environ, E2E_PROGRESS=str(progress))
         with open(OUT / "pytest.log", "w", encoding="utf-8") as log:
-            code = subprocess.run([sys.executable, "-X", "utf8", "-m", "pytest", *pytest_args,
+            code = subprocess.run([sys.executable, "-X", "utf8", "-m", "pytest", "-p", "guest.progress", *pytest_args,
                                    f"--junitxml={OUT / 'junit.xml'}"],
-                                  cwd=str(LOCAL_SRC), stdout=log, stderr=subprocess.STDOUT).returncode
+                                  cwd=str(LOCAL_SRC), stdout=log, stderr=subprocess.STDOUT, env=env).returncode
     except Exception:  # noqa: BLE001 - the runner reports its own failure in the status file
         write_status(run, {"state": "done", "exit": 99, "runner_error": traceback.format_exc(),
                            "seconds": round(time.time() - started, 1)})
