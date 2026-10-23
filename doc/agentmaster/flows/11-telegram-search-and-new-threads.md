@@ -49,6 +49,9 @@ deletes the thread.
 - **E2 A closed (archived) session** → Resume brings it back; its queue is rehydrated.
 - **E3 /clear (or ⊘ Clear)** → the Search conversation starts over; it otherwise carries on after a restart.
 - **E4 The first Search request of a run** → waits for the index (≤ 90 s) and never answers from a partial index.
+  ⚠ The index is read at the FIRST Search request, not when the bot starts (MESSAGING.md §21.20 says the bot's start;
+  the bridge that starts the read is made lazily — found 2026-10-23 in production's log: the first request waited 31 s
+  for 3,787 sessions). The test measures the first answer's delay and records which of the two it sees.
 - **E5 A session command in Search** (`/steer`, `/runner`) → refused with Search's own command list.
 - **E6 Interrupted-turn fork** (NOT BUILT, INT-07) → asks in Search.
 

@@ -51,6 +51,11 @@ database tools from the next start; the CLI verbs `search`, `sql`, `sessdb`; a s
 **Phases**
 1. **By alias.** `agentmaster sessions` → the release profile; `agentmasterdev sessions` → the dev profile.
 2. **Cross-target.** `agentmaster sessions --instance dev` → the dev profile.
+3. **An unpackaged install on PATH.** *Do:* a per-user or all-users install whose folder is on PATH beside (or instead of)
+   the package. *Expect:* `agentmaster sessions` answers as the CLI. *Today:* a bare `agentmaster` resolves to that
+   install's `Agentmaster.exe` (the GUI), not the CLI — seen 2026-10-23 on the workstation, where it opened two
+   "profile in use" dialogs; `agentmaster-cli.exe` by its full path works. Treat as an expected failure until the CLI
+   has a name of its own on PATH for unpackaged installs.
 
 **Known defects (expected failures until fixed)**
 - **CLI-K1 The dev alias fails on every real verb** (`0xC0000409` in `exit()`, the Debug build's Control Flow Guard table;
