@@ -13,36 +13,43 @@
 > specifies the code that wraps every one of them, and the special suite. It builds on [E2E_TESTING.md](E2E_TESTING.md):
 > it details that plan's §7.6 (the ambient checks) and §7.7 (the evidence), and extends its §8 (the runner).
 >
-> **A second plan for the same request** was written the same afternoon by another session, independently:
-> [E2E_RELIABILITY.md](E2E_RELIABILITY.md) (fafece429). The owner picks one, or merges them.
+> **Two companion plans are retained (CG-D0, owner decision 2026-10-23).**
+> [E2E_RELIABILITY.md](E2E_RELIABILITY.md) covers the shared reliability contract and scenario overview; this document
+> supplies the Guard's detailed design and scenario catalog. They must agree; there is no merge prerequisite and no
+> third plan. The accepted decisions in §13 supersede the original recommendations in both documents.
+>
+> **Preparation only:** the owner's answers authorize these plan changes. They do not authorize a build, deployment,
+> installation, fault injection or VM run. Build/package publication of matching PDBs is assigned to another agent.
 >
 > **The request, in the user's words (2026-10-23):** "Our automated testing needs to be handling memory corruption,
 > memory leaks and crashes as part of special scenarios suite that runs. Crashes and memory corruption and sudden shut
 > downs must be handled by every single test (single code running 'around' all) so we get clear signal on such a case."
 
 **The plan in brief.**
-- **The Guard: one wrapper around every test.** It is a pytest plugin that is always on. It starts every process of
-  the test inside a Windows **job object**, so it knows each process and its exit code even after the app has died. It
-  watches:
+- **The Guard: one wrapper around every test.** Its pytest client registers processes with the external Sentinel,
+  which owns the attempt's Windows **job objects**, retained handles and reconciled process ledger. It keeps process
+  identities and available exit codes after the app has died, and reports any observation gap. It watches:
   - Windows Error Reporting;
   - the app's own logs;
   - the UI's liveness, from outside the app;
   - resources;
   - the profile's files.
 - **It stops a test the moment the app crashes, hangs or exits unasked**, and reports that as the failure: the
-  process, the exit code, the step the test was on, and a dump. The timeout that would have followed is listed under it
+  process, the exit code, the step the test was on, and the dump or its absence reason. The timeout that would have followed is listed under it
   as a consequence.
 - **Two outer rings cover what pytest cannot survive:**
-  - the **Sentinel**, in the guest: pytest crashed or hung → record, end it, resume the run;
-  - the **Watchdog**, on the host: the guest froze or died → look at it through QEMU, collect, reset, resume.
+  - the **Sentinel**, in the guest: one fresh pytest worker and mock process per test attempt; retain ownership and
+    evidence if the worker crashes or hangs, then clean up before the next attempt;
+  - the **Watchdog**, on the host: the guest froze or died → observe, collect bounded evidence, fail the run and stop
+    the guest. Deliberately resetting or pausing the guest is deferred.
 - **A special reliability suite provokes each failure on purpose.** First it proves that every detector works on the
   build under test. Then it checks the product:
-  - sudden kills, crashes, a Windows shutdown and power loss at chosen moments, each followed by a durability check;
+  - sudden application/owned-process kills and crashes at chosen moments, followed by a durability check;
   - damaged files on disk;
-  - hostile input to the app's parsers under page heap and Application Verifier (and AddressSanitizer, if that build
-    flavor is approved);
+  - hostile input to the app's parsers under page heap and Application Verifier, and AddressSanitizer after its
+    feasibility step and separately authorized build;
   - leak cycles with a slope test and heap-census attribution;
-  - a hostile machine.
+  - machine-fault scenarios retained as deferred references, outside implementation scope (CG-D10).
 
 ## Contents
 
@@ -58,7 +65,7 @@
 10. [The corruption lanes](#10-the-corruption-lanes)
 11. [Phases and acceptance](#11-phases-and-acceptance)
 12. [Risks and limits](#12-risks-and-limits)
-13. [Decisions for the owner](#13-decisions-for-the-owner)
+13. [Owner decisions and remaining choices](#13-owner-decisions-and-remaining-choices)
 - [Appendix A — exit codes and statuses](#appendix-a--exit-codes-and-statuses)
 - [Appendix B — files, API and markers (proposed)](#appendix-b--files-api-and-markers-proposed)
 - [Appendix C — a red test, as it would be reported](#appendix-c--a-red-test-as-it-would-be-reported)
@@ -100,9 +107,9 @@ What runs where:
 |---|---|---|
 | Crash | detected, classified, the test stopped at once, the dump kept | provoked: canaries, a real product crash, crash-instead-of-kill variants |
 | Memory corruption | the crash codes and dump signatures that mean corruption (§5.6); the profile's files checked after every unexpected end | instrumented lanes (page heap, Application Verifier, AddressSanitizer), lifecycle stress, hostile input to the parsers |
-| Sudden shutdown | any end nobody asked for: of any process, of the runner, of the machine | kills, crashes, a Windows shutdown and power loss at chosen moments, each followed by the durability check |
+| Sudden shutdown | any end nobody asked for: of an owned process, the runner or the guest | application/owned-process kills and crashes, followed by the durability check; forced guest shutdown/power loss deferred |
 | Hang | UI liveness measured from outside, the app's own `[ui-stall]` lines, modal dialogs | hang canaries; the self-restart path |
-| Leak | resource budgets as runaway tripwires | leak cycles: repetition, a slope test, heap-census attribution |
+| Leak | lightweight diagnostic samples and configured safety caps; no leak verdict | dedicated leak cycles: repetition, a slope test, heap-census attribution |
 
 What the Guard cannot promise:
 
@@ -118,7 +125,7 @@ What the Guard cannot promise:
 
 ## 2. What exists today, and the gaps
 
-**What the suite does now** (*read*: `e2e/suites/conftest.py`, `e2e/amdriver/app.py`, `e2e/amdriver/evidence.py`,
+**Original audited baseline** (*read*: `e2e/suites/conftest.py`, `e2e/amdriver/app.py`, `e2e/amdriver/evidence.py`,
 `e2e/guest/*`, `e2e/host/e2e_run.py`):
 
 - **Before each test,** the `am` fixture kills whatever the previous test left: an `Agentmaster.exe`, a `claude.exe`, or
@@ -148,7 +155,7 @@ What the Guard cannot promise:
 | G8 | No resource numbers: no memory, handles, GDI/USER objects or threads. | A runaway leak shows only when the guest runs out of memory. |
 | G9 | Strays are killed silently at the next test's start. Leftovers only go to a text file. | A process that should have ended is never a failure. The 11 stored run zips hold 0 leftovers (*measured*), so making leftovers a failure costs nothing today. |
 | G10 | Nothing outside pytest watches pytest. The mock runs inside it. The host polls `status.json` and collects only the final zip. | A crashed or hung runner, or a dead guest, loses the whole run's results. |
-| G11 | The published zips carry no PDBs (*measured*: the 0.8.0 x64 zip has 67 entries, none a `.pdb`), and the release workflow publishes no symbols. | A dump of the tested build names `TerminalApp.dll+0x…`, never a source line. |
+| G11 | The audited 0.8.0 x64 zip has 67 entries and no `.pdb`, and the original workflow had no public symbols. CG-D8 assigns publication of matching PDBs to another agent. | Until that dependency is complete, an old dump may name `TerminalApp.dll+0x…` without a source line; symbol readiness must be reported. |
 | G12 | The guest's error reporting is partial. There are no LocalDumps for `pwsh.exe`, `powershell.exe`, `agentmaster-cli.exe`, `agentmaster-sessiondb.exe` or `python.exe`. `DontShowUI` is not set. Nothing checks that no JIT debugger is registered. The app inherits the runner's error mode. | A helper's crash leaves no dump. A registered debugger would hold a crashed process on screen. An inherited `SEM_NOGPFAULTERRORBOX` might keep WER from running at all (GSF-01 rules it out). |
 
 ---
@@ -187,7 +194,8 @@ What the Guard cannot promise:
 **The startup watchdog** never kills a debuggee either.
 
 **What this means for the Guard:**
-- It must never attach a debugger to the app; both watchdogs would stand down.
+- Ordinary and watchdog-validation lanes must never attach a debugger; both watchdogs would stand down. A separately
+  qualified corruption/debugger lane cannot provide watchdog evidence (§4).
 - A test meets a wedge minutes before the app reacts to it, so the Guard needs its own, faster liveness checks
   (§5.4, M4).
 
@@ -236,8 +244,11 @@ What the Guard cannot promise:
 
 ### 3.7 Builds and the history the suite can lean on
 
-- **PDBs.** The published zips carry no PDBs (*measured*). The local layouts in `Q:\agentmaster-layouts\<slot>` do
-  (CLAUDE.md, Building FAST #1).
+- **PDBs.** The originally inspected published zip carried no PDBs (*measured*, historical baseline). CG-D8 now
+  requires matching PDBs to be published with every public build of this open-source project; another agent owns
+  that packaging work. The local layouts in `Q:\agentmaster-layouts\<slot>` already carry them (CLAUDE.md, Building
+  FAST #1). The run manifest records the tested build and matching symbol identity; missing/mismatched symbols are
+  an explicit readiness/triage failure, never silently substituted by a private-only symbol policy.
 - **A real leak with a published before and after** (*read*: `git tag --contains`):
   - `v0.7.10-prerelease` lacks fa3245561, the UText fix ([MEMORY_LEAKS.md](MEMORY_LEAKS.md) §3);
   - `v0.8.0` has it.
@@ -262,10 +273,10 @@ What the Guard cannot promise:
  │  e2e_run.py + watchdog.py  │◄───────────┤  heartbeat · run journal · supervises pytest · resume         │
  │  heartbeat staleness       │ heartbeat  │  guest settings check · incremental export to Z:              │
  │  QEMU monitor: status,     │ journal    │  ┌────────────────────────────────────────────────────────┐  │
- │   screendump, stop/cont,   │ per-test   │  │ pytest — the suite                                      │  │
- │   reset, powerdown         │ zips       │  │  Ring 1: the GUARD — one wrapper around EVERY test       │  │
+ │   screendump, status       │ per-test   │  │ fresh pytest worker — ONE test attempt                  │  │
+ │   bounded collection      │ zips       │  │  Ring 1: the GUARD — setup, body and teardown           │  │
  │  docker state, desktop_logs│            │  │   preflight · job object · monitors · expectations       │  │
- │  reset + resume            │            │  │   verdict · bounded evidence                             │  │
+ │  fail + final teardown     │            │  │   verdict · bounded evidence                             │  │
  │  triage: symbols, buckets  │            │  │   ┌────────────── the test's job object ─────────────┐   │  │
  └────────────────────────────┘            │  │   │ Agentmaster.exe ─ OpenConsole.exe ─ pwsh ─        │   │  │
                                            │  │   │  claude.exe ─ hook forwarders ─ tools ─ helpers   │   │  │
@@ -279,12 +290,22 @@ Each ring covers what the ring inside it cannot survive:
 - the Sentinel cannot survive the guest's death;
 - the Watchdog sees the guest from outside.
 
+**The test attempt is the isolation boundary (CG-D6/CG-D7).** Its fresh pytest worker, mock server, profiles,
+app generations, children, helper workers, endpoint and evidence directory belong only to that attempt. The
+run-wide Sentinel owns the process handles, job handles, ledger and evidence handoff outside pytest. It places the
+worker, product tree and mock/helpers in independently controllable jobs, so a dead or killed worker does not destroy the
+app before evidence is collected. It retires the whole attempt before starting another. App restarts inside the
+same scenario are generations of that attempt, never a handoff to another test's processes.
+
 **Principles:**
 
-1. **One choke point for process lifetimes.** Every process a test starts is started by the Guard, inside the test's
-   job. Every end the test asks for is announced to the Guard first. This is the "single code running around all".
-2. **Watch from outside.** No debugger is ever attached to the app (it would silence both of the app's watchdogs,
-   §3.2). No thread is suspended to observe it. No code is injected outside the fault suite.
+1. **One choke point for process lifetimes.** The Guard asks the Sentinel to start every owned process in the
+   attempt's jobs and announces every requested end first. The Sentinel retains ownership through capture and
+   cleanup even if the worker dies. This is the "single code running around all".
+2. **Watch from outside.** Ordinary and watchdog-validation lanes never attach a debugger (it would silence both
+   app watchdogs, §3.2). A separately qualified corruption/debugger lane may do so only with that behavioral change
+   declared; it cannot validate watchdog behavior. No thread is suspended to observe it. No code is injected outside
+   the fault suite.
 3. **Classify at the moment of detection,** with a screenshot taken then, not at teardown.
 4. **Two sources per verdict where possible:** the exit code and WER; the Guard's ping and the app's `[ui-stall]`. The
    confidence is printed.
@@ -329,7 +350,7 @@ preflight → arm → [setup: fixtures; am → guard.spawn(app)] → [call: the 
 | Phase | Does | An incident found here is reported as |
 |---|---|---|
 | preflight | the clean-machine check (§5.11); the Guard's self-check | a STRAY, charged to the previous test; BLIND when the Guard cannot arm |
-| arm | creates the job; starts the monitors; takes the baselines | BLIND |
+| arm | binds to the Sentinel's attempt and jobs; starts the monitors; takes the baselines | BLIND |
 | setup | the fixtures; the app starts inside the job | a setup ERROR, the verdict first |
 | call | the test body | a FAILURE: the verdict first, the test's own exception chained under it |
 | call-check | the incidents so far; a liveness probe when the test failed without an incident | a FAILURE |
@@ -340,22 +361,27 @@ preflight → arm → [setup: fixtures; am → guard.spawn(app)] → [call: the 
 
 ### 5.2 Ownership: the test's job object
 
-**The job.** It is created at arm, unnamed, with these settings:
-- **`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.** The job handle lives in pytest, so if pytest dies, Windows ends the whole
-  tree. No process survives a runner crash.
-- **No breakaway.** Nothing escapes: the session database service's breakaway attempt fails, and its own fallback
-  starts it inside (§3.3).
-- **A notification-only `JobMemoryLimit`** as a runaway tripwire: 6 GB in an 8 GB guest; nothing is refused (§3.4).
+**The jobs.** The Sentinel creates separate unnamed jobs for the attempt's worker, product tree and mock/helpers
+before launch:
+- **`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.** The Sentinel retains the authoritative job handles outside pytest. Worker
+  death therefore leaves the app/mock tree available for bounded capture; the Sentinel then drains/terminates it
+  and closes the handles. If the Sentinel itself dies, closing its final handles is the fallback cleanup. The worker
+  job can be terminated without prematurely killing the app; every job belongs to one attempt.
+- **No breakaway on the product job.** Qualify the session database service's fallback into the job (§3.3), nested
+  jobs and packaged activation. Register any owned out-of-job process separately; job membership is not a blanket
+  guarantee that brokered activation cannot escape.
+- **A notification-only `JobMemoryLimit`** as a safety tripwire; nothing is refused (§3.4). Its numeric value is an
+  explicit configuration choice, still open (CG-D11), not an automatic calibration requirement.
 
-**Spawning: `guard.spawn(argv, env, cwd, role)`.**
+**Spawning: `guard.spawn(argv, env, cwd, role)`.** The request goes to the Sentinel, which records the attempt id and:
 1. Start the process through `subprocess.Popen` with `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP |
    CREATE_DEFAULT_ERROR_MODE`. The last flag keeps the runner's error mode from reaching the app.
-2. Send stderr to `guard\app-stderr.log`. A file never blocks its writer, and it collects the dialog echo of
-   [CLI.md](CLI.md) §2b once that is built.
+2. Send stderr to the attempt's `logs\app-stderr.log`. This avoids pipe-backpressure deadlocks and collects the
+   dialog echo of [CLI.md](CLI.md) §2b once built. Filesystem stalls/errors still need the outer deadline.
 3. `AssignProcessToJobObject`.
 4. Resume the main thread (*measured* to work).
 
-Every process the app ever starts is then in the job:
+Qualify job inheritance for each expected process role, and separately register brokered exceptions:
 - the ConPTY hosts, the shells and the claudes;
 - the hook forwarders and the tools the sessions run;
 - the session database service;
@@ -363,9 +389,10 @@ Every process the app ever starts is then in the job:
 - the UI-stall restart's relauncher, and the app it starts again. *G0 checks:* that `Start-Process` from inside the job
   keeps the new process in the job. For an unpackaged build it should; AUMID activation of a packaged one would not.
 
-**The ledger.** The job's completion port posts `NEW_PROCESS`, `EXIT_PROCESS`, `ABNORMAL_EXIT_PROCESS`,
-`NOTIFICATION_LIMIT` and `ACTIVE_PROCESS_ZERO`, each with the process id.
-- **On `NEW_PROCESS`,** the Guard at once opens a `SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION` handle and records
+**The ledger.** The Sentinel retains the job's completion port and process handles independently of pytest. It
+consumes `NEW_PROCESS`, `EXIT_PROCESS`, `ABNORMAL_EXIT_PROCESS`, `NOTIFICATION_LIMIT` and `ACTIVE_PROCESS_ZERO`
+messages and reconciles them with an owned-process census; notifications alone do not guarantee complete coverage.
+- **On `NEW_PROCESS`,** the Sentinel opens a `SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION` handle and records
   the image, the command line, the parent, the start time and the role.
 - **On an exit,** it reads the exit code from that handle. A process that ended before its handle opened is recorded
   with "exit code unknown"; its abnormal flag is kept only as a hint.
@@ -399,16 +426,21 @@ Today `App.proc` is replaced at each restart; the Guard keeps every generation.
 **The end: `guard.end(proc, how)`.**
 - `how="kill"` terminates the GUI with exit code `0x00E2E0D1`, which is recognizable in every record (Appendix A).
 - `how="close"` / `"quit-all"` registers the expectation (§5.3) and lets the driver click.
-- **Then the drain:** wait for the GUI to exit; for WER, when a dump is being written; and for the job's other
-  processes, 30 s by default plus the WER time.
+- **Then the product drain:** wait for the GUI to exit; for WER, when a dump is being written; and for the product
+  job's other processes, provisionally 30 s plus the WER time. The attempt's mock/collector helpers have separate
+  jobs, remain available through evidence capture and then receive their own bounded shutdown before final-check.
 - **What is left** is recorded with its ancestry, then ended with `TerminateJobObject(job, 0x00E2E0D4)`.
+- **Every test-owned leftover fails, including `tool` processes** such as `bash.exe` and `node.exe` (CG-D4). An image
+  name alone never proves ownership; unrelated external processes are recorded as context and left untouched.
 
 ### 5.3 Expectations: the only way an incident is forgiven
 
 ```python
-with guard.expect("crash", role="agent", code=0xC0000005, within_s=10):   # a scenario that crashes a claude
-    faults.raise_in(session.claude_pids()[0], code=0xC0000005)
-guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
+target = guard.process_for(session)  # exact PID + creation/boot identity and attempt, not just a role
+with guard.expect("crash", process=target, code=0xC0000005, within_s=10):
+    faults.raise_in(target.pid, code=0xC0000005)
+with guard.expect("swallowed", process=am.guarded_process, signature="GSF-07 injected throw", within_s=5, count=1):
+    faults.append_synthetic_swallowed_line(signature="GSF-07 injected throw")
 ```
 
 **Rules:**
@@ -416,6 +448,8 @@ guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
 - **An expectation not met is a failure.** If its window passes without its incident: "the expected crash of agent did
   not happen".
 - **Only an exact match is forgiven.** An incident that differs in code, process or time is unexpected.
+- **Only a deliberately caused fault qualifies.** Known defects, recurring exception signatures and defect ids
+  annotate failures; they never convert an ordinary feature test's incident to a warning, pass or expected failure.
 - **The driver registers its own expectations,** so scenario authors don't:
 
 | Driver call | What it registers |
@@ -431,8 +465,8 @@ guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
   - Any exit code other than `0` while a quit is expected (a `0xC0000409` during the close: the pool-thread
     last-reference class) → **CRASH during the quit**.
   - Still alive at the deadline → **QUIT-HANG** (a HANG).
-- **`known_defect` never hides an incident.** A known defect that IS a crash names its exact signature:
-  `@pytest.mark.known_defect("CG-K1", incident="CRASH app-gui 0xC000027B")`.
+- **`known_defect` never hides an incident.** A matching defect id is report metadata only. A known product crash
+  still fails; a deliberate injection can be expected only under the exact, bounded rule above.
 
 ### 5.4 The monitors
 
@@ -444,7 +478,7 @@ guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
 | M4 | UI liveness | per main window: `SendMessageTimeoutW(WM_NULL)`, `IsHungAppWindow`, `GetGUIThreadInfo`; a UI Automation ping from a worker process; the app's own `[ui-stall]` lines; top-level dialogs | 1 s (pump), 2 s (UIA) | a dead message pump; an unanswering XAML with the pump alive (the wedge's shape); a modal dialog | the worker answers for a live window |
 | M5 | Resources | per job process: private bytes, working set, handles, GDI and USER objects, threads; the job's peaks; the guest's commit and `C:` free space | 1 s (the app), 5 s (the rest) | budget overruns, a runaway, low commit, low disk | the samples arrive |
 | M6 | The runner | the Guard's own sampling loop; `faulthandler`; a watch on the test's thread | 0.25 s | a machine stall (the Guard's own loop paused > 5 s); a stuck test thread | — |
-| M7 | The mock | its server thread, its error counters, its request log | at each check | the mock dead; a request from a claude of an ended generation; unknown kinds or endpoints (E2E_TESTING.md §7.6) | the thread alive |
+| M7 | The mock | the attempt's separate mock process, health endpoint, error counters and request log | at each check | the mock dead; a request from a claude of an ended generation; unknown kinds or endpoints (E2E_TESTING.md §7.6) | the process and endpoint answer |
 | M8 | Profile integrity | the test profile's JSON files; the session records' continuity | after every unexpected end, and at final-check | a file that no longer parses; a session record lost; a temp file left behind | — |
 | M9 | The steps journal | every driver action: start, click, keys, menu choice, dialog answer, wait begin and end | per action | the last steps before an incident | — |
 | M10 | The app's stderr | `app-stderr.log` (the dialog echo, CLI.md §2b, NOT BUILT) | tail | the text of a startup dialog | — |
@@ -473,10 +507,10 @@ guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
 
 | Line | Incident |
 |---|---|
-| `[exc] … swallowed …` | SWALLOWED, unless allowlisted |
+| `[exc] … swallowed …` | SWALLOWED: fail, including known signatures; only an exact deliberately injected fault expectation can match it |
 | `[wil] failfast …` | the cause line of the CRASH that follows |
-| `[wil] exception …` | SWALLOWED; the allowlist that GSF-15 builds absorbs upstream code's expected ones |
-| `[wil] log` / `return` | a NOTE, until calibration shows how often upstream code logs them |
+| `[wil] exception …` | SWALLOWED: the same unconditional failure policy as `[exc]` |
+| `[wil] log` / `return` | a NOTE; review observed frequency without an automatic calibration requirement |
 | `[ui-stall] … has NOT pumped` | HANG (the app's own judgment, CONFIRMED with M4) |
 | `[ui-stall] … RECOVERED` | recorded |
 | `[ui-stall] UNRECOVERABLE … RESTARTING` | announces the SELF-RESTART |
@@ -507,8 +541,9 @@ guard.allow_log(r"\[persist-fail\]", reason="HMC-02 fills the disk on purpose")
 - **What is sampled:** `PROCESS_QUERY_LIMITED_INFORMATION` reads only: the `memwatch.py` counters of `tools/leakhunt`,
   plus GDI and USER objects through `GetGuiResources`.
 - **Where it goes:** a `resources.csv` per test, and the peaks in `guard.json`.
-- **System headroom:** under 512 MB of commit headroom during a test → MACHINE-PRESSURE. The process that holds the
-  most commit is named.
+- **System headroom:** use existing OS/VM counters and a configured low-headroom safety cap → MACHINE-PRESSURE.
+  The process that holds the most commit is named. Numeric caps remain open; no ordinary-test leak verdict follows
+  from one resource peak (CG-D11/CG-D12).
 
 **M6 — the runner.**
 - **A machine stall is never an app hang.** A gap of more than 5 s in the Guard's own 0.25-s loop means the machine
@@ -563,10 +598,10 @@ cannot explain stays the test's own: a behavior defect.
 | STARTUP | the app ended with `1460` (the startup watchdog), exited before its first window, or its first window never came | fail |
 | HANG | the UI did not answer: the pump dead ≥ 10 s, or the XAML ping dead ≥ 30 s with the pump alive, or an app `[ui-stall]`. Also QUIT-HANG (still alive 60 s after an expected quit) and DRAIN-HANG (a ConPTY host that does not end its clients) | fail |
 | DIALOG | a modal dialog nobody expected: the app's, a hard-error box, `Debug Assertion Failed!`, WER's | fail |
-| ORPHAN | a process alive after the drain (with its role and ancestry); a stray found at the next preflight; an unexpected `[orphan-reap]` | fail for our roles, warn for `tool` (CG-D4) |
-| SWALLOWED | an `[exc]` or `[wil] exception` line that is not on the allowlist | fail for a new signature (CG-D1) |
+| ORPHAN | a test-owned process alive after the drain (with its role and ancestry); an owned stray found at the next preflight; an unexpected `[orphan-reap]` | fail for every owned role, including `tool` (CG-D4) |
+| SWALLOWED | an `[exc]` or `[wil] exception` line | fail, including known signatures (CG-D1); exact deliberately injected faults only may be expected |
 | DATA | a profile file that no longer parses, a lost session record, a `[persist-fail]` | fail |
-| RESOURCE | RUNAWAY: a hard budget or the job's tripwire exceeded. LEAK-SUSPECT: a soft budget exceeded | fail (RUNAWAY), warn (LEAK-SUSPECT) |
+| RESOURCE | RUNAWAY: a configured hard safety cap or job tripwire exceeded. RESOURCE-WARNING: a diagnostic soft cap exceeded | safety failure/abort (RUNAWAY), diagnostic warning (RESOURCE-WARNING); neither is a leak verdict |
 | RUNNER | pytest crashed or hung, the mock died, the UI Automation client broke | reported apart (E2E_TESTING.md §8.3) |
 | MACHINE | the guest paused, rebooted, ran out of commit or disk, or died | reported apart |
 | BLIND | a monitor the test needs could not run | not green: an error |
@@ -579,14 +614,18 @@ cannot explain stays the test's own: a behavior defect.
 The report lists every incident, the primary first. BLIND leads only when nothing else failed: a real crash stays the
 headline even when another monitor was blind.
 
+Use that ordering among independent supported incidents, not to overwrite a cause with its aftermath. For example,
+a collector/worker failing during capture of a confirmed app crash is secondary; it must not replace the crash
+headline with RUNNER. Retain first-observed time and the causal sequence regardless of the primary classification.
+
 **Blame, by role:**
 
 | Role | Blamed on |
 |---|---|
 | `app-gui`, `forwarder`, `ask-helper`, `sessiondb`, `cli`, `relauncher` | Agentmaster |
 | `conpty-host` | Agentmaster: `OpenConsole` is upstream Windows Terminal code in this tree |
-| `agent`, `harness` | Claude Code, or the mock's reply. It is an Agentmaster defect only when the app killed it or fed it something wrong |
-| `tool` | the session's work (a warning) |
+| `agent`, `harness` | initially the affected process; attribute to Claude Code, the mock or Agentmaster only when evidence supports it. The crash fails regardless of attribution (CG-D2) |
+| `tool` | the session's owned work; a leftover fails, and attribution never reduces its severity |
 | the runner's `python.exe`, the mock | the harness |
 | `werfault`, `explorer`, `unknown` | recorded |
 
@@ -627,10 +666,14 @@ headline even when another monitor was blind.
 - **UI Automation evidence** (the tree dump, the terminal text) is taken only while the XAML ping answers.
 
 **Storage:**
-- **Where:** `C:\e2e\out\tests\<test>\guard\` holds `guard.json`, `timeline.txt`, `steps.jsonl`, `ledger.jsonl`,
-  `resources.csv`, `logs\`, `dumps\`, `screens\` and `triage.txt`. The folder is zipped at export (§6.7).
+- **Where:** `C:\e2e\out\tests\<node-hash>\<attempt>\` holds `guard.json`, `actions.jsonl`, `processes.jsonl`,
+  `incidents.jsonl`, `resources.csv`, `artifacts.json`, `logs\`, `dumps\`, `screen\` and optional readable timeline/
+  triage summaries, matching E2E_RELIABILITY.md §8. The manifest stores the full pytest node id (including parameters)
+  and attempt id; truncated function names cannot identify the folder. The folder is zipped at export (§6.7).
 - **Dump kinds:** full dumps for `app-gui`, `conpty-host` and `agent`; minidumps for the rest (§6.4).
-- **Caps:** at most 3 full dumps per test and 20 per run; the rest are kept as their exception summaries.
+- **Caps:** bounded per-test and per-run dump collection is required. The previous 3-per-test / 20-per-run figures
+  are proposals only; CG-D13 accepted retention, not these numeric values. Configure and record the selected limits,
+  preserve exception summaries when a cap is reached, and report every omitted dump.
 - **No secrets:** dumps from the guest hold mock data only. No real credential enters a test machine (E2E_TESTING.md
   §5.3). They still stay on `Q:` and are never committed.
 
@@ -644,7 +687,8 @@ headline even when another monitor was blind.
   - each expectation and how it was met;
   - the last steps.
 
-  Green runs then calibrate the budgets (§5.9).
+  Passing-test records are retained too (CG-D14). They support later tuning without requiring an automatic
+  calibration subsystem (§5.9).
 - **The pytest report:** the verdict's lines come first in the failure text; the test's own exception follows.
 - **JUnit `<properties>`:** `guard.kind`, `guard.process`, `guard.exit`, `guard.at`, `guard.after_step`, `guard.dump`,
   `guard.bucket`.
@@ -656,34 +700,24 @@ Appendix C shows a full example.
 
 ### 5.9 Policy, budgets and default numbers
 
-**`e2e/guard/policy.toml`** holds two things:
-- **An action per kind and lane:** fail, warn or record.
-- **The allowlist.** Each entry has a signature (a regex), a reason, a defect id and an expiry date. An expired entry
-  is reported in the run summary. The format:
-
-```toml
-# The format only: this is not a real entry.
-[[allow]]
-kind = "SWALLOWED"
-signature = 'SomeContext: swallowed winrt::hresult_error hr=0x80070490'
-reason = "why this exception is harmless here"
-defect = "TCM-K9"
-expires = "2026-12-31"
-```
+**`e2e/guard/policy.toml`** records actions per kind and lane, subject to the owner's fixed failure rules in §13.
+It cannot downgrade unexpected swallowed exceptions, crashes, self-restarts or owned leftovers. Known signatures
+may carry a defect id for attribution and grouping; there is no known-signature allowlist. Only the scenario's
+exact, bounded, single-use expectation for a deliberately caused fault can make that incident expected (§5.3).
 
 **`e2e/guard/budgets.toml`** holds, per lane and per role, soft and hard limits for:
 - private bytes, handles, GDI and USER objects, and threads;
 - the job's commit.
 
-A test overrides them with `@pytest.mark.guard(...)`. The budgets are **calibrated, not guessed** (decision CG-D11):
-1. Run the suite green 5 times.
-2. Take each test's maximum per counter.
-3. Set soft = maximum × 1.5 and hard = maximum × 4, never below a floor.
-4. Recalibrate when a test changes.
+A test declares a justified override with `@pytest.mark.guard(...)`, and the selected caps go in `guard.json`.
+CG-D11 calls for a lightweight first implementation: reuse OS/VM counters and simple configurable safety caps;
+avoid a new automatic budget manager. The original proposal (five green runs, maximum ×1.5 soft / ×4 hard) is
+**not approved** and is not an acceptance gate. Numeric limits, sampling cost and any later calibration policy
+remain open. Ordinary tests produce diagnostics and safety aborts only; dedicated repeated-action tests establish
+leak findings (CG-D12, §9).
 
-The calibration run is GSF-15.
-
-**Default numbers,** before calibration:
+**Proposed starting numbers, for implementation review.** These are design estimates, not owner-approved resource
+thresholds or a requirement to implement automatic calibration:
 
 | What | Default | Why |
 |---|---|---|
@@ -696,13 +730,13 @@ The calibration run is GSF-15.
 | Test time | soft 300 s, hard = soft + 180 s, × the lane factor (fast 1, realtime 2, heap 4, asan 3) | run7: 40 tests in 24 min |
 | Heartbeat | every 10 s; the host acts after 120 s without one | §7 |
 | Machine floors at preflight | 2 GB of commit headroom, 5 GB free on `C:` | §5.11 |
-| Job memory tripwire | 6 GB (in an 8 GB guest) | §5.2 |
+| Job memory tripwire | explicit configured cap; 6 GB in an 8 GB guest was the original proposal only | §5.2; CG-D11 remains open on values |
 
 ### 5.10 How it plugs into today's code
 
 | File (today) | Change | Why |
 |---|---|---|
-| `pytest.ini` | `-p guard.plugin`; the markers `guard`, `rel_smoke`, `rel_shutdown`, `rel_leak`, `rel_heap`, `rel_asan`, `rel_machine` | the wrapper is always on |
+| `pytest.ini` | `-p guard.plugin`; the markers `guard`, `rel_smoke`, `rel_shutdown`, `rel_leak`, `rel_heap`, `rel_asan`; `rel_machine` remains deferred | the wrapper is always on |
 | `suites/conftest.py` | `_end_strays()` becomes the Guard's preflight; the dump comparison and the `pytest.fail` paths become the Guard's verdict; `am` keeps its shape | one owner of crash detection |
 | `amdriver/app.py` | `start()` spawns through `guard.spawn()`; `kill()`, `close()` and `restart()` announce their ends; `children()` and `claude_processes()` read the ledger; `ended_by_test` retires | the choke point |
 | `amdriver/waits.py` | `wait_until` and `hold_true` check `guard.tripped` on every iteration | the cooperative stop |
@@ -719,21 +753,24 @@ Scenario files do not change. A scenario that causes an incident on purpose wrap
 
 The preflight checks:
 
-1. **Nothing of the previous test runs.** Its job closed, which ends its tree. No `Agentmaster.exe`,
-   `OpenConsole.exe`, `claude.exe`, `pwsh.exe` or `powershell.exe` with a `C:\e2e` command line runs.
+1. **Nothing owned by the previous attempt runs.** The Sentinel has drained/terminated and closed all its jobs.
+   Check retained identities and ancestry for every owned role, including `bash.exe` and `node.exe`; never kill by
+   image name or command-line substring alone. Unowned external processes stay untouched.
 2. **No `WerFault.exe`, and `C:\e2e\dumps` is empty.** A dump there now is a late crash; it joins the previous test's
    verdict.
 3. **No window the previous test left:** an Explorer folder window from "Open In Explorer", a dialog.
-4. **At least 2 GB of commit headroom and 5 GB free on `C:`.**
+4. **Configured commit headroom and disk floors are met.** The original 2 GB / 5 GB numbers remain proposals.
 5. **The guest did not reboot** since the last test (its boot time).
-6. **The mock** has no request in flight, and its gates are open.
+6. **The attempt's fresh mock** has no prior requests, its gates are open and its process/endpoint are healthy.
 7. **The Guard's own setup:** the LocalDumps keys, `DontShowUI`, no registered `AeDebug` debugger, the dump folder
    writable, the Sentinel's heartbeat fresh.
 
 **What it does with a finding:**
-- Anything left over is a **STRAY**. It is charged to the previous test in the run journal, which amends that test's
-  verdict in `reliability.json`, and then it is cleaned up.
-- A failed self-check makes the test **BLIND**.
+- Anything test-owned left over is a **STRAY** failure. It is charged to the previous attempt in the journal, which
+  amends that test's verdict in `reliability.json`, and then it is cleaned up. Ownership uncertainty blocks cleanup
+  of that process and is reported; it is not permission to kill unrelated work.
+- A failed required self-check makes the affected test **BLIND** and the suite nonzero. A failed required canary
+  blocks or fails tests relying on that detector; it can never yield successful unguarded tests (CG-D16).
 
 ---
 
@@ -741,8 +778,10 @@ The preflight checks:
 
 ### 6.1 What it is
 
-`run_suite.py` grows into the Sentinel: a long-lived Python process, started detached by the host as today, that starts
-and supervises pytest. It runs with `-X faulthandler`.
+`run_suite.py` grows into the Sentinel: a long-lived Python process, started detached by the host as today, that
+collects the selected tests and runs one fresh pytest worker for exactly one test attempt at a time. It runs with
+`-X faulthandler`. The Sentinel owns the attempt's job handles, ledger, mock process, namespace and evidence, and
+remains outside every worker's teardown boundary. This is the process↔test encapsulation requested in CG-D6/CG-D7.
 
 ### 6.2 Heartbeat and journal
 
@@ -752,47 +791,55 @@ The host creates `Z:\e2e\out\<run>\` and its `tests\` before the run. Python in 
 - **`heartbeat.json`, every 10 s.** It holds the time, a sequence number, the current test and its phase, pytest's
   pid, and the guest's commit, disk and CPU. It is flushed on each write: Z: is the host's folder over SMB, and a
   heartbeat must reach the host even if the guest dies a second later.
-- **`journal.jsonl`.** One line at each test's start and end, with the verdict summary. This is the source of truth
-  for resuming a run.
+- **`journal.jsonl`.** Attempt ids, collection/selection, each attempt's start and end, verdict, evidence handoff and
+  cleanup completion. This is the source of truth for scheduling the next fresh worker, with no result erased by a
+  worker crash. An explicitly requested retry has a new id and preserves the previous failure.
 - **`current-test.json`, in `C:\e2e\out`.** The plugin keeps the test in flight and the app's pids there, for the
   Sentinel to read.
 
-### 6.3 Supervising pytest
+### 6.3 Supervising one worker per attempt
 
-- **pytest exits.** A normal code ends the run. A crash code (a `python.exe` crash from comtypes or ctypes) makes the
-  test in flight RUNNER, with `faulthandler`'s output and python's WER dump.
-- **The test in flight passes its hard budget.** The Sentinel:
-  1. snapshot-dumps the app (its pid is in `current-test.json`) and takes a screenshot;
-  2. ends pytest's process tree. The test's job closes with pytest's handles (kill-on-close), so the app tree ends too;
-  3. records the test as RUNNER-LOST.
-- **Resume.** pytest runs again with `--guard-resume <journal>`. The plugin deselects the finished tests and the lost
-  one, and at the end the JUnit files of the parts are merged. After `max_resumes` (default 5) a run that keeps losing
-  its runner ends.
-- **The off-the-shelf alternative** (decision CG-D6): pytest-xdist with one worker plus pytest-timeout give the same
-  recovery from crashes and hangs, without evidence taken before the kill.
+- **A normal worker exit** completes only its one attempt, after final verdict, bounded evidence export and owned
+  cleanup. A reported pass without that completion handshake is an infrastructure failure.
+- **A worker crash** makes its attempt RUNNER-CRASH, preserving `faulthandler` output and Python's WER dump. The
+  Sentinel still owns the app/mock handles and captures their evidence before terminating those jobs.
+- **A worker passes its hard deadline.** The Sentinel snapshots the app and takes a screenshot within collection
+  deadlines, records RUNNER-LOST, ends the worker, then drains/terminates its app/mock jobs. A failed collector is
+  recorded and never prevents final cleanup.
+- **The next test** gets a new worker, mock, profile, namespace, jobs and endpoint only after the previous attempt
+  has finished cleanup. A late dump is assigned through the retained process identity and attempt ledger. JUnit and
+  `reliability.json` aggregate every attempt; no worker restart rewrites a failed attempt as a pass.
+- **Framework choice is an implementation detail.** A custom scheduler or an off-the-shelf worker framework is
+  acceptable only if it preserves this ownership, evidence-before-kill and one-attempt boundary. CG-D6 did not
+  approve a particular pytest plugin or a shared long-lived worker.
 
 ### 6.4 Guest settings (provisioning sets them, the Sentinel checks them at start)
 
 - **LocalDumps, for every process.**
-  - **The default,** values on the `LocalDumps` key itself: `DumpType 1` (a minidump), `DumpCount 50`. Any crashing
-    process then leaves at least a minidump.
+  - **Proposed fallback default,** values on the `LocalDumps` key itself: `DumpType 1` (a minidump), `DumpCount 50`.
+    This is a capture request, not a guarantee that every exit produces a dump; qualify each target image/context.
   - **Full dumps** (`DumpType 2`) for `Agentmaster.exe`, `OpenConsole.exe`, `claude.exe`, `agentmaster-cli.exe`,
     `agentmaster-sessiondb.exe`, `WindowsTerminal.exe` and `python.exe`.
-  - The Guard moves the dumps out at once, so rotation never matters.
+  - The Guard archives completed dumps promptly and tracks partial files, rotation and capture gaps. A missed dump
+    remains an explicit evidence limitation; no crash is forgiven because the file is absent.
 - **No crash UI and no JIT debugger:**
   - `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\DontShowUI = 1`;
   - no `AeDebug` `Debugger` with `Auto = 1`.
-- **Defender:** exclusions for `C:\e2e` and the venv (decision CG-D15). The fault toolkit's remote threads look like an
-  attack.
+- **Defender: OPEN (CG-D15 was unanswered).** The previous recommendation was guest-only exclusions for `C:\e2e`
+  and the venv. Do not provision exclusions or disable Defender without a decision. If the existing policy blocks a
+  required canary, report its failure and block affected tests; do not silently weaken protection.
 - **No surprise reboots or relaunches:**
   - Windows Update paused for the run;
   - "restart apps after sign-in" off, so that a reboot never relaunches the app behind the suite's back (§3.1).
 
 ### 6.5 The mock out of process (decision CG-D7)
 
-- **The Sentinel runs it:** `python -m mockllm --port 8787 --log …`, started and restarted by the Sentinel.
-- **The tests reset it** through its control API, as they already do (`mock.reset()`).
-- **A dead mock** is a RUNNER incident of the test in flight, never the app's.
+- **The Sentinel starts a fresh separate mock process per attempt**, with an attempt-specific endpoint, control
+  namespace and log. It remains alive if that attempt's pytest worker crashes, until bounded capture and cleanup.
+- **The tests control it** through its existing API. Resetting state may serve steps within one attempt; it is not
+  a substitute for starting a new process at the next test boundary.
+- **A dead mock** fails its attempt as RUNNER. The next attempt receives a fresh mock only after cleanup; restarting
+  a mock never erases the current test's failure or leaks requests into another test.
 
 ### 6.6 The machine-wide ledger (optional)
 
@@ -802,12 +849,15 @@ The host creates `Z:\e2e\out\<run>\` and its `tests\` before the run. Python in 
 - a packaged relaunch (AUMID activation starts it outside the job);
 - services.
 
+This is observation, not ownership. Processes outside the jobs require retained creation/ancestry evidence before
+they can be charged to an attempt or cleaned up; unrelated external processes are never killed.
+
 **How.** WMI's `Win32_ProcessStartTrace` and `Win32_ProcessStopTrace`, with `ExitStatus`. G0 measures whether WMI keeps
 up with 500 short processes a minute. If not, a small ETW consumer of `Microsoft-Windows-Kernel-Process` replaces it.
 
 ### 6.7 Incremental export
 
-- **After each test,** its folder is zipped to `Z:\e2e\out\<run>\tests\<seq>-<test>.zip`. A run that dies keeps
+- **After each test,** its folder is zipped to `Z:\e2e\out\<run>\tests\<node-hash>-<attempt>.zip`. A run that dies keeps
   everything it finished.
 - **`status.json`** keeps today's fields (the host reads them) and adds `heartbeat`, `current_test`, `resumes` and the
   reliability counts.
@@ -847,11 +897,12 @@ own timeout:
 **What the Watchdog then does:**
 1. Writes `machine-incident.json`, with the screens, into the run's folder.
 2. Collects what Z: holds: the heartbeat, the journal, the per-test zips.
-3. Either ends the run, or, with `--resume-on-machine-loss`, resets the desktop, provisions it, and runs the tests the
-   journal has not finished. The test in flight is MACHINE-LOST.
+3. Fails the in-flight attempt as MACHINE-LOST and ends the run nonzero, with completed results and available
+   partial evidence preserved. The host's `finally` stops the guest after bounded collection (§7.4).
 
-**Scenarios that span a guest reboot** (SDN-12, SDN-13) are split into a before part and an after part, joined by a file
-on Z:. The Watchdog's resume runs the after part first.
+Passive observation of an unexpected guest failure remains required. Deliberate pause/reset/reboot/power-loss
+experiments, automatic machine-loss reset/resume, and before/after reboot scenarios SDN-12/SDN-13 are deferred by
+CG-D10. They are not acceptance gates for the first implementation.
 
 ### 7.3 Triage on the host
 
@@ -875,7 +926,17 @@ on Z:. The Watchdog's resume runs the after part first.
 
 - The fleet token lives only in a variable and is never printed.
 - No desktop token and no noVNC link goes into an artifact.
-- The desktop is deleted after the run. `--keep-on-failure` (decision CG-D17) keeps it for a live look.
+- **The VM starts with the test run and always stops with it (CG-D17).** There is no `--keep-on-failure` live guest.
+  Success, test failure, worker failure, cancellation and capture/export errors all enter one host `finally`:
+  bounded final evidence export, stop/power off, then the normal disposable-desktop deletion policy. Offline
+  retained evidence is separate from keeping a running VM; a failed export never extends the guest's life
+  indefinitely. Export/stop failures make the run nonzero and record available partial artifacts and cleanup state.
+- **Retention is required (CG-D13).** Store completed and partial run artifacts on `Q:` with a manifest, creation
+  time, completion state and applied retention/dump policy. A bounded cleanup pass expires eligible finalized
+  successful, failed and interrupted runs, including their partial artifacts,
+  excludes active runs, and logs deletions and failed deletions. The old 30-day retention and 20-full-dumps-per-run
+  values remain proposals; exact duration and caps are open. Retention operates on stored artifacts after VM
+  shutdown and never requires retaining a live guest. Every passing test's `guard.json` is included (CG-D14).
 
 ---
 
@@ -892,13 +953,15 @@ on Z:. The Watchdog's resume runs the after part first.
 | Lane | Runs | Build | What | Time |
 |---|---|---|---|---|
 | rel-smoke | at the start of EVERY run, before the feature suites | the tested build | the GSF canaries that need no fault DLL | ~5 min |
-| rel-shutdown | nightly | the tested build | SDN and CST | ~40 min |
+| rel-shutdown | nightly proposal | the tested build | active SDN and CST; excludes SDN-12/13 | ~40 min |
 | rel-leak | nightly (short N), weekly (long N) | the tested build, plus `v0.7.10-prerelease` as the positive control of LKS-12 | LKS | 1–3 h |
-| rel-heap | weekly | the tested build under page heap / Application Verifier | the P0 feature suite, MCR-01–07, CST again | 2–4 h |
+| rel-heap | on demand; cadence open | the tested build under page heap / Application Verifier | bounded P0/MCR-01–07/CST subset within the ordinary VM envelope; no larger guest assumption | scope-dependent |
 | rel-asan | on demand (each needs a build) | an AddressSanitizer build | the P0 suite and MCR | 2–4 h |
-| rel-machine | weekly | the tested build | HMC, GSF-12, SDN-12, SDN-13 | ~1 h |
+| rel-machine | deferred; not scheduled | — | HMC, GSF-12, SDN-12, SDN-13 retained as future references only (CG-D10) | — |
 
-A canary that fails at the start of a run marks the whole run UNGUARDED in its summary (decision CG-D16).
+A required canary that fails is a failed test and makes the run nonzero (CG-D16). Tests depending on its detector
+are blocked or failed, never counted as successful unguarded coverage. Unaffected diagnostics may continue with
+that dependency visible; this does not erase the canary failure or make the suite green.
 
 ### 8.2 The fault toolkit (`e2e/faults/`, NOT BUILT)
 
@@ -914,12 +977,14 @@ It is test-only and is used only in the disposable guest.
 | The app's handles growing | `DuplicateHandle` of an event into the app, N times | ctypes | the handle budget and slope; the handle census |
 | UI-thread faults: a fail-fast with a chosen subcode, a stowed exception (`RoFailFastWithErrorContext`), a Win32 message box, GDI growth | a test DLL loaded onto the UI thread through `SetWindowsHookEx(WH_GETMESSAGE, <the UI thread's id>)`, triggered by a registered message | a small C++ DLL and its injector: a tool build (the owner's go) | the UI-thread crash shapes; DIALOG; the GDI budget |
 | A kill at a moment | `TerminateProcess(GUI, 0x00E2E0D2)` after a log line or a delay | ctypes | SDN |
-| Machine faults | QEMU's monitor (`stop` / `cont`, `system_reset`); `shutdown /r` in the guest; a commit hog; a disk filler | host and guest scripts | HMC, SDN-12, SDN-13, GSF-12 |
+| Machine faults — DEFERRED | QEMU pause/reset, guest reboot, commit hog and disk filler remain reference designs only | outside implementation scope (CG-D10) | HMC, SDN-12, SDN-13, GSF-12 are not first-implementation requirements |
 | Runner faults | `kernel32.Sleep(INFINITE)` in a test; `ctypes.string_at(0)`; stopping the mock | none | the Sentinel's resume |
 
 ### 8.3 In-app fault switches (NOT BUILT: app changes, active only under `AGENTMASTER_E2E=1`)
 
-These follow the pattern of E2E_TESTING.md §6.1. Only these four things cannot be done from outside:
+CG-D5 accepts external fault injection first. These four later switches follow E2E_TESTING.md §6.1 because their
+specific behavior cannot be made reliably from outside. This decision does not authorize their app build or the
+UI-thread fault DLL build; those still need the owner's go under the Development Rules.
 
 | Variable | Effect | For |
 |---|---|---|
@@ -980,24 +1045,25 @@ guest.
 **GSF-06 · A process that outlives the drain is an ORPHAN**
 - *Do:* from a session's shell tab, start a hidden process that is not on the tab's console (`Start-Process
   -WindowStyle Hidden …`); then end the app.
-- *Expect:* an ORPHAN after the drain, named with its role (`tool`) and ancestry, then ended by the job; a warning, per
-  the policy.
-- *The same with a copy named `claude.exe`:* a failure.
+- *Expect:* an ORPHAN failure after the drain, named with its role (`tool`) and ancestry, then ended by the job.
+- *The same with a copy named `claude.exe`:* the same failure rule. A separate unrelated process remains untouched.
 
-**GSF-07 · A swallowed exception fails the test; an allowlisted one does not**
+**GSF-07 · Every unexpected swallowed exception fails, including a known signature**
 - *Do:*
   1. append a synthetic `[exc]` block to the test profile's `hooks.log` (the tailer's own input; no app change);
-  2. append one that matches an allowlist entry;
+  2. append one bearing a known signature and defect id; repeat with `[wil] exception`;
   3. later, with the in-app switch, cause a real one.
 - *Expect:*
-  1. SWALLOWED;
-  2. nothing;
-  3. SWALLOWED, with the real throw stack.
+  1. SWALLOWED failure in the inner target attempt;
+  2. SWALLOWED failure again, with the defect id as metadata only;
+  3. SWALLOWED, with the real throw stack. The canary separately verifies one exact deliberate-fault expectation,
+     and that a second occurrence, different signature or out-of-window line still fails. Its own pass proves the
+     classifier produced the required target result; it does not forgive a feature test's exception.
 
 **GSF-08 · Growth trips the budgets**
 - *Do:* commit 1 MB a second into the app up to its hard budget; duplicate 5,000 event handles into it.
 - *Expect:*
-  - LEAK-SUSPECT at the soft budget;
+  - RESOURCE-WARNING at the configured diagnostic soft cap, with no leak claim;
   - RUNAWAY at the hard one, and at the job's notification;
   - the handle census names `Event`.
 
@@ -1010,15 +1076,19 @@ guest.
 - *Do:* a test that blocks in `Sleep(INFINITE)`; a test that crashes Python; a test that stops the mock.
 - *Expect:*
   - RUNNER-LOST, RUNNER-CRASH and RUNNER (mock), each charged to its own test;
-  - the app tree ended by the job;
-  - the next test runs and passes.
+  - app/mock processes remain available to the Sentinel after worker death for bounded evidence capture, then their
+    jobs end and the attempt's endpoints disappear;
+  - the next test uses fresh worker/mock identities (PID plus creation time and boot id), jobs, profile and endpoint,
+    with no inherited requests or incidents; numerical PID reuse alone is not a failure;
+  - an evidence collector failure still leads to cleanup and a nonzero attempt; a deliberate mock crash is never
+    silently repaired into a pass.
 
 **GSF-11 · A blind monitor makes the test BLIND, never green**
 - *Do:* make `C:\e2e\dumps` read-only and crash the app; separately, start the app outside the job.
 - *Expect:* for the first, CRASH (the exit code still tells) plus BLIND (WER); for the second, BLIND (job), and the
   test does not pass.
 
-**GSF-12 · A paused machine is not an app hang** (rel-machine, the host ring)
+**GSF-12 · A paused machine is not an app hang — DEFERRED** (CG-D10; not an implementation gate)
 - *Do:* QEMU `stop` for 4 minutes, then `cont`.
 - *Expect:*
   - the Watchdog reports MACHINE-STALL, with screens;
@@ -1034,10 +1104,11 @@ guest.
 - *Expect:* the next preflight reports a STRAY and kills it; the previous test's verdict in `reliability.json` is
   amended.
 
-**GSF-15 · No false alarms** (the acceptance and calibration run)
+**GSF-15 · Unexpected incidents stay failures** (the acceptance run)
 - *Do:* the whole feature suite, three times, on the tested build.
-- *Expect:* zero unexpected incidents, or each one allowlisted with a defect id; the budgets calibrated from these
-  runs.
+- *Expect:* zero unexpected incidents for a green acceptance result. Known defects remain failures and carry their
+  defect ids as metadata. Save each passing `guard.json`; use observations to review simple configured safety caps,
+  with no required five-run calibration engine or automatic multipliers.
 
 **GSF-16 · A real product crash, end to end**
 - *Do:* the upstream context-menu crash on the tested build (§3.7): the Menu key in a terminal → Split pane → Esc → the
@@ -1046,12 +1117,14 @@ guest.
   - CRASH `0xC000027B`;
   - the stowed error decoded on the host down to `AppBar::SetFocusOnAppBar` and `E_INVALIDARG`;
   - one crash bucket across runs.
-- Kept as a known defect (`CG-K1`) until upstream's fix (PR #20612: `MenuFlyout` for the nested menus) is taken.
+- A reproduced crash remains a product failure tagged `CG-K1` until upstream's fix (PR #20612: `MenuFlyout` for the
+  nested menus) is taken. Knowing this signature does not waive it; detector canaries use deliberate injections.
 - *G0 checks* that it reproduces in the guest.
 
 ### 8.5 SDN — sudden shutdown and recovery
 
-These run in the rel-shutdown lane. They test durability, CLAUDE.md Rule #16.
+The active application/owned-process scenarios run in rel-shutdown and test durability, CLAUDE.md Rule #16. Forced
+guest-loss scenarios SDN-12/13 remain below as deferred references only; sudden app crashes and kills stay in scope.
 
 **The durability check** is one helper (`suites/reliability/durability.py`) that ends every SDN scenario. After the
 restart:
@@ -1143,15 +1216,15 @@ restart:
 - *Expect:* the app reconnects to or restarts what it needs; a dropped hook is logged in `forwarder-errors.log`; no app
   incident.
 
-**SDN-12 · Windows restarts with the app open** (rel-machine)
+**SDN-12 · Windows restarts with the app open — DEFERRED** (CG-D10; reference only)
 - *Do:* `shutdown /r /t 0` in the guest.
 - *Expect:* the app receives `WM_QUERYENDSESSION` and `WM_ENDSESSION` and finalizes its persistence. After the
   auto-logon, the after part starts the app and runs the durability check.
 - *Variant:* with "restart apps after sign-in" on, the app comes back by itself (`RegisterApplicationRestart`), on the
   right profile.
-- *G0 checks* that a guest reboot keeps the desktop: QEMU does not exit, and `C:` stays intact.
+- A future reactivation would first need to qualify guest reboot persistence; it is not a current G0 check.
 
-**SDN-13 · Power loss during a save storm** (rel-machine)
+**SDN-13 · Power loss during a save storm — DEFERRED** (CG-D10; reference only)
 - *Do:* in the guest, rename and tag every 200 ms for 60 s, while the host resets the VM (`system_reset`) at a random
   moment. After the boot, start the app. Ten runs.
 - *Expect:*
@@ -1167,8 +1240,10 @@ restart:
 
 **SDN-15 · A prompt in delivery is never sent twice**
 - *Do:* kill at moments around a Prompt Queue Runner delivery: between `[send]`, `[delivered]` and the echo.
-- *Expect:* after the restart the prompt is either Sent once (the mock saw it once) or Pending (never sent), never sent
-  twice (Rule #4). A prompt that was Sent but never delivered is not replayed.
+- *Expect:* correlate a unique prompt identity with the mock's durable receipt/acknowledgment and transcript
+  evidence across the restart; never infer acceptance solely from a `Sent` state or log line. Acknowledged delivery
+  is not duplicated. An interrupted attempt with ambiguous acceptance is reported explicitly and must not be
+  silently replayed as if known unsent. The test records the ambiguity and product recovery behavior (Rule #4).
 
 ### 8.6 CST — damaged state on disk
 
@@ -1272,7 +1347,7 @@ These run in the rel-heap and rel-asan lanes.
   - framing lengths of 0, 2³¹ and truncated.
 - *Expect:* no crash, no hang, bounded memory; real hooks are still delivered afterwards.
 
-**MCR-08 · All of the above under AddressSanitizer** (needs an approved build flavor, decision CG-D9)
+**MCR-08 · All of the above under AddressSanitizer** (CG-D9 accepted; feasibility and separate build permission first)
 - *What:* the P0 suite and MCR-04 to MCR-07.
 - *Effect:* a report names the bad access, plus the allocating and freeing stacks.
 
@@ -1300,9 +1375,12 @@ These run in the rel-leak lane. The method is §9.
 | LKS-16 | a theme flip with 40 tabs | 20 (3) | |
 | LKS-17 | the toolkit's injected leaks of 8, 32 and 128 KB per cycle | 30 (5) | the lane's sensitivity |
 
-### 8.9 HMC — a hostile machine
+### 8.9 HMC — a hostile machine (deferred)
 
-These run in the rel-machine lane.
+These are retained as future references. CG-D10 declined the proposed machine-test work, weekly machine lane and
+larger VM; none of HMC-01–07 is a current implementation or acceptance requirement. Passive telemetry for an
+unexpected pressure/stall/failure remains part of the Guard and Watchdog. Do not launch a stress hog, fill the guest
+disk, change its clock, or pause/reset/reboot the VM under this plan update.
 
 **HMC-01 · Commit pressure**
 - *Do:* a hog leaves less than 500 MB of commit for 2 minutes while the app switches tabs and runs a turn.
@@ -1385,11 +1463,16 @@ minutes, not hours. N then counts the samples, not the cycles.
   - the robust slope (Theil–Sen) over the N measured cycles, times N, exceeds max(threshold, 3 × the MAD of the
     cycle-to-cycle deltas);
   - the median of the last third exceeds the median of the first third.
-- **A flag is a LEAK verdict** for that scenario: a failure in the leak lane, with the slope per cycle in the report.
+- **A flag fails the leak lane's retention/capacity gate** and reports the slope per cycle as a reproducible growth
+  finding. It is not yet proof of leaked allocations: label the cause unconfirmed until the ownership/lifetime
+  evidence in §9.5 supports a leak verdict. This analysis belongs to repeated-action leak tests, never a single
+  ordinary test's peak (CG-D12).
 
 ### 9.4 Calibration and sensitivity
 
-- **The noise floor:** each scenario runs 5 times on a known-good build. That sets its threshold.
+- **The noise floor:** repeated runs on a known-good build qualify each dedicated leak scenario. Five runs was the
+  original proposal; exact repetitions, thresholds and sensitivity remain implementation-review choices, not
+  CG-D11's unapproved general-purpose calibration subsystem.
 - **The positive controls set the sensitivity:**
   - LKS-17's injected leaks of 8, 32 and 128 KB per cycle;
   - LKS-12 on `v0.7.10-prerelease`, the real UText leak.
@@ -1406,7 +1489,10 @@ When a cycle is flagged:
    ([tools/leakhunt](../../tools/leakhunt/README.md)).
 3. Beside that: the handle type census, and the bridge's object counters once they are built (§8.3).
 
-The verdict then names the classes that grew per cycle, for example "+1 `AgentTabOverlay` and +3 `ToolTip` per cycle".
+The evidence names the classes that grew per cycle, for example "+1 `AgentTabOverlay` and +3 `ToolTip` per cycle".
+Qualify whether that growth is a leak using allocation stacks and lifetime/ownership evidence. A cache or deliberate
+retention must not be relabeled a confirmed memory leak merely because its slope was positive. The companion
+[reliability plan](E2E_RELIABILITY.md) details this qualification and evidence contract.
 
 ⚠ Check any heap walk against objects whose count you know first, such as one live `Tab` per open tab. The 26200 LFH
 bitmap misread once halved every count (MEMORY_LEAKS.md §7).
@@ -1421,9 +1507,11 @@ bitmap misread once halved every count (MEMORY_LEAKS.md §7).
 (`Z:\e2e\cache`). Its **Heaps** layer is page heap, either full, or targeted with the random and size properties. Its
 other layers watch handles, locks, memory, TLS and the thread pool.
 
-**How a stop becomes a verdict.** No debugger is attached (§4, principle 2). A stop is a breakpoint exception with no
-debugger to take it, so WER writes a dump and the process ends with `0x80000003`. The Guard reads that as CORRUPTION in
-these lanes, and attaches the verifier's log, exported to XML with `appverif -export log`.
+**How a stop becomes a verdict.** Qualify the chosen instrumentation mode before relying on it. In the debugger-free
+variant (§4, principle 2), the expected stop is a breakpoint exception leading to WER and exit `0x80000003`; G0 must
+verify that exact chain for the chosen verifier settings. If a mode needs a debugger, use a separately qualified
+corruption lane and report verifier/debugger stops as failures; that lane cannot validate the app's watchdogs.
+Attach the verifier's log, exported to XML with `appverif -export log`, and report missing capture explicitly.
 
 **The segment heap.** The app opts into it (§3.3). With page heap on, the process may not run the segment heap at all.
 *G0 checks* which heap the process actually runs under each setting, and records the exact `appverif` commands that
@@ -1431,12 +1519,17 @@ work in the guest.
 
 **The cost.**
 - **Time:** the lane factor (heap ×4, §5.9) stretches the Guard's budgets.
-- **Memory:** full page heap gives every allocation at least a page, so the lane uses the random and size modes, and
-  a guest of 12–16 GB (decision CG-D10).
-- **The app's own ladder does not stretch.** Its 20-second threshold is fixed, so in these lanes a `[ui-stall]` that
-  recovers is a NOTE. A self-restart still fails.
+- **Memory:** full page heap gives every allocation at least a page. CG-D10 declined the proposed 12–16 GB guest;
+  start with targeted random/size modes and bounded scenarios within the ordinary VM's configured resources. If
+  that cannot run credibly, mark the lane blocked/deferred rather than silently allocating a larger VM.
+- **The app's own ladder does not stretch.** Its 20-second threshold is fixed. Record instrumentation/snapshot
+  intervals and qualified lane deadlines so legitimate declared diagnostic work is distinguishable from a wedge.
+  A confirmed unexpected `[ui-stall]`/HANG still fails even if it recovers; recovery alone is never a NOTE exemption.
+  An unexpected self-restart always fails. Do not use a debugger lane to claim watchdog correctness.
 
 ### 10.2 AddressSanitizer (decision CG-D9)
+
+The owner accepted this direction. Feasibility comes first; acceptance of the plan is not permission to build.
 
 **The build.** A separate configuration of our binaries:
 - what: `TerminalApp`, `TerminalControl`, `TerminalConnection`, the GUI exe, the CLI and `OpenConsole`;
@@ -1444,7 +1537,7 @@ work in the guest.
 - the ASan runtime DLL beside the exe;
 - into its own layout slot, `Q:\agentmaster-layouts\Asan`.
 
-It is a build, so each run needs the owner's go (the Development Rules). `src/common.build.pre.props` already carries
+Each build needs the owner's go (the Development Rules). `src/common.build.pre.props` already carries
 `/fsanitize=address` in upstream's `Fuzzing` configuration: start from that pattern. That configuration also links the
 static CRT and the coverage library for conhost's fuzzers; an app build keeps the app's own CRT.
 
@@ -1478,15 +1571,15 @@ with subcode 57. It needs two things:
 
 | Phase | What | Done when |
 |---|---|---|
-| G0 | A spike in a test desktop: measure, keep nothing | every *G0 checks* of this document is answered in `e2e/guard/G0-FACTS.md` (the full list is below) |
-| G1 | The Guard's core: the plugin; the job and the ledger; the exit-code classifier; the WER monitor; the log scan; expectations; the verdict and the reports; profile integrity; the steps journal; the preflight; the driver changes (`app.py`, `waits.py`) | GSF-01, 02, 05 (claude and host), 06, 07 (synthetic), 13 and 14 pass 10 times out of 10; the existing feature suite stays green with the Guard on (GSF-15: three runs, zero unexpected incidents, or each allowlisted) |
-| G2 | Liveness and resources: the pings and the UIA worker; the dialog watch; the sampler and budgets; the hang evidence; the stopping ladder; the UIA timeouts in the driver | GSF-04 (suspend form), 08, 09 (first form) and 11 pass; the test stops ≤ 5 s after a crash; a hang is decided ≤ 15 s after it starts |
-| G3 | The Sentinel: heartbeat, journal, supervision, resume, export, the mock out of process, the guest settings | GSF-10 (all three); a feature run with two injected runner faults ends with every other test's result plus two RUNNER-LOST |
-| G4 | The Watchdog, the host triage, the crash buckets | GSF-12; a QEMU `stop` in the middle of a run → MACHINE-STALL; a forced reset → MACHINE-REBOOT, then the run resumes on a reset desktop; GSF-16's crash symbolized and bucketed |
+| G0 | A qualification spike in a test desktop; retain facts/evidence, no live guest after the run | every *G0 checks* of this document is answered in `e2e/guard/G0-FACTS.md` (the full list is below) |
+| G1 | The attempt boundary first: Sentinel-owned handles/jobs/ledger; one fresh pytest worker and separate mock per attempt; Guard plugin; exit classifier; WER/log scan; exact expectations; reports; profile integrity; steps; preflight; driver changes | GSF-01, 02, 05 (claude and host), 06, 07 (synthetic), 13 and 14 pass 10 times out of 10; GSF-10 proves capture survives worker death and cleanup isolates the next test; GSF-15 has zero unexpected incidents, with no known-signature waiver |
+| G2 | Liveness and resources: the pings and the UIA worker; the dialog watch; the sampler and budgets; the hang evidence; the stopping ladder; the UIA timeouts in the driver | GSF-04 (suspend form), 08, 09 (first form) and 11 pass; scenario work stops ≤ 5 s after detected crash; hangs meet their qualified pump/XAML deadlines in §5.9, separately from bounded evidence collection |
+| G3 | Complete run lifecycle: heartbeat, journal, incremental/final export, retention, guest readiness and required-canary dependency gates | GSF-10 (all three); runner/collector failure preserves partial evidence and each result; a failed required canary fails the suite and blocks dependent coverage; final cleanup runs on success, failure and cancellation |
+| G4 | Passive host Watchdog, triage, crash buckets, public matching-symbol readiness and guaranteed VM stop | simulated observer-input fixtures validate classification without forced guest faults; GSF-16's crash symbolized and bucketed; bounded export failure stays nonzero and the VM is still stopped; no pause/reset/reboot gate |
 | G5 | The fault DLL (a tool build: the owner's go) | GSF-03; GSF-04 (DLL form); GSF-09 (second form); the GDI control |
-| G6 | SDN and CST | each scenario runs; its first findings are recorded as known defects |
+| G6 | Active SDN and CST; SDN-12/13 and HMC deferred | active scenarios run; known defects annotate failures without waiving them; sudden application and owned-process kill/crash coverage is present |
 | G7 | LKS, and the method's validation | LKS-17 gives each scenario's sensitivity; LKS-12 flags `v0.7.10-prerelease` and passes `v0.8.0` |
-| G8 | The corruption lanes: Application Verifier and page heap (MCR-01–07); ASan after CG-D9 | the heap lanes run the P0 suite to the end; each stop gives a verdict with its stack |
+| G8 | Qualified Application Verifier/page-heap subset within the ordinary VM envelope; ASan direction accepted, feasibility and separately authorized build first | selected lanes complete within configured caps; each instrumentation stop fails with its evidence; larger VM/machine fault work is not assumed |
 | G9 | The app's changes in E2E mode (NOT BUILT): the fault switches, the fast ladder, `uiBeatAgeMs`, the object counters | ROB-09, ROB-10 and SDN-08 run; GSF-07 end to end |
 
 **G0's checks**, in one list:
@@ -1494,6 +1587,8 @@ with subcode 57. It needs two things:
 - **Processes and the job:**
   - the app spawned into a job, and its tree inside the job, including the session database service;
   - the UI-stall relauncher and the relaunched app stay in the job.
+  - a killed worker leaves app/mock ownership and capture with the Sentinel until final drain;
+  - a new attempt inherits no processes, mock requests, endpoints or profile state from its predecessor.
 - **WER:**
   - LocalDumps writes for an injected crash of each process kind, including the global minidump default;
   - event 1000 and its timing;
@@ -1503,9 +1598,9 @@ with subcode 57. It needs two things:
 - **UI Automation:** the timeouts in the guest.
 - **The host and the VM:**
   - QEMU's monitor is reachable for an E2E desktop;
-  - a heartbeat write survives a guest reset;
-  - a guest reboot and `system_reset` keep the desktop and `C:`;
-  - what the guest's clock does across a `stop` / `cont`.
+  - incremental evidence reaches the host and can be read without the guest;
+  - bounded final capture and VM stop run on every exit path, including capture errors and cancellation;
+  - forced pause/reset/reboot checks are deferred by CG-D10.
 - **The machine-wide ledger:** WMI under 500 short processes a minute.
 - **Tools:** `snapdump.exe` runs in the guest.
 - **Instrumentation:**
@@ -1518,19 +1613,21 @@ with subcode 57. It needs two things:
 ## 12. Risks and limits
 
 - **The job object could change behavior:** the session database service stays inside it; jobs nest. G0 measures it.
-  The job also ends the whole tree when the runner dies, which is a feature in tests, not on a user's PC.
+  The Sentinel must retain the jobs when a worker dies, or capture loses the app too early. Sentinel death still
+  triggers kill-on-close as a cleanup fallback.
 - **The Guard's own load can disturb timing.** On a 4–6 core VM, the pings, the samples and the UIA worker take time.
   Rates are set per lane, and the realtime lane samples less.
-- **False HANGs** during long legitimate UI work: a 40-tab restore, the heap lanes. Mitigated by per-lane thresholds,
-  machine-stall detection, and calibration.
+- **False HANGs** during long legitimate UI work: a 40-tab restore, the heap lanes. Mitigated by reviewed per-lane
+  thresholds and machine-stall detection, without requiring a new calibration subsystem.
 - **Dumps are big:** 0.3–1 GB for an app crash at test sizes, more at scale. Mitigated by caps, zip and retention
   (CG-D13).
 - **The asynchronous stop can leave the driver in the middle of an action.** The test fails anyway, the job kill
   resets the app, and the next preflight checks that the machine is clean.
 - **WMI can drop events under load.** The job is the authority for the test's tree; WMI is only for what lies outside
   it.
-- **Defender may block the fault toolkit's injection.** The exclusions apply in the guest only.
-- **Page heap needs memory.** The guest is sized for it, and the job's tripwire watches it.
+- **Defender may block the fault toolkit's injection.** CG-D15 is unanswered; no exclusion or disablement is
+  authorized. A blocked canary makes affected coverage unavailable and the run nonzero.
+- **Page heap needs memory.** Bound the active lane to the existing VM envelope; the proposed larger VM was declined.
 - **ASan may not build or run** with C++/WinRT and XAML Islands: feasibility first.
 - **A canary also exercises the product's crash path.** Expected incidents are labeled as such, so reports never mix
   the two.
@@ -1540,27 +1637,39 @@ with subcode 57. It needs two things:
 
 ---
 
-## 13. Decisions for the owner
+## 13. Owner decisions and remaining choices
 
-| Id | Question | Recommendation |
+**Decision record, 2026-10-23.** The user's D0–D17 map to CG-D0–CG-D17 here. These answers supersede the original
+recommendations throughout this plan and its companion [E2E_RELIABILITY.md](E2E_RELIABILITY.md). An omitted answer
+stays open; a qualified answer is not blanket approval of the recommendation's numbers or mechanism. This is the
+canonical decision record, mirrored by the companion plan; there is one `e2e/guard/` implementation and one
+`guard.json`/verdict contract, not separate implementations for the two documents.
+
+| Id | Owner answer | Status and resulting requirement |
 |---|---|---|
-| CG-D1 | A swallowed-exception line (`[exc]`, `[wil] exception`): fail, warn or ignore? | Fail on a new signature; allowlist the known ones with a defect id. Rule #18 logs them precisely so that they get looked at |
-| CG-D2 | A `claude.exe` crash during a feature test | Fail, blamed on Claude Code (or the mock), unless the scenario expects it |
-| CG-D3 | A self-restart (`0x51A11`) during an ordinary test | Fail: the app survived, but it wedged |
-| CG-D4 | Leftovers after the drain | Fail for our roles, warn for `tool` processes |
-| CG-D5 | How faults are injected | The external toolkit first: it works on published builds with no app change. In-app switches only for the four faults it cannot make (§8.3). The UI-thread DLL needs a tool build |
-| CG-D6 | Runner supervision | The Sentinel's own resume loop (evidence before the kill, one owner of process lifetimes), rather than pytest-xdist + pytest-timeout |
-| CG-D7 | The mock out of process, under the Sentinel | Yes, from G3 |
-| CG-D8 | PDBs for the builds under test | Test only builds whose PDBs we keep: local Release builds (E2E_TESTING.md D6), or a private CI artifact of each commit's PDBs |
-| CG-D9 | An AddressSanitizer build flavor | Yes, as its own layout slot, built on request; feasibility first |
-| CG-D10 | Machine-level scenarios on the user's PC: VM pause, reset, reboot; a 12–16 GB guest for the heap lanes | VM only, weekly, never while the user games |
-| CG-D11 | Budgets | Calibrated from green runs (§5.9), not fixed |
-| CG-D12 | Leak verdicts in ordinary tests | Hard budgets fail, soft budgets warn; slopes only in the leak lane |
-| CG-D13 | Evidence retention | Runs on `Q:` for 30 days; at most 20 full dumps per run |
-| CG-D14 | Keep each passing test's `guard.json` | Yes: a few KB, and it is the calibration data |
-| CG-D15 | Defender in the guest | Exclusions for `C:\e2e` and the venv, not Defender off |
-| CG-D16 | A canary failing at the start of a run | Continue, and mark the run UNGUARDED in its summary |
-| CG-D17 | Keep the desktop after a failed run for a live look | Off by default (`--keep-on-failure`): a Windows desktop takes 4–6 GB and several cores of the user's PC |
+| CG-D0 | "two docs" | **Decided.** Keep both companion plans, align their contracts and cross-links. No merge gate or third spec. |
+| CG-D1 | "fail the test" | **Decided.** Unexpected `[exc]` / `[wil] exception` lines fail, including known signatures. No defect allowlist downgrade. An exact, bounded deliberately injected fault may be expected (§5.3). |
+| CG-D2 | "fail" | **Decided.** A Claude/owned-agent crash fails. Record the affected process; assign product/mock/Claude blame only from evidence. Deliberate crash tests use exact expectations. |
+| CG-D3 | "Fail" | **Decided.** An unexpected `0x51A11` self-restart fails, even if recovery succeeds. |
+| CG-D4 | "Fail" | **Decided.** Every test-owned leftover fails, including bash/node and other `tool` processes. Ownership must be proven; unrelated external processes remain untouched. |
+| CG-D5 | "as recommended" | **Decided.** External faults first; later in-app switches only for blocked startup, simulated wedge, swallowed exception and faster stall timings (§8.3). Each app/tool build still requires the owner's go. |
+| CG-D6 | "We need some sort of encapsulation per process<->test" | **Requirement accepted; mechanism specified by this plan.** One fresh pytest worker per test attempt; Sentinel outside it owns jobs, retained handles, ledger, capture and cleanup. The worker framework remains an implementation choice (§6.3). |
+| CG-D7 | "as D6" | **Requirement accepted.** One fresh separate mock process/endpoint/log per attempt under the same Sentinel ownership; no run-shared mock or cross-test state. Capture survives worker death (§6.5). |
+| CG-D8 | "We are open source, always publish with pdbs (another agent takes care of that)" | **Decided; delegated dependency.** Every published build includes matching public PDBs. Verify build/symbol identity and report missing/mismatched symbols. Another agent owns packaging; this plan does not duplicate that work. |
+| CG-D9 | "Yes" | **Direction accepted.** ASan flavor in its own Q: slot, feasibility first. No build is authorized by this plan update. |
+| CG-D10 | "Nah but we do or should have sudden crash" | **Proposed machine work declined.** Retain sudden application/owned-process crash and kill coverage; defer deliberate VM pause/reset/reboot/power loss, the hostile-machine lane and larger-VM/weekly machine work. Keep passive guest-loss detection and bounded cleanup. |
+| CG-D11 | "its in VMs, honestly we should somehow manage but that might be too much code" | **Qualified/open on policy and values.** Begin with existing OS/VM telemetry and simple configured safety caps. The five-green-run ×1.5/×4 automatic calibration recommendation is not accepted or required; exact thresholds remain open. |
+| CG-D12 | "tests usually dont do repeated actions enough times to detect significant leaks. we have dedicated tests for leaks" | **Decided.** Leak verdicts belong to dedicated repeated-action lanes. Ordinary tests retain lightweight diagnostics and safety limits, with no single-test leak claim. |
+| CG-D13 | "Add retention" | **Requirement accepted; numbers open.** Add bounded artifact retention and cleanup on Q:, with manifests and deletion records. Thirty days and twenty full dumps per run remain proposals, not adopted values (§7.4). |
+| CG-D14 | "Yes" | **Decided.** Save `guard.json` for passing tests as well as failures, including monitor health and resource peaks. |
+| CG-D15 | No answer | **OPEN.** Exclusions versus the current Defender configuration is undecided. Do not provision exclusions or disable Defender. |
+| CG-D16 | "fail means test fail" | **Decided.** A required-canary failure is a failed test and makes the suite nonzero; tests needing that detector are blocked or fail. No successful UNGUARDED result. Unaffected diagnostic continuation does not erase the failure. |
+| CG-D17 | "don't keep, vm launches with the tests and turns off with them." | **Decided.** Start VM with the run; bounded export then unconditional stop in host `finally`, including failure/cancellation/export-error paths. No live `--keep-on-failure`. Preserve offline evidence under retention; follow normal disposable VM deletion policy. |
+
+**Remaining owner choices:** CG-D15's Defender policy, CG-D11's numerical safety limits/any later calibration, and
+CG-D13's retention duration/dump caps. These stay explicitly open rather than inheriting the original defaults.
+Detailed implementation choices for per-attempt isolation and lane sizing must satisfy the accepted contract and
+do not reopen the decisions above. The repository's build/deploy/install permission rule remains in force.
 
 ---
 
@@ -1594,37 +1703,37 @@ The "abnormal" column was measured on this Windows (Appendix D).
 
 ```text
 e2e/guard/
-  plugin.py        the pytest hooks; the autouse `guard` fixture; the markers; the resume selection
+  plugin.py        the pytest hooks; the autouse `guard` fixture; markers; one-attempt Sentinel client
   testguard.py     TestGuard: phases, incidents, expectations, the verdict
   job.py           the job object (ctypes): create, spawn suspended, assign, resume, the port, peaks, terminate
-  ledger.py        process records, roles, generations, exit codes
+  ledger.py        Sentinel-owned attempt/process records, roles, generations, exit codes and census reconciliation
   wer.py           the dump folder, Report.wer, the event log, the minidump exception reader
   ping.py          the pump ping and the dialog watch; uiaping.py is the UI Automation worker process
   resources.py     the sampler, the budgets
-  logscan.py       the app's logs: incident lines, signatures, the allowlist
+  logscan.py       the app's logs: incident lines and signatures; known-defect metadata never waives failure
   integrity.py     the profile's files, the session records' continuity
   steps.py         the @step decorator, the journal
   evidence.py      bounded collectors (today's amdriver/evidence.py folded in)
   verdict.py       kinds, precedence, rendering, guard.json, the JUnit properties
-  sentinel.py      Ring 2
-  policy.toml      actions per kind and lane; the allowlist
+  sentinel.py      Ring 2: fresh worker/mock per attempt, retained handles/jobs, capture, cleanup, aggregation
+  policy.toml      actions per kind and lane under §13's fixed failure requirements
   budgets.toml     resource and time budgets per lane
 e2e/host/watchdog.py, e2e/host/triage.py     Ring 3; Q:\agentmaster-e2e\crash-buckets.json
 e2e/faults/
   inject.py        ctypes: remote raise, terminate, commit, handles, suspend
   amfault.cpp      the UI-thread test DLL (SetWindowsHookEx), and its injector
-  hog.py, diskfill.py, qemu.py (wraps tools/install-qa/qm.py: stop, cont, system_reset, screendump, info status)
+  # hog.py, diskfill.py and QEMU pause/reset helpers are DEFERRED (CG-D10), not implementation requirements
 e2e/suites/reliability/
   durability.py    the durability check (§8.5)
-  test_gsf_*.py, test_sdn_*.py, test_cst_*.py, test_mcr_*.py, test_lks_*.py, test_hmc_*.py
+  test_gsf_*.py, test_sdn_*.py, test_cst_*.py, test_mcr_*.py, test_lks_*.py
+  # deferred GSF-12, SDN-12/13 and test_hmc_*.py are excluded from active selection
 ```
 
 ```python
 guard.spawn(argv, env, cwd, role="app-gui") -> GuardedProcess   # inside the test's job
 guard.end(proc, how="kill" | "close" | "quit-all", deadline_s=60)
-guard.expect(kind, role=None, code=None, within_s=None, count=1) # a context manager; single use
+guard.expect(kind, process, code=None, signature=None, within_s=None, count=1) # exact attempt/process identity; single use
 guard.expect_dialog(title)
-guard.allow_log(pattern, reason)
 guard.tripped -> Incident | None                                 # read by wait_until / hold_true
 guard.phase(name)                                                # labels the timeline ("restart", "cycle 7")
 guard.measure(label) -> dict                                     # one resources sample (the leak lane)
@@ -1633,8 +1742,7 @@ guard.processes(role=None) -> list[ProcessRecord]                # the job's led
 ```
 
 ```python
-@pytest.mark.guard(budget_s=600, resources={"app-gui": {"private_mb": 2500}})
-@pytest.mark.known_defect("CG-K1", incident="CRASH app-gui 0xC000027B")
+@pytest.mark.guard(budget_s=600, resources={"app-gui": {"private_mb": 2500}})  # illustrative values, not approved defaults
 @pytest.mark.rel_shutdown
 def test_kill_during_the_startup_restore(am, guard, faults): ...
 ```
@@ -1648,11 +1756,11 @@ FAILED suites/test_tab_menu.py::test_fork_session_branches_the_conversation
 GUARD CRASH (CONFIRMED) — Agentmaster.exe pid 4312, generation 1 (started 13:02:05.114) exited 0xC0000005
   at 13:02:11.482, 1.8 s after step 14: tab_menu("t1").choose("Fork session", "Default")
   fault: read of 0x00000000000000D8 at Microsoft.Terminal.Control.dll+0xAE43, thread 0x1F04 (the UI thread)
-  WER: full dump guard\dumps\Agentmaster.exe.4312.dmp (412 MB); Application Error event at 13:02:12.9
+  WER: full dump dumps\Agentmaster.exe.4312.dmp (412 MB); Application Error event at 13:02:12.9
   the app's last line: [nav] fork-managed-done new=8afac204 from=15c8cb70
   children: 3 ConPTY hosts drained in 2.1 s, 0 left over; the profile's files parse; 0 sessions lost
   then: WaitTimeout — timed out after 30.0 s waiting for the fork's tab (a consequence of the crash)
-  evidence: C:\e2e\out\tests\test_fork_session_branches_the_conversation\guard\
+  evidence: C:\e2e\out\tests\8e4d6b1c\attempt-001\
 ```
 
 ```json

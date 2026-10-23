@@ -5,11 +5,16 @@
 > 2.1.291). Another agent owns feature-scenario implementation. This document defines the shared reliability
 > infrastructure and the special scenarios that implementation should use.
 >
+> **Owner decisions applied (2026-10-23): keep two documents (D0).** This document and
+> [E2E_CRASH_GUARD.md](E2E_CRASH_GUARD.md) describe one implementation. The owner's D1–D17 correspond to that
+> document's CG-D1–CG-D17; its §13 is the decision record, mirrored in §11 here. They are no longer unanswered
+> recommendations. D15 remains unanswered; numerical resource and retention settings remain open as noted there.
+>
 > The user's requirement: “memory corruption, memory leaks and crashes as part of special scenarios suite” and
 > “Crashes and memory corruption and sudden shut downs must be handled by every single test (single code running
 > 'around' all) so we get clear signal on such a case.”
 
-**Recommendation:** put a mandatory reliability guard around the complete lifetime of every desktop test, backed
+**Implementation direction:** put a mandatory reliability guard around the complete lifetime of every desktop test, backed
 by a supervisor outside pytest and a watchdog outside the guest. Use that same guard for targeted lifecycle,
 leak, corruption and recovery suites. Ordinary scenarios should not have to remember crash assertions. A process
 exit, recovery restart, swallowed failure or broken monitor must never disappear behind a passing UI assertion.
@@ -18,6 +23,13 @@ This is the reliability extension to [E2E_TESTING.md](E2E_TESTING.md), especiall
 original exclusion of memory measurements. [The flow catalog](flows/README.md) remains the behavioral contract;
 [the existing driver](../../e2e/README.md) remains the scenario API. Proposed names and interfaces below do not
 exist yet. The word **must** describes acceptance of the future implementation, not a capability already shipped.
+
+The two documents have different jobs: [E2E_CRASH_GUARD.md](E2E_CRASH_GUARD.md) details the Guard, Sentinel,
+Watchdog, concrete runner integration and GSF/SDN/CST/MCR/LKS/HMC scenarios; this document details observation
+coverage, evidence validity, leak experiments and their acceptance. Use the same `e2e/guard/` implementation and
+`guard.json` result, not two plugins. The decision record overrides the older recommendations in either plan;
+this document's diagnostic/tool qualifications apply to the companion's concrete recipes. Scenario IDs are
+cross-references and may share tests. There is no merge prerequisite before implementation preparation.
 
 ## 1. What success means, and what it cannot mean
 
@@ -42,6 +54,11 @@ incomplete and nonzero, even if pytest returned 0. Preserve pytest's original re
 failures rather than silently rewriting the scenario's assertion history. Publish final success only after the
 supervisor finishes reconciliation and artifact acknowledgment.
 
+Under D16, a required canary that fails is a **failed test and a nonzero run**, not an UNGUARDED warning. Its
+dependent scenarios cannot run as qualified passes: mark them blocked/unqualified with the failing canary as
+the cause. Independently qualified tests or bounded diagnostics may continue without clearing that failure.
+Whether to stop all scheduling immediately is an implementation choice, not a separate owner decision.
+
 This does **not** prove that no latent corruption or leak exists. An uninstrumented process can corrupt memory
 without immediately crashing. Page heap, Application Verifier and AddressSanitizer each detect particular classes
 in particular allocations/code. A finite soak can only bound growth for its exercised workload and sensitivity.
@@ -52,7 +69,7 @@ unexpected process exit are different observations. Do not label them all “cra
 
 ## 2. What exists, and the gaps the plan must close
 
-The transcript's earlier “suite does not exist” description is historical. The current
+The transcript's earlier “suite does not exist” description is historical. At the original review baseline, the
 [E2E plan status](E2E_TESTING.md) and [runner README](../../e2e/README.md) record 40 tests. This review read the source;
 it did not repeat those runs or establish the reliability of the published binary.
 
@@ -66,8 +83,8 @@ it did not repeat those runs or establish the reliability of the published binar
 | [`evidence.collect`](../../e2e/amdriver/evidence.py) runs collectors in pytest | A blocked UIA call can block reporting and cleanup | Independent, killable collectors, each with its own deadline |
 | [`provision.ps1`](../../e2e/guest/provision.ps1) sets full WER dumps for Agentmaster, OpenConsole and Claude, `DumpCount=5` | Useful existing fallback, but not proof of capture or complete process coverage | Qualify collection per lane/image; archive promptly and track overwrites, ACLs and capacity |
 | [`run_suite.py`](../../e2e/guest/run_suite.py) packages selected output files and test folders | The separate dump directory is not included; a dead pytest may produce no useful JUnit | Publish supervisor journals and referenced dumps independently; reconcile incomplete runs |
-| [`e2e_run.py`](../../e2e/host/e2e_run.py) waits for run status and can delete in `finally` | An unreachable guest or failed export can lose the last evidence | Host heartbeat/deadline, incremental export, verified collection before deletion |
-| The mock server lives inside pytest | A wedged or dead pytest also removes the mock | Report that dependency; consider a separately supervised mock for fault suites |
+| [`e2e_run.py`](../../e2e/host/e2e_run.py) waits for run status and can delete in `finally` | An unreachable guest or failed export can lose the last evidence | Host heartbeat/deadline, incremental export, bounded final salvage, always stop VM when run ends (D17) |
+| The mock server lives inside pytest | A wedged or dead pytest also removes the mock | Separately supervised mock owned by one test attempt, paired with its fresh worker (D6/D7) |
 | E2E_TESTING §6's bridge/timing/AutomationId changes are proposals | A plan that requires their presence cannot protect today's suite | First guard uses Windows, existing files and current UIA; optional future hooks are explicitly separate |
 
 ### Actual failure history determines the coverage
@@ -100,30 +117,36 @@ hashes, matching symbols and capabilities; never infer the tested build's behavi
 ```mermaid
 flowchart TD
     H[Host orchestrator: guest health, deadline, artifact acknowledgments]
-    S[Guest supervisor: process ledger, incidents, budgets, durable journal]
-    P[Pytest plugin: setup, call, teardown, phase and intent events]
-    A[Agentmaster process generations and every window]
-    C[Owned ConPTY hosts, shells, Claude and helpers]
+    S[Sentinel: process ledger, incidents, deadlines, durable journal]
+    subgraph T[One isolated test attempt]
+      P[Fresh pytest worker and Guard plugin]
+      M[Separate mock process and request log]
+      A[Agentmaster generations and every window]
+      C[Owned ConPTY hosts, shells, Claude, tools and helpers]
+    end
     E[Bounded evidence workers: dumps, logs, events, UI, resource traces]
     H --> S
     S --> P
+    S --> M
     P -->|Existing page objects and real input| A
     S -->|Windows observation| A
     S -->|Windows observation| C
     A --> C
+    C --> M
     S --> E
     E -->|Verified artifacts| H
 ```
 
-**In pytest:** a mandatory plugin applies to every test under the desktop suites, including new files, setup,
+**Inside each test's pytest worker:** a mandatory plugin applies to every test under the desktop suites, including new files, setup,
 teardown and tests that do not request `am`. Collection must reject a desktop test without the plugin. Pure mock
-unit tests explicitly belong to a different scope. The plugin owns per-test contracts and forwards phase/action
+unit tests explicitly belong to a different scope. The plugin registers per-test contracts and forwards phase/action
 markers; the existing `am` fixture becomes a client of this infrastructure. Direct alternate app launches must
 register through the same lifecycle service. Parallel desktop tests in one interactive guest are unsupported;
 parallelism uses separate guests.
 
-**In the guest, outside pytest:** the supervisor owns durable process records, monitoring, the verdict journal and
-collector deadlines. It starts before pytest and remains alive after it. A Python GIL lock, UIA COM hang, fixture
+**In the guest, outside every test worker:** the Sentinel owns durable process records, monitoring, jobs/handles,
+the verdict journal and collector deadlines. It starts before the first worker and remains alive after the last.
+A Python GIL lock, UIA COM hang, fixture
 exception, `os._exit`, killed pytest or missing JUnit must not silence it. No UIA work runs on its monitoring loop.
 Its own heartbeat and write failures are monitored by the host. It does not trust the app's self-reported state as
 proof of survival or responsiveness.
@@ -131,12 +154,41 @@ proof of survival or responsiveness.
 **On the host:** monitor guest boot identity, supervisor heartbeats and an independent per-run deadline; persist
 the current test and last acknowledged artifact manifest. Lost transport is initially `GUEST_UNREACHABLE`, not a
 claim that Windows crashed. Fleet/hypervisor state, reboot identity and guest evidence refine the diagnosis.
-Reconnect and collect before resetting. If the guest cannot be recovered, retain partial host evidence and mark
-the interrupted test incomplete. Never synthesize a pass from an absent status file.
+Make bounded reconnect/collection attempts while the run is active. If the guest cannot be recovered, retain partial
+host evidence and mark the interrupted test incomplete/nonzero. D10 does not authorize deliberate VM pause/reset/
+reboot tests; passive detection of unexpected guest loss remains required. D17 ends the guest's running lifetime
+when the run finishes, including failure. Never synthesize a pass from an absent status file.
 
 One versioned policy classifies incidents and expected faults in all three layers. The guest does not contain a
 second, weaker interpretation of what the pytest fixture means. Future helper and policy file names should live
-under `e2e/reliability/`; no product dependency on the runner is needed for the first phase.
+under `e2e/guard/`, matching the companion plan; no product dependency on the runner is needed for the first phase.
+
+### 3.1 Per-test process encapsulation (D6 and D7)
+
+This is the concrete design interpretation of “some sort of encapsulation per process↔test,” not a claim the owner
+selected a particular pytest extension. Use the existing subprocess/pytest machinery with one selected node id
+per fresh worker. The Sentinel queues test attempts serially within a desktop; no general distributed scheduler
+is required. A parametrized case or explicit retry gets a distinct attempt identity.
+
+Each attempt owns its fresh pytest worker, app generations and their full descendant set, a separate mock process,
+profile/config/work folders, mock gates/request log, and evidence namespace. A scenario with several windows,
+sessions or app restarts keeps all those generations within the **same** attempt. The Sentinel and bounded capture
+workers are outside the workload's termination boundary but record which attempt they serve. No worker, mock
+process or mutable scenario state is reused by the next attempt; only immutable builds/tools/fixtures may be cached.
+
+Order: allocate identity and monitor coverage → start/register mock and verify readiness → start/register one test
+worker → exercise and gather results → capture on failure → stop worker/workload with natural child drain first →
+stop that attempt's mock/collectors and verify no owned survivors → export/reconcile → schedule the next attempt.
+Keep the mock alive during bounded failure capture so its evidence survives worker death. An unexpected mock exit
+fails that attempt; silently restarting it inside the same attempt must not erase the failure. A deliberately
+tested mock outage uses the normal narrow expectation contract.
+
+The Sentinel retains job/process handles across worker death: closing the worker must not kill the app before
+evidence collection. It eventually enforces containment after the bounded capture/drain, including tool descendants.
+Its own loss is a separate host-monitored failure; qualified kill-on-final-job-handle-close is a last-resort cleanup,
+not the normal way to end an attempt. Before starting the next item, require a clean ownership ledger and endpoint
+drain. If the next item cannot be isolated, stop scheduling it and fail the run. A lost worker remains failed in
+the aggregate; continuing with later fresh workers is not a retry that turns the lost test green.
 
 ## 4. The guarded lifecycle
 
@@ -149,7 +201,7 @@ under `e2e/reliability/`; no product dependency on the runner is needed for the 
 | Quiesce | Stop new UI actions; keep observation live; capture the last healthy state and the first-failure evidence |
 | Teardown | Perform the declared close/quit/kill operation; observe all generations and children through their drain; report any forced rescue separately |
 | Reconcile | Await bounded late diagnostics/dump completion; resolve or expire every expectation; verify no owned survivors and no monitor gaps |
-| Commit/export | Write scenario and guard results atomically; export manifest and artifacts; verify sizes/hashes; only then permit profile reuse/deletion |
+| Commit/export | Write scenario and guard results atomically; bounded export and hash verification; missing evidence makes the run nonzero. No mutable state reuse; final VM shutdown follows §8 even if export failed |
 
 Every failure path uses the same finalizer, including a failed setup or evidence worker. No evidence operation can
 block progress forever. An overall deadline is enforced by the supervisor even if pytest is unable to execute
@@ -180,9 +232,11 @@ Very short-lived processes can evade a polling-only observer. Qualification must
 a reliable process-event source for full child coverage; when denied or events are lost, report reduced coverage,
 not “all children monitored.” In elevated/packaged lanes, qualify access and instance handoff separately.
 
-Job Objects may help inventory and final containment, but are not the initial authority. Assignment/inheritance
-can change ConPTY, child jobs and breakaway behavior; kill-on-close can erase the natural orphan behavior under
-test. Keep the observer outside any job being killed. Qualify jobs separately, and supplement their notifications
+Use a qualified per-attempt Job Object for the workload's containment, with ownership and handles retained by the
+Sentinel; job notifications alone are not the liveness authority. Assignment/inheritance can change ConPTY, child
+jobs and breakaway behavior, so qualify those paths and separately register escapes such as packaged activations.
+Do not kill the job before observing natural child drain and capturing evidence. Keep the observer outside any
+job being killed. Supplement job notifications
 with retained handles: Microsoft explicitly does not guarantee all job completion-port notifications
 ([Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)).
 
@@ -227,21 +281,33 @@ Windows will never publish a later event, so any unresolved incident remains exp
 
 ## 5. Detectors and verdicts
 
+The categories below explain detection coverage; they are not a second wire-format enum. The canonical report
+kinds are [E2E_CRASH_GUARD.md §5.6](E2E_CRASH_GUARD.md#56-classification): exits map to `SUDDEN-EXIT`/`STARTUP`/
+`SELF-RESTART`, native faults to `CRASH`/`CORRUPTION`, swallowed exceptions to `SWALLOWED`, stalls to `HANG`,
+resources to `RESOURCE`, survivors to `ORPHAN`, missing coverage to `BLIND`, and interrupted infrastructure to
+`RUNNER`/`MACHINE`. Evidence retains the precise signal and whether the target actually died.
+
 | Signal | Classification and action |
 |---|---|
 | Registered required process exits outside its contract, including code 0 and no dump | `UNEXPECTED_EXIT`; stop scenario, preserve evidence, identify role/generation. Cause may remain unknown |
 | Unhandled/last-chance exception or fast-fail; heap-corruption report, verifier stop, ASan report, or verified unallowed first-chance corruption diagnostic | `NATIVE_FAULT` with code, chance, subcode, module and lane; fail unless the exact synthetic fault was expected. Handled first-chance AVs follow the qualified policy below |
-| WER event/dump but process remains alive | `NATIVE_DIAGNOSTIC`; retain exit-alive distinction, fail/quarantine by verified signature; probe visual/functional recovery |
-| New unallowed `[exc]`, `[wil]`, `[persist-fail]`, `[launch-fail]`, `[ui-stall]`, startup/recovery watchdog event | `APP_DIAGNOSTIC`; preserve full context, state and exception stack, not just matching line |
+| WER event/dump but process remains alive | `NATIVE_DIAGNOSTIC`; retain exit-alive distinction, fail on a verified unexpected native failure; probe visual/functional recovery. Known defects do not waive it |
+| Any unexpected `[exc]` or `[wil] exception` line, known or new | `APP_DIAGNOSTIC` / canonical `SWALLOWED`; **fail** (D1), preserving full context and stack. A defect id groups incidents and cannot downgrade them |
+| Unexpected `[persist-fail]`, `[launch-fail]`, `[ui-stall]`, startup/recovery watchdog event | `APP_DIAGNOSTIC`; fail under the corresponding DATA/STARTUP/HANG/SELF-RESTART policy. Recovery does not excuse a wedge (D3) |
 | Required process exists but declared action makes no observable progress | `HANG_OR_STALL`; collect bounded snapshots before intervention; distinguish UI, renderer, session and mock |
 | Repeated resource growth beyond a qualified contract | `RESOURCE_GROWTH`; use §7 to distinguish confirmed leak from unexplained retention or capacity failure |
-| Child survives natural drain, or unexpected process appears after quiesce | `ORPHAN_OR_LATE_WORK`; fail before forced cleanup |
+| Any test-owned process survives natural drain, or unexpected owned process appears after quiesce | `ORPHAN_OR_LATE_WORK`; **fail**, including `bash`, `node`, MCP servers and other tools (D4). Never charge/kill unrelated external processes by name |
 | Monitor died, access denied, event buffer overflow, UI probe/capture service unavailable, collection deadline missing | `OBSERVATION_GAP`; required coverage incomplete, never green |
 | Guest/runner vanished or host deadline elapsed | `RUN_INTERRUPTED`; preserve partials; classify product vs infrastructure only with evidence |
 
-Retain all incidents, with one primary first-failure classification and secondary consequences. A missing dump is
+Retain all incidents and their chronology. Select the primary report kind through the companion's shared policy,
+with causal evidence so a cleanup consequence cannot replace the original failure. A missing dump is
 an evidence limitation, not grounds to discard an exit or crash. No crash can be automatically downgraded because
 the scenario is already marked known-defective. Exact expected faults in special tests are the sole exception.
+
+A Claude crash in a feature test **fails** (D2). Identify the failing role as Claude; attribute a cause to Claude,
+the mock or Agentmaster only when the evidence supports it. A declared tool command returning an expected failure
+code remains distinct from its process crashing. A required canary's failure is never softened to a warning (D16).
 
 ### Native diagnostics need context
 
@@ -261,9 +327,12 @@ throttle/suppression context. Its logging path is best-effort and intentionally 
 absence of `[exc]` is not proof that nothing failed. A missing begin/end log pair is a clue, not an independent
 proof of crash: missing logging and hangs are also possible.
 
-Any allowlist is exact and reviewable: code, normalized stack/context, module/build range, lane, reason, owner,
-expiry and permitted count. No blanket `[wil]`, XAML, HRESULT, first-chance AV or module-name exemptions. Unexpected
-new signatures block the required lane. Keep raw evidence for allowed signatures too.
+D1 rejects a known-signature allowlist that would forgive app-reported swallowed exceptions. Such signatures may
+carry defect ids for attribution but still fail. This is distinct from identifying benign **handled first-chance
+debugger events** that never constitute an app error, such as a qualified ASan runtime mechanism. That detector
+policy must be exact and reviewable (code, stack/context, build/lane, reason, expiry/count), and cannot override
+D1–D4. Keep raw evidence. Only a deliberately injected, exact, bounded expected incident in a special scenario
+is permitted by §4.2; there is no broad warning-only mode for known app faults.
 
 ### Responsiveness has several independent dimensions
 
@@ -290,10 +359,10 @@ Every lane keeps the universal guard. Instrumentation adds detection; it never r
 | Normal | Exact released/candidate executable; all desktop scenarios | Exits, WER, app diagnostics, stalls, child leaks, coarse resource trends | Does not catch silent arbitrary memory corruption |
 | Lifecycle soak | Same binary; repeated fixed workloads and long runs | Retention slopes, lifecycle leaks, late races, UI/GPU resource accumulation | Compare equivalent settled states; do not conflate elapsed time with operation count |
 | Verifier + page heap | Isolated guest; selected high-risk scenarios; existing native binaries | Invalid heap/handle use and corruption nearer the cause; full page heap protects allocation boundaries | Qualify exact Win11 build, heap kind and modules; large memory/timing overhead; smaller fleets |
-| ASan | Separately built instrumented native modules plus matching runtime/PDBs | Heap/stack/global bounds errors, use-after-free and supported lifetime faults | Build work and approval required; module/allocator boundaries and coroutine gaps recorded; not leak detection |
+| ASan | Separately built instrumented native modules plus matching runtime/PDBs | Heap/stack/global bounds errors, use-after-free and supported lifetime faults | Direction accepted by D9; feasibility first, separate layout and build permission still required; coverage gaps recorded; not leak detection |
 | Heap/ETW investigation | Matched control/treatment actions with supported WPR heap or UMDH allocation stacks | Allocation-site growth and resource attribution | Select a validated heap/tool pairing; instrumentation changes behavior and trace volume |
 | Fault/recovery | Shipped binary where possible; explicit test hooks only where necessary | Whether detectors see faults and the app restores usable, durable state | Every injection scoped to owned disposable processes/storage; expected-fault contract required |
-| Hardware/rendering qualification | Dedicated isolated Windows desktop with relevant GPU/driver | Failures the software-rendered/QEMU guest cannot reproduce | VM WARP success makes no claim about the historical NVIDIA device-exhaustion bug |
+| Hardware/rendering qualification — deferred | Would require a separate isolated Windows desktop with relevant GPU/driver | Failures the software-rendered/QEMU guest cannot reproduce | Outside the current preparation scope; VM WARP success makes no claim about the historical NVIDIA defect |
 
 ### 6.1 Crash capture
 
@@ -322,16 +391,23 @@ dump nor a WER event. The process ledger must still fail that test when the term
 
 Application Verifier/PageHeap settings are normally image-scoped and take effect on subsequent launches. Keep
 all targets inside the disposable guest, record active settings before launch, verify they took effect, and
-restore/reset the guest between lanes. Never apply image-wide settings on the user's workstation. Start with
+restore instrumentation settings or provision a clean guest between lanes. Never apply image-wide settings on the
+user's workstation. Start with
 Agentmaster and owned DLLs; instrument OpenConsole or external native tools in separate lanes so an upstream
 failure is not misattributed. Full page heap is not suitable for a 700-active-tab capacity test.
+
+D10 does not approve a compulsory 12–16 GB guest. Begin with small workloads on the configured VM, check headroom,
+and report a capacity block if an instrumented case cannot fit; do not enlarge the VM or add machine stress by
+implication. D15 is unanswered: preserve Defender's existing settings. If a tool is blocked, report that unmet
+prerequisite; do not automatically add exclusions or turn Defender off.
 
 A helper proves the tool works on its allocator; it does **not** prove coverage of every heap in Agentmaster.
 Inventory NT/segment/custom heaps and instrumented modules. Qualification must show where settings change heap
 selection, where stacks are recorded, and what remains unobserved. Do not silently disable the segment heap or
 declare it supported without measurement. Keep ordinary segment-heap runs as a separate baseline.
 
-MSVC AddressSanitizer is a later feasibility task for the native solution, not a single asserted build flag.
+MSVC AddressSanitizer is an accepted direction (D9), with feasibility first for the native solution, not a single
+asserted build flag. Each build still needs the normal permission and its own layout slot.
 Determine supported projects and dependencies, XAML/generated-code constraints, incompatible options and runtime
 deployment. Microsoft documents no MSVC LeakSanitizer, limitations for UWP, and uninstrumented resumable functions
 including coroutines. Agentmaster's coroutine teardown risk therefore still needs lifecycle stress and other
@@ -340,17 +416,28 @@ coverage. ASan, PageHeap and Verifier initially run separately; combine only aft
 
 ## 7. Memory and resource leaks: make the experiment discriminating
 
-### 7.1 Measurements on every test
+### 7.1 Lightweight safeguards on every test (D11/D12)
 
-Sample each owned long-lived process independently: private committed bytes, working set, thread count, handles,
+Reuse existing OS/VM counters rather than building a resource-management subsystem. Sample each owned long-lived
+process independently: private committed bytes, working set, thread count, handles,
 CPU and I/O deltas; add GUI GDI/USER counts and supported GPU budget/usage observations where available. Also record
 guest commit used/limit, available memory and evidence-volume free space. Python/mock growth must remain separate
 from Agentmaster, OpenConsole and Claude growth. Summing working sets double-counts shared pages; label every metric.
+
+Use simple configurable headroom/capacity tripwires and explicit missing-capacity results. Exact thresholds remain
+open. The former proposal to run every test five times and set soft/hard limits to maximum ×1.5/×4 is **not approved**
+and is not a prerequisite for the initial guard. Do not add automatic recalibration, auto-resizing or a scheduler
+that negotiates machine resources. Keep measurements for later analysis in each `guard.json` (D14).
 
 Short tests use these measurements for gross runaway/resource-budget detection and context. They do not receive
 a “no leaks” certificate from a start/end delta. Working set can fall after trimming even with leaked allocations;
 private bytes can stay high after frees because an allocator retains pages. Do not call `EmptyWorkingSet`, force
 an artificial cache purge or restart midway to make a leak test pass.
+
+A safety ceiling being crossed can fail as RESOURCE/runaway; a modest resource increase is diagnostic only. Do not
+call a soft overrun `LEAK-SUSPECT` or infer a leak from one ordinary test. Leak verdicts come from the dedicated
+repeated-action experiments below (D12). Their noise/sensitivity calibration is necessary measurement work,
+separate from the unapproved general per-test budget engine.
 
 ### 7.2 A repeatable leak experiment
 
@@ -420,7 +507,7 @@ storage/allocator. A process-job memory cap changes semantics and is a separate 
 
 ## 8. Evidence survives the failure it describes
 
-Keep a compact manifest and guard summary for **every** test, even a pass. Keep heavier artifacts on failure,
+Keep a compact manifest and **`guard.json` for every test**, even a pass (D14). Keep heavier artifacts on failure,
 at prescribed leak checkpoints and in a sampled success control. A pass without a guard interval, monitor status
 and registered process generations is not auditable.
 
@@ -430,7 +517,7 @@ Proposed result layout under the existing run's output directory:
 manifest.json                      build, guest, tools, lane, policies, capabilities
 run-events.jsonl                    append-only supervisor/host journal
 tests/<node-hash>/<attempt>/
-  result.json                      scenario, reliability, observation, evidence results
+  guard.json                       scenario, reliability, observation, evidence results
   actions.jsonl                    phase/action intent and completion; expectation ids
   processes.jsonl                  identities, generations, ownership, births/exits
   incidents.jsonl                  first signal, classification, related artifacts
@@ -458,6 +545,12 @@ The minimum useful incident bundle contains:
   last successful UI/terminal state. Logs without profile state cannot establish workspace recovery.
 * Best-effort screenshot and UIA/terminal state when accessible; if the app is dead, still collect desktop state,
   remaining processes, events and files. State exactly which collectors timed out or lacked permission.
+
+**Symbols (D8):** every public open-source release is to publish its matching PDBs; another agent owns that release
+packaging work. Testing consumes the matching public symbol artifact and verifies binary/PDB identities. This plan
+does not implement publication or treat private CI-only symbols as the desired release policy. A historical zip
+without symbols remains usable for explicitly labeled limited diagnosis, but cannot satisfy a lane that requires
+source-level symbolization. Keep its failure nonzero/unsymbolized rather than pretending matching symbols exist.
 
 Capture order is adaptive: flush the tiny incident/identity record first; then the diagnostic needed before the
 target disappears; then independent files/events; finally UI and expensive analysis. On hangs, take two time-spaced
@@ -488,10 +581,21 @@ dumps per incident, keep the earliest decisive dump plus prescribed comparisons,
 Never delete an unexported incident to make room for a later pass. Full dumps contain process memory; seed only
 synthetic credentials/transcripts and keep dumps out of Git and public CI artifacts.
 
-After export, the host verifies manifest checksums and artifact sizes before acknowledging completion. Compression
-and copying need their own disk reserve/deadline. `--delete-after` may run only after successful collection or an
-explicitly recorded unrecoverable-guest decision with host partials preserved. An export failure keeps the desktop
-for bounded recovery and reports cleanup still needed; it must not silently discard the evidence in `finally`.
+**Retention (D13):** add an explicit host-side cleanup policy under `Q:\agentmaster-e2e\runs`. Configure age and
+storage/dump caps, record deletions and preserve small verdict/manifest records when heavy artifacts expire. Protect
+active runs and in-flight exports, restrict cleanup to validated run-root paths, and retain known failure evidence
+according to the configured policy rather than accumulating dumps indefinitely. The proposed **30 days / 20 full
+dumps per run remain unconfirmed values**, not an owner-approved requirement. Select and record bounded values
+before enabling unattended retention; retaining data is accepted, its exact numeric policy is still open. Public
+PDB publication does not authorize public upload of private memory dumps.
+
+After export, the host verifies manifest checksums and artifact sizes before acknowledging completion. Compression,
+copying and final salvage have their own disk reserve/deadline. Under **D17**, the VM starts with the test run and
+is always stopped when the run ends, in success, failure, timeout and export-error paths. Remove live
+`--keep-on-failure` behavior. Do incremental export and a bounded final salvage **inside** the run lifetime; if that
+fails, preserve host partials/missing-artifact reasons and return nonzero, then still stop the VM in finalization.
+Use the normal disposal policy for a disposable desktop; shutdown does not itself require inventing a new policy
+to erase every stopped disk or offline evidence copy. No evidence-copy failure can keep a VM running indefinitely.
 
 ## 9. Special scenarios: phases, expectations and independent checks
 
@@ -502,6 +606,10 @@ flows and page objects; do not duplicate their behavior definitions. Every scena
 The guard is active throughout. Each family below defines the important phases, its independent oracle and edges.
 Exact workloads and budgets become versioned scenario data after calibration. P0 here means necessary for a
 trustworthy reliability gate; it does not rewrite the flow catalog's existing priority labels.
+
+D10 retains sudden **process** crash/kill scenarios. Deliberate VM pause/reset/reboot, host sleep, hostile-machine
+load and expanded-VM requirements are deferred; passive detection remains active. The retained scenario inventory
+includes these deferred ideas for reference, not as required or approved work in the first implementation.
 
 ### 9.1 First prove the guard can fail correctly (G-series, P0)
 
@@ -517,12 +625,12 @@ positive control proves the detection chain. Real Agentmaster lifecycle scenario
 | G-04 | Crash before first window; fail another setup fixture; crash during teardown after scenario assertion passes | All phases receive guard results and available artifacts; teardown crash overrides behavioral success |
 | G-05 | Arm a normal-close expectation but AV instead; cancel a close then exit; arm an expectation that never occurs | All fail: close permission is not crash permission; unused/cancelled contracts do not remain exemptions |
 | G-06 | Restart through two generations; fault the old one during close; rapidly replace a child/PID in ledger tests | Old-generation incident retained; identity reuse and successor do not overwrite it |
-| G-07 | Kill a registered Claude-role helper while GUI/shell stand-ins live; leave a registered child after parent exit | Death detected by role; orphan fails before cleanup; ownership survives parent exit |
+| G-07 | Kill a registered Claude-role helper while GUI/shell stand-ins live; leave a registered child/tool after parent exit | Death detected by role; every owned orphan, including bash/node, fails before cleanup; ownership survives parent exit; an unrelated external process survives |
 | G-08 | Delay a synthetic diagnostic until after teardown; reuse a dump filename; present a pre-existing unrelated dump | Correlate to the correct test/generation; overwrite recognized; unrelated evidence never falsely charged |
-| G-09 | Block UIA worker and dump worker separately; kill pytest; kill mock; kill supervisor | Independent deadline returns a non-pass with partials; host catches supervisor loss |
-| G-10 | Disconnect guest transport, reboot/stop the guest, fail artifact copy, or fill the evidence quota in a controlled fixture | No missing report becomes green; host partials survive; deletion cannot precede export acknowledgment |
+| G-09 | Block UIA/dump workers; kill the attempt's pytest worker or mock; kill supervisor in separate controls; then schedule a fresh attempt | Independent deadline returns non-pass with partials; capture precedes owned-workload cleanup; next attempt has fresh worker/mock/state; no stale request/child contamination; host catches supervisor loss |
+| G-10 | Simulate transport/guest-loss reports in protocol tests; fail artifact copy or quota checks without exhausting the VM | No missing report becomes green; host partials survive; bounded salvage then VM shutdown still occurs. Actual forced VM pause/reset/reboot is deferred by D10 |
 | G-11 | Introduce controlled retained allocations/handles and a bounded cache in matched helper workloads | Leak/growth detector distinguishes unbounded retention from warm-up plateau at its declared sensitivity |
-| G-12 | Put an unexpected native failure inside a known-defect/xfail test; simulate event loss or denied process access | Overall run fails or is incomplete regardless of pytest's scenario label; unavailable detector is visible |
+| G-12 | Put unexpected native and known/new swallowed failures inside known-defect/xfail tests; fail a required canary; simulate lost events/denied access | Overall run nonzero regardless of scenario label; canary is failed and dependent scenarios unqualified; a known defect id does not waive D1–D4 |
 
 After each case verify cleanup and a fresh healthy control run. Meta-tests expect the child run's **non-success**
 and inspect its incident; they do not globally turn crash failures into expected pytest results. Include wrong
@@ -558,8 +666,8 @@ and after release. Start with the first four: they include a known leak and gaps
 | L-04 / P0 / MGR, SP, MSC | Refresh board/tree/queue, hover cards/tooltips, open menus/Tags, alternate LOCAL/GLOBAL and shown/hidden surfaces | Overlay/grip, column, event registration, menu/tooltip/TextBlock live counts plateau at equal population; inspect owner chains |
 | L-05 / P1 / STA-08 | Duplicate-conversation binding churn at fixed tabs, followed by stable ownership and closure | No rebind/overlay amplification; bounded live UI counts, handle/memory slope and action latency |
 | L-06 / P1 / TRN, AIS, SES | Repeated transcript render/copy/refresh and search/cancel over a fixed corpus, then release views | String/parse/cache allocations and child search processes bounded; count distinct corpus entries so legitimate cache fills are visible |
-| L-07 / P1 / DSP | Activate/hide/minimize/restore terminals, wait through the real hidden-device release interval, close them | Device/thread/GPU/handle resource release and correct repaint after return; software and hardware lanes reported separately |
-| L-08 / P1 / ROB-06/07 | Fixed modest fleet runs for 2 hours initially, then 8-hour qualification; mix quiet idle with recorded turn/view churn | Time-dependent and action-dependent slopes; no unexpected restart; app, Claude and mock costs separated; restore after sleep/disconnect treated explicitly |
+| L-07 / P1 / DSP | Activate/hide/minimize/restore terminals within the guest, wait through the real hidden-device release interval, close them | Device/thread/handle release and correct repaint; software-rendering coverage only initially; hardware lane deferred |
+| L-08 / P1 / ROB-06/07 | Fixed modest fleet runs for 2 hours initially, then 8-hour qualification; mix quiet idle with recorded turn/view churn | Time- and action-dependent slopes; no unexpected restart; app/Claude/mock costs separated. Deliberate host/VM sleep or disconnect variants are deferred |
 | L-09 / P2 / TGT/TGC/TGQ | Once the fake Telegram API exists: repeat history/card/question creation, cancellation and topic teardown at fixed corpus | Bounded outbox, HTTP/pipe/socket handles, threads and retained messages; no live service credentials or real messages |
 | L-10 / P2 / SDB | Only when the session database feature/build is enabled: repeat bounded corpus update, query/cancel and service restart | Per-process transaction/index memory, file/pipe handles and working-state release; unavailable feature is declared not covered |
 
@@ -576,24 +684,25 @@ healthy recovery and natural cleanup. A second unexplained failure during recove
 
 | ID / priority / flow | Failure point and recovery phases | Required evidence and edges |
 |---|---|---|
-| R-01 / P0 / STA-07, TAB-10 | Kill GUI during a held turn, queue wait and idle in separate cases; observe child drain; restart same profile; check restored windows/tabs/selected session and continued work | OS exit/drain + raw saved files + mock/transcripts. A sent/acknowledged prompt must not silently replay; a known pending prompt must not vanish. No empty-fleet fallback may masquerade as a clean start |
+| R-01 / P0 / STA-07, TAB-10 | Abrupt GUI termination and a controlled native crash are separate variants during held turn, queue wait and idle; observe drain/evidence; restart same profile and verify restored workspace/work | OS exit/drain and crash evidence when applicable + raw saved files + mock/transcripts. A known acknowledged prompt must not silently replay; pending work must not vanish; expose ambiguous in-flight delivery. This is D10's retained sudden-crash coverage |
 | R-02 / P0 / STA-11 | Kill only the owned Claude while GUI and shell live; verify terminal modes/UI state; restart session and send next prompt | OS proves child exit; screen/input shows usable shell; transcript/mock prove resumed identity. Include fullscreen and legacy renderers; current known behavior is reported by tested build, not excused by the guard |
 | R-03 / P0 / ROB-01 | Deliberately kill one owned OpenConsole; let orphan reaper react; verify unrelated controlled external session survives; repeat with reaper disabled | Exact console-group membership and processes, not names alone. With reaper off, survivors are explicitly expected until scenario cleanup; outside this test they fail the guard |
 | R-04 / P0 / TAB-10 | Close/quit normally at multiple restore/async phases; keep second window where applicable; reopen | No native fault hidden by close intent, correct session refs instead of shell substitution (TAB-K1), dormant/focus behavior, no leftover helper. Final exit may legitimately be code 0 hard termination |
-| R-05 / P1 / persistence | Interrupt writes at named boundaries: before temp write, mid-write, after data write, before/after replace, and between related files; restart | For each file old or new complete bytes where the writer promises it; cross-file invariants and user recovery preserved. Exact boundaries need a future controlled hook; random kills are labeled probabilistic coverage |
+| R-05 / P1 / persistence | Initially use external process kills around observable persistence activity, then restart; named internal before/after-write/replace cuts remain future proposals | Check complete-file/cross-file recovery. Random kills are probabilistic coverage, not exact write-boundary coverage; additional product hooks exceed D5's four initial seams |
 | R-06 / P1 / ROB-09 | Deliberately block startup in a future scoped hook; observe watchdog exit/marker; hang a second launch with marker present; unblock/relaunch and exercise first layout/restore | First hang terminates once; second is log-only and bounded by harness intervention; successful startup clears marker. No endless singleton/handoff loop. Run without debugger; missing hook means uncovered |
-| R-07 / P1 / ROB-10 | Distinguish one window missing its heartbeat from the shared UI thread's dispatch wedge; exercise pump-alive/dispatch-stuck, blocked pump, repeated recovery and wake-after-sleep cases | Rescue/restart only under existing conditions; blocked pump means no automatic restart; three drain-assisted recoveries in ten minutes exercise escalation; elapsed sleep alone does not escalate. Verify workspace and every window after recovery |
-| R-08 / P1 / failure paths | Fail a controlled allocation, file write/replace, or mocked dependency at a named operation; remove fault; retry through UI | Graceful refusal/recovery, no invalid state, dead latch, silent data loss or unexpected process death. Prefer typed failure hooks to global random allocation failure; unrelated diagnostics remain fatal |
-| R-09 / P2 / system loss | Host stops/reboots the disposable guest while app writes/runs; reboot it, collect original disk evidence, then relaunch app | Host journal spans missing guest; boot identity changes; bounded workspace/queue recovery. Do not reset to a clean image before inspecting the failed disk |
+| R-07 / P1 / ROB-10 | Distinguish one window missing its heartbeat from the shared UI thread's dispatch wedge; exercise pump-alive/dispatch-stuck, blocked pump and repeated recovery | Rescue/restart only under existing conditions; blocked pump means no automatic restart; three drain-assisted recoveries in ten minutes exercise escalation. Verify workspace and every window. Deliberate sleep/wake variant deferred |
+| R-08 / P1 / failure paths | Start with external mocked-dependency failures or narrowly scoped file access failures; remove fault and retry through UI | No invalid state, dead latch, silent data loss or unexpected death. Named allocation/write hooks and disk-pressure tests remain later proposals, not added to D5's initial scope |
+| R-09 / deferred / system loss | Historical proposal: deliberately stop/reboot the guest during work and inspect recovery | Not scheduled or required by the current plan (D10). Unexpected guest loss still produces a non-pass and preserved host partials; no power-loss guarantee is inferred from process-crash tests |
 | R-10 / P2 / INS | With fake update service and staged builds: interrupt updater handoff/replacement/relaunch; resume or roll back through supported path | Old/new binary hash, expected process chain, profile retention and no double-running GUI; no exemption for every process named updater |
 
 **Durability boundaries:** `Persistence.cpp::WriteAllUtf8` writes a sibling temporary file, calls
 `FlushFileBuffers`, and replaces the target; its flush is best-effort and the return value is not enforced. Separate
 file atomicity from durability and multi-file consistency. A killed process is not a power cut; even stopping a
 VM may preserve host disk caches. Record the storage/fault model and claim only the guarantees actually exercised.
-Test disk-full/sharing-denied paths using a dedicated small test volume or scoped failure hook, not by filling the
-guest system disk that the supervisor and dump collector need. An induced `[persist-fail]` is allowed only by the
-exact R-08 contract, with the expected unchanged/recoverable data verified.
+If disk-pressure tests are separately taken up later, use a dedicated small test volume or scoped failure hook,
+not the guest system disk that the supervisor and dump collector need. They are deferred under D10, and further
+product hooks are not part of D5's initial four. An induced `[persist-fail]` in an in-scope file-failure case is
+allowed only by its exact R-08 contract, with the unchanged/recoverable data verified.
 
 **Delivery boundaries:** app logs saying “sent” are not proof the remote/tool action occurred. Capture mock request
 ids, transcript entries and durable queue status around interruption. Test pre-delivery, acknowledged-delivery
@@ -603,9 +712,14 @@ duplicating it; a product gap discovered here is a reported defect, not a reason
 
 ### 9.5 Fault injection contract
 
-Use existing UI/mock controls first. Any new product hook is a separate implementation/design change requiring
-the usual build permission. Prefer named seams such as “before persistent replace,” “after async result before
-UI dispatch,” or “hold first-layout task”; avoid random corruption of an arbitrary live app address. A hook must
+Under D5 use external UI/mock/fault tools first against published binaries. The accepted later in-app seams are
+limited to **blocked startup, simulated dispatch wedge, swallowed exception and faster stall timings**, as detailed
+in [E2E_CRASH_GUARD.md §8.3](E2E_CRASH_GUARD.md#83-in-app-fault-switches-not-built-app-changes-active-only-under-agentmaster_e2e1).
+The UI-thread fault DLL is a separate small tool build and still needs the normal build permission. Named persistent
+write cuts, allocation failure and other hooks mentioned as future scenarios are not implicitly included in those
+four. Any such extension is a separate design change; every actual product/tool build still needs permission.
+
+Keep deliberate corruption inside owned disposable targets and exact expected-fault contracts. A hook must
 be off by default, require explicit isolated-run opt-in, accept only a bounded named operation/count, announce its
 arming/firing to the independent journal, and restore state through cleanup. Keep dangerous corruption canaries in
 the helper. Hooks must not inject their own success assertion into the app's result.
@@ -623,17 +737,23 @@ normal authorization rules.
 
 | Phase | Deliverable and main seams | Exit condition |
 |---|---|---|
-| 0 — contracts and qualification | Versioned incident/result/expectation schemas; capability manifest; fixed helper fault inventory; policy and resource budget format | Review shows startup, every test phase, all generations, late evidence and missing observation have a defined non-silent result |
-| 1 — universal guard | New `e2e/reliability/` plugin/supervisor; `conftest.py` delegates; `App.start/close/kill/restart` register lifecycle; retained process ledger; bounded workers | G-01, G-04–G-08 and G-12 pass as detector meta-tests; G-09/G-10 pass with simulated collector/transport/export failures; deliberately failing child runs produce non-pass reports; all current desktop tests get a guard summary |
-| 2 — evidence and native diagnostics | Extend provisioning qualifications, event/dump collection, `evidence.py`, guest pack/status and host salvage; matching-symbol archive | G-02/G-03 qualified for normal capture; G-09/G-10 exercised end to end with real collectors, guest loss and exports; actual dumps survive host copy and requested guest deletion; no cleanup-before-capture gap |
+| 0 — contracts and qualification | Shared `e2e/guard/` schemas; capability manifest; helper fault inventory; simple configurable resource caps; D0–D17 decision record | Startup, all phases/generations, late evidence and missing observation have non-silent results; D15 and numeric settings explicitly unresolved |
+| 1 — universal guard and attempt isolation | Guard/Sentinel/Watchdog contract; fresh pytest worker plus separate mock per attempt; retained jobs/handles; `App` lifecycle integration; bounded workers | G-01, G-04–G-08 and G-12 pass; G-09 proves worker/mock failure isolation; simulated G-10 failures nonzero; every test has guard.json; all owned survivors fail |
+| 2 — evidence and native diagnostics | Qualified event/dump collectors, guest pack/status, bounded host salvage; consume matching public PDBs; retention with chosen settings | G-02/G-03 and real collector/export G-09/G-10 variants pass; guest loss tested by protocol simulation only; failed export still ends VM lifetime; failed required canary prevents qualified success |
 | 3 — real lifecycle regression | C-01–C-04, R-01–R-04 and current feature tests through same guard; repeat stressed sequences | No unexpected fault/exit/orphan and complete observation on at least 10 independent runs of each initial stress case; existing behavioral defects separately visible |
 | 4 — corruption lanes | Qualify Verifier/PageHeap; measure affected heaps and overhead; ASan feasibility/build separately | Known representative misuse detected at expected stacks; matched benign controls pass; lane reports explicit uninstrumented coverage and uses qualified budgets |
 | 5 — leak baselines | Lightweight telemetry everywhere; L-01–L-04 and G-11; validated heap tooling and baseline artifacts | Known leak canary detectable at declared sensitivity; bounded-cache control passes; repeatable growth and no-growth classifications across at least 3 fresh-process replicates |
-| 6 — long runs and recovery depth | Extend C/L/R families; named hooks, storage faults, guest loss, mock messaging/updater prerequisites | Required workload matrix completes with evidence; power-loss and GPU claims limited to tested environment; interrupted runs cannot appear green |
+| 6 — long runs and recovery depth | Extend in-scope C/L/R families, D5's four later switches and mock messaging/updater prerequisites | Required process-crash/recovery/leak matrix completes with evidence; forced VM-loss/hostile-machine and additional hooks remain deferred; interrupted runs cannot appear green |
 
 Phases 1–3 can primarily extend the existing runner and test existing binaries. Phases 4/6 may need compiler/tool
 installation and product changes. Do not delay universal crash protection until ASan or fault hooks are ready.
 Helper unit/protocol tests run on suitable hosts; desktop qualification remains in a disposable Windows 11 guest.
+
+These phases are acceptance groupings for the companion's G0–G9 work breakdown, not a second implementation queue.
+Per-attempt isolation and supervisor-owned handles must be designed before the plugin; a temporary pytest-owned
+kill-on-close design cannot meet D6/D7. Strict policy, failed-canary gating and final VM shutdown are required from
+the first integrated guarded run. Retention values and any Defender change must be resolved only when needed;
+neither is permission to keep the VM running.
 
 ### Boundaries for the scenario implementer
 
@@ -646,16 +766,18 @@ Helper unit/protocol tests run on suitable hosts; desktop qualification remains 
 * New background helpers and alternate app launches register ownership. An intentional external-session fixture
   registers its protected/unmanaged role so neither the product reaper nor cleanup can kill it accidentally.
 * Long leak/stress scenarios use a declared workload and checkpoint contract. Do not add their own sampling,
-  dump or allowlist implementation. One guard/reporting path is the requirement.
+  dump or incident-suppression implementation. One guard/reporting path is the requirement.
 * Proposed coverage must be linked to build capabilities and existing flow ids. The new R/L/C ids provide failure
   coverage; they do not claim every phase of the linked feature flow was exercised.
 
 ### Operational scheduling and release meaning
 
-On demand/PR: all normal scenarios plus guard smoke controls and short C/R cases. Nightly: qualified corruption
-subset and L-01–L-07 batches. Longer scheduled or explicitly requested runs: 2/8-hour soak, larger dormant fleet,
-guest shutdown/storage and hardware lanes. Pin the principal Claude version and add the latest-version contract
-lane separately so upstream drift is diagnosable. These are proposed schedules, not automations created here.
+Initial implementation runs on demand: normal scenarios plus guard controls and short process-crash/recovery cases.
+Possible later schedules: qualified corruption subsets and repeated-action leak batches, with 2/8-hour soak only
+within the configured VM envelope. These are proposals, not enabled automations or accepted resource allocations.
+No scheduled VM pause/reset/reboot, hostile-machine or enlarged-VM lane follows from D10. Pin the principal Claude
+version and keep latest-version contract coverage separate so upstream drift is diagnosable. Every run shuts down
+its VM at the end (D17).
 
 Track detection latency, evidence success, missing coverage, monitor overhead, failure signature recurrence and
 leak sensitivity alongside test counts. Initial performance objective: normal guard adds no more than about 10%
@@ -668,18 +790,39 @@ run. Quarantined known failures remain visible and cannot turn the reliability s
 heap parser, graphics driver or diagnostic tool requires the relevant positive controls before comparison to an
 old baseline.
 
-## 11. Recommended decisions and unresolved measurements
+## 11. Owner decisions and remaining open settings
 
-These recommendations are concrete defaults for later implementation, not requests to implement now:
+The owner answered on 2026-10-23. D0–D17 below mirror the decision record in
+[E2E_CRASH_GUARD.md §13](E2E_CRASH_GUARD.md#13-owner-decisions-and-remaining-choices); D1–D17 there use the `CG-` prefix.
+The quoted answer is kept separate from its implementation interpretation. These are planning decisions, not a
+request to build/install now or a claim that the implementation already exists.
 
-1. Make the universal guard mandatory for desktop tests, with a supervisor outside pytest and host salvage.
-2. Ship the first guard against existing binaries; keep ASan and intrusive heap diagnostics in separate lanes.
-3. Replace `ended_by_test` with scoped intent/outcome contracts; never waive native faults during a normal close.
-4. Start special product coverage with C-01–C-04, L-01–L-04 and R-01–R-04, grounded in actual incidents and missing
-   prior measurements. First prove the detector with G-series controls.
-5. Keep compact pass evidence and verified failing dumps; block deletion when export is incomplete.
-6. Calibrate numerical leak/liveness budgets on pinned workloads and publish detection limits. Do not promote an
-   arbitrary observed high-water mark to the baseline just to make a run green.
+| Decision | Owner answer | Applied contract / remaining choice |
+|---|---|---|
+| D0 | “two docs” | Keep both companion plans; one implementation, no merge gate |
+| D1 / CG-D1 | “fail the test” | Every unexpected app-reported swallowed exception fails, known or new; no defect allowlist that turns it green |
+| D2 / CG-D2 | “fail” | Unexpected Claude crash fails; identify role and use evidence for root-cause attribution |
+| D3 / CG-D3 | “Fail” | Unexpected self-restart after wedge fails even if recovery works |
+| D4 / CG-D4 | “Fail” | Every test-owned leftover fails, tools included; unrelated external processes remain protected |
+| D5 / CG-D5 | “as recommended” | External first; four later in-app seams only; UI-thread DLL and all actual builds still require normal permission |
+| D6 / CG-D6 | “We need some sort of encapsulation per process↔test” | §3.1 makes each attempt a fresh worker and owned process set, supervised from outside; no suite-wide worker reuse |
+| D7 / CG-D7 | “as D6” | A separate fresh mock process per attempt, owned by the same attempt and managed by the Sentinel; evidence survives worker death |
+| D8 / CG-D8 | “We are open source, always publish with pdbs (another agent takes care of that)” | Consume matching publicly published PDBs; publication is the other agent's work, not part of this change |
+| D9 / CG-D9 | “Yes” | ASan direction accepted, feasibility first and separate layout; not blanket build permission |
+| D10 / CG-D10 | “Nah but we do or should have sudden crash” | Decline bundled machine-stress/reboot/large-VM proposal; retain sudden application/owned-process crashes and passive guest-loss detection. Actual machine-fault variants deferred |
+| D11 / CG-D11 | “its in VMs, honestly we should somehow manage but that might be too much code” | Prefer existing OS/VM telemetry and simple caps; do not require a new budget engine. Exact ceilings and the five-run ×1.5/×4 proposal remain open |
+| D12 / CG-D12 | “tests usually dont do repeated actions enough times to detect significant leaks. we have dedicated tests for leaks” | Ordinary tests provide lightweight safety/context only; leak verdicts require dedicated repeated workloads |
+| D13 / CG-D13 | “Add retention” | Retention required; age/size/dump caps open. 30 days / 20 dumps remain proposals |
+| D14 / CG-D14 | “Yes” | Keep guard.json for every passing test as well as failures |
+| D15 / CG-D15 | No answer | **Open.** Leave Defender unchanged; no implicit exclusion or disablement |
+| D16 / CG-D16 | “fail means test fail” | Failed required canary is failed and run nonzero; dependent tests cannot pass unguarded. Unaffected continuation must preserve failure |
+| D17 / CG-D17 | “don't keep, vm launches with the tests and turns off with them” | VM lifetime follows the run, always shutdown after bounded export/salvage, no live keep-on-failure |
+
+Still open: Defender (D15), exact lightweight resource ceilings (D11), retention age/size/dump values (D13).
+Per-test isolation and D10's retained process-crash/deferred machine-fault split are explicit design interpretations
+of the owner's words. Tool/lane qualification and measured leak sensitivity remain engineering work. Do not
+silently restore the rejected machine work, generic budget machinery, warning policies or live-VM retention while
+implementing those details.
 
 Measurements still needed: usable process-event source/access in the guest; actual packaged activation/child
 ownership; monitor overhead; WER/debugger capture compatibility; segment/custom-heap coverage; feasible ASan module
