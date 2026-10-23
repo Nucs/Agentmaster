@@ -179,10 +179,11 @@ void TestMessagingSearch()
                   !SearchPickStateHasTopic(SearchPickState::Closed) && !SearchPickStateHasTopic(SearchPickState::IdleTab) && !SearchPickStateHasTopic(SearchPickState::ParkedTab),
               "the states that imply a topic of their own");
 
-        // The menu's buttons, per state: what fits where the session stands, Fork and Cancel always last and together.
-        const auto rowsOf = [](SearchPickState st, bool pinned) {
+        // The menu's buttons, per state: what fits where the session stands, Fork and Cancel always last and together, and
+        // no 📌 variant anywhere (the user's "Remove the pin overloads", 2026-10-23).
+        const auto rowsOf = [](SearchPickState st) {
             std::vector<std::vector<std::wstring>> out;
-            for (const auto& row : SearchPickMenuRows(st, pinned))
+            for (const auto& row : SearchPickMenuRows(st))
             {
                 std::vector<std::wstring> labels;
                 for (const std::wstring_view kind : row)
@@ -195,49 +196,42 @@ void TestMessagingSearch()
         };
         using Rows = std::vector<std::vector<std::wstring>>;
         const std::vector<std::wstring> forkCancel{ L"\x2442 Fork", L"\x2715 Cancel" };
-        CHECK((rowsOf(SearchPickState::Closed, false) == Rows{ { L"\x25B6 Resume", L"\x25B6 Resume \U0001F4CC" }, forkCancel }), "closed: Resume and Resume 📌, as before");
-        CHECK((rowsOf(SearchPickState::Closed, true) == Rows{ { L"\x25B6 Resume", L"\x25B6 Resume \U0001F4CC" }, forkCancel }), "closed: Resume 📌 is kept whatever the old record says");
-        CHECK((rowsOf(SearchPickState::ParkedTab, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, forkCancel }), "deactivated, no topic: Activate and Activate 📌 (the user's request)");
-        CHECK((rowsOf(SearchPickState::ParkedListed, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, { L"\U0001F4AC Go to topic" }, forkCancel }),
-              "deactivated with a topic: Activate, then Go to topic");
-        CHECK((rowsOf(SearchPickState::ParkedListed, true) == Rows{ { L"\x25B6 Activate" }, { L"\U0001F4AC Go to topic" }, forkCancel }), "a pinned one is offered no 📌 twin");
-        CHECK((rowsOf(SearchPickState::ExitedTab, false) == Rows{ { L"\x25B6 Activate", L"\x25B6 Activate \U0001F4CC" }, { L"\U0001F4AC Go to topic" }, forkCancel }),
-              "an exited claude: Activate starts it again, and its topic");
-        CHECK((rowsOf(SearchPickState::IdleTab, false) == Rows{ { L"\x23F0 Wake", L"\x23F0 Wake \U0001F4CC" }, forkCancel }), "an idle tab whose claude runs: Wake (it was \"Resume\")");
-        CHECK((rowsOf(SearchPickState::Listed, false) == Rows{ { L"\U0001F4AC Go to topic", L"\U0001F4CC Pin" }, forkCancel }), "listed: Go to topic and Pin, never a Resume that opens nothing");
-        CHECK((rowsOf(SearchPickState::Listed, true) == Rows{ { L"\U0001F4AC Go to topic" }, forkCancel }), "listed and pinned: Go to topic alone");
+        CHECK((rowsOf(SearchPickState::Closed) == Rows{ { L"\x25B6 Resume" }, forkCancel }), "closed: Resume, then Fork and Cancel");
+        CHECK((rowsOf(SearchPickState::ParkedTab) == Rows{ { L"\x25B6 Activate" }, forkCancel }), "deactivated, no topic: Activate (the user's request)");
+        CHECK((rowsOf(SearchPickState::ParkedListed) == Rows{ { L"\x25B6 Activate", L"\U0001F4AC Go to topic" }, forkCancel }), "deactivated with a topic: Activate beside Go to topic");
+        CHECK((rowsOf(SearchPickState::ExitedTab) == Rows{ { L"\x25B6 Activate", L"\U0001F4AC Go to topic" }, forkCancel }), "an exited claude: Activate starts it again, beside its topic");
+        CHECK((rowsOf(SearchPickState::IdleTab) == Rows{ { L"\x23F0 Wake" }, forkCancel }), "an idle tab whose claude runs: Wake (it was \"Resume\")");
+        CHECK((rowsOf(SearchPickState::Listed) == Rows{ { L"\U0001F4AC Go to topic" }, forkCancel }), "listed: Go to topic, never a Resume that opens nothing");
         for (const auto st : all)
         {
-            for (const bool pinned : { false, true })
+            const auto rows = SearchPickMenuRows(st);
+            bool fits = !rows.empty() && rows.back() == std::vector<std::wstring_view>{ kSearchPickFork, kSearchPickCancel };
+            bool resume = false;
+            bool pinLabel = false;
+            for (const auto& row : rows)
             {
-                const auto rows = SearchPickMenuRows(st, pinned);
-                bool fits = !rows.empty() && rows.back() == std::vector<std::wstring_view>{ kSearchPickFork, kSearchPickCancel };
-                bool resume = false;
-                for (const auto& row : rows)
+                fits = fits && !row.empty() && row.size() <= 2;
+                for (const std::wstring_view kind : row)
                 {
-                    fits = fits && !row.empty() && row.size() <= 2;
-                    for (const std::wstring_view kind : row)
-                    {
-                        fits = fits && IsSearchPickActionKind(kind) && !std::wstring{ SearchPickActionLabel(kind) }.empty();
-                        resume = resume || kind == kSearchPickResume || kind == kSearchPickResumePin;
-                    }
+                    const std::wstring label{ SearchPickActionLabel(kind) };
+                    fits = fits && IsSearchPickActionKind(kind) && !label.empty();
+                    resume = resume || kind == kSearchPickResume;
+                    pinLabel = pinLabel || label.find(L"\U0001F4CC") != std::wstring::npos;
                 }
-                CHECK(fits, "every menu: two buttons a row at most, every button a known action with a label, Fork and Cancel last");
-                CHECK(resume == (st == SearchPickState::Closed), "only a closed session's menu offers Resume");
             }
+            CHECK(fits, "every menu: two buttons a row at most, every button a known action with a label, Fork and Cancel last");
+            CHECK(resume == (st == SearchPickState::Closed), "only a closed session's menu offers Resume");
+            CHECK(!pinLabel, "no menu offers a 📌 variant");
         }
-        // The token kinds: the pick actions, and nothing else.
-        for (const std::wstring_view kind : { kSearchPickResume, kSearchPickResumePin, kSearchPickActivate, kSearchPickActivatePin, kSearchPickWake, kSearchPickWakePin, kSearchPickTopic,
-                                              kSearchPickPin, kSearchPickFork, kSearchPickCancel })
+        // The token kinds: the pick actions, and nothing else — the pinning kinds of the build before are no action any more.
+        for (const std::wstring_view kind : { kSearchPickResume, kSearchPickActivate, kSearchPickWake, kSearchPickTopic, kSearchPickFork, kSearchPickCancel })
         {
             CHECK(IsSearchPickActionKind(kind) && kind.substr(0, 5) == L"pick-", "a pick action's kind is a known pick-* token kind");
         }
         CHECK(!IsSearchPickActionKind(L"wake") && !IsSearchPickActionKind(L"pick-") && !IsSearchPickActionKind(L"pick-resumes") && !IsSearchPickActionKind(L""),
               "other token kinds (the /idle list's wake) are no pick action");
-        CHECK(SearchPickActionPins(kSearchPickResumePin) && SearchPickActionPins(kSearchPickActivatePin) && SearchPickActionPins(kSearchPickWakePin) && SearchPickActionPins(kSearchPickPin) &&
-                  !SearchPickActionPins(kSearchPickResume) && !SearchPickActionPins(kSearchPickActivate) && !SearchPickActionPins(kSearchPickWake) && !SearchPickActionPins(kSearchPickTopic) &&
-                  !SearchPickActionPins(kSearchPickFork) && !SearchPickActionPins(kSearchPickCancel),
-              "exactly the 📌 actions pin (there is no fork-and-pin)");
+        CHECK(!IsSearchPickActionKind(L"pick-resume-pin") && !IsSearchPickActionKind(L"pick-activate-pin") && !IsSearchPickActionKind(L"pick-wake-pin") && !IsSearchPickActionKind(L"pick-pin"),
+              "the pinning kinds are gone");
     }
 
     // ---- 5. the answer as EVIDENCE CARDS (§21.10, the user's "C1" of 2026-10-17) ----
