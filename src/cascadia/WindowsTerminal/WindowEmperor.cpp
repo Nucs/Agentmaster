@@ -51,6 +51,10 @@
 // Agentmaster: the launch SPLASH — a lightweight Win32 loading window on its OWN thread, so it keeps
 // animating while the UI thread is blocked in session/window restore. Header-only + pure Win32.
 #include "../TerminalApp/AgentMaster/Splash.h"
+// Agentmaster (doc/agentmaster/CLI.md §2b): every dialog this exe opens is echoed to the console of the command that
+// started it (DialogEcho.h + CallerSink.h), and a dialog the running app opens for a command line handed to it is sent
+// back to the sender (HandoffReply). Header-only, plain Win32.
+#include "../TerminalApp/AgentMaster/DialogEcho.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
@@ -152,11 +156,16 @@ struct Handoff
     wil::zwstring_view env;
     wil::zwstring_view cwd;
     uint32_t show;
+    // Agentmaster (CallerSink.h HandoffReply): the sender's reply section, a 5th field that only a sender with a caller
+    // sink appends. Empty from an older sender (its payload ends after `show`).
+    wil::zwstring_view reply;
 };
 
 // Serializes all relevant parameters to a byte blob for a WM_COPYDATA message.
 // This allows us to hand off an invocation to an existing instance of the Terminal.
-static std::vector<uint8_t> serializeHandoffPayload(int nCmdShow)
+// Agentmaster: `reply` (the HandoffReply section's name) is appended as a 5th string when not empty. An older receiver
+// reads the four fields it knows and ignores the rest (deserializeHandoffPayload never required the end of the data).
+static std::vector<uint8_t> serializeHandoffPayload(int nCmdShow, std::wstring_view reply = {})
 {
     const auto args = GetCommandLineW();
     const wil::unique_environstrings_ptr envMem{ GetEnvironmentStringsW() };
@@ -168,6 +177,11 @@ static std::vector<uint8_t> serializeHandoffPayload(int nCmdShow)
     serializeString(out, env);
     serializeString(out, cwd);
     serializeUint32(out, static_cast<uint32_t>(nCmdShow));
+    if (!reply.empty())
+    {
+        const std::wstring terminated{ reply }; // serializeString wants a zero-terminated view
+        serializeString(out, terminated);
+    }
     return out;
 }
 
@@ -180,6 +194,12 @@ static Handoff deserializeHandoffPayload(const uint8_t* beg, const uint8_t* end)
     it = deserializeString(it, end, result.env);
     it = deserializeString(it, end, result.cwd);
     it = deserializeUint32(it, end, result.show);
+    // Agentmaster: the optional reply section's name (CallerSink.h HandoffReply), only when a sender appended one. A
+    // malformed tail throws like any other field, which the WM_COPYDATA handler already contains.
+    if (it != end)
+    {
+        it = deserializeString(it, end, result.reply);
+    }
     return result;
 }
 
@@ -187,6 +207,13 @@ static Handoff deserializeHandoffPayload(const uint8_t* beg, const uint8_t* end)
 // or attempts to pass the commandline to the existing instance.
 static wil::unique_mutex acquireMutexOrAttemptHandoff(const wchar_t* className, int nCmdShow)
 {
+    // Agentmaster (CallerSink.h HandoffReply; doc/agentmaster/CLI.md §2b): when this command line is handed to the
+    // running app, a dialog it opens there (Windows Terminal's --help / --version / command-line error box) cannot
+    // reach OUR caller's console. A reply section, named in the payload, lets the running app write it back before its
+    // WM_COPYDATA handler returns; it is created only when this process has a caller to echo to.
+    auto reply = ::Agentmaster::HandoffReply::Create(::Agentmaster::CallerSink::Active());
+    const auto closeReply = wil::scope_exit([&]() noexcept { ::Agentmaster::HandoffReply::Close(reply); });
+
     // If the process that owns the mutex has not finished creating the window yet,
     // FindWindowW will return nullptr. We'll retry a few times just in case.
     // At the 1.5x growth rate, this will retry up to ~30s in total.
@@ -207,7 +234,7 @@ static wil::unique_mutex acquireMutexOrAttemptHandoff(const wchar_t* className, 
         // In both cases it's quite fast though at ~1us/op vs ~3us/op (good old Win32 <3).
         if (const auto hwnd = FindWindowW(className, nullptr))
         {
-            auto payload = serializeHandoffPayload(nCmdShow);
+            auto payload = serializeHandoffPayload(nCmdShow, reply.name);
             const COPYDATASTRUCT cds{
                 .dwData = TERMINAL_HANDOFF_MAGIC,
                 .cbData = gsl::narrow<DWORD>(payload.size()),
@@ -223,6 +250,11 @@ static wil::unique_mutex acquireMutexOrAttemptHandoff(const wchar_t* className, 
 
             if (SendMessageTimeoutW(hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds), SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 5000, nullptr))
             {
+                // Agentmaster: the running app has handled the line; echo a dialog it opened for it (if it wrote one).
+                if (const auto dialog = ::Agentmaster::HandoffReply::Read(reply))
+                {
+                    ::Agentmaster::DialogEcho::EchoForeignDialog(*dialog);
+                }
                 return {};
             }
         }
@@ -956,7 +988,9 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
                 // The launch then sits blocked on an invisible modal with zero taskbar presence — the
                 // 2026-07-03 "dev is not launching" report: a 3-window reopen stalled 74s until the box
                 // was found and clicked (hooks.log: reopen-scan +566ms -> prelude-done +74573ms).
-                doRestore = ::MessageBoxW(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES;
+                // Echoed to the command's console (DialogEcho.h): a launch from a shell or an agent stops here, and the
+                // caller now reads why, and the answer.
+                doRestore = ::Agentmaster::DialogEcho::ShowMessageBox(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES;
             }
 
             if (doRestore)
@@ -1033,6 +1067,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // is the exe→dll handoff point — compare it to a window's "first-layout TOTAL" to split launch
     // time into exe-prelude (incl. window dispatch) vs. per-window setup.
     ::Agentmaster::Startup::Mark(L"exe prelude done — entering message loop");
+
+    // Agentmaster (CallerSink.h; doc/agentmaster/CLI.md §2b): the command that started this process is answered — its
+    // windows are dispatched, every startup prompt was asked. Release its console / pipe now (or, while an echoed dialog
+    // still waits on another thread, the moment it is answered), so a caller reading the pipe to its end (bash `$(...)`,
+    // Claude Code's Bash tool) is not held for the app's whole life, and nothing later prints into a stranger's console.
+    ::Agentmaster::CallerSink::RequestRelease();
 
     // Agentmaster (splash): start the lightweight loading window NOW — deliberately AFTER every modal
     // launch prompt (the update dialog + the "reopen N windows?" MessageBox), so a TOPMOST splash can
@@ -1192,7 +1232,7 @@ void WindowEmperor::_dispatchSpecialKey(const MSG& msg) const
     window->OnDirectKeyEvent(vkey, scanCode, keyDown);
 }
 
-void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs args)
+void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs args, std::wstring_view handoffReply)
 {
     _assertIsMainThread();
 
@@ -1200,6 +1240,16 @@ void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs arg
 
     if (const auto msg = args.ExitMessage(); !msg.empty())
     {
+        // Agentmaster (CallerSink.h HandoffReply; doc/agentmaster/CLI.md §2b): a line handed over by another process
+        // (`agentmaster --version` while the app runs) opens this box HERE, out of reach of that process's console.
+        // Write it into the sender's reply section now, before the WM_COPYDATA handler returns: the sender, still
+        // waiting in SendMessageTimeoutW, echoes it to its caller. (The box itself is echoed only by a process that
+        // has a caller sink: _showMessageBox.)
+        if (!handoffReply.empty())
+        {
+            const auto title = GetStringResource(exitCode != 0 ? IDS_ERROR_DIALOG_TITLE : IDS_HELP_DIALOG_TITLE);
+            ::Agentmaster::HandoffReply::Write(handoffReply, { std::wstring{ title }, std::wstring{ msg }, GetCurrentProcessId() });
+        }
         _showMessageBox(msg, exitCode != 0);
         return;
     }
@@ -1280,7 +1330,7 @@ void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs arg
     }
 }
 
-void WindowEmperor::_dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand)
+void WindowEmperor::_dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand, std::wstring_view handoffReply)
 {
     // Agentmaster (the Debug Mode escape hatch; ProfileBootstrap.h IsDebugPackage): `--debug`
     // (or `-debug`) turns on Debug Mode, the gate for debug-only features, in any build. It is NOT a
@@ -1306,7 +1356,7 @@ void WindowEmperor::_dispatchCommandlineCommon(winrt::array_view<const winrt::hs
     c.CurrentDirectory(currentDirectory);
     c.CurrentEnvironment(envString);
     c.ShowWindowCommand(showWindowCommand);
-    _dispatchCommandline(std::move(c));
+    _dispatchCommandline(std::move(c), handoffReply);
 }
 
 // This is an implementation-detail of _dispatchCommandline().
@@ -1519,6 +1569,11 @@ safe_void_coroutine WindowEmperor::_showMessageBox(winrt::hstring message, bool 
         PostMessageW(hwnd, WM_MESSAGE_BOX_CLOSED, 0, 0);
     });
 
+    // Agentmaster (CallerSink.h; doc/agentmaster/CLI.md §2b): taken HERE, on the main thread, before the hop below. The
+    // main thread goes on into the message loop, where the startup releases the caller's console; this Hold keeps it
+    // until the box below was echoed and answered (`agentmaster --help` with no app running reaches this).
+    ::Agentmaster::CallerSink::Hold echoHold;
+
     // We must yield to a background thread, because MessageBoxW() is a blocking call, and we can't
     // block the main thread. That would prevent us from servicing WM_COPYDATA messages and similar.
     //
@@ -1530,7 +1585,8 @@ safe_void_coroutine WindowEmperor::_showMessageBox(winrt::hstring message, bool 
     const auto messageIcon = error ? MB_ICONERROR : MB_ICONWARNING;
     // The dialog cannot have our _window as the parent, because that one is always hidden/invisible.
     // TODO:GH#4134: polish this dialog more, to make the text more like msiexec /?
-    MessageBoxW(nullptr, message.c_str(), GetStringResource(messageTitle).c_str(), MB_OK | messageIcon);
+    // Agentmaster (DialogEcho.h): echoed to the command's console with its answer, like every dialog of this exe.
+    ::Agentmaster::DialogEcho::ShowMessageBox(nullptr, message.c_str(), GetStringResource(messageTitle).c_str(), MB_OK | messageIcon);
 }
 
 LRESULT WindowEmperor::_messageHandler(HWND window, UINT const message, WPARAM const wParam, LPARAM const lParam) noexcept
@@ -1675,7 +1731,8 @@ LRESULT WindowEmperor::_messageHandler(HWND window, UINT const message, WPARAM c
                 // toast's Activated event, so just ignore this handoff.
                 if (argv.size() != 2 || argv[1] != L"--from-toast")
                 {
-                    _dispatchCommandlineCommon(argv, handoff.cwd, handoff.env, handoff.show);
+                    // Agentmaster: the sender's reply section (CallerSink.h HandoffReply), for a dialog this line opens.
+                    _dispatchCommandlineCommon(argv, handoff.cwd, handoff.env, handoff.show, handoff.reply);
                 }
             }
             return 0;

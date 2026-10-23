@@ -30,6 +30,7 @@
 #include "AgentAmbientAnimation.h" // AgentDotsPulse — the unsent-draft dots' pulse on the Composition API (BuildPendingDots)
 #include "AgentCatchLog.h" // AgentLogCaughtException — Rule #18 forensics for a refused pulse start / stop (BuildPendingDots)
 #include "AgentMaster/SessionTimingText.h" // FormatSessionTimingLine — the cards' and rows' "created 4d1h, active 2m4s ago" (FormatSessionTiming)
+#include "AgentMaster/DialogEcho.h" // ShowFileDialog — the two pickers below go through the one dialog echo (CLI.md §2b)
 
 namespace
 {
@@ -209,7 +210,9 @@ namespace
         FILEOPENDIALOGOPTIONS opts{};
         dlg->GetOptions(&opts);
         dlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
-        if (FAILED(dlg->Show(owner)))
+        // Through DialogEcho (CLI.md §2b) like every dialog we open; in the running app no caller is attached, so this
+        // is the plain Show.
+        if (FAILED(::Agentmaster::DialogEcho::ShowFileDialog(dlg.get(), owner, L"Locate claude.exe (the native build)", L"file")))
         {
             return std::nullopt; // user canceled
         }
@@ -251,7 +254,8 @@ namespace
                 dlg->SetFolder(start.get()); // open AT this folder (not just a default), since the user already typed a path
             }
         }
-        if (FAILED(dlg->Show(owner)))
+        // Through DialogEcho (CLI.md §2b) like every dialog we open (the plain Show in the running app).
+        if (FAILED(::Agentmaster::DialogEcho::ShowFileDialog(dlg.get(), owner, L"Choose a working directory", L"folder")))
         {
             return std::nullopt; // user canceled
         }

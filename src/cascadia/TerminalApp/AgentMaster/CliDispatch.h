@@ -28,6 +28,8 @@
 
 #include <windows.h>
 
+#include "CallerSink.h" // IsInheritedWritable — which of the caller's standard handles this process really holds
+
 #include <optional>
 #include <string>
 #include <string_view>
@@ -327,7 +329,12 @@ namespace Agentmaster::CliDispatch
             STARTUPINFOW caller{};
             caller.cb = sizeof(caller);
             ::GetStartupInfoW(&caller);
-            const bool callerPassedHandles = (caller.dwFlags & STARTF_USESTDHANDLES) != 0;
+            // Only handles this process really inherited count (CallerSink.h): measured 2026-10-23, a console handle passed
+            // to a GUI process is unusable, and a caller that sets STARTF_USESTDHANDLES without inheriting leaves values
+            // that may name unrelated handles of ours. With none usable, the CLI goes to the caller's console instead.
+            const bool callerPassedHandles = (caller.dwFlags & STARTF_USESTDHANDLES) != 0 &&
+                                             (CallerSink::detail::IsInheritedWritable(caller.hStdOutput) ||
+                                              CallerSink::detail::IsInheritedWritable(caller.hStdError));
 
             // Attaching first lets the CLI share the caller's console, so it opens no window of its own. It fails
             // harmlessly when the caller has no console (pythonw, a scheduled task, Explorer).

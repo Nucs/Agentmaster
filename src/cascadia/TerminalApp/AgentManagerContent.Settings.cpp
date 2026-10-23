@@ -2637,12 +2637,14 @@ namespace winrt::TerminalApp::implementation
                     {
                         const std::wstring store = ::Agentmaster::Profiles::ProfileChoiceStorePath();
                         ::Agentmaster::LogNav(L"profile-change " + active + L" -> " + pick.dir + L" FAILED to persist (store: " + store + L")");
-                        ::MessageBoxW(::GetActiveWindow(),
-                                      (L"The profile choice could not be saved.\n\nThis copy stores its choice at:\n\n    " + store +
-                                       L"\n\nMake that location writable and try again.")
-                                          .c_str(),
-                                      L"Agentmaster",
-                                      MB_OK | MB_ICONWARNING);
+                        // Through DialogEcho (CLI.md §2b) like every dialog we open; in the running app no caller is attached
+                        // any more, so this is the plain box.
+                        ::Agentmaster::DialogEcho::ShowMessageBox(::GetActiveWindow(),
+                                                                  (L"The profile choice could not be saved.\n\nThis copy stores its choice at:\n\n    " + store +
+                                                                   L"\n\nMake that location writable and try again.")
+                                                                      .c_str(),
+                                                                  L"Agentmaster",
+                                                                  MB_OK | MB_ICONWARNING);
                         return;
                     }
                     // Nav audit: the user re-pointed this install at a different profile folder (the cog's
@@ -2658,10 +2660,11 @@ namespace winrt::TerminalApp::implementation
                     {
                         _setProfileDir.Text(winrt::hstring{ active + L"  \x2192  " + pick.dir + L" (after restart)" });
                     }
-                    ::MessageBoxW(::GetActiveWindow(),
-                                  (L"Profile saved:\n\n    " + pick.dir + L"\n\nIt applies the next time Agentmaster starts.").c_str(),
-                                  L"Agentmaster",
-                                  MB_OK | MB_ICONINFORMATION);
+                    // Through DialogEcho (CLI.md §2b) like every dialog we open (the plain box: no caller is attached here).
+                    ::Agentmaster::DialogEcho::ShowMessageBox(::GetActiveWindow(),
+                                                              (L"Profile saved:\n\n    " + pick.dir + L"\n\nIt applies the next time Agentmaster starts.").c_str(),
+                                                              L"Agentmaster",
+                                                              MB_OK | MB_ICONINFORMATION);
                 });
             }
         });
@@ -2737,7 +2740,8 @@ namespace winrt::TerminalApp::implementation
                                  std::wstring text = L"The uninstaller did not start. " + ::Agentmaster::PortableInstall::ScriptStartFailureText(machineRun, true) +
                                                      L"\n\nAsk an administrator to remove Agentmaster for all users.";
                                  std::thread([text = std::move(text)]() noexcept {
-                                     ::TaskDialog(nullptr, nullptr, L"Agentmaster", L"Agentmaster was not uninstalled", text.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
+                                     // Through DialogEcho (CLI.md §2b) like every dialog we open (the plain box here).
+                                     ::Agentmaster::DialogEcho::ShowTaskDialog(nullptr, nullptr, L"Agentmaster", L"Agentmaster was not uninstalled", text.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
                                  }).detach();
                              }
                          }

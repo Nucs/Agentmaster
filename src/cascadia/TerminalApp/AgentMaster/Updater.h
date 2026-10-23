@@ -76,6 +76,7 @@
 
 #include "Json.h"
 #include "ProfileBootstrap.h"
+#include "DialogEcho.h" // the update prompt is echoed to the caller's console like every dialog (CLI.md §2b)
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -1615,7 +1616,9 @@ namespace Agentmaster::Updater
         cfg.pfCallback = UpdatePromptCallback;
 
         int pressed = 0, radio = ridRestart;
-        if (FAILED(::TaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
+        // Echoed to the command's console (DialogEcho.h): at a launch from a shell this prompt holds the startup, and
+        // the caller reads which version is offered, every postpone option, and the answer.
+        if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
         {
             return Decision::RemindNextRestart; // comctl v6 unavailable / unexpected failure -> least-destructive
         }

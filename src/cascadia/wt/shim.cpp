@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <filesystem>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -15,6 +17,9 @@
 // shared with the app exe's own wWinMain, which answers the same command lines when the name
 // `agentmaster` finds Agentmaster.exe itself (an unpackaged install on PATH, CLI.md §2a).
 #include "../TerminalApp/AgentMaster/CliDispatch.h"
+// Agentmaster: the caller's console or stderr, handed to the app this shim starts, so every dialog the app opens can
+// be echoed where the command ran (CLI.md §2b). Header-only, plain Win32.
+#include "../TerminalApp/AgentMaster/CallerSink.h"
 
 // Agentmaster: this launcher shim is the target of the agentmaster[dev].exe execution alias, and it
 // is now DUAL-MODE (doc/agentmaster/CLI.md §2):
@@ -97,7 +102,45 @@ int __cdecl wmain(int /*argc*/, wchar_t** /*argv*/)
     si.cb = sizeof(si);
     GetStartupInfoW(&si);
 
+    // Agentmaster (CallerSink.h; doc/agentmaster/CLI.md §2b): this shim exits as soon as the app is started, so the app
+    // cannot find the caller's console or pipe by itself (its parent is gone), and a dialog it opens (the update prompt,
+    // "Reopen your N windows?", Windows Terminal's --help box) would never reach the command's output. Hand it over:
+    // the caller's stderr pipe or file as ONE inheritable handle (PROC_THREAD_ATTRIBUTE_HANDLE_LIST: nothing else is
+    // inherited, exactly as with bInheritHandles=FALSE before), or the caller's console by a process attached to it,
+    // named in AGENTMASTER_CALLER_SINK. Nothing to hand over (our reopen ShellExecute: the console was freed above)
+    // leaves the start below exactly as it always was. The app releases the handle when its startup ends.
+    auto forward = ::Agentmaster::CallerSink::PrepareForChild();
+    const auto closeForward = wil::scope_exit([&]() noexcept { ::Agentmaster::CallerSink::CloseForward(forward); });
+
     // Go!
     wil::unique_process_information pi;
+    if (forward.inheritable)
+    {
+        SIZE_T bytes = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+        std::vector<std::byte> storage(bytes);
+        const auto list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+        if (InitializeProcThreadAttributeList(list, 1, 0, &bytes))
+        {
+            const auto deleteList = wil::scope_exit([&]() noexcept { DeleteProcThreadAttributeList(list); });
+            if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &forward.inheritable, sizeof(forward.inheritable), nullptr, nullptr))
+            {
+                STARTUPINFOEXW six{};
+                six.StartupInfo = si;
+                six.StartupInfo.cb = sizeof(six);
+                // The caller's own standard handles are not in the list, so they could not reach the app anyway (they
+                // never did: the start used bInheritHandles=FALSE); don't name them.
+                six.StartupInfo.dwFlags &= ~STARTF_USESTDHANDLES;
+                six.StartupInfo.hStdInput = six.StartupInfo.hStdOutput = six.StartupInfo.hStdError = nullptr;
+                six.lpAttributeList = list;
+                if (CreateProcessW(module.c_str(), cmdline.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &six.StartupInfo, &pi))
+                {
+                    return 0;
+                }
+            }
+        }
+        // The hand-over could not be set up: start the app without it, as before.
+        ::Agentmaster::CallerSink::CloseForward(forward);
+    }
     return !CreateProcessW(module.c_str(), cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
 }

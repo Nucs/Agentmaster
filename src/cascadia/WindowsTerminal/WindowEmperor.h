@@ -52,8 +52,11 @@ private:
     bool _summonWindow(const SummonWindowSelectionArgs& args) const;
     void _summonAllWindows() const;
     void _dispatchSpecialKey(const MSG& msg) const;
-    void _dispatchCommandline(winrt::TerminalApp::CommandlineArgs args);
-    void _dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand);
+    // Agentmaster (CallerSink.h HandoffReply): `handoffReply` names the reply section of a command line handed over by
+    // another process (WM_COPYDATA); a dialog that line opens here is written into it, so that process can echo it to
+    // its caller's console. Empty for every other dispatch.
+    void _dispatchCommandline(winrt::TerminalApp::CommandlineArgs args, std::wstring_view handoffReply = {});
+    void _dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand, std::wstring_view handoffReply = {});
     safe_void_coroutine _dispatchCommandlineCurrentDesktop(winrt::TerminalApp::CommandlineArgs args);
     LRESULT _messageHandler(HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept;
     void _createMessageWindow(const wchar_t* className);

@@ -77,6 +77,7 @@
 #include <vector>
 
 #include "Json.h" // Agentmaster::json — read the persisted "Enable Debug Mode" setting (PersistedDebugModeEnabled); tiny + header-only
+#include "DialogEcho.h" // every dialog of this header (the picker, its folder browser, "profile in use") is echoed to the caller's console (CLI.md §2b)
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -1273,8 +1274,10 @@ namespace Agentmaster::Profiles
                     DWORD opts = 0;
                     dlg->GetOptions(&opts);
                     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-                    dlg->SetTitle(title ? title : L"Choose the Agentmaster profile folder");
-                    if (SUCCEEDED(dlg->Show(owner)))
+                    const wchar_t* const shownTitle = title ? title : L"Choose the Agentmaster profile folder";
+                    dlg->SetTitle(shownTitle);
+                    // Echoed to the command's console like every dialog (DialogEcho.h): the picker and its answer.
+                    if (SUCCEEDED(DialogEcho::ShowFileDialog(dlg, owner, shownTitle, L"folder")))
                     {
                         IShellItem* item = nullptr;
                         if (SUCCEEDED(dlg->GetResult(&item)) && item)
@@ -1420,7 +1423,8 @@ namespace Agentmaster::Profiles
 
             int pressed = 0;
             BOOL verified = FALSE;
-            if (FAILED(::TaskDialogIndirect(&cfg, &pressed, nullptr, &verified)))
+            // Echoed to the command's console (DialogEcho.h): a portable copy's first launch from a shell asks here.
+            if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, nullptr, &verified)))
             {
                 return result; // comctl v6 unavailable / unexpected failure -> behave like cancel
             }
@@ -1643,7 +1647,9 @@ namespace Agentmaster::Profiles
                 L"\n\nis already in use by another running Agentmaster instance (it may be one started with "
                 L"administrator rights, which runs separately from a normal one). Running two instances "
                 L"on one profile can corrupt its data (sessions, window records, settings).\n\nContinue anyway?";
-            if (::MessageBoxW(nullptr, warn.c_str(), L"Agentmaster \x2014 profile in use", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+            // Echoed to the command's console (DialogEcho.h): the 2026-10-23 incident's dialog, opened by a command
+            // (`agentmaster show ...` finding an all-users copy) whose console then said nothing about it.
+            if (DialogEcho::ShowMessageBox(nullptr, warn.c_str(), L"Agentmaster \x2014 profile in use", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
             {
                 return false;
             }
