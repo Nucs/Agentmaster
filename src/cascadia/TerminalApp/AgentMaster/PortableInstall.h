@@ -2491,6 +2491,26 @@ namespace Agentmaster::PortableInstall
         return tail.empty() ? std::wstring{} : detail::Base64Utf16(tail);
     }
 
+    // PURE: what an elevated run of the embedded install script asks administrator rights FOR, in words, from the
+    // script parameter it starts with — the text the UAC prompt's echo prints to the command's console (DialogEcho.h
+    // ShellExecuteWithEcho), since the prompt itself (on the secure desktop) names only "Windows PowerShell".
+    //   args    — the script's parameters as RunEmbeddedScript gets them ("-InstallMachine -SourceDir ...").
+    //   returns — e.g. "install Agentmaster for all users of this PC".
+    //   throws  — std::bad_alloc only.
+    inline std::wstring ElevationPurpose(std::wstring_view args)
+    {
+        const auto first = args.substr(0, args.find(L' '));
+        if (first == L"-InstallMachine")
+        {
+            return L"install Agentmaster for all users of this PC";
+        }
+        if (first == L"-UninstallMachine")
+        {
+            return L"uninstall the Agentmaster installed for all users of this PC";
+        }
+        return L"run the Agentmaster install script (" + std::wstring{ first } + L")";
+    }
+
     // Materialize the embedded am-update.ps1 (the AM_UPDATE_PS1 resource — the shared PowerShell
     // install core) into %TEMP%\Agentmaster-update and run it with `args`. Used for the steps that need
     // DIFFERENT RIGHTS than this process has: the all-users install / uninstall (elevated: a UAC prompt)
@@ -2549,7 +2569,9 @@ namespace Agentmaster::PortableInstall
             sei.lpParameters = params.c_str();
             sei.lpDirectory = dir.c_str();
             sei.nShow = showWindow ? SW_SHOWNORMAL : SW_HIDE;
-            if (!::ShellExecuteExW(&sei))
+            // An elevated run shows Windows' UAC prompt: a dialog our code causes, so it is echoed to the command's
+            // console with its answer (DialogEcho.h); a plain "open" is the plain call. GetLastError survives it.
+            if (!DialogEcho::ShellExecuteWithEcho(&sei, ElevationPurpose(args)))
             {
                 const DWORD err = ::GetLastError();
                 run.error = err;
@@ -3327,7 +3349,8 @@ namespace Agentmaster::PortableInstall
         cfg.nDefaultButton = IDOK;
         cfg.pfCallback = detail::ProgressCallback;
         cfg.lpCallbackData = reinterpret_cast<LONG_PTR>(&st);
-        if (FAILED(::TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr)))
+        // Echoed to the command's console (DialogEcho.h), like every dialog: "Installing Agentmaster..." and "closed".
+        if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, nullptr, nullptr, nullptr)))
         {
             // No dialog (comctl v6 unavailable): the work still runs — just wait for it.
         }
@@ -3559,7 +3582,8 @@ namespace Agentmaster::PortableInstall
 
             int pressed = 0;
             BOOL verified = FALSE;
-            if (FAILED(::TaskDialogIndirect(&cfg, &pressed, nullptr, &verified)))
+            // Echoed to the command's console (DialogEcho.h): an unzip started from a shell asks here, every option listed.
+            if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, nullptr, &verified)))
             {
                 return result; // comctl v6 unavailable / failure -> like "later"
             }
@@ -3655,7 +3679,8 @@ namespace Agentmaster::PortableInstall
     //   throws  — nothing (a TaskDialog failure only means no box).
     inline void ShowError(HWND owner, const std::wstring& text, const wchar_t* heading = L"The install did not complete")
     {
-        ::TaskDialog(owner, nullptr, L"Agentmaster", heading, text.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
+        // Echoed to the command's console (DialogEcho.h): the error text reaches a caller that cannot see the screen.
+        DialogEcho::ShowTaskDialog(owner, nullptr, L"Agentmaster", heading, text.c_str(), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
     }
 
     namespace detail
@@ -4170,7 +4195,8 @@ namespace Agentmaster::PortableInstall
                 const std::wstring how = Profiles::IsPortableInstallIn(exeDir) ?
                                              L"This copy of Agentmaster is not installed: nothing is registered for it. To remove it, close Agentmaster and delete its folder:\n    " + exeDir :
                                              L"This Agentmaster is not a portable install. If it is the app package, remove it from Settings \x2192 Apps \x2192 Installed apps (or in Agentmaster: the Home button \x2192 \x2699 Settings \x2192 About \x2192 Uninstall).";
-                ::TaskDialog(nullptr, nullptr, L"Agentmaster", L"Nothing to uninstall here", how.c_str(), TDCBF_OK_BUTTON, TD_INFORMATION_ICON, nullptr);
+                // Echoed to the command's console (DialogEcho.h): `Agentmaster.exe --uninstall-portable` from a shell.
+                DialogEcho::ShowTaskDialog(nullptr, nullptr, L"Agentmaster", L"Nothing to uninstall here", how.c_str(), TDCBF_OK_BUTTON, TD_INFORMATION_ICON, nullptr);
                 LogInstall(L"--uninstall-portable on " + exeDir + L": not an installed copy \x2014 nothing done");
                 return true;
             }
@@ -4206,7 +4232,8 @@ namespace Agentmaster::PortableInstall
             cfg.nDefaultButton = IDCANCEL;
             cfg.pfCallback = detail::ForegroundOnCreate;
             int pressed = 0;
-            if (SUCCEEDED(::TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr)) && pressed == IDOK)
+            // Echoed to the command's console (DialogEcho.h), with the answer.
+            if (SUCCEEDED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, nullptr, nullptr)) && pressed == IDOK)
             {
                 ScriptRun machineRun;
                 const bool launched = machine ? LaunchMachineUninstaller(exeDir, &machineRun) : LaunchPortableUninstaller(exeDir);

@@ -10,6 +10,9 @@
 // Agentmaster (doc/agentmaster/CLI.md §2a): the rule that tells a CLI call (`agentmaster show <id>`) from a launch,
 // shared with the console launcher shim (wt/shim.cpp). Header-only, plain Win32.
 #include "../TerminalApp/AgentMaster/CliDispatch.h"
+// Agentmaster (doc/agentmaster/CLI.md §2b): every dialog this exe opens is echoed to the console of the command that
+// started it (the caller sink, captured first thing below). Header-only, plain Win32.
+#include "../TerminalApp/AgentMaster/DialogEcho.h"
 
 using namespace winrt;
 using namespace winrt::Windows::UI;
@@ -77,10 +80,11 @@ static void EnsureNativeArchitecture()
 
         auto buffer{ wil::str_printf<std::wstring>(formatPattern.data(), nativeArchitecture.data(), processArchitecture.data()) };
 
-        MessageBoxW(nullptr,
-                    buffer.data(),
-                    GetStringResource(IDS_ERROR_DIALOG_TITLE).data(),
-                    MB_OK | MB_ICONERROR);
+        // Agentmaster (DialogEcho.h): echoed to the command's console like every dialog of this exe.
+        ::Agentmaster::DialogEcho::ShowMessageBox(nullptr,
+                                                  buffer.data(),
+                                                  GetStringResource(IDS_ERROR_DIALOG_TITLE).data(),
+                                                  MB_OK | MB_ICONERROR);
 
         ExitProcess(0);
     }
@@ -117,6 +121,13 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int nCmdShow)
         TerminateProcess(GetCurrentProcess(), static_cast<UINT>(*cliExitCode));
         __assume(false);
     }
+
+    // Agentmaster (CallerSink.h; doc/agentmaster/CLI.md §2b): find where the command that started this process reads
+    // (the launcher's hand-over, the handles the caller passed, or its console) BEFORE the first dialog can open: from
+    // here every dialog of the startup (the architecture box below, the install question, the profile prompts, the
+    // update prompt, "Reopen your N windows?", Windows Terminal's --help box) is echoed there. WindowEmperor releases it
+    // when the startup ends, so the app never keeps the caller's pipe open.
+    ::Agentmaster::CallerSink::Capture();
 
     // Block the user from starting if they launched the incorrect architecture version of the project.
     // This should only be applicable to developer versions. The package installation process

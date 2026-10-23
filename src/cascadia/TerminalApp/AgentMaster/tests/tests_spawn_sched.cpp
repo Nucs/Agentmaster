@@ -31,6 +31,9 @@
 #include <fstream> // TestHookInvocation reads the materialized settings file back
 #include <iterator> // std::istreambuf_iterator (the same read)
 #include <algorithm> // std::all_of - the console guard's printable-ASCII check (TestSpawnBuilders)
+#include <cctype> // std::isalnum - TestDialogEchoCoverage's source scanner
+#include <set> // the forbidden direct dialog calls (TestDialogEchoCoverage)
+#include "../DialogEcho.h" // the dialog echo + caller sink + hand-off reply (TestDialogEcho, TestDialogEchoCoverage; CLI.md §2b)
 
 // The updater tests odr-use RunStartupUpdateCheck (the fresh-launch latch-clear check), which pulls
 // ShowUpdatePrompt -> TaskDialogIndirect — imported from comctl32 BY ORDINAL (345), which only
@@ -6438,4 +6441,564 @@ void TestCliDispatch()
     {
         CHECK(!TryRunCliCall().has_value(), "try: this harness's own command line (no CLI verb) is not answered");
     }
+}
+
+namespace
+{
+    // Reads everything a pipe's read end holds right now (the test wrote and closed nothing else), as UTF-8 bytes.
+    //   read    — the pipe's read end.
+    //   returns — the bytes available.
+    std::string DrainPipe(HANDLE read)
+    {
+        std::string out;
+        DWORD available = 0;
+        while (::PeekNamedPipe(read, nullptr, 0, nullptr, &available, nullptr) && available > 0)
+        {
+            std::string chunk(available, '\0');
+            DWORD got = 0;
+            if (!::ReadFile(read, chunk.data(), available, &got, nullptr) || got == 0)
+            {
+                break;
+            }
+            chunk.resize(got);
+            out += chunk;
+        }
+        return out;
+    }
+}
+
+// Agentmaster (CLI.md §2b — "make sure that all dialogs we open are logging to cli console", 2026-10-23): CallerSink.h
+// (where the command that started a process reads; the launcher's hand-over; the hand-off reply) and DialogEcho.h (what
+// a dialog prints). The pure parts in full; the sink's real write through a pipe; the hand-off reply through a real named
+// section. Real dialogs are shown by tools/dialog-echo-probe on a hidden desktop, never here.
+void TestDialogEcho()
+{
+    std::wprintf(L"Dialog echo (every dialog written to the caller's console):\n");
+    using namespace ::Agentmaster;
+
+    // --- AGENTMASTER_CALLER_SINK: only the two exact forms decode; anything else switches the echo off ---
+    {
+        const auto h = CallerSink::ParseEnvValue(L"handle:0x1a4");
+        CHECK(h.kind == CallerSink::Kind::Handle && h.handle == 0x1a4, "sink env: handle:0x1a4 decodes");
+        CHECK(CallerSink::ParseEnvValue(L"handle:1A4").handle == 0x1a4, "sink env: hex without 0x, either case");
+        const auto c = CallerSink::ParseEnvValue(L"console:1234");
+        CHECK(c.kind == CallerSink::Kind::Console && c.pidCount == 1 && c.pids[0] == 1234, "sink env: console:1234 decodes");
+        const auto list = CallerSink::ParseEnvValue(L"console:12,34,12,56");
+        CHECK(list.kind == CallerSink::Kind::Console && list.pidCount == 3 && list.pids[0] == 12 && list.pids[1] == 34 && list.pids[2] == 56,
+              "sink env: a list keeps its order, a pid named twice once");
+        CHECK(CallerSink::ParseEnvValue(L"console:1,2,3,4,5,6,7,8").pidCount == 8 && CallerSink::ParseEnvValue(L"console:1,2,3,4,5,6,7,8,9").kind == CallerSink::Kind::None,
+              "sink env: eight pids at most (the launcher never writes more)");
+        CHECK(CallerSink::ParseEnvValue(L"").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"handle:").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"handle:0").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"handle:xyz").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"handle:12345678901234567").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"console:0").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"console:12a").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"console:99999999999").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"pipe:0x10").kind == CallerSink::Kind::None,
+              "sink env: empty, zero, junk, too long, out of range and unknown kinds all decode to none");
+        CHECK(CallerSink::ParseEnvValue(L"console:").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"console:1,").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"console:,1").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"console:1,,2").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"console:1,0").kind == CallerSink::Kind::None && CallerSink::ParseEnvValue(L"console:1,99999999999").kind == CallerSink::Kind::None &&
+                  CallerSink::ParseEnvValue(L"console:1;2").kind == CallerSink::Kind::None,
+              "sink env: one bad element refuses the whole list");
+        CHECK(CallerSink::ParseEnvValue(CallerSink::FormatHandleEnvValue(0x2bc)).handle == 0x2bc &&
+                  CallerSink::ParseEnvValue(CallerSink::FormatConsoleEnvValue(4321)).pids[0] == 4321,
+              "sink env: the launcher's values round-trip");
+        const std::vector<DWORD> ten{ 1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        CHECK(CallerSink::FormatConsoleEnvValue(std::vector<DWORD>{ 7, 0, 9 }) == L"console:7,9" && CallerSink::FormatConsoleEnvValue(std::vector<DWORD>{}).empty() &&
+                  CallerSink::FormatConsoleEnvValue(DWORD{ 0 }).empty() && CallerSink::FormatConsoleEnvValue(ten) == L"console:1,2,3,4,5,6,7,8",
+              "sink env: a console list skips zeros, writes eight at most, and an empty list writes nothing");
+    }
+
+    // --- the launcher's console candidates: its parent first, then the console's other processes, never itself ---
+    {
+        const std::vector<DWORD> attached{ 50, 40, 30, 20, 0, 40 }; // GetConsoleProcessList's order; 50 = the launcher
+        CHECK((CallerSink::ConsoleCandidates(attached, 50, 30) == std::vector<DWORD>{ 30, 40, 20 }), "candidates: the parent first, then the others in order, self/0/twice skipped");
+        CHECK((CallerSink::ConsoleCandidates(attached, 50, 99) == std::vector<DWORD>{ 40, 30, 20 }), "candidates: a parent not attached to the console is not named");
+        CHECK(CallerSink::ConsoleCandidates(std::vector<DWORD>{ 50 }, 50, 30).empty(), "candidates: a console of the launcher alone names nobody");
+        std::vector<DWORD> crowd;
+        for (DWORD pid = 100; pid < 120; ++pid)
+        {
+            crowd.push_back(pid);
+        }
+        const auto capped = CallerSink::ConsoleCandidates(crowd, 1, 115);
+        CHECK(capped.size() == CallerSink::kMaxConsoleCandidates && capped.front() == 115 && capped[1] == 100, "candidates: eight at most, the parent kept first");
+        const auto decoded = CallerSink::ParseEnvValue(CallerSink::FormatConsoleEnvValue(capped));
+        CHECK(decoded.kind == CallerSink::Kind::Console && decoded.pidCount == capped.size() && std::equal(capped.begin(), capped.end(), decoded.pids.begin()),
+              "candidates: the launcher's list round-trips through the variable");
+    }
+
+    // --- IsInheritedWritable: an inherited-capable pipe end yes; a private one, null and INVALID no ---
+    {
+        SECURITY_ATTRIBUTES inheritable{ sizeof(inheritable), nullptr, TRUE };
+        HANDLE r1 = nullptr, w1 = nullptr, r2 = nullptr, w2 = nullptr;
+        ::CreatePipe(&r1, &w1, &inheritable, 0);
+        ::CreatePipe(&r2, &w2, nullptr, 0);
+        CHECK(CallerSink::detail::IsInheritedWritable(w1), "inherited check: an inheritable pipe end is accepted");
+        CHECK(!CallerSink::detail::IsInheritedWritable(w2), "inherited check: a private (non-inheritable) handle is refused");
+        CHECK(!CallerSink::detail::IsInheritedWritable(nullptr) && !CallerSink::detail::IsInheritedWritable(INVALID_HANDLE_VALUE), "inherited check: null and INVALID are refused");
+        for (const HANDLE h : { r1, w1, r2, w2 })
+        {
+            ::CloseHandle(h);
+        }
+    }
+
+    // --- the sink's real write (a pipe), the Hold, the deferred release ---
+    {
+        HANDLE read = nullptr, write = nullptr;
+        ::CreatePipe(&read, &write, nullptr, 0);
+        CallerSink::detail::UseHandleForTest(write);
+        CHECK(CallerSink::Active(), "sink: a test pipe is active");
+        CallerSink::Write(L"first line\nsecond \x2014 line");
+        CHECK(DrainPipe(read) == "first line\nsecond \xE2\x80\x94 line\n", "sink: UTF-8 with a final newline, lines kept");
+        {
+            const CallerSink::Hold hold;
+            CallerSink::RequestRelease(); // the startup ends while a dialog is open
+            CHECK(CallerSink::Active(), "sink: a release requested while a dialog is open waits for it");
+            CallerSink::Write(L"answered");
+            CHECK(DrainPipe(read) == "answered\n", "sink: the answer is still written");
+        }
+        CHECK(!CallerSink::Active(), "sink: released when the last open dialog closed");
+        CallerSink::Write(L"too late");
+        CHECK(DrainPipe(read).empty(), "sink: nothing is written after the release");
+        ::CloseHandle(write);
+        ::CloseHandle(read);
+    }
+    {
+        // A caller that went away: the write fails and the sink is dropped.
+        HANDLE read = nullptr, write = nullptr;
+        ::CreatePipe(&read, &write, nullptr, 0);
+        CallerSink::detail::UseHandleForTest(write);
+        ::CloseHandle(read);
+        CallerSink::Write(L"nobody reads");
+        CHECK(!CallerSink::Active(), "sink: a broken pipe drops the sink");
+        ::CloseHandle(write);
+        CallerSink::RequestRelease();
+    }
+
+    // --- the launcher's hand-over leaves nothing behind once closed ---
+    {
+        auto forward = CallerSink::PrepareForChild();
+        CallerSink::CloseForward(forward);
+        wchar_t value[8]{};
+        CHECK(::GetEnvironmentVariableW(CallerSink::kEnvVariable, value, ARRAYSIZE(value)) == 0 && forward.inheritable == nullptr && !forward.envSet,
+              "launcher hand-over: CloseForward removes the variable and the handle");
+    }
+
+    // --- the hand-off reply: encode / decode, the cut, the refusals, a real section ---
+    {
+        const HandoffReply::Message m{ L"Windows Terminal", L"Usage: wt [options]\nline two", 4242 };
+        const auto bytes = HandoffReply::Encode(m, HandoffReply::kBytes);
+        const auto back = HandoffReply::Decode(bytes.data(), bytes.size());
+        CHECK(back && back->title == m.title && back->text == m.text && back->pid == 4242, "reply: a message round-trips");
+        // (never name a variable `small`: rpcndr.h, which <shobjidl.h> brings in, #defines it to `char`)
+        const auto tight = HandoffReply::Encode(HandoffReply::Message{ L"T", std::wstring(5000, L'x'), 1 }, sizeof(HandoffReply::Header) + 200 * sizeof(wchar_t));
+        const auto cut = HandoffReply::Decode(tight.data(), tight.size());
+        CHECK(tight.size() <= sizeof(HandoffReply::Header) + 200 * sizeof(wchar_t) && cut && cut->text.ends_with(L"[... cut: the dialog shows the rest]"),
+              "reply: a long text is cut to the section, with a marker");
+        std::vector<std::uint8_t> zero(HandoffReply::kBytes, 0);
+        CHECK(!HandoffReply::Decode(zero.data(), zero.size()), "reply: an untouched (zero) section is no reply");
+        auto bad = bytes;
+        bad[0] ^= 0xFF;
+        CHECK(!HandoffReply::Decode(bad.data(), bad.size()), "reply: a wrong magic is refused");
+        auto lying = bytes;
+        HandoffReply::Header h{};
+        std::memcpy(&h, lying.data(), sizeof(h));
+        h.textChars = 1000000;
+        std::memcpy(lying.data(), &h, sizeof(h));
+        CHECK(!HandoffReply::Decode(lying.data(), lying.size()), "reply: lengths past the end are refused");
+
+        auto none = HandoffReply::Create(false);
+        CHECK(none.name.empty() && !HandoffReply::Read(none), "reply: no channel when nobody can read the echo");
+        auto channel = HandoffReply::Create(true);
+        CHECK(!channel.name.empty() && std::wstring_view{ channel.name }.starts_with(HandoffReply::kNamePrefix), "reply: a channel has our name");
+        CHECK(!HandoffReply::Read(channel), "reply: a fresh channel holds no reply");
+        HandoffReply::Write(L"Local\\SomethingElse", m);
+        CHECK(!HandoffReply::Read(channel), "reply: a name that is not ours is refused by the writer");
+        HandoffReply::Write(channel.name, m);
+        const auto read = HandoffReply::Read(channel);
+        CHECK(read && read->title == m.title && read->text == m.text && read->pid == 4242, "reply: the receiver's write reaches the sender through the section");
+        HandoffReply::Close(channel);
+        CHECK(channel.name.empty() && !HandoffReply::Read(channel), "reply: a closed channel reads nothing");
+    }
+
+    // --- what the dialogs print: message boxes ---
+    CHECK(DialogEcho::MessageBoxChoices(MB_YESNO | MB_DEFBUTTON2) == L"Yes | No (default)", "msgbox: Yes / No, No by default (the profile-in-use box)");
+    CHECK(DialogEcho::MessageBoxChoices(MB_OK) == L"OK (default)", "msgbox: OK");
+    CHECK(DialogEcho::MessageBoxChoices(MB_YESNOCANCEL | MB_DEFBUTTON3) == L"Yes | No | Cancel (default)", "msgbox: the third default");
+    CHECK(DialogEcho::MessageBoxChoices(MB_CANCELTRYCONTINUE) == L"Cancel (default) | Try Again | Continue", "msgbox: Cancel / Try Again / Continue");
+    CHECK(DialogEcho::MessageBoxAnswer(IDYES) == L"Yes" && DialogEcho::MessageBoxAnswer(IDNO) == L"No" && DialogEcho::MessageBoxAnswer(0).starts_with(L"not shown"),
+          "msgbox: answers in words, 0 = not shown");
+    {
+        const auto d = DialogEcho::DescribeMessageBox(L"The profile\n\n    C:\\p\n\nContinue anyway?", L"Agentmaster \x2014 profile in use", MB_YESNO | MB_DEFBUTTON2);
+        CHECK(d.title == L"Agentmaster \x2014 profile in use" && d.lines.size() == 6 && d.lines[2] == L"    C:\\p" && d.lines.back() == L"choices: Yes | No (default)",
+              "msgbox: the text line by line, then the choices");
+        CHECK(DialogEcho::DescribeMessageBox(L"x", nullptr, MB_OK).title == L"Error", "msgbox: no caption = Windows' \"Error\"");
+    }
+
+    // --- what the dialogs print: task dialogs (the update prompt's shape) ---
+    {
+        const TASKDIALOG_BUTTON buttons[] = { { 2001, L"Update now" }, { 2002, L"Postpone" } };
+        const TASKDIALOG_BUTTON radios[] = { { 3000, L"Remind me next restart" }, { 3002, L"Remind me in 3 days" } };
+        TASKDIALOGCONFIG cfg{};
+        cfg.cbSize = sizeof(cfg);
+        cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_ENABLE_HYPERLINKS;
+        cfg.pszWindowTitle = L"Agentmaster";
+        cfg.pszMainInstruction = L"Agentmaster 0.9.0 is available";
+        cfg.pszContent = L"You have 0.8.0.";
+        cfg.pszFooter = L"<a href=\"https://github.com/Nucs/Agentmaster/releases/tag/v0.9.0\">What's new \x2192</a>";
+        cfg.cButtons = 2;
+        cfg.pButtons = buttons;
+        cfg.nDefaultButton = 2001;
+        cfg.cRadioButtons = 2;
+        cfg.pRadioButtons = radios;
+        cfg.nDefaultRadioButton = 3000;
+        cfg.pszVerificationText = L"Don't ask again";
+        const auto d = DialogEcho::DescribeTaskDialog(cfg);
+        const auto has = [&](std::wstring_view line) { return std::find(d.lines.begin(), d.lines.end(), line) != d.lines.end(); };
+        CHECK(d.title == L"Agentmaster" && d.lines.front() == L"Agentmaster 0.9.0 is available", "task dialog: the title, then the main instruction");
+        CHECK(has(L"What's new \x2192 (https://github.com/Nucs/Agentmaster/releases/tag/v0.9.0)"), "task dialog: the footer link as text + URL");
+        CHECK(has(L"button: Update now (default)") && has(L"button: Postpone"), "task dialog: custom buttons, the default marked");
+        CHECK(has(L"(o) Remind me next restart (default)") && has(L"( ) Remind me in 3 days"), "task dialog: radio buttons, the default selected");
+        CHECK(has(L"[ ] Don't ask again"), "task dialog: an unticked check box");
+        CHECK(DialogEcho::TaskDialogAnswer(cfg, S_OK, 2002, 3002, TRUE) == L"Postpone; option: Remind me in 3 days; check box: ticked", "task dialog: button, option and check box");
+        CHECK(DialogEcho::TaskDialogAnswer(cfg, S_OK, IDCANCEL, 3000, FALSE) == L"closed without a choice (Cancel, Esc or X)", "task dialog: Esc / X with no Cancel button");
+        CHECK(DialogEcho::TaskDialogAnswer(cfg, E_FAIL, 0, 0, FALSE) == L"not shown (error 0x80004005)", "task dialog: a failure");
+
+        const TASKDIALOG_BUTTON links[] = { { 1, L"Install just for you\nIn %USERPROFILE%\\.agentmaster\\bin" }, { 2, L"Ask me later" } };
+        TASKDIALOGCONFIG question{};
+        question.cbSize = sizeof(question);
+        question.dwFlags = TDF_USE_COMMAND_LINKS | TDF_VERIFICATION_FLAG_CHECKED;
+        question.pszWindowTitle = L"Agentmaster";
+        question.pszMainInstruction = L"Where should Agentmaster live?";
+        question.cButtons = 2;
+        question.pButtons = links;
+        question.pszVerificationText = L"Remove the app package afterwards";
+        const auto q = DialogEcho::DescribeTaskDialog(question);
+        const auto hasQ = [&](std::wstring_view line) { return std::find(q.lines.begin(), q.lines.end(), line) != q.lines.end(); };
+        CHECK(hasQ(L"button: Install just for you - In %USERPROFILE%\\.agentmaster\\bin (default)") && hasQ(L"button: Ask me later"),
+              "task dialog: a command link's note after a dash; with no explicit default the first button is it");
+        CHECK(hasQ(L"[x] Remove the app package afterwards"), "task dialog: a ticked check box");
+        CHECK(DialogEcho::TaskDialogAnswer(question, S_OK, 1, 0, TRUE) == L"Install just for you; check box: ticked", "task dialog: a command link answers by its label");
+
+        TASKDIALOGCONFIG simple{};
+        simple.cbSize = sizeof(simple);
+        simple.pszWindowTitle = L"Agentmaster";
+        simple.pszMainInstruction = L"Nothing to uninstall here";
+        simple.dwCommonButtons = TDCBF_OK_BUTTON;
+        const auto s = DialogEcho::DescribeTaskDialog(simple);
+        CHECK(s.lines.back() == L"buttons: OK (default)" && DialogEcho::TaskDialogAnswer(simple, S_OK, IDOK, 0, FALSE) == L"OK", "task dialog: common buttons");
+
+        TASKDIALOGCONFIG progress{};
+        progress.cbSize = sizeof(progress);
+        progress.dwFlags = TDF_SHOW_MARQUEE_PROGRESS_BAR;
+        progress.pszWindowTitle = L"Agentmaster";
+        progress.pszMainInstruction = L"Installing Agentmaster\x2026";
+        CHECK(DialogEcho::TaskDialogAnswer(progress, S_OK, IDOK, 0, FALSE) == L"closed", "task dialog: a progress dialog answers \"closed\"");
+        CHECK(DialogEcho::DescribeTaskDialog(TASKDIALOGCONFIG{ sizeof(TASKDIALOGCONFIG) }).title == L"(untitled)", "task dialog: no title");
+    }
+
+    // --- the echo's lines ---
+    {
+        const auto text = DialogEcho::FormatOpened(DialogEcho::Description{ L"T", { L"a", L"", L"b" } }, L"x.exe, pid 1, waits");
+        CHECK(text == L"[agentmaster dialog] opened: T (x.exe, pid 1, waits)\n[agentmaster dialog] | a\n[agentmaster dialog] | \n[agentmaster dialog] | b",
+              "echo: a header, then every line behind the prefix");
+        std::vector<std::wstring> many(500, std::wstring(100, L'y'));
+        const auto long_ = DialogEcho::FormatOpened(DialogEcho::Description{ L"T", many }, L"w");
+        CHECK(long_.size() <= DialogEcho::kMaxEchoChars + 100 && long_.ends_with(L"| [... cut: the dialog shows the rest]"), "echo: cut at the limit, with a marker");
+        CHECK(DialogEcho::FormatAnswered(L"T", L"No") == L"[agentmaster dialog] answered: T: No", "echo: the answer line");
+        CHECK(DialogEcho::StripLinkMarkup(L"plain") == L"plain" && DialogEcho::StripLinkMarkup(L"a <a href=\"u\">t</a> b") == L"a t (u) b" &&
+                  DialogEcho::StripLinkMarkup(L"<a href=\"u\">open") == L"<a href=\"u\">open",
+              "echo: link markup to text, unbalanced markup kept");
+        CHECK(DialogEcho::SplitLines(L"a\r\nb\rc\n").size() == 4 && DialogEcho::SplitLines(L"").empty(), "echo: CRLF, CR and LF all break lines");
+    }
+
+    // --- a wrapper with no sink writes nothing and still answers (the plain call): checked without opening a dialog ---
+    {
+        CHECK(!CallerSink::Active(), "wrapper: no sink is held in the harness after the tests above");
+        CHECK(DialogEcho::ShowTaskDialogIndirect(nullptr, nullptr, nullptr, nullptr) == E_POINTER && DialogEcho::ShowFileDialog(nullptr, nullptr, L"t", L"file") == E_POINTER,
+              "wrapper: a null dialog is refused without a call");
+    }
+
+    // --- the purpose an elevation asks for (PortableInstall.h), as the UAC echo prints it ---
+    CHECK(PortableInstall::ElevationPurpose(L"-InstallMachine -SourceDir \"x\"") == L"install Agentmaster for all users of this PC" &&
+              PortableInstall::ElevationPurpose(L"-UninstallMachine -PortableDir \"x\"") == L"uninstall the Agentmaster installed for all users of this PC" &&
+              PortableInstall::ElevationPurpose(L"-RunAsMainUser") == L"run the Agentmaster install script (-RunAsMainUser)",
+          "UAC echo: what the rights are for, in words");
+}
+
+namespace
+{
+    // The source scanner of TestDialogEchoCoverage: `src` with every comment removed and the content of every string and
+    // character literal (raw strings included) emptied, line breaks kept so line numbers still match. A digit separator
+    // (10'000, 0xFF'FF) is not a character literal; L'x', u'x', U'x' and u8'x' are.
+    //   src     — a source file's bytes (UTF-8).
+    //   returns — the code alone.
+    std::string StripCommentsAndLiterals(std::string_view s)
+    {
+        const auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        const auto isDigitSeparator = [&](size_t i) {
+            if (i == 0)
+            {
+                return false;
+            }
+            const char prev = s[i - 1];
+            if (prev >= '0' && prev <= '9')
+            {
+                // u8'x' is a character literal: '8' after a lone 'u'
+                return !(prev == '8' && i >= 2 && s[i - 2] == 'u' && (i < 3 || !ident(s[i - 3])));
+            }
+            if (std::isxdigit(static_cast<unsigned char>(prev)))
+            {
+                size_t k = i;
+                while (k > 0 && (std::isxdigit(static_cast<unsigned char>(s[k - 1])) || s[k - 1] == '\''))
+                {
+                    --k;
+                }
+                return k >= 2 && s[k - 1] == 'x' && s[k - 2] == '0';
+            }
+            return false;
+        };
+        std::string out;
+        out.reserve(s.size());
+        size_t i = 0;
+        while (i < s.size())
+        {
+            const char c = s[i];
+            if (c == '/' && i + 1 < s.size() && s[i + 1] == '/')
+            {
+                while (i < s.size() && s[i] != '\n')
+                {
+                    ++i;
+                }
+                continue;
+            }
+            if (c == '/' && i + 1 < s.size() && s[i + 1] == '*')
+            {
+                i += 2;
+                while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/'))
+                {
+                    if (s[i] == '\n')
+                    {
+                        out.push_back('\n');
+                    }
+                    ++i;
+                }
+                i = (std::min)(s.size(), i + 2);
+                continue;
+            }
+            const bool rawPrefixOk = i == 0 || !ident(s[i - 1]) ||
+                                     ((s[i - 1] == 'L' || s[i - 1] == 'u' || s[i - 1] == 'U') && (i < 2 || !ident(s[i - 2]))) ||
+                                     (i >= 2 && s[i - 2] == 'u' && s[i - 1] == '8' && (i < 3 || !ident(s[i - 3])));
+            if (c == 'R' && i + 1 < s.size() && s[i + 1] == '"' && rawPrefixOk)
+            {
+                const size_t open = s.find('(', i + 2);
+                if (open != std::string_view::npos && open - (i + 2) <= 16)
+                {
+                    const std::string close = ")" + std::string{ s.substr(i + 2, open - (i + 2)) } + "\"";
+                    const size_t end = s.find(close, open + 1);
+                    const size_t stop = end == std::string_view::npos ? s.size() : end + close.size();
+                    out += "R\"\"";
+                    for (size_t k = i; k < stop; ++k)
+                    {
+                        if (s[k] == '\n')
+                        {
+                            out.push_back('\n');
+                        }
+                    }
+                    i = stop;
+                    continue;
+                }
+            }
+            if (c == '"' || (c == '\'' && !isDigitSeparator(i)))
+            {
+                ++i;
+                while (i < s.size() && s[i] != c && s[i] != '\n')
+                {
+                    if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] != '\n')
+                    {
+                        ++i;
+                    }
+                    ++i;
+                }
+                if (i < s.size() && s[i] == c)
+                {
+                    ++i;
+                }
+                out.push_back(c);
+                out.push_back(c);
+                continue;
+            }
+            out.push_back(c);
+            ++i;
+        }
+        return out;
+    }
+
+    // The direct dialog calls in one stripped source: a call of a Win32 dialog function (the message boxes and task
+    // dialogs DialogEcho.h wraps, and the other families no product code uses today, so that a new one fails the suite
+    // until it gets a wrapper: the common file / folder / color / font / print dialogs, the shell's message boxes,
+    // resource dialogs, the credential prompts), and — in a file that uses a file dialog — a `->Show(` / `.Show(` call.
+    //   code             — StripCommentsAndLiterals' output.
+    //   fileDialogsHere  — the file names IFileDialog / IFileOpenDialog / IFileSaveDialog / FileOpenDialog in code.
+    //   returns          — "line N: <identifier>" per hit.
+    std::vector<std::string> FindDirectDialogCalls(std::string_view code, bool fileDialogsHere)
+    {
+        static const std::set<std::string, std::less<>> kForbidden = {
+            // wrapped by DialogEcho.h
+            "MessageBox", "MessageBoxA", "MessageBoxW", "MessageBoxEx", "MessageBoxExA", "MessageBoxExW", "MessageBoxIndirect", "MessageBoxIndirectA",
+            "MessageBoxIndirectW", "MessageBoxTimeout", "MessageBoxTimeoutA", "MessageBoxTimeoutW", "TaskDialog", "TaskDialogIndirect",
+            // not used by any product code (2026-10-23): a first use needs a wrapper in DialogEcho.h
+            "ShellMessageBox", "ShellMessageBoxA", "ShellMessageBoxW", "SHMessageBoxCheck", "SHMessageBoxCheckA", "SHMessageBoxCheckW",
+            "GetOpenFileName", "GetOpenFileNameA", "GetOpenFileNameW", "GetSaveFileName", "GetSaveFileNameA", "GetSaveFileNameW",
+            "SHBrowseForFolder", "SHBrowseForFolderA", "SHBrowseForFolderW", "ChooseColor", "ChooseColorA", "ChooseColorW",
+            "ChooseFont", "ChooseFontA", "ChooseFontW", "PrintDlg", "PrintDlgA", "PrintDlgW", "PrintDlgEx", "PrintDlgExA", "PrintDlgExW",
+            "PageSetupDlg", "PageSetupDlgA", "PageSetupDlgW", "PickIconDlg", "DialogBox", "DialogBoxA", "DialogBoxW", "DialogBoxParam",
+            "DialogBoxParamA", "DialogBoxParamW", "DialogBoxIndirect", "DialogBoxIndirectA", "DialogBoxIndirectW", "DialogBoxIndirectParam",
+            "DialogBoxIndirectParamA", "DialogBoxIndirectParamW", "CredUIPromptForCredentials", "CredUIPromptForCredentialsA",
+            "CredUIPromptForCredentialsW", "CredUIPromptForWindowsCredentials", "CredUIPromptForWindowsCredentialsA",
+            "CredUIPromptForWindowsCredentialsW"
+        };
+        const auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        std::vector<std::string> hits;
+        size_t line = 1;
+        for (size_t i = 0; i < code.size(); ++i)
+        {
+            if (code[i] == '\n')
+            {
+                ++line;
+                continue;
+            }
+            if (!ident(code[i]) || (i > 0 && ident(code[i - 1])))
+            {
+                continue;
+            }
+            size_t j = i;
+            while (j < code.size() && ident(code[j]))
+            {
+                ++j;
+            }
+            const std::string_view id = code.substr(i, j - i);
+            size_t k = j;
+            while (k < code.size() && (code[k] == ' ' || code[k] == '\t'))
+            {
+                ++k;
+            }
+            const bool call = k < code.size() && code[k] == '(';
+            if (call && kForbidden.contains(id))
+            {
+                hits.push_back("line " + std::to_string(line) + ": " + std::string{ id });
+            }
+            else if (call && fileDialogsHere && id == "Show" && i >= 1 && (code[i - 1] == '.' || (i >= 2 && code[i - 2] == '-' && code[i - 1] == '>')))
+            {
+                hits.push_back("line " + std::to_string(line) + ": Show (a file dialog)");
+            }
+            i = j - 1;
+        }
+        return hits;
+    }
+}
+
+// Agentmaster (CLI.md §2b, the user's "make sure"): no product source calls a dialog API directly; every dialog goes
+// through DialogEcho.h, so it is echoed to the console of the command that caused it. Scans src\cascadia of the
+// repository this harness was built in (found from the exe's own path; a copy outside a checkout skips the scan), after
+// testing the scanner itself. A direct call fails the suite with its file and line.
+void TestDialogEchoCoverage()
+{
+    std::wprintf(L"Dialog echo coverage (no direct dialog call in src\\cascadia):\n");
+
+    // --- the scanner: comments and literals never count, digit separators and raw strings are handled ---
+    CHECK(StripCommentsAndLiterals("a // MessageBoxW(x)\nb") == "a \nb", "scanner: a line comment goes, the line break stays");
+    CHECK(StripCommentsAndLiterals("a /* MessageBoxW(\n) */ b") == "a \n b", "scanner: a block comment goes, its line breaks stay");
+    CHECK(StripCommentsAndLiterals("f(L\"MessageBoxW(\", 'x', L'\"', u8'y');") == "f(L\"\", '', L'', u8'');", "scanner: string and character literal contents go");
+    CHECK(StripCommentsAndLiterals("x = 10'000'000ULL; y = 0xFF'FF; z = MessageBoxW(n);") == "x = 10'000'000ULL; y = 0xFF'FF; z = MessageBoxW(n);",
+          "scanner: digit separators are not literals");
+    CHECK(StripCommentsAndLiterals("s = LR\"ps(MessageBoxW( \" ' \n)ps\"; t();") == "s = LR\"\"\n; t();", "scanner: a raw string with quotes and a line break goes");
+    CHECK(StripCommentsAndLiterals("\"a \\\" // b\" c") == "\"\" c", "scanner: an escaped quote does not end the string, // inside it is no comment");
+
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("void f(){ ::MessageBoxW(nullptr, L\"x\", L\"y\", 0); }"), false).size() == 1,
+          "finder: a direct MessageBoxW call is found (negative control)");
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("h = TaskDialogIndirect (&c, 0, 0, 0);\nTaskDialog(0,0,0,0,0,0,0,0);"), false).size() == 2, "finder: both task dialog calls");
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("GetOpenFileNameW(&ofn); SHBrowseForFolderW(&bi); DialogBoxParamW(i, t, o, p, 0);"), false).size() == 3,
+          "finder: the dialog families with no wrapper yet are refused too");
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("DialogEcho::ShowMessageBox(o, t, c, 0); ShowTaskDialogIndirect(p, 0, 0, 0); MyMessageBoxW(x);"), false).empty(),
+          "finder: the wrappers and other names are fine");
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("dlg->Show(owner);"), true).size() == 1 && FindDirectDialogCalls(StripCommentsAndLiterals("notifier.Show(toast);"), false).empty(),
+          "finder: Show counts only in a file that uses a file dialog");
+    CHECK(FindDirectDialogCalls(StripCommentsAndLiterals("// MessageBoxW() is a blocking call\nint MessageBoxWidth = 3;"), false).empty(), "finder: comments and look-alike names");
+
+    // --- the repository: from this exe up to the folder that holds OpenConsole.slnx ---
+    wchar_t self[MAX_PATH * 2]{};
+    ::GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
+    std::error_code ec;
+    std::filesystem::path root = std::filesystem::path{ self }.parent_path();
+    while (!root.empty() && !std::filesystem::exists(root / L"OpenConsole.slnx", ec) && root.has_parent_path() && root.parent_path() != root)
+    {
+        root = root.parent_path();
+    }
+    if (root.empty() || !std::filesystem::exists(root / L"OpenConsole.slnx", ec) || !std::filesystem::is_directory(root / L"src" / L"cascadia", ec))
+    {
+        std::wprintf(L"  (scan skipped: this harness was not built inside a repository checkout)\n");
+        return;
+    }
+
+    // Allowed direct calls, each with its reason. A stale entry fails, so it is removed with the file.
+    const std::pair<std::wstring, const char*> allowed[] = {
+        { L"TerminalApp\\AgentMaster\\DialogEcho.h", "the wrappers themselves" },
+        { L"WinRTUtils\\inc\\Utils.h", "upstream Windows Terminal's settings-editor file picker: opened only from the running app's settings UI, which no command line reaches, after the startup released the caller's console" },
+    };
+    const std::filesystem::path cascadia = root / L"src" / L"cascadia";
+    size_t scanned = 0;
+    size_t violations = 0;
+    for (const auto& [rel, reason] : allowed)
+    {
+        CHECK(std::filesystem::exists(cascadia / rel, ec), "coverage: every allowlisted file still exists");
+        (void)reason;
+    }
+    for (auto it = std::filesystem::recursive_directory_iterator{ cascadia, std::filesystem::directory_options::skip_permission_denied, ec };
+         it != std::filesystem::recursive_directory_iterator{};
+         it.increment(ec))
+    {
+        if (ec)
+        {
+            break;
+        }
+        const auto& path = it->path();
+        if (it->is_directory(ec))
+        {
+            const auto name = path.filename().wstring();
+            // Generated headers (thousands of winrt projections), build output, and the tests (they spell the APIs).
+            if (name == L"Generated Files" || name == L"obj" || name == L"bin" || (name == L"tests" && path.parent_path().filename() == L"AgentMaster"))
+            {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+        const auto ext = path.extension().wstring();
+        if (ext != L".cpp" && ext != L".h" && ext != L".hpp")
+        {
+            continue;
+        }
+        const auto relative = std::filesystem::relative(path, cascadia, ec).wstring();
+        bool allowedFile = false;
+        for (const auto& [rel, reason] : allowed)
+        {
+            allowedFile = allowedFile || _wcsicmp(relative.c_str(), rel.c_str()) == 0;
+        }
+        std::ifstream in{ path, std::ios::binary };
+        const std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
+        ++scanned;
+        if (allowedFile)
+        {
+            continue;
+        }
+        const std::string code = StripCommentsAndLiterals(bytes);
+        const bool fileDialogs = code.find("IFileDialog") != std::string::npos || code.find("IFileOpenDialog") != std::string::npos ||
+                                 code.find("IFileSaveDialog") != std::string::npos || code.find("FileOpenDialog") != std::string::npos;
+        for (const auto& hit : FindDirectDialogCalls(code, fileDialogs))
+        {
+            ++violations;
+            std::wprintf(L"  direct dialog call (use DialogEcho.h): src\\cascadia\\%ls %S\n", relative.c_str(), hit.c_str());
+        }
+    }
+    CHECK(scanned > 300, "coverage: the scan read the source tree");
+    CHECK(violations == 0, "coverage: every dialog in src\\cascadia goes through DialogEcho.h (or is allowlisted with a reason)");
 }

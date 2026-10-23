@@ -109,6 +109,137 @@ and writes to the console). In those shells type **`agentmaster-cli <verb>`**, t
 the same folder on PATH. The table's last row was not run live: it would open a window on the
 user's screen.
 
+## 2b. Every dialog is echoed to the command's console (2026-10-23, NOT BUILT)
+
+**Why.** In the §2a incident the "profile in use" dialog appeared on the user's screen, and the
+Claude session that typed the command read nothing about it in its output. The user's request of
+2026-10-23: every dialog Agentmaster opens is also written to the console of the command that
+started the process, so a command that makes a dialog appear says so where it ran.
+
+**What a dialog prints.** Before the dialog shows: its title, its text line by line, its choices.
+Once it is answered: the answer. Every line starts with `[agentmaster dialog] `, so a reader (an
+agent, `grep`) finds these lines among the command's output:
+
+```
+[agentmaster dialog] opened: Agentmaster — profile in use (Agentmaster.exe, pid 1234, waits for an answer on the desktop)
+[agentmaster dialog] | The profile
+[agentmaster dialog] |
+[agentmaster dialog] |     C:\Users\<user>\.agentmaster
+[agentmaster dialog] |
+[agentmaster dialog] | is already in use by another running Agentmaster instance (...)
+[agentmaster dialog] | choices: Yes | No (default)
+[agentmaster dialog] answered: Agentmaster — profile in use: No
+```
+
+- A **task dialog** (the update prompt, the install question) lists each button (`button: Update now
+  (default)`; a command link's note follows a dash), each option (`(o) Remind me next restart
+  (default)`, `( ) Remind me in 3 days`), its check box (`[x]` / `[ ]`), its collapsed details and its
+  footer links as text plus URL. The answer names the button, the option and the check box
+  (`answered: Agentmaster: Postpone; option: Remind me in 3 days`). A progress dialog answers `closed`.
+- A **file or folder picker** prints its title and `choices: pick a folder | Cancel`, and answers
+  `chosen: <path>` or `cancelled`.
+- A **UAC prompt** our code asks for (the install for all users, its uninstall, PROFILES.md §2b)
+  prints `opened: User Account Control` with what the rights are for, and answers `approved`,
+  `declined` or `refused: a policy forbids this account to elevate`.
+- A dialog that could not open answers `not shown (...)`. One dialog's echo is cut at 8,000
+  characters with a marker: a pipe nobody reads blocks its writer once it is full.
+
+**Where the lines go: the caller sink** (`AgentMaster/CallerSink.h`). `wWinMain` captures it right
+after the CLI check (§2a), before the first dialog can open. The first of three sources that exists
+wins:
+
+1. **The launcher's hand-over.** The package's alias runs the console launcher (`wt/shim.cpp`), which
+   starts `Agentmaster.exe` and exits at once, so the app cannot find the caller by itself. The
+   launcher names the caller's sink in `AGENTMASTER_CALLER_SINK`. A pipe or a file on stderr is passed
+   as one inheritable duplicate (`handle:0x…`, the only handle in the start's
+   `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so nothing else is inherited, as before). A console is passed
+   as up to 8 processes attached to it, the launcher's parent first (`console:<pid>,<pid>…`). The app
+   reads and removes the variable at once, so no child of the app ever sees it.
+2. **The standard handles the caller passed** (`STARTF_USESTDHANDLES`): stderr, else stdout, but only
+   a handle this process really inherited (`HANDLE_FLAG_INHERIT` set, a pipe, a disk file or a
+   character device).
+3. **The parent's console**, attached for each write: `AttachConsole(parent)`, `CONOUT$`,
+   `WriteConsoleW`, `FreeConsole`, with a Ctrl+C / Ctrl+Break handler for those milliseconds, so a key
+   pressed in that console cannot end the app.
+
+A pipe or a file gets UTF-8, a console gets `WriteConsoleW` (right in any console code page). Every
+handle the sink keeps is a private, non-inheritable duplicate, and a console sink holds a
+`SYNCHRONIZE` handle on each process it may attach through, accepted only when that process is older
+than the app, so a reused process id can never receive the text.
+
+**How long.** The sink belongs to the command, not to the app: `WindowEmperor` releases it where the
+startup ends (before the message loop). A dialog still open then keeps it (`CallerSink::Hold`) until
+its answer is written. Kept longer, a caller that reads the pipe to its end (bash `$(...)`, Claude
+Code's Bash tool) would wait for the whole life of the app.
+
+**A command line handed to the running app.** When another instance already runs, the new process
+hands its command line over (`WM_COPYDATA`) and exits, and a dialog that line causes (Windows
+Terminal's `--help` / `--version` box, a command-line error) opens in the RUNNING app. The sender
+creates a small named section (`Local\AgentmasterHandoffReply-<pid>-<tick>`, 64 KB) and names it in
+the payload as an optional fifth field. The receiver writes the dialog's title and text into it
+before its `WM_COPYDATA` handler returns, and the sender echoes it, with a line saying the running
+app shows the dialog and that its answer is not reported. An older receiver ignores the field, and
+nothing is echoed.
+
+**Enforced.** No code calls `MessageBoxW`, `TaskDialog`, `TaskDialogIndirect` or `IFileDialog::Show`
+directly: it calls the wrappers in `AgentMaster/DialogEcho.h` (`ShowMessageBox`, `ShowTaskDialog`,
+`ShowTaskDialogIndirect`, `ShowFileDialog`, `ShellExecuteWithEcho`). The m5 test
+`TestDialogEchoCoverage` scans every `.cpp` / `.h` under `src\cascadia` of the checkout it was built
+in, with comments and string literals stripped, and fails on a direct call. It also fails on any
+other Win32 dialog family (the common file / folder / color / font / print dialogs, the shell's
+message boxes, resource dialogs, the credential prompts): none is used today, and a first use needs a
+wrapper. Two files are allowed, each with its reason: `DialogEcho.h` (the wrappers) and upstream's
+`WinRTUtils\inc\Utils.h` (the settings editor's file picker, opened only from the running app's UI).
+
+**What is echoed.** Every Win32 dialog of the app exe's startup: the architecture mismatch box, the
+portable copy's install question, its progress dialog, its errors, the uninstall confirmation and
+"Nothing to uninstall here", the profile picker and its folder browser, "profile in use", the update
+prompt, "Reopen your N previous windows?", Windows Terminal's `--help` / `--version` / command-line
+error box, and the UAC prompt of the install or uninstall for all users.
+
+**What is not echoed, and why.**
+
+- **The running app's own UI**: every dialog it opens after the startup, such as the hourly update
+  prompt and the XAML dialogs inside a window (the settings load warnings, the close and quit
+  confirmations, the Sessions page's questions, the Settings cog). They open after the startup
+  released the sink, so no command waits on them. The Settings cog's message boxes and pickers go
+  through the wrappers too, but `TerminalApp.dll` keeps its own copy of the sink state (an inline
+  function's static is per binary) and never captures one.
+- **UAC prompts that helper processes ask for**: `elevate-shim.exe` (upstream's helper that opens a
+  tab whose profile asks for administrator rights; the running app starts it after the startup) and
+  the update script's own elevation (`am-update.ps1`, after the app quit).
+- **A caller with nothing to write to**: the Run box, a shortcut, our own reopen `ShellExecute` (no
+  console and no handles). A caller that discarded stderr (`2>nul`) gets what it asked for.
+- **A console caller that does not wait** (an interactive cmd.exe, PowerShell's own console): the
+  lines still reach its console, after its next prompt.
+
+**Measured** (2026-10-23, the probe kit `tools/dialog-echo-probe`: a GUI stand-in compiled on the
+real headers opens REAL dialogs on a hidden desktop, `WinSta0\AgentmasterDialogProbe`, where each
+answers itself; eleven checks, three runs, no failure):
+
+- pipe caller: a message box, a task dialog with buttons, options and a footer link, a dialog still
+  open when the release is requested, no dialog → no output;
+- console caller: an interactive cmd.exe's way (no handles: the GUI attaches to its parent's
+  console), a caller that passes the console's handles explicitly (a GUI process cannot use them:
+  step 2 refuses them, and step 3 still lands in the console), and PowerShell 7 with the output piped
+  on (stderr the console, refused; stdout PowerShell's pipe, which gets the lines);
+- the REAL launcher shim (`wt/shim.cpp`, compiled by the kit) with a pipe caller and with a console
+  caller, and `cmd /c <shim>`;
+- no probe process left running.
+
+The facts the design rests on, each measured with a probe:
+
+- a `CONOUT$` handle opened while attached is dead after `FreeConsole` (error 6), so a console sink
+  attaches for each write;
+- a console handle passed to a GUI process is unusable (`HANDLE_FLAG_INHERIT` clear, file type 0,
+  both write calls fail with error 6), also when the caller made it inheritable;
+- cmd.exe passes its standard handles to its children by inheritance. PowerShell 7 passes none when
+  the output is not piped on (like cmd.exe), and with `| Out-String` passes stdin and stderr as the
+  console's handles and stdout as its pipe;
+- under `cmd /c agentmaster ...` the launcher's parent, the cmd.exe, exits as soon as the launcher
+  did, before the app writes. A hand-over naming that one process lost every line, hence the list of
+  processes attached to the console.
+
 ## 3. Data sources: read from state that already exists
 
 The Fleet Observer already proved the entire live picture is derivable **purely out-of-band** — PEB
@@ -372,6 +503,10 @@ beats none).
   defterm (`-Embedding`), reopen (`-w -s`), and bare launch must all behave exactly as before.
 - **A CLI call never starts the app**, from the shim or from the app exe itself (§2a), also when the
   CLI cannot be started; every other command line reaches the app exactly as before.
+- **Every dialog goes through `DialogEcho.h`** (§2b), so it is echoed to the console or pipe of the
+  command that caused it while the startup lasts; `TestDialogEchoCoverage` fails on a direct dialog
+  call. The sink is released when the startup ends (or when the last echoed dialog was answered), so
+  the app never holds the caller's pipe open.
 - **One profile, resolved once, headless-safe** (Rule #15) — the CLI reads through
   `AgentmasterStateDir()`; it never shows UI and never re-homes state.
 
