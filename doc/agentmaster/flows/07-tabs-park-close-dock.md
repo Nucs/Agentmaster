@@ -334,11 +334,15 @@ would not start. With a CLAUDE tab focused at the quit only that tab starts (che
 the shells' startup batch, after the shells exist; until then the first Claude tab is the selected, SHOWN tab, and a
 shown terminal starts. **Expected:** only the focused tab (and busy ones, INT-04) start (TAB-10 E1).
 
-### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place — FIXED in code 2026-10-23 (NOT BUILT into a release)
+### TAB-K4 · Shift+Click on a parked tab switches to it instead of starting it in place — FIXED in code 2026-10-23, verified on a test build (NOT BUILT into a release)
 > **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (its known-defect test, replaced by
 > `e2e/suites/test_tab_lifecycle.py::test_shift_click_on_a_parked_tab_starts_it_in_place`, `needs_fix`). **The fix:**
-> the tab's press handler receives the left press, and the Shift+Click keeps its release from selecting the tab.
-> What it was on 0.8.0:
+> the tab's press handler receives the left press, and the Shift+Click keeps its release from selecting the tab
+> (c039d73f1). **Verified** on the test build 0.8.1.1 (a purged Release build of HEAD c0dcc2504 + the working tree at
+> 18:25, whose `TerminalApp.dll` holds the fix; never installed on this PC): in the full-suite run `fixall-0811`
+> (desktop `am-fixcheck-0811`; finished 2026-10-23 20:53:52) the test passed in 84 s — the parked tab started in place, the
+> selection and the keyboard stayed on t2, no `tab-focus`, and a second Shift+Click started nothing. On 0.8.0 the same
+> test fails as designed (run `nf-080`: `[nav] tab-focus <sid8>`, no `activate-dormant`). What it was on 0.8.0:
 
 The tab menu names the gesture — "Activate Tab (Shift+Click)", tooltip "You can also Shift+Click the tab to do this" —
 but a Shift+Click on a parked (or restored-dormant) tab SELECTS it: `[nav] tab-focus <sid8>`, the page or the tab you
