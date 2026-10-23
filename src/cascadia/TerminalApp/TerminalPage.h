@@ -968,6 +968,10 @@ namespace winrt::TerminalApp::implementation
         // Claude tab would degrade to an anonymous Other ref) over that good record. Stays false on the
         // quit-all path for the NON-initiating windows — they are torn down straight through the
         // destructor with no per-window close, so the destructor is their only flush seam.
+        // Agentmaster (flows TAB-K1): once set, NOTHING writes the record again — _FlushWindowRecord refuses (and
+        // logs `[window-save] <id> late save refused`) and _ScheduleWindowRecordSave arms no autosave, because an
+        // autosave still pending at the close used to fire after the archive and save the Claude tabs as shells.
+        // Set only after the user's final decision, so a window that stays open never stops saving.
         bool _windowRecordTeardownFlushed{ false };
         // Agentmaster (M10 Increment 3): the Emperor-assigned record id for a multi-window restore,
         // set by TerminalWindow before _OnFirstLayout. Empty => single-window (claim the front record).

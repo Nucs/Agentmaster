@@ -253,27 +253,75 @@ that was focused selected, and only that tab (and a busy one, INT-04) started.
 **Edge cases**
 - **E1 A shell tab focused at the quit** → the reopen selects the shell, and NO Claude tab starts (today the first
   Claude tab starts: TAB-K2).
-- **E2 A tab switch, a rename or a resize just before the close** → the record still holds the Claude refs (TAB-K1:
-  seen degraded once).
-- **E3 Several windows** → **Close Window** on one keeps its record for **Reopen Windows (N)**; the next start reopens
-  the windows that were open at the quit ("Reopen your N previous Agentmaster windows?", Yes / No).
+- **E2 A tab switch, a rename or a resize just before the close** → the record still holds the Claude refs, and
+  nothing writes it after the close's own save (TAB-K1: on 0.8.0 the autosave such a change armed could fire after
+  the close archived the sessions and save every Claude tab as a shell; fixed in code 2026-10-23).
+- **E3 Several windows** → **Close Window** on one keeps its record for **Reopen Windows (N)**, also with a tab switch
+  just before the close (E2); the next start reopens the windows that were open at the quit ("Reopen your N previous
+  Agentmaster windows?", Yes / No).
 
 ---
 
 ## Known defects (expected failures until fixed)
 
-### TAB-K1 · A close can save the window's Claude tabs as plain shell tabs (intermittent)
+### TAB-K1 · A close can save the window's Claude tabs as plain shell tabs — FIXED in code 2026-10-23 (NOT BUILT into a release)
 > **P0** · Seen once by the e2e suite on 2026-10-23 against 0.8.0 (run5, the restart test; 5 later attempts kept the
-> refs) · evidence: the test's hooks.log and `windows\<id>.json`
+> refs), then REPRODUCED on 0.8.0 the same day (run tabk1-repro3: 3 of 9 closes) by
+> `e2e/suites/test_workspace.py::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs` and
+> `…::test_closing_one_of_two_windows_keeps_its_claude_tab` (`needs_fix("TAB-K1")`) · evidence: each case's
+> `close-timeline.json`, hooks.log and `windows\<id>.json`
 
-After **Close Window** the record held `[Other, Other]` for a shell and a Claude tab (the Claude tab as an anonymous
-shell with a `renameTab "alpha"` action), so the next start reopened it as a PowerShell tab titled `alpha`; the
-session itself was kept (sessions.json, resumable from Sessions). hooks.log: `[nav] window-close confirmed` →
-`[teardown-archive] <id>` → **67 ms later** `[window-save] … tabs=2 [sh,sh,]`. **By reading:** `CloseWindow` flushes
-the record and sets `_windowRecordTeardownFlushed` before `_ArchiveWindowSessionsOnTeardown`, but
-`_FlushWindowRecord` — also the body of the throttled autosave (`_saveWindowRecordThrottled`) — never checks that
-latch, so an autosave that fires after the archive captures the archived tabs as Other refs and overwrites the close
-flush. **Expected:** nothing overwrites the record after the teardown flush (TAB-10 E2).
+**What it was on 0.8.0.** After **Close Window** the record held `[Other, Other]` for a shell and a Claude tab (the
+Claude tab as an anonymous shell with a `renameTab "alpha"` action), so the next start reopened it as a PowerShell tab
+titled `alpha`; the session itself was kept (sessions.json, resumable from Sessions). hooks.log: `[nav] window-close
+confirmed` → `[teardown-archive] <id>` → **67 ms later** `[window-save] … tabs=2 [sh,sh,]`.
+
+**The cause.** `CloseWindow` (like every teardown seam) flushes the record, sets `_windowRecordTeardownFlushed` and
+then archives the window's sessions (`_ArchiveWindowSessionsOnTeardown`), which empties `_claudeTabs`. But the close
+is only POSTED to the emperor (`AppHost::_CloseRequested` → `WM_CLOSE_TERMINAL_WINDOW`), so the page and its 750 ms
+autosave (`_saveWindowRecordThrottled`, restarted by every tab switch, tab add or remove, resize and lens change) live
+a little longer, and `_FlushWindowRecord` — the autosave's body — never checked the latch. An autosave still pending at
+the close therefore captured the window after the archive, read every Claude tab as an anonymous shell
+(`_ClaudeSessionForTab` found no session) and saved that over the close's good record. A window that is one of
+several loses what **Reopen Windows (N)** brings back too: `UnregisterLiveWindow` reads the record from DISK into the
+reclaimable pool.
+
+**Reproduced** (2026-10-23, 0.8.0, Claude Code 2.1.291, a claude-fleet Windows 11 desktop). The ✕ opens "Close this
+window?" about a second after the click, so a tab switch made BEFORE the ✕ always lands its save first (run
+tabk1-repro: the dialog was found 0.85–1.6 s after the switch). The tests open the dialog first, switch tabs under it
+through UI Automation (`[nav] tab-focus <sid8>` marks the moment the autosave restarted) and invoke **Close Window** a
+chosen time after the switch; each case's `close-timeline.json` holds the times read off hooks.log's stamps:
+
+| Close | Close Window invoked after the switch | Archived after the switch | The save fell due | Result |
+|---|---|---|---|---|
+| The only window (the app quits) | 250 ms | 521 ms | 229 ms after the archive | no late save; refs kept |
+| | 325 ms | 588 ms | 162 ms after | no late save; refs kept |
+| | 400 ms | 655 ms | 95 ms after | no late save; refs kept |
+| | 475 ms | 720 ms | 30 ms after | **saved 95 ms after the archive: `[sh,sh,sh,]`** |
+| | 550 ms | 784 ms | 34 ms before | saved before the archive; refs kept |
+| One of two windows (the app stays) | — (a quiet close, 1.93 s) | 2,191 ms | long before | refs kept |
+| | 325 ms | 578 ms | 172 ms after | no late save; refs kept |
+| | 400 ms | 694 ms | 56 ms after | **saved 76 ms after the archive: `[sh,sh,]`** |
+| | 475 ms | 762 ms | 12 ms before | **the busy close delayed it to 2 ms after the archive: `[sh,sh,]`** |
+
+So a save falls into the gap when it is due between the archive and about 80 ms after it; a later one never fired (the
+window, or the whole app, was gone first). Which cases hit moves with the machine's speed, which is why the suite
+sweeps the moment.
+
+**The fix** (`TerminalPage.AgentWindowRecord.cpp`; not in a release): the teardown flush is the window's LAST write.
+Once `_windowRecordTeardownFlushed` is set, `_FlushWindowRecord` refuses to write and logs `[window-save] <id> late
+save refused: …` (how a run tells that a late save existed and was stopped), and `_ScheduleWindowRecordSave` arms
+nothing (the archive's own registry notifications are such triggers). Every seam sets the latch only after the user's
+final choice (a cancelled close or quit returns before it) and only after its flush, so a window that stays open keeps
+saving. **Expected** (and what the two sweeps check): every case keeps the Claude refs and the focused session
+(TAB-10 E2, E3).
+
+**Verified** (2026-10-23, run tabk1-verify2): a TEST build of the working tree with the fix (a purged Release build,
+packaged as a portable zip stamped 0.8.1.1; never installed on the PC) passed all 9 cases of the two sweeps, the quit
+test, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant` and `test_tab_lifecycle.py::
+test_a_parked_tab_starts_in_place_and_survives_a_restart` (12 of 12). Three cases met the very gap that broke 0.8.0 —
+the last window's close with the save due 8 ms after the archive, and the closes of one of two windows with it due
+42 and 108 ms after — and each logged `late save refused` (67, 74 and 119 ms after the archive) with the refs intact.
 
 ### TAB-K2 · A reopen whose focused tab was a shell starts the first Claude tab
 > **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_tab_menu.py`

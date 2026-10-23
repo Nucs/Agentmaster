@@ -9,7 +9,7 @@
 > park, wake, Deactivate's scopes, Close of a folder across windows, closing onto dormant tabs) — run against the
 > published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop: 49 tests,
 > 49 green in 37 min. On its first day the suite found ten defects of 0.8.0 — MGR-K1, SP-K1, SP-K2,
-> TCM-K1, TCM-K2, TAB-K1 (seen once), TAB-K2, TAB-K3, TAB-K4, ROB-K1 — kept as known-defect tests where they
+> TCM-K1, TCM-K2, TAB-K1 (fixed in code that day), TAB-K2, TAB-K3, TAB-K4, ROB-K1 — kept as known-defect tests where they
 > reproduce, and replaced by a `needs_fix` test that proves the fix once a defect is fixed in code (TCM-K2: fixed
 > 2026-10-23, not in a release — `test_tab_menu.py::test_tags_from_the_tab_menu_take_the_keyboard`, flows/23). How
 > to run it and how to write a scenario:

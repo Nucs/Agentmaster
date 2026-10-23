@@ -24,6 +24,7 @@ would write into the next test's mock log — and reported, because on a user's 
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -81,7 +82,14 @@ def find_agentmaster_pids(exe: Optional[Path] = None, image: str = "Agentmaster.
 
 
 def _safe_name(name: str) -> str:
-    """A folder-safe version of a test name.
+    """A folder-safe version of a test name, different for different names.
+
+    A name that fits in 60 characters is only cleaned. A longer one keeps its first 51 characters and 8 hex digits
+    of a hash of the whole name: a parametrized test's id ("[700]") sits at the END, which a plain cut dropped, so
+    every case of a long test shared one folder, and a case's setup could not empty the folder its predecessor's
+    processes were still letting go (WinError 145 "The directory is not empty", 2026-10-23). The 60-character bound
+    stays: the name appears twice in a Claude transcript's path (the config folder, then the encoded work folder).
+    host/e2e_run.py's safe_name repeats this rule — keep the two in step.
 
     Args:
         name: Any text (a pytest node name).
@@ -89,7 +97,9 @@ def _safe_name(name: str) -> str:
         Letters, digits, '-', '_' and '.' only, at most 60 characters.
     """
     out = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
-    return out[:60].strip("_") or "test"
+    if len(out) <= 60:
+        return out.strip("_") or "test"
+    return out[:51].strip("_") + "-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
 @dataclass
