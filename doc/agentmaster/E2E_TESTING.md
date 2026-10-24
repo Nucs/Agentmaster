@@ -65,6 +65,18 @@
 > takes no interrupt hold, so the runner sends the next queued prompt once the status has settled; the owner
 > decides).
 >
+> **The Prompt Queue Runner and Claude's life cycle (2026-10-24):** `e2e/suites/test_prompt_queue_runner.py` (26 tests,
+> flows/03 — §10's ladder, numbered by the flows) and `e2e/suites/test_claude_lifecycle.py` (7 tests, the new
+> [`flows/24-claude-lifecycle.md`](flows/24-claude-lifecycle.md): a launch, `/exit`, a kill, Close and Resume here, a
+> claude typed into a shell tab, a never-prompted session's restart, `/clear`, each with the runner around it), with
+> page objects for the Prompt Queue tab, the per-tab badge and the Sessions page — at the production timings. On 0.8.0
+> all 33 pass (runs `pqr1`, then `pqr2` for the 8 corrected on the way). They found two defects — PQR-K6 (Restart
+> session starts no settle window: a held prompt goes 8 s after the restart) and PQR-K7 (`/clear` leaves the tab's queue
+> with the old conversation; the owner decides) — and reproduced PQR-K1–K3, which reading had found. Measured on the
+> way: the runner writes a reason only when it is asked (never while a session runs, needs approval, reads Error or
+> Done, or is Paused), and a settle window's anchor is the last status change — usually the ~20 s running blip after a
+> turn, not the turn's end (flows/03 "Measured").
+>
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
 > lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part
@@ -804,6 +816,15 @@ in the code on 2026-10-22).
 Every test launches its session through the Agent Manager's launch bar, acts through the UI, and asserts
 through the mock log + transcript + bridge + UIA.
 
+**Built 2026-10-24** as `e2e/suites/test_prompt_queue_runner.py`, numbered by [`flows/03`](flows/03-prompt-queue-runner.md)
+rather than by the ladder below, at the PRODUCTION timings (the fast lane's short settle and spacing are not built):
+L0 (the smoke test), L1 (flows' PQR-01, -02, -04, -05, -06), L2 PQR-21–23 (PQR-20 and PQR-24 not), L3 PQR-31 (PQR-30,
+-32, -33 not), L4 PQR-40 (PQR-41 and PQR-42 are flows/05's and flows/06's tests; PQR-43 is STA-K1, and LIF-03 checks
+that the killed claude's shell never gets the queue), L5 PQR-50–51, K1–K3 — plus the two defects the suite found
+(PQR-K6, PQR-K7) and Claude's own life cycle around the queue ([`flows/24`](flows/24-claude-lifecycle.md),
+`e2e/suites/test_claude_lifecycle.py`). The bridge is not built, so the oracles are the mock, the transcript, the
+logs and UI Automation; what the runner logs, and when, is in flows/03 "Measured".
+
 ### L0 — the chain works
 
 | Id | Test | Assertions |
@@ -902,7 +923,7 @@ where to check — are in [`flows/`](flows/README.md) (its *Infrastructure the f
 | 1 — the mock | `e2e/mockllm/`: §4 complete, unit tests of the parser and the SSE output, the contract lane (claude.exe + mock, no Agentmaster) | DONE 2026-10-23 for 2.1.291 (the unit tests; every suite test runs claude.exe on it); the latest lane not run yet |
 | 2 — the machine and the chain, no app change | `e2e/guest/provision.ps1`, `e2e/host/e2e_run.py`, `amdriver` lifecycle + UIA + terminal + page objects, the first suites using names and `sessions.json` | DONE 2026-10-23 with the MGR / SP / TCM suites instead of PQR-00/01 (the user's choice of areas); PQR-00/01 next |
 | 3 — testability in the app | §6.1–§6.3 for the §10 surfaces; one Release build (the user's go) | the bridge answers; the §10 controls are found by id; m5 green |
-| 4 — the first suite | §10 L0–L5 + K1–K3; ambient checks; fast + realtime lanes | 10 consecutive fast runs green except the known defects, < 30 min each |
+| 4 — the first suite | §10 L0–L5 + K1–K3; ambient checks; fast + realtime lanes | 10 consecutive fast runs green except the known defects, < 30 min each. IN PART 2026-10-24: §10's ladder written and run at the production timings (`test_prompt_queue_runner.py`, ~70 min a run); no fast lane, no ten-run streak yet |
 | 5 — breadth | §11 area by area; the e2e golden image; the CI build artifact; the explorer runs | per area: its ladder green; the latest lane nightly |
 
 ---

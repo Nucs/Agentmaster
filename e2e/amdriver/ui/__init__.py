@@ -16,5 +16,6 @@ in the test guest (`python -m amdriver dump`, 2026-10-23):
   IsEnabled false.
 
 Modules: window (MainWindow, the root of the rest), tabstrip, menus, dialogs, manager (the Agent Manager page),
-sidepanel.
+sidepanel, queue (the page's Prompt Queue tab and the toolbar's global pause), badge (the per-tab badge's runner
+parts), sessions (the Sessions page).
 """

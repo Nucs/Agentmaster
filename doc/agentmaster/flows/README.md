@@ -28,7 +28,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
 | [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 37 | 27 | 2 (fixed in code; SP-K2 reclassified as a feature) |
-| [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
+| [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 7 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
@@ -49,7 +49,8 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 677** | **≈ 567** | **26** (8 fixed in code) |
+| [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 1 | — (its three are filed in 03 and 05: PQR-K6, PQR-K7, STA-K1) |
+| **Total** | | **193** | **82 / 80 / 26** (+6 NOT BUILT) | **≈ 699** | **≈ 568** | **28** (8 fixed in code) |
 
 ---
 
@@ -213,20 +214,24 @@ where it was (SP-02 phase 8; SP-K3).
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,
 SES-05, SES-06), Needs approval and long quiet work (STA-03, STA-05), drafts remembered (DRF-09), profiles (INS-10), the
-workspace trust seed (MSC-09), the CLI (CLI-01, CLI-02).
+workspace trust seed (MSC-09), the CLI (CLI-01, CLI-02), and claude's own life cycle in a tab — a launch, `/exit`, a
+kill, Close and Resume here, a claude typed into a shell tab, a never-prompted session's restart, `/clear` — with the
+runner around each edge (LIF-01–LIF-07, added 2026-10-24).
 
 **Not covered here** (older than the range and unchanged by it): Codex's managed lifecycle, the per-tab badge's basics,
-the Explorer tree, templates, adopting a hand-typed claude. They belong to the suite's later breadth (E2E_TESTING.md §11).
+the Explorer tree, templates. They belong to the suite's later breadth (E2E_TESTING.md §11).
 
 ## Known defects the suite should show on its first day
 
 | Id | What | Source |
 |---|---|---|
-| PQR-K1 | Send now re-sends a selected history row | read, 2026-10-21 (memory `prompt-queue-runner-study-2026-10-21`) |
-| PQR-K2 | Move up / down swap by raw queue index (history rows included) | read |
-| PQR-K3 | The board's ⚙ sent/total counts history | read |
+| PQR-K1 | Send now re-sends a selected history row | read, 2026-10-21 (memory `prompt-queue-runner-study-2026-10-21`); a known-defect test since 2026-10-24 (`e2e/suites/test_prompt_queue_runner.py`) |
+| PQR-K2 | Move up / down swap by raw queue index (history rows included) | read; a known-defect test since 2026-10-24 |
+| PQR-K3 | The board's ⚙ sent/total counts history | read; a known-defect test since 2026-10-24 |
 | PQR-K4 | Templates copy history and reach archived sessions | read |
 | PQR-K5 | Records the registry mints get only the cog's mode | read |
+| PQR-K6 | Restart session starts no settle window: a prompt held while claude was gone goes into the restarted claude's first seconds (8 s after the restart, before its SessionStart hook), where a parked tab's wake waits the whole window | e2e suite, 2026-10-24 (probe `pqprobe1`; `e2e/suites/test_prompt_queue_runner.py`) |
+| PQR-K7 | `/clear` leaves the tab's queue with the old, archived conversation: the tab's new conversation has an empty queue on the cog's default mode, and the queued prompt is never sent (the owner decides whether the queue should follow the tab, as its topic does) | e2e suite, 2026-10-24 (probe `pqprobe1`; `e2e/suites/test_prompt_queue_runner.py`) |
 | TGT-K1 | A session's topic the user deleted is never made again | MESSAGING.md §21.21 |
 | TGT-K2 | A send that gets no answer is lost | MESSAGING.md §21.21 |
 | TGC-K1 | `/newsession` / `/forksession` take any text as the model | MESSAGING.md §21.21; memory `telegram-remote-launch-bugs` |
@@ -257,7 +262,8 @@ which is why it is a sweep). On the test build 0.8.1.1 — a purged Release buil
 zipped and run only in a claude-fleet desktop, never installed on this PC — every one passes (runs `fixall-0811`,
 `fixall-0811b`). The open defects the suite found (TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
 asserts TODAY's wrong behavior; each passes on both builds, so none of the fixes touched them. The defects found by
-reading or measuring (PQR-K1–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet.
+reading or measuring (PQR-K4–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet; PQR-K1–K3 got
+known-defect tests on 2026-10-24, beside the two the runner's suite found (PQR-K6, PQR-K7).
 
 **Reclassified.** TAB-K2 — a reopen whose focused tab was a shell starts a Claude tab: the LAST restored one ("the
 first" as filed, measured with one Claude tab) — is a FEATURE, not a defect (the user's decision of 2026-10-23, the
@@ -319,6 +325,16 @@ from two more probe rounds (`stprobe4`, `stprobe5`): with the smoke test, 49 of 
 and the three that failed on timing they had not allowed for passed once fixed (run `stcov2`); its known-defect
 tests are now STA-K1 and STA-K5.
 
+**The Prompt Queue Runner and Claude's life cycle** (2026-10-24, `test_prompt_queue_runner.py`, 26 tests, and
+`test_claude_lifecycle.py`, 7 tests — [03-prompt-queue-runner.md](03-prompt-queue-runner.md) "Measured",
+[24-claude-lifecycle.md](24-claude-lifecycle.md)), written from a probe round (`pqprobe1`) at the production timings:
+on the published 0.8.0, 25 passed in the full run (`pqr1`: with the smoke test 26 of 34 in 68.7 min), and the 8 that
+failed — five waited for runner reasons that are never written (nothing asks the runner while a session runs, needs
+approval, reads Error or Done, or is Paused), two marked the log too late or read a record the restore drops, one
+lost its fixture's Launch click — passed once corrected (run `pqr2`: 9 of 9 with the smoke test in 19.1 min). Its five
+known-defect tests reproduce on 0.8.0: PQR-K1–K3 (read in the code on 2026-10-21) and PQR-K6, PQR-K7 (found by the
+probe).
+
 | Flow | Automated | Tests (`e2e/suites/`) |
 |---|---|---|
 | F-S | the fixture on every surface | `test_smoke.py` |
@@ -367,6 +383,27 @@ tests are now STA-K1 and STA-K5.
 | STA-16 | phase 1 | `…::test_state_follows_with_every_hook_disabled` |
 | INT-01 | phases 1–3 (a connection lost after a tool result; Restart session rewinds, and the turn goes on) | `test_interrupted_work.py::test_restart_session_continues_a_turn_that_died_on_an_api_error` |
 | INT-04 | phases 1, 3, 4 in one window (a cut-off turn woken after a kill or a quit) | `test_session_state.py::test_a_turn_cut_off_by_the_app_ending_reads_error_then_the_restore_wake_continues_it` |
+| PQR-01 | phases 1–5 (the settle from the queue time, the badge's `⏳1` and `settling`, one verified delivery, the `auto` row) | `test_prompt_queue_runner.py::test_a_queued_prompt_waits_out_the_settle_window_and_is_delivered_once` |
+| PQR-02 | phases 1–3, E2 (a background agent's work) | `…::test_the_queue_drains_one_prompt_per_turn_never_into_a_running_turn`, `…::test_a_background_agents_work_holds_the_queue_until_it_is_done` |
+| PQR-03 | phase 2 (phase 1 and phase 3's cue: PQR-01's test; E1: PQR-05's; E2: PQR-06's); a restart starts no window (PQR-K6) | `…::test_a_status_change_restarts_the_settle_window`, `…::test_known_defect_restart_session_does_not_restart_the_settle_window` |
+| PQR-04 | phases 1–4, E1 | `…::test_paused_holds_the_queue_and_the_badges_auto_releases_it`, `…::test_the_cogs_default_mode_paused_starts_new_sessions_paused` |
+| PQR-05 | phases 1–3, 5 (two windows: both buttons, both badges `Auto (Off globally)`) | `…::test_the_global_pause_holds_every_window_and_resume_releases_them` |
+| PQR-06 | phases 1–3, E4; PQR-K1 | `…::test_send_now_asks_first_then_types_at_once_into_a_paused_session`, `…::test_send_now_into_a_running_turn_runs_as_the_next_turn`, `…::test_known_defect_send_now_sends_a_selected_history_row_again` |
+| PQR-07 | phases 1–4, E3 | `…::test_esc_parks_the_runner_until_the_users_next_message`, `…::test_a_mode_chosen_during_the_interrupt_hold_cancels_its_resume` |
+| PQR-08 | phases 1–3 | `…::test_a_question_holds_the_queue_until_the_user_answers`, `…::test_re_arming_the_runner_releases_a_question_hold` |
+| PQR-09 | phases 2, 3, E2 (phase 1: PQR-02's test; phase 5: PQR-11 phase 3's; phase 6: LIF-02's) | `…::test_an_open_question_dialog_holds_the_queue_until_it_is_answered`, `…::test_a_menu_on_screen_holds_the_queue_until_it_closes`, `…::test_a_compaction_holds_the_queue_until_the_status_settles` |
+| PQR-10 | phases 1–2 (phase 3: LIF-04's test) | `…::test_a_parked_tab_never_gets_a_queued_prompt_until_it_is_woken` |
+| PQR-11 | phases 1–3 | `…::test_an_api_error_pauses_the_runner_until_the_user_re_arms_it`, `…::test_with_stop_on_error_off_the_queue_waits_out_the_error` |
+| PQR-13 | PQR-K2; the queue across `/clear` (PQR-K7) | `…::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row`, `…::test_known_defect_clear_leaves_the_tabs_queue_behind` |
+| PQR-14 | PQR-K3 | `…::test_known_defect_the_boards_send_count_counts_typed_history` |
+| PQR-15 | phases 1–3 | `…::test_a_queue_survives_a_restart_and_nothing_sent_is_sent_again`, `…::test_a_turn_cut_off_by_a_quit_pauses_the_runner_and_holds_the_queue` |
+| LIF-01 | phases 1–3, E1 | `test_claude_lifecycle.py::test_a_launch_starts_a_fresh_claude_and_the_first_prompt_makes_its_transcript`, `…::test_a_prompt_queued_into_a_fresh_session_is_its_first_message` |
+| LIF-02 | phases 1–4 (and PQR-09 phase 6) | `…::test_exit_ends_claude_and_restart_session_resumes_the_conversation_and_its_queue` |
+| LIF-03 | phases 1–3 | `…::test_a_killed_claudes_shell_never_gets_the_queue_and_restart_session_recovers` |
+| LIF-04 | phases 1–4 (and PQR-10 phase 3) | `…::test_close_keeps_the_session_and_resume_here_brings_it_back_with_its_queue` |
+| LIF-05 | phases 1–4 | `…::test_a_claude_typed_into_a_shell_tab_is_adopted_and_driven` |
+| LIF-06 | phases 1–2 | `…::test_a_never_prompted_session_comes_back_fresh_after_a_restart` |
+| LIF-07 | phases 1–2 (phase 2 today: PQR-K7) | `test_prompt_queue_runner.py::test_known_defect_clear_leaves_the_tabs_queue_behind` |
 | ROB-11 | phases 1–2 (phase 2 today: ROB-K1) | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
 | CLI-02 | CLI-K2's fix (`needs_fix`): the release CLI beside an unpackaged install, from a plain shell, reads the install's own profile | `test_cli.py::test_a_plain_shell_reads_the_installs_own_profile` |
 | INS-01 | the installer script: IS-01–IS-04 (just for you: install, up to date, upgrade over a user's file, uninstall), IS-10 (the caller's PowerShell keeps nothing, 5.1 and 7), IS-14–IS-16 (`-InstallDir`), IS-26–IS-27 (a standard account at the keyboard) — the install lane | `install/test_install_script.py::test_just_for_you_life_cycle`, `…::test_the_callers_powershell_keeps_nothing`, `…::test_install_dir_rules`, `install/test_install_accounts.py::test_another_account_runs_the_installer` |
@@ -386,7 +423,10 @@ phase 3 (MRU mode), TAB-05–TAB-09, STA-02's 20-prompt sample, STA-03 E1, E2, E
 (2.1.291 runs every Agent call in the background), E2 (the flash ring), STA-06 E1–E3, STA-07 E2, E3, E6, STA-08 phase 3
 (the host tab closed), E1–E3, STA-09 phase 1 (F-CORP), STA-10 phase 2 (the summary's link), STA-11 phases 1–3,
 STA-12 phase 3, E2, STA-13 E2–E4 (scheduled tasks and teammates are not mocked yet), STA-14 E1, E4, STA-15 E1–E2, STA-16 E1–E2, INT-01 E1–E9,
-INT-02, INT-03, INT-04 phases 2–3 (two windows, several busy tabs), E1–E8, INT-05–INT-07 (NOT BUILT), the edge cases not listed above.
+INT-02, INT-03, INT-04 phases 2–3 (two windows, several busy tabs), E1–E8, INT-05–INT-07 (NOT BUILT), PQR-01 E1–E6, PQR-02 E1, E3–E5, PQR-03
+E3–E4 (the lanes' timings), PQR-04 E2–E4, PQR-05 phase 4, E1–E6, PQR-06 phases 4–5, E1–E3, PQR-07 E1, E2, E4–E9, PQR-08
+phase 4, E1–E5, PQR-09 phase 4, E1, PQR-10 E1–E3, PQR-11 E1–E5, PQR-12, PQR-13 phases 1–4, PQR-14 phases 1–3, PQR-15
+E1–E3, PQR-16, PQR-K4, PQR-K5, the edge cases not listed above.
 
 ## Adding a flow
 
