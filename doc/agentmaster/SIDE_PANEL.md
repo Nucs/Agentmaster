@@ -951,27 +951,52 @@ when you deliberately peek another.** Two inputs drive the one selection (`_side
   marks its presses Handled) plus its bubbling `GotFocus`. The panel's OWN controls live in a
   SIBLING `ContentArea` column (not under `TabContent`), so touching cards / search / the summary
   never fires these — only touching the terminal does, which is exactly what ends a peek.
-- **Focus that is HANDED BACK is not a touch** (2026-10-24, NOT BUILT yet; the user's report: "Move
-  to Idle/Done" in the 5th card's menu selected the TOP card and jumped the list to the top). A
-  card's context menu takes keyboard focus when it opens, and when it closes WinUI gives focus back
-  to the element that had it, the terminal (`CPopup::Close`: the popup's content leaves the popup
-  layer first, then the previous element gets focus). That return raised the terminal's
-  `GotFocus`, so every item of the menu, and its Esc, ended the peek of the very card it was
-  opened on and, with ⌖ on, scrolled the list to the focused tab's card (§2a). Now the `GotFocus`
-  follows only when focus came from the terminal column itself (another pane), from the side
-  panel's own controls (its filter box), or from nowhere (the window regaining activation).
-  Focus handed back by a closing menu, flyout, dialog or popup, by a page overlay (the transcript
-  reading view of the same menu's **Show Transcript**, the command palette), from the title bar's
-  tab strip, or from an element already gone (a tab switch's previous terminal, whose own funnel
-  moved the selection already) keeps the peek: the selection and the list stay where they were.
-  `TabContent`'s `GettingFocus` (`AddHandler`, `handledEventsToo`; raised synchronously, while
-  the element losing focus can still be asked where it lives) records where focus came from
-  (`SidePanelFocusArrivalEndsPeek`), and the `GotFocus` that follows consumes it. A kept peek
-  that the old rule would have ended writes one hooks.log line: `[sidepanel] focus came back to
-  the terminal from a menu, a dialog or an overlay: the selection stays on <sid8> (the focused
-  tab shows <sid8>; a click into the terminal ends the peek)`. A press that only closes a
-  light-dismiss menu is not a terminal click either: XAML gives it to no element, so the
-  `PointerPressed` never sees it, and the next click into the terminal ends the peek.
+- **Focus that is HANDED BACK is not a touch** (2026-10-24, NOT BUILT yet; the user's two reports
+  that day: "Move to Idle/Done" in the 5th card's menu selected the TOP card and jumped the list to
+  the top, and closing the menu WITHOUT a choice jumped it too). A card's context menu takes
+  keyboard focus when it opens (`MenuFlyout::ShowAt`, the standard show mode), and when it closes
+  WinUI gives focus back to the element that had it, the terminal. That return raised the
+  terminal's `GotFocus`, so every way of closing the menu — an item, Esc, a click outside it —
+  ended the peek of the very card it was opened on and, with ⌖ on, scrolled the list to the
+  focused tab's card (§2a). Now the `GotFocus` follows only when focus came from the terminal
+  column itself (another pane) or from the side panel's own controls (its filter box). Everything
+  else keeps the peek, so the selection and the list stay where they were: focus arriving from
+  NOWHERE, focus handed back by a page overlay (the transcript reading view of the same menu's
+  **Show Transcript**, the command palette), focus from the title bar's tab strip, and focus from
+  an element already gone (a tab switch's previous terminal, whose own funnel moved the selection
+  already).
+  - **Why "from nowhere" is the menu's case** (read in WinUI's source — microsoft-ui-xaml
+    `Popup.cpp`, `Control.cpp`, `FocusMgr.cpp`): `CPopup::Close` first takes the popup's content
+    out of the tree. The focused element in it (a menu item, or the menu itself) leaves, and its
+    `CControl::LeaveImpl` asks `CFocusManager::SetFocusOnNextFocusableElement` for a new home.
+    While the menu is still listed open, every candidate lies in the closing popup (its next tab
+    stop, or the popup itself, which `GetFirstFocusableElement` returns while a light-dismiss
+    popup is open), so focus ends on the popup or nowhere. Only then does `Close` give focus back
+    to the element that held it before the popup opened — and only in those two states ("nothing
+    now has focus", or the popup still holds it). The terminal's `GettingFocus` therefore names
+    no previous element, or one inside the closed popup, never one under the terminal column or
+    the panel.
+  - **The first version of this rule** (678f11056, never built) read "from nowhere" as the window
+    regaining activation and FOLLOWED, so it fixed neither report. A window coming back to the
+    foreground keeps the peek now too: it is not a touch of the terminal either. (Before
+    678f11056 every `GotFocus` followed; the original rule named the window regaining activation
+    as one of its cases — whether XAML Islands raises the terminal's `GotFocus` then was never
+    measured.)
+  - **How it is wired:** `TabContent`'s `GettingFocus` (`AddHandler`, `handledEventsToo`; raised
+    synchronously, while the element losing focus can still be asked where it lives) records
+    whether the arrival ends a peek (`SidePanelFocusArrivalEndsPeek`) and, for a kept peek, where
+    focus came from (`SidePanelFocusOriginText`: "nowhere", or the element's runtime class and
+    `x:Name`); the `GotFocus` that follows consumes both.
+  - **The log line:** a kept peek that the follow would have ended writes one hooks.log line,
+    naming where focus came from — the evidence, on a real build, of which case a hand-back was:
+    `[sidepanel] focus came back to the terminal from <nowhere (…) | a runtime class, e.g.
+    Windows.UI.Xaml.Controls.MenuFlyoutPresenter>, not by a click into it: the selection stays on
+    <sid8> (the focused tab shows <sid8>; a click into the terminal ends the peek)`.
+  - **A press that only closes a light-dismiss menu** is not a terminal click either, even one on
+    the terminal: while such a popup is open its popup root hit-tests every point of the window
+    (`CPopupRoot::HitTestLocalInternalImpl`), and `CPopupRoot::OnPointerPressed` closes the menu
+    and marks the press handled, so it reaches no element and `TabContent`'s `PointerPressed`
+    never sees it. The next click into the terminal ends the peek.
 - **PEEK** — clicking a **card** pins the summary to THAT session (drives the Manager lens too,
   "like the board card"); it holds until you re-engage the terminal. Because a non-focusable card
   `Border` doesn't move keyboard focus off the terminal, `PointerPressed` (not `GotFocus`) is the

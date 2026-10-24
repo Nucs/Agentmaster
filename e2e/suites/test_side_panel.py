@@ -11,6 +11,7 @@ import pytest
 from amdriver import inputs
 from amdriver.session import wait_new_session
 from amdriver.ui.menus import Menu
+from amdriver.ui.sidepanel import COUNT_RE
 from amdriver.waits import hold_true, wait_until
 
 SHELL = "Administrator: Windows PowerShell"
@@ -89,6 +90,75 @@ def test_card_context_menu(am, s1):
                  "Open New Session Here", "Restart session", "Fork session", "Close"):
         assert item in names, names
     menu.close()
+
+
+@pytest.mark.p1
+@pytest.mark.flow("SP-02")
+@pytest.mark.needs_fix("SP-K3")
+def test_card_menu_keeps_the_peek(am, s2):
+    """SP-02 phase 8 + E8 (SP-K3's fix, 2026-10-24): closing a card's right-click menu keeps that card selected —
+    with Esc, with a click outside the menu, and with one of its commands (Move to Idle/Done); a click into the
+    terminal still ends the peek. On 0.8.0 the menu handed the keyboard back to the terminal as it closed, the
+    terminal's GotFocus ended the peek, and the focused tab's card was selected again (with ⌖ on, the list scrolled to
+    it — two cards here, so only the selection is read).
+
+    The app names how each hand-back arrived (`[sidepanel] focus came back to the terminal from <origin>, …`):
+    printed for the record, since WinUI's source says "nowhere" (the closing menu moves focus off its own content
+    first) and only a real build can confirm it. At least one such line must appear: without it the menus never handed
+    focus to the terminal, and this test did not exercise SP-K3's path.
+
+    Args:
+        am: The app.
+        s2: F-S2 (t1 and t2 in one window).
+    """
+    a, b = s2
+    w = am.window
+    panel = w.side_panel
+    a.select()
+    # The keyboard in t1's terminal first: the menu gives focus back to whatever held it when it opened, and only a
+    # return INTO the terminal is the path under test (a real click — it also makes the summary follow t1).
+    w.terminal.focus()
+    wait_until(lambda: panel.summary_title() == "t1", 10, what="the summary on t1", describe=panel.summary_texts)
+    mark = am.profile.hooks.mark()
+
+    def open_menu_on_t2() -> Menu:
+        """Right-click t2's card: its menu opens, and the right-click itself peeks at t2 (like a click).
+
+        Returns:
+            The open menu.
+        """
+        before = Menu.open_hwnds(am)
+        panel.card("t2").right_click()
+        menu = Menu.wait_new(am, before)
+        wait_until(lambda: panel.summary_title() == "t2", 10, what="the right-click's peek on t2",
+                   describe=panel.summary_texts)
+        return menu
+
+    # 1. Esc (Menu.close presses it).
+    open_menu_on_t2().close()
+    hold_true(lambda: panel.summary_title() == "t2", 2.0, what="t2 still selected after Esc closed its menu",
+              describe=panel.summary_texts)
+    # 2. A click outside the menu, on the panel's count line: the popup root takes that press (it reaches no element).
+    open_menu_on_t2()
+    count = next(k for k in panel.controls() if k.role == "text" and COUNT_RE.match(k.name))
+    count.click()
+    wait_until(lambda: not Menu.open_hwnds(am), 5, what="the click outside closes the menu")
+    hold_true(lambda: panel.summary_title() == "t2", 2.0, what="t2 still selected after a click outside closed its menu",
+              describe=panel.summary_texts)
+    # 3. A command: the user's own report ("Move to Idle/Done" selected the top card and jumped the list there).
+    open_menu_on_t2().choose("Move to Idle/Done")
+    panel.wait_card("t2", state="idle", timeout_s=10)
+    hold_true(lambda: panel.summary_title() == "t2", 2.0, what="t2 still selected after Move to Idle/Done",
+              describe=panel.summary_texts)
+    assert w.tabs.selected().title == "t1"  # the menus never switched the tab
+    kept = am.profile.hooks.find(r"\[sidepanel\] focus came back to the terminal from (.*?), not by a click", since=mark)
+    for line in kept:
+        print("SP-K3: focus came back from " + line.group(1))
+    assert kept, "no kept-peek line in hooks.log: no menu handed focus back to the terminal"
+    # 4. A click into the terminal ends the peek.
+    w.terminal.focus()
+    wait_until(lambda: panel.summary_title() == "t1", 10, what="the peek ended by a click into the terminal",
+               describe=panel.summary_texts)
 
 
 @pytest.mark.p1
