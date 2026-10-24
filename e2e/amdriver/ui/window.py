@@ -203,6 +203,36 @@ class MainWindow:
         from .popups import SpecifyModelCard
         return SpecifyModelCard(self)
 
+    @property
+    def queue(self):
+        """The Agent Manager page's Prompt Queue tab (open it for a session with `queue.open(title)`).
+
+        Returns:
+            A PromptQueuePane.
+        """
+        from .queue import PromptQueuePane
+        return PromptQueuePane(self.manager)
+
+    @property
+    def badge(self):
+        """The per-tab badge of the terminal this window shows (its runner mode, queued count, next prompt).
+
+        Returns:
+            A TabBadge.
+        """
+        from .badge import TabBadge
+        return TabBadge(self)
+
+    @property
+    def sessions(self):
+        """The Sessions page (open it from the Agent Manager toolbar with `sessions.open()`).
+
+        Returns:
+            A SessionsPage.
+        """
+        from .sessions import SessionsPage
+        return SessionsPage(self)
+
     def home(self) -> uia.Element:
         """The Home button (its name is its face: "Agent Manager" or "Jump back to <title>").
 

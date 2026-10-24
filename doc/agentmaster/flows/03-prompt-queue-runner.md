@@ -2,7 +2,9 @@
 
 > Conventions, fixtures (F-…), oracle tags ([UI] [ENG] [LOG] [TR] [MOCK] [OS] [TG]) and the mock script
 > language: [README.md](README.md). Spec: DELIVERY.md §5–§18; CLAUDE.md *Prompt Queue Runner*;
-> memory `prompt-queue-runner-study-2026-10-21`.
+> memory `prompt-queue-runner-study-2026-10-21`. The suite: `e2e/suites/test_prompt_queue_runner.py`; the
+> runner across claude's own life cycle (exit, kill, Close, Resume here, adoption, `/clear`): [24-claude-lifecycle.md](24-claude-lifecycle.md)
+> and `e2e/suites/test_claude_lifecycle.py`.
 
 **What shipped.** 0.7.7: atomic, verified delivery (the delivery gate; fill → read back → submit), the
 20 s send spacing, the interrupt hold, the question-guard releases, Ctrl+Shift+Up. 0.7.9: renamed from
@@ -33,6 +35,52 @@ visible and holds no menu; the previous send was picked up; the next Pending pro
 question guard; the status has held for the settle window (40 s; E2E lane: 2 s) counted from the later
 of the last status change and the prompt's queue time; at least the send spacing (20 s; E2E lane: 1 s)
 since the previous automatic send; fewer than `maxAutoSends` (100) automatic sends since the last re-arm.
+
+## Measured (2026-10-24)
+
+The suite (26 tests) and the probe run `pqprobe1` drove the runner against **Agentmaster 0.8.0** and **Claude Code
+2.1.291**, with the mock, in a claude-fleet Windows 11 desktop of a loaded PC, at the PRODUCTION values (the 40 s settle,
+the 20 s spacing: the E2E lane's short values are not built). What a test can rely on, and what it cannot:
+
+- **A reason is written only when the runner is ASKED.** A change asks it only for a live, started (or adopted)
+  session in Idle or Waiting for you whose mode is not Paused and that has a Pending prompt
+  (`Scheduler::_wantsIdleStart`); a turn's end and a timed re-check (a settle window ending, a dormant tab) ask too.
+  So while a session runs, needs approval, reads Error or Done, or its runner is Paused, NO `[advance-skip]` line is
+  written: "not ready …" and "autorunner off" never appeared there (run `pqr1`: five tests that waited for them
+  failed). The reasons seen: `queue settle`, `status settle`, `delivery in flight`, `awaiting injection pickup`,
+  `global pause`, `question pending …`, `tab dormant …`, `input box not visible[ (a menu/dialog is open)]`,
+  `autorunner off (interrupt hold …)` (the Esc's synthesized turn end asks), and `autorunner off` after a turn ends in
+  a Paused session. A hold is judged by the mock's silence and no `[send]`, never by a reason that may not come.
+- **The decision is the clock.** autorunner.log's `[send] <id> #<n>` is stamped when the runner decides; the mock saw
+  the prompt 10–20 s later on that desktop (the paste, the read-back, the Enter, then Claude Code's UserPromptSubmit
+  hook, which runs before the model request and took 10–22 s there — flows/05). Time a settle window from `[send]`,
+  never from the mock's arrival.
+- **The anchor is the LAST status change, and the end of a turn is usually not it.** After almost every turn the side
+  panel showed waiting-for-you → running (~20 s later) → waiting-for-you: claude's busy heartbeat outlived the slow
+  Stop hook (scanner.log `[recon-subagent] <id> (presence=busy, outlived turn-end, Waiting -> Running)`), and the blip
+  moved the anchor. A queued prompt then went 40 s after the blip's end, a minute or more after its turn — the accepted
+  status lag of flows/05 working as the safety margin the owner wants it to be. The tests read the anchor off the side
+  panel's timeline (its last change before the `[send]`) and accept 37–60 s after it.
+- **A released hold goes within one window, not at once.** When a hold ends (the question answered, Auto again, the
+  global pause lifted, the user's own message after Esc, a dialog or menu closed), the next decision waits out the
+  settle window of the change that release caused, if it caused one: the tests accept the send within ~45 s of the
+  release.
+- **`/exit` can leave the session ready.** Claude Code cancelled the SessionEnd hook at its 5 s budget ("SessionEnd
+  hook … failed: Hook cancelled"), so the session kept reading waiting-for-you after `/exit` (flows/05 STA-K1). The
+  runner held the queue only because no Claude input box was on the screen ("input box not visible"; after 60 s the
+  `[send-verify] <sid8> queued prompts HELD: no parseable input box for >60s …` warning): the BOX gate, not the state,
+  keeps a prompt out of the PowerShell host a claude leaves behind (LIF-02, LIF-03). When the hook does arrive, the
+  session reads Done and the runner is not asked at all (run `pqr1`).
+- **A wake settles; a restart does not.** A parked tab woken by Activate Tab got its prompt 40.7 s after the wake
+  (`started` changed, the window restarted); a session whose ended claude was started again by Restart session got its
+  prompt 8 s after the restart, a second before the new claude's SessionStart hook ran (PQR-K6).
+- **`/clear` leaves the queue behind** with the old conversation (PQR-K7).
+- **A reopened session runs on the cog's default mode.** A queue left Paused came back Auto after a quit and a reopen
+  (PQR-15 phase 2) and after Close + Resume here (LIF-04), and went once the tab had started and settled.
+- **`/model`'s picker reads MenuOpen:** `[advance-skip] <id> (input box not visible (a menu/dialog is open))` for as
+  long as it is on the screen (55 s watched, nothing sent); Esc closed it and the prompt — queued 69 s earlier — was in
+  Claude's box 3 s later and at the model 10.7 s later: a picker changes no status, so no new window starts (PQR-09
+  phase 3; this settles the question noted there).
 
 ---
 
@@ -157,8 +205,9 @@ pane toggle and the tab badge always agree.
    sessions** (Auto out of the box). *Check:* [UI] pane toggle and badge; [ENG] `autorunner.mode Full`.
 2. **Pause from the pane.** *Do:* click the toggle. *Expect:* `Prompt Queue Runner: Paused` (gray ○);
    the badge's mode button reads `Paused` at once. *Check:* [LOG] `[nav] autorunner <sid8> -> Off`.
-3. **Queue while Paused.** *Do:* queue two prompts; wait several settle windows. *Expect:* nothing sent;
-   `[advance-skip] … autorunner off`. *Check:* [MOCK] silence.
+3. **Queue while Paused.** *Do:* queue two prompts; wait several settle windows. *Expect:* nothing sent. *Check:*
+   [MOCK] silence; [LOG] no `[send]`. (`[advance-skip] … autorunner off` is written only when a turn ends in the
+   Paused session: a queue alone asks the runner nothing — measured 2026-10-24, "Measured" above.)
 4. **Auto from the badge.** *Do:* hover the badge, click its mode button. *Expect:* both surfaces read
    Auto; the queue starts after the settle.
 
@@ -313,13 +362,16 @@ whose box it cannot see.
 2. **Needs approval** (`ask "Pick?" A,B`) → NeedsApproval (orange-red), held; answer in the terminal
    (wait for the dialog to settle, Enter) → the turn ends → `next` goes.
 3. **A menu on screen** (`/model` typed in the terminal opens its picker) → held; Esc closes it → goes.
-   ⚠ Which box state the detector reads for THIS picker (MenuOpen or NoBox) is not established — both
-   hold; the test asserts the hold and records the state (the bridge's `pendingBoxState`), and an
-   AskUserQuestion menu is the case known to read MenuOpen (PENDING_INPUT.md, `IsMenuOptionCaret`).
+   Measured (2026-10-24): the picker reads MenuOpen — `[advance-skip] … (input box not visible (a menu/dialog
+   is open))` — like an AskUserQuestion menu (PENDING_INPUT.md, `IsMenuOptionCaret`); the prompt went ~11 s
+   after Esc (no status change, so no new settle window).
 4. **The box not visible** (Ctrl+G opens Claude's external editor in the terminal) → held; after 60 s
    [LOG] `[send-verify] … HELD` (warning, not a failure); closing the editor → goes.
 5. **Error** (`error 400 invalid_request_error "x"`) → not ready (and see PQR-11).
-6. **Done** (`/exit` typed) → not ready; the queue waits.
+6. **Done** (`/exit` typed) → not ready; the queue waits. Measured (2026-10-24), two outcomes: the SessionEnd
+   hook arrived — Done, and nothing asks the runner (no line at all, run `pqr1`); or, on a loaded PC, it was
+   cancelled — the session kept reading waiting-for-you and the box gate held the queue ("input box not
+   visible": the tab shows a PowerShell prompt). LIF-02 accepts both and judges the hold by the mock's silence.
 
 **Edge cases**
 - **E1 A delivery in flight** (the draft swap holds the box) → `[advance-skip] … delivery in flight`,
@@ -343,7 +395,10 @@ by itself once the tab starts.
 2. **Enter the tab.** *Do:* click the tab. *Expect:* claude resumes; the session settles; p is sent.
 3. **Closed session.** *Do:* queue q, close the tab (Close). *Expect:* `[advance-skip] … session closed
    (no open tab)`. *Do:* Sessions page → Resume here. *Expect:* the queue comes back with the session and
-   q goes out after start + settle (Auto).
+   q goes out after start + settle (Auto). Measured (2026-10-24, LIF-04): with the runner Paused at the
+   Close nothing asks the runner to decide, so the `session closed` line does not appear (the test checks
+   `[archive] <id>` and the card leaving the board); Resume here re-arms the session on the cog's default
+   (Auto), so a queue closed Paused goes after the resume too.
 
 **Edge cases**
 - **E1 Window-restored background tab** with a queue (F-RS) → same as phase 1–2.
@@ -466,7 +521,9 @@ cut off is never followed blindly.
 1. **At rest.** *Do:* Paused session with 2 Pending + 3 Sent rows; quit; reopen (Yes to reopen).
    *Expect:* the same rows and statuses; the tab dormant until entered; nothing sent while dormant.
 2. **Mode on reopen.** *Expect:* the restored session's mode is the cog default (re-stamped at the
-   restored launch), not the saved one — note it (by design today).
+   restored launch), not the saved one — note it (by design today). Measured (2026-10-24): a session left
+   Paused with two queued prompts came back Auto and, once its tab started and settled, sent both, one per
+   turn; the SENT row was never typed again.
 3. **Mid-turn quit.** *Do:* Auto session with `p1 [[mock hold g1; …]]` running and `p2` queued; quit.
    *Expect after reopen:* the session reads **Error** (a cut-off turn), the runner is Paused
    (stop-on-error); p2 not sent. If the session was the focused tab or woken by the restore wake, its
@@ -504,6 +561,9 @@ the code on 2026-10-22.
 
 ### PQR-K1 · Send now re-sends a selected history row
 
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_send_now_sends_a_selected_history_row_again`
+> (`known_defect`)
+
 `AgentManagerContent.AutoTesting.cpp:804` `_DoSendNow`: with an empty box it sends the SELECTED row
 whatever its status. *Do:* select a `typed` row in SENT, click **!**, Send. *Correct:* nothing is sent (or
 the button is disabled for a history row). *Today:* the row is typed again; as a `typed` origin it gets no
@@ -511,12 +571,18 @@ echo consume and no Enter-retry rescue, and a duplicate `typed` row is recorded.
 
 ### PQR-K2 · Move up / down swap by raw queue index
 
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row`
+> (`known_defect`)
+
 `AgentManagerContent.AutoTesting.cpp:1321` `_OnMovePrompt`: swaps with the neighbor in the raw queue,
 history rows included. *Do:* a queue whose raw order is [Sent a, Pending b, Sent c, Pending d]; Move up on
 d. *Correct:* d moves above b in UPCOMING. *Today:* d swaps with c (a history row) — UPCOMING looks
 unchanged.
 
 ### PQR-K3 · The board's ⚙ sent/total counts history
+
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_the_boards_send_count_counts_typed_history`
+> (`known_defect`)
 
 *Do:* a session with typed history and no queue. *Correct:* no ⚙ count (or 0/0). *Today:* a blue
 `⚙ N/N` appears.
@@ -532,3 +598,43 @@ too, and the archived session receives the prompts.
 *Do:* a hand-typed claude in a shell tab (adopted) with the cog's maxAutoSends = 2. *Correct:* the adopted
 session's runner takes the cog's maxAutoSends / stopOnError too. *Today:* it takes the struct defaults
 (100 / on).
+
+### PQR-K6 · Restart session starts no settle window
+
+> **P1** · Found by the e2e suite on 2026-10-24 against 0.8.0 (probe `pqprobe1` pq04) ·
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_restart_session_does_not_restart_the_settle_window`
+> (`known_defect`)
+
+**What it is.** A prompt the runner held because the session's claude had ended — no Claude input box on the screen,
+the tab at its PowerShell prompt — is typed into the claude that **Restart session** starts as soon as that claude's
+input box draws. Measured: the `[send]` 8 s after the restart, a second BEFORE the new claude's SessionStart hook
+ran. It went through (the Enter-retry's press 3 s later found the box already empty: only the UserPromptSubmit hook
+was slow), but the settle window exists to keep a prompt out of exactly such a claude's first seconds (DELIVERY.md
+§16: "a resumed tab starts up"). A parked tab's WAKE gets the window (the send 40.7 s after Activate Tab), a restart
+does not.
+
+**The cause.** The window counts from `SessionInfo::stateChangedAtUnixMs`, which moves when the state, `live` or
+`started` changes. Around a restart none of them did: a claude that ended without its SessionEnd hook keeps reading
+waiting-for-you (STA-K1 — `/exit` on a busy PC, or a kill), so the restart's SessionStart changed no state, and
+`_RestartManagedSession` swaps the connection in place without touching `started`. The window had long ended when
+the box came back.
+
+**Expected.** The window counts from the restarted claude's start (a restart is a status change of its own), so the
+prompt goes ≥ 40 s after Restart session, like after a wake. The test kills the claude (≥ 10 s after its turn, so the
+session keeps reading waiting-for-you): the deterministic way to an ended claude whose session still reads ready.
+
+### PQR-K7 · `/clear` leaves the tab's queue with the old conversation
+
+> **P1** · Found by the e2e suite on 2026-10-24 against 0.8.0 (probe `pqprobe1` pq06) ·
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_clear_leaves_the_tabs_queue_behind` (`known_defect`) ·
+> flows: PQR-13, LIF-07 · **decision owed by the owner** (like TAB-K2: it may be meant)
+
+**What it is.** `/clear` in a tab starts a new conversation there, and the tab, its card and its Telegram topic follow
+it (hooks.log `[rehome] <old> -> <new> (same tab, new conversation id)`, `[nav] tab-swap <old8> -> <new8> …`, `[lineage]
+<new8> continues <old8> (/clear …)`). The QUEUE does not: the prompts queued for the tab stay in the old conversation's
+record, which is archived. Measured: the tab's new conversation shows an empty queue, its runner on the cog's default
+(Auto) although the user had paused the tab, the Prompt Queue tab says "Select a session …" until the new card is
+picked, and the queued prompt is never sent (it would go into the OLD conversation if that one were ever resumed).
+
+**Expected (if the owner decides it is a defect).** The queue and the runner's mode follow the tab to its new
+conversation, as its topic does (`Rekey` in MESSAGING.md §21.6).

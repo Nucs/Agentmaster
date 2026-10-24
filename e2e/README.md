@@ -159,6 +159,9 @@ restart: `am.claude.seed(settings={...})` before `am.launch(...)` — each claud
 | `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`, `queue_prompt(text)` (the compose row's Add to queue, confirmed by the engine's `[nav] queue` line — click the session's card first), `activate_all(scope)` (Activate All Tabs (N); `dormant_count()`); a Card: `click`, `double_click`, `right_click` |
 | `window.side_panel` | `cards()` / `card(title)` (title, state word), `titles()`, `count_line()`, `scope()`, `sum_on()`, `dock_side()`, `collapsed()`, `summary_title()` / `summary_texts()` | `button(name).click()` ('Sum', 'LOCAL', '⌖', '⇄', '«'), `toggle_scope()`, `set_sum(on)`, `open_launcher()` → LauncherCard (`box`, `folder_list`, `type_folder`, `launch`) |
 | `window.terminal` | `text()`, `lines()`, `input_box()` (Claude's box and its draft) | `focus()`, `type(text)`, `submit(prompt)`, `wait_input_box()`, `wait_text(regex)` |
+| `window.queue` (`amdriver.ui.queue`) | the page's Prompt Queue tab for the session picked there: `mode()` (`Auto`, `Paused`, `Paused → Auto on your next message`), `rows()` / `sent()` / `upcoming()` (a `QueueRow`: glyph, status, label, tag `auto` / `typed` / `[turn-done]`), `counts()` (sent, typed, upcoming), `row(prefix)`, `compose_text()`; `global_paused(page)` | `open(title)` (the page, the session's card, the tab), `click_toggle()`, `wait_mode()`, `queue(*prompts)` → the queue time, `wait_row(prefix, section)`, `row_menu(row)` → Menu, `send_now(text)` → the "Send now?" Dialog; `set_global_pause(page, on)` (the toolbar's Pause / Resume Prompt Queue Runner) |
+| `window.badge` (`amdriver.ui.badge`) | the per-tab badge of the terminal on screen: `texts()`, `mode()` (`Auto`, `Paused`, `Paused → Auto`, each with ` (Off globally)` while the global pause is on), `queued()` (its `⏳N`), `prompt_line()` (row 3), `cue()` (`held`, `settling` or empty) | `click_mode()`, `wait_mode(mode)` |
+| `window.sessions` (`amdriver.ui.sessions`) | the Sessions page: `showing()`, `rows()` (each row's cell texts, from its star on), `titles()`, `action(name)` (the detail pane's Resume here / Jump to tab / Fork here / Open New Session Here) | `open()` (the Manager toolbar's Sessions), `select(title)`, `resume(title)` → the opened session's 8-character id, `back()` |
 | `window.tags` / `window.specify` (`amdriver.ui.popups`) | the Tags panel: `texts()`, `count()` ('N of M tags'); the Specify card: `value()` | `wait_open()`; Tags: `add(name)`; Specify: `use(model)`, `press('Cancel')` |
 | `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name, title=…)`, `new_window()`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
@@ -215,6 +218,29 @@ since=mark)`), then the UI.
   SessionStart(resume) landed after the scanner had promoted the continuing turn to running, and the record read idle
   for 52–115 ms; a `/clear`'s old SessionEnd showed done ~3 s before the tab followed the new conversation. Allow a
   blip (`BLIP_S`, `_longest_stretch` in test_session_state.py) and fail a state that holds.
+- **The Prompt Queue Runner at the production timings** (measured 2026-10-24; flows/03 "Measured"). Time a settle
+  window from autorunner.log's `[send] <id> #<n>`, the runner's decision — the mock sees the prompt 10–20 s later
+  (Claude Code's UserPromptSubmit hook runs before the request). The window counts from the session's LAST status
+  change, and after almost every turn the side panel shows waiting-for-you → running (~20 s later) → waiting-for-you
+  (the busy heartbeat outlives a slow Stop hook), so `test_prompt_queue_runner.py`'s `Clock` reads the anchor off a
+  `StateTimeline` (its last change before the send) and accepts 37–60 s after it; a released hold goes within ~45 s.
+  The runner writes an `[advance-skip]` reason only when it is ASKED — never while a session runs, needs approval,
+  reads Error or Done, or is Paused (only an idle-or-waiting change, a turn's end or a timed re-check asks) — so a test
+  judges a hold by the mock's silence and no `[send]`, and waits only for the reasons flows/03 "Measured" lists.
+- **Claude Code's trust question** (a claude started by hand in a folder nobody trusted): its FIRST option, "No,
+  exit", is the selected one, so Enter alone ends claude — press Down, check the caret reads `❯ Yes, I trust this
+  folder`, then Enter. A `+` tab's shell does not carry the test's environment (Windows Terminal builds a new tab's from
+  the registry): set `CLAUDE_CONFIG_DIR` in that shell before starting claude by hand (LIF-05).
+- **`/exit` on a busy desktop can leave the session ready.** Its SessionEnd hook was cancelled at its 5 s budget, the
+  session kept reading waiting-for-you (STA-K1), and only the box gate ("input box not visible") held the queue. For a
+  claude that is gone while its session reads ready, kill it ≥ 10 s after its turn (within ~2 s it reads running for
+  good).
+- **The Sessions page lies over the Agent Manager page**: its controls follow the page's in the content element. A
+  table row is a XAML Border, which has no automation peer — it is its cells' texts, from its star (☆ or ★) on — and a
+  click on its title cell selects it. Resume here logs `[nav] sessions resume-done new=<sid8>`.
+- **The per-tab badge** is a row of the terminal's siblings in the content element, at the terminal's top right: texts,
+  and its runner mode as a button named by the mode. The Prompt Queue tab's runner toggle has NO name on 0.8.0 (its
+  content is a panel): `PromptQueuePane` finds it by its label text.
 
 - **A click is a hand's click.** The pointer rests ~150 ms on the target before the press, and the button is HELD
   ~60 ms. A press on arrival races the target's hover work, and a down and an up sent together are both queued
@@ -300,6 +326,11 @@ since=mark)`), then the UI.
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
 | STA-K1 | STA-11 E3, STA-01 phase 5 | A claude that ends without its SessionEnd never reads Done; killed mid-turn (or within ~2 s after a turn) the session reads Running for good — its last `busy` heartbeat outlives the process, and the scanner's "work outlived the turn" rule trusts it | `test_session_state.py::test_known_defect_a_killed_claude_keeps_reading_running` |
 | STA-K5 | STA-12 E1, PQR-07 | Esc before any output takes no interrupt hold (Claude Code writes no "[Request interrupted by user]" marker for it, and the hold is taken only on that marker): once the status has settled and held still, the runner sends the next queued prompt — 66 s after the Esc in the probe — the draft swap keeping the user's restored prompt around the send; every other Esc parks the runner until the user's next message (the owner decides whether it is a defect) | `test_session_state.py::test_known_defect_esc_before_any_output_takes_no_interrupt_hold` |
+| PQR-K1 | PQR-06 | Send now with an empty compose box sends the SELECTED row whatever its status: a history row is typed into the session again (found by reading, 2026-10-21) | `test_prompt_queue_runner.py::test_known_defect_send_now_sends_a_selected_history_row_again` |
+| PQR-K2 | PQR-13 | Move up / Move down swap a row with its neighbor in the RAW queue, history rows included: a queued row "moved up" past a history row stays where it was in UPCOMING (found by reading) | `test_prompt_queue_runner.py::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row` |
+| PQR-K3 | PQR-14 | The board card's `⚙ sent/total` counts the history: a session with one typed prompt and nothing queued says `⚙ 1/1` (found by reading) | `test_prompt_queue_runner.py::test_known_defect_the_boards_send_count_counts_typed_history` |
+| PQR-K6 | PQR-03, LIF-02 | Restart session starts no settle window: a prompt held while claude was gone is typed into the restarted claude 8 s after the restart, before its SessionStart hook; a parked tab's wake waits the whole window | `test_prompt_queue_runner.py::test_known_defect_restart_session_does_not_restart_the_settle_window` |
+| PQR-K7 | PQR-13, LIF-07 | `/clear` leaves the tab's queue with the old, archived conversation: the new conversation's queue is empty, its runner on the cog's default, the queued prompt never sent (the owner decides whether it is a defect) | `test_prompt_queue_runner.py::test_known_defect_clear_leaves_the_tabs_queue_behind` |
 
 TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
 filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a
