@@ -105,13 +105,14 @@ def _assert_no_user_install(state: install.MachineState, dest: Path) -> None:
 
 @pytest.mark.p0
 @pytest.mark.flow("INS-01")
-@pytest.mark.install("IS-01", "IS-02", "IS-03", "IS-04")
+@pytest.mark.install("IS-17", "IS-01", "IS-02", "IS-03", "IS-04")
 def test_just_for_you_life_cycle(lane, kit, machine):
-    """A per-user install from a zip, again (up to date), upgraded over a user's own file, then uninstalled.
+    """A zip for another processor refused; a per-user install from a zip, again (up to date), upgraded over a user's
+    own file, then uninstalled.
 
-    Promise (INS-01, INS-07): just for you needs no rights and registers everything a user expects; a run of the same
-    version changes nothing; an upgrade replaces only what a release ships; the uninstall removes only that and keeps
-    the user's data.
+    Promise (INS-01, INS-07): the installer never installs a build this PC cannot run; just for you needs no rights and
+    registers everything a user expects; a run of the same version changes nothing; an upgrade replaces only what a
+    release ships; the uninstall removes only that and keeps the user's data.
 
     Args:
         lane: The install lane's facts (the staged installer).
@@ -123,6 +124,17 @@ def test_just_for_you_life_cycle(lane, kit, machine):
         AssertionError: Naming the first registration, file or message that is wrong.
     """
     dest = install.user_install_dir()
+
+    # IS-17: a zip for another processor (the installer reads it from the name, as the release assets are named):
+    # refused before anything is written. The other half — an x64 zip on an ARM64 PC only warns — needs an ARM64 desktop.
+    other = kit.zip("0.8.1.0", "Agentmaster_0.8.1.0_arm64.zip")
+    run = install.run_installer(lane, "-Scope", "User", "-ZipPath", str(other))
+    assert run.code != 0, f"an arm64 zip was installed on this x64 PC\n{run}"
+    assert "is the arm64 build, and this PC needs the x64 one" in run.output, str(run)
+    state = install.MachineState.read()
+    assert state.user is None and state.user_entry is None and state.user_verbs == {} and state.user_path == [] \
+        and state.shortcuts == [], "the refused run installed or registered something"
+
     zip1 = kit.zip("0.8.1.0")
     run = install.run_installer(lane, "-Scope", "User", "-ZipPath", str(zip1))
     assert run.code == 0, str(run)

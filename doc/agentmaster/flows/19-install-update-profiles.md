@@ -251,7 +251,7 @@ spending the 60 GitHub API requests an hour this PC shares with its desktops):
 | `deny` | standard users' elevation refused by policy | not yet |
 | `demote` | the signed-in user removed from Administrators (a reboot) | not yet |
 | `pkg` | an MSIX package the guest trusts (F-PKG, or the real release bundle with `net`) | not yet |
-| `sys` | a one-shot scheduled task as SYSTEM | not yet |
+| `sys` | a one-shot scheduled task as SYSTEM | prepared: nothing to provision; `amdriver.install.run_as_system` makes the task (`amqa-sys-…`, removed with its result) and `stop_as_system` ends what it started |
 | `old` | a build from before the manifest / `--register-user` (the released v0.7.10 zip, with or without a manifest added) | prepared: `provision.ps1 -Lane Install -Old` extracts v0.7.10 as published; `Kit.old_zip(manifest=…)` makes the zips |
 | `sign-in` | a Windows sign-in inside the scenario (Active Setup runs then): a reboot the host must wait out | not yet |
 | `human` | a surface the suite cannot drive yet: the taskbar's jump list (pinning), SmartScreen's *Run anyway* | — |
@@ -281,7 +281,7 @@ what it waits for.
 | IS-14 | `-InstallDir .\relative` | made absolute (an elevated or signed-in-user step is another process) | fresh | unit | `test_install_script.py::test_install_dir_rules` |
 | IS-15 | `-InstallDir <a folder of other files>` | "… holds other files: Agentmaster goes into …\Agentmaster" | fresh | edges | same test |
 | IS-16 | a second per-user copy elsewhere | refused, with how to move it; nothing written | fresh | edges | same test |
-| IS-17 | a zip for another processor | refused (an x64 zip on ARM64: a warning) | fresh | unit | planned |
+| IS-17 | a zip for another processor | refused (an x64 zip on ARM64: a warning) | fresh | unit | `test_install_script.py::test_just_for_you_life_cycle` (an arm64 zip on the x64 desktop; the ARM64 warning needs an ARM64 desktop) |
 | IS-18 | `-Scope Machine -ZipPath <zip>` | `C:\Program Files\Agentmaster`; HKLM `Uninstall\AgentmasterAllUsers` named *Agentmaster (all users)*; the machine PATH; the HKLM verbs; the Active Setup component (`"<exe>" --register-user`); the signed-in user's own icons, none shared; only that step elevated (UAC on: one consent) | fresh (UAC off: no prompt) | probe, edges | `test_install_script.py::test_for_all_users_life_cycle` |
 | IS-19 | the same again | "Already up to date for all users" | fresh | edges | same test |
 | IS-20 | `-Uninstall -Scope Machine` | files, the component, the entry, verbs and machine PATH gone; the icons it gave swept; the user's data kept | fresh | own | same test |
@@ -292,7 +292,7 @@ what it waits for.
 | IS-25 | the all-users upgrade typed into a tab of the all-users copy | the new window, Go on?, closed, upgraded, started again | fresh | edges | planned: typing |
 | IS-26 | a standard account, `-ForCurrentAccount`, non-interactive, beside the all-users copy | "non-interactive: installing for scope User"; installed without rights; the note that its own copy takes over | std | edges | `test_install_accounts.py::test_another_account_runs_the_installer` |
 | IS-27 | a standard OTHER account, `-Scope User` | refused before anything is downloaded; `-ForCurrentAccount` installs for itself | std | probe | same test |
-| IS-28 | SYSTEM (a scheduled task), `-Scope User -Launch` | installed for the signed-in user through a phase in their session; the app runs as them | sys | probe | planned: `sys` |
+| IS-28 | SYSTEM (a scheduled task), `-Scope User -Launch` | installed for the signed-in user through a phase in their session; the app runs as them | sys | probe | `test_install_system.py::test_system_installs_for_the_signed_in_user` |
 | IS-29 | another administrator, `-Scope User -Force -Launch` | installed for the signed-in user; their running app closed (GUI only), replaced, started again as them | adm2 | probe | `test_install_accounts.py::test_another_administrator_runs_the_installer` (a fresh machine: nothing running to close) |
 | IS-30 | `-Scope Package -NonInteractive` | the release's certificate trusted through one elevation (that step only); the package added for the user | net, pkg | probe, edges | planned: `net` |
 | IS-31 | the package upgrade typed into the package app's tab | the new window; the user's own instance closed right before the install (`-ForceApplicationShutdown` does not close it); the new version added and started | net, pkg | edges | planned: `net`, typing |
@@ -313,12 +313,12 @@ what it waits for.
 | IS-46 | an older copy over it | *Use the installed Agentmaster (vZ) (recommended)*; never a downgrade; the copy becomes a stub (`install.path` = the install) and its next launch starts the installed copy | fresh | probe, real app | same test |
 | IS-47 | *Install for all users of this PC* (UAC off: no prompt) | IS-18's install; the user's own icons; the copy runs as the user | fresh | probe, real app (UAC Yes) | `…::test_install_for_all_users` |
 | IS-48 | *Install for all users*, UAC *No* | "cancelled at the UAC prompt", back to the question, nothing installed | uac | real app | planned: `uac` |
-| IS-49 | a per-user and an all-users install, both current | the per-user one recommended | fresh | probe | planned |
+| IS-49 | a per-user and an all-users install, both current | the per-user one recommended | fresh | probe | `test_install_first_launch.py::test_both_installs_current` |
 | IS-50 | *Install to a folder you pick…* | a non-empty folder → `<folder>\Agentmaster`; inside the copy → refused; Program Files without rights → refused, pointing at *for all users* | fresh | — | planned: the folder dialog |
-| IS-51 | *Install here* | the registration only, no copy | fresh | — | planned |
+| IS-51 | *Install here* | the registration only, no copy | fresh | — | `test_install_first_launch.py::test_install_here` |
 | IS-52 | another administrator, elevated, in the user's session | *Set it up for <user> (recommended)*; the copy restarts as the user (~13 s), who gets their own question; nothing installed for the administrator | adm2 | probe, real app | `test_install_accounts.py::test_another_administrator_sets_it_up_for_the_signed_in_user` |
 | IS-53 | another account without rights in the user's session | the warning with how to set it up for the signed-in user; its own install offered by name; nothing written | std | probe, real app | `test_install_accounts.py::test_another_account_sees_the_question` |
-| IS-54 | SYSTEM in session 0 | no question; nothing persisted | sys | probe | planned: `sys` |
+| IS-54 | SYSTEM in session 0 | no question; nothing persisted | sys | probe | `test_install_system.py::test_a_copy_started_in_session_0` |
 | IS-55 | `AGENTMASTER_PROFILE` set, or `-Embedding` | no question | fresh | — | every other suite (each test sets the profile) |
 | IS-56 | a browser-marked zip extracted by Explorer | SmartScreen once (*More info* → *Run anyway*); the installed copy asks nothing more; no installed file keeps the mark (60 of 63 did before the fix) | human | real app | planned |
 | IS-57 | the copy `Install-Agentmaster.ps1` v0.7.10 made, then a newer copy | *Update the installed Agentmaster … the copy the install script made*; registered in that folder; *Agentmaster (Portable)* removed | fresh | A1 | planned |
@@ -331,7 +331,7 @@ what it waits for.
 | Id | Scenario | Expected | Machine | Checked by hand | e2e |
 |---|---|---|---|---|---|
 | IS-61 | the user's marker and both icons deleted, then a sign-in | Active Setup's stub ran at the sign-in: both icons back with the AUMID, the marker written, no app started | sign-in | own | planned: `sign-in` |
-| IS-62 | the desktop icon deleted, the shared copy started from Start | the icon stays deleted | fresh | own | planned |
+| IS-62 | the desktop icon deleted, the shared copy started from Start | the icon stays deleted | fresh | own | `test_install_coexistence.py::test_the_shared_copys_upkeep` |
 | IS-63 | a standard user starts the all-users copy | no question; their own profile `C:\Users\<them>\.agentmaster`; the folder untouched | std | probe | `test_install_accounts.py::test_a_standard_user_and_the_shared_copy` |
 | IS-64 | `--register-user` as the second account | that account's own icons; no `.agentmaster` folder made | std | own | same test |
 | IS-65 | the all-users uninstall with a second account's icons | every user's icons swept; after a reinstall the second account gets icons again | std | own | same test (the icons again through `--register-user`; Active Setup's own run at a sign-in needs `sign-in`) |
@@ -345,9 +345,9 @@ what it waits for.
 | IS-71 | the shared copy started by path with `-d C:\Windows` | handed off: the user's copy runs with the arguments, the shared process gone; logged | fresh | own | `test_install_coexistence.py::test_a_users_own_copy_takes_over` |
 | IS-72 | the same while the user's copy runs | one process, the user's copy | fresh | own | same test |
 | IS-73 | `AGENTMASTER_NO_HANDOFF=1` | the shared copy runs itself | fresh | own | same test |
-| IS-74 | the shared copy's `agentmaster-cli.exe` | the user's CLI runs with the arguments; a redirected file and the exit code pass through | fresh | own | planned |
+| IS-74 | the shared copy's `agentmaster-cli.exe` | the user's CLI runs with the arguments; a redirected file and the exit code pass through | fresh | own | `test_install_coexistence.py::test_a_users_own_copy_takes_over` (a stand-in for the user's CLI: `cmd.exe` under its name) |
 | IS-75 | the user's copy uninstalled while the shared one stays | its icons open the shared copy again | fresh | own | same test |
-| IS-76 | the user's copy deleted by hand, then the shared copy starts | the leftovers removed (verbs, entry, PATH, icons), the pins moved back, the icons made again | fresh | own | planned |
+| IS-76 | the user's copy deleted by hand, then the shared copy starts | the leftovers removed (verbs, entry, PATH, icons), the pins moved back, the icons made again | fresh | own | same test as IS-62 (the pins: no test pins the taskbar, `human`) |
 
 ### E · The in-app update
 
@@ -361,7 +361,7 @@ what it waits for.
 | IS-85 | the MSIX package's update (A4) | the certificate question [A] / [U] / [C]; [C] restarts it with no prompt; [U] installs per user on the package's profile and removes the package | net, pkg | A4 | planned |
 | IS-86 | a demoted user updates the per-user install an administrator made (B1) | no prompt; updated in ~12 s; no set-aside folder left | net, demote | B1 | planned |
 | IS-87 | the swap fails half way (a locked file) | the old files back; the installed version started again; that run behaves as *Remind me next restart* | net | unit | planned |
-| IS-88 | offline | the check fails quietly within 6 s; the app starts normally | fresh | — | planned (the lane is offline to GitHub: a startup-time check) |
+| IS-88 | offline | the check fails quietly within 6 s; the app starts normally | fresh | — | `test_install_first_launch.py::test_install_just_for_you` (the installed copy's first start: the lane points `api.github.com` at 127.0.0.1) |
 
 ### F · Uninstall
 

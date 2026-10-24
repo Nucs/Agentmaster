@@ -93,7 +93,7 @@ python e2e/host/install_lane.py --plan                                          
 
 - **Never by e2e_run.py.** Outside the lane the install tests are deselected (no `C:\e2e\install-lane.json`, which only
   `provision.ps1 -Lane Install` writes and every Standard provisioning removes): a full run on a shared desktop shows
-  "18 deselected".
+  "23 deselected".
 - **Each scenario is ONE test**, listed in `suites/install/install_catalog.py` with its catalog ids, its flow and the
   machine it needs; the host plans its resets from that file, and a test missing from it fails the collection. Write a
   scenario as a life cycle (install → again → upgrade → uninstall) when its steps build on one another: each test costs
@@ -115,8 +115,10 @@ python e2e/host/install_lane.py --plan                                          
 - **Machine tags** (the catalog's `machine`): `std` and `adm2` make the host provision `-Accounts` (the standard user
   `qastd`, the administrator `qaadmin`: `lane.account("std")`, then `install.run_as(account, exe, *args)`,
   `start_as`, `run_installer_as`, and `account_state(account)` for what that account sees); `old` makes it provision
-  `-Old` (v0.7.10 as published: `kit.old_zip(manifest=True | False)`). A tag the lane cannot prepare yet (`uac`, `deny`,
-  `demote`, `net`, `pkg`, `sign-in`) makes the host skip the scenario and say so.
+  `-Old` (v0.7.10 as published: `kit.old_zip(manifest=True | False)`); `sys` needs nothing provisioned
+  (`install.run_as_system(exe, *args, wait=…)` runs a program as SYSTEM in session 0 through a one-shot scheduled task,
+  `stop_as_system(pid)` ends it). A tag the lane cannot prepare yet (`uac`, `deny`, `demote`, `net`, `pkg`, `sign-in`)
+  makes the host skip the scenario and say so.
 
 ## Writing a scenario
 

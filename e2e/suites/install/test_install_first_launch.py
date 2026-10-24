@@ -117,13 +117,14 @@ def _assert_registered_for_user(state: install.MachineState, version: str) -> No
 
 @pytest.mark.p0
 @pytest.mark.flow("INS-02")
-@pytest.mark.install("IS-40", "IS-41", "IS-42", "IS-99")
+@pytest.mark.install("IS-40", "IS-41", "IS-42", "IS-99", "IS-88")
 def test_install_just_for_you(lane, kit, machine):
     """The question as a user first sees it, then its recommended answer: installed just for this user.
 
     Promise (INS-02 phases 1 and 4, INS-10 phase 1): a fresh copy asks where Agentmaster should live, with the per-user
     install recommended; that install registers everything, the installed copy starts on the Default profile without a
-    profile question, and the copy's own process goes away.
+    profile question, and the copy's own process goes away. Offline (the lane blocks GitHub's API), the installed
+    copy's startup update check fails quietly within its bound (IS-88).
 
     Args:
         lane: The install lane's facts.
@@ -165,6 +166,31 @@ def test_install_just_for_you(lane, kit, machine):
     lines = install.install_log_lines()
     assert any("install begin:" in ln for ln in lines), f"no [install] begin line in the Default profile's hooks.log: {lines}"
     assert not any("install FAILED" in ln for ln in lines), lines
+    _assert_offline_check_failed_quietly()
+
+
+def _assert_offline_check_failed_quietly() -> None:
+    """IS-88: the installed copy's startup update check, offline. The lane points api.github.com at 127.0.0.1, so the
+    check of a portable install (an updater channel) fails at once; it must say so in its `[update]` lines, end within
+    its 6 s bound (Updater.h RunUpdateCheckAndPrompt's kDeadlineMs: past it the check is "abandoned"), and the app must
+    start anyway — the caller has already seen its window.
+
+    Returns:
+        None.
+    Raises:
+        AssertionError: Naming the lines that are missing or the time it took.
+    """
+    updates = install.profile_log_lines("[update]")
+    begins = [i for i, ln in enumerate(updates) if "check (startup) begin:" in ln]
+    assert begins, f"no startup update check in the Default profile's hooks.log: {updates}"
+    after = updates[begins[-1] + 1:]
+    end = next((ln for ln in after if "check (startup)" in ln), None)
+    assert end is not None and "check (startup) failed:" in end, \
+        f"the offline startup check did not fail quietly: {updates[begins[-1]]!r} then {end!r}"
+    took = install.log_time_s(end) - install.log_time_s(updates[begins[-1]])
+    if took < 0:
+        took += 86400  # across midnight
+    assert took < 6.0, f"the offline check took {took:.1f} s (its bound is 6 s): {updates[begins[-1]]} / {end}"
 
 
 @pytest.mark.p0
@@ -346,3 +372,83 @@ def test_install_for_all_users(lane, kit, machine):
         "shared icons (a current release gives every user their own)"
     assert state.user is None and state.user_entry is None, "an all-users install made a per-user one"
     hold_true(lambda: len(install.app_processes(dest)) == 1, 3.0, what="one Agentmaster from Program Files")
+
+
+@pytest.mark.p1
+@pytest.mark.flow("INS-02")
+@pytest.mark.install("IS-49")
+def test_both_installs_current(lane, kit, machine):
+    """A copy started where the user has an install of their own AND an all-users install exists, both of its
+    version: the question recommends the user's own install and offers the all-users one without recommending it.
+
+    Promise (PortableInstall.h DecidePromptDefault, the 2026-10-21 probe matrix): for a user with an install of their
+    own, that install comes first — it is the one their icons, pins and the agentmaster command open.
+
+    Args:
+        lane: The install lane's facts (the staged installer, for the two installs).
+        kit: Stamped zips and copies of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: Naming the option that is wrong or missing.
+    """
+    zip1 = kit.zip("0.8.1.0")
+    for scope in ("Machine", "User"):
+        run = install.run_installer(lane, "-Scope", scope, "-ZipPath", str(zip1))
+        assert run.code == 0, str(run)
+    exe = kit.copy("0.8.1.0", "both")
+    question, started = _start_copy(exe)
+    labels = question.labels()
+    assert re.fullmatch(rf"Use the installed Agentmaster \(v{_v('0.8.1.0')}\) \(recommended\)", labels[0]), \
+        f"first option {labels[0]!r}; all: {labels}"
+    shared = next((label for label in labels if label.startswith("Use the Agentmaster installed for all users")), None)
+    assert shared is not None, f"the all-users install is not offered: {labels}"
+    assert re.fullmatch(rf"Use the Agentmaster installed for all users \(v{_v('0.8.1.0')}\)", shared), \
+        f"the all-users option {shared!r} (recommended too, or the wrong version)"
+    question.press(r"^Ask me later")
+    install.wait_app(exe.parent, newer_than=started)
+    assert not (exe.parent / "install.path").exists(), "'Ask me later' wrote a decision"
+
+
+@pytest.mark.p1
+@pytest.mark.flow("INS-02")
+@pytest.mark.install("IS-51")
+def test_install_here(lane, kit, machine):
+    """"Install here": the copy becomes the install where it is — registered in place, nothing copied elsewhere.
+
+    Promise (INS-02, PortableInstall.h PerformInstall in place): a user who unzipped Agentmaster where they want it gets
+    the same install as "Install just for you" — Apps & Features, the verbs, the PATH, the icons — for that folder.
+
+    Args:
+        lane: The install lane's facts.
+        kit: Stamped copies of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: Naming the decision file, registration or copy that is wrong.
+    """
+    # Named like a real unzip (the release zip's top folder is agentmaster-<version>): the lane's PATH reading, its
+    # baseline check and Reset-AmQa know a PATH entry by "agentmaster" in it, and the first run of this test, with a
+    # copy named "here", left C:\e2e\kit\run\here on the user PATH unseen (2026-10-24).
+    exe = kit.copy("0.8.1.0", "agentmaster-0.8.1.0")
+    copy = exe.parent
+    question, started = _start_copy(exe)
+    question.press(r"^Install here$")
+    # In place, the elevated start (UAC off) hands over to a start without rights from the same folder.
+    app = install.wait_app(copy, timeout_s=180, newer_than=started)
+    facts = install.InstallFacts.read(copy)
+    assert facts.install_path == "installed", f"install.path {facts.install_path!r} in {copy}"
+    assert _norm(facts.profile_path) == _norm(install.default_profile()), f"profile.path {facts.profile_path!r}"
+    state = install.MachineState.read()
+    assert state.user is None, f"'Install here' copied the app to {install.user_install_dir()}"
+    e = state.user_entry
+    assert e is not None and _norm(e.get("InstallLocation", "")) == _norm(copy), f"HKCU Apps & Features: {e}"
+    assert _norm(e.get("UninstallString", "")) == _norm(f'"{exe}" --uninstall-portable'), e
+    assert set(state.user_verbs) == set(install.VERB_KEYS), f"verbs: {state.user_verbs}"
+    assert any(_norm(p) == _norm(copy) for p in state.user_path), f"{copy} not on the user PATH: {state.user_path}"
+    for folder in ("desktop", "programs"):
+        assert any(_norm(link.target) == _norm(exe) for link in state.shortcuts_in(folder)), \
+            f"no {folder} icon of {exe}: {state.shortcuts_in(folder)}"
+    assert TaskDialog.all(pids=[app.pid]) == [], "the copy installed in place asked something more"
