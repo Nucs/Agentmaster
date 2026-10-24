@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import http.client
 import json
+import select
+import socket
 import threading
 import time
 
@@ -60,6 +62,97 @@ def post(port: int, body: dict, path: str = "/v1/messages", timeout: float = 15.
     data = resp.read()
     conn.close()
     return resp.status, data
+
+
+def post_with_headers(port: int, body: dict, timeout: float = 15.0) -> tuple[int, dict, bytes]:
+    """POST a Messages API body and read the whole answer with its headers.
+
+    Args:
+        port: The server's port.
+        body: The request body.
+        timeout: The socket timeout.
+    Returns:
+        (status, {lower-case header name: value}, raw body bytes).
+    Raises:
+        http.client.HTTPException / OSError: When the server cuts the connection.
+    """
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    conn.request("POST", "/v1/messages", json.dumps(body), {"content-type": "application/json"})
+    resp = conn.getresponse()
+    data = resp.read()
+    headers = {k.lower(): v for k, v in resp.getheaders()}
+    conn.close()
+    return resp.status, headers, data
+
+
+class RawStream:
+    """A Messages API request on a plain socket, read as raw bytes as they arrive — to see SILENCE, which an
+    http.client response cannot show (a read that times out breaks it for good).
+
+    Attributes:
+        sock: The connection.
+        data: Every byte received so far (headers, chunk sizes and events, undecoded).
+    """
+
+    def __init__(self, port: int, body: dict) -> None:
+        """Connect and send the request.
+
+        Args:
+            port: The server's port.
+            body: The request body.
+        Returns:
+            None.
+        Raises:
+            OSError: When the connection fails.
+        """
+        payload = json.dumps(body).encode("utf-8")
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=15)
+        self.sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-type: application/json\r\n"
+                          b"content-length: %d\r\n\r\n" % len(payload) + payload)
+        self.data = bytearray()
+
+    def read_until(self, marker: bytes, timeout_s: float = 10.0) -> None:
+        """Read until the received bytes hold a marker.
+
+        Args:
+            marker: The bytes to wait for.
+            timeout_s: How long.
+        Returns:
+            None.
+        Raises:
+            AssertionError: When the marker did not arrive in time, or the server closed first.
+        """
+        end = time.monotonic() + timeout_s
+        while marker not in self.data:
+            left = end - time.monotonic()
+            assert left > 0, f"{marker!r} did not arrive; got {bytes(self.data)[-300:]!r}"
+            readable, _, _ = select.select([self.sock], [], [], left)
+            if readable:
+                chunk = self.sock.recv(65536)
+                assert chunk, f"the server closed before {marker!r}; got {bytes(self.data)[-300:]!r}"
+                self.data += chunk
+
+    def quiet_for(self, seconds: float) -> bool:
+        """Whether no byte arrives for a while (the bytes that do arrive are kept).
+
+        Args:
+            seconds: How long to listen.
+        Returns:
+            True when nothing arrived.
+        """
+        readable, _, _ = select.select([self.sock], [], [], seconds)
+        if not readable:
+            return True
+        self.data += self.sock.recv(65536)
+        return False
+
+    def close(self) -> None:
+        """Close the connection (a client that gives up).
+
+        Returns:
+            None.
+        """
+        self.sock.close()
 
 
 def events(raw: bytes) -> list[tuple[str, dict]]:
@@ -431,6 +524,121 @@ def test_drop_cuts_the_connection(mock):
     port, _, _ = mock
     with pytest.raises((http.client.HTTPException, OSError)):
         post(port, request('[[mock say "half"; drop]]'))
+
+
+def test_error_headers_reach_the_client_and_the_log(mock):
+    """An `error … retry=no retry_after=120` answers with the API's x-should-retry / retry-after headers (what makes
+    Claude Code give up at once), and the request log records them.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On a missing header.
+    """
+    port, client, _ = mock
+    status, headers, raw = post_with_headers(port, request('[[mock error 429 rate_limit_error "slow" retry=no retry_after=120]]'))
+    assert status == 429 and json.loads(raw)["error"]["type"] == "rate_limit_error"
+    assert headers.get("x-should-retry") == "false" and headers.get("retry-after") == "120"
+    assert client.requests(kind="main")[-1]["headers"] == {"x-should-retry": "false", "retry-after": "120"}
+    status, headers, _ = post_with_headers(port, request('[[mock error 529 overloaded_error "busy"]]'))
+    assert status == 529 and "x-should-retry" not in headers and "retry-after" not in headers
+
+
+def test_gate_failed_with_headers_before_the_stream_started(mock):
+    """A gate failed with headers answers a held request that has sent nothing yet with that status AND those headers.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On a wrong status or a missing header.
+    """
+    port, client, _ = mock
+    client.fail("g4", status=429, etype="rate_limit_error", message="slow", headers={"retry-after": "90"})
+    status, headers, raw = post_with_headers(port, request('[[mock hold g4; reply "never"]]'))
+    assert status == 429 and headers.get("retry-after") == "90"
+    assert json.loads(raw)["error"]["message"] == "slow"
+
+
+def test_stall_starts_the_stream_then_sends_nothing_until_released(mock):
+    """A `stall` after some text sends NO byte while it waits (a `hold` would ping every 2 s), then the rest of the
+    response once the gate is released; a stall before any output starts the stream at once (message_start), where a
+    hold would send nothing at all.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On a byte during the stall, or a missing part of the response.
+    """
+    port, client, _ = mock
+    s = RawStream(port, request('[[mock say "half"; stall g5; reply "rest"]]'))
+    try:
+        s.read_until(b"content_block_stop")  # the text block is complete: the stall comes after it
+        client.wait_holding("g5", timeout_s=5)
+        assert s.quiet_for(2.6), f"bytes arrived during the stall: {bytes(s.data)[-200:]!r}"
+        client.release("g5")
+        s.read_until(b"0\r\n\r\n")
+        assert b'"rest"' in s.data and b"message_stop" in s.data and b"event: ping" not in s.data
+    finally:
+        s.close()
+    t = RawStream(port, request('[[mock stall g6; reply "late"]]'))
+    try:
+        t.read_until(b"message_start", timeout_s=3)
+        assert b"content_block_start" not in t.data
+        client.release("g6")
+        t.read_until(b"0\r\n\r\n")
+        assert b'"late"' in t.data
+    finally:
+        t.close()
+
+
+def test_stall_notices_a_client_that_gives_up(mock):
+    """A client that closes the connection during a stall (Claude Code's watchdog) ends the mock's wait without a
+    release: the request is logged as `client_gone` and the gate has no waiting stream any more.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: When the mock keeps waiting.
+    """
+    port, client, _ = mock
+    s = RawStream(port, request('[[mock say "half"; stall g7; reply "never"]]'))
+    s.read_until(b'"half"')
+    client.wait_holding("g7", timeout_s=5)
+    s.close()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and not client.requests(kind="main")[-1].get("client_gone"):
+        time.sleep(0.2)
+    assert client.requests(kind="main")[-1].get("client_gone"), client.requests(kind="main")[-1]
+    assert client.gates()["g7"]["waiting"] == 0
+
+
+def test_size_filler_streams_whole(mock):
+    """`say size=<n>` streams exactly n characters of filler, and `write <path> size=<n>` sends a Write whose content
+    is n characters long.
+
+    Args:
+        mock: The fixture.
+    Returns:
+        None.
+    Raises:
+        AssertionError: On a wrong length.
+    """
+    port, _, _ = mock
+    _, raw = post(port, request('[[mock say size=5000; reply "end"]]'))
+    text = texts(events(raw))
+    assert len(text) == 5003 and text.startswith("filler line 000001 ") and text.endswith("end")
+    _, raw = post(port, request('[[mock write C:/w/big.txt size=300000; reply "ok"]]'))
+    deltas = [d["delta"]["partial_json"] for n, d in events(raw)
+              if n == "content_block_delta" and d["delta"]["type"] == "input_json_delta"]
+    assert len(json.loads("".join(deltas))["content"]) == 300000
 
 
 def test_bad_script_and_bad_tool_input_answer_and_flag(mock):

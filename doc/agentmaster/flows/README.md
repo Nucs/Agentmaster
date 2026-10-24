@@ -30,7 +30,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 37 | 27 | 2 (fixed in code; SP-K2 reclassified as a feature) |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
-| [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 50 | 4 |
+| [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
 | [07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) | Deactivate, Close, drag / dock, the strip, quitting (TAB) | 10 | 5 / 2 / 3 | 39 | 27 | 4 (3 fixed in code; TAB-K2 reclassified as a feature) |
 | [08-telegram-topics.md](08-telegram-topics.md) | Telegram: setup, topics, history, the mirror (TGT) | 11 | 4 / 6 / 1 | 37 | 25 | 2 |
@@ -49,7 +49,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 677** | **≈ 565** | **28** (8 fixed in code) |
+| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 677** | **≈ 567** | **26** (8 fixed in code) |
 
 ---
 
@@ -248,9 +248,7 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | TAB-K5 | A reopen with a shell tab in the window starts the last Claude tab even when another Claude tab was focused (TAB-K2's mechanism; with a SHELL focused it is a feature) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | ROB-K1 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured 2026-10-23: the app's replace fails while any handle is open), and nothing re-saves until the next change | e2e suite, 2026-10-23 (`e2e/suites/test_robustness.py`) |
 | STA-K1 | A claude that ends without its SessionEnd never reads Done; killed mid-turn, or within ~2 s after a turn, it reads **Running** for good (its last `busy` heartbeat outlives the process and the scanner's "work outlived the turn" rule trusts it); `/exit` on a busy PC whose SessionEnd hook is cancelled stays Waiting | e2e suite, 2026-10-23 (`e2e/suites/test_session_state.py`) |
-| STA-K2 | Esc before any output reads Running ~30 s more (Claude Code writes nothing; the presence-idle release needs 30 s of quiet) | e2e suite, 2026-10-23 (`e2e/suites/test_session_state.py`) |
-| STA-K3 | A manual `/compact` reads Running ~30 s after it ended (PostCompact sets Waiting; 2 ms later the still-`busy` heartbeat promotes Running again) | e2e suite, 2026-10-23 (`e2e/suites/test_session_state.py`) |
-| STA-K4 | A Stop hook that blocks leaves the session Waiting for you while Claude Code continues the same turn (~20 s until the busy heartbeat outlives the turn) | e2e suite, 2026-10-23 (`e2e/suites/test_session_state.py`) |
+| STA-K5 | Esc before any output takes no interrupt hold (Claude Code writes no interrupt marker for it): once the status has settled, the runner sends the next queued prompt around the user's prompt, which Claude Code put back in the box; every other Esc parks the runner until the user's next message | e2e suite, 2026-10-24 (probe `stprobe5`; `e2e/suites/test_session_state.py`) |
 
 **Checked both ways (2026-10-23).** Every defect fixed in code (MGR-K1, SP-K1, TCM-K2, TAB-K1, TAB-K3, A11Y-K1,
 TAB-K4, CLI-K2) has a `needs_fix` test that asserts the CORRECT behavior, and each was run on both builds. On 0.8.0
@@ -268,7 +266,12 @@ day the suite filed it): TAB-10 E1 expects it, and
 ([07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) *Reclassified: not defects*). SP-K2 — with Sum off, a
 side-panel card's hover opens no rich card (the tab's hover does) — is a FEATURE too (the user's ruling of
 2026-10-24): SP-04 phase 2 expects it, and `e2e/suites/test_side_panel.py::test_sum_off_card_hover_opens_no_rich_card`
-proves it ([02-side-panel.md](02-side-panel.md) *Reclassified: not defects*).
+proves it ([02-side-panel.md](02-side-panel.md) *Reclassified: not defects*). STA-K2, STA-K3 and STA-K4 — a
+status that lags ~20–30 s behind a change Claude Code made without telling (Esc before any output, the end of a
+manual `/compact`, a blocking Stop hook's continuation) — are ACCEPTED DELAYS (the user's ruling of 2026-10-24:
+"no reason to worry for 30s-ish status update delay. We sometimes use that delay for safety of pilot autorunner to
+not spam a mistake sent during status change"): bounded tests replace their known-defect tests, and the runner's
+side is measured ([05-session-state.md](05-session-state.md) *Reclassified: accepted delays*).
 
 ## Where the documents disagree with the code (found while writing)
 
@@ -310,7 +313,11 @@ new known-defect tests and the dialog probe: 5 of 5). On 0.8.0 every `needs_fix`
 **The session-state suite** (2026-10-23, `test_session_state.py`, 29 tests written from three probe rounds of
 Claude Code 2.1.291's own events — [05-session-state.md](05-session-state.md) "Claude Code's events, measured"): with
 the smoke test, 30 of 30 pass on the published 0.8.0 in 20.5 min (run `sta-final2`); its four known-defect tests
-(STA-K1–K4) assert today's wrong behavior and fail once each is fixed.
+(STA-K1–K4) assert today's wrong behavior and fail once each is fixed. On 2026-10-24 STA-K2–K4 became accepted delays
+(bounded tests, `ACCEPTED_LAG_S`) and the suite grew by 19 tests (22 cases; INT-01 in `test_interrupted_work.py`)
+from two more probe rounds (`stprobe4`, `stprobe5`): with the smoke test, 49 of 52 passed in 61.8 min (run `stcov1`),
+and the three that failed on timing they had not allowed for passed once fixed (run `stcov2`); its known-defect
+tests are now STA-K1 and STA-K5.
 
 | Flow | Automated | Tests (`e2e/suites/`) |
 |---|---|---|
@@ -342,18 +349,24 @@ the smoke test, 30 of 30 pass on the published 0.8.0 in 20.5 min (run `sta-final
 | TAB-10 | phases 1–3, E1 (TAB-K2, a feature since 2026-10-23), E4 (TAB-K5; TAB-K1 is named by the restart test's record check); phase 3's quit confirmation read by UI Automation (`needs_fix`, a build with TAB-K3's fix) | `test_workspace.py::test_close_all_windows_keeps_the_claude_tab`, `test_tab_menu.py::test_restart_restores_the_renamed_tab_dormant`, `…::test_a_shell_focused_reopen_starts_the_last_claude_tab`, `…::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` (E4, TAB-K5), `test_accessibility.py::test_the_quit_confirmation_is_readable` |
 | TAB-10 E2, E3 / TAB-K1 | the fix's own checks (`needs_fix`): Close Window right after a tab switch, swept over 5 moments, and on one of two windows over 4 | `test_workspace.py::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs`, `…::test_closing_one_of_two_windows_keeps_its_claude_tab` |
 | A11Y-K1 / TAB-K3 | the fixes' own checks (`needs_fix`), MGR-05 phase 2 among them (the selection on every surface and the tab's pill, read from item status) | `test_accessibility.py::test_the_selection_is_readable_on_every_surface`, `…::test_the_large_paste_warning_is_readable`, `…::test_the_page_names_its_glyph_buttons_and_cards`, `…::test_the_tab_says_its_session_state`, `…::test_known_defect_a_hit_test_passes_through_a_dialog` (A11Y-K2) |
-| STA-01 | phases 1–3, 5, E2, E3 (phase 4, the unread ring: DSP) | `test_session_state.py::test_turn_reads_running_then_waiting_with_no_blip`, `…::test_turn_under_two_seconds_settles_to_waiting`, `…::test_type_ahead_is_absorbed_into_the_running_turn`, `…::test_exit_reads_done` |
+| STA-01 | phases 1–3, 5, E1 (the Waiting-for-you timeout: a read session decays to idle, an unread one waits until it is read), E2, E3 (phase 4, the unread ring: DSP) | `test_session_state.py::test_turn_reads_running_then_waiting_with_no_blip`, `…::test_turn_under_two_seconds_settles_to_waiting`, `…::test_type_ahead_is_absorbed_into_the_running_turn`, `…::test_exit_reads_done`, `…::test_a_read_session_decays_to_idle_after_the_waiting_timeout`, `…::test_an_unread_session_keeps_waiting_past_the_timeout_until_read` |
 | STA-02 | no blip while a turn is held 10 s (not the 20-prompt sample) | `…::test_turn_reads_running_then_waiting_with_no_blip` |
 | STA-03 | phases 1–2, E3 | `…::test_question_reads_needs_approval_until_answered`, `…::test_permission_prompt_reads_needs_approval` |
-| STA-04 | phases 1–2, E1, E2 (a cut, a server error mid-stream), E4, E6 | `…::test_final_api_error_reads_error_with_its_message_and_recovers`, `…::test_retried_overload_never_reads_error`, `…::test_stream_cut_mid_response_reads_error`, `…::test_server_error_mid_stream_reads_error`, `…::test_model_not_found_reads_error`, `…::test_repeated_overload_reads_error`, `…::test_a_retrying_request_reads_running_until_esc` |
-| STA-05 | phase 3 | `…::test_background_agent_that_keeps_working_relights_running` |
-| STA-06 | phase 1 (STA-K3), phase 2 | `…::test_known_defect_compact_reads_running_half_a_minute_after_it_ended`, `…::test_auto_compaction_mid_turn_keeps_running` |
+| STA-04 | phases 1–2, E1 (a `retry-after` waited out too), E2 (a cut, a server error mid-stream), E4, E6, E8 (429 and 500 that Claude Code will not retry), E9 (a stream gone silent) | `…::test_final_api_error_reads_error_with_its_message_and_recovers`, `…::test_retried_overload_never_reads_error`, `…::test_stream_cut_mid_response_reads_error`, `…::test_server_error_mid_stream_reads_error`, `…::test_model_not_found_reads_error`, `…::test_repeated_overload_reads_error`, `…::test_a_retrying_request_reads_running_until_esc`, `…::test_an_api_error_claude_code_will_not_retry_reads_error_at_once`, `…::test_a_rate_limit_retry_after_is_waited_out_running`, `…::test_a_stream_that_goes_silent_reads_running_then_error` |
+| STA-05 | phases 1, 3, E1 (a background shell) | `…::test_a_long_tool_call_stays_running`, `…::test_background_agent_that_keeps_working_relights_running`, `…::test_a_background_shell_that_outlives_its_turn_relights_running` |
+| STA-06 | phase 1 (STA-K3, an accepted delay: bounded), phase 2 | `…::test_compact_settles_waiting_within_the_accepted_lag`, `…::test_auto_compaction_mid_turn_keeps_running` |
+| STA-07 | phases 1–4 (killed and quit), E1, E4 (a question open at the crash), E5 (Deactivate; Restart reads running throughout) | `…::test_a_turn_cut_off_by_the_app_ending_reads_error_then_the_restore_wake_continues_it`, `…::test_a_question_open_at_a_crash_reads_error_then_is_asked_again`, `…::test_deactivate_mid_turn_reads_error_and_activate_continues_the_turn`, `…::test_restart_session_mid_turn_continues_the_turn_running` |
+| STA-08 | phases 1–2 (a `claude --resume` typed into a shell tab: one host, one card; a turn in either tab moves the state) | `…::test_one_conversation_in_two_tabs_keeps_one_host` |
+| STA-09 | phases 2–3 (a 3.2 MB transcript of its own, one line over 1 MiB, read after a restart) | `…::test_a_multi_megabyte_transcript_reads_right_after_a_restart` |
+| STA-10 | phase 1 | `…::test_clear_keeps_the_tab_managed_on_the_new_conversation` |
 | STA-11 | E3 (STA-K1) | `…::test_known_defect_a_killed_claude_keeps_reading_running` |
-| STA-12 | phases 1–2, E1 (STA-K2) | `…::test_esc_mid_stream_reads_waiting_and_holds_the_runner`, `…::test_esc_during_a_tool_reads_waiting`, `…::test_known_defect_esc_before_any_output_reads_running_for_half_a_minute` |
-| STA-13 | phases 1–2 (phase 2: STA-K4) | `…::test_background_bash_completion_starts_a_turn_nobody_typed`, `…::test_known_defect_a_blocking_stop_hook_reads_waiting_while_claude_continues` |
+| STA-12 | phases 1–2, E1 (STA-K2, an accepted delay: bounded; the runner's side: STA-K5), E3 | `…::test_esc_mid_stream_reads_waiting_and_holds_the_runner`, `…::test_esc_during_a_tool_reads_waiting`, `…::test_esc_before_any_output_settles_waiting_within_the_accepted_lag`, `…::test_known_defect_esc_before_any_output_takes_no_interrupt_hold`, `…::test_esc_on_a_question_reads_waiting_and_holds_the_runner`, `…::test_esc_on_a_permission_prompt_reads_waiting_and_writes_nothing` |
+| STA-13 | phases 1–2 (phase 2: STA-K4, an accepted delay: bounded; the runner sends nothing into the continuation) | `…::test_background_bash_completion_starts_a_turn_nobody_typed`, `…::test_a_blocking_stop_hooks_continuation_reads_running_within_the_accepted_lag`, `…::test_the_runner_sends_nothing_into_a_blocked_stops_continuation` |
 | STA-14 | phases 1–4, E2 | `…::test_max_tokens_continuation_stays_running`, `…::test_refusal_retried_once_then_answered_never_reads_error`, `…::test_refusal_twice_reads_error`, `…::test_prompt_too_long_compacts_and_continues`, `…::test_prompt_too_long_that_compaction_cannot_fix_reads_error` |
 | STA-15 | phase 1 | `…::test_model_switch_dialog_changes_no_state` |
 | STA-16 | phase 1 | `…::test_state_follows_with_every_hook_disabled` |
+| INT-01 | phases 1–3 (a connection lost after a tool result; Restart session rewinds, and the turn goes on) | `test_interrupted_work.py::test_restart_session_continues_a_turn_that_died_on_an_api_error` |
+| INT-04 | phases 1, 3, 4 in one window (a cut-off turn woken after a kill or a quit) | `test_session_state.py::test_a_turn_cut_off_by_the_app_ending_reads_error_then_the_restore_wake_continues_it` |
 | ROB-11 | phases 1–2 (phase 2 today: ROB-K1) | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
 | CLI-02 | CLI-K2's fix (`needs_fix`): the release CLI beside an unpackaged install, from a plain shell, reads the install's own profile | `test_cli.py::test_a_plain_shell_reads_the_installs_own_profile` |
 | INS-01 | the installer script: IS-01–IS-04 (just for you: install, up to date, upgrade over a user's file, uninstall), IS-10 (the caller's PowerShell keeps nothing, 5.1 and 7), IS-14–IS-16 (`-InstallDir`), IS-26–IS-27 (a standard account at the keyboard) — the install lane | `install/test_install_script.py::test_just_for_you_life_cycle`, `…::test_the_callers_powershell_keeps_nothing`, `…::test_install_dir_rules`, `install/test_install_accounts.py::test_another_account_runs_the_installer` |
@@ -369,10 +382,11 @@ Not automated yet in these areas: MGR-05 phase 5
 phase 3–4, SP-05 E1, E4–E8, SP-06 phases 1–2 (splitter drags), TCM-01 phase 4 (an adopted shell claude),
 TAB-01 E1–E3, E5, E6 (the focused tab — MGR-03 phase 3 —,
 a turn cut off, an adopted session, a delivery in flight, the strip's place), TAB-02 E2, TAB-03 E2–E4 and E6, TAB-04
-phase 3 (MRU mode), TAB-05–TAB-09, STA-02's 20-prompt sample, STA-03 E1, E2, E4, STA-04 E3, E5, STA-05 phases 1–2
-(2.1.291 runs every Agent call in the background), STA-06 E1–E3, STA-07–STA-10 (a cut-off turn, one conversation in two
-tabs, large transcripts, `/clear`), STA-11 phases 1–3, STA-12 phase 3, E2, E3, STA-13 E2–E4 (scheduled tasks and
-teammates are not mocked yet), STA-14 E1, E4, STA-15 E1–E2, STA-16 E1–E2, the edge cases not listed above.
+phase 3 (MRU mode), TAB-05–TAB-09, STA-02's 20-prompt sample, STA-03 E1, E2, E4, STA-04 E3, E5, STA-05 phase 2
+(2.1.291 runs every Agent call in the background), E2 (the flash ring), STA-06 E1–E3, STA-07 E2, E3, E6, STA-08 phase 3
+(the host tab closed), E1–E3, STA-09 phase 1 (F-CORP), STA-10 phase 2 (the summary's link), STA-11 phases 1–3,
+STA-12 phase 3, E2, STA-13 E2–E4 (scheduled tasks and teammates are not mocked yet), STA-14 E1, E4, STA-15 E1–E2, STA-16 E1–E2, INT-01 E1–E9,
+INT-02, INT-03, INT-04 phases 2–3 (two windows, several busy tabs), E1–E8, INT-05–INT-07 (NOT BUILT), the edge cases not listed above.
 
 ## Adding a flow
 

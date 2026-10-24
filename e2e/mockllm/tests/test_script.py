@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from mockllm.script import (Element, ScriptError, check_tool_input, expand_shorthand, find_scripts, parse_steps,
-                            plan)
+from mockllm.script import (FILLER_LINE_CHARS, MAX_FILLER_CHARS, Element, Quoted, ScriptError, check_tool_input,
+                            expand_shorthand, filler, find_scripts, parse_steps, plan)
 
 
 def kinds(response) -> list:
@@ -108,6 +108,23 @@ class TestParseSteps:
         """
         with pytest.raises(ScriptError, match="does not parse"):
             parse_steps('tool Bash {"command": }')
+
+    def test_a_quoted_text_holding_equals_is_never_an_option(self):
+        """A JSON string argument with "=" in it stays the step's text (it was taken for a key=value option before
+        the parser marked quoted texts); a bare word with "=" is still an option.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: When the quoted text is read as an option.
+        """
+        steps = parse_steps('bash "FOO=1 make"; say "x = 1"; error 429 rate_limit_error "a=b" times=1')
+        assert isinstance(steps[0][1][0], Quoted) and steps[0][1][0] == "FOO=1 make"
+        p = plan('bash "FOO=1 make"; reply "x = 1"')
+        assert p.responses[0].elements[0].input["command"] == "FOO=1 make"
+        assert p.responses[1].elements[0].text == "x = 1"
+        q = plan('error 429 rate_limit_error "limit=1" times=1; reply "ok"')
+        assert q.responses[0].fail == (429, "rate_limit_error", "limit=1", 1)
 
 
 class TestPlan:
@@ -221,6 +238,92 @@ class TestPlan:
         """
         p = plan('error 529 overloaded_error "busy" 1; reply "ok"')
         assert p.responses[0].fail[3] == 1
+
+    def test_error_retry_options_become_headers(self):
+        """`retry=no|yes` and `retry_after=<s>` give the failing attempts the API's x-should-retry / retry-after headers,
+        on a permanent error and on a `times=N` one (carried to the response it fails); no option, no header.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On a wrong header set.
+        """
+        final = plan('error 429 rate_limit_error "slow down" retry=no').responses[0]
+        assert final.fail == (429, "rate_limit_error", "slow down", None)
+        assert final.fail_headers == {"x-should-retry": "false"}
+        later = plan('error 429 rate_limit_error "wait" times=1 retry_after=5; reply "after"').responses[0]
+        assert later.fail == (429, "rate_limit_error", "wait", 1) and later.fail_headers == {"retry-after": "5"}
+        both = plan('error 500 api_error "x" retry=yes retry_after=1.5').responses[0]
+        assert both.fail_headers == {"x-should-retry": "true", "retry-after": "1.5"}
+        assert plan('error 529 overloaded_error "x"').responses[0].fail_headers == {}
+
+    def test_error_options_are_checked(self):
+        """A misspelled or malformed `error` option fails the script instead of sending no header.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: When no ScriptError is raised.
+        """
+        with pytest.raises(ScriptError, match="unknown option"):
+            plan('error 429 rate_limit_error "x" retry_afer=5')
+        with pytest.raises(ScriptError, match="retry must be yes or no"):
+            plan('error 429 rate_limit_error "x" retry=maybe')
+        with pytest.raises(ScriptError, match="number of seconds"):
+            plan('error 429 rate_limit_error "x" retry_after=soon')
+        with pytest.raises(ScriptError, match="not be negative"):
+            plan('error 429 rate_limit_error "x" retry_after=-1')
+
+    def test_stall_is_a_gate_element(self):
+        """`stall <gate>` plans like `hold` (an element naming its gate), with its own kind so the server can keep it
+        silent.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On a wrong plan.
+        """
+        r = plan('say "half"; stall g1; reply "rest"').responses[0]
+        assert kinds(r) == ["text", "stall", "text"] and r.elements[1].name == "g1"
+        with pytest.raises(ScriptError, match="needs a text argument"):
+            plan("stall")
+
+    def test_size_fills_a_text_or_a_write(self):
+        """`size=<n>` puts exactly n characters of numbered filler in a say / think / reply block or a Write's content;
+        a text and a size together, a bad size, or one over the cap fail loudly.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On a wrong length or a missing refusal.
+        """
+        r = plan('think size=10; say size=1000; reply size=5').responses[0]
+        assert [len(el.text) for el in r.elements] == [10, 1000, 5]
+        assert r.elements[1].text.startswith("filler line 000001 ")
+        w = plan('write C:/w/big.txt size=200000; reply "ok"').responses[0]
+        assert w.elements[0].name == "Write" and len(w.elements[0].input["content"]) == 200000
+        assert plan('write C:/w/a.txt "x"; reply "ok"').responses[0].elements[0].input["content"] == "x"
+        with pytest.raises(ScriptError, match="not both"):
+            plan('say "text" size=10')
+        with pytest.raises(ScriptError, match="whole number"):
+            plan("say size=lots")
+        with pytest.raises(ScriptError, match=r"size must be 0\.\."):
+            plan(f"say size={MAX_FILLER_CHARS + 1}")
+
+    def test_filler_is_numbered_lines_of_a_fixed_width(self):
+        """The filler is deterministic, exactly as long as asked, and made of numbered lines of FILLER_LINE_CHARS.
+
+        Returns:
+            None.
+        Raises:
+            AssertionError: On a wrong shape.
+        """
+        text = filler(FILLER_LINE_CHARS * 3 + 7)
+        lines = text.split("\n")
+        assert len(text) == FILLER_LINE_CHARS * 3 + 7 and text == filler(FILLER_LINE_CHARS * 3 + 7)
+        assert [len(x) + 1 for x in lines[:3]] == [FILLER_LINE_CHARS] * 3
+        assert lines[2].startswith("filler line 000003 ") and lines[3] == "filler "
+        assert filler(0) == "" and filler(-5) == ""
 
     def test_stream_delay_hold_drop_stop_usage(self):
         """Stream-control steps land in order on the response; stop and usage override its fields.
