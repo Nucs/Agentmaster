@@ -38,6 +38,13 @@
 // With Callbacks::tabs set (SESSIONS.md §9.14; both search conversations in the app), a third server
 // `tabs` acts on the user's WORKSPACE:
 //
+//   tabs.overview    — every window and its tabs as ONE Markdown page, each window's tabs grouped by
+//                      the folder they work in, a table row per tab (status, age, turns, ctx, model,
+//                      queue, notes): what the model reads first whenever the user mentions a window,
+//                      a tab or an open session (SESSIONS.md §9.16). Its filters take one value or a list.
+//   tabs.status      — what up to 32 sessions are doing now (open or closed): the registry's live facts,
+//                      the last reply and recap, the draft, the queue and why its next prompt waits. One
+//                      id answers one object, a list answers a list (SESSIONS.md §9.16).
 //   tabs.list        — the windows and their tabs (title, session, state, folders, last turn, last
 //                      activity): what the model reads to pick a window and the place for a new tab.
 //   tabs.resume      — open a closed session again in a tab, in a chosen window, after a chosen tab.
@@ -66,6 +73,7 @@
 
 #include "AgentHarness.h" // HarnessToolServer / HarnessToolResult
 #include "Json.h"
+#include "SessionModels.h" // SessionInfo / SessionState — the status tool's facts are read from a registry record (SessionLiveFactsOf)
 #include "SessionSearch.h" // SessionQuery / SessionHit
 #include "TranscriptStore.h" // SessionIndexEntry / TranscriptRef
 #include "WindowTabTools.h" // WindowCensus / WindowToolRequest / WindowToolOutcome — the tabs server's exchange with the windows
@@ -336,11 +344,19 @@ namespace Agentmaster
     std::wstring SessionSearchHandleOf(const std::wstring& sessionId);
 
     // A search result as the JSON text the model reads: the window it covered, the counts, and
-    // one compact object per row (short id, title, folder, branch, times, sizes, why it matched).
+    // one compact object per row (short id, title, folder, branch, status, age, times, sizes, why it
+    // matched).
     //   handleOf — the short id to print for a session id; empty = SessionSearchHandleOf. (The
     //              toolset passes its own, which lengthens a short id that two sessions share.)
+    //   live     — the BRIEF live facts of the rows' sessions that are open in a tab, by whole id
+    //              (Callbacks::TabTools::facts with full false), or null. A row whose session is in it
+    //              gets that tab's status (SessionStatusPhrase: "running", "idle (dormant)", ...) and
+    //              its age since its newest turn started or ended (the MOST RECENT order, SESSIONS.md
+    //              §9.16). Every other row reads "closed" — or "open" when the catalog says a tab has it
+    //              but no facts say its state (a host without the facts callback, a tab opened after
+    //              the facts were read) — with its age since its newest message.
     //   throws   — std::bad_alloc; whatever `handleOf` throws.
-    std::wstring FormatSessionSearchResult(const SessionCatalog& catalog, const SessionSearchParams& params, const SessionSearchOutcome& outcome, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf = {});
+    std::wstring FormatSessionSearchResult(const SessionCatalog& catalog, const SessionSearchParams& params, const SessionSearchOutcome& outcome, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf = {}, const std::unordered_map<std::wstring, SessionLiveFacts>* live = nullptr);
 
     // A one-line description of a search for the user ("tab drag crash" · last 30 days · full text).
     //   throws — std::bad_alloc.
@@ -489,6 +505,145 @@ namespace Agentmaster
     /// <remarks>Pure; with exactly one window an empty argument means that window (there is nothing to ask).</remarks>
     std::optional<size_t> ResolveWindowArgument(const std::vector<WindowCensus>& windows, std::wstring_view argument, const std::wstring& originWindowId, std::wstring& error);
 
+    // ===== live facts: the status and overview tools (SESSIONS.md §9.16) ====================
+
+    /// <summary>At most this many sessions one `status` call reports (the user's number of 2026-10-24: "32 sessions
+    /// and not 8"); the ids past it are named in the result as not reported.</summary>
+    /// <remarks>32 full status objects stay under ~32,000 characters (the texts in them are cut), well inside the
+    /// ~25,000-token cap Claude Code puts on a tool's result.</remarks>
+    inline constexpr size_t kStatusMaxIds = 32;
+
+    /// <summary>
+    /// The longest `overview` page, in characters (about 16,000 tokens). A workspace whose full page is longer folds its
+    /// quiet tabs (idle or done, nothing queued, nothing unread) into one line per folder, step by step, and past the
+    /// last step names how many tabs it left out (RenderWorkspaceOverview).
+    /// </summary>
+    inline constexpr size_t kOverviewMaxChars = 48000;
+
+    /// <summary>The Triage Board's word for a state: "running", "waiting for you", "needs approval", "error", "idle" or
+    /// "done" — what the model reads as a tab's state everywhere (list, overview, status, a search row).</summary>
+    /// <param name="state">The session's state.</param>
+    /// <returns>A static, NUL-terminated word; never null.</returns>
+    const wchar_t* SessionStateWord(SessionState state) noexcept;
+
+    /// <summary>
+    /// The one-phrase status a search row, an overview row and a status object carry: the state word for a session that
+    /// runs in a tab, the state word plus " (dormant)" for a tab whose agent is not started (it starts when the tab is
+    /// entered), "closed" for a session with no tab.
+    /// </summary>
+    /// <param name="stateWord">SessionStateWord of its state ("" = not known: "open" is said for a live tab).</param>
+    /// <param name="live">It has a tab open.</param>
+    /// <param name="started">Its agent process runs.</param>
+    /// <param name="external">Adopted (a claude the user started by hand: it runs whatever `started` says).</param>
+    /// <returns>The phrase.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    std::wstring SessionStatusPhrase(const std::wstring& stateWord, bool live, bool started, bool external);
+
+    /// <summary>
+    /// Whether a session has something the user has not looked at: the context menu's Mark Unread, or a state that needs
+    /// the user (waiting for you, needs approval, error) reached by activity newer than the user's last visit of its tab
+    /// (SessionInfo::readUnixMs &lt; lastActivityUnixMs, the Waiting-for-you decay's own test).
+    /// </summary>
+    /// <param name="s">The session.</param>
+    /// <returns>True when it is unread.</returns>
+    /// <remarks>readUnixMs is transient: after a restart every waiting session reads unread until its tab is visited,
+    /// which is what "nobody looked at it since" means.</remarks>
+    bool SessionLooksUnread(const SessionInfo& s) noexcept;
+
+    /// <summary>
+    /// A session's Prompt Queue Runner in one word: "auto" (it sends the next queued prompt by itself), "paused", or
+    /// "held" (paused because the user interrupted a turn; Auto again on the user's next message), each followed by
+    /// " (Pause all on)" while the global pause holds every session.
+    /// </summary>
+    /// <param name="s">The session.</param>
+    /// <param name="globalPause">The scheduler's Pause all.</param>
+    /// <returns>The word.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    std::wstring SessionRunnerWord(const SessionInfo& s, bool globalPause);
+
+    /// <summary>How many prompts wait in a session's queue: Pending, and the legacy Held.</summary>
+    /// <param name="s">The session (a SnapshotLiveForScan record keeps every open prompt, so its count is exact).</param>
+    /// <returns>The count.</returns>
+    uint32_t SessionQueuedCount(const SessionInfo& s) noexcept;
+
+    /// <summary>
+    /// Why the next queued prompt of a session has not gone out, in plain words: the runner's own decision
+    /// (Scheduler.h DecideAdvance, the same pure function the scheduler runs) translated for the model — the runner is
+    /// paused, the tab is dormant, the turn is still running, a question waits for the user, the 40-second status
+    /// settle, ... — or that it goes out now.
+    /// </summary>
+    /// <param name="s">The session WITH its queue (Get, or a SnapshotLiveForScan record).</param>
+    /// <param name="nowUnixMs">The current time.</param>
+    /// <param name="lastHumanInputUnixMs">SessionRegistry::LastHumanInputUnixMs (0 = never).</param>
+    /// <param name="globalPause">The scheduler's Pause all.</param>
+    /// <returns>The sentence; "" when nothing is queued.</returns>
+    /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+    /// <remarks>DecideAdvance's reasons are fixed literals; one this function does not know is passed on as it is, so a
+    /// new gate is never hidden (it only reads less well).</remarks>
+    std::wstring DescribeQueueWait(const SessionInfo& s, int64_t nowUnixMs, int64_t lastHumanInputUnixMs, bool globalPause);
+
+    /// <summary>
+    /// The live facts of one registry record, as the status tool reports them: state and since when, the MOST RECENT
+    /// key, the tab's start, the folders, the model and context, the heartbeat, the flags, the error, the texts (cut:
+    /// the last reply and the recap to 240 characters, the draft to 160, the next prompt's first line to 120), the
+    /// queue with the runner's mode and DescribeQueueWait, the lineage.
+    /// </summary>
+    /// <param name="s">The record: Get (everything), or a lean snapshot record (its emptied parts come back empty).</param>
+    /// <param name="nowUnixMs">The current time.</param>
+    /// <param name="lastHumanInputUnixMs">SessionRegistry::LastHumanInputUnixMs (0 = never).</param>
+    /// <param name="globalPause">The scheduler's Pause all.</param>
+    /// <returns>The facts, known and managed set; turns -1, tags and favorite empty (the transcript index's part, which
+    /// the caller adds).</returns>
+    /// <exception cref="std::bad_alloc">If the facts cannot be allocated.</exception>
+    SessionLiveFacts SessionLiveFactsOf(const SessionInfo& s, int64_t nowUnixMs, int64_t lastHumanInputUnixMs, bool globalPause);
+
+    /// <summary>What an `overview` call lists: its arguments, parsed. An empty list is no filter; the three combine with
+    /// AND, the values of one with OR.</summary>
+    struct OverviewFilter
+    {
+        std::vector<size_t> windows; // indices into the census, each once, in the order asked
+        std::vector<std::wstring> dirs; // folded pieces of a folder path (lower case, '/' as '\'): a tab matches when its dir or works_in contains any
+        std::vector<std::wstring> states; // folded words: a tab matches when any is one of its words (see RenderWorkspaceOverview)
+    };
+
+    /// <summary>
+    /// Read an `overview` call's arguments: `window`, `dir` and `state`, each one value or a list of values (a window as a
+    /// number or an id, ResolveWindowArgument's forms).
+    /// </summary>
+    /// <param name="arguments">The model's argument object.</param>
+    /// <param name="windows">The census (the windows a `window` value may name).</param>
+    /// <param name="originWindowId">The window the request came from (only described in an error).</param>
+    /// <param name="error">Receives, when the result is nullopt, what is wrong, written for the model (a window that
+    /// names no open window, with every window described; a value of a wrong type).</param>
+    /// <returns>The filter, or nullopt with `error` set.</returns>
+    /// <exception cref="std::bad_alloc">If the filter cannot be allocated.</exception>
+    std::optional<OverviewFilter> ParseOverviewFilter(const json::Value& arguments, const std::vector<WindowCensus>& windows, const std::wstring& originWindowId, std::wstring& error);
+
+    /// <summary>
+    /// The `overview` page: a Markdown document for the model. A header (the time, the counts by status, the filter, what
+    /// the columns mean); per window a section (its number, short id, tab count, selected tab, used last / asked from);
+    /// in it one group per working folder (works_in, else dir), the groups with the most recent work first, each a table
+    /// in strip order: pos, title, id, status, age, turns, ctx, model, queue, notes; the shell tabs last, on one line.
+    /// </summary>
+    /// <param name="windows">The census (WindowTabInfo's overview columns filled).</param>
+    /// <param name="filter">ParseOverviewFilter's result (an empty filter lists everything).</param>
+    /// <param name="originWindowId">The window the request came from ("" = none: a phone).</param>
+    /// <param name="nowUnixMs">The current time.</param>
+    /// <param name="handleOf">The short id to print for a session id (the toolset's own, so every other tool takes it).</param>
+    /// <param name="maxChars">The page's budget (kOverviewMaxChars; a test passes a small one).</param>
+    /// <returns>The Markdown text.</returns>
+    /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+    /// <exception cref="std::exception">Whatever `handleOf` throws.</exception>
+    /// <remarks>
+    /// A page over the budget is made again with its QUIET tabs (idle or done; not selected, unread, pinned, queued, with
+    /// no draft and no error) folded into one line per folder ("Quiet: pos title [id] age; ..."): first the ones quiet
+    /// for over a day, then every quiet tab, then without their ages; still too long, it stops at the budget and names
+    /// how many tabs it left out and how to narrow the call. A tab's words for the `state` filter: its state word,
+    /// "dormant", "unread", "queued", "draft", "pinned", "compacting", and "shell" for a tab with no session; a filter
+    /// value matches a word it equals or, with 3 characters or more, is part of ("waiting" matches "waiting for you").
+    /// </remarks>
+    std::wstring RenderWorkspaceOverview(const std::vector<WindowCensus>& windows, const OverviewFilter& filter, const std::wstring& originWindowId, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf, size_t maxChars = kOverviewMaxChars);
+
     // ===== the tool servers =================================================================
 
     // The tool servers of the Sessions AI search (sessions or agentmaster, display, and with
@@ -582,6 +737,16 @@ namespace Agentmaster
                 // a test). Optional. Only described to the model ("this request came from it"): it never chooses the
                 // window by itself, because the user's rule is that with several windows the user names one.
                 std::function<std::wstring()> originWindowId;
+                // The live facts of these sessions (whole ids), index-aligned with the ids asked (SESSIONS.md §9.16).
+                // full = true: everything the `status` tool reports (the app: SessionLiveFactsOf over each registry
+                // record, open or closed, plus the transcript index's counts; else the index alone for a session
+                // Agentmaster never ran; known false for an id that names no session). full = false: the BRIEF facts a
+                // search row carries — and only for the sessions open in a tab; any other id comes back with live false
+                // and nothing else, and the row's catalog answers for it. Optional: without it the status tool is not
+                // served and search rows take their status from the catalog alone. Called on the tool-call thread with
+                // the model waiting, maybe by two read-only calls at once: thread-safe, and quick (registry reads; for
+                // full, at most kStatusMaxIds records). A throw reaches the harness, which answers the model with it.
+                std::function<std::vector<SessionLiveFacts>(const std::vector<std::wstring>& sessionIds, bool full)> facts;
             } tabs;
         };
 
@@ -592,8 +757,9 @@ namespace Agentmaster
         // The servers to put into HarnessOptions::toolServers: "sessions" (search, grep, read)
         // and "display" (show); with Callbacks::database.call set, "agentmaster" (the database's
         // tools, then this toolset's own read) and "display" instead. With Callbacks::tabs.census
-        // set, a last server "tabs" (list, resume, fork, deactivate) in either mode. The handlers
-        // refer to this object: it must outlive the conversation's process.
+        // set, a last server "tabs" (overview, status — with tabs.facts —, list, resume, fork,
+        // deactivate) in either mode. The handlers refer to this object: it must outlive the
+        // conversation's process.
         //   throws — std::bad_alloc.
         std::vector<HarnessToolServer> Servers();
 
@@ -672,9 +838,11 @@ namespace Agentmaster
         // The database's server (the model calls mcp__agentmaster__<tool>): the same name as the
         // stdio MCP server `agentmaster-sessiondb.exe mcp`, so a tool reads the same everywhere.
         static constexpr wchar_t kDatabaseServer[] = L"agentmaster";
-        // The window and tab tools' server (the model calls mcp__tabs__list, mcp__tabs__resume,
-        // mcp__tabs__fork and mcp__tabs__deactivate).
+        // The window and tab tools' server (the model calls mcp__tabs__overview, mcp__tabs__status,
+        // mcp__tabs__list, mcp__tabs__resume, mcp__tabs__fork and mcp__tabs__deactivate).
         static constexpr wchar_t kTabsServer[] = L"tabs";
+        static constexpr wchar_t kTabsOverviewTool[] = L"overview";
+        static constexpr wchar_t kTabsStatusTool[] = L"status";
         static constexpr wchar_t kTabsListTool[] = L"list";
         static constexpr wchar_t kTabsResumeTool[] = L"resume";
         static constexpr wchar_t kTabsForkTool[] = L"fork";
@@ -764,10 +932,47 @@ namespace Agentmaster
         void RememberHandles(const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds);
         int64_t Now() const;
 
-        /// <summary>The tabs server's four tools (descriptions, schemas, handlers), in the order the model reads them.</summary>
-        /// <returns>list, resume, fork, deactivate.</returns>
+        /// <summary>The tabs server's tools (descriptions, schemas, handlers), in the order the model reads them.</summary>
+        /// <returns>overview, status (only with Callbacks::tabs.facts), list, resume, fork, deactivate.</returns>
         /// <exception cref="std::bad_alloc">If the tools cannot be allocated.</exception>
         std::vector<HarnessTool> MakeTabTools();
+
+        /// <summary>
+        /// The `overview` tool: the census, the filters parsed (ParseOverviewFilter), the page rendered
+        /// (RenderWorkspaceOverview) with this conversation's short ids — every listed session gets one, so status, read,
+        /// show, resume, fork and deactivate take the ids the page prints.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <returns>The Markdown page, or an error result written for the model (no window answered, a bad filter).</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the census callback throws (the harness answers the model with it).</exception>
+        HarnessToolResult Overview(const json::Value& arguments);
+
+        /// <summary>
+        /// The `status` tool: `ids` as one id (the answer is one session's object) or a list (the answer lists them, in
+        /// the order asked, at most kStatusMaxIds), each resolved like every other tool's ids; the facts from
+        /// Callbacks::tabs.facts (full), the tab's place from the census (asked only when one of them is open); unknown ids
+        /// named, never guessed.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <returns>The JSON result, or an error result written for the model (no ids, a single unknown id).</returns>
+        /// <exception cref="std::bad_alloc">If the result cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the facts / census callbacks throw.</exception>
+        HarnessToolResult StatusOf(const json::Value& arguments);
+
+        /// <summary>
+        /// Add `status` and `age` to every row of a database search result (the database mode's twin of
+        /// FormatSessionSearchResult's live facts): the brief facts of the rows' sessions that are open in a tab, "closed"
+        /// for the others. The text is returned unchanged when it is not a JSON object with a `rows` array, or when the
+        /// facts callback is missing.
+        /// </summary>
+        /// <param name="resultText">The database's search result.</param>
+        /// <param name="handles">The rows' ids as printed, in order.</param>
+        /// <param name="fullIds">The whole ids behind them, index-aligned ("" = not resolved: that row gets nothing).</param>
+        /// <returns>The result text, with the two fields added.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        /// <exception cref="std::exception">Whatever the facts callback throws.</exception>
+        std::wstring AddLiveFactsToDatabaseRows(const std::wstring& resultText, const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds);
 
         /// <summary>
         /// The `list` tool: the census, filtered by window / dir / title, each window's tabs cut to `limit` (the

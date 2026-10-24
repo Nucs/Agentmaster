@@ -6,6 +6,7 @@
 #include "SessionSearchTools.h"
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir, LogSwallowedException, ResolveClaudeTranscriptPath
+#include "Scheduler.h" // DecideAdvance: why a session's next queued prompt waits (the status tool, DescribeQueueWait)
 #include "SessionDbToolDefs.h" // the session database's tools (the database mode's server)
 #include "SessionStore.h" // stored titles, tags, favorites
 #include "TranscriptTurns.h" // RenderTranscriptTurnsFile: the read tool's compact transcript
@@ -18,6 +19,7 @@
 #include <condition_variable>
 #include <ctime>
 #include <cwchar>
+#include <iterator> // std::make_move_iterator: the live facts put into a database row (AddLiveFactsToDatabaseRows)
 #include <stdexcept>
 #include <thread>
 
@@ -601,13 +603,14 @@ namespace
     L"and before (YYYY-MM-DD: a session active at any time in the period is in, also one that started before it or went on " \
     L"after it), dir, branch, tag, favorite and open; sort by relevance (the default: name matches first, then paths, " \
     L"prompts and other text, newest first in each), active or created; limit 1 to 200 (default 30). A result with `more` " \
-    L"holds only part of the matches: raise limit. Each row has a short id, the title, the folder, the branch, the times, " \
-    L"the sizes, how it matched (title, path, prompt or text, with snippets), for a path match the `path` that matched and " \
-    L"- when that is a file it touched - its first_prompt (what the session was for, in the user's words), and - when you " \
-    L"gave after or before - in_period: how many of its own messages and prompts fall inside the period (none = it only " \
-    L"spans the period). deep:true also reads Claude's replies and tool output, for words that only Claude wrote, or " \
-    L"several words that must meet in one message in any order: it can take tens of seconds over every session, so narrow " \
-    L"it with dir or a period, and try grep first for exact text.\n" \
+    L"holds only part of the matches: raise limit. Each row has a short id, the title, the folder, the branch, its status " \
+    L"(overview's words for a session open in a tab, else closed) and age (as in overview), the times, the sizes, how it " \
+    L"matched (title, path, prompt or text, with snippets), for a path match the `path` that matched and - when that is a " \
+    L"file it touched - its first_prompt (what the session was for, in the user's words), and - when you gave after or " \
+    L"before - in_period: how many of its own messages and prompts fall inside the period (none = it only spans the " \
+    L"period). deep:true also reads Claude's replies and tool output, for words that only Claude wrote, or several words " \
+    L"that must meet in one message in any order: it can take tens of seconds over every session, so narrow it with dir or " \
+    L"a period, and try grep first for exact text.\n" \
     L"- mcp__sessions__grep finds exact text or a regex (ECMAScript) in the conversations' full text: the user's prompts, " \
     L"Claude's replies and thinking, tool calls and their output. For each matching session it returns its folder (dir), " \
     L"how many messages match and the first matches in context, each with who wrote it (user or claude) and when; sessions " \
@@ -637,8 +640,9 @@ namespace
     L"last 90 days - pass days:3650 to search every session), after and before (YYYY-MM-DD), dir, branch, tag, favorite and " \
     L"open; sort by relevance (the default: name matches first, then paths, prompts and other text, the best first in " \
     L"each), active or created; limit 1 to 50 (default 15), and cursor (the result's next) for the rows after them. Rows " \
-    L"carry a short id, why they matched, and up to two snippets whose ref opens their context in messages. It is fast " \
-    L"(under 0.2 s): search again with other words rather than giving up.\n" \
+    L"carry a short id, its status (overview's words for a session open in a tab, else closed), why they matched, and up to " \
+    L"two snippets whose ref opens their context in messages. It is fast (under 0.2 s): search again with other words " \
+    L"rather than giving up.\n" \
     L"- mcp__agentmaster__grep finds exact text or an RE2 regex (no lookarounds, no backreferences) in the conversations, " \
     L"with the words around each match: in the sessions of ids (up to 50), or in every session of a period and dir (days " \
     L"defaults to 90: pass days:3650 for every session). By default it reads the user's prompts, Claude's replies, tool " \
@@ -682,8 +686,17 @@ namespace
     L"it once per request, after the procedure's check. When a search request found nothing that fits, call it with an " \
     L"empty ids list.\n" \
     L"\n" \
-    L"Windows and tabs. list only reads; resume, fork and deactivate change the user's workspace, so use them only when the " \
-    L"user asked:\n" \
+    L"Windows and tabs. overview, status and list only read; resume, fork and deactivate change the user's workspace, so " \
+    L"use them only when the user asked:\n" \
+    L"- mcp__tabs__overview shows every window and its tabs as one Markdown page, each window's tabs grouped by the folder " \
+    L"they work in, a row per tab: pos, title, id, status (running, waiting for you, needs approval, error, idle or done, " \
+    L"plus dormant: its agent starts when the tab is entered), age (since its newest turn started or ended), turns " \
+    L"(messages the user sent), ctx (context tokens), model, queue and notes (selected, unread, draft, pinned, an error). " \
+    L"Call it FIRST whenever the user mentions a window, a tab or an open session. window, dir and state each take one " \
+    L"value or a list.\n" \
+    L"- mcp__tabs__status tells what up to 32 sessions are doing now, open or closed: status and since when, age, its tab, " \
+    L"Claude's heartbeat, model, ctx, turns, its last reply and recap, an unsent draft, the queue and why its next prompt " \
+    L"waits, an error. ids takes one id (one object back) or a list (a list back).\n" \
     L"- mcp__tabs__list lists the Agentmaster windows and their tabs. Per window: its number (window), id, tab count, " \
     L"whether the user used it last (last_used) and whether this request came from it (asked_from). Per tab: its position " \
     L"(pos), title, kind (claude, codex or shell), session id, state (running, waiting for you, needs approval, error, idle " \
@@ -751,7 +764,7 @@ namespace
 
 #define AM_PROMPT_WORKFLOWS_5_TO_7 \
     L"5. A mark or a state (\"my open sessions\", \"the starred ones\", \"tagged release\", \"on branch X\"): search with open, " \
-    L"favorite, tag or branch. For what runs in the tabs right now, list the tabs (workflow 15).\n" \
+    L"favorite, tag or branch. For what runs in the tabs right now, call overview (workflow 15).\n" \
     L"6. A question about what a session did or decided (\"did that session finish the release?\", \"what did we decide about " \
     L"the cache?\"): find it, read it at the level that shows the answer (level default and more chars for details; grep for " \
     L"the exact place), and answer with the evidence, quoting briefly; show the session too.\n" \
@@ -794,9 +807,11 @@ namespace
     L"approval, tell the user that its turn would be cut off and ask to confirm; only then call again with " \
     L"cut_off_turn:true. One tab per request: deactivate the first and ask the user to confirm each next one. Say that the " \
     L"tab resumes when it is entered.\n" \
-    L"15. A question about the workspace (\"which tabs are open in window 2?\", \"what is running right now?\", \"which tab " \
-    L"works in the catalog folder?\", \"what needs me?\"): list the tabs, narrowed with window, dir or title, and answer from " \
-    L"the list; show the sessions too when the user may want to open them.\n"
+    L"15. A request that mentions a window, a tab or an open session, or asks about the workspace (\"which tabs are open in " \
+    L"window 2?\", \"what is running right now?\", \"which tab works in the catalog folder?\", \"what needs me?\"): call overview " \
+    L"(narrowed with window, dir or state: \"what needs me\" is state [\"waiting for you\",\"needs approval\",\"error\"]) and " \
+    L"answer from it; call status for the sessions your answer is about (what one is doing, why its queue waits); show the " \
+    L"sessions too when the user may want to open them.\n"
 
 #define AM_PROMPT_WORKFLOW_16_PAGE \
     L"16. Token use, cost, or a session's relatives (its forks, the session it was forked from): this search has no tool " \
@@ -918,6 +933,23 @@ namespace
         LR"("id":{"type":"string","description":"The session whose tab to deactivate: its id from list or another result."},)"
         LR"("cut_off_turn":{"type":"boolean","description":"true only after the user confirmed it: deactivate even though the tab's turn is running or waiting for approval (that turn is cut off)."})"
         LR"(},"required":["id"]})";
+
+    // The overview and status tools (SESSIONS.md §9.16). Every filter and the ids take ONE value or a LIST (the user's
+    // request of 2026-10-24: "accept either scalar or vector of values and respond accordingly structured"), written as
+    // anyOf so the model sees both forms; ParseOverviewFilter and StatusOf read both, and Claude Code does not check a
+    // call against the schema anyway (AgentHarness.h). Their words are the prompt's; no description speaks of a "screen".
+    const wchar_t kTabsOverviewSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("window":{"anyOf":[{"type":"string"},{"type":"integer"},{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"integer"}]}}],"description":"Only this window (its number or id from a result), or only the windows of a list. Leave it out for every window."},)"
+        LR"("dir":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Only tabs whose folder (dir or works_in) contains this text, or any text of a list. Any case; '/' and '\\' are the same."},)"
+        LR"("state":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Only tabs in this state, or in any state of a list: running, waiting for you, needs approval, error, idle, done, dormant, unread, queued, draft, pinned, compacting or shell. \"what needs me\" is [\"waiting for you\",\"needs approval\",\"error\"]."})"
+        LR"(},"required":[]})";
+
+    const wchar_t kTabsStatusSchema[] =
+        LR"({"type":"object","properties":{)"
+        LR"("ids":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"maxItems":32}],"description":"One session id (a short id from any result, or a whole id): the answer is that session's object. Or a list of up to 32 ids: the answer lists them in that order. Open and closed sessions alike."})"
+        LR"(},"required":["ids"]})";
+    static_assert(kStatusMaxIds == 32, "kTabsStatusSchema, the status tool's description and the prompt say up to 32 ids: change their text too");
 
     // `ascii` (a SessionDbToolDefs.h string: ASCII by its contract) as a wide string; a byte above 0x7F becomes '?'
     // rather than a guess at an encoding. Never throws beyond std::bad_alloc.
@@ -1572,7 +1604,7 @@ namespace Agentmaster
         return out;
     }
 
-    std::wstring FormatSessionSearchResult(const SessionCatalog& catalog, const SessionSearchParams& params, const SessionSearchOutcome& outcome, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf)
+    std::wstring FormatSessionSearchResult(const SessionCatalog& catalog, const SessionSearchParams& params, const SessionSearchOutcome& outcome, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf, const std::unordered_map<std::wstring, SessionLiveFacts>* live)
     {
         using json::Value;
         Value root = Value::MkObj();
@@ -1632,6 +1664,39 @@ namespace Agentmaster
             if (!e.stats.gitBranch.empty())
             {
                 o.Set(L"branch", Value::MkStr(e.stats.gitBranch));
+            }
+            // SESSIONS.md §9.16 (the user's request of 2026-10-24: "make sure search provides status of the agent, age
+            // since last active (same as MOST RECENT filter)"): a session open in a tab says its tab's status and how long
+            // ago its newest turn started or ended — the key the Manager's MOST RECENT order sorts by; any other session
+            // says "closed" and how long ago its newest message was (the `active` time below).
+            {
+                const SessionLiveFacts* facts = nullptr;
+                if (live)
+                {
+                    if (const auto it = live->find(e.sessionId); it != live->end() && it->second.live)
+                    {
+                        facts = &it->second;
+                    }
+                }
+                std::wstring status;
+                int64_t ageFrom = 0;
+                if (facts)
+                {
+                    status = SessionStatusPhrase(facts->state, true, facts->started, facts->external);
+                    ageFrom = facts->mostRecentUnixMs != 0 ? facts->mostRecentUnixMs : SessionSearchLastActivityMs(e);
+                }
+                else
+                {
+                    // No facts for it: closed — or merely "open" when the catalog says a tab has it but its state is not
+                    // known here (a host that gives no facts, or a tab that opened after the facts were read).
+                    status = catalog.openIds.count(e.sessionId) != 0 ? std::wstring{ L"open" } : std::wstring{ L"closed" };
+                    ageFrom = SessionSearchLastActivityMs(e);
+                }
+                o.Set(L"status", Value::MkStr(std::move(status)));
+                if (const std::wstring age = AgoText(ageFrom, nowUnixMs); !age.empty())
+                {
+                    o.Set(L"age", Value::MkStr(age));
+                }
             }
             const int64_t active = SessionSearchLastActivityMs(e);
             // "2026-10-12 01:08 (5m ago)". A session active within the last minute reads "(now)" —
@@ -2155,6 +2220,943 @@ namespace Agentmaster
         return std::nullopt;
     }
 
+    // ===== live facts: the status and overview tools (SESSIONS.md §9.16) ====================
+
+    namespace
+    {
+        /// <summary>The first line of a text (a queued prompt), as one line cut to `maxChars`.</summary>
+        /// <param name="text">The text.</param>
+        /// <param name="maxChars">The longest result.</param>
+        /// <returns>The line; "" for an empty text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring FirstLineCut(std::wstring_view text, size_t maxChars)
+        {
+            const std::wstring trimmed = Trim(text);
+            const size_t eol = trimmed.find_first_of(L"\r\n");
+            const bool more = eol != std::wstring::npos;
+            std::wstring line = OneLine(more ? std::wstring_view{ trimmed }.substr(0, eol) : std::wstring_view{ trimmed });
+            // A prompt whose first line goes on in more lines says so, as the per-tab badge's queue preview does.
+            return Cut(more ? line + L" ..." : line, maxChars);
+        }
+
+        /// <summary>A context size for a cell: "950", "427K", "1.2M"; "-" for 0 (not known).</summary>
+        /// <param name="tokens">The tokens.</param>
+        /// <returns>The text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring CtxText(int64_t tokens)
+        {
+            if (tokens <= 0)
+            {
+                return L"-";
+            }
+            if (tokens < 1000)
+            {
+                return std::to_wstring(tokens);
+            }
+            if (const int64_t k = (tokens + 500) / 1000; k < 1000)
+            {
+                return std::to_wstring(k) + L"K";
+            }
+            wchar_t buf[32]{};
+            swprintf_s(buf, L"%.1fM", static_cast<double>(tokens) / 1000000.0);
+            return buf;
+        }
+
+        /// <summary>A model id as a cell: without the "claude-" that every Claude id starts with ("claude-opus-5-5" ->
+        /// "opus-5-5"), the board card's own shortening; an alias or a Codex model as it is.</summary>
+        /// <param name="model">The model id.</param>
+        /// <returns>The label; "" for "".</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring ModelLabel(const std::wstring& model)
+        {
+            constexpr std::wstring_view prefix = L"claude-";
+            if (model.size() > prefix.size() && FoldLower(std::wstring_view{ model }.substr(0, prefix.size())) == prefix)
+            {
+                return model.substr(prefix.size());
+            }
+            return model;
+        }
+
+        /// <summary>Text for one cell of a Markdown table: one line, cut to `maxChars`, '|' escaped (a title may hold one,
+        /// and an unescaped one would split the row).</summary>
+        /// <param name="text">The text.</param>
+        /// <param name="maxChars">The longest text before escaping.</param>
+        /// <returns>The cell's text.</returns>
+        /// <exception cref="std::bad_alloc">If the string cannot be allocated.</exception>
+        std::wstring MdCell(std::wstring_view text, size_t maxChars)
+        {
+            const std::wstring one = Cut(OneLine(text), maxChars);
+            std::wstring out;
+            out.reserve(one.size() + 4);
+            for (const wchar_t c : one)
+            {
+                if (c == L'|')
+                {
+                    out += L"\\|";
+                }
+                else
+                {
+                    out.push_back(c);
+                }
+            }
+            return out;
+        }
+
+        /// <summary>
+        /// The values of an argument that takes ONE value or a LIST of them (the overview's filters, the status tool's
+        /// ids — the user's request of 2026-10-24): a string or a whole non-negative number is one value, an array its
+        /// string and number elements. A string that is itself a JSON list ("[\"a\",\"b\"]", the way some models write a
+        /// list) is read as that list.
+        /// </summary>
+        /// <param name="arguments">The model's argument object.</param>
+        /// <param name="key">The argument's name.</param>
+        /// <param name="splitWords">Also split each string at commas and white space (ids hold neither, a folder path
+        /// may).</param>
+        /// <param name="out">Receives the values, trimmed, the empty ones left out, in order.</param>
+        /// <param name="wasList">Receives true when the argument was a list (an array, or a string holding one).</param>
+        /// <param name="error">Receives, on false, what is wrong, written for the model.</param>
+        /// <returns>False when the argument has another type (an object, a boolean, a fraction, a negative number).</returns>
+        /// <exception cref="std::bad_alloc">If the values cannot be allocated.</exception>
+        bool ReadOneOrMany(const json::Value& arguments, const wchar_t* key, bool splitWords, std::vector<std::wstring>& out, bool& wasList, std::wstring& error)
+        {
+            using Type = json::Value::Type;
+            out.clear();
+            wasList = false;
+            const json::Value* v = arguments.Find(key);
+            if (!v || v->type == Type::Null)
+            {
+                return true; // absent: no values (the caller decides whether that is allowed)
+            }
+            std::optional<json::Value> inner;
+            if (v->type == Type::Str)
+            {
+                const std::wstring text = Trim(v->str);
+                if (!text.empty() && text.front() == L'[')
+                {
+                    inner = json::Parse(text);
+                    if (inner && inner->type == Type::Arr)
+                    {
+                        v = &*inner;
+                    }
+                }
+            }
+            const auto add = [&out, splitWords](const std::wstring& text) {
+                if (!splitWords)
+                {
+                    if (std::wstring t = Trim(text); !t.empty())
+                    {
+                        out.push_back(std::move(t));
+                    }
+                    return;
+                }
+                std::wstring word;
+                for (const wchar_t c : text + L" ")
+                {
+                    if (c == L',' || c == L';' || c == L' ' || c == L'\t' || c == L'\r' || c == L'\n')
+                    {
+                        if (!word.empty())
+                        {
+                            out.push_back(std::move(word));
+                            word.clear();
+                        }
+                        continue;
+                    }
+                    word.push_back(c);
+                }
+            };
+            const auto one = [&add](const json::Value& x) {
+                if (x.type == Type::Str)
+                {
+                    add(x.str);
+                    return true;
+                }
+                // A short id of only digits, or a window number, the model sent as a JSON number.
+                if (x.type == Type::Num && x.num >= 0 && x.num < 1e15 && x.num == static_cast<double>(x.AsI64()))
+                {
+                    add(std::to_wstring(x.AsI64()));
+                    return true;
+                }
+                return false;
+            };
+            const std::wstring usage = std::wstring{ L"Pass " } + key + L" as one value (a string) or as a list of them.";
+            if (v->type == Type::Arr)
+            {
+                wasList = true;
+                for (const auto& x : v->arr)
+                {
+                    if (!one(x))
+                    {
+                        error = usage;
+                        return false;
+                    }
+                }
+                return true;
+            }
+            if (!one(*v))
+            {
+                error = usage;
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>The words an overview tab answers to in the `state` filter (RenderWorkspaceOverview's remarks).</summary>
+        /// <param name="tab">The tab.</param>
+        /// <returns>The folded words.</returns>
+        /// <exception cref="std::bad_alloc">If the words cannot be allocated.</exception>
+        std::vector<std::wstring> OverviewStateWords(const WindowTabInfo& tab)
+        {
+            std::vector<std::wstring> words;
+            if (tab.sessionId.empty())
+            {
+                words.emplace_back(L"shell");
+                return words;
+            }
+            words.push_back(tab.state.empty() ? std::wstring{ L"open" } : FoldLower(tab.state));
+            if (!tab.started && !tab.external)
+            {
+                words.emplace_back(L"dormant");
+            }
+            if (tab.unread)
+            {
+                words.emplace_back(L"unread");
+            }
+            if (tab.queued > 0)
+            {
+                words.emplace_back(L"queued");
+            }
+            if (tab.draft)
+            {
+                words.emplace_back(L"draft");
+            }
+            if (tab.pinned)
+            {
+                words.emplace_back(L"pinned");
+            }
+            if (tab.compacting)
+            {
+                words.emplace_back(L"compacting");
+            }
+            return words;
+        }
+
+        /// <summary>Whether a tab passes an overview's filter (its window is checked by the caller).</summary>
+        /// <param name="tab">The tab.</param>
+        /// <param name="filter">The filter.</param>
+        /// <returns>True when it is listed.</returns>
+        /// <exception cref="std::bad_alloc">If a folded text cannot be allocated.</exception>
+        bool OverviewTabPasses(const WindowTabInfo& tab, const OverviewFilter& filter)
+        {
+            if (!filter.dirs.empty())
+            {
+                const std::wstring dir = FoldPathText(tab.dir);
+                const std::wstring worksIn = FoldPathText(tab.worksIn);
+                const bool hit = std::any_of(filter.dirs.begin(), filter.dirs.end(), [&](const std::wstring& d) {
+                    return (!dir.empty() && dir.find(d) != std::wstring::npos) || (!worksIn.empty() && worksIn.find(d) != std::wstring::npos);
+                });
+                if (!hit)
+                {
+                    return false; // a shell tab has no folder: a folder filter leaves it out
+                }
+            }
+            if (!filter.states.empty())
+            {
+                const std::vector<std::wstring> words = OverviewStateWords(tab);
+                const bool hit = std::any_of(filter.states.begin(), filter.states.end(), [&words](const std::wstring& value) {
+                    return std::any_of(words.begin(), words.end(), [&value](const std::wstring& word) {
+                        // "waiting" is part of "waiting for you"; a value of 1 or 2 characters must be a whole word.
+                        return word == value || (value.size() >= 3 && word.find(value) != std::wstring::npos);
+                    });
+                });
+                if (!hit)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>A quiet tab — idle or done, and nothing about it needs the user: what an overview over its budget folds
+        /// into one line per folder.</summary>
+        /// <param name="tab">A session tab.</param>
+        /// <returns>True when it may be folded.</returns>
+        bool OverviewTabIsQuiet(const WindowTabInfo& tab) noexcept
+        {
+            return !tab.sessionId.empty() && (tab.state == L"idle" || tab.state == L"done") && !tab.selected && !tab.unread && !tab.draft && !tab.pinned && !tab.compacting &&
+                   tab.queued == 0 && tab.errorMessage.empty();
+        }
+
+        // The status words in the order the overview counts them.
+        constexpr const wchar_t* kOverviewStateOrder[] = { L"running", L"waiting for you", L"needs approval", L"error", L"idle", L"done", L"open" };
+
+        /// <summary>"1 running, 2 waiting for you" — the counts of a set of session tabs by status, in the board's order,
+        /// the zero ones left out.</summary>
+        /// <param name="tabs">The session tabs.</param>
+        /// <returns>The text; "" for no tab.</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        std::wstring OverviewStateCounts(const std::vector<const WindowTabInfo*>& tabs)
+        {
+            std::wstring out;
+            for (const wchar_t* word : kOverviewStateOrder)
+            {
+                size_t n = 0;
+                for (const auto* t : tabs)
+                {
+                    n += (t->state.empty() ? std::wstring_view{ L"open" } : std::wstring_view{ t->state }) == word ? 1 : 0;
+                }
+                if (n > 0)
+                {
+                    out += (out.empty() ? L"" : L", ") + std::to_wstring(n) + L" " + word;
+                }
+            }
+            return out;
+        }
+
+        /// <summary>One folder group of one window in an overview.</summary>
+        struct OverviewGroup
+        {
+            std::wstring label; // the folder as the first of its tabs spells it; "" = not known
+            std::vector<const WindowTabInfo*> tabs; // strip order
+            int64_t newestMs{ 0 }; // the newest MOST RECENT key among them: the groups' order
+            size_t firstPos{ 0 }; // the strip position of its first tab: the tie-break
+        };
+    }
+
+    const wchar_t* SessionStateWord(SessionState state) noexcept
+    {
+        switch (state)
+        {
+        case SessionState::Running:
+            return L"running";
+        case SessionState::WaitingForInput:
+            return L"waiting for you";
+        case SessionState::NeedsApproval:
+            return L"needs approval";
+        case SessionState::Error:
+            return L"error";
+        case SessionState::Done:
+            return L"done";
+        case SessionState::Idle:
+        default:
+            return L"idle";
+        }
+    }
+
+    std::wstring SessionStatusPhrase(const std::wstring& stateWord, bool live, bool started, bool external)
+    {
+        if (!live)
+        {
+            return L"closed";
+        }
+        std::wstring phrase = stateWord.empty() ? std::wstring{ L"open" } : stateWord;
+        if (!started && !external)
+        {
+            // Its agent is not started (a window-restored tab, or a Deactivated one): it starts when the tab is entered.
+            phrase += L" (dormant)";
+        }
+        return phrase;
+    }
+
+    bool SessionLooksUnread(const SessionInfo& s) noexcept
+    {
+        if (s.manualUnread)
+        {
+            return true;
+        }
+        const bool needsYou = s.state == SessionState::WaitingForInput || s.state == SessionState::NeedsApproval || s.state == SessionState::Error;
+        return needsYou && s.readUnixMs < s.lastActivityUnixMs;
+    }
+
+    std::wstring SessionRunnerWord(const SessionInfo& s, bool globalPause)
+    {
+        std::wstring word = InterruptHoldActive(s.autorunner) ? L"held" : (s.autorunner.mode == AutorunnerMode::Full ? L"auto" : L"paused");
+        if (globalPause)
+        {
+            word += L" (Pause all on)";
+        }
+        return word;
+    }
+
+    uint32_t SessionQueuedCount(const SessionInfo& s) noexcept
+    {
+        uint32_t n = 0;
+        for (const auto& q : s.queue)
+        {
+            if (q.status == PromptStatus::Pending || q.status == PromptStatus::Held)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    // DescribeQueueWait's settle sentences name the window in seconds.
+    static_assert(kStateSettleMs == 40000, "DescribeQueueWait says the status must hold for 40 seconds: change its text too");
+
+    std::wstring DescribeQueueWait(const SessionInfo& s, int64_t nowUnixMs, int64_t lastHumanInputUnixMs, bool globalPause)
+    {
+        if (SessionQueuedCount(s) == 0)
+        {
+            return {};
+        }
+        // The scheduler's own pure decision, so the answer is the one the runner acts on.
+        const AdvancePlan plan = DecideAdvance(s, nowUnixMs, lastHumanInputUnixMs, globalPause);
+        if (plan.action == AdvanceAction::Send)
+        {
+            return L"it goes out now: the session is ready and the runner is on";
+        }
+        const std::wstring& r = plan.reason;
+        const auto starts = [&r](const wchar_t* prefix) { return r.rfind(prefix, 0) == 0; };
+        if (starts(L"global pause"))
+        {
+            return L"Pause all is on: the runner sends nothing to any session until it is resumed";
+        }
+        if (starts(L"autorunner off (interrupt hold"))
+        {
+            return L"the user interrupted a turn, so the runner holds the queue; it goes on after the user's next message";
+        }
+        if (starts(L"autorunner off"))
+        {
+            return L"the runner is paused for this session: only Send now sends it";
+        }
+        if (starts(L"session closed"))
+        {
+            return L"the session has no open tab";
+        }
+        if (starts(L"tab dormant"))
+        {
+            return L"the tab is dormant: the queue goes on when the tab is entered or activated";
+        }
+        if (starts(L"not ready"))
+        {
+            switch (s.state)
+            {
+            case SessionState::Running:
+                return L"after the running turn ends";
+            case SessionState::NeedsApproval:
+                return L"after the user answers what the session asks (it needs approval)";
+            case SessionState::Error:
+                return L"the session is in error: the runner sends nothing into it";
+            case SessionState::Done:
+                return L"its claude has ended in that tab";
+            default:
+                return L"the session is not ready for a prompt";
+            }
+        }
+        if (starts(L"human typing"))
+        {
+            return L"the user is typing in its tab";
+        }
+        if (starts(L"maxAutoSends"))
+        {
+            return L"the runner reached its send limit for this run";
+        }
+        if (starts(L"delivery in flight"))
+        {
+            return L"a prompt is being typed into its input box right now";
+        }
+        if (starts(L"input box not visible (a menu"))
+        {
+            return L"a menu or dialog is open in its terminal";
+        }
+        if (starts(L"input box not visible"))
+        {
+            return L"its input box is not visible";
+        }
+        if (starts(L"awaiting injection pickup"))
+        {
+            return L"the prompt sent last has not started its turn yet";
+        }
+        if (starts(L"manual gate"))
+        {
+            return L"it is marked to be sent only by Send now";
+        }
+        if (starts(L"question pending"))
+        {
+            return L"its last turn ended with a question: it waits until the user answers";
+        }
+        if (starts(L"queue settle"))
+        {
+            return L"it was queued moments ago: it goes out once the session's status has held for 40 seconds";
+        }
+        if (starts(L"status settle"))
+        {
+            return L"the status changed moments ago: it goes out once the status has held for 40 seconds";
+        }
+        if (starts(L"send spacing"))
+        {
+            return L"a prompt went out moments ago: it waits a few seconds";
+        }
+        if (starts(L"queue drained"))
+        {
+            return {}; // only legacy Held prompts are left; the scheduler turns them back into Pending ones
+        }
+        // A reason this list does not know yet: the runner's own words rather than nothing.
+        return L"the runner holds it: " + r;
+    }
+
+    SessionLiveFacts SessionLiveFactsOf(const SessionInfo& s, int64_t nowUnixMs, int64_t lastHumanInputUnixMs, bool globalPause)
+    {
+        SessionLiveFacts f;
+        f.sessionId = s.id;
+        f.known = true;
+        f.managed = true;
+        f.live = s.live;
+        f.started = s.started;
+        f.external = s.external;
+        f.codex = s.kind == AgentKind::Codex;
+        f.state = SessionStateWord(s.state);
+        f.stateSinceUnixMs = s.stateChangedAtUnixMs;
+        f.mostRecentUnixMs = MostRecentSortKeyMs(s);
+        f.createdUnixMs = s.createdUnixMs != 0 ? s.createdUnixMs : s.convCreatedUnixMs;
+        f.title = s.title;
+        f.dir = s.workingDir;
+        f.worksIn = s.inferredWorkingDir; // stored empty when it is the launch folder
+        f.branch = s.branch;
+        f.contextTokens = s.contextTokens;
+        // The model the newest reply came from wins over the launch request (a /model mid-session changes only the first).
+        f.model = !s.currentModel.empty() ? s.currentModel : s.model;
+        f.effort = s.effort;
+        f.heartbeat = s.presenceStatus;
+        f.waitingFor = s.presenceWaitingFor;
+        f.compacting = s.compactingSinceUnixMs != 0;
+        f.unread = SessionLooksUnread(s);
+        f.pinned = s.pinned;
+        f.askedQuestion = s.lastMessageWasQuestion;
+        if (s.state == SessionState::Error)
+        {
+            // The message is only what the Error card shows: it stays on a record that has left Error.
+            f.errorMessage = Cut(OneLine(s.errorMessage), 200);
+            f.errorStatus = s.errorStatus;
+        }
+        f.lastReply = Cut(OneLine(s.lastAssistantText), 240);
+        f.recap = Cut(OneLine(s.recap), 240);
+        f.draft = Cut(OneLine(s.pendingInput), 160);
+        f.draftUnixMs = f.draft.empty() ? 0 : s.pendingInputUnixMs;
+        f.queued = SessionQueuedCount(s);
+        for (const auto& q : s.queue)
+        {
+            if (q.status == PromptStatus::Pending || q.status == PromptStatus::Held)
+            {
+                f.nextPrompt = FirstLineCut(!q.text.empty() ? std::wstring_view{ q.text } : std::wstring_view{ q.label }, 120);
+                break;
+            }
+        }
+        // A managed Codex has no Prompt Queue Runner (lifecycle and state only).
+        if (!f.codex)
+        {
+            f.runner = SessionRunnerWord(s, globalPause);
+            f.nextWait = DescribeQueueWait(s, nowUnixMs, lastHumanInputUnixMs, globalPause);
+        }
+        f.forkedFrom = s.forkParentId;
+        f.continuedFrom = s.continuedFromId;
+        f.continuedVia = s.continuedVia;
+        return f;
+    }
+
+    std::optional<OverviewFilter> ParseOverviewFilter(const json::Value& arguments, const std::vector<WindowCensus>& windows, const std::wstring& originWindowId, std::wstring& error)
+    {
+        OverviewFilter filter;
+        std::vector<std::wstring> values;
+        bool list = false;
+        if (!ReadOneOrMany(arguments, L"window", false, values, list, error))
+        {
+            return std::nullopt;
+        }
+        for (const auto& value : values)
+        {
+            // Each value as resume and fork read theirs: a number, "#2", "window 2", a short or whole id.
+            std::wstring windowError;
+            const std::optional<size_t> index = ResolveWindowArgument(windows, value, originWindowId, windowError);
+            if (!index)
+            {
+                error = std::move(windowError);
+                return std::nullopt;
+            }
+            if (std::find(filter.windows.begin(), filter.windows.end(), *index) == filter.windows.end())
+            {
+                filter.windows.push_back(*index);
+            }
+        }
+        if (!ReadOneOrMany(arguments, L"dir", false, values, list, error))
+        {
+            return std::nullopt;
+        }
+        for (const auto& value : values)
+        {
+            if (std::wstring folded = FoldPathText(value); !folded.empty())
+            {
+                filter.dirs.push_back(std::move(folded));
+            }
+        }
+        if (!ReadOneOrMany(arguments, L"state", false, values, list, error))
+        {
+            return std::nullopt;
+        }
+        for (const auto& value : values)
+        {
+            if (std::wstring folded = FoldLower(Trim(value)); !folded.empty())
+            {
+                filter.states.push_back(std::move(folded));
+            }
+        }
+        return filter;
+    }
+
+    std::wstring RenderWorkspaceOverview(const std::vector<WindowCensus>& windows, const OverviewFilter& filter, const std::wstring& originWindowId, int64_t nowUnixMs, const std::function<std::wstring(const std::wstring&)>& handleOf, size_t maxChars)
+    {
+        const auto idOf = [&handleOf](const std::wstring& sessionId) { return handleOf ? handleOf(sessionId) : SessionSearchHandleOf(sessionId); };
+        // The windows in the order asked (a `window` list), else the census order: a window's number is its census place.
+        std::vector<size_t> order = filter.windows;
+        const bool windowsAsked = !order.empty();
+        if (!windowsAsked)
+        {
+            for (size_t w = 0; w < windows.size(); ++w)
+            {
+                order.push_back(w);
+            }
+        }
+
+        // The listed tabs, per window: the session tabs grouped by folder, the shells apart.
+        struct WindowPart
+        {
+            size_t index{ 0 };
+            std::vector<OverviewGroup> groups;
+            std::vector<const WindowTabInfo*> shells;
+            size_t listed{ 0 };
+        };
+        std::vector<WindowPart> parts;
+        std::vector<const WindowTabInfo*> listedSessions;
+        size_t listedShells = 0;
+        size_t totalTabs = 0;
+        for (const auto& w : windows)
+        {
+            totalTabs += w.tabs.size();
+        }
+        for (const size_t w : order)
+        {
+            if (w >= windows.size())
+            {
+                continue;
+            }
+            WindowPart part;
+            part.index = w;
+            std::vector<std::wstring> keys; // the folded folder of each group, index-aligned with part.groups
+            for (const auto& tab : windows[w].tabs)
+            {
+                if (!OverviewTabPasses(tab, filter))
+                {
+                    continue;
+                }
+                ++part.listed;
+                if (tab.sessionId.empty())
+                {
+                    part.shells.push_back(&tab);
+                    ++listedShells;
+                    continue;
+                }
+                listedSessions.push_back(&tab);
+                // The folder it WORKS in (the inferred one when it differs from the launch folder), as the tab colors and
+                // the Explorer tree group by it.
+                const std::wstring& folder = tab.worksIn.empty() ? tab.dir : tab.worksIn;
+                const std::wstring key = FoldPathText(folder);
+                size_t g = 0;
+                while (g < keys.size() && keys[g] != key)
+                {
+                    ++g;
+                }
+                if (g == keys.size())
+                {
+                    keys.push_back(key);
+                    OverviewGroup group;
+                    group.label = Trim(folder);
+                    group.firstPos = tab.index;
+                    part.groups.push_back(std::move(group));
+                }
+                part.groups[g].tabs.push_back(&tab);
+                part.groups[g].newestMs = (std::max)(part.groups[g].newestMs, tab.mostRecentUnixMs);
+            }
+            // The folders with the most recent work first (the MOST RECENT order); a tie in strip order.
+            std::stable_sort(part.groups.begin(), part.groups.end(), [](const OverviewGroup& a, const OverviewGroup& b) {
+                return a.newestMs != b.newestMs ? a.newestMs > b.newestMs : a.firstPos < b.firstPos;
+            });
+            // A window with nothing listed is left out — unless the call named it: then it says so.
+            if (part.listed > 0 || windowsAsked)
+            {
+                parts.push_back(std::move(part));
+            }
+        }
+
+        // ---- the head: the same at every fold level ----
+        const bool filtered = windowsAsked || !filter.dirs.empty() || !filter.states.empty();
+        std::wstring head = L"# Agentmaster windows and tabs (now " + LocalDateTimeText(nowUnixMs) + L")\n\n";
+        head += std::to_wstring(windows.size()) + (windows.size() == 1 ? L" window" : L" windows") + L" open, " + std::to_wstring(totalTabs) + (totalTabs == 1 ? L" tab" : L" tabs") + L" in all.";
+        if (filtered)
+        {
+            std::wstring what;
+            if (windowsAsked)
+            {
+                std::wstring nums;
+                for (const size_t w : filter.windows)
+                {
+                    nums += (nums.empty() ? L"" : L", ") + std::to_wstring(w + 1);
+                }
+                what += (filter.windows.size() == 1 ? L"window " : L"windows ") + nums;
+            }
+            const auto join = [](const std::vector<std::wstring>& v) {
+                std::wstring out;
+                for (const auto& x : v)
+                {
+                    out += (out.empty() ? L"" : L" or ") + x;
+                }
+                return out;
+            };
+            if (!filter.dirs.empty())
+            {
+                what += (what.empty() ? L"" : L"; ") + std::wstring{ L"folder containing " } + join(filter.dirs);
+            }
+            if (!filter.states.empty())
+            {
+                what += (what.empty() ? L"" : L"; ") + std::wstring{ L"state " } + join(filter.states);
+            }
+            head += L" Filter: " + what + L".";
+        }
+        head += L"\nListed: " + std::to_wstring(listedSessions.size()) + (listedSessions.size() == 1 ? L" session" : L" sessions");
+        if (!listedSessions.empty())
+        {
+            size_t dormant = 0, unread = 0, queued = 0;
+            for (const auto* t : listedSessions)
+            {
+                dormant += (!t->started && !t->external) ? 1 : 0;
+                unread += t->unread ? 1 : 0;
+                queued += t->queued > 0 ? 1 : 0;
+            }
+            head += L" (" + OverviewStateCounts(listedSessions);
+            if (dormant > 0)
+            {
+                head += L"; " + std::to_wstring(dormant) + L" dormant";
+            }
+            if (unread > 0)
+            {
+                head += L"; " + std::to_wstring(unread) + L" unread";
+            }
+            if (queued > 0)
+            {
+                head += L"; " + std::to_wstring(queued) + L" with prompts queued";
+            }
+            head += L")";
+        }
+        head += L" and " + std::to_wstring(listedShells) + (listedShells == 1 ? L" shell tab.\n" : L" shell tabs.\n");
+        head += L"Columns: pos = the tab's place in its window's strip; id = the session's short id (status, read, show, resume, fork and deactivate take it); status (dormant: its agent starts when the tab is entered); age = since its newest turn started or ended; turns = messages the user sent; ctx = context tokens; queue = prompts waiting and the runner (auto, paused, held).\n";
+        if (listedSessions.empty() && listedShells == 0)
+        {
+            head += L"\nNo tab matches the filter.\n";
+        }
+
+        // One render at a fold level: 0 none, 1 the tabs quiet for over a day, 2 every quiet tab, 3 every quiet tab and
+        // no ages in the folded lines. `stopAtBudget` (the last resort) stops before the part that would pass maxChars and
+        // counts what it left out.
+        const auto render = [&](int level, bool stopAtBudget) {
+            std::wstring out = head;
+            size_t omittedTabs = 0;
+            size_t omittedWindows = 0;
+            bool stopped = false;
+            // Room kept for the closing note of a page that stops early.
+            const size_t budget = maxChars > 400 ? maxChars - 400 : maxChars;
+            const auto fits = [&](size_t more) { return !stopAtBudget || out.size() + more <= budget; };
+            for (const auto& part : parts)
+            {
+                const WindowCensus& win = windows[part.index];
+                if (stopped)
+                {
+                    omittedTabs += part.listed;
+                    ++omittedWindows;
+                    continue;
+                }
+                std::wstring section = L"\n## Window " + std::to_wstring(part.index + 1) + L" (id " + WindowHandleOf(win.windowId) + L"): " + std::to_wstring(win.tabs.size()) + (win.tabs.size() == 1 ? L" tab" : L" tabs");
+                if (filtered && part.listed != win.tabs.size())
+                {
+                    section += L", " + std::to_wstring(part.listed) + L" listed";
+                }
+                const auto selected = std::find_if(win.tabs.begin(), win.tabs.end(), [](const WindowTabInfo& t) { return t.selected; });
+                if (win.managerPageVisible)
+                {
+                    section += L"; its Agent Manager page is shown";
+                }
+                else if (selected != win.tabs.end())
+                {
+                    section += L"; \"" + MdCell(selected->title, 60) + L"\" (pos " + std::to_wstring(selected->index + 1) + L") selected";
+                }
+                if (win.lastActive)
+                {
+                    section += L"; the user used it last";
+                }
+                if (!originWindowId.empty() && win.windowId == originWindowId)
+                {
+                    section += L"; this request came from it";
+                }
+                section += L"\n";
+                if (part.listed == 0)
+                {
+                    section += L"No tab of this window matches the filter.\n";
+                }
+                if (!fits(section.size()))
+                {
+                    stopped = true;
+                    omittedTabs += part.listed;
+                    ++omittedWindows;
+                    continue;
+                }
+                out += section;
+                for (const auto& group : part.groups)
+                {
+                    if (stopped)
+                    {
+                        omittedTabs += group.tabs.size();
+                        continue;
+                    }
+                    std::vector<const WindowTabInfo*> rows;
+                    std::vector<const WindowTabInfo*> folded;
+                    for (const auto* t : group.tabs)
+                    {
+                        const bool quiet = OverviewTabIsQuiet(*t);
+                        const bool quietLong = quiet && (t->mostRecentUnixMs == 0 || nowUnixMs - t->mostRecentUnixMs > 24LL * 3600 * 1000);
+                        if ((level == 1 && quietLong) || (level >= 2 && quiet))
+                        {
+                            folded.push_back(t);
+                        }
+                        else
+                        {
+                            rows.push_back(t);
+                        }
+                    }
+                    std::wstring g = L"\n### " + (group.label.empty() ? std::wstring{ L"(folder not known)" } : MdCell(group.label, 200)) + L": " + std::to_wstring(group.tabs.size()) +
+                                     (group.tabs.size() == 1 ? L" tab (" : L" tabs (") + OverviewStateCounts(group.tabs) + L")\n";
+                    if (!rows.empty())
+                    {
+                        g += L"| pos | title | id | status | age | turns | ctx | model | queue | notes |\n|---|---|---|---|---|---|---|---|---|---|\n";
+                        for (const auto* t : rows)
+                        {
+                            const std::wstring age = AgoText(t->mostRecentUnixMs, nowUnixMs);
+                            std::wstring model = ModelLabel(t->model);
+                            if (!t->effort.empty())
+                            {
+                                model += (model.empty() ? L"" : L" ") + t->effort;
+                            }
+                            std::wstring notes;
+                            const auto note = [&notes](const std::wstring& n) { notes += (notes.empty() ? L"" : L", ") + n; };
+                            if (t->selected)
+                            {
+                                note(L"selected");
+                            }
+                            if (t->unread)
+                            {
+                                note(L"unread");
+                            }
+                            if (t->draft)
+                            {
+                                note(L"draft");
+                            }
+                            if (t->pinned)
+                            {
+                                note(L"pinned");
+                            }
+                            if (t->compacting)
+                            {
+                                note(L"compacting");
+                            }
+                            if (t->external)
+                            {
+                                note(L"adopted");
+                            }
+                            if (t->codex)
+                            {
+                                note(L"codex");
+                            }
+                            if (!t->errorMessage.empty())
+                            {
+                                note(L"error: " + Cut(OneLine(t->errorMessage), 80));
+                            }
+                            g += L"| " + std::to_wstring(t->index + 1) + L" | " + MdCell(t->title, 60) + L" | " + idOf(t->sessionId) + L" | " +
+                                 SessionStatusPhrase(t->state, true, t->started, t->external) + L" | " + (age.empty() ? std::wstring{ L"-" } : age) + L" | " +
+                                 (t->turns >= 0 ? std::to_wstring(t->turns) : std::wstring{ L"-" }) + L" | " + CtxText(t->contextTokens) + L" | " +
+                                 (model.empty() ? std::wstring{ L"-" } : MdCell(model, 40)) + L" | " +
+                                 (t->queued > 0 ? std::to_wstring(t->queued) + (t->runner.empty() ? std::wstring{} : L" " + t->runner) : std::wstring{ L"-" }) + L" | " +
+                                 (notes.empty() ? std::wstring{ L"-" } : MdCell(notes, 120)) + L" |\n";
+                        }
+                    }
+                    if (!folded.empty())
+                    {
+                        g += level == 1 ? L"Quiet for over a day (" : L"Quiet, idle or done (";
+                        g += std::to_wstring(folded.size()) + L"): ";
+                        for (size_t k = 0; k < folded.size(); ++k)
+                        {
+                            const auto* t = folded[k];
+                            g += (k ? L"; " : L"") + std::to_wstring(t->index + 1) + L" " + MdCell(t->title, level >= 3 ? 40 : 60) + L" [" + idOf(t->sessionId) + L"]";
+                            if (level < 3)
+                            {
+                                const std::wstring age = AgoText(t->mostRecentUnixMs, nowUnixMs);
+                                g += L" " + (age.empty() ? std::wstring{ L"-" } : age);
+                                if (t->state == L"done")
+                                {
+                                    g += L" done";
+                                }
+                            }
+                        }
+                        g += L"\n";
+                    }
+                    if (!fits(g.size()))
+                    {
+                        stopped = true;
+                        omittedTabs += group.tabs.size();
+                        continue;
+                    }
+                    out += g;
+                }
+                if (!part.shells.empty())
+                {
+                    std::wstring s = L"\nShell tabs (" + std::to_wstring(part.shells.size()) + L", no session): ";
+                    for (size_t k = 0; k < part.shells.size(); ++k)
+                    {
+                        const auto* t = part.shells[k];
+                        s += (k ? L"; " : L"") + std::to_wstring(t->index + 1) + L" \"" + MdCell(t->title, 60) + L"\"" + (t->selected ? L" (selected)" : L"");
+                    }
+                    s += L"\n";
+                    if (stopped || !fits(s.size()))
+                    {
+                        stopped = true;
+                        omittedTabs += part.shells.size();
+                    }
+                    else
+                    {
+                        out += s;
+                    }
+                }
+            }
+            if (omittedTabs > 0)
+            {
+                out += L"\n" + std::to_wstring(omittedTabs) + (omittedTabs == 1 ? L" more tab is" : L" more tabs are") + L" not listed";
+                if (omittedWindows > 0)
+                {
+                    out += L" (" + std::to_wstring(omittedWindows) + (omittedWindows == 1 ? L" window left out)" : L" windows left out)");
+                }
+                out += L": this page has a size limit. Call overview again with window, dir or state to see them.\n";
+            }
+            return out;
+        };
+
+        // The page at the first fold level that fits; past the last one, the last one cut at the budget.
+        for (int level = 0; level <= 3; ++level)
+        {
+            std::wstring page = render(level, false);
+            if (page.size() <= maxChars)
+            {
+                return page;
+            }
+        }
+        return render(3, true);
+    }
+
     // ===== the tool servers =================================================================
 
     SessionSearchToolset::SessionSearchToolset(Callbacks callbacks) :
@@ -2317,6 +3319,19 @@ namespace Agentmaster
                 if (!id.empty())
                 {
                     ids.push_back(id);
+                }
+            }
+            // SESSIONS.md §9.16: every row also says its status and its age, as the page search's rows do.
+            if (_callbacks.tabs.facts)
+            {
+                try
+                {
+                    result.text = AddLiveFactsToDatabaseRows(result.text, handles, full);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the database's rows as they came, without the two fields.
+                    LogSwallowedException(L"SessionSearchToolset::DatabaseCall: the rows' live facts");
                 }
             }
         }
@@ -2602,7 +3617,33 @@ namespace Agentmaster
             const auto it = handleById.find(id);
             return it != handleById.end() ? it->second : SessionSearchHandleOf(id);
         };
-        return { FormatSessionSearchResult(*catalog, *params, outcome, now, handleOf), false };
+        // SESSIONS.md §9.16: the BRIEF live facts of the rows' sessions that are open in a tab — their status and their
+        // age by the MOST RECENT key (one lean registry read in the app). A failure costs the rows only those two fields
+        // (each then reads from the catalog), never the search.
+        std::unordered_map<std::wstring, SessionLiveFacts> liveFacts;
+        bool haveFacts = false;
+        if (_callbacks.tabs.facts && !ids.empty())
+        {
+            try
+            {
+                for (auto& f : _callbacks.tabs.facts(ids, false))
+                {
+                    if (f.live && !f.sessionId.empty())
+                    {
+                        std::wstring id = f.sessionId;
+                        liveFacts.insert_or_assign(std::move(id), std::move(f));
+                    }
+                }
+                haveFacts = true;
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: the rows carry the catalog's open / closed and their newest message's age.
+                LogSwallowedException(L"SessionSearchToolset::Search: the rows' live facts");
+                liveFacts.clear();
+            }
+        }
+        return { FormatSessionSearchResult(*catalog, *params, outcome, now, handleOf, haveFacts ? &liveFacts : nullptr), false };
     }
 
     HarnessToolResult SessionSearchToolset::Grep(const json::Value& arguments)
@@ -3829,12 +4870,409 @@ namespace Agentmaster
         return { L"Deactivated " + place + L": its claude stopped; the tab keeps its place, title, color and prompt queue, and the conversation resumes when the user enters it." + (outcome.message.empty() ? std::wstring{} : L" " + outcome.message), false };
     }
 
+    HarnessToolResult SessionSearchToolset::Overview(const json::Value& arguments)
+    {
+        const std::vector<WindowCensus> windows = _callbacks.tabs.census();
+        if (windows.empty())
+        {
+            return { L"No Agentmaster window answered. Try once more; if it fails again, tell the user that the windows did not answer.", true };
+        }
+        const std::wstring origin = _callbacks.tabs.originWindowId ? _callbacks.tabs.originWindowId() : std::wstring{};
+        std::wstring error;
+        const std::optional<OverviewFilter> filter = ParseOverviewFilter(arguments, windows, origin, error);
+        if (!filter)
+        {
+            return { error, true };
+        }
+        // The conversation's own short ids (AssignHandleLocked is idempotent: a page rendered again at a fold level prints
+        // the same ones), so every other tool takes what the page prints.
+        const auto handleOf = [this](const std::wstring& sessionId) {
+            std::lock_guard lock{ _mutex };
+            return AssignHandleLocked(sessionId);
+        };
+        return { RenderWorkspaceOverview(windows, *filter, origin, Now(), handleOf), false };
+    }
+
+    HarnessToolResult SessionSearchToolset::StatusOf(const json::Value& arguments)
+    {
+        using json::Value;
+        if (!_callbacks.tabs.facts)
+        {
+            return { L"The status of sessions is not available here.", true };
+        }
+        // `ids` is the argument; `id` is read the same way (a model writes either).
+        const wchar_t* const key = arguments.Find(L"ids") ? L"ids" : L"id";
+        std::vector<std::wstring> written;
+        bool asList = false;
+        std::wstring error;
+        if (!ReadOneOrMany(arguments, key, true, written, asList, error))
+        {
+            return { error, true };
+        }
+        // Several ids in one string ("a1b2c3d4, e5f6a7b8") are a list as well: the answer then lists them.
+        asList = asList || written.size() > 1;
+        if (written.empty())
+        {
+            return { L"Pass ids: one session id (a short id from a result, or a whole session id), or a list of up to 32.", true };
+        }
+        size_t notReported = 0;
+        if (written.size() > kStatusMaxIds)
+        {
+            notReported = written.size() - kStatusMaxIds;
+            written.resize(kStatusMaxIds);
+        }
+        std::vector<std::wstring> unknown;
+        const std::vector<std::wstring> ids = ResolveWrittenIds(written, unknown);
+        if (!asList && ids.empty())
+        {
+            return { L"No session has the id " + Cut(written.front(), 40) + L". Pass an id exactly as a result printed it (overview, list, search, grep), or search first.", true };
+        }
+        const std::vector<SessionLiveFacts> facts = ids.empty() ? std::vector<SessionLiveFacts>{} : _callbacks.tabs.facts(ids, true);
+        // Where the open ones are: one census (a hop to the windows' UI thread), and only when one of them is open.
+        const bool anyLive = std::any_of(facts.begin(), facts.end(), [](const SessionLiveFacts& f) { return f.known && f.live; });
+        std::vector<WindowCensus> windows;
+        if (anyLive && _callbacks.tabs.census)
+        {
+            windows = _callbacks.tabs.census();
+        }
+        const int64_t now = Now();
+        const auto handle = [this](const std::wstring& sessionId) {
+            std::lock_guard lock{ _mutex };
+            return AssignHandleLocked(sessionId);
+        };
+
+        // One session's object, its fields in the order the model reads them: who and where, how it stands, what it said.
+        const auto objectOf = [&](const SessionLiveFacts& f, bool withNow) {
+            Value o = Value::MkObj();
+            if (withNow)
+            {
+                o.Set(L"now", Value::MkStr(LocalDateTimeText(now)));
+            }
+            o.Set(L"id", Value::MkStr(handle(f.sessionId)));
+            if (!f.title.empty())
+            {
+                o.Set(L"title", Value::MkStr(Cut(OneLine(f.title), 120)));
+            }
+            o.Set(L"status", Value::MkStr(SessionStatusPhrase(f.state, f.live, f.started, f.external)));
+            if (f.live && f.stateSinceUnixMs > 0)
+            {
+                o.Set(L"since", Value::MkStr(ActiveWithAgo(f.stateSinceUnixMs, now)));
+            }
+            if (f.mostRecentUnixMs > 0)
+            {
+                // The user's "age since last active (same as MOST RECENT filter)": its newest turn's start or end.
+                o.Set(L"age", Value::MkStr(AgoText(f.mostRecentUnixMs, now)));
+                o.Set(L"last_active", Value::MkStr(ActiveWithAgo(f.mostRecentUnixMs, now)));
+            }
+            if (f.live)
+            {
+                if (const std::optional<TabLocation> where = FindSessionTab(windows, f.sessionId))
+                {
+                    const auto& tab = windows[where->window].tabs[where->tab];
+                    Value t = Value::MkObj();
+                    t.Set(L"window", Value::MkNum(static_cast<double>(where->window + 1)));
+                    t.Set(L"pos", Value::MkNum(static_cast<double>(tab.index + 1)));
+                    if (tab.selected)
+                    {
+                        t.Set(L"selected", Value::MkBool(true));
+                    }
+                    if (!f.started && !f.external)
+                    {
+                        t.Set(L"dormant", Value::MkBool(true));
+                    }
+                    if (f.external)
+                    {
+                        t.Set(L"adopted", Value::MkBool(true));
+                    }
+                    o.Set(L"tab", std::move(t));
+                }
+                else
+                {
+                    o.Set(L"tab_note", Value::MkStr(windows.empty() ? L"the windows did not answer, so where its tab is is not known" : L"no window shows its tab right now (it may be opening or closing)"));
+                }
+            }
+            if (f.codex)
+            {
+                o.Set(L"kind", Value::MkStr(L"codex"));
+            }
+            if (!f.dir.empty())
+            {
+                o.Set(L"dir", Value::MkStr(f.dir));
+            }
+            if (!f.worksIn.empty())
+            {
+                o.Set(L"works_in", Value::MkStr(f.worksIn));
+            }
+            if (!f.branch.empty())
+            {
+                o.Set(L"branch", Value::MkStr(f.branch));
+            }
+            if (f.turns >= 0)
+            {
+                o.Set(L"turns", Value::MkNum(f.turns));
+            }
+            if (f.contextTokens > 0)
+            {
+                o.Set(L"ctx", Value::MkStr(CtxText(f.contextTokens)));
+            }
+            if (!f.model.empty())
+            {
+                o.Set(L"model", Value::MkStr(ModelLabel(f.model)));
+            }
+            if (!f.effort.empty())
+            {
+                o.Set(L"effort", Value::MkStr(f.effort));
+            }
+            if (f.live && !f.heartbeat.empty())
+            {
+                // Claude's own heartbeat (~/.claude/sessions/<pid>.json): the process's word, apart from the board's state.
+                o.Set(L"heartbeat", Value::MkStr(f.waitingFor.empty() ? f.heartbeat : f.heartbeat + L" (" + Cut(OneLine(f.waitingFor), 60) + L")"));
+            }
+            if (f.compacting)
+            {
+                o.Set(L"compacting", Value::MkBool(true));
+            }
+            if (f.unread)
+            {
+                o.Set(L"unread", Value::MkBool(true));
+            }
+            if (f.pinned)
+            {
+                o.Set(L"pinned", Value::MkBool(true));
+            }
+            if (f.favorite)
+            {
+                o.Set(L"fav", Value::MkBool(true));
+            }
+            if (!f.tags.empty())
+            {
+                Value tags = Value::MkArr();
+                for (const auto& tag : f.tags)
+                {
+                    tags.Push(Value::MkStr(tag));
+                }
+                o.Set(L"tags", std::move(tags));
+            }
+            if (f.askedQuestion)
+            {
+                o.Set(L"asked_question", Value::MkBool(true));
+            }
+            if (!f.errorMessage.empty())
+            {
+                o.Set(L"error", Value::MkStr(f.errorStatus > 0 ? f.errorMessage + L" (HTTP " + std::to_wstring(f.errorStatus) + L")" : f.errorMessage));
+            }
+            if (!f.lastReply.empty())
+            {
+                o.Set(L"last_reply", Value::MkStr(f.lastReply));
+            }
+            if (!f.recap.empty())
+            {
+                o.Set(L"recap", Value::MkStr(f.recap));
+            }
+            if (!f.draft.empty())
+            {
+                o.Set(L"draft", Value::MkStr(f.draft));
+                if (const std::wstring seen = AgoText(f.draftUnixMs, now); !seen.empty())
+                {
+                    o.Set(L"draft_seen", Value::MkStr(seen == L"now" ? seen : seen + L" ago"));
+                }
+            }
+            if (f.queued > 0)
+            {
+                Value q = Value::MkObj();
+                q.Set(L"waiting", Value::MkNum(static_cast<double>(f.queued)));
+                if (!f.nextPrompt.empty())
+                {
+                    q.Set(L"next", Value::MkStr(f.nextPrompt));
+                }
+                if (!f.runner.empty())
+                {
+                    q.Set(L"runner", Value::MkStr(f.runner));
+                }
+                if (!f.nextWait.empty())
+                {
+                    q.Set(L"next_goes", Value::MkStr(f.nextWait));
+                }
+                o.Set(L"queue", std::move(q));
+            }
+            else if (f.live && !f.runner.empty())
+            {
+                o.Set(L"runner", Value::MkStr(f.runner)); // nothing queued: only whether a queued prompt would go out by itself
+            }
+            if (!f.forkedFrom.empty())
+            {
+                o.Set(L"forked_from", Value::MkStr(handle(f.forkedFrom)));
+            }
+            if (!f.continuedFrom.empty())
+            {
+                Value c = Value::MkObj();
+                c.Set(L"id", Value::MkStr(handle(f.continuedFrom)));
+                if (!f.continuedVia.empty())
+                {
+                    c.Set(L"via", Value::MkStr(f.continuedVia));
+                }
+                o.Set(L"continues", std::move(c));
+            }
+            if (f.createdUnixMs > 0)
+            {
+                o.Set(L"created", Value::MkStr(LocalDateText(f.createdUnixMs)));
+            }
+            if (!f.managed)
+            {
+                o.Set(L"note", Value::MkStr(L"Agentmaster has no record of it: only its transcript is known (it never ran in a tab of this Agentmaster)."));
+            }
+            return o;
+        };
+
+        std::vector<std::wstring> missing = unknown;
+        std::vector<Value> objects;
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            // The answer is index-aligned with the ids by contract; a shorter one leaves the rest unknown.
+            if (i >= facts.size() || !facts[i].known)
+            {
+                missing.push_back(handle(ids[i]));
+                continue;
+            }
+            objects.push_back(objectOf(facts[i], !asList));
+        }
+        if (!asList)
+        {
+            // One id asked: its object is the answer (the user's "respond accordingly structured").
+            if (objects.empty())
+            {
+                return { L"No session has the id " + Cut(written.front(), 40) + L": neither Agentmaster nor Claude Code has a record or a transcript of it.", true };
+            }
+            return { json::Dump(objects.front()), false };
+        }
+        Value root = Value::MkObj();
+        root.Set(L"now", Value::MkStr(LocalDateTimeText(now)));
+        root.Set(L"count", Value::MkNum(static_cast<double>(objects.size())));
+        Value list = Value::MkArr();
+        for (auto& o : objects)
+        {
+            list.Push(std::move(o));
+        }
+        root.Set(L"sessions", std::move(list));
+        if (!missing.empty())
+        {
+            Value names = Value::MkArr();
+            for (const auto& m : missing)
+            {
+                names.Push(Value::MkStr(m));
+            }
+            root.Set(L"unknown", std::move(names));
+        }
+        if (notReported > 0)
+        {
+            root.Set(L"not_reported", Value::MkStr(std::to_wstring(notReported) + L" more ids were not reported: at most " + std::to_wstring(kStatusMaxIds) + L" per call. Call status again with them."));
+        }
+        return { json::Dump(root), false };
+    }
+
+    std::wstring SessionSearchToolset::AddLiveFactsToDatabaseRows(const std::wstring& resultText, const std::vector<std::wstring>& handles, const std::vector<std::wstring>& fullIds)
+    {
+        using json::Value;
+        if (!_callbacks.tabs.facts)
+        {
+            return resultText;
+        }
+        std::optional<Value> parsed = json::Parse(resultText);
+        if (!parsed || parsed->type != Value::Type::Obj)
+        {
+            return resultText;
+        }
+        Value* rows = nullptr;
+        for (auto& member : parsed->members)
+        {
+            if (member.first == L"rows" && member.second.type == Value::Type::Arr)
+            {
+                rows = &member.second;
+                break;
+            }
+        }
+        if (!rows || rows->arr.empty())
+        {
+            return resultText;
+        }
+        std::unordered_map<std::wstring, std::wstring> fullOf; // printed handle (folded) -> whole id
+        std::vector<std::wstring> ids;
+        for (size_t i = 0; i < handles.size() && i < fullIds.size(); ++i)
+        {
+            if (!fullIds[i].empty())
+            {
+                fullOf[FoldLower(Trim(handles[i]))] = fullIds[i];
+                ids.push_back(fullIds[i]);
+            }
+        }
+        std::unordered_map<std::wstring, SessionLiveFacts> live;
+        for (auto& f : _callbacks.tabs.facts(ids, false))
+        {
+            if (f.live && !f.sessionId.empty())
+            {
+                std::wstring id = f.sessionId;
+                live.insert_or_assign(std::move(id), std::move(f));
+            }
+        }
+        const int64_t now = Now();
+        for (auto& row : rows->arr)
+        {
+            if (row.type != Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto full = fullOf.find(FoldLower(Trim(row.StrAt(L"id"))));
+            if (full == fullOf.end())
+            {
+                continue; // a row whose id did not resolve: nothing is known about it here
+            }
+            std::vector<std::pair<std::wstring, Value>> added;
+            if (const auto f = live.find(full->second); f != live.end())
+            {
+                added.emplace_back(L"status", Value::MkStr(SessionStatusPhrase(f->second.state, true, f->second.started, f->second.external)));
+                if (const std::wstring age = AgoText(f->second.mostRecentUnixMs, now); !age.empty())
+                {
+                    added.emplace_back(L"age", Value::MkStr(age));
+                }
+            }
+            else
+            {
+                added.emplace_back(L"status", Value::MkStr(L"closed")); // its `active` time is the database's own
+            }
+            // After the row's folder and branch, where the page search's rows carry them.
+            auto at = std::find_if(row.members.begin(), row.members.end(), [](const auto& m) { return m.first == L"active"; });
+            row.members.insert(at, std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
+        }
+        return json::Dump(*parsed);
+    }
+
     std::vector<HarnessTool> SessionSearchToolset::MakeTabTools()
     {
         std::vector<HarnessTool> tools;
+        // The two that READ the workspace come first: overview is what the model reads whenever the user mentions a
+        // window, a tab or an open session (SESSIONS.md §9.16), status what one session (or 32) is doing.
+        HarnessTool overview;
+        overview.name = kTabsOverviewTool;
+        overview.description = L"Every Agentmaster window and its tabs as one Markdown page: per window its number, id and selected tab; its tabs grouped by the folder they work in, the folders with the most recent work first, a row per tab with pos, title, id, status, age (since its newest turn started or ended), turns, ctx (context tokens), model, queue and notes (selected, unread, draft, pinned, an error). Call it first whenever the user mentions a window, a tab or an open session. window, dir and state each take one value or a list. Changes nothing.";
+        overview.inputSchemaJson = kTabsOverviewSchema;
+        overview.readOnly = true; // it only reads; one model step may run it beside a search
+        overview.handler = [this](const json::Value& arguments) { return Overview(arguments); };
+        tools.push_back(std::move(overview));
+
+        if (_callbacks.tabs.facts)
+        {
+            HarnessTool status;
+            status.name = kTabsStatusTool;
+            status.description = L"What up to 32 sessions are doing now, open or closed: status and since when, age (since its newest turn started or ended), where its tab is, Claude's heartbeat, model, ctx, turns, its last reply and Claude's recap, an unsent draft, the prompt queue and why its next prompt waits, an error, what it was forked from. ids: one id (the answer is that session's object) or a list (the answer lists them). Changes nothing.";
+            status.inputSchemaJson = kTabsStatusSchema;
+            status.readOnly = true; // registry reads and one census: safe beside any read-only call
+            status.handler = [this](const json::Value& arguments) { return StatusOf(arguments); };
+            tools.push_back(std::move(status));
+        }
+
         HarnessTool list;
         list.name = kTabsListTool;
-        list.description = L"List the Agentmaster windows and their tabs: per tab its position, title, session id, state, folder (dir, works_in), last turn and last activity; per window its number, the selected tab, and whether the user used it last or asked from it. Read it before you resume, fork or deactivate, and to answer what is open or running. Changes nothing.";
+        list.description = L"List the Agentmaster windows and their tabs as JSON: per tab its position, title, session id, state, folder (dir, works_in), last turn and last activity; per window its number, the selected tab, and whether the user used it last or asked from it. Read it before you resume, fork or deactivate, to choose the window and the place; to answer what is open or running, overview reads better. Changes nothing.";
         list.inputSchemaJson = kTabsListSchema;
         list.readOnly = true; // it only reads; one model step may run it beside a search
         list.handler = [this](const json::Value& arguments) { return ListTabs(arguments); };

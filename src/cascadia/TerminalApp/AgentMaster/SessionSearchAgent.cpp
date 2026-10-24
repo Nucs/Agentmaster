@@ -8,6 +8,7 @@
 #include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException, ResolveClaudeTranscriptPath
 #include "Engine.h" // SharedEngine — the shared agent's registry
 #include "Persistence.h" // LoadAppSettings — the shared agent's persisted thinking level
+#include "Scheduler.h" // Scheduler::GlobalPaused — Pause all, which the status and overview tools report (SESSIONS.md §9.16)
 #include "SessionDbClient.h" // SESSIONS_DB.md §8.2 — the database mode's tool calls
 #include "SessionDbProtocol.h" // kToolCall / kResolveIds
 #include "SessionRegistry.h" // LiveTabBindings / HeadlinesOf — the open sessions
@@ -359,30 +360,61 @@ namespace
     /// guard compares ("running" / "needs approval" mean a turn is in flight).</summary>
     /// <param name="state">The session's state.</param>
     /// <returns>A static, NUL-terminated word.</returns>
+    /// <remarks>Since 2026-10-24 the words are read from SessionStateWord (SessionSearchTools.h), the ONE table the list,
+    /// overview and status tools and the search rows share, so a tab never reads one word in list and another in status.</remarks>
     const wchar_t* TabStateWord(SessionState state) noexcept
     {
-        switch (state)
-        {
-        case SessionState::Running:
-            return L"running";
-        case SessionState::WaitingForInput:
-            return L"waiting for you";
-        case SessionState::NeedsApproval:
-            return L"needs approval";
-        case SessionState::Error:
-            return L"error";
-        case SessionState::Done:
-            return L"done";
-        case SessionState::Idle:
-        default:
-            return L"idle";
-        }
+        return SessionStateWord(state);
     }
+
+    /// <summary>
+    /// Where the session index stands for the live-facts reads: the shared keeper's newest published index (never waited
+    /// for — an overview or a status call must answer at once) and a lookup by session id over it.
+    /// </summary>
+    struct IndexLookup
+    {
+        std::shared_ptr<const SessionCatalog> catalog; // null: no index was published yet (the counts then read "not known")
+        std::unordered_map<std::wstring, const SessionIndexEntry*> byId; // into catalog->entries
+
+        /// <summary>The newest index of the process's shared keeper, indexed by id.</summary>
+        /// <returns>The lookup; empty when no index was published.</returns>
+        /// <exception cref="std::bad_alloc">If the lookup cannot be allocated.</exception>
+        /// <remarks>Reads nothing from disk and waits for nothing (SessionCatalogKeeper::Current). The keeper may be the
+        /// database mode's, which never builds an index: the counts are then not known.</remarks>
+        static IndexLookup Current()
+        {
+            IndexLookup lookup;
+            if (const auto keeper = SharedSessionCatalogKeeper())
+            {
+                lookup.catalog = keeper->Current();
+            }
+            if (lookup.catalog)
+            {
+                lookup.byId.reserve(lookup.catalog->entries.size());
+                for (const auto& entry : lookup.catalog->entries)
+                {
+                    lookup.byId.emplace(entry.sessionId, &entry);
+                }
+            }
+            return lookup;
+        }
+
+        /// <summary>The index entry of a session, or null.</summary>
+        /// <param name="sessionId">The whole id.</param>
+        /// <returns>The entry (owned by `catalog`), or null when the index does not hold it.</returns>
+        const SessionIndexEntry* Find(const std::wstring& sessionId) const
+        {
+            const auto it = byId.find(sessionId);
+            return it != byId.end() ? it->second : nullptr;
+        }
+    };
 
     /// <summary>
     /// Fill the session half of every tab of a census (WindowTabInfo) from the shared registry: one lean snapshot of
     /// the LIVE sessions (SnapshotLiveForCards: no queues, no transcript texts), and a queue-less read for a tab whose
-    /// session is not in it (a tab mid-bind).
+    /// session is not in it (a tab mid-bind). Since 2026-10-24 also the overview's columns (SESSIONS.md §9.16): the
+    /// queue counts from a second lean snapshot (SnapshotLiveForScan, whose queue keeps every open prompt), the turns and
+    /// a missing context size from the shared session index as it stands (never waited for), Pause all from the scheduler.
     /// </summary>
     /// <param name="windows">The census the windows answered (their strip halves).</param>
     /// <exception cref="std::bad_alloc">If the snapshot cannot be allocated.</exception>
@@ -404,6 +436,20 @@ namespace
             std::wstring id = s.id;
             live.emplace(std::move(id), std::move(s));
         }
+        // SESSIONS.md §9.16, the overview's columns. The queue counts come from the scanner's lean snapshot, whose queue
+        // keeps every OPEN prompt (SnapshotLiveForCards copies no queue at all); the turns and a context size the registry
+        // has not read yet from the session index (never waited for); Pause all from the scheduler.
+        std::unordered_map<std::wstring, uint32_t> queuedById;
+        for (const auto& s : registry->SnapshotLiveForScan())
+        {
+            if (const uint32_t n = SessionQueuedCount(s); n > 0)
+            {
+                queuedById.emplace(s.id, n);
+            }
+        }
+        const auto scheduler = SharedEngine().scheduler;
+        const bool globalPause = scheduler && scheduler->GlobalPaused();
+        const IndexLookup index = IndexLookup::Current();
         for (auto& window : windows)
         {
             for (auto& tab : window.tabs)
@@ -440,6 +486,35 @@ namespace
                 tab.lastTurnUnixMs = s->turnStartUnixMs;
                 // The newest activity of any kind: the transcript's own (line-derived), the decay anchor, a turn's end.
                 tab.lastActivityUnixMs = (std::max)({ s->convLastActivityUnixMs, s->lastActivityUnixMs, s->turnEndUnixMs });
+
+                // The overview's columns (SESSIONS.md §9.16), by the rules the status tool uses (SessionSearchTools.h).
+                tab.mostRecentUnixMs = MostRecentSortKeyMs(*s);
+                tab.contextTokens = s->contextTokens;
+                tab.model = !s->currentModel.empty() ? s->currentModel : s->model;
+                tab.effort = s->effort;
+                // A tab whose record came from GetWithoutQueue (mid-bind) has no queue copy: 0, never a guess.
+                if (const auto q = queuedById.find(tab.sessionId); q != queuedById.end())
+                {
+                    tab.queued = q->second;
+                }
+                tab.runner = tab.codex ? std::wstring{} : SessionRunnerWord(*s, globalPause); // a managed Codex has no runner
+                tab.unread = SessionLooksUnread(*s);
+                tab.draft = !s->pendingInput.empty(); // both reads above keep pendingInput (the side panel's draft dots)
+                tab.pinned = s->pinned;
+                tab.compacting = s->compactingSinceUnixMs != 0;
+                if (s->state == SessionState::Error)
+                {
+                    tab.errorMessage = s->errorMessage;
+                }
+                if (const SessionIndexEntry* entry = index.Find(tab.sessionId))
+                {
+                    tab.turns = entry->stats.userPrompts;
+                    if (tab.contextTokens == 0)
+                    {
+                        // The registry learns it when the scanner tail-reads the transcript; a dormant tab may not be read yet.
+                        tab.contextTokens = entry->stats.contextTokens;
+                    }
+                }
             }
         }
     }
@@ -1716,6 +1791,115 @@ namespace Agentmaster
             // forget: the tool says it asked, and the next list shows the result.
             ActivateSessionInOtherWindows(sessionId, std::wstring{});
             return true;
+        };
+        // SESSIONS.md §9.16: the status tool's facts (full) and a search row's status and age (brief). Registry reads on
+        // the tool-call thread, never on a UI thread; the session index as it stands, never waited for.
+        tools.facts = [](const std::vector<std::wstring>& ids, bool full) -> std::vector<SessionLiveFacts> {
+            std::vector<SessionLiveFacts> out(ids.size());
+            for (size_t i = 0; i < ids.size(); ++i)
+            {
+                out[i].sessionId = ids[i];
+            }
+            const auto registry = SharedEngine().registry;
+            if (!full)
+            {
+                // A search row needs a status and an age, and only for an open session: ONE lean copy of the live set
+                // (no queues, no transcript texts) answers up to 200 rows, where a Get per row would copy every queue.
+                if (!registry)
+                {
+                    return out;
+                }
+                std::unordered_map<std::wstring, size_t> wanted;
+                for (size_t i = 0; i < ids.size(); ++i)
+                {
+                    wanted.emplace(ids[i], i);
+                }
+                for (const auto& s : registry->SnapshotLiveForCards())
+                {
+                    const auto it = wanted.find(s.id);
+                    if (it == wanted.end())
+                    {
+                        continue;
+                    }
+                    SessionLiveFacts& f = out[it->second];
+                    f.known = true;
+                    f.managed = true;
+                    f.live = s.live;
+                    f.started = s.started;
+                    f.external = s.external;
+                    f.codex = s.kind == AgentKind::Codex;
+                    f.state = SessionStateWord(s.state);
+                    f.mostRecentUnixMs = MostRecentSortKeyMs(s);
+                }
+                return out;
+            }
+            // The status tool: at most kStatusMaxIds sessions, so each gets its WHOLE record (Get: the queue for why its
+            // next prompt waits, the last reply and the recap) — open or closed alike.
+            const auto scheduler = SharedEngine().scheduler;
+            const bool globalPause = scheduler && scheduler->GlobalPaused();
+            const IndexLookup index = IndexLookup::Current();
+            const int64_t now = NowUnixMs();
+            for (size_t i = 0; i < ids.size(); ++i)
+            {
+                const std::wstring& id = ids[i];
+                const std::optional<SessionInfo> record = registry ? registry->Get(id) : std::nullopt;
+                // The transcript index's entry: the shared index's, else the session's own sidecar (a session the index
+                // has not reached yet — a fork made a minute ago). ⚠ The sidecar read may parse a grown transcript; at most
+                // kStatusMaxIds of them, with the model waiting.
+                const SessionIndexEntry* entry = index.Find(id);
+                std::optional<SessionIndexEntry> ownEntry;
+                if (!entry)
+                {
+                    ownEntry = IndexEntryForSession(id);
+                    entry = ownEntry ? &*ownEntry : nullptr;
+                }
+                if (!record && !entry)
+                {
+                    continue; // neither Agentmaster nor Claude Code knows it: known stays false
+                }
+                SessionLiveFacts& f = out[i];
+                if (record)
+                {
+                    f = SessionLiveFactsOf(*record, now, registry->LastHumanInputUnixMs(id), globalPause);
+                }
+                else
+                {
+                    // Claude Code has its transcript, Agentmaster never ran it: a closed session, told by its index entry.
+                    f.known = true;
+                    f.title = SessionSearchTitleOf(*entry);
+                    f.dir = SessionSearchDirOf(*entry);
+                    f.branch = entry->stats.gitBranch;
+                    f.mostRecentUnixMs = SessionSearchLastActivityMs(*entry);
+                    f.createdUnixMs = SessionSearchCreatedMs(*entry);
+                }
+                if (entry)
+                {
+                    f.turns = entry->stats.userPrompts;
+                    if (f.contextTokens == 0)
+                    {
+                        f.contextTokens = entry->stats.contextTokens;
+                    }
+                    if (f.forkedFrom.empty())
+                    {
+                        // The registry keeps a fork's source only until the fork writes its own first message; the
+                        // transcript's copied lines name it for good.
+                        f.forkedFrom = entry->stats.forkedFromId;
+                    }
+                    if (f.branch.empty())
+                    {
+                        f.branch = entry->stats.gitBranch;
+                    }
+                }
+                if (index.catalog)
+                {
+                    if (const auto tags = index.catalog->tags.find(id); tags != index.catalog->tags.end())
+                    {
+                        f.tags = tags->second;
+                    }
+                    f.favorite = index.catalog->favorites.count(id) != 0;
+                }
+            }
+            return out;
         };
         return tools;
     }
