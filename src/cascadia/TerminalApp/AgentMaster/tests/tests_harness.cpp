@@ -713,6 +713,32 @@ void TestSessionSearchTools()
             const auto& prompt = sessions->arr[3];
             CHECK(prompt.StrAt(L"match") == L"prompt" && prompt.I64At(L"hits") == 2 && prompt.Find(L"snippets") && prompt.Find(L"snippets")->arr.size() == 2 && prompt.Find(L"snippets")->arr[0].str.find(L'\n') == std::wstring::npos, "result row: a prompt match carries its hits and one-line snippets");
             CHECK(prompt.StrAt(L"branch") == L"feature/tags" && prompt.Find(L"tags") && prompt.Find(L"tags")->arr.size() == 1, "result row: the branch and the tags");
+            // SESSIONS.md 9.16 (the user's request of 2026-10-24): every row says its status and its age. Without live
+            // facts, the catalog's open flag reads "open", any other session "closed", each aged by its newest message.
+            CHECK(first.StrAt(L"status") == L"open" && first.StrAt(L"age") == L"1d" && sessions->arr[1].StrAt(L"status") == L"closed" && sessions->arr[1].StrAt(L"age") == L"6mo",
+                  "result row: without live facts, open / closed and the age of its newest message");
+        }
+        {
+            // With the BRIEF live facts of the open sessions: a tab's own status (a dormant one marked) and its age by the
+            // MOST RECENT key (its newest turn's start or end), the catalog's age where no turn is known; a session that has
+            // no tab reads "closed" whatever the catalog says.
+            std::unordered_map<std::wstring, SessionLiveFacts> live;
+            SessionLiveFacts running;
+            running.sessionId = kIdDrag;
+            running.live = running.started = true;
+            running.state = L"running";
+            running.mostRecentUnixMs = kNow - 5 * 60000;
+            SessionLiveFacts dormant;
+            dormant.sessionId = kIdDragTwin;
+            dormant.live = true;
+            dormant.state = L"idle";
+            live.emplace(kIdDrag, running);
+            live.emplace(kIdDragTwin, dormant);
+            const json::Value withLive = J(FormatSessionSearchResult(catalog, p, outcome, kNow, {}, &live));
+            const auto* rows = withLive.Find(L"sessions");
+            CHECK(rows && rows->arr.size() == 4 && rows->arr[0].StrAt(L"status") == L"running" && rows->arr[0].StrAt(L"age") == L"5m" && rows->arr[2].StrAt(L"status") == L"idle (dormant)" &&
+                      rows->arr[2].StrAt(L"age") == L"2d" && rows->arr[1].StrAt(L"status") == L"closed" && rows->arr[3].StrAt(L"status") == L"closed",
+                  "result row: with live facts, the tab's status (dormant marked) and the MOST RECENT age; every other row closed");
         }
         const auto none = RunSessionSearch(catalog, params(LR"({"query":"zebra"})"), kNow, content);
         CHECK(J(FormatSessionSearchResult(catalog, params(LR"({"query":"zebra"})"), none, kNow)).StrAt(L"hint").find(L"deep:true") != std::wstring::npos, "result: nothing matched -> a hint that names the next steps");

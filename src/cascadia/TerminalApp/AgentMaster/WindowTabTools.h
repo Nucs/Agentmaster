@@ -51,6 +51,87 @@ namespace Agentmaster
         std::wstring branch; // the git branch it runs on; "" = unknown
         int64_t lastTurnUnixMs{ 0 }; // the most recent turn START (the user's newest prompt); 0 = no turn yet
         int64_t lastActivityUnixMs{ 0 }; // the most recent activity of any kind (a turn's end, a tool call, a hook); 0 = none recorded
+
+        // ---- the overview's columns (SESSIONS.md §9.16; filled with the session half, empty / 0 / false for a shell) ----
+        // The MOST RECENT key (SessionModels.h MostRecentSortKeyMs): the newer of its last turn start and end, else the
+        // decay anchor (a new session's creation instant). The overview's `age` and the order of its folder groups: the
+        // order the Manager's tree and board and the side panel show under MOST RECENT. 0 = nothing known.
+        int64_t mostRecentUnixMs{ 0 };
+        // Messages the user sent in its conversation (the transcript index's real prompts, which a fork shares with its
+        // source). -1 = not known: the session index is not read yet, or the session has no transcript of its own yet.
+        int32_t turns{ -1 };
+        int64_t contextTokens{ 0 }; // its context size in tokens (the newest reply's usage, else the index's); 0 = not known yet
+        std::wstring model; // the model its newest reply came from, else the launch model; "" = not known
+        std::wstring effort; // its effort level; "" = the default
+        uint32_t queued{ 0 }; // prompts waiting in its Prompt Queue (Pending)
+        // Its Prompt Queue Runner (SessionRunnerWord): "auto", "paused", "held" (paused by an interrupt until the user's
+        // next message), each with " (Pause all on)" while the global pause holds every session.
+        std::wstring runner;
+        bool unread{ false }; // it finished or asked something the user has not looked at yet (SessionLooksUnread)
+        bool draft{ false }; // an unsent draft sits in its input box
+        bool pinned{ false }; // pinned: it never decays to Idle
+        bool compacting{ false }; // a compaction runs now
+        std::wstring errorMessage; // in Error: what Claude Code said, cut; "" otherwise
+    };
+
+    /// <summary>
+    /// What the AI search's `status` tool reports about one session (SESSIONS.md §9.16), and — for a search row — the
+    /// brief part of it: Agentmaster's live facts from its registry, the counts of the transcript index, and the texts a
+    /// tab row leaves out (the last reply, Claude's recap, the unsent draft, why the next queued prompt waits).
+    /// </summary>
+    /// <remarks>
+    /// Filled by SessionSearchToolset::Callbacks::TabTools::facts: the app builds it with SessionLiveFactsOf from a
+    /// registry record (open or closed), or from the transcript index for a session Agentmaster never ran; a test fills
+    /// it directly. A BRIEF answer (the callback's `full` false, for search rows) fills only sessionId, live, started,
+    /// external, codex, state and mostRecentUnixMs, and only for a session open in a tab; every other field stays empty.
+    /// Plain data, so the standalone test harness builds the tools with no registry at all.
+    /// </remarks>
+    struct SessionLiveFacts
+    {
+        std::wstring sessionId; // the whole id that was asked
+        bool known{ false }; // a registry record or a transcript of it exists; false = no such session (the rest stays empty)
+        bool managed{ false }; // Agentmaster's registry has a record of it (open or closed); false = only its transcript is known
+        bool live{ false }; // it has a tab open in some window
+        bool started{ false }; // its agent process runs; false while live = a dormant tab (it starts when the tab is entered)
+        bool external{ false }; // adopted: a claude the user started by hand in a shell tab
+        bool codex{ false }; // a managed Codex session
+        std::wstring state; // the Triage Board's word (SessionStateWord); "" when not managed
+        int64_t stateSinceUnixMs{ 0 }; // when its status, its tab or its start last changed THIS run; 0 = not known (e.g. before a restart)
+        // The MOST RECENT key (MostRecentSortKeyMs) of a managed session; for a session Agentmaster never ran, its
+        // transcript's newest message. The status tool's `age`. 0 = nothing known.
+        int64_t mostRecentUnixMs{ 0 };
+        int64_t createdUnixMs{ 0 }; // when it was created; 0 = not known
+        std::wstring title; // its title (the tab's pinned title for a managed session)
+        std::wstring dir; // the launch working directory
+        std::wstring worksIn; // the inferred working directory when it differs from `dir`; "" = the same
+        std::wstring branch; // the git branch; "" = unknown
+        int32_t turns{ -1 }; // messages the user sent (WindowTabInfo::turns); -1 = not known
+        int64_t contextTokens{ 0 }; // context size in tokens; 0 = not known
+        std::wstring model; // the model its newest reply came from, else the launch model
+        std::wstring effort; // its effort level; "" = the default
+        std::wstring heartbeat; // Claude's own heartbeat status (busy, idle, waiting, shell); "" = no running claude reports one
+        std::wstring waitingFor; // what the heartbeat says it waits for ("input needed"), when it waits
+        bool compacting{ false }; // a compaction runs now
+        bool unread{ false }; // SessionLooksUnread
+        bool pinned{ false }; // pinned: it never decays to Idle
+        bool favorite{ false }; // starred
+        bool askedQuestion{ false }; // its last turn ended with a question to the user
+        std::vector<std::wstring> tags; // its bookmark tags
+        std::wstring errorMessage; // in Error: what Claude Code said, cut; "" otherwise
+        int32_t errorStatus{ 0 }; // the API error's HTTP status; 0 = none or not an API error
+        std::wstring lastReply; // Claude's newest reply, cut
+        std::wstring recap; // Claude Code's own recap of the session (its away summary), cut
+        std::wstring draft; // the unsent draft in its input box, cut; "" = none
+        int64_t draftUnixMs{ 0 }; // when the draft was last seen
+        uint32_t queued{ 0 }; // prompts waiting in its Prompt Queue (Pending)
+        std::wstring nextPrompt; // the first line of the next one, cut; "" = nothing queued
+        std::wstring runner; // SessionRunnerWord; "" when not managed
+        // Why the next queued prompt has not gone out (DescribeQueueWait: the runner's own decision in plain words), or
+        // that it goes out now; "" = nothing queued.
+        std::wstring nextWait;
+        std::wstring forkedFrom; // the whole id of the session it was forked from; "" = not a fork (or not known)
+        std::wstring continuedFrom; // the whole id of the session it continues after a /clear or a /handover; ""
+        std::wstring continuedVia; // how: "clear" or "handover"; "" with continuedFrom
     };
 
     /// <summary>

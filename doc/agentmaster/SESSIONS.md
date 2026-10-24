@@ -1096,7 +1096,8 @@ none of its 3 sessions in its 20 s.
 > no live model run yet.
 
 **The tabs server** (`AgentMaster/SessionSearchTools.{h,cpp}`; in both modes, last in the model's
-list so the search tools keep their places):
+list so the search tools keep their places; §9.16 put `mcp__tabs__overview` and `mcp__tabs__status` in front of the
+four below on 2026-10-24):
 
 | Tool | What it does |
 |---|---|
@@ -1461,6 +1462,126 @@ a first grep after the transcripts left the file cache waits about a minute for 
 of them; the session database of SESSIONS_DB.md is the way past it); the Debug build's grep and read rarely finish
 over large sessions; the database mode's procedure was never evaluated; nothing here has met the app's XAML or a
 Telegram chat.
+
+### 9.16 Overview and status: what the open sessions are doing now (2026-10-24, NOT BUILT yet)
+
+> **The user's request of 2026-10-24**, after a study of what the agent can reach (8 tools, no shell, no CLI) and of
+> the `agentmaster` CLI: "Add the following tools but have them accept either scalar or vector of values and respond
+> accordingly structured. 1. status - make sure search provides status of the agent, age since last active (same as
+> MOST RECENT filter) 1.a. also update across to 32 sessions and not 8 2. overview - shows all windows and in a list all
+> the tab titles grouped per workdir with full infograph like status, turns, ctx and more necessary info composed as an
+> md response that present the data to the agent. The overview should be accessed when user mentions, window, tab, or
+> open session." Written and tested in the m5 suite and with `cl /Zs`; no build, no live model run, no eval round.
+
+**Two new tools on the tabs server** (`AgentMaster/SessionSearchTools.{h,cpp}`; both read-only, both in the page mode
+and the database mode; the server's order is now overview, status, list, resume, fork, deactivate):
+
+| Tool | What it does |
+|---|---|
+| `mcp__tabs__overview` | Every window and its tabs as ONE Markdown page (`RenderWorkspaceOverview`): a head (the time, the windows and tabs in all, the filter, the listed sessions counted by status plus dormant / unread / queued, what the columns mean); per window a `## Window N (id x)` section (tab count, "M listed" under a filter, the selected tab, the Agent Manager page, used last, asked from); in it one `### <folder>` group per working folder (`works_in`, else `dir`), the groups with the most recent work first (the newest MOST RECENT key among their tabs), each a table in strip order: `pos`, `title`, `id`, `status`, `age`, `turns`, `ctx`, `model` (without `claude-`, with the effort), `queue` (the count and the runner), `notes` (selected, unread, draft, pinned, compacting, adopted, codex, an error's text); the shell tabs of a window last, on one line. Filters: `window`, `dir`, `state`, each ONE value or a LIST (OR inside one, AND across them). |
+| `mcp__tabs__status` | What up to 32 sessions are doing now (`kStatusMaxIds`), open or closed: `status`, `since` (when the status last changed this run), `age` + `last_active` (the MOST RECENT key), `tab` (window, pos, selected, dormant, adopted), `kind`, `dir`, `works_in`, `branch`, `turns`, `ctx`, `model`, `effort`, `heartbeat` (Claude's own, with what it waits for), `compacting`, `unread`, `pinned`, `fav`, `tags`, `asked_question`, `error` (with the HTTP status), `last_reply` and `recap` (cut to 240), `draft` (160) with `draft_seen`, `queue` (`waiting`, `next` — the first line —, `runner`, `next_goes`: why it has not gone out), `runner` when nothing is queued, `forked_from`, `continues` (`id`, `via` clear / handover), `created`, and a `note` for a session Agentmaster never ran. `ids` as ONE id answers that session's object (with `now` in it); a LIST (an array, a JSON list in a string, or ids separated by commas or spaces) answers `{now, count, sessions, unknown, not_reported}` in the order asked. `id` is read like `ids`. |
+
+**Search rows say it too** (the user's "make sure search provides status of the agent, age since last active"):
+every row of `mcp__sessions__search` now carries `status` and `age` (`FormatSessionSearchResult`'s new `live` map,
+filled by one BRIEF facts read for the rows). A session open in a tab says its tab's status and its age since its
+newest turn started or ended (the MOST RECENT key); any other row says `closed` and its age since its newest message
+(its `active` time); a session the catalog lists as open but no facts describe says `open`. In the database mode the
+service's rows get the same two fields, put in before their `active` (`AddLiveFactsToDatabaseRows`; a closed row
+gets only `status`, the database's own `active` being its time).
+
+**One value or a list** (the user's "accept either scalar or vector of values and respond accordingly structured"):
+the schemas say it with `anyOf` (Claude Code checks no call against a schema; `ReadOneOrMany` reads both forms, a
+whole number as one value, a string holding a JSON list as the list, and for `ids` also several ids in one string).
+`status` answers one object for one id and a list for a list (a one-element ARRAY still answers a list); `overview`
+answers one Markdown page whose window sections follow a `window` list in the order asked.
+
+**The words, one rule each** (pure, in `SessionSearchTools.h`, shared by the overview's columns, the status objects
+and the search rows):
+
+- `SessionStateWord`: the Triage Board's words — running, waiting for you, needs approval, error, idle, done (the
+  agent's `TabStateWord`, the list tool's `state`, now reads this one table).
+- `SessionStatusPhrase`: the state word; `" (dormant)"` added for a tab whose agent is not started (it starts when the
+  tab is entered; an adopted tab is never dormant); `closed` for a session with no tab; `open` for a tab whose state
+  is not known.
+- `age` = `MostRecentSortKeyMs` (SessionModels.h): the newer of the last turn start and end, else the decay anchor —
+  the order the Manager's tree and board and the side panel show under MOST RECENT. A running turn's age is therefore
+  the time since it STARTED, while the list tool's `active` moves with every tool call.
+- `SessionLooksUnread`: Mark Unread, or a state that needs the user (waiting for you, needs approval, error) reached by
+  activity newer than the user's last visit of its tab (`readUnixMs < lastActivityUnixMs`, the Waiting-for-you decay's
+  test). `readUnixMs` is transient: after a restart every waiting session reads unread until its tab is visited. It is
+  the registry's read stamp, not a window's flash ring.
+- `SessionRunnerWord`: `auto`, `paused`, `held` (an interrupt's hold, Auto again on the user's next message), each
+  with ` (Pause all on)` while the global pause holds; none for a managed Codex (it has no runner).
+- `DescribeQueueWait`: why the next queued prompt has not gone out, from the scheduler's own `DecideAdvance` (the same
+  pure function the runner acts on) in plain words — Pause all, the runner paused for this session, an interrupt's
+  hold, no open tab, a dormant tab, "after the running turn ends", "after the user answers what the session asks", an
+  error, claude ended, the user typing, the send budget, a delivery in flight, a menu open, the box not visible, the
+  last prompt not picked up yet, the Send-now-only gate, a question waiting for the answer, the 40-second status or
+  queue settle, the send spacing — or "it goes out now". A reason it does not know reads `the runner holds it: <the
+  runner's words>`, so a new gate is never hidden.
+- `SessionLiveFactsOf`: the status object's facts from one registry record (the texts cut: the last reply and the
+  recap to 240 characters, the draft to 160, the next prompt's first line to 120).
+
+**The overview's budget** (`kOverviewMaxChars`, 48,000 characters, about 16,000 tokens; a tool result over Claude
+Code's ~25,000 tokens would be cut): a page over it is made again with its QUIET tabs folded into one line per folder
+— idle or done, not selected, unread, pinned, compacting, queued, without a draft or an error — first the ones quiet
+for over a day (`Quiet for over a day (N): pos title [id] age; ...`), then every quiet one (`Quiet, idle or done
+(N): ...`), then without their ages; still too long, it stops at the budget and says how many tabs (and windows) it
+left out and how to narrow the call. A tab's words for the `state` filter: its state word, `dormant`, `unread`,
+`queued`, `draft`, `pinned`, `compacting`, `shell` for a tab with no session; a value matches a word it equals or,
+with 3 characters or more, is part of (`waiting` matches waiting for you; a 2-character value must be a whole word).
+A folder filter leaves the shells out; a window with nothing listed is left out unless the call named it.
+
+**Where the facts come from in the app** (`SessionSearchAgent.cpp`, on the tool-call thread, never a UI thread):
+
+- The census's session half (`EnrichWindowCensus`) also fills the overview's columns (`WindowTabInfo` gained
+  `mostRecentUnixMs`, `turns`, `contextTokens`, `model`, `effort`, `queued`, `runner`, `unread`, `draft`, `pinned`,
+  `compacting`, `errorMessage`): the queue counts from a second lean registry copy (`SnapshotLiveForScan`, whose queue
+  keeps every open prompt; the cards' copy has no queue), Pause all from the scheduler, the turns — and a context size
+  the registry has not read yet (a dormant tab) — from the shared session index as it stands (`IndexLookup`, over
+  `SharedSessionCatalogKeeper()->Current()`: never waited for; in the database mode, which builds no index, the turns
+  read `-`).
+- `Callbacks::TabTools::facts(ids, full)` (`MakeEngineTabTools`): BRIEF (search rows: one `SnapshotLiveForCards` for up
+  to 200 rows, only the live sessions answered) or FULL (status: `Get` per id — the whole record, for the queue, the
+  reply and the recap — plus `LastHumanInputUnixMs`, Pause all, the index's entry for the turns, a missing context size,
+  the fork source, the tags and the star; a session the index does not hold yet gets its own sidecar,
+  `IndexEntryForSession`, which may parse a grown transcript; a session only Claude Code knows is reported from its
+  index entry, `managed` false). The status tool asks the census (a hop to the windows' UI thread) only when one of
+  its sessions is open.
+- The cost added to every census (list, resume, fork, deactivate too): one more lean live copy and an id lookup over
+  the index (~3,600 entries): a few milliseconds per call.
+
+**The prompt** (`tools/ai-search-eval/pieces.txt`, generated into the `AM_PROMPT_*` macros by `gen_prompt.py` and
+`splice_prompt.py`): `SHOW_AND_TABS` opens with "overview, status and list only read" and gains the two tools' bullets
+— overview "Call it FIRST whenever the user mentions a window, a tab or an open session", status "up to 32 sessions
+... ids takes one id (one object back) or a list (a list back)"; workflow 5 sends "what runs in the tabs right now"
+to overview; workflow 15 is now "A request that mentions a window, a tab or an open session, or asks about the
+workspace": overview narrowed by window, dir or state ("what needs me" = `["waiting for you","needs approval",
+"error"]`), then status for the sessions the answer is about; `TOOLS_PAGE` and `TOOLS_DATABASE` name the rows' status
+and age. The page prompt grew from 26,869 to 28,098 characters (MSVC's literal limit is the m5 suite's 30,000), the
+database prompt from 26,195 to 27,399; still nineteen workflows and ten behaviors. The tools' full contracts live in
+their descriptions and schemas, which do not count against that limit. ⚠ No eval round was run (its queries are search
+requests, which the change touches only by two more row fields); run one before relying on the prompt (the README's
+"A round").
+
+**Tests:** `tests_tabtools.cpp` — `TestLiveFactsRules` (the words, the phrase, unread, the runner, the queue count, the
+queue wait over DecideAdvance's gates, the facts of a record with its model / error / draft / reply / fork source /
+Codex) and `TestOverviewAndStatus` (the server's tools and schemas; the page's head, sections, folder groups in MOST
+RECENT order, rows and shells; every filter as one value and as a list, the string-held list, the 2-character rule, the
+errors; the three fold levels and the size limit; status as one id and as a list, its tab, queue, lineage, unknown
+ids, the 32-id cap, the census asked only for an open session; the database mode's rows); `TestPrompts` pins the new
+rules; `tests_harness.cpp` pins the rows' status and age with and without facts. Run isolated on 2026-10-24: 9,914
+checks, the 3 known TestTaskbarBadge failures and nothing else. `cl /Zs` with the last Debug build's recorded lines
+(`/W3 /WX` and the warnings-as-errors list) passed for SessionSearchTools.cpp, SessionSearchAgent.cpp, Engine.cpp,
+MessagingSearchBridge.cpp and three TerminalPage units (with the PCH); a planted unused local in
+`RenderWorkspaceOverview` failed there with C4189.
+
+⚠ **The next build should purge**: `WindowTabTools.h`'s `WindowTabInfo` gained members, and the struct crosses from
+the windows' code (TerminalPage, whose header includes it) to the engine (Engine.cpp, SessionSearchAgent.cpp).
+
+**Open:** nothing here has met the live model or a build; `turns` is not known in the database mode and for a Codex
+session (its rollout is not in the Claude index); the Telegram Search topic shows the model's reply only, so the
+overview's tables reach the user through the model's words.
 
 ---
 
