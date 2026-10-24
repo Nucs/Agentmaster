@@ -73,7 +73,7 @@ def test_another_account_runs_the_installer(lane, kit, machine):
     # IS-27: -Scope User, run by a standard account that is not the signed-in user: refused, nothing installed.
     run = install.run_installer_as(account, lane, "-Scope", "User", "-ZipPath", str(zip2))
     assert run.code != 0, f"the other account's run was not refused\n{run}"
-    assert f"This PowerShell runs as" in run.output and "is signed in" in run.output and "-ForCurrentAccount" in run.output, \
+    assert "This PowerShell runs as" in run.output and "is signed in" in run.output and "-ForCurrentAccount" in run.output, \
         str(run)
     assert not (account.install_dir / "Agentmaster.exe").exists(), "the refused run installed for the other account"
     assert install.MachineState.read().user is None, "the refused run installed for the signed-in user"

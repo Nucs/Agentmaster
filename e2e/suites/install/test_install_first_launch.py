@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -452,3 +453,134 @@ def test_install_here(lane, kit, machine):
         assert any(_norm(link.target) == _norm(exe) for link in state.shortcuts_in(folder)), \
             f"no {folder} icon of {exe}: {state.shortcuts_in(folder)}"
     assert TaskDialog.all(pids=[app.pid]) == [], "the copy installed in place asked something more"
+
+
+PICK_TITLE = "Choose where to install Agentmaster"
+"""The folder dialog's title for "Install to a folder you pick…" (PortableInstall.h ShowInstallPrompt, BrowseForFolder)."""
+
+
+def _pick_folder(copy_dir: Path, folder: Path) -> None:
+    """Answer the copy's folder dialog: the common IFileOpenDialog (a #32770 window), its "Folder:" box given a full
+    path, then "Select Folder" — what a user does who types or pastes the path.
+
+    Args:
+        copy_dir: The copy's folder (the dialog belongs to its process).
+        folder: The folder to pick (it must exist: the dialog checks).
+    Returns:
+        None.
+    Raises:
+        WaitTimeout: When the dialog or one of its controls did not come.
+    """
+    picker = wait_until(lambda: next(iter(TaskDialog.all(exe_dirs=[copy_dir], title=PICK_TITLE)), None), 60,
+                        what="the folder dialog", describe=lambda: [repr(d) for d in TaskDialog.all(title=None)])
+    root = picker.element()
+    root.wait_find(30, role="edit", name="Folder:").set_value(str(folder))
+    root.wait_find(10, role="button", name="Select Folder").invoke()
+
+
+@pytest.mark.p2
+@pytest.mark.flow("INS-02")
+@pytest.mark.install("IS-50")
+def test_install_to_a_folder_you_pick(lane, kit, machine):
+    """"Install to a folder you pick…": the folder dialog; a folder inside the copy is refused and the question comes
+    back; a folder that holds files of the user's gets the install in its own `Agentmaster` subfolder, registered there,
+    and the user's files stay as they were. (The row's third case — Program Files without administrator rights — needs
+    a user who has none: the `uac` machine.)
+
+    Promise (INS-02, PortableInstall.h idBrowse and PerformInstall): like any installer, a pick of a busy folder never
+    mixes the app into the user's files, and a pick that would copy the app into itself is refused with a way out.
+
+    Args:
+        lane: The install lane's facts.
+        kit: Stamped copies of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: Naming the dialog, folder or registration that is wrong.
+    """
+    target = install.E2E_ROOT / "w" / "picked"
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("the user's own file\n", encoding="utf-8")
+    exe = kit.copy("0.8.1.0", "agentmaster-pick")
+    inside = exe.parent / "sub"
+    inside.mkdir()
+
+    # A folder inside the copy: refused, and the question comes back.
+    question, started = _start_copy(exe)
+    question.press(r"^Install to a folder you pick")
+    _pick_folder(exe.parent, inside)
+    error = TaskDialog.wait("The install did not complete", exe_dirs=[exe.parent], timeout_s=60)
+    assert "must not contain (or sit inside) the folder Agentmaster is running from" in error.text(), error.text()
+    error.press(r"^OK$")
+    question = install.wait_question(exe.parent, timeout_s=60)
+    assert not (inside / "Agentmaster.exe").exists(), "the refused pick installed into the copy"
+
+    # A folder of the user's files: the install goes to its Agentmaster subfolder.
+    question.press(r"^Install to a folder you pick")
+    _pick_folder(exe.parent, target)
+    dest = target / "Agentmaster"
+    install.wait_app(dest, timeout_s=180, newer_than=started)
+    facts = install.InstallFacts.read(dest)
+    assert facts is not None and facts.version == "0.8.1.0", f"no install in {dest}: {facts}"
+    assert facts.install_path == "installed", f"install.path {facts.install_path!r} in {dest}"
+    assert (target / "notes.txt").exists() and not (target / "Agentmaster.exe").exists(), \
+        f"the install went into the picked folder itself, beside the user's files: {sorted(p.name for p in target.iterdir())}"
+    e = install.MachineState.read().user_entry
+    assert e is not None and _norm(e.get("InstallLocation", "")) == _norm(dest), f"not registered in {dest}: {e}"
+
+
+@pytest.mark.p2
+@pytest.mark.flow("INS-02")
+@pytest.mark.install("IS-57")
+def test_the_old_scripts_copy_is_updated(lane, kit, machine):
+    """The copy the OLD install script made (v0.7.10's Install-Agentmaster.ps1: %LOCALAPPDATA%\\Programs\\Agentmaster,
+    a Start-menu entry "Agentmaster (Portable)", nothing registered), then a newer copy: its question offers to update
+    THAT copy, which becomes a registered install in its own folder, the old entry replaced by the usual one.
+
+    Promise (PROFILES.md §2b, the A1 pass of the 2026-10-21 night): a user of the old script never gets a second copy
+    beside the first; the update keeps their folder and gives it what an install has.
+
+    Args:
+        lane: The install lane's facts (the older release, v0.7.10 as published).
+        kit: Stamped copies of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: Naming the option, folder or registration that is wrong.
+    """
+    legacy = install.legacy_script_dir()
+    old_entry = install.known_folder("programs") / "Agentmaster (Portable).lnk"
+    # What the old script left, made by hand: the A1 pass ran that script itself, and it needs GitHub's API, which the
+    # lane blocks. Its folder holds the release as extracted (never started: no install.path) and its Start-menu entry.
+    shutil.copytree(lane.old, legacy, ignore=shutil.ignore_patterns(".e2e-source"))
+    run = install.make_shortcut(old_entry, legacy / "Agentmaster.exe")
+    assert run.code == 0 and old_entry.exists(), str(run)
+    old_version = install.InstallFacts.read(legacy).version
+    assert old_version, f"the older release in {legacy} carries no .am-version"
+
+    exe = kit.copy("0.8.1.0", "agentmaster-0.8.1.0-newer")
+    question, started = _start_copy(exe)
+    first = question.buttons()[0]
+    assert re.fullmatch(rf"Update the installed Agentmaster \(v{_v(old_version)} {ARROW} v{_v('0.8.1.0')}\) \(recommended\)",
+                        first.label), f"first option {first.label!r}; all: {question.labels()}"
+    # The note is the command link's second line, "<folder>  —  the copy the install script made; …" (UI Automation's
+    # HelpText: Button.note).
+    assert re.match(re.escape(str(legacy)) + r"\s+—\s+the copy the install script made", first.note, re.IGNORECASE), \
+        f"the first option's note does not name the old script's copy: {first.note!r}"
+    question.press(r"^Update the installed Agentmaster")
+    install.wait_app(legacy, timeout_s=180, newer_than=started)
+    _gone(exe.parent)
+    facts = install.InstallFacts.read(legacy)
+    assert facts.version == "0.8.1.0", f"the old script's copy was not updated: {facts.version}"
+    assert facts.install_path == "installed", f"install.path {facts.install_path!r} in {legacy}"
+    state = install.MachineState.read()
+    e = state.user_entry
+    assert e is not None and _norm(e.get("InstallLocation", "")) == _norm(legacy), f"not registered in {legacy}: {e}"
+    assert state.user is None, f"a second copy went to {install.user_install_dir()}"
+    assert not old_entry.exists(), "the old script's 'Agentmaster (Portable)' entry is left"
+    assert any(_norm(link.target) == _norm(legacy / "Agentmaster.exe") for link in state.shortcuts_in("programs")), \
+        f"no Start-menu entry of the updated copy: {[(s.path, s.target) for s in state.shortcuts_in('programs')]}"

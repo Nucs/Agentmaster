@@ -723,7 +723,7 @@ the stopped overlay would still cost the cold boot a reset costs, and only save 
 **The guards that keep the scenarios in their lane** (`e2e/suites/install/conftest.py`):
 
 1. *Deselected elsewhere.* `provision.ps1 -Lane Install` writes `C:\e2e\install-lane.json`; without it the install tests
-   are not even collected ("23 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
+   are not even collected ("30 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
    file, so a desktop the lane prepared and nobody reset does not run them in the next ordinary run either.
 2. *Planned.* A test missing from the catalog fails the collection: the host plans its resets from the catalog.
 3. *Checked clean.* The `machine` fixture reads the machine first (`amdriver.install.MachineState`: the per-user and
@@ -763,9 +763,28 @@ reset: PowerShell 7 12.0 s, the venv 21.3 s, the kit 1.5 s; 58 s in the guest). 
 run as a file in Windows PowerShell 5.1 or PowerShell 7 with no console input (a question takes its default and says so),
 the machine state, a start the way a double-click makes it (`explorer.exe <exe>`: Explorer's token and environment), the
 task dialogs Agentmaster shows before its first window (the install question, the profile picker, the uninstall
-confirmation: `#32770` windows titled "Agentmaster", their command links buttons named by their first line), the wait for
+confirmation: `#32770` windows titled "Agentmaster", their command links buttons named by their label alone, each link's
+note in UI Automation's HelpText — `Button.note`, never a text element), the wait for
 an Agentmaster to run from a folder with its window up, and the end of every Agentmaster (the GUI first; the ConPTY
-hosts left to drain).
+hosts left to drain). Typing like a user, focus-free (the rows IS-05–IS-09, IS-13 and IS-25): `start_in_console` opens
+a PowerShell window (a new console; the desktops' default terminal makes it a Windows Terminal tab), and `console_type` /
+`console_text` attach a helper process to a program's console — that window's, or the shell's of an Agentmaster tab —
+and write key presses (`WriteConsoleInputW`: Read-Host and PSReadLine read them like the keyboard) or read its screen.
+⚠ A fresh PowerShell tab runs no script FILE: Windows 11's default execution policy is Restricted ("running scripts is
+disabled on this system", seen 2026-10-24; the agent's own processes run under Process Bypass, which an app started the
+way Explorer starts it does not inherit), so a test types what a user must type — `powershell -ExecutionPolicy Bypass
+-File …` — or the README's script block, which no policy stops.
+⚠ The installer's lines are longer than a 120-column console (its "Agentmaster is running from …" line is ~190
+characters, a record's path ~100) and wrap: `console_text` joins a row filled to the edge with the next one, and a test
+matches on the screen with its whitespace collapsed, because a wrap that falls on a space looks like a line end
+(checked on this PC with a hidden console: a 249-character path and the 190-character line read whole). A Ctrl+C at a
+chosen point (IS-13, half way through an upgrade's copy): `console_ctrl_c_when(pid, folder, prefix)` attaches the helper
+to the console, looks at the folder every 5 ms and sends `GenerateConsoleCtrlEvent` the moment an entry with that name
+appears; a Ctrl+C written as a key record is only input. Its target starts through `start_in_console_handling_ctrl_c`:
+Windows hands a process's "ignore Ctrl+C" flag on to its children, so the helper clears it for itself before it starts
+the window (checked on this PC, hidden: the signal stopped a sleeping PowerShell in 0.4 s and its `finally` ran). A
+console just opened in a new window cannot be attached to until Windows has handed it to the default terminal (the
+first try failed so): the Ctrl+C verb tries for 15 s, and the test arms it once the installer's first step shows.
 
 **Other accounts (`std`, `adm2`, prepared).** `provision.ps1 -Lane Install -Accounts` (the host adds it when a
 scenario's Machine names `std` or `adm2`) makes the standard local user `qastd` and the administrator `qaadmin`, their

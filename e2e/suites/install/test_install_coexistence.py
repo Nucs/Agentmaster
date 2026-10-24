@@ -21,7 +21,9 @@ import pytest
 
 from amdriver import install, uia, win32
 from amdriver.app import MAIN_CLASS
+from amdriver.ui.manager import ManagerPage
 from amdriver.ui.taskdialog import TaskDialog
+from amdriver.ui.window import MainWindow
 from amdriver.waits import hold_true, wait_until
 
 pytestmark = [pytest.mark.install]
@@ -291,7 +293,7 @@ def test_uninstall_from_apps_and_features(lane, kit, machine):
     proc = install.start_direct(exe, "--uninstall-portable")
     confirm = TaskDialog.wait(install.UNINSTALL_CONFIRM, exe_dirs=[dest], timeout_s=60)
     text = confirm.text()
-    assert f"This removes Agentmaster from" in text and str(dest) in text, text
+    assert "This removes Agentmaster from" in text and str(dest) in text, text
     assert str(install.default_profile()) in text, f"the confirmation does not say the data stays in the profile\n{text}"
     confirm.press(r"^Cancel$")
     proc.wait(timeout=30)
@@ -317,6 +319,101 @@ def test_uninstall_from_apps_and_features(lane, kit, machine):
     TaskDialog.wait(install.NOTHING_TO_UNINSTALL, exe_dirs=[plain.parent], timeout_s=60).press(r"^OK$")
     proc.wait(timeout=30)
     assert sorted(p.name for p in plain.parent.iterdir()) == names, "the flag changed a copy that is no install"
+
+
+class _AppStub:
+    """The little of the Standard lane's amdriver.app.App that the window page objects read (MainWindow,
+    ManagerPage): the process, its main windows, and the time of the last Home click (Home ignores a second click
+    inside the double-click time). The install lane's app runs on the Default profile, not on a test profile.
+
+    Attributes:
+        pid: The Agentmaster process.
+    """
+
+    def __init__(self, pid: int) -> None:
+        """Bind to a process.
+
+        Args:
+            pid: The Agentmaster process.
+        Returns:
+            None.
+        """
+        self.pid = pid
+        self._last_home_click = 0.0
+
+    def main_hwnds(self) -> list[int]:
+        """The process's visible main windows.
+
+        Returns:
+            Their handles.
+        """
+        return _main_windows(self.pid)
+
+
+@pytest.mark.p2
+@pytest.mark.flow("INS-07")
+@pytest.mark.install("IS-90")
+def test_uninstall_from_the_cog(lane, kit, machine):
+    """⚙ → About → "Uninstall Agentmaster…" on a per-user install: the confirmation names what goes and what stays,
+    the app closes, and everything but the data is removed.
+
+    Promise (INS-07, the real app's pass of the 2026-10-21 evening): the app can remove itself from inside, without a
+    console or Apps & Features, and never takes the user's data with it.
+
+    Args:
+        lane: The install lane's facts (the staged installer).
+        kit: Stamped zips of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout / LookupError: Naming the control, text or leftover that is wrong.
+    """
+    dest = install.user_install_dir()
+    _install(lane, kit, "User", "0.8.1.0")
+    started = time.time()
+    install.start_like_explorer(dest / "Agentmaster.exe")
+    app = install.wait_app(dest, timeout_s=120, newer_than=started)
+    stub = _AppStub(app.pid)
+    window = MainWindow(stub, wait_until(stub.main_hwnds, 30, what="the app's main window")[0])
+    page = ManagerPage(window).open()
+    # 0.8.0's cog is the nameless button right before "Sessions" in the page's toolbar (a later build names it
+    # "Settings": E2E_TESTING.md §6.3).
+    controls = page.controls()
+    at = next((i for i, el in enumerate(controls) if el.role == "button" and el.name == "Sessions"), None)
+    assert at is not None, f"no Sessions button on the page: {[el.name for el in controls if el.name][:30]}"
+    cog = controls[at - 1]
+    assert cog.role == "button" and cog.name in ("", "Settings"), f"before Sessions comes {cog.role} {cog.name!r}"
+    cog.invoke()
+    root = window.element()
+    root.wait_find(30, 40, role="button", name="About").invoke()
+    root.wait_find(20, 40, role="button", name="Uninstall Agentmaster…").invoke()
+    confirm = root.wait_find(20, 40, role="button", name="Uninstall")
+    said = " ".join(window.element().texts(40))
+    for part in ("Uninstall Agentmaster?", "This removes the installed Agentmaster files", "Apps & Features entry",
+                 "the PATH entry", "is kept"):
+        assert part in said, f"the confirmation does not say {part!r}: {said[-1200:]}"
+    profile = install.default_profile()
+    # A real click, as a user's: "Uninstall" ends the app (it launches the uninstaller, then quits), and a UI
+    # Automation Invoke waits for the app's answer — it ended in "Catastrophic failure" (0x8000FFFF) on 2026-10-24
+    # although the uninstaller had started. A click does not wait on the app.
+    window.focus()
+    confirm.click()
+    wait_until(lambda: not install.app_processes(dest), 60, what="the app to close for its uninstall")
+
+    def removed() -> bool:
+        """Whether the uninstaller (detached, after the app closed) is done with every registration and file.
+
+        Returns:
+            True when nothing of the install is left.
+        """
+        s = install.MachineState.read()
+        return s.user is None and s.user_entry is None and s.user_verbs == {} and s.user_path == [] \
+            and not [link for link in s.shortcuts if _norm(dest) in _norm(link.target)]
+
+    wait_until(removed, 180, interval_s=1.0, what="the uninstall to finish",
+               describe=lambda: install.MachineState.read().baseline_problems())
+    assert (profile / "hooks.log").exists(), f"the uninstall removed the data in {profile}"
 
 
 @pytest.mark.p1
