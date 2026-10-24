@@ -8,9 +8,9 @@
 > context menu (TCM, [`flows/23-tab-context-menu.md`](flows/23-tab-context-menu.md)) and the tab life cycle (TAB-01–04:
 > park, wake, Deactivate's scopes, Close of a folder across windows, closing onto dormant tabs) — run against the
 > published 0.8.0 portable build and Claude Code 2.1.291 in a claude-fleet Windows 11 desktop: 49 tests,
-> 49 green in 37 min. On its first day the suite found twelve defects of 0.8.0 — MGR-K1, SP-K1, SP-K2,
-> TCM-K1, TCM-K2, TAB-K1, TAB-K3, TAB-K4, TAB-K5, A11Y-K1, A11Y-K2, ROB-K1 (and TAB-K2, which the user ruled a FEATURE
-> the same day, flows/07) — kept as known-defect tests where they reproduce, and replaced by a `needs_fix` test that
+> 49 green in 37 min. On its first day the suite found eleven defects of 0.8.0 — MGR-K1, SP-K1,
+> TCM-K1, TCM-K2, TAB-K1, TAB-K3, TAB-K4, TAB-K5, A11Y-K1, A11Y-K2, ROB-K1 (and two behaviors the user then ruled
+> FEATURES: TAB-K2 the same day, flows/07, and SP-K2 on 2026-10-24, flows/02) — kept as known-defect tests where they reproduce, and replaced by a `needs_fix` test that
 > proves the fix once a defect is fixed in code (seven of them were, that day). How to run it and how to write a
 > scenario:
 > [`e2e/README.md`](../../e2e/README.md). §6 (the app's testability changes: E2E mode, the read-only bridge,
@@ -37,7 +37,7 @@
 > `src/` equals HEAD 1f4c68678, zipped and run only in a claude-fleet desktop — passed all 67 (runs `fixall-0811`, 63 of
 > 65 with two test versions since corrected, and `fixall-0811b`, 5 of 5 with the dialog probe). On 0.8.0 every
 > `needs_fix` test fails on its defect (runs `nf-080`, `nf-080b`), and the known-defect tests of the open defects
-> (SP-K2, TCM-K1, ROB-K1, TAB-K5, A11Y-K2) pass on both builds. [`flows/README.md`](flows/README.md), *Checked both ways*.
+> (TCM-K1, ROB-K1, TAB-K5, A11Y-K2; SP-K2's too, a feature since 2026-10-24) pass on both builds. [`flows/README.md`](flows/README.md), *Checked both ways*.
 >
 > **Session state through Claude Code's own events (2026-10-23):** `e2e/suites/test_session_state.py` (29 tests,
 > flows/05 STA-01–STA-16) watches a session's side-panel state word every 150 ms (`e2e/amdriver/timeline.py`) through

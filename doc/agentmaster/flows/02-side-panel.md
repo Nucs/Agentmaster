@@ -5,7 +5,8 @@
 **What shipped.** 0.7.9: a panel that belongs to the window, docked LEFT of the terminal (⇄ flips it): the
 session cards (state dot, folder color band, draft dots, timing, tag ribbons, filter box, the board's sort,
 per-window LOCAL / GLOBAL) over the summary of the session you are in; card click = peek; ⌖ scrolls to the
-selected tab's card; **Sum** hides the summary and shows a rich card beside the panel on hover; **+** opens the
+selected tab's card; **Sum** hides the summary so the cards fill the panel (a card's hover then shows no rich card —
+a feature, SP-K2); **+** opens the
 launch row in a card at the click; per-window splitters; « collapses. 0.8.0: the card list is virtualized and
 a card costs no composition node; the **+** card opens with its folder list ready; one click on Launch
 while its preset menu is open. After 0.8.0 (NOT BUILT): each card's dot is the tab strip's status icon — the
@@ -118,23 +119,23 @@ click back into the terminal; double-click jumps to a card's tab.
 
 ---
 
-### SP-04 · Sum off: cards fill the panel, a rich card on hover
+### SP-04 · Sum off: cards fill the panel, and a card's hover opens no rich card
 
 > **Since** 0.7.9 · **P1** · **Needs** F-S2 · **Spec** SIDE_PANEL.md §2d
 
 **Phases**
 1. **Sum off.** *Do:* click **Sum**. *Expect:* the summary area and its splitter disappear; the cards fill
    the panel.
-2. **Hover.** *Do:* rest the pointer on a card. *Expect:* the session's rich card (the tab header's hover
-   card) opens BESIDE the panel (right of it when docked left), vertically centered on the card; its summary
-   wheel-scrolls. Not observed in the test desktop on 0.8.0 (SP-K2).
-3. **Leave.** *Expect:* the card closes; it never covers the panel's own controls.
+2. **Hover.** *Do:* rest the pointer on a card. *Expect:* NO rich card opens (a feature, the user's ruling of
+   2026-10-24: SP-K2, *Reclassified* below); the same hover on the session's TAB still opens the tab's rich card.
+   (Until the ruling this phase expected the rich card beside the panel, SIDE_PANEL.md §2d; the test desktop never
+   showed it, on 0.8.0 or 0.8.1.1.)
+3. **Leave.** *Expect:* nothing to close; the card and the panel's own controls stay as they were.
 4. **Persist.** *Expect:* per window; the last change seeds new windows.
 
 **Edge cases**
-- **E1 Docked right** → the rich card opens left of the panel.
-- **E2 Tag ribbons** on a card are a tooltip-free zone: hovering them opens the tag hover panel, not the
-  rich card.
+- **E2 Tag ribbons** on a card are a tooltip-free zone: hovering them opens the tag hover panel. (E1, "docked right:
+  the rich card opens left of the panel", went with phase 2's ruling.)
 
 ---
 
@@ -283,13 +284,19 @@ automation's zero-length click) is lost on the page's Launch too, because the fi
 (`GetAsyncKeyState`) when the menu closes and finds it already released. A fast tap on a busy UI thread could meet
 the same race.
 
-### SP-K2 · With Sum off, a card's hover opens no rich card
-> **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (`e2e/suites/test_side_panel.py`
-> `test_known_defect_sum_off_card_hover_opens_no_rich_card`)
+## Reclassified: not defects
+
+### SP-K2 · With Sum off, a card's hover opens no rich card — a FEATURE, not a defect
+> Filed by the e2e suite on 2026-10-23 against 0.8.0 as a known defect (P1), and **reclassified by the user on
+> 2026-10-24: "Mark this as a feature and not a problem."** SP-04 phase 2 expects it;
+> `e2e/suites/test_side_panel.py::test_sum_off_card_hover_opens_no_rich_card` proves it (it replaced the known-defect
+> test `test_known_defect_sum_off_card_hover_opens_no_rich_card`, which passed on 0.8.0 — run g1full — and on the test
+> build 0.8.1.1 — run fixall-0811).
 
 **Sum** off (hooks.log: `[nav] sidepanel summary -> hidden (cards show the rich session tooltip)`), then the pointer
-glides onto a card and rests: no tooltip opens in 9 s (every popup window of the app polled every 0.3 s). The same
-glide onto the session's TAB opens its rich card at once (the test's control half), so the input reaches XAML's
-tooltip service. **Not yet known:** whether the card's `AgentSessionToolTipHost` is never attached in the virtualized
-list (`_SidePanelArmCardToolTip` runs from `_SidePanelApplyCardTipMode`), or attached and then closed by the card's
-suppressed floating tip. **Expected:** the rich card beside the panel (SP-04 phase 2).
+glides onto a card and rests: no tooltip opens (in the first measurement, 9 s with every popup window of the app polled
+every 0.3 s). The same glide onto the session's TAB opens its rich card at once (the test's control half), so the input
+reaches XAML's tooltip service. What the documents and the code still say: SIDE_PANEL.md §2d describes the rich card
+beside the panel, the code keeps its hover host for such cards (`_SidePanelArmCardToolTip`, run from
+`_SidePanelApplyCardTipMode`), and the log line above still names it. Why that card never opens was not looked into: it
+is not wanted. Whether to remove the unused host and reword the line is the owner's call.

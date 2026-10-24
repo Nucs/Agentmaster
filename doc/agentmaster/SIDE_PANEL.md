@@ -378,6 +378,13 @@ body, and **hovering a card opens that session's RICH card beside the panel** �
 header shows when you hover it: same content, same lifecycle, same wheel scrolling. It opens to the
 RIGHT of a left-docked panel and to the LEFT of a right-docked one.
 
+> **⚠ As it runs (2026-10-24): NO rich card opens over a card, and that is now the intended behavior.** The e2e suite
+> never saw one, on 0.8.0 or on the test build 0.8.1.1 (the same hover on the session's TAB opens the tab's rich card at
+> once), and filed it as SP-K2; the user ruled it a FEATURE on 2026-10-24 ("Mark this as a feature and not a
+> problem"). The design below is kept as the record of what was built: the hover host is still attached to every card
+> and the log line still names the rich tooltip. Why it never opens was not looked into. Removing the unused host (and
+> rewording the line) is the owner's call. [`flows/02-side-panel.md`](flows/02-side-panel.md) SP-04 and *Reclassified*.
+
 - **The click** (`_SidePanelToggleSummary`): flips `_sidePanelSummaryHidden`, logs
   `[nav] sidepanel summary -> hidden (cards show the rich session tooltip)` / `-> shown`, re-pins the
   button (`_SidePanelUpdateSumButton` — the member is the truth, not the button's own flip), applies

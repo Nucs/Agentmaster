@@ -27,7 +27,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 36 | 26 | 2 (1 fixed in code) |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 36 | 25 | 1 (fixed in code; SP-K2 reclassified as a feature) |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 50 | 4 |
@@ -49,7 +49,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 676** | **≈ 564** | **28** (7 fixed in code) |
+| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 676** | **≈ 563** | **27** (7 fixed in code) |
 
 ---
 
@@ -237,7 +237,6 @@ the Explorer tree, templates, adopting a hand-typed claude. They belong to the s
 | SP-K1 | The + card's Launch needs a second click while its presets menu is open (the page's own Launch takes one) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; SP-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TCM-K1 | A blank tab rename leaves the tab showing Claude Code's own terminal title (the session keeps its title) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
 | TCM-K2 | Tags from the tab menu leaves the keyboard in the terminal (typed text and Esc reach claude) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`; TCM-05 phase 5; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_tab_menu.py`) |
-| SP-K2 | With Sum off, hovering a side-panel card opens no rich card (the tab's hover does) | e2e suite, 2026-10-23 (`e2e/suites/test_side_panel.py`) |
 | TAB-K1 | A window close can save its Claude tabs as plain shell tabs (an autosave still pending at the close fired after the teardown archive) — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (run `fixall-0811`: 9 of 9; TAB-10 E2, E3; not in a release) | e2e suite, 2026-10-23 (seen once, then reproduced on 0.8.0: 3 of 9 closes in the first sweep, 6 of 9 in run `nf-080`; `e2e/suites/test_workspace.py`) |
 | TAB-K3 | The quit confirmation ("Do you want to close all windows?") is invisible to UI Automation — **fixed in code 2026-10-23**, verified on the test build 0.8.1.1 (runs `fixall-0811`, `fixall-0811b`; every page dialog is built in code: a declared one was shown nested in the page, not as a window-level popup, so the driver — and a screen reader looking for the window's dialog — did not find it; TAB-10 phase 3; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
 | A11Y-K1 | Agentmaster's own surfaces say little to UI Automation: the cog, the compose icons, ⋯ and every board card and tree row have no name, nothing has a stable id, and a card's selection, a tab's selection pill, an unread ring or an unsent draft are pixels only (a screen reader cannot tell them; the suite read them from side effects) — **fixed in code 2026-10-23** (AgentAutomation.h: names, `am.*` AutomationIds, item status — [`../E2E_TESTING.md`](../E2E_TESTING.md) §6.3 "As built"; verified on the test build 0.8.1.1, run `fixall-0811`; not in a release) | e2e suite, 2026-10-23 (`e2e/suites/test_accessibility.py`) |
@@ -255,7 +254,7 @@ TAB-K4, CLI-K2) has a `needs_fix` test that asserts the CORRECT behavior, and ea
 every one fails on its defect (runs `nf-080`, `nf-080b`; TAB-K1's sweep on 6 of its 9 moments — the defect is a race,
 which is why it is a sweep). On the test build 0.8.1.1 — a purged Release build whose `src/` equals HEAD 1f4c68678,
 zipped and run only in a claude-fleet desktop, never installed on this PC — every one passes (runs `fixall-0811`,
-`fixall-0811b`). The open defects the suite found (SP-K2, TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
+`fixall-0811b`). The open defects the suite found (TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
 asserts TODAY's wrong behavior; each passes on both builds, so none of the fixes touched them. The defects found by
 reading or measuring (PQR-K1–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet.
 
@@ -263,7 +262,10 @@ reading or measuring (PQR-K1–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1
 first" as filed, measured with one Claude tab) — is a FEATURE, not a defect (the user's decision of 2026-10-23, the
 day the suite filed it): TAB-10 E1 expects it, and
 `e2e/suites/test_tab_menu.py::test_a_shell_focused_reopen_starts_the_last_claude_tab` proves it
-([07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) *Reclassified: not defects*).
+([07-tabs-park-close-dock.md](07-tabs-park-close-dock.md) *Reclassified: not defects*). SP-K2 — with Sum off, a
+side-panel card's hover opens no rich card (the tab's hover does) — is a FEATURE too (the user's ruling of
+2026-10-24): SP-04 phase 2 expects it, and `e2e/suites/test_side_panel.py::test_sum_off_card_hover_opens_no_rich_card`
+proves it ([02-side-panel.md](02-side-panel.md) *Reclassified: not defects*).
 
 ## Where the documents disagree with the code (found while writing)
 
@@ -318,7 +320,7 @@ the smoke test, 30 of 30 pass on the published 0.8.0 in 20.5 min (run `sta-final
 | MGR-07 | phases 1–6 (`needs_fix`: a build with MGR-K1's fix) | `…::test_a_launch_from_the_page_stays_on_the_page`, `…::test_a_plus_card_launch_follows_where_the_user_looks` |
 | SP-01 | phases 1, 3, 4 | `test_side_panel.py::test_panel_lists_this_windows_sessions` |
 | SP-02 | phases 1–5 | `…::test_follow_peek_and_jump`, `…::test_card_context_menu` |
-| SP-04 | phase 1; SP-K2 | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_known_defect_sum_off_card_hover_opens_no_rich_card` |
+| SP-04 | phases 1–2 (phase 2: no rich card on a card's hover — SP-K2, a feature since 2026-10-24) | `…::test_sum_off_lets_the_cards_fill_the_panel`, `…::test_sum_off_card_hover_opens_no_rich_card` |
 | SP-05 | phases 1, 3, 4, 5, E2, E3 (phase 5: `needs_fix`, a build with SP-K1's fix) | `…::test_plus_launcher_card`, `…::test_plus_card_launch_takes_one_click_with_its_menu_open` |
 | SP-06 | phases 3–5 | `…::test_collapse_and_dock`, `…::test_panel_state_survives_a_restart` |
 | TCM-01 | phases 1–3, E1 | `test_tab_menu.py::test_menu_fits_the_tab`, `…::test_triage_item_follows_the_state` |
