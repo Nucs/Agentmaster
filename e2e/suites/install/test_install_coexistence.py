@@ -21,9 +21,8 @@ import pytest
 
 from amdriver import install, uia, win32
 from amdriver.app import MAIN_CLASS
-from amdriver.ui.manager import ManagerPage
+from amdriver.ui import installed
 from amdriver.ui.taskdialog import TaskDialog
-from amdriver.ui.window import MainWindow
 from amdriver.waits import hold_true, wait_until
 
 pytestmark = [pytest.mark.install]
@@ -321,35 +320,6 @@ def test_uninstall_from_apps_and_features(lane, kit, machine):
     assert sorted(p.name for p in plain.parent.iterdir()) == names, "the flag changed a copy that is no install"
 
 
-class _AppStub:
-    """The little of the Standard lane's amdriver.app.App that the window page objects read (MainWindow,
-    ManagerPage): the process, its main windows, and the time of the last Home click (Home ignores a second click
-    inside the double-click time). The install lane's app runs on the Default profile, not on a test profile.
-
-    Attributes:
-        pid: The Agentmaster process.
-    """
-
-    def __init__(self, pid: int) -> None:
-        """Bind to a process.
-
-        Args:
-            pid: The Agentmaster process.
-        Returns:
-            None.
-        """
-        self.pid = pid
-        self._last_home_click = 0.0
-
-    def main_hwnds(self) -> list[int]:
-        """The process's visible main windows.
-
-        Returns:
-            Their handles.
-        """
-        return _main_windows(self.pid)
-
-
 @pytest.mark.p2
 @pytest.mark.flow("INS-07")
 @pytest.mark.install("IS-90")
@@ -374,19 +344,8 @@ def test_uninstall_from_the_cog(lane, kit, machine):
     started = time.time()
     install.start_like_explorer(dest / "Agentmaster.exe")
     app = install.wait_app(dest, timeout_s=120, newer_than=started)
-    stub = _AppStub(app.pid)
-    window = MainWindow(stub, wait_until(stub.main_hwnds, 30, what="the app's main window")[0])
-    page = ManagerPage(window).open()
-    # 0.8.0's cog is the nameless button right before "Sessions" in the page's toolbar (a later build names it
-    # "Settings": E2E_TESTING.md §6.3).
-    controls = page.controls()
-    at = next((i for i, el in enumerate(controls) if el.role == "button" and el.name == "Sessions"), None)
-    assert at is not None, f"no Sessions button on the page: {[el.name for el in controls if el.name][:30]}"
-    cog = controls[at - 1]
-    assert cog.role == "button" and cog.name in ("", "Settings"), f"before Sessions comes {cog.role} {cog.name!r}"
-    cog.invoke()
-    root = window.element()
-    root.wait_find(30, 40, role="button", name="About").invoke()
+    window = installed.InstalledApp(app.pid).window()
+    root = installed.open_settings_tab(window, "About")
     root.wait_find(20, 40, role="button", name="Uninstall Agentmaster…").invoke()
     confirm = root.wait_find(20, 40, role="button", name="Uninstall")
     said = " ".join(window.element().texts(40))

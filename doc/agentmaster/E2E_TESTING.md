@@ -723,7 +723,7 @@ the stopped overlay would still cost the cold boot a reset costs, and only save 
 **The guards that keep the scenarios in their lane** (`e2e/suites/install/conftest.py`):
 
 1. *Deselected elsewhere.* `provision.ps1 -Lane Install` writes `C:\e2e\install-lane.json`; without it the install tests
-   are not even collected ("30 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
+   are not even collected ("35 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
    file, so a desktop the lane prepared and nobody reset does not run them in the next ordinary run either.
 2. *Planned.* A test missing from the catalog fails the collection: the host plans its resets from the catalog.
 3. *Checked clean.* The `machine` fixture reads the machine first (`amdriver.install.MachineState`: the per-user and
@@ -807,14 +807,29 @@ administrator may not hold the right to end a SYSTEM process; SYSTEM does), and 
 the user's. IS-28 (the installer as SYSTEM installs for the signed-in user) and IS-54 (a copy started in session 0 asks
 nothing and persists nothing) use it.
 
+**A fake GitHub (`net`, prepared).** Nothing to provision either: the `fake_github` fixture (`e2e/amdriver/fakegithub.py`)
+answers api.github.com, github.com and raw.githubusercontent.com from 127.0.0.1:443 inside the guest, so the in-app
+updater (WinHTTP to the releases API, then `am-update.ps1`'s Invoke-WebRequest of the asset, which `IsTrustedAssetUrl`
+only accepts under `https://github.com/Nucs/Agentmaster/releases/download/`) and the installer (Invoke-RestMethod,
+`irm … | iex`) meet releases the test publishes: a version newer than the build under test, a pre-release, a token GitHub
+refuses (401 "Bad credentials"), the rate limit (403 with GitHub's headers). `FakeGitHub.requests()` tells what each
+program asked and downloaded — or did not. Neither program changes: both reach GitHub only through names the guest
+resolves and certificates it trusts. The fixture makes the certificates in the guest with PowerShell 7 (.NET
+`CertificateRequest`) IN MEMORY: the CA's private key is never written anywhere, so no further certificate can be signed
+with it; only the CA's public certificate goes into LocalMachine\Root, and a marked hosts block points the names at
+127.0.0.1 (the leak guard already points api.github.com there). Afterwards it removes both — a failed undo fails the
+test — and the desktop is reset after the scenario anyway. The server reads its state file on every request, so a test
+publishes and changes rules while it runs. Checked first on this PC without changing it (the certificate script into a
+scratch folder, the server on a high port, a client trusting only the test CA). IS-11, IS-12, IS-80, IS-81 + IS-82 and
+IS-87 use it; the radio buttons of the updater's prompt are `TaskDialog.choices()` / `choose()`.
+
 **Not automated yet** — the catalog's Machine tags the lane does not prepare (`install_catalog.PREPARED` holds `std`,
-`adm2`, `old` and `sys`; the host skips a scenario that needs another, and says which):
+`adm2`, `old`, `sys` and `net`; the host skips a scenario that needs another, and says which):
 
 | Tag | What the lane would add |
 |---|---|
 | `uac` | EnableLUA on and a reboot by the host before the guest run (after it the elevated agent sees `\\host.lan\Data`, not `Z:` — run_suite.py would need that fallback); the consent and credential prompts answered through QEMU's monitor (`qm.py`) by a host-side broker that the guest asks through a request file in `Z:\e2e\out`, the folder the host already watches |
 | `deny`, `demote` | the policy values or the group change, then the same reboot |
-| `net` | the hosts line lifted for the test, and the API quota counted (60 an hour) — or a fake releases API: the updater's host is `api.github.com` over HTTPS (`Updater.h`), so it needs the hosts file plus a certificate the guest trusts, or an E2E override |
 | `pkg` | `mkmsix.ps1` on the host (a build's `.msix` re-signed with a throwaway certificate) and that certificate trusted by the provisioning |
 | `sign-in` | a scenario in two guest runs with a host reboot between them |
 | `human` | — (the taskbar's jump list, SmartScreen) |

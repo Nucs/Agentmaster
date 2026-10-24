@@ -93,7 +93,7 @@ python e2e/host/install_lane.py --plan                                          
 
 - **Never by e2e_run.py.** Outside the lane the install tests are deselected (no `C:\e2e\install-lane.json`, which only
   `provision.ps1 -Lane Install` writes and every Standard provisioning removes): a full run on a shared desktop shows
-  "30 deselected".
+  "35 deselected".
 - **Each scenario is ONE test**, listed in `suites/install/install_catalog.py` with its catalog ids, its flow and the
   machine it needs; the host plans its resets from that file, and a test missing from it fails the collection. Write a
   scenario as a life cycle (install → again → upgrade → uninstall) when its steps build on one another: each test costs
@@ -108,12 +108,15 @@ python e2e/host/install_lane.py --plan                                          
   `MachineState.read()` (every install, entry, verb, PATH entry, icon, Active Setup, profile and process),
   `start_like_explorer(exe)` (a double-click), `start_direct(exe, *args, env=…)`, `wait_question(copy_dir)` → a
   `TaskDialog` (`labels()`, `buttons()[i].note` — a command link's note, UI Automation's HelpText —, `text()`,
-  `press(r"^Install just for you")`), `wait_app(folder, newer_than=t)`,
-  `end_agentmaster()`, `install_log_lines()`; typing like a user: `start_in_console(*argv)` (a new PowerShell window),
-  `console_type(pid, "text\r")` and `console_text(pid)` (keys into, and the screen of, a program's console — a window's,
-  or the shell's of an Agentmaster tab; focus untouched; a long line wraps, so match on `" ".join(text.split())`),
-  `console_ctrl_c_when(pid, folder, prefix)` (a Ctrl+C the moment such an entry appears; start the window with
-  `start_in_console_handling_ctrl_c`), `Kit.zip(version, extra={name: size})` (a zero-filled file in the layout).
+  `press(r"^Install just for you")`, `choices()` / `choose(r"^Remind me in 3 days")` for radio buttons),
+  `wait_app(folder, newer_than=t)`, `end_agentmaster()`, `install_log_lines()`, `profile_log_lines("[update]")`; typing
+  like a user: `start_in_console(*argv)` (a new PowerShell window), `console_type(pid, "text\r")` and
+  `console_text(pid)` (keys into, and the screen of, a program's console — a window's, or the shell's of an Agentmaster
+  tab; focus untouched), `wait_console_text(pid, regex, timeout_s)` (matched with the whitespace collapsed: a long line
+  wraps), `console_ctrl_c_when(pid, folder, prefix)` (a Ctrl+C the moment such an entry appears; start the window with
+  `start_in_console_handling_ctrl_c`), `Kit.zip(version, extra={name: size})` (a zero-filled file in the layout); inside
+  an installed copy's window, `ui/installed.py` (`InstalledApp(pid).window()`, `open_settings_tab(window, "About")`)
+  gives the Standard lane's page objects the app they expect.
 - **The oracle is the machine** — files, registry, shortcuts, processes — and the scripts' own words, never the app's
   view of itself. The test desktops run with UAC off: every start is elevated, so the question shows its "running with
   administrator rights" note.
@@ -122,8 +125,11 @@ python e2e/host/install_lane.py --plan                                          
   `start_as`, `run_installer_as`, and `account_state(account)` for what that account sees); `old` makes it provision
   `-Old` (v0.7.10 as published: `kit.old_zip(manifest=True | False)`); `sys` needs nothing provisioned
   (`install.run_as_system(exe, *args, wait=…)` runs a program as SYSTEM in session 0 through a one-shot scheduled task,
-  `stop_as_system(pid)` ends it). A tag the lane cannot prepare yet (`uac`, `deny`, `demote`, `net`, `pkg`, `sign-in`)
-  makes the host skip the scenario and say so.
+  `stop_as_system(pid)` ends it); `net` needs nothing provisioned either: the `fake_github` fixture
+  (`amdriver/fakegithub.py`) serves api.github.com, github.com and raw.githubusercontent.com from 127.0.0.1:443 in the
+  guest (`publish(tag, {name: zip}, prerelease=…)`, `serve_raw(path, file)`, `refuse_tokens(...)`, `rate_limited()`,
+  `requests()`), its certificates made in memory there and its CA trusted for the test only. A tag the lane cannot
+  prepare yet (`uac`, `deny`, `demote`, `pkg`, `sign-in`) makes the host skip the scenario and say so.
 
 ## Writing a scenario
 

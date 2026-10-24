@@ -281,6 +281,52 @@ class TaskDialog:
         """
         return [b.label for b in self.buttons()]
 
+    def _radios(self) -> list[uia.Element]:
+        """The dialog's radio buttons (TASKDIALOGCONFIG pRadioButtons), in order.
+
+        Returns:
+            Their elements (empty when the dialog has none, or closed under the read).
+        """
+        try:
+            return [el for el in self.element().find_all(12, role="radio button") if el.name]
+        except comtypes.COMError:
+            return []
+
+    def choices(self) -> list[str]:
+        """The labels of the dialog's radio buttons (the updater's prompt: "Remind me next restart" … "Skip this version").
+
+        Returns:
+            The labels, in order.
+        """
+        return [el.name for el in self._radios()]
+
+    def chosen(self) -> str:
+        """The radio button selected now.
+
+        Returns:
+            Its label, or "" when none is.
+        """
+        return next((el.name for el in self._radios() if el.selected), "")
+
+    def choose(self, label_re: str) -> str:
+        """Select the first radio button whose label matches, the way a click on it does (UI Automation's
+        SelectionItem pattern), and check that it took.
+
+        Args:
+            label_re: A regex searched in the label.
+        Returns:
+            The selected label.
+        Raises:
+            LookupError: When no radio button matches (the message lists them), or the selection did not take.
+        """
+        for el in self._radios():
+            if re.search(label_re, el.name):
+                el.select()
+                if self.chosen() != el.name:
+                    raise LookupError(f"selecting {el.name!r} did not take: {self.chosen()!r} is selected")
+                return el.name
+        raise LookupError(f"no radio button matches {label_re!r}: {self.choices()}")
+
     def button(self, label_re: str) -> Optional[Button]:
         """The first button whose label matches.
 

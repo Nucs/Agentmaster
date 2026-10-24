@@ -32,6 +32,16 @@ SCENARIOS = [
      "ids": ["IS-25"], "flow": "INS-03", "machine": [], "minutes": 3},
     {"test": "test_install_typed.py::test_ctrl_c_half_way_through_an_upgrade",
      "ids": ["IS-13"], "flow": "INS-01", "machine": [], "minutes": 2},
+    {"test": "test_install_update.py::test_a_refused_token_is_dropped",
+     "ids": ["IS-11"], "flow": "INS-01", "machine": ["net"], "minutes": 2},
+    {"test": "test_install_update.py::test_irm_iex_with_a_current_install",
+     "ids": ["IS-12"], "flow": "INS-01", "machine": ["net"], "minutes": 2},
+    {"test": "test_install_update.py::test_the_startup_prompt_and_its_choices",
+     "ids": ["IS-81", "IS-82"], "flow": "INS-06", "machine": ["net"], "minutes": 6},
+    {"test": "test_install_update.py::test_update_now_from_the_cog",
+     "ids": ["IS-80"], "flow": "INS-06", "machine": ["net"], "minutes": 3},
+    {"test": "test_install_update.py::test_a_failed_update_starts_the_old_version_again",
+     "ids": ["IS-87"], "flow": "INS-06", "machine": ["net"], "minutes": 3},
     {"test": "test_install_first_launch.py::test_install_just_for_you",
      "ids": ["IS-40", "IS-41", "IS-42", "IS-99", "IS-88"], "flow": "INS-02", "machine": [], "minutes": 2},
     {"test": "test_install_first_launch.py::test_ask_me_later_then_keep_it_portable",
@@ -79,7 +89,7 @@ SCENARIOS = [
 ]
 """Every automated install scenario, in the order the lane runs them."""
 
-PREPARED = frozenset({"std", "adm2", "old", "sys"})
+PREPARED = frozenset({"std", "adm2", "old", "sys", "net"})
 """The Machine tags the lane can prepare today (besides "fresh"): "std" and "adm2" (provision.ps1 -Accounts makes the
 standard account qastd and the administrator qaadmin), "old" (provision.ps1 -Old extracts v0.7.10 as published) and
 "sys" (nothing to provision: amdriver.install.run_as_system makes a one-shot scheduled task as SYSTEM). UAC, the policy,
