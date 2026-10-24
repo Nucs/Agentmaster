@@ -49,7 +49,7 @@ command does; the deeper behavior of Deactivate, Close and the strip lives in [0
 | New Session Here ▸ | ✓ (plain for Codex) | ✓ | Default · Specify… · the launch models · (presets) · Add presets… |
 | Restart session | ✓ | ✓ | |
 | Fork session ▸ | ✓ (plain for Codex) | plain = Windows Terminal's duplicate tab | Default · Specify… · the launch models · (presets) · Add presets… |
-| Deactivate ▸ | ✓, never for an ADOPTED session | — | Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs |
+| Deactivate ▸ | ✓, never for an ADOPTED session | — | Deactivate Tab (disabled when dormant) · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · Deactivate All Idle Tabs (2026-10-24, NOT BUILT: the window's Idle sessions; disabled while none would park — flows/07 TAB-02 phase 7) |
 | Close ▸ | ✓ | ✓ | Close tabs to the left · Close tabs to the right · Close other tabs · Of Same Folder · Other of Same Folder (session) · Close all tabs · ★ Favorite & close all tabs (when the window holds a managed session) · Close pane (only when the tab is split) |
 | Close tab | ✓ | ✓ | |
 
@@ -108,6 +108,9 @@ Deactivate); a parked tab offers Activate; every item reflects the tab NOW, not 
 **Edge cases**
 - **E1 An enabled scope that reaches only shells** (Deactivate ▸ Tabs to the Right over shell tabs) parks nothing:
   `[nav] deactivate-done … parked=0` — enabled by position, not by content (documented, not a defect).
+- **E2 Deactivate All Idle Tabs is the one item gated by CONTENT** (2026-10-24, NOT BUILT): enabled only while the
+  window holds a session in the Idle state that a park would accept (the page counts them at the flyout's Opening),
+  whatever the tab's position.
 
 ---
 

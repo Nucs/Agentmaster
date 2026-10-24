@@ -2110,8 +2110,22 @@ namespace winrt::TerminalApp::implementation
         // out, and its one-shot first-layout init starts the resume — the same wake every restored tab
         // gets; "Activate Tab" / "Activate All Tabs (N)" initialize it in place (InitializeWithSize).
         // All UI thread.
-        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: one of Tab's kDeactivateScope* codes — this tab · other tabs · all tabs · tabs to the left · tabs to the right (all five: this window) · of same folder · other of same folder (both: EVERY window — the tabs this window hosts are parked here, the rest are fanned out to their hosting window, DeactivateSessionInOtherWindows). An unknown code parks nothing and is logged. When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
+        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: one of Tab's kDeactivateScope* codes — this tab · other tabs · all tabs · tabs to the left · tabs to the right (all five: this window) · of same folder · other of same folder (both: EVERY window — the tabs this window hosts are parked here, the rest are fanned out to their hosting window, DeactivateSessionInOtherWindows) · the window's Idle tabs ("Deactivate All Idle Tabs": exactly _IdleTabsToDeactivate, read at the click). An unknown code parks nothing and is logged. When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
         bool _DeactivateSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-deactivate): park the session's tab IN THIS WINDOW, the receiving half of the park-session sink. Runs the whole single-tab path (_DeactivateTabsFromMenu, this-tab scope), so THIS window's focused-tab rule applies: a session on screen here sends this window to its Agent Manager page first. Returns false when this window doesn't host the session's tab (the fan-out simply misses here). No confirmation, and a turn in progress is cut off
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs", 2026-10-24): the tabs of THIS window that the idle scope
+        // parks right now, in strip order — the ONE list behind the click (_DeactivateTabsFromMenu's idle scope) AND both
+        // menus' gray-out (the tab menu's flyout-open, the session menu's SessionTabSpot::idleTabs), so an enabled item
+        // always has something to park when the menu opens. A tab qualifies when its session is live, in the Idle state
+        // (the gray dot — SessionState::Idle; Waiting-for-you, Running, Needs-approval, Error and Done keep running, so no
+        // turn is cut off and no unread answer or question is hidden), AND _ResolveDeactivateTarget accepts it: ours (not
+        // adopted), running (not already dormant), not mid-delivery. States come from one lean registry read
+        // (HeadlinesOf), and only the idle tabs pay for the full resolve.
+        // ⚠ It reads the states NOW: the menu's gray-out and the click each call it, and a session that changed between
+        // the two is judged by its state at the click.
+        // Returns the tabs (empty when none qualifies). Throws std::bad_alloc, and what the tab-vector calls throw on a
+        // torn-down tree (winrt::hresult_error); never throws for a single tab it cannot resolve (that tab is left out).
+        // UI thread only.
+        std::vector<winrt::TerminalApp::Tab> _IdleTabsToDeactivate();
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the board card / tree row / side-panel card twins of the WT
         // tab menu's two submenus, AgentManagerContent::_MakeSessionScopeSubmenu): run ONE item of them for `sessionId`
         // exactly as that session's own tab menu would, in the window that HOSTS its tab — which need not be this one (the
@@ -2123,8 +2137,9 @@ namespace winrt::TerminalApp::implementation
         // dormant tab — archives the record in place (_ArchiveClaudeSession's dead branch), because no window would answer.
         //   sessionId — the menu's session; empty is a no-op.
         //   close     — false: "Deactivate ▸" (park; no confirm by design, a turn in flight is cut off); true: "Close ▸".
-        //   scope     — Tab::kDeactivateScope* (0..6, the tab menu's own codes) or kSessionMenuScopeFavoriteAllTabs (Close
-        //               only); an unknown code, or FavoriteAllTabs with Deactivate, does nothing but log.
+        //   scope     — Tab::kDeactivateScope* (0..7, the tab menu's own codes; 7 = the window's Idle tabs, Deactivate only)
+        //               or kSessionMenuScopeFavoriteAllTabs (Close only); an unknown code, FavoriteAllTabs with Deactivate
+        //               or the idle scope with Close does nothing but log.
         // Returns nothing: the outcome is in hooks.log ([nav] session-menu …, then the tab menu's own begin/done lines).
         // Throws what the tab-menu paths it calls throw on a torn-down tree (winrt::hresult_error) and std::bad_alloc — the
         // content's dispatcher callback contains and logs it. UI thread only.
@@ -2144,20 +2159,22 @@ namespace winrt::TerminalApp::implementation
         // Throws what the called tab-menu paths throw (see _RunSessionMenuScope). UI thread only.
         bool _RunSessionMenuScopeHere(const std::wstring& sessionId, bool close, int32_t scope, bool fromOtherWindow);
         // Agentmaster (session menu): "Close ▸ ★ Favorite & Close All Tabs" — the one session-menu scope with no Deactivate
-        // twin and no Tab::kDeactivateScope* code, so it takes the next free number after them. AgentManagerContent's
+        // twin and no Tab::kDeactivateScope* code, so it takes the next free number after them (8 since 2026-10-24, when
+        // the idle scope took 7; the code never leaves the process, so no stored value depends on it). AgentManagerContent's
         // SessionMenuScope::FavoriteAllTabs is static_asserted equal where the page wires the content.
-        static constexpr int32_t kSessionMenuScopeFavoriteAllTabs{ 7 };
+        static constexpr int32_t kSessionMenuScopeFavoriteAllTabs{ 8 };
         // Agentmaster (session menu): the session-action words that carry a session-menu item to the window hosting the
         // session's tab (_RemoteSessionAction reads them); the argument is the scope code in decimal. Distinct from every
         // Telegram action word, so the bot can never send one by accident.
         static constexpr const wchar_t* kSessionMenuDeactivateAction{ L"session-menu-deactivate" };
         static constexpr const wchar_t* kSessionMenuCloseAction{ L"session-menu-close" };
         // Agentmaster (session menu): the hooks.log word of a session-menu scope — the tab menu's own words
-        // (_DeactivateTabsFromMenu's "this" / "others" / "all" / "left" / "right" / "folder" / "folder-others"), so one grep
-        // finds both menus' actions, plus "favorite-all" for Close's FavoriteAllTabs. It doubles as the validity check: the
-        // two routers refuse a code it does not name rather than guess at a scope.
+        // (_DeactivateTabsFromMenu's "this" / "others" / "all" / "left" / "right" / "folder" / "folder-others" / "idle"), so one
+        // grep finds both menus' actions, plus "favorite-all" for Close's FavoriteAllTabs. It doubles as the validity check:
+        // the two routers refuse a code it does not name rather than guess at a scope.
         //   scope — the code (Tab::kDeactivateScope* or kSessionMenuScopeFavoriteAllTabs).
-        //   close — the verb: FavoriteAllTabs exists only under Close, so it has no word (nullptr) under Deactivate.
+        //   close — the verb: FavoriteAllTabs exists only under Close and the idle scope only under Deactivate, so each has
+        //           no word (nullptr) under the other verb.
         // Returns a static string, or nullptr for a code no session-menu item of that verb raises. Never throws.
         static const wchar_t* _SessionMenuScopeWord(int32_t scope, bool close) noexcept;
         bool _DeactivateManagedTab(const winrt::TerminalApp::Tab& tab); // ONE tab -> dormant; false == skipped (not a managed session / adopted-external / already dormant / mid-delivery / no claude.exe / connection or pane build failed / the swap refused), each meaningful skip logged

@@ -2107,6 +2107,13 @@ namespace winrt::TerminalApp::implementation
                 addScopeItem(L"Other of Same Folder", L"Deactivate every OTHER open session whose working directory is the same as this one \x2014 in EVERY window, without asking first. This session keeps running. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::OtherSameFolder, true);
             }
             addScopeItem(L"All Tabs", L"Deactivate EVERY managed session tab in the window that hosts this session's tab \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. That window lands on its Agent Manager.", SessionMenuScope::AllTabs, true);
+            // Deactivate All Idle Tabs (2026-10-24, the user's "Add to all menus 'Deactivate All Idle Tabs' under
+            // Deactivate"; the tab menu's twin, Tab::_AppendDeactivateMenuItems): every tab of the hosting window whose
+            // session is Idle — the window's sessions nobody is using, while a running turn, an unread answer or an open
+            // question keeps its tab running. Grayed, like the tab menu's, when this window holds no tab it would park
+            // (spot->idleTabs, the page's own list); for another window's session (no spot) it stays enabled and that
+            // window decides.
+            addScopeItem(L"Deactivate All Idle Tabs", L"Deactivate every session tab in the window that hosts this session's tab whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. Nothing asks first: each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::IdleTabs, !spot || spot->idleTabs > 0);
             return sub;
         }
 

@@ -2908,7 +2908,8 @@ namespace winrt::TerminalApp::implementation
         // the conversation resuming the moment the tab is focused or activated. scope: 0 == this tab ·
         // 1 == other tabs · 2 == all tabs · 3 == tabs to the left · 4 == tabs to the right · 5 == of
         // same folder · 6 == other of same folder (Tab.h's kDeactivateScope* codes — the "Close ▸"
-        // submenu's scopes; the two folder ones reach every window, see _DeactivateTabsFromMenu).
+        // submenu's scopes; the two folder ones reach every window, see _DeactivateTabsFromMenu) ·
+        // 7 == the window's Idle tabs ("Deactivate All Idle Tabs", no Close twin; _IdleTabsToDeactivate).
         hostingTab.DeactivateTabsRequested([weakTab, weakThis](int32_t scope) {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
@@ -3144,6 +3145,13 @@ namespace winrt::TerminalApp::implementation
                     // (computed above for "Activate Tab") grays its "Deactivate Tab" item when this
                     // session is already parked; the batch items stay clickable (other tabs may run).
                     tab->SetAgentDeactivateState(isSession && !isExternal, dormant);
+                    // Agentmaster (deactivate — "Deactivate All Idle Tabs"): grayed while no tab of this window
+                    // would park — the same list the click acts on (_IdleTabsToDeactivate), counted only when
+                    // the submenu shows at all, so a shell or adopted tab's menu pays nothing for it.
+                    if (isSession && !isExternal)
+                    {
+                        tab->SetAgentDeactivateIdleEnabled(!page->_IdleTabsToDeactivate().empty());
+                    }
                 }
             });
         }

@@ -81,10 +81,16 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
    deactivate-done … elsewhere=1 dir=<fA>`; window 2 logs `[nav] deactivate-remote <sid8>`.
 5. **Other of Same Folder** on T2 → T4 and T6; T2 keeps running.
 6. **All Tabs** → every managed tab of THIS window parked; window 2 untouched.
+7. **Deactivate All Idle Tabs** (2026-10-24, NOT BUILT; Deactivate ▸'s last item, here and in the card / row
+   menu — flows/02 SP-02 E7; test `test_deactivate_all_idle_tabs`, marked `needs_fix("TAB-F1")` until a release
+   holds it) → with T1 and T3 Idle (launched with no prompt) and T2 Waiting for you: from any tab of window 1,
+   T1 and T3 park and T2 keeps running; window 2 untouched. Running, Needs-approval, Error and Done sessions
+   keep running too. *Check:* [LOG] `[nav] deactivate-done scope=idle parked=2 skipped=0`.
 
 **Edge cases**
 - **E1 Gates:** Tabs to the Left grayed on the left-most tab, Tabs to the Right on the right-most, Other Tabs
-  on a window's only tab; an enabled item can still park nothing (`parked=0`).
+  on a window's only tab; an enabled item can still park nothing (`parked=0`). Deactivate All Idle Tabs is
+  grayed while the window holds no Idle session it would park (phase 7 leaves none: T1 and T3 are dormant).
 - **E2 A running turn** in a folder-scoped tab of window 2 → cut off without asking (the tooltip warns "in
   EVERY window, without asking first").
 - **E3 Shell tabs in scope** → untouched (only managed sessions park).

@@ -3706,7 +3706,9 @@ namespace winrt::TerminalApp::implementation
     // focus/activate) · 3 == every managed tab LEFT of this one · 4 == every managed tab RIGHT of this
     // one (both: this window; this tab keeps running) · 5 == every live managed session sharing this
     // tab's session's EFFECTIVE work dir, this one included · 6 == the same folder batch minus this
-    // session. The scopes mirror the "Close ▸" submenu one for one. The two FOLDER scopes use the key
+    // session · 7 == every tab of this window whose session is Idle ("Deactivate All Idle Tabs",
+    // 2026-10-24: exactly _IdleTabsToDeactivate at the click, this tab included when it is idle; it has
+    // no Close twin). The scopes 0–6 mirror the "Close ▸" submenu one for one. The two FOLDER scopes use the key
     // "Close ▸ Of Same Folder" uses (NormDirKey of EffectiveWorkingDir — the inferred dir while the
     // session infers, else the launch cwd) and its reach, EVERY window: the tabs this window hosts are
     // parked here, and each session hosted elsewhere is handed to its own window
@@ -3767,6 +3769,9 @@ namespace winrt::TerminalApp::implementation
         case implementation::Tab::kDeactivateScopeOtherSameFolder:
             scopeLabel = L"folder-others";
             break;
+        case implementation::Tab::kDeactivateScopeIdleTabs:
+            scopeLabel = L"idle";
+            break;
         default:
             break;
         }
@@ -3812,6 +3817,14 @@ namespace winrt::TerminalApp::implementation
         if (scope == implementation::Tab::kDeactivateScopeThisTab)
         {
             targets.push_back(anchorTab);
+        }
+        else if (scope == implementation::Tab::kDeactivateScopeIdleTabs)
+        {
+            // "Deactivate All Idle Tabs": the anchor only names the window. The list is read NOW — the states the menu
+            // grayed its item by may have moved since it opened — and it is the very list that gray-out counted
+            // (_IdleTabsToDeactivate), so a busy, unread or questioning session is never parked by it. The loop below
+            // still parks each one through _DeactivateManagedTab, which re-checks and logs a late skip.
+            targets = _IdleTabsToDeactivate();
         }
         else if (folderScope)
         {
@@ -3991,6 +4004,79 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
+    // Agentmaster (deactivate — "Deactivate All Idle Tabs"): this window's tabs that the idle scope parks now — the
+    // contract is in TerminalPage.h. Three passes keep it linear in the window's tab count (a window can hold hundreds of
+    // tabs, and both menus call this each time they open): the hosted sessions from _claudeTabs once (a per-tab
+    // _ClaudeSessionForTab would search that map once per tab), their states in ONE lean read, and the full park
+    // resolve only for the few that are idle.
+    std::vector<winrt::TerminalApp::Tab> TerminalPage::_IdleTabsToDeactivate()
+    {
+        std::vector<winrt::TerminalApp::Tab> result;
+        if (!_sessionRegistry)
+        {
+            return result; // the engine is not up yet: no session to judge
+        }
+        // 1. The sessions this window hosts (an expired weak tab is a tab that already closed: skipped).
+        std::vector<std::pair<winrt::TerminalApp::Tab, std::wstring>> hosted;
+        std::vector<std::wstring> ids;
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            if (auto tab = weakTab.get())
+            {
+                hosted.emplace_back(std::move(tab), id);
+                ids.push_back(id);
+            }
+        }
+        if (ids.empty())
+        {
+            return result;
+        }
+        // 2. Their states in one lean read — five small fields per session (HeadlinesOf), never the records with their
+        //    queues and transcript texts. Only a LIVE session in the Idle state stays a candidate: Waiting-for-you (an
+        //    answer the user may not have read), Running, Needs-approval, Error and Done all keep running.
+        std::unordered_set<std::wstring> idleIds;
+        for (const auto& headline : _sessionRegistry->HeadlinesOf(ids))
+        {
+            if (headline.live && headline.state == ::Agentmaster::SessionState::Idle)
+            {
+                idleIds.insert(headline.id);
+            }
+        }
+        if (idleIds.empty())
+        {
+            return result;
+        }
+        std::vector<std::pair<winrt::TerminalApp::Tab, std::wstring>> candidates;
+        for (auto& entry : hosted)
+        {
+            if (idleIds.count(entry.second) != 0)
+            {
+                candidates.push_back(std::move(entry));
+            }
+        }
+        // 3. In STRIP order (so the parks and their log lines run left to right), each through the park's own checks
+        //    without acting or logging (_ResolveDeactivateTarget: ours, not adopted, running — not already dormant —,
+        //    not mid-delivery). A tab it refuses is left out, so the menus never count a tab the click would skip.
+        for (const auto& t : _tabs)
+        {
+            const auto match = std::find_if(candidates.begin(), candidates.end(), [&t](const auto& c) { return c.first == t; });
+            if (match == candidates.end())
+            {
+                continue; // a shell tab, or a session tab that is not idle
+            }
+            std::wstring sessionId;
+            std::optional<::Agentmaster::SessionInfo> info;
+            std::shared_ptr<Pane> pane;
+            TermControl control{ nullptr };
+            std::wstring skipReason;
+            if (_ResolveDeactivateTarget(t, sessionId, info, pane, control, skipReason))
+            {
+                result.push_back(t);
+            }
+        }
+        return result;
+    }
+
     // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): the hooks.log word of a scope code — see TerminalPage.h. The
     // switch over every code is also the proof that kSessionMenuScopeFavoriteAllTabs collides with none of Tab's codes: a
     // duplicate case value would not compile (C2196).
@@ -4012,6 +4098,8 @@ namespace winrt::TerminalApp::implementation
             return L"folder";
         case implementation::Tab::kDeactivateScopeOtherSameFolder:
             return L"folder-others";
+        case implementation::Tab::kDeactivateScopeIdleTabs:
+            return close ? nullptr : L"idle"; // Deactivate only: no item closes the idle tabs
         case kSessionMenuScopeFavoriteAllTabs:
             return close ? L"favorite-all" : nullptr; // Close only: no item parks and stars
         default:

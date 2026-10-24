@@ -104,7 +104,8 @@ namespace winrt::TerminalApp::implementation
             TabsAfter = 4, // the tabs RIGHT of it; it and the tabs left of it are kept
             SameFolder = 5, // every live session whose effective work dir is this session's, in EVERY window, this one included
             OtherSameFolder = 6, // the same folder batch minus this session, which is kept
-            FavoriteAllTabs = 7, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin
+            IdleTabs = 7, // Deactivate only ("Deactivate All Idle Tabs", 2026-10-24): every tab of the hosting window whose session is Idle (the gray dot), this one included when it is; Close has no twin
+            FavoriteAllTabs = 8, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin. Was 7 until IdleTabs took that number (never stored: the code lives one click long)
         };
         // Agentmaster: the verb of a SessionMenuScope item — what happens to the tabs it reaches. Deactivate PARKS them
         // (the agent shuts down, the tab keeps its place and resumes the conversation when it is focused or activated;
@@ -119,11 +120,13 @@ namespace winrt::TerminalApp::implementation
         // it exactly as the WT tab menu grays its own (Tab::_EnableMenuItems): "Tabs to the Left" on the left-most tab,
         // "Tabs to the Right" on the right-most one, "Other Tabs" on a window's only tab. A session hosted in ANOTHER
         // window has no spot here, and its strip items then stay enabled — that window applies them, and a scope with no
-        // tab in it does nothing (its hooks.log line says so).
+        // tab in it does nothing (its hooks.log line says so). "Deactivate All Idle Tabs" is grayed from it too, when this
+        // window holds no tab that item would park (idleTabs == 0).
         struct SessionTabSpot
         {
             uint32_t index{ 0 }; // the tab's index in the strip (0 == the left-most tab)
             uint32_t count{ 0 }; // how many tabs the strip holds, this one included (>= 1 for a spot that exists)
+            uint32_t idleTabs{ 0 }; // how many tabs of this window "Deactivate All Idle Tabs" would park now (TerminalPage::_IdleTabsToDeactivate)
         };
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): install the page's action behind every item of the two
         // submenus EXCEPT Close's two folder items, which keep the folder close this content already confirms and
