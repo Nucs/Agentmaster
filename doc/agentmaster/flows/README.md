@@ -27,7 +27,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | File | Area (code) | Flows | P0 / P1 / P2 | Phases | Edge cases | Known defects |
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
-| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 36 | 25 | 1 (fixed in code; SP-K2 reclassified as a feature) |
+| [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 37 | 27 | 2 (fixed in code; SP-K2 reclassified as a feature) |
 | [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 67 | 5 |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 50 | 4 |
@@ -49,7 +49,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
-| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 676** | **≈ 563** | **27** (7 fixed in code) |
+| **Total** | | **186** | **78 / 77 / 26** (+6 NOT BUILT) | **≈ 677** | **≈ 565** | **28** (8 fixed in code) |
 
 ---
 
@@ -205,7 +205,9 @@ release CLI on the right profile (CLI-02 phase 3, CLI-K2; 3b042ea32) · the inst
 status icon: the draft's three dots, the red unread ring, the cache-warm spark crown (SP-08; SIDE_PANEL.md §2g) · a
 launch made on the Agent Manager page stays on the page and selects the new session there, and a launch from a tab is
 selected on the page too (MGR-07; MGR-K1) · ONE click on the + card's Launch while its presets menu is open (SP-05
-phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps the selection (TAB-01 phase 4; TAB-K4).
+phase 5; SP-K1) · a Shift+Click on a tab starts its session in place and keeps the selection (TAB-01 phase 4; TAB-K4)
+· a side-panel card menu's action (Move to Idle/Done, Esc, Show Transcript …) keeps that card selected and the list
+where it was (SP-02 phase 8; SP-K3).
 
 **The regression base** — older behaviors the recent releases build on, covered because every new feature leans on
 them: the /handover family (HND-01, HND-03, HND-04, HND-05, HND-07, HND-08), the Sessions browser (SES-01, SES-02,

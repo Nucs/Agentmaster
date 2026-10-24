@@ -82,6 +82,12 @@ click back into the terminal; double-click jumps to a card's tab.
    Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · ★ Favorite & Close All
    Tabs; **Tabs to the Right** asks once ("Close N tabs?") and closes only the tabs right of B's tab.
    *Check:* [LOG] `[nav] session-menu close right <B8>`, then `close-all begin`.
+8. **A card menu's action keeps the card and the list** (2026-10-24, NOT BUILT; SP-K3's fix). *Do:* 20+ sessions
+   in this window, tab A selected (MOST ACTIVE: A's card at the top); scroll the list down; right-click the 5th
+   visible card B (Waiting for you) → **Move to Idle/Done**. *Expect:* B's card stays selected and its state turns
+   Idle; the list does not scroll; the summary shows B. *Do:* click into A's terminal. *Expect:* the peek ends: A's
+   card selected and, with ⌖ on, scrolled into view. *Check:* [LOG] `[sidepanel] focus came back to the terminal
+   from a menu, a dialog or an overlay: the selection stays on <B8> (the focused tab shows <A8>; …)`.
 
 **Edge cases**
 - **E1 On the Agent Manager page** a card click also scrolls the tab strip to that session's tab (even a
@@ -102,6 +108,11 @@ click back into the terminal; double-click jumps to a card's tab.
   grayed while that window holds no Idle session to park; a card of ANOTHER window's session leaves it
   enabled and that window parks its own Idle tabs. *Check:* [LOG] `[nav] session-menu deactivate idle <B8>`,
   then `[nav] deactivate-done scope=idle parked=N`.
+- **E8 The card menu closed with Esc, by any other item (Copy, Mark Unread, Favorite), or by a click outside it**
+  (phase 8, NOT BUILT) → the same: B stays selected and the list stays. A click that only closed the menu (XAML
+  gives it to no element) does not end the peek; the next click into the terminal does.
+- **E9 Show Transcript from B's card menu, then Esc** (phase 8, NOT BUILT) → when the reading view closes, B is still
+  selected and the list has not moved.
 
 ---
 
@@ -283,6 +294,26 @@ the menu shows → click once. **Expected:** one session launched, the card clos
 automation's zero-length click) is lost on the page's Launch too, because the fix reads the button's LIVE state
 (`GetAsyncKeyState`) when the menu closes and finds it already released. A fast tap on a busy UI thread could meet
 the same race.
+
+### SP-K3 · A card menu's action selects the focused tab's card and jumps the list to it — FIXED in code 2026-10-24 (NOT BUILT into a release)
+> **P1** · Reported by the user on 2026-10-24: "if I right-click -> Move to Idle/Done then it should not select index
+> 0 (top item) and have the scroll jump to the top while the click was in a 5th or whatever index card in the list".
+> Read from the code and from WinUI's source; not yet reproduced by the e2e suite (SP-02 phase 8 and E8–E9 are its
+> checks). Present since the side panel's follow rule (0.7.9).
+> **The cause:** the card's context menu takes keyboard focus when it opens, and when it closes WinUI gives focus back
+> to the element that held it, the terminal (`CPopup::Close`). The terminal's `GotFocus` was one of the side panel's
+> two "back to work" signals (SIDE_PANEL.md §3), so every item of the menu, and its Esc, ended the peek of the card
+> the menu was opened on. The focused tab's card was selected instead and, with ⌖ on (the default), the list scrolled
+> to it, usually the top card (MOST ACTIVE / MOST RECENT put the session you work in first).
+> **The fix** (`TerminalPage.AgentSidePanel.cpp`, `SidePanelFocusArrivalEndsPeek`): the `GotFocus` follows only
+> focus that comes from the terminal column itself, the side panel's own controls or the window's activation. Focus
+> handed back by a menu, a flyout, a dialog, a popup or a page overlay keeps the peek, and so does focus from the title
+> bar's tab strip. A click into the terminal still ends a peek. What it was on 0.8.0:
+
+Right-click any card below the focused tab's card → **Move to Idle/Done** (or any other item, or Esc): the card the
+menu was about is deselected, the focused tab's card is selected, and with ⌖ on the list jumps to that card. The
+same happens when **Show Transcript**'s reading view closes. **Repro:** 10+ sessions, the focused tab's card at the
+top, the list scrolled down, right-click a lower card → Move to Idle/Done. **Expected:** SP-02 phase 8.
 
 ## Reclassified: not defects
 
