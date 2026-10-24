@@ -49,7 +49,7 @@ these build recipes but adds the pipeline/draft/publish flow).
 |---|---|---|
 | Package | `AgentmasterDev_56k4f06dsfp9r` | `Agentmaster_56k4f06dsfp9r` |
 | Manifest source | `Package-Dev.appxmanifest` (default) | `Package-Rel.appxmanifest` (`/p:AgentmasterPackageIdentity=Release`) |
-| Registered from | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Debug` or `Debug-B` (since 2026-10-13) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Release` or `Release-B` (since 2026-10-12) — always read `(Get-AppxPackage Agentmaster).InstallLocation` |
+| Registered from | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Debug` or `Debug-B` (since 2026-10-13) — always read `(Get-AppxPackage AgentmasterDev).InstallLocation` | **a Q: layout slot** (§4a): `Q:\agentmaster-layouts\Release` or `Release-B` (since 2026-10-12) — always read `(Get-AppxPackage Agentmaster).InstallLocation`. **Or the installed MSIX of a GitHub release** (0.8.0.0 under `C:\Program Files\WindowsApps` since 2026-10-22), which no hot swap can replace (§4a) |
 | Launch | alias `agentmasterdev` · Start "Agentmaster Dev" · `shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App` | alias `agentmaster` · Start "Agentmaster" · `shell:appsFolder\Agentmaster_56k4f06dsfp9r!App` |
 | Profile (state) | `~\.agentmaster-dev` | `~\.agentmaster` |
 | Updated by | any full **Debug** package build | any full **Release** package build (incl. release pre-validation!) |
@@ -334,6 +334,18 @@ bash tools/am-lock.sh release --token "$TOKEN"
   `Swap-AgentmasterLayout.ps1 -LayoutDir <previous slot>` re-registers it (the next version
   number) — seconds, no rebuild. If the swap's register step itself fails, the script relaunches
   the still-registered old version on its own before rethrowing.
+- ⚠ **Both production swaps after 2026-10-20 FAILED** (CLAUDE.md *The swap script* → *Output,
+  failure and undo* and *Measured runs*):
+  - **2026-10-24: production ran the INSTALLED v0.8.0 MSIX.** Windows registers no loose layout over
+    an installed package of the same family (`0x80073CFB`, AppXDeployment-Server event 409), and no
+    installed package over a loose one either. The swap stopped production, was refused, and
+    relaunched 0.8.0.0 (27.8 s down; 7 running turns cut off for nothing). Before any swap, read
+    `(Get-AppxPackage Agentmaster).IsDevelopmentMode`: `False` = remove the package first
+    (CLAUDE.md "Or from an installed MSIX") or don't swap.
+  - **2026-10-21: a WMI "Call cancelled" in the drain killed the script AFTER the stop.** The
+    rollback runs only for a failed register, so nothing relaunched production for 12 min. A
+    transcript with `stopped` but neither `registered` nor `rollback:` = the instance is down: start
+    it yourself.
 - **Close / verify production by its InstallLocation, never by a hard-coded slot** — a filter on
   `*\agentmaster-layouts\Release\*` does NOT match slot B (`Release-B\`).
 - The next deploy's target is the OTHER slot. Before building into a slot, make sure nothing
