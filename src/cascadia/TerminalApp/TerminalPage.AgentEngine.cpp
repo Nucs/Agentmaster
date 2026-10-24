@@ -2132,8 +2132,9 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the board card / tree row / side-panel card twins of the WT
         // tab menu's two submenus): every item but Close's two folder ones (SetCloseFolderHandler above) runs as the
         // session's own tab menu would, in the window that hosts its tab (_RunSessionMenuScope: here, or handed to that
-        // window). The content's scope values ARE the tab menu's codes — asserted here, so the two menus can never name
-        // different tabs for one item — and FavoriteAllTabs is the page's one extra code.
+        // window) — except "Deactivate All Idle Tabs", which runs in THIS window and asks here (_DeactivateIdleTabsAsking).
+        // The content's scope values ARE the tab menu's codes — asserted here, so the two menus can never name different
+        // tabs for one item — and FavoriteAllTabs is the page's one extra code.
         using SessionMenuScope = implementation::AgentManagerContent::SessionMenuScope;
         using SessionMenuVerb = implementation::AgentManagerContent::SessionMenuVerb;
         static_assert(static_cast<int32_t>(SessionMenuScope::ThisTab) == implementation::Tab::kDeactivateScopeThisTab, "the session menu's ThisTab must be the tab menu's code");
@@ -2152,10 +2153,9 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // Where a session's tab sits in THIS window's strip (nullopt: another window hosts it, or no tab yet) — the content
-        // grays the menu's strip items from it exactly as the tab menu grays its own (Tab::_EnableMenuItems), and grays
-        // "Deactivate All Idle Tabs" when this window holds no tab that item would park (idleTabs: the click's own list,
-        // _IdleTabsToDeactivate, like the tab menu's flyout-open). Read on the UI thread each time a session menu opens;
-        // _claudeTabs + the strip are this window's own. A dead page answers nullopt.
+        // grays the menu's strip items from it exactly as the tab menu grays its own (Tab::_EnableMenuItems). Read on the
+        // UI thread each time a session menu opens; _claudeTabs + the strip are this window's own. A dead page answers
+        // nullopt.
         content->SetSessionTabSpotProvider([weakThis](const std::wstring& id) -> std::optional<implementation::AgentManagerContent::SessionTabSpot> {
             const auto self = weakThis.get();
             if (!self)
@@ -2169,7 +2169,16 @@ namespace winrt::TerminalApp::implementation
             {
                 return std::nullopt; // not hosted here, or the tab is mid-move and out of the strip this instant
             }
-            return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size(), static_cast<uint32_t>(self->_IdleTabsToDeactivate().size()) };
+            return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size() };
+        });
+        // "Deactivate All Idle Tabs" in the session menu: enabled while a tab of THIS window (_IdleTabsToDeactivate, the list
+        // its click parks) or of another window (_IdleSessionsElsewhere, what the click's "All windows" answer reaches; read
+        // only when this window has none) would park — the tab menu's flyout-open gate, for a menu that acts in this window
+        // whatever window hosts its session (_RunSessionMenuScope keeps the idle scope here). Read on the UI thread each time
+        // a session menu builds its Deactivate ▸. A dead page answers false: nothing it could park.
+        content->SetIdleTabsProvider([weakThis]() -> bool {
+            const auto self = weakThis.get();
+            return self && (!self->_IdleTabsToDeactivate().empty() || !self->_IdleSessionsElsewhere().empty());
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())

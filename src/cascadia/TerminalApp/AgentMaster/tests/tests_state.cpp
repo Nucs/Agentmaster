@@ -2275,7 +2275,7 @@ void TestRegistryLeanReads()
     CHECK(!liveAgain.empty() && liveAgain[0].id == L"live-a" && liveAgain[0].queue.size() == 7 && liveAgain[0].pendingInput == L"an unsent draft",
           "SnapshotLive still copies whole records");
 
-    // --- HeadlinesOf (tags perf, 2026-10-10): five fields per ASKED id, live and archived alike ---
+    // --- HeadlinesOf (tags perf, 2026-10-10; started / external since 2026-10-24): seven fields per ASKED id, live and archived alike ---
     // Last among the reads on this fixture: it stamps activity onto the records first, and the checks
     // above compare a lean copy with a full one taken earlier.
     {
@@ -2302,6 +2302,13 @@ void TestRegistryLeanReads()
               "HeadlinesOf: the activity is the NEWER of the hook-side and the transcript-derived stamp");
         CHECK(heads.size() == 4 && heads[2].title.empty() && heads[2].lastActivityUnixMs == 0,
               "HeadlinesOf: an untitled session with no recorded activity reads empty / 0");
+        // started / external (2026-10-24, "Deactivate All Idle Tabs"): live-a's terminal started, live-b has none yet (a
+        // dormant tab), and codex-external is an adopted session — the three cases the idle scope's filter tells apart.
+        const std::vector<std::wstring> askedFlags{ L"live-a", L"live-b", L"codex-external" };
+        const auto flags = reg.HeadlinesOf(askedFlags);
+        CHECK(flags.size() == 3 && flags[0].started && !flags[0].external, "HeadlinesOf: started as stored (a running tab), not adopted");
+        CHECK(flags.size() == 3 && !flags[1].started && !flags[1].external, "HeadlinesOf: a dormant tab reads started == false");
+        CHECK(flags.size() == 3 && flags[2].external, "HeadlinesOf: an ADOPTED session reads external == true");
         const std::vector<std::wstring> nothing;
         const std::vector<std::wstring> unknownOnly{ L"nope" };
         CHECK(reg.HeadlinesOf(nothing).empty() && reg.HeadlinesOf(unknownOnly).empty(), "HeadlinesOf: nothing asked, or nothing known -> empty");

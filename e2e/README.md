@@ -144,8 +144,9 @@ since=mark)`), then the UI.
   it passes against a build of the branch and fails on the older release, where a run deselects it with
   `-m "not needs_fix"` (MGR-K1, SP-K1, TCM-K2, TAB-K4, TAB-K3, A11Y-K1 and CLI-K2 since 2026-10-23).
 - A NEW FEATURE that no published release holds takes the same marker with an `-F<n>` id, so the same deselection
-  covers it: TAB-F1 = Deactivate ▸ "Deactivate All Idle Tabs" (2026-10-24,
-  `test_tab_lifecycle.py::test_deactivate_all_idle_tabs`; flows/07 TAB-02 phase 7). An existing test whose exact
+  covers it: TAB-F1 = Deactivate ▸ "Deactivate All Idle Tabs" and its "This window / All windows" question (2026-10-24,
+  `test_tab_lifecycle.py::test_deactivate_all_idle_tabs` + `::test_deactivate_idle_tabs_asks_which_windows`; flows/07
+  TAB-02 phases 7–8). An existing test whose exact
   list the feature extends accepts both forms meanwhile (`test_tab_menu.py::test_menu_fits_the_tab`, `DEACTIVATE_IDLE`).
 - A new surface: open it in a probe, `python -m amdriver dump --out Z:\e2e\out\dumps\<name>.txt`, read the names and
   the structure, then add a page object method — never pixel positions.

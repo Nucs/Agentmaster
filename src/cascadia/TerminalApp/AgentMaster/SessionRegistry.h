@@ -115,6 +115,12 @@ namespace Agentmaster
         SessionState state{ SessionState::Idle }; // the triage state (meaningful for a live session; an archived one keeps its last)
         bool live{ false }; // has an open tab this run (SessionInfo::live); false = closed, resumable from the Sessions browser
         int64_t lastActivityUnixMs{ 0 }; // max(lastActivityUnixMs, convLastActivityUnixMs): the newer of the hook-side stamp and the transcript-derived one; 0 = no recorded activity
+        // Added 2026-10-24 for "Deactivate All Idle Tabs" (TerminalPage::_IdleTabsToDeactivate / _IdleSessionsElsewhere): the two
+        // facts that tell a tab the idle scope can park from one it cannot, read here so a window full of restored tabs (Idle and
+        // dormant) never pays a whole-record Get per tab to learn it. Appended LAST with defaults, so the aggregate initializer of
+        // the five fields above still compiles unchanged.
+        bool started{ false }; // SessionInfo::started — its terminal left NotConnected (false = DORMANT: restored and never opened, or parked; a few seconds stale at most, the liveness tick's cadence)
+        bool external{ false }; // SessionInfo::external — ADOPTED (a claude the user typed into their own shell): its ConPTY is the user's, never ours to park
     };
 
     // Agentmaster (MESSAGING.md §21.17 — one more lean registry read): WHERE one session worked and how recently, copied WITHOUT
@@ -197,11 +203,11 @@ namespace Agentmaster
         //   throws  — std::bad_alloc on allocation failure only.
         std::vector<std::wstring> ManagedCodexTabTokens() const;
 
-        // The headline of each asked session (SessionHeadline: id, title, state, live, newest activity) —
-        // live AND archived records alike, since a closed session can still carry a bookmark tag. For a
+        // The headline of each asked session (SessionHeadline: id, title, state, live, newest activity, started,
+        // external) — live AND archived records alike, since a closed session can still carry a bookmark tag. For a
         // reader that shows a few named sessions in a list (the Tags panel's activity ranking, the tag
-        // hover panel's carrier rows): it copies five small fields per asked session, where Snapshot()
-        // copied every record of the registry with its queue.
+        // hover panel's carrier rows) or sorts many by their state ("Deactivate All Idle Tabs"): it copies seven
+        // small fields per asked session, where Snapshot() copied every record of the registry with its queue.
         // ⚠ Not for a caller that needs every session: it costs one map lookup per asked id, so ask for
         // the ids you show.
         //   ids     — the session ids to look up, in any order. An id the registry does not know is left

@@ -361,6 +361,10 @@ class TabStrip:
     def deactivate(self, title: TabRef, scope: str = "Deactivate Tab") -> None:
         """Park sessions with the tab menu's Deactivate ▸ (no confirmation by design).
 
+        One item can ask: "Deactivate All Idle Tabs" (a build of the branch since 2026-10-24, not 0.8.0) shows a dialog
+        "Deactivate idle tabs" — "This window (N)" / "All windows (M)" / "Cancel" — when OTHER windows hold idle tabs
+        too; this helper only chooses the item, so the caller answers it (Dialog.wait(app, title="Deactivate idle tabs")).
+
         Args:
             title: The tab whose menu is used (the anchor of the scope).
             scope: The submenu item: "Deactivate Tab", "Tabs to the Left", "Tabs to the Right", "Other Tabs",

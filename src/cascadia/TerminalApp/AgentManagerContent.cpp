@@ -357,6 +357,14 @@ namespace winrt::TerminalApp::implementation
     {
         _sessionTabSpotProvider = std::move(provider);
     }
+    // Agentmaster (session menu "Deactivate All Idle Tabs"): store the page's "would that item park anything?" answer (see
+    // the header). Read only while a session menu builds its Deactivate ▸, so installing it repaints nothing.
+    // provider: () -> true when a tab of this window or another one would park; replaces any previous one.
+    // Returns nothing; throws nothing.
+    void AgentManagerContent::SetIdleTabsProvider(std::function<bool()> provider)
+    {
+        _idleTabsProvider = std::move(provider);
+    }
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
         _restoreHandler = std::move(handler);

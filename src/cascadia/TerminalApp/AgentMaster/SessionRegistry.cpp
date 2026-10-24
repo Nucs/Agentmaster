@@ -454,8 +454,9 @@ namespace Agentmaster
                 continue; // unknown (never loaded, or removed): the caller falls back to its own source
             }
             const SessionInfo& s = it->second;
-            // (std::max) parenthesized: windows.h's max macro.
-            out.push_back(SessionHeadline{ s.id, s.title, s.state, s.live, (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs) });
+            // (std::max) parenthesized: windows.h's max macro. `started` and `external` ride along for the idle-tab scope's
+            // filter (SessionHeadline): two bools, so no reader pays for them.
+            out.push_back(SessionHeadline{ s.id, s.title, s.state, s.live, (std::max)(s.lastActivityUnixMs, s.convLastActivityUnixMs), s.started, s.external });
         }
         return out;
     }

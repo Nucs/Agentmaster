@@ -2035,9 +2035,11 @@ namespace winrt::TerminalApp::implementation
         // Deactivate") — every tab of this window whose session is IDLE (the gray dot), wherever it sits in the
         // strip, this one included when it is idle. A Running / Waiting-for-you / Needs-approval / Error / Done
         // session keeps running, so the item parks what nobody is using without cutting a turn off, hiding an
-        // answer not read yet, or dropping a question. Nothing asks first, like every Deactivate scope. Grayed
-        // while no tab of this window would park (SetAgentDeactivateIdleEnabled, decided by the page at
-        // flyout-open): unlike the strip items above, this gate needs session states, which only the page knows.
+        // answer not read yet, or dropping a question. When OTHER windows hold idle tabs too, the page first asks
+        // "This window / All windows" (TerminalPage::_DeactivateIdleTabsAsking, the user's request the same day) —
+        // the one Deactivate scope that can ask; with idle tabs here only it parks them at once. Grayed while no
+        // window holds a tab it would park (SetAgentDeactivateIdleEnabled, decided by the page at flyout-open):
+        // unlike the strip items above, this gate needs session states, which only the page knows.
         _deactivateIdleTabsMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
@@ -2045,7 +2047,7 @@ namespace winrt::TerminalApp::implementation
             }
         });
         _deactivateIdleTabsMenuItem.Text(L"Deactivate All Idle Tabs");
-        WUX::Controls::ToolTipService::SetToolTip(_deactivateIdleTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every session tab in this window whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. Nothing asks first: each parked tab resumes its conversation when you focus or activate it." }));
+        WUX::Controls::ToolTipService::SetToolTip(_deactivateIdleTabsMenuItem, box_value(winrt::hstring{ L"Deactivate every session tab whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. When other windows hold idle tabs too, you are asked whether to park this window's or every window's. Each parked tab resumes its conversation when you focus or activate it." }));
 
         // The submenu header. Moon glyph (QuietHours) — "asleep, waiting": deactivation is dormancy,
         // not an ending (that is Close's X). Kept as a member so the page can show/hide it
@@ -2984,12 +2986,13 @@ namespace winrt::TerminalApp::implementation
         _deactivateTabMenuItem.IsEnabled(!thisTabDormant);
     }
 
-    // Agentmaster (deactivate — "Deactivate All Idle Tabs"): gray that item while no tab of this window would
-    // park — see Tab.h. Page-driven at flyout-open right after SetAgentDeactivateState (the page counts the
-    // window's tabs it would park now: TerminalPage::_IdleTabsToDeactivate). Kept apart from that setter so its
+    // Agentmaster (deactivate — "Deactivate All Idle Tabs"): gray that item while no window holds a tab it would
+    // park — see Tab.h. Page-driven at flyout-open right after SetAgentDeactivateState (the page counts the tabs
+    // it would park now: this window's, TerminalPage::_IdleTabsToDeactivate, else the other windows',
+    // _IdleSessionsElsewhere, which the click's "All windows" answer reaches). Kept apart from that setter so its
     // two callers' contract stays as it was. The page re-checks the states at the click, so a session that
     // changed between the open and the click is judged by its state THEN.
-    //   enabled — true when at least one tab of this window would park now.
+    //   enabled — true when at least one tab of this window or another one would park now.
     // Returns nothing. Throws the WinRT error of the property write; UI thread only (asserted).
     void Tab::SetAgentDeactivateIdleEnabled(bool enabled)
     {

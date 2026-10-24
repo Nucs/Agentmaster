@@ -109,6 +109,14 @@ namespace winrt::TerminalApp::implementation
                 }
                 answer = std::wstring{ ::Agentmaster::Msg::MenuAnswerResultWord(result) };
             }
+            else if (action == kDeactivateIdleSessionAction)
+            {
+                // Agentmaster ("Deactivate All Idle Tabs" answered "All windows" — not the bot): another window handed out
+                // one of its idle sessions, and this window hosts its tab. Judged again here (still idle? a turn that started
+                // since is never cut off) and parked through the single-tab path (_DeactivateIdleSessionLocal), so this
+                // window's focused-tab rule applies. No argument; no answer.
+                _DeactivateIdleSessionLocal(sessionId);
+            }
             else if (action == kSessionMenuDeactivateAction || action == kSessionMenuCloseAction)
             {
                 // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — not the bot): another window's board card, tree row

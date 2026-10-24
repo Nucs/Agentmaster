@@ -919,7 +919,9 @@ scratch program that links the repository's `SessionStore.cpp` unchanged.
     could pass the tag limit.
 - **A lean registry read.** `SessionRegistry::HeadlinesOf(ids)` returns id, title, state, live and newest
   activity for the asked sessions only. The Tags panel asks for the tagged sessions; the hover panel asks
-  once for all carriers.
+  once for all carriers. (Since 2026-10-24 it also returns `started` and `external`: "Deactivate All Idle
+  Tabs" sorts a whole window's sessions, and every other window's, with it at each menu open — a dormant
+  or adopted one is dropped there, before any whole-record read.)
 - **The panel answers first.** A tag edit rebuilds the panel's list at once. The Sessions page, the Manager
   board and the side panel are repainted ~40 ms after the last edit (`_QueueTagSurfacesRefresh`, a one-shot
   timer; a burst of edits is one repaint). The session's own tab badges are still repainted at once.
@@ -962,7 +964,8 @@ Estimated from the measured parts. The app is not built, so no live number exist
   off, the record read-modify-write through the cache, and the guard off. Each one fails the check that
   guards it; the unchanged copy fails none.
 - `TestRegistryLeanReads`: `HeadlinesOf` (the asked order, an unknown id left out, an archived record
-  answered, the newer of the two activity stamps, the stored record untouched).
+  answered, the newer of the two activity stamps, `started` / `external` as stored — 2026-10-24 —, the
+  stored record untouched).
 - **The harness** (isolated copy, scratch profile): 6,164 checks, 3 failures, the known taskbar-badge
   baseline (HEAD: 6,097 checks, the same 3).
   - In 3 of 18 runs (13 on earlier states of this change, 5 on the final one) one real-time scheduler
