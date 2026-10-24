@@ -481,8 +481,10 @@ param([string]$AccountsFile, [string]$Kind, [string]$Exe, [string]$ArgLine64, [s
 $ErrorActionPreference = 'Stop'
 $acc = (Get-Content -Raw -LiteralPath $AccountsFile | ConvertFrom-Json).$Kind
 $cred = New-Object System.Management.Automation.PSCredential ($acc.name, (ConvertTo-SecureString $acc.password -AsPlainText -Force))
-# '-' stands for no arguments (an empty argument does not survive every command line on the way here).
-$argLine = if ($ArgLine64 -eq '-') { '' } else { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgLine64)) }
+# '_none_' stands for no arguments: an empty argument does not survive every command line on the way here, and a bare
+# '-' (the first sentinel) is read by -File's binding as a parameter without a name ("Cannot process argument because
+# the value of argument "name" is not valid", every start_as of 2026-10-24's first run). '_' is outside base64's alphabet.
+$argLine = if ($ArgLine64 -eq '_none_') { '' } else { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgLine64)) }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $in = Join-Path $OutDir 'stdin.txt'; $out = Join-Path $OutDir 'stdout.txt'; $err = Join-Path $OutDir 'stderr.txt'
 Set-Content -LiteralPath $in -Value '' -Encoding ASCII
@@ -556,7 +558,7 @@ def run_as(account: Account, exe: Path, *args: str, wait: bool = True, timeout_s
     line = " ".join(_quote_arg(a) for a in args)
     launcher = [str(WINDOWS_POWERSHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
                 "-AccountsFile", str(account.accounts_file), "-Kind", account.kind, "-Exe", str(exe),
-                "-ArgLine64", base64.b64encode(line.encode("utf-8")).decode("ascii") or "-", "-OutDir", str(out_dir),
+                "-ArgLine64", base64.b64encode(line.encode("utf-8")).decode("ascii") or "_none_", "-OutDir", str(out_dir),
                 "-Wait", "1" if wait else "0", "-TimeoutS", str(int(timeout_s))]
     started = time.monotonic()
     proc = subprocess.run(launcher, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -992,10 +994,11 @@ OTHER_ACCOUNTS = ("qastd", "qaadmin")
 
 
 def _other_account_leftovers() -> list[str]:
-    """What the lane's other accounts hold of Agentmaster, as files: a profile folder, an Agentmaster icon.
+    """What the lane's other accounts hold of Agentmaster: a profile folder, an Agentmaster icon, and in their own
+    registry an Apps & Features entry, the Active Setup marker, a right-click verb or a PATH entry.
 
     Returns:
-        One line per leftover (none for an account that never signed in: it has no folder).
+        One line per leftover (none for an account that never signed in: it has no folder and no registry).
     """
     out = []
     for name in OTHER_ACCOUNTS:
@@ -1007,6 +1010,125 @@ def _other_account_leftovers() -> list[str]:
                 out += [f"{name}'s icon {lnk}" for lnk in folder.glob("Agentmaster*.lnk")]
             except OSError:
                 continue
+        out += _account_registry_leftovers(name, home)
+    return out
+
+
+_PROFILE_LIST = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+"""Where Windows maps each SID that ever signed in to its profile folder (ProfileImagePath)."""
+
+
+def _profile_sid(home: Path) -> Optional[str]:
+    """The SID whose profile folder is a given folder (Windows' ProfileList).
+
+    Args:
+        home: The account's profile folder (C:\\Users\\<name>).
+    Returns:
+        The SID text, or None for an account that never signed in (no profile, so no registry to check).
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST) as root:
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                sid = winreg.EnumKey(root, i)
+                try:
+                    with winreg.OpenKey(root, sid) as k:
+                        image = str(winreg.QueryValueEx(k, "ProfileImagePath")[0])
+                except OSError:
+                    continue
+                if os.path.normcase(os.path.expandvars(image).rstrip("\\")) == os.path.normcase(str(home).rstrip("\\")):
+                    return sid
+    except OSError:
+        return None
+    return None
+
+
+def _key_exists(path: str) -> bool:
+    """Whether a key under HKEY_USERS exists.
+
+    Args:
+        path: The key's path below HKEY_USERS.
+    Returns:
+        True when it opens.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, path):
+            return True
+    except OSError:
+        return False
+
+
+def _reg_hive(action: str, *args: str) -> bool:
+    """`reg.exe load` / `reg.exe unload` (it enables the backup and restore privileges itself, which winreg's LoadKey
+    would need the caller to hold already).
+
+    Args:
+        action: "load" or "unload".
+        *args: The key below HKU, and for "load" the hive file.
+    Returns:
+        True when reg.exe succeeded.
+    """
+    hku = "HKU\\" + args[0]
+    r = subprocess.run(["reg.exe", action, hku, *args[1:]], stdin=subprocess.DEVNULL, capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
+    return r.returncode == 0
+
+
+def _account_registry_leftovers(name: str, home: Path) -> list[str]:
+    """What one other account's own registry (its HKCU) holds of Agentmaster.
+
+    Its hive is under HKEY_USERS\\<sid> only while it is loaded (signed in, or a process of that account runs); an
+    account that ran a scenario a minute ago is usually unloaded again. Its NTUSER.DAT and UsrClass.dat (the second
+    hive, HKCU\\Software\\Classes: the verbs) are then loaded under temporary names for the read and unloaded after —
+    the way tools/install-qa's Reset-AmQa cleans them (2026-10-24: the clean isolation's first run of the account
+    scenarios started one with qastd's registration of a copy whose files were already gone, unseen).
+
+    Args:
+        name: The account name.
+        home: Its profile folder.
+    Returns:
+        One line per leftover; a hive that cannot be loaded is one line too (the machine cannot be called clean).
+    """
+    sid = _profile_sid(home)
+    if not sid:
+        return []
+    hive, classes, mounts = sid, sid + "_Classes", []
+    if not _key_exists(sid):
+        hive = f"amqa-check-{name}"
+        if not _reg_hive("load", hive, str(home / "NTUSER.DAT")):
+            return [f"{name}'s registry could not be read (reg load of its NTUSER.DAT failed)"]
+        mounts.append(hive)
+        classes = f"amqa-check-{name}-classes"
+        if _reg_hive("load", classes, str(home / "AppData" / "Local" / "Microsoft" / "Windows" / "UsrClass.dat")):
+            mounts.append(classes)
+        else:
+            classes = None
+    out = []
+    try:
+        for sub, what in ((UNINSTALL_KEY + "\\" + USER_ENTRY, "Apps & Features entry"),
+                          (ACTIVE_SETUP_KEY, "Active Setup marker")):
+            if _key_exists(hive + "\\" + sub):
+                out.append(f"{name}'s {what} (HKCU\\{sub})")
+        if classes is None:
+            out.append(f"{name}'s right-click verbs could not be read (reg load of its UsrClass.dat failed)")
+        else:
+            out += [f"{name}'s right-click verb (HKCU\\Software\\Classes\\{v}\\shell\\Agentmaster)" for v in VERB_KEYS
+                    if _key_exists(f"{classes}\\{v}\\shell\\Agentmaster")]
+        try:
+            with winreg.OpenKey(winreg.HKEY_USERS, hive + r"\Environment") as k:
+                path = str(winreg.QueryValueEx(k, "Path")[0])
+        except OSError:
+            path = ""
+        out += [f"{name}'s PATH entry {e}" for e in path.split(";") if "agentmaster" in e.lower()]
+    finally:
+        # Every handle above is closed by its `with`; a hive left loaded would keep the account's next start from
+        # loading its profile, so the unload is retried (reg.exe refuses while a handle is still being released).
+        for m in reversed(mounts):
+            for _ in range(10):
+                if _reg_hive("unload", m):
+                    break
+                time.sleep(0.3)
+            else:
+                out.append(f"{name}'s hive LEFT LOADED at HKU\\{m} (reg unload failed 10 times)")
     return out
 
 

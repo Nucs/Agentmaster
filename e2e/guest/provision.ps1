@@ -18,7 +18,10 @@
       C:\e2e\git\           PortableGit (Claude Code's Bash tool needs Git Bash on Windows).
       C:\e2e\pwsh\          PowerShell 7 (only with -Pwsh; without it managed sessions run under Windows
                             PowerShell 5.1 - Agentmaster's ResolvePwshLauncher fallback).
-      C:\e2e\venv\          a Python venv with the runner's packages (pytest, comtypes, psutil, pillow).
+      C:\e2e\venv\          a Python venv with the runner's packages (pytest, comtypes, psutil, pillow), filled by the
+                            base Python's pip (the venv has no pip of its own since 2026-10-24).
+      Defender exclusions   C:\e2e\pwsh, C:\e2e\venv and C:\e2e\git, the test tooling, are not scanned (the build under
+                            test and every folder an install writes still are).
       hosts file            api.anthropic.com and the telemetry hosts point at 127.0.0.1, so anything that
                             bypasses the mock's base URL fails at once instead of reaching the real API.
       user environment      the mock URL + a dummy token and the anti-update variables in HKCU\Environment, so
@@ -191,6 +194,47 @@ function Get-Cached([string]$url, [string]$leaf) {
     return $dest
 }
 
+function Expand-Zip([string]$zip, [string]$dest) {
+    <#
+    .SYNOPSIS
+        Extract a zip into a folder that holds no files yet, with .NET's ZipFile instead of Expand-Archive.
+    .PARAMETER zip
+        The zip file (a full path: .NET resolves a relative one against the process's folder, not PowerShell's).
+    .PARAMETER dest
+        The destination folder (a full path); made when missing. The callers remove what an earlier run left there
+        first: ZipFile refuses to overwrite a file, where Expand-Archive -Force would have mixed two builds.
+    .OUTPUTS
+        None. Throws when the zip cannot be read, a file is in the way, or an entry would land outside the destination.
+    .NOTES
+        Windows PowerShell 5.1's Expand-Archive copies every entry in an interpreted PowerShell loop. Measured on a
+        freshly reset test desktop on 2026-10-24, the PowerShell 7 zip (101 MB, 658 files) took 146 s with it inside a
+        provisioning and 12.4 s with ZipFile (7.6 s with Defender scanning nothing) - from a copy on the local disk.
+        Straight from the persist share it took 49.9 s: ZipFile reads in 4 KB pieces, each one a round trip to the host,
+        while copying the whole zip took 0.6 s. So a zip that is not on the system drive is copied to %TEMP% first.
+    #>
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $source = $zip
+    $copy = $null
+    if (-not $zip.StartsWith($env:SystemDrive, [StringComparison]::OrdinalIgnoreCase)) {
+        $copy = Join-Path $env:TEMP ('e2e-' + [guid]::NewGuid().ToString('N') + '.zip')
+        Copy-Item -LiteralPath $zip -Destination $copy
+        $source = $copy
+    }
+    try {
+        [IO.Compression.ZipFile]::ExtractToDirectory($source, $dest)
+    }
+    finally {
+        # The copy goes whether the extraction worked or not (a failed one throws on to the step, which reports it).
+        if ($copy) { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# How long Windows PowerShell took to start and reach this line. After a reset the first step began 85 s after
+# provision.cmd started PowerShell (2026-10-24, a loaded PC); this line tells a slow start from a slow step. Not a step:
+# the summary the host reads holds steps only.
+$startedAt = (Get-Process -Id $PID).StartTime
+Write-Output ("{0,-10} PowerShell {1} reached the script {2:N1} s after its process started" -f 'start', $PSVersionTable.PSVersion, ((Get-Date) - $startedAt).TotalSeconds)
+
 New-Item -ItemType Directory -Force $Root, $Cache, "$Root\dumps", "$Root\out", "$Root\p", "$Root\c", "$Root\w" | Out-Null
 
 $installLane = $Lane -eq 'Install'
@@ -227,6 +271,26 @@ function Skip-InLane([string]$name, [string]$why) {
     $summary[$name] = $outcome
 }
 
+# ---- Microsoft Defender: the test tooling unscanned ---------------------------------------------
+# Only the TOOLING the runner and the mock use (PowerShell 7, the venv, Git). Defender scanned every file the extractions
+# and pip wrote, most of a provisioning after a reset (measured 2026-10-24 on a freshly reset desktop: its engine spent
+# 22 s of CPU on a 28 s pip install and 18 s on a 25 s `python -m venv`). The build under test (C:\e2e\am, C:\e2e\kit),
+# the copies the scenarios start and every folder an install writes stay scanned, as on a user's PC. A desktop without
+# Defender's cmdlets, or one that refuses the change, is only reported: the steps work either way, slower.
+Step 'defender' {
+    $want = @("$Root\pwsh", "$Root\venv", "$Root\git")
+    try {
+        $have = @((Get-MpPreference -ErrorAction Stop).ExclusionPath)
+        $add = @($want | Where-Object { $have -notcontains $_ })
+        if (-not $add) { return 'skip: the tooling folders are excluded' }
+        Add-MpPreference -ExclusionPath $add -ErrorAction Stop
+        return "excluded $($add -join ', ') from scanning"
+    }
+    catch {
+        return "skip: not changed ($($_.Exception.Message))"
+    }
+}
+
 # ---- Agentmaster ------------------------------------------------------------------------------
 # The install lane never runs this copy (each install scenario copies the pristine kit instead), so it skips it.
 if ($installLane) { Skip-InLane 'agentmaster' 'each scenario copies the kit instead' } else { Step 'agentmaster' {
@@ -242,7 +306,7 @@ if ($installLane) { Skip-InLane 'agentmaster' 'each scenario copies the kit inst
     if (Test-Path "$Root\am") { Remove-Item -Recurse -Force "$Root\am" }
     $tmp = "$Root\am.extract"
     if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    Expand-Zip $zip $tmp
     # A release zip holds one top folder (agentmaster-<ver>\...); a hand-made zip may hold the files directly.
     $exe = Get-ChildItem $tmp -Recurse -Filter Agentmaster.exe | Select-Object -First 1
     if (-not $exe) { throw "no Agentmaster.exe inside $zip" }
@@ -320,7 +384,7 @@ if ($Pwsh) {
             $cached = Get-Item (Get-Cached $asset.browser_download_url $asset.name)
         }
         if (Test-Path "$Root\pwsh") { Remove-Item -Recurse -Force "$Root\pwsh" }
-        Expand-Archive -Path $cached.FullName -DestinationPath "$Root\pwsh" -Force
+        Expand-Zip $cached.FullName "$Root\pwsh"
         return "extracted $($cached.Name)"
     }
 }
@@ -332,7 +396,10 @@ Step 'venv' {
     $vpy = "$Root\venv\Scripts\python.exe"
     if (-not (Test-Path $vpy) -or $Force) {
         if (Test-Path "$Root\venv") { Remove-Item -Recurse -Force "$Root\venv" }
-        $r = Invoke-Native $py @('-m', 'venv', "$Root\venv")
+        # Without a pip of its own: ensurepip installing pip into every new venv cost 25 s of a provisioning after a
+        # reset (0.3 s without it, measured 2026-10-24). The base Python's pip fills it below (`pip --python`), and
+        # nothing else ever runs pip in it; `python -m ensurepip` adds one by hand when wanted.
+        $r = Invoke-Native $py @('-m', 'venv', '--without-pip', "$Root\venv")
         if ($r.Code -ne 0) { throw "python -m venv failed ($($r.Code)): $($r.Output)" }
     }
     $need = @('pytest', 'comtypes', 'psutil', 'pillow')
@@ -345,11 +412,15 @@ Step 'venv' {
     if (-not $missing) { return 'skip: packages present' }
     $wheels = Join-Path $Cache 'wheels'
     New-Item -ItemType Directory -Force $wheels | Out-Null
-    # Fill the wheel cache from PyPI (a no-op for wheels already there), then install from it, so a reset
-    # desktop installs without the network.
-    $r = Invoke-Native $vpy (@('-m', 'pip', 'download', '--quiet', '--disable-pip-version-check', '--dest', $wheels) + $missing)
+    # The base Python's pip installs INTO the venv (`--python`, pip 22.3+; the golden image has pip 26.2): a venv
+    # made before 2026-10-24 has a pip of its own, and this works for both. The wheel cache first, without the
+    # network (a reset desktop's case, 5 s of PyPI questions saved); PyPI fills the cache only when it lacks something.
+    $install = @('-m', 'pip', '--python', $vpy, 'install', '--quiet', '--disable-pip-version-check', '--no-index', '--find-links', $wheels) + $missing
+    $r = Invoke-Native $py $install
+    if ($r.Code -eq 0) { return "installed $($missing -join ', ') from the wheel cache" }
+    $r = Invoke-Native $py (@('-m', 'pip', 'download', '--quiet', '--disable-pip-version-check', '--dest', $wheels) + $missing)
     if ($r.Code -ne 0) { Write-Output "  (pip download exit $($r.Code): $($r.Output); installing from the cache only)" }
-    $r = Invoke-Native $vpy (@('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--no-index', '--find-links', $wheels) + $missing)
+    $r = Invoke-Native $py $install
     if ($r.Code -ne 0) { throw "pip install failed ($($r.Code)): $($r.Output)" }
     return "installed $($missing -join ', ')"
 }
@@ -437,7 +508,7 @@ if ($installLane) {
         if (Test-Path $kit) { Remove-Item -Recurse -Force $kit }
         New-Item -ItemType Directory -Force $kit | Out-Null
         $tmp = "$kit\extract"
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        Expand-Zip $zip $tmp
         # A release zip holds one top folder (agentmaster-<ver>\...); a hand-made zip may hold the files directly.
         $exe = Get-ChildItem $tmp -Recurse -Filter Agentmaster.exe | Select-Object -First 1
         if (-not $exe) { throw "no Agentmaster.exe inside $zip" }
@@ -502,7 +573,7 @@ if ($installLane) {
             if (Test-Path $oldDir) { Remove-Item -Recurse -Force $oldDir }
             $tmp = "$Root\kit\old.extract"
             if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
-            Expand-Archive -Path $zip -DestinationPath $tmp -Force
+            Expand-Zip (Get-Item $zip).FullName $tmp
             $exe = Get-ChildItem $tmp -Recurse -Filter Agentmaster.exe | Select-Object -First 1
             if (-not $exe) { throw "no Agentmaster.exe inside $zip" }
             Move-Item $exe.Directory.FullName $oldDir

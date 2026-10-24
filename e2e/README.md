@@ -93,11 +93,13 @@ python e2e/host/install_lane.py --plan                                          
 
 - **Never by e2e_run.py.** Outside the lane the install tests are deselected (no `C:\e2e\install-lane.json`, which only
   `provision.ps1 -Lane Install` writes and every Standard provisioning removes): a full run on a shared desktop shows
-  "11 deselected".
+  "18 deselected".
 - **Each scenario is ONE test**, listed in `suites/install/install_catalog.py` with its catalog ids, its flow and the
   machine it needs; the host plans its resets from that file, and a test missing from it fails the collection. Write a
   scenario as a life cycle (install → again → upgrade → uninstall) when its steps build on one another: each test costs
-  a reset and a provisioning (~2–3 min).
+  a reset (35–70 s on a quiet PC, 7–10 min on one running three more Windows desktops, measured 2026-10-24) and the
+  lane's provisioning (78 s after a reset; it was ~6.4 min before `Expand-Zip`, the Defender exclusion of the test
+  tooling and the pip-less venv — E2E_TESTING.md §8.5).
 - **Fixtures** (`suites/install/conftest.py`): `lane` (the lane's facts), `kit` (`kit.copy("0.8.1.0", "name")` — a
   fresh portable copy stamped with that version; `kit.zip("0.8.2.0")` — a release-shaped zip), `machine` (the clean
   machine, checked before the test; evidence after a failure; every Agentmaster ended after).

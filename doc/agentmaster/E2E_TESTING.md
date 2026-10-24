@@ -679,7 +679,7 @@ reset.
 | Mode | Between scenarios | For |
 |---|---|---|
 | `reset` (default) | the fleet's `reset_desktop` + the lane's provisioning | every real run |
-| `clean` | nothing on the host: one guest run of every scenario, each test first removes every Agentmaster install of every account (`tools\install-qa\amqa-guest.ps1` `Reset-AmQa`, the manual QA's clean-up) and then checks; the final reset still runs | iterating on the suite (minutes instead of a reset each) |
+| `clean` | nothing on the host: one guest run of every scenario, each test first removes every Agentmaster install of every account (`tools\install-qa\amqa-guest.ps1` `Reset-AmQa`, the manual QA's clean-up; an account whose hive is not loaded gets its `NTUSER.DAT` and `UsrClass.dat` loaded for it since 2026-10-24, when the first run of the account scenarios left `qastd`'s registration behind) and then checks; the final reset still runs | iterating on the suite (minutes instead of a reset each) |
 | `none` | nothing at all; a scenario on a machine that is not clean fails at once | debugging one scenario on a desktop you watch |
 
 **Why a reset, not a snapshot.** A QEMU snapshot (`savevm` / `loadvm` through the monitor `tools\install-qa\qm.py`
@@ -695,15 +695,16 @@ the stopped overlay would still cost the cold boot a reset costs, and only save 
 **The guards that keep the scenarios in their lane** (`e2e/suites/install/conftest.py`):
 
 1. *Deselected elsewhere.* `provision.ps1 -Lane Install` writes `C:\e2e\install-lane.json`; without it the install tests
-   are not even collected ("11 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
+   are not even collected ("18 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
    file, so a desktop the lane prepared and nobody reset does not run them in the next ordinary run either.
 2. *Planned.* A test missing from the catalog fails the collection: the host plans its resets from the catalog.
 3. *Checked clean.* The `machine` fixture reads the machine first (`amdriver.install.MachineState`: the per-user and
    all-users folders, both Apps & Features entries, the verbs, both PATHs, the icons of both desktops and Start menus,
-   Active Setup, the Default profile, running Agentmaster processes) and fails a scenario that does not start from
-   nothing, naming what was left. A failed scenario's evidence: the screen, every dialog of an Agentmaster process, the
-   state as JSON, the QA kit's `Get-AmQaState`, every script run with its output, the `[install]` lines and the
-   installer's own records.
+   Active Setup, the Default profile, running Agentmaster processes; the other accounts' profile folders and icons, and
+   in their own registry the Apps & Features entry, the Active Setup marker, the verbs and the PATH, an unloaded hive
+   read through `reg load`) and fails a scenario that does not start from nothing, naming what was left. A failed
+   scenario's evidence: the screen, every dialog of an Agentmaster process, the state as JSON, the QA kit's
+   `Get-AmQaState`, every script run with its output, the `[install]` lines and the installer's own records.
 
 **What the lane's provisioning puts in place** (`-Lane Install`, §5.2's script): the venv, PowerShell 7 and the crash
 dumps as usual; no Claude Code, no Git and no mock environment (no scenario starts a session); the **kit** — the build
@@ -713,6 +714,22 @@ from which each test makes fresh copies and release-shaped zips stamped with ver
 hosts guard, so every installed copy's startup update check fails at once (flows/19 IS-88) instead of spending the 60
 GitHub API requests an hour this PC shares with its desktops. The host stages the scripts under test beside the suite:
 `tools\Install-Agentmaster.ps1` and `tools\install-qa\amqa-guest.ps1` (`Z:\e2e\src\kit\`).
+
+**What a scenario costs** (measured 2026-10-24 on `am-install-1`, 4 vCPUs, the PC running three more Windows desktops
+at ~93% CPU). A reset takes 435–570 s there; on a quiet PC it took 35–70 s. The provisioning after a reset took ~6.4 min:
+85 s before its first step, 146 s for PowerShell 7's extraction (101 MB, 658 files), ~80 s for the venv and 15 s for the
+kit, and every step's line now carries its time. A benchmark on a freshly reset desktop found where the time goes.
+`Expand-Archive` (Windows PowerShell 5.1's interpreted copy loop) took 51.4 s against 12.4 s for .NET's `ZipFile`, and
+ZipFile straight from the persist share took 49.9 s, because it reads in 4 KB pieces, each a round trip to the host,
+while copying the whole zip took 0.6 s. Defender scanned every file pip wrote: its engine spent 22 s of CPU on a 28 s
+`pip install` and 18 s on the 25 s `python -m venv`, ensurepip's pip install (0.3 s with `--without-pip`). So
+provisioning now extracts with `Expand-Zip` (ZipFile, from a local copy of a zip on another drive), excludes only the
+test tooling from Defender (`C:\e2e\pwsh`, `venv`, `git`; the build under test, the copies the scenarios start and
+every folder an install writes stay scanned), makes the venv without a pip of its own and fills it with the base
+Python's pip from the wheel cache before asking PyPI. With that the lane's provisioning after a reset took 112 s from
+the host (inst-dev4, the same loaded PC, before the local-copy step: PowerShell 7 49.9 s, the venv 19.2 s, the kit
+9.1 s, the accounts 4.1 s, v0.7.10's download and extraction 7.7 s), and with it 78 s (inst-reset2, after a 139 s
+reset: PowerShell 7 12.0 s, the venv 21.3 s, the kit 1.5 s; 58 s in the guest). A test itself took 30–110 s.
 
 **The driver** (`e2e/amdriver/install.py`, `e2e/amdriver/ui/taskdialog.py`): the lane's facts, the kit, the installer
 run as a file in Windows PowerShell 5.1 or PowerShell 7 with no console input (a question takes its default and says so),
