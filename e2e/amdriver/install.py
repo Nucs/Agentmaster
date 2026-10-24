@@ -11,6 +11,8 @@ What a scenario does with it:
     Kit.copy / Kit.zip     a FRESH portable copy, or a release-shaped zip, of the build stamped with a chosen version
                            (the app reads its own version from `.am-version`; tools/install-qa's New-AmQaCopy did this)
     run_installer          tools/Install-Agentmaster.ps1 in Windows PowerShell 5.1 or PowerShell 7, non-interactive
+    run_as / start_as      a program as the lane's other account in the signed-in user's session ("std", "adm2")
+    run_as_system          a program as SYSTEM in session 0, through a one-shot scheduled task ("sys")
     MachineState.read      every install, registration, shortcut, PATH entry, profile and process, in one snapshot
     start_like_explorer    a double-click: Explorer starts the exe with its own token and environment
     wait_question / ...    the copy's "Where should Agentmaster live?" (ui/taskdialog.py)
@@ -669,6 +671,151 @@ def account_state(account: Account) -> dict:
     return json.loads(line[len("STATE "):])
 
 
+# ---- SYSTEM (the catalog's Machine tag "sys") ------------------------------------------------------------------------
+
+_SYSTEM_TASK = r"""
+param([string]$Exe, [string]$ArgLine64, [string]$OutDir, [int]$Wait, [int]$TimeoutS)
+# Runs AS SYSTEM, in session 0 (a one-shot scheduled task: run_as_system). The program's three standard streams go to
+# files, then its exit code - or, not waited for, its process id - to result.txt: a task's own output goes nowhere.
+$result = Join-Path $OutDir 'result.txt'
+try {
+    $argLine = if ($ArgLine64 -eq '_none_') { '' } else { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgLine64)) }
+    $in = Join-Path $OutDir 'stdin.txt'
+    Set-Content -LiteralPath $in -Value '' -Encoding ASCII
+    $sp = @{ FilePath = $Exe; PassThru = $true; WorkingDirectory = $OutDir; RedirectStandardInput = $in
+             RedirectStandardOutput = (Join-Path $OutDir 'stdout.txt'); RedirectStandardError = (Join-Path $OutDir 'stderr.txt') }
+    if ($argLine) { $sp.ArgumentList = $argLine }
+    $p = Start-Process @sp
+    # Read the handle at once, or a finished process reports no ExitCode later (as in run-as.ps1).
+    $null = $p.Handle
+    if ($Wait -eq 0) { Set-Content -LiteralPath $result -Value ('PID ' + $p.Id) -Encoding ASCII; exit 0 }
+    if (-not $p.WaitForExit($TimeoutS * 1000)) { try { $p.Kill() } catch { }; Set-Content -LiteralPath $result -Value 'TIMEOUT' -Encoding ASCII; exit 3 }
+    Set-Content -LiteralPath $result -Value ('EXIT ' + $p.ExitCode) -Encoding ASCII
+}
+catch {
+    Set-Content -LiteralPath $result -Value ('ERROR ' + $_.Exception.Message) -Encoding UTF8
+}
+"""
+
+_SYSTEM_REGISTER = r"""
+param([string]$TaskName, [string]$TaskArgs64, [string]$OutDir)
+# Register and start a one-shot task that runs Windows PowerShell as SYSTEM with the task script's arguments.
+$ErrorActionPreference = 'Stop'
+$taskArgs = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TaskArgs64))
+$ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$action = New-ScheduledTaskAction -Execute $ps -Argument $taskArgs -WorkingDirectory $OutDir
+$principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName $TaskName
+'STARTED'
+"""
+
+_RUN_AS_SYSTEM_COUNT = [0]
+"""How many SYSTEM runs this process made (each gets a task and an output folder of its own)."""
+
+
+def run_as_system(exe: Path, *args: str, wait: bool = True, timeout_s: float = 600.0) -> ScriptRun:
+    """Run a program as SYSTEM in session 0 — the catalog's Machine tag "sys": a one-shot scheduled task, the way a
+    management tool, an installer service or a deployment runs one.
+
+    The task is named `amqa-sys-…` (tools/install-qa's Reset-AmQa removes every `amqa-*` task a failed run leaves) and
+    is unregistered here once its result is in. A program not waited for keeps running after its task ended.
+
+    Args:
+        exe: The program.
+        *args: Its arguments (quoted with CommandLineToArgvW's rules, carried base64-encoded like run_as).
+        wait: Wait for it to end; False returns once it started, with "PID <n>" as the output.
+        timeout_s: How long a waited run may take (it is killed after).
+    Returns:
+        The ScriptRun: code = the program's exit code (3 = timed out, 4 = the task script failed or never wrote its
+        result, for wait=False 0), output = the result line + the program's stdout and stderr. Appended to RUNS.
+    Raises:
+        RuntimeError: When the task could not be registered or started (its output is in the message).
+    """
+    import base64
+    _RUN_AS_SYSTEM_COUNT[0] += 1
+    n = _RUN_AS_SYSTEM_COUNT[0]
+    task = f"amqa-sys-{os.getpid()}-{n}"
+    out_dir = E2E_ROOT / "w" / "system" / f"{os.getpid()}-{n}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    script = E2E_ROOT / "w" / "system" / "system-task.ps1"
+    script.write_text(_SYSTEM_TASK, encoding="ascii")
+    register = E2E_ROOT / "w" / "system" / "register.ps1"
+    register.write_text(_SYSTEM_REGISTER, encoding="ascii")
+    line = " ".join(_quote_arg(a) for a in args)
+    task_args = " ".join(_quote_arg(a) for a in (
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Exe", str(exe),
+        "-ArgLine64", base64.b64encode(line.encode("utf-8")).decode("ascii") or "_none_", "-OutDir", str(out_dir),
+        "-Wait", "1" if wait else "0", "-TimeoutS", str(int(timeout_s))))
+    started = time.monotonic()
+    reg = run_powershell(["-File", str(register), "-TaskName", task,
+                          "-TaskArgs64", base64.b64encode(task_args.encode("utf-8")).decode("ascii"), "-OutDir", str(out_dir)],
+                         "5.1", timeout_s=120)
+    RUNS.pop()  # the registration is plumbing; the run below is the scenario's
+    if reg.code != 0 or "STARTED" not in reg.output:
+        raise RuntimeError(f"the SYSTEM task {task} did not start:\n{reg}")
+    result_file = out_dir / "result.txt"
+    deadline = time.monotonic() + (timeout_s if wait else 120) + 60
+    result = ""
+    try:
+        while time.monotonic() < deadline:
+            try:
+                result = result_file.read_text(encoding="utf-8-sig").strip()
+            except OSError:
+                result = ""
+            if result:
+                break
+            time.sleep(1.0)
+    finally:
+        # The task is not needed once its result is in (or never came): a left task would run again only if started.
+        run_powershell(["-Command", f"Unregister-ScheduledTask -TaskName '{task}' -Confirm:$false -ErrorAction SilentlyContinue"],
+                       "5.1", timeout_s=60)
+        RUNS.pop()
+    if result.startswith("EXIT "):
+        code = int(result.split()[1])
+    elif result.startswith("PID ") and not wait:
+        code = 0
+    elif result == "TIMEOUT":
+        code = 3
+    else:
+        code = 4
+    output = result or "(the task wrote no result)"
+    for name in ("stdout.txt", "stderr.txt"):
+        f = out_dir / name
+        if f.exists():
+            output += f"\n--- {name}\n" + _decode(f.read_bytes())
+    run = ScriptRun(what=f"as SYSTEM: {exe} {line}", code=code, output=output, seconds=time.monotonic() - started)
+    RUNS.append(run)
+    return run
+
+
+def stop_as_system(pid: int) -> ScriptRun:
+    """End a process SYSTEM started (an administrator may not hold the right to end a SYSTEM process; SYSTEM does).
+
+    Args:
+        pid: Its id.
+    Returns:
+        The taskkill run (code 128 = no such process: it had ended already).
+    """
+    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+    return run_as_system(taskkill, "/F", "/T", "/PID", str(pid), timeout_s=60)
+
+
+def process_session(pid: int) -> Optional[int]:
+    """The Windows session a process runs in (0 = services, no desktop).
+
+    Args:
+        pid: Its id.
+    Returns:
+        The session id, or None when the process is gone or cannot be asked.
+    """
+    session = wintypes.DWORD()
+    if ctypes.windll.kernel32.ProcessIdToSessionId(wintypes.DWORD(pid), ctypes.byref(session)):
+        return int(session.value)
+    return None
+
+
 # ---- the machine's state ------------------------------------------------------------------------------------------
 
 _KNOWN_FOLDERS = {
@@ -1151,8 +1298,9 @@ class MachineState:
         default_profile: Whether %USERPROFILE%\\.agentmaster exists, and its top-level names.
         home_map: Whether %USERPROFILE%\\.agentmaster.profiles exists.
         processes: The running Agentmaster processes.
-        other_accounts: What the lane's other accounts hold, read as files (their profile folders and their Agentmaster
-            icons): a leftover there is a leftover too. Their registry needs a read AS them (account_state).
+        other_accounts: What the lane's other accounts hold: their profile folders and Agentmaster icons, and in their
+            own registry the Apps & Features entry, the Active Setup marker, the verbs and the PATH (an unloaded hive is
+            loaded for the read: _account_registry_leftovers). A leftover there is a leftover too.
     """
 
     user: Optional[InstallFacts]
@@ -1417,12 +1565,40 @@ def install_log_lines(profile: Optional[Path] = None) -> list[str]:
     Returns:
         The lines, oldest first.
     """
+    return profile_log_lines("[install]", profile)
+
+
+def profile_log_lines(tag: str, profile: Optional[Path] = None) -> list[str]:
+    """The lines of a profile's hooks.log that carry one tag (`[install]`, `[update]`, …).
+
+    Args:
+        tag: The tag, brackets included.
+        profile: The profile folder (default: the Default profile).
+    Returns:
+        The lines, oldest first (none when the log is missing).
+    """
     log = (profile or default_profile()) / "hooks.log"
     try:
         text = win32.read_bytes_shared(log).decode("utf-8", "replace")
     except OSError:
         return []
-    return [line for line in text.splitlines() if "[install]" in line]
+    return [line for line in text.splitlines() if tag in line]
+
+
+def log_time_s(line: str) -> Optional[float]:
+    """The seconds of the day a hooks.log line's `[HH:MM:SS.mmm]` stamp says (the app's local time).
+
+    Args:
+        line: The line.
+    Returns:
+        The seconds since midnight, or None when the line has no stamp.
+    """
+    import re
+    m = re.match(r"^\[(\d\d):(\d\d):(\d\d)\.(\d\d\d)\]", line)
+    if not m:
+        return None
+    h, mi, s, ms = (int(g) for g in m.groups())
+    return h * 3600 + mi * 60 + s + ms / 1000.0
 
 
 # ---- clean-up and evidence --------------------------------------------------------------------------------------

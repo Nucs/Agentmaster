@@ -723,7 +723,7 @@ the stopped overlay would still cost the cold boot a reset costs, and only save 
 **The guards that keep the scenarios in their lane** (`e2e/suites/install/conftest.py`):
 
 1. *Deselected elsewhere.* `provision.ps1 -Lane Install` writes `C:\e2e\install-lane.json`; without it the install tests
-   are not even collected ("18 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
+   are not even collected ("23 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
    file, so a desktop the lane prepared and nobody reset does not run them in the next ordinary run either.
 2. *Planned.* A test missing from the catalog fails the collection: the host plans its resets from the catalog.
 3. *Checked clean.* The `machine` fixture reads the machine first (`amdriver.install.MachineState`: the per-user and
@@ -780,8 +780,16 @@ Active Setup marker, profile) by running AS it.
 manifest, no `--register-user`) to `C:\e2e\kit\old`; `Kit.old_zip(manifest=True)` stands for "an older app without
 `--register-user`" (the 2026-10-22 evening QA's method), `manifest=False` for the release an all-users install refuses.
 
+**SYSTEM (`sys`, prepared).** Nothing to provision: `amdriver.install.run_as_system` starts a program as SYSTEM in
+session 0 through a one-shot scheduled task (`amqa-sys-…`, the way a deployment tool or Intune runs one): a fixed task
+script runs it with its three standard streams in files and writes its exit code (or, not waited for, its process id)
+to a result file, which the driver polls before it unregisters the task. `stop_as_system` ends what it started (an
+administrator may not hold the right to end a SYSTEM process; SYSTEM does), and `process_session` tells session 0 from
+the user's. IS-28 (the installer as SYSTEM installs for the signed-in user) and IS-54 (a copy started in session 0 asks
+nothing and persists nothing) use it.
+
 **Not automated yet** — the catalog's Machine tags the lane does not prepare (`install_catalog.PREPARED` holds `std`,
-`adm2` and `old`; the host skips a scenario that needs another, and says which):
+`adm2`, `old` and `sys`; the host skips a scenario that needs another, and says which):
 
 | Tag | What the lane would add |
 |---|---|

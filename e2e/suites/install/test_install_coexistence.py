@@ -1,15 +1,18 @@
 """Installs side by side, their uninstall, and the old name: a user's own copy wins over the shared one, Apps &
 Features' Uninstall, `WindowsTerminal.exe`.
 
-flows/19 INS-05, INS-07 and INS-09 — the catalog's sections D, F and G. The installs are made with the installer script
-(its own tests prove that path); what is tested here is how the APP behaves on top of them: the shared copy handing
-every launch to the user's copy, the `--uninstall-portable` entry Windows' Settings runs, the old-name forwarder.
+flows/19 INS-05, INS-07 and INS-09 — the catalog's sections D, F and G, and IS-62 of section C. The installs are made
+with the installer script (its own tests prove that path); what is tested here is how the APP behaves on top of them:
+the shared copy handing every launch to the user's copy and keeping the user's icons in order, the `--uninstall-portable`
+entry Windows' Settings runs, the old-name forwarder.
 
 Runs only in the install lane (E2E_TESTING.md §8.5).
 """
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -106,13 +109,13 @@ def _shell_cwds(app_pid: int) -> list[str]:
 
 @pytest.mark.p1
 @pytest.mark.flow("INS-05")
-@pytest.mark.install("IS-71", "IS-72", "IS-73", "IS-75")
+@pytest.mark.install("IS-71", "IS-72", "IS-73", "IS-74", "IS-75")
 def test_a_users_own_copy_takes_over(lane, kit, machine):
     """The all-users copy and a per-user copy of the same user: every start of the shared copy runs the user's own.
 
     Promise (INS-05, PROFILES.md §2b "A user's own install wins"): the shared copy by path hands off (with its
-    arguments), one instance stays the user's, `AGENTMASTER_NO_HANDOFF=1` opts out, and when the user's copy is
-    uninstalled their icons open the shared copy again.
+    arguments), one instance stays the user's, `AGENTMASTER_NO_HANDOFF=1` opts out, the shared copy's CLI hands
+    every call to the user's, and when the user's copy is uninstalled their icons open the shared copy again.
 
     Args:
         lane: The install lane's facts (the staged installer).
@@ -159,6 +162,23 @@ def test_a_users_own_copy_takes_over(lane, kit, machine):
     assert not install.app_processes(own_dir), "the opt-out still handed off"
     install.end_agentmaster()
 
+    # IS-74: the shared copy's agentmaster-cli.exe hands every call to the user's own CLI, with its arguments, on the
+    # same standard handles (a redirected file gets the output), and passes its exit code back. A stand-in for the
+    # user's CLI makes all three visible: cmd.exe under the CLI's name (the hand-off runs whatever file is there).
+    shared_cli, own_cli = shared_dir / "agentmaster-cli.exe", own_dir / "agentmaster-cli.exe"
+    shutil.copy2(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe", own_cli)
+    token = f"handed-off-{os.getpid()}"
+    out_file = install.E2E_ROOT / "w" / f"{token}.txt"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_file, "wb") as f:
+        r = subprocess.run([str(shared_cli), "/c", "echo", token], stdin=subprocess.DEVNULL, stdout=f,
+                           stderr=subprocess.STDOUT, env=install.clean_env(), timeout=60)
+    said = out_file.read_bytes().decode("utf-8", "replace")
+    assert r.returncode == 0 and token in said, f"the user's CLI did not answer through the shared one: exit {r.returncode}, {said!r}"
+    r = subprocess.run([str(shared_cli), "/c", "exit", "7"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env=install.clean_env(), timeout=60)
+    assert r.returncode == 7, f"the user's CLI's exit code did not pass through: {r.returncode}"
+
     # IS-75: the user's copy uninstalled: their icons open the shared copy again.
     run = install.run_installer(lane, "-Uninstall", "-Scope", "User")
     assert run.code == 0, str(run)
@@ -167,6 +187,78 @@ def test_a_users_own_copy_takes_over(lane, kit, machine):
     for folder in ("desktop", "programs"):
         targets = [_norm(s.target) for s in state.shortcuts_in(folder)]
         assert _norm(shared) in targets, f"the user's {folder} icons were not handed back to the shared copy: {targets}"
+
+
+@pytest.mark.p1
+@pytest.mark.flow("INS-05")
+@pytest.mark.install("IS-62", "IS-76")
+def test_the_shared_copys_upkeep(lane, kit, machine):
+    """The shared copy's per-user step at each start: an icon the user deleted stays deleted (IS-62), and a user's own
+    copy deleted by hand leaves no broken entries — the shared copy removes its verbs, Apps & Features entry, PATH entry
+    and icons, and gives the user its own icons again (IS-76).
+
+    Promise (PortableInstall.h MachineCopyUserUpkeep, the 2026-10-22 own-install-wins table): the user's choices about
+    their icons are kept, and a folder deleted without its uninstall never leaves a right-click entry or an icon that
+    opens nothing.
+
+    Args:
+        lane: The install lane's facts (the staged installer).
+        kit: Stamped zips of the build under test.
+        machine: The clean machine the test starts from.
+    Returns:
+        None.
+    Raises:
+        AssertionError / WaitTimeout: Naming the icon, entry or log line that is wrong.
+    """
+    _install(lane, kit, "Machine", "0.8.1.0")
+    shared_dir = install.machine_install_dir()
+    shared = shared_dir / "Agentmaster.exe"
+    desktop_icon = install.known_folder("desktop") / "Agentmaster.lnk"
+    start_icon = install.known_folder("programs") / "Agentmaster.lnk"
+    for icon in (desktop_icon, start_icon):
+        found = install.read_shortcuts([icon.parent])
+        assert any(_norm(s.path) == _norm(icon) and _norm(s.target) == _norm(shared) for s in found), \
+            f"the all-users install gave the user no {icon}: {[(s.path, s.target) for s in found]}"
+
+    # IS-62: the desktop icon deleted, the shared copy started from Start: the per-user step is done, so no icon
+    # comes back (the Active Setup marker keeps it deleted at every sign-in and start).
+    desktop_icon.unlink()
+    started = time.time()
+    install.start_like_explorer(start_icon)
+    install.wait_app(shared_dir, timeout_s=120, newer_than=started)
+    hold_true(lambda: not desktop_icon.exists(), 5.0, what="the deleted desktop icon to stay deleted")
+    install.end_agentmaster()
+
+    # IS-76: the user's own copy, deleted by hand (no uninstall), then the shared copy started by path.
+    _install(lane, kit, "User", "0.8.2.0")
+    own_dir = install.user_install_dir()
+    own = own_dir / "Agentmaster.exe"
+    state = install.MachineState.read()
+    assert state.user_entry is not None and state.user_verbs, f"the user's own copy is not registered: {state.user_entry}"
+    assert any(_norm(link.target) == _norm(own) for link in state.shortcuts_in("programs")), \
+        f"the user's icons do not open their own copy: {[(s.path, s.target) for s in state.shortcuts]}"
+    install.end_agentmaster()
+    shutil.rmtree(own_dir)
+    started = time.time()
+    install.start_direct(shared)
+    install.wait_app(shared_dir, timeout_s=120, newer_than=started)
+
+    def cleaned() -> bool:
+        """Whether the deleted copy's entries are gone and the user's icons open the shared copy.
+
+        Returns:
+            True when the shared copy's clean-up is visible.
+        """
+        s = install.MachineState.read()
+        icons = all(any(_norm(link.target) == _norm(shared) for link in s.shortcuts_in(f)) for f in ("desktop", "programs"))
+        return s.user_entry is None and s.user_verbs == {} and not any(_norm(own_dir) in _norm(p) for p in s.user_path) \
+            and icons and not any(_norm(own_dir) in _norm(link.target) for link in s.shortcuts)
+
+    wait_until(cleaned, 60, interval_s=1.0, what="the deleted copy's leftovers removed and the shared copy's icons made",
+               describe=lambda: (lambda s: (s.user_entry, s.user_verbs, s.user_path,
+                                            [(link.path, link.target) for link in s.shortcuts]))(install.MachineState.read()))
+    lines = install.install_log_lines()
+    assert any("is gone (deleted by hand)" in ln for ln in lines), f"no clean-up line in [install]: {lines[-5:]}"
 
 
 @pytest.mark.p0
