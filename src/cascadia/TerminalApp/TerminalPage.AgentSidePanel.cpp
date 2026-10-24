@@ -654,6 +654,46 @@ namespace
         }
         return false;
     }
+
+    // --- FOLLOW vs a focus RETURN (SIDE_PANEL.md §3) --------------------------------------------------------------
+    // Does this arrival of focus in the terminal column END a peek, that is, is it the user coming back to the terminal?
+    // YES in the three cases the follow rule was built for: nothing in this window held focus before (the window
+    // regaining activation, its first focus), focus moved within the terminal column itself (another pane of the tab),
+    // and focus came from the side panel's own controls (its filter box).
+    // NO when focus came from anywhere else:
+    //   - a menu, a flyout, a dialog or another popup handing it back as it closes. WinUI's CPopup::Close takes the
+    //     popup's content out of the popup layer first, THEN gives focus back to the element that held it before the
+    //     popup opened, so the element losing focus hangs under nothing by then. A card's context menu takes focus when
+    //     it opens, so every item of it (and its Esc) used to end the peek of the card it was opened on and, with the ⌖
+    //     toggle on, scroll the list back to the focused tab's card. The user's report of 2026-10-24: "Move to
+    //     Idle/Done" on the 5th card selected the top card and jumped the list to the top.
+    //   - an overlay over the page that gives focus back when it closes: the transcript reading view (the same card
+    //     menu's "Show Transcript", then Esc), the command palette.
+    //   - the title bar's tab strip (a tab's rename box).
+    //   - an element already gone: the previous terminal of a tab switch, whose own funnel
+    //     (_SyncManagerSelectionToTab) moved the selection already.
+    // None of these is the user touching the terminal. A click into the terminal still ends a peek: its PointerPressed
+    // follows unconditionally.
+    //   oldFocus       - GettingFocusEventArgs::OldFocusedElement, the element losing focus (null: none in this window).
+    //   terminalColumn - the terminal column the handler is on (TabContent).
+    //   sidePanelHost  - the side panel's root (_sidePanelHost; null before the panel is built).
+    //   returns        - true when the arrival ends a peek (the follow runs), false when the peek is kept.
+    //   throws         - what the XAML reads throw on a torn-down tree (the caller contains it).
+    bool SidePanelFocusArrivalEndsPeek(const winrt::Windows::UI::Xaml::DependencyObject& oldFocus,
+                                       const winrt::Windows::UI::Xaml::UIElement& terminalColumn,
+                                       const winrt::Windows::UI::Xaml::UIElement& sidePanelHost)
+    {
+        if (!oldFocus)
+        {
+            return true;
+        }
+        // The same bounded walk the "+" card's focus checks use (a Hyperlink starts from the control hosting its text).
+        if (terminalColumn && SidePanelLaunchIsUnder(oldFocus, terminalColumn))
+        {
+            return true;
+        }
+        return sidePanelHost && SidePanelLaunchIsUnder(oldFocus, sidePanelHost);
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -1357,6 +1397,14 @@ namespace winrt::TerminalApp::implementation
         //     keyboard focus off the terminal, so a later re-click raises no GotFocus.
         //   * GotFocus (plain bubbling) — covers a keyboard/programmatic return of focus INTO the
         //     terminal (e.g. from the side panel's search box, or the window regaining activation).
+        //     ONLY those (2026-10-24, SidePanelFocusArrivalEndsPeek): focus that a closing menu,
+        //     flyout, dialog, popup or page overlay hands back is XAML (or the overlay) putting focus
+        //     back where it was, not the user touching the terminal. A card's context menu takes focus
+        //     when it opens, so before this every item of it (and its Esc) ended the peek of the very
+        //     card it was opened on, and with ⌖ on scrolled the list back to the focused tab's card. A
+        //     press that only closes a light-dismiss menu is not a terminal click either: XAML gives it
+        //     to no element, so the PointerPressed above never sees it; the next click into the
+        //     terminal ends the peek.
         // Registered ONCE (TabContent outlives the page) and captured weak, so no revoke is needed —
         // the Root()/_tabView AddHandler precedent; a dead page makes the handler a no-op.
         if (const auto content = TabContent())
@@ -1370,10 +1418,72 @@ namespace winrt::TerminalApp::implementation
                     }
                 } }),
                 true /* handledEventsToo — the terminal control marks its presses Handled */);
-            content.GotFocus([weakThis](const IInspectable&, const RoutedEventArgs&) {
-                if (const auto self = weakThis.get())
+            // HOW focus last arrived in the column, for the GotFocus below. GettingFocus is raised synchronously, while
+            // the element losing focus can still be asked where it lives (inside a closing menu, that is the menu's own
+            // item); GotFocus comes later and can no longer tell (AgentLaunchBar's _cwdBoxFocusArrival idiom). Written by
+            // EVERY GettingFocus that reaches the column and consumed by the GotFocus that follows it: true = this
+            // arrival keeps the peek. Shared by the two handlers alone, so the page gains no member; neither handler holds
+            // an element (the column is read through `sender`, the panel through the weak page).
+            auto focusKeepsPeek = std::make_shared<bool>(false);
+            content.AddHandler(
+                UIElement::GettingFocusEvent(),
+                winrt::box_value(winrt::Windows::Foundation::TypedEventHandler<UIElement, GettingFocusEventArgs>{
+                    [weakThis, focusKeepsPeek](const UIElement& sender, const GettingFocusEventArgs& e) {
+                        try
+                        {
+                            UIElement panel{ nullptr }; // stays null with the page gone: then only the column counts
+                            if (const auto self = weakThis.get())
+                            {
+                                panel = self->_sidePanelHost; // the panel's root Grid (built before this handler)
+                            }
+                            *focusKeepsPeek = !SidePanelFocusArrivalEndsPeek(e.OldFocusedElement(), sender, panel);
+                        }
+                        catch (...)
+                        {
+                            // Where focus came from is unknown: follow, the rule before this one (a peek ends and
+                            // nothing is lost). Recorded (Rule #18).
+                            *focusKeepsPeek = false;
+                            ::Agentmaster::AgentLogCaughtException(L"sidepanel terminal column GettingFocus");
+                        }
+                    } }),
+                true /* handledEventsToo — every arrival is read, so a stale value can never apply to the next one */);
+            content.GotFocus([weakThis, focusKeepsPeek](const IInspectable&, const RoutedEventArgs&) {
+                // Consumed whatever happens next, so this arrival's answer never leaks into a later one.
+                const bool keepPeek = std::exchange(*focusKeepsPeek, false);
+                const auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                if (!keepPeek)
                 {
                     self->_SidePanelFollowFocusedTab();
+                    return;
+                }
+                // Focus was handed back (a menu, a dialog, an overlay closing): the selection and the list stay where the
+                // user left them. One hooks.log line when that kept a peek the follow would have ended, so a selection
+                // that "did not follow" says why.
+                try
+                {
+                    if (self->_sidePanelBuilt && self->_startupState == StartupState::Initialized)
+                    {
+                        if (const auto tab = self->_GetFocusedTab())
+                        {
+                            const auto tabId = self->_ClaudeSessionForTab(tab);
+                            if (!tabId.empty() && tabId != self->_sidePanelSelectedId)
+                            {
+                                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                              L"[sidepanel] focus came back to the terminal from a menu, a dialog or an overlay: the selection stays on " +
+                                                                  ::Agentmaster::ShortId(self->_sidePanelSelectedId) + L" (the focused tab shows " +
+                                                                  ::Agentmaster::ShortId(tabId) + L"; a click into the terminal ends the peek)\n");
+                            }
+                        }
+                    }
+                }
+                catch (...)
+                {
+                    // Only the diagnostic line is lost; the selection already stayed. Recorded (Rule #18).
+                    ::Agentmaster::AgentLogCaughtException(L"sidepanel focus handed back to the terminal");
                 }
             });
         }

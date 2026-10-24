@@ -210,7 +210,9 @@ the card list until that tab's card is on screen**. It is a GLOBAL preference,
   even when the panel already had that card selected (you peeked it, scrolled away, then picked its
   tab). And a terminal touch that ENDS a peek (`_SidePanelFollowFocusedTab` moving the selection back
   to your tab — §3) scrolls back to your tab's card; a terminal touch that changes nothing never
-  scrolls, so clicking into the terminal can't snap back a list you scrolled by hand.
+  scrolls, so clicking into the terminal can't snap back a list you scrolled by hand. Focus that a
+  closing menu, dialog or overlay hands back to the terminal is no touch (§3, 2026-10-24): a card
+  menu's action leaves the list where it was.
 - **What never scrolls it.** A list update (updates follow every fleet change and would fight your
   own scrolling), a card click (the card is already where you clicked it), a Manager-side selection (the
   lens push), and the Agent Manager page itself (no tab is selected there).
@@ -946,6 +948,27 @@ when you deliberately peek another.** Two inputs drive the one selection (`_side
   marks its presses Handled) plus its bubbling `GotFocus`. The panel's OWN controls live in a
   SIBLING `ContentArea` column (not under `TabContent`), so touching cards / search / the summary
   never fires these — only touching the terminal does, which is exactly what ends a peek.
+- **Focus that is HANDED BACK is not a touch** (2026-10-24, NOT BUILT yet; the user's report: "Move
+  to Idle/Done" in the 5th card's menu selected the TOP card and jumped the list to the top). A
+  card's context menu takes keyboard focus when it opens, and when it closes WinUI gives focus back
+  to the element that had it, the terminal (`CPopup::Close`: the popup's content leaves the popup
+  layer first, then the previous element gets focus). That return raised the terminal's
+  `GotFocus`, so every item of the menu, and its Esc, ended the peek of the very card it was
+  opened on and, with ⌖ on, scrolled the list to the focused tab's card (§2a). Now the `GotFocus`
+  follows only when focus came from the terminal column itself (another pane), from the side
+  panel's own controls (its filter box), or from nowhere (the window regaining activation).
+  Focus handed back by a closing menu, flyout, dialog or popup, by a page overlay (the transcript
+  reading view of the same menu's **Show Transcript**, the command palette), from the title bar's
+  tab strip, or from an element already gone (a tab switch's previous terminal, whose own funnel
+  moved the selection already) keeps the peek: the selection and the list stay where they were.
+  `TabContent`'s `GettingFocus` (`AddHandler`, `handledEventsToo`; raised synchronously, while
+  the element losing focus can still be asked where it lives) records where focus came from
+  (`SidePanelFocusArrivalEndsPeek`), and the `GotFocus` that follows consumes it. A kept peek
+  that the old rule would have ended writes one hooks.log line: `[sidepanel] focus came back to
+  the terminal from a menu, a dialog or an overlay: the selection stays on <sid8> (the focused
+  tab shows <sid8>; a click into the terminal ends the peek)`. A press that only closes a
+  light-dismiss menu is not a terminal click either: XAML gives it to no element, so the
+  `PointerPressed` never sees it, and the next click into the terminal ends the peek.
 - **PEEK** — clicking a **card** pins the summary to THAT session (drives the Manager lens too,
   "like the board card"); it holds until you re-engage the terminal. Because a non-focusable card
   `Border` doesn't move keyboard focus off the terminal, `PointerPressed` (not `GotFocus`) is the
