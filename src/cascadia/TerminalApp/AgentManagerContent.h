@@ -104,7 +104,7 @@ namespace winrt::TerminalApp::implementation
             TabsAfter = 4, // the tabs RIGHT of it; it and the tabs left of it are kept
             SameFolder = 5, // every live session whose effective work dir is this session's, in EVERY window, this one included
             OtherSameFolder = 6, // the same folder batch minus this session, which is kept
-            IdleTabs = 7, // Deactivate only ("Deactivate All Idle Tabs", 2026-10-24): every tab of the hosting window whose session is Idle (the gray dot), this one included when it is; Close has no twin
+            IdleTabs = 7, // Deactivate only ("Deactivate All Idle Tabs", 2026-10-24): every tab whose session is Idle (the gray dot) in the window the menu was opened in — or in every window, when other windows hold idle tabs too and the page's question is answered so (TerminalPage::_DeactivateIdleTabsAsking); never routed to the session's own window; Close has no twin
             FavoriteAllTabs = 8, // Close only ("★ Favorite & Close All Tabs"): AllTabs with every managed session of that window starred first; Deactivate has no twin. Was 7 until IdleTabs took that number (never stored: the code lives one click long)
         };
         // Agentmaster: the verb of a SessionMenuScope item — what happens to the tabs it reaches. Deactivate PARKS them
@@ -120,13 +120,12 @@ namespace winrt::TerminalApp::implementation
         // it exactly as the WT tab menu grays its own (Tab::_EnableMenuItems): "Tabs to the Left" on the left-most tab,
         // "Tabs to the Right" on the right-most one, "Other Tabs" on a window's only tab. A session hosted in ANOTHER
         // window has no spot here, and its strip items then stay enabled — that window applies them, and a scope with no
-        // tab in it does nothing (its hooks.log line says so). "Deactivate All Idle Tabs" is grayed from it too, when this
-        // window holds no tab that item would park (idleTabs == 0).
+        // tab in it does nothing (its hooks.log line says so). "Deactivate All Idle Tabs" does not read the spot: it acts
+        // in the window the menu is open in, whatever window hosts the session, so its gray-out is SetIdleTabsProvider's.
         struct SessionTabSpot
         {
             uint32_t index{ 0 }; // the tab's index in the strip (0 == the left-most tab)
             uint32_t count{ 0 }; // how many tabs the strip holds, this one included (>= 1 for a spot that exists)
-            uint32_t idleTabs{ 0 }; // how many tabs of this window "Deactivate All Idle Tabs" would park now (TerminalPage::_IdleTabsToDeactivate)
         };
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): install the page's action behind every item of the two
         // submenus EXCEPT Close's two folder items, which keep the folder close this content already confirms and
@@ -145,6 +144,15 @@ namespace winrt::TerminalApp::implementation
         //              enabled). Unwired => the same. Replaces any previous provider.
         // Returns nothing; throws nothing (a std::function move).
         void SetSessionTabSpotProvider(std::function<std::optional<SessionTabSpot>(const std::wstring&)> provider);
+        // Agentmaster (session menu "Deactivate ▸ Deactivate All Idle Tabs", 2026-10-24): install the page's answer to
+        // "would that item park anything?" — read each time a session menu builds its Deactivate ▸, to gray the item like
+        // the tab menu grays its own (TerminalPage.cpp's tab-flyout Opening handler).
+        //   provider — () -> true when at least one tab in THIS window or another one would park now (TerminalPage::
+        //              _IdleTabsToDeactivate / _IdleSessionsElsewhere: the lists the click acts on and offers). A throw is
+        //              caught and logged by the menu, which then leaves the item enabled (the click reads the states again
+        //              and parks nothing when there is nothing). Unwired => enabled. Replaces any previous provider.
+        // Returns nothing; throws nothing (a std::function move).
+        void SetIdleTabsProvider(std::function<bool()> provider);
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
@@ -1052,6 +1060,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _closeFolderHandler; // Agentmaster ("Close ▸ Of Same Folder" / "Other of Same Folder"): (folder, excludeId) -> the page closes every live managed session in that folder (cross-window) SKIPPING excludeId, the content having already shown the one confirm
         std::function<void(winrt::hstring, SessionMenuVerb, SessionMenuScope)> _sessionMenuScopeHandler; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId, verb, scope) -> the page runs that item as the session's own tab menu would, in the window hosting the tab (SetSessionMenuScopeHandler); null until wired — the items then do nothing
         std::function<std::optional<SessionTabSpot>(const std::wstring&)> _sessionTabSpotProvider; // Agentmaster (session menu "Deactivate ▸" / "Close ▸"): (sessionId) -> where its tab sits in THIS window's strip, nullopt when another window hosts it — grays the strip items like the tab menu (SetSessionTabSpotProvider); null => nothing grayed
+        std::function<bool()> _idleTabsProvider; // Agentmaster (session menu "Deactivate All Idle Tabs"): () -> would that item park a tab in this window or another one now — grays the item like the tab menu (SetIdleTabsProvider); null => enabled
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)

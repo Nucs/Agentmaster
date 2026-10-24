@@ -2110,22 +2110,87 @@ namespace winrt::TerminalApp::implementation
         // out, and its one-shot first-layout init starts the resume — the same wake every restored tab
         // gets; "Activate Tab" / "Activate All Tabs (N)" initialize it in place (InitializeWithSize).
         // All UI thread.
-        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: one of Tab's kDeactivateScope* codes — this tab · other tabs · all tabs · tabs to the left · tabs to the right (all five: this window) · of same folder · other of same folder (both: EVERY window — the tabs this window hosts are parked here, the rest are fanned out to their hosting window, DeactivateSessionInOtherWindows) · the window's Idle tabs ("Deactivate All Idle Tabs": exactly _IdleTabsToDeactivate, read at the click). An unknown code parks nothing and is logged. When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
+        void _DeactivateTabsFromMenu(const winrt::TerminalApp::Tab& anchorTab, int32_t scope); // scope: one of Tab's kDeactivateScope* codes — this tab · other tabs · all tabs · tabs to the left · tabs to the right (all five: this window) · of same folder · other of same folder (both: EVERY window — the tabs this window hosts are parked here, the rest are fanned out to their hosting window, DeactivateSessionInOtherWindows) · the window's Idle tabs ("Deactivate All Idle Tabs": exactly _IdleTabsToDeactivate, read at the click; the menus reach it through _DeactivateIdleTabsAsking, which asks "This window / All windows" first when other windows hold idle tabs too — this dispatcher asks nothing). An unknown code parks nothing and is logged. When the FOCUSED tab is among them, the Agent Manager page is shown FIRST, so the fresh control is never laid out on screen (laying it out would start it at once). The right-clicked tab stays in view (_KeepTabHeaderInView) — the 2026-10-01 strip jump
         bool _DeactivateSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window folder-deactivate): park the session's tab IN THIS WINDOW, the receiving half of the park-session sink. Runs the whole single-tab path (_DeactivateTabsFromMenu, this-tab scope), so THIS window's focused-tab rule applies: a session on screen here sends this window to its Agent Manager page first. Returns false when this window doesn't host the session's tab (the fan-out simply misses here). No confirmation, and a turn in progress is cut off
         // Agentmaster (deactivate — "Deactivate All Idle Tabs", 2026-10-24): the tabs of THIS window that the idle scope
-        // parks right now, in strip order — the ONE list behind the click (_DeactivateTabsFromMenu's idle scope) AND both
-        // menus' gray-out (the tab menu's flyout-open, the session menu's SessionTabSpot::idleTabs), so an enabled item
-        // always has something to park when the menu opens. A tab qualifies when its session is live, in the Idle state
-        // (the gray dot — SessionState::Idle; Waiting-for-you, Running, Needs-approval, Error and Done keep running, so no
-        // turn is cut off and no unread answer or question is hidden), AND _ResolveDeactivateTarget accepts it: ours (not
-        // adopted), running (not already dormant), not mid-delivery. States come from one lean registry read
-        // (HeadlinesOf), and only the idle tabs pay for the full resolve.
+        // parks right now, in strip order — the ONE list behind the click (_DeactivateTabsFromMenu's idle scope), the
+        // prompt's "This window (N)" (_DeactivateIdleTabsAsking) AND both menus' gray-out (the tab menu's flyout-open, the
+        // session menu's idle provider — AgentManagerContent::SetIdleTabsProvider), so an enabled item always has something
+        // to park when the menu opens. A tab qualifies when its session is live, in the Idle state (the gray dot —
+        // SessionState::Idle; Waiting-for-you, Running, Needs-approval, Error and Done keep running, so no turn is cut off
+        // and no unread answer or question is hidden), AND _ResolveDeactivateTarget accepts it: ours (not adopted), running
+        // (not already dormant), not mid-delivery. States come from one lean registry read (HeadlinesOf), which also drops
+        // a dormant or adopted session (SessionHeadline::started / external), so only the idle RUNNING tabs pay for the full
+        // resolve — a window of restored tabs, Idle and dormant by the hundred, costs no whole-record read per tab.
         // ⚠ It reads the states NOW: the menu's gray-out and the click each call it, and a session that changed between
-        // the two is judged by its state at the click.
+        // the two is judged by its state at the click. A tab whose terminal started in the last ~2.5 s can still read
+        // dormant in the registry (SessionInfo::started follows the liveness tick) and is then left running.
         // Returns the tabs (empty when none qualifies). Throws std::bad_alloc, and what the tab-vector calls throw on a
         // torn-down tree (winrt::hresult_error); never throws for a single tab it cannot resolve (that tab is left out).
         // UI thread only.
         std::vector<winrt::TerminalApp::Tab> _IdleTabsToDeactivate();
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs" in ALL windows, 2026-10-24): the sessions that OTHER windows
+        // would park for that item — the prompt's "All windows" count beyond this window, the list the All-windows answer
+        // hands out, and the menus' gray-out when this window itself holds no idle tab. From the registry alone (a park
+        // needs the hosting window's own controls, which this window cannot see): a LIVE session in the Idle state whose
+        // terminal STARTED (not dormant), that is not ADOPTED, that has a hosting terminal (a tab token), and whose tab
+        // this window does not host. Two lean reads (LiveTabBindings, HeadlinesOf), never a whole record.
+        // ⚠ An estimate of what each hosting window will do: that window judges every session again when the request
+        // arrives (_DeactivateIdleSessionLocal: still idle? then the park's own checks, which also refuse a tab whose
+        // prompt delivery or draft swap is in flight — a fact this window cannot read), so a count can be one or two
+        // high, never a reason to park a busy session.
+        // Returns the session ids in registry order (empty when none, or before the engine is up). Throws std::bad_alloc.
+        // UI thread only (it reads _claudeTabs).
+        std::vector<std::wstring> _IdleSessionsElsewhere();
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs", the user's "Add prompt asking if to deactivate This window
+        // or All windows", 2026-10-24): what BOTH menus' item runs — the tab menu's (TerminalPage.cpp's
+        // DeactivateTabsRequested handler, scope 7) and the session menu's (_RunSessionMenuScope, which keeps the idle scope
+        // in the window the user clicked in instead of handing it to the session's own window: "This window" must be the
+        // one the dialog shows in). It counts this window's idle tabs (_IdleTabsToDeactivate) and the other windows'
+        // (_IdleSessionsElsewhere), then:
+        //   · nothing idle anywhere — logs and does nothing (the states moved after the menu opened);
+        //   · no OTHER window holds one — parks this window's at once, NO prompt: the "Activate All Tabs" rule (ask only
+        //     when the answer can differ), so one window, or idle tabs here only, works as before the prompt existed;
+        //   · otherwise — asks: "This window (N)" (grayed at N == 0) / "All windows (M)" / Cancel, default "This window"
+        //     (Cancel when this window holds none: the windows the user is not looking at are reached only by a deliberate
+        //     click). This window parks its own (_DeactivateIdleTabsHere); All
+        //     windows also hands every other window's idle session to its own window (RequestSessionActionInWindows,
+        //     kDeactivateIdleSessionAction), each read again at the answer. Cancel, Esc, or a dialog put away by a newer
+        //     one (the presenter shows one at a time and answers None for the hidden one) parks nothing.
+        //     Without a dialog presenter (a window mid-teardown) it parks this window's, the item's behavior before the
+        //     prompt, and logs it.
+        // Nothing asks beyond that one question — a park ends no conversation (each tab resumes when focused or
+        // activated), the rule of every Deactivate scope.
+        //   anchorTab — the right-clicked tab, or the session's tab for the session menu; null or a tab of another window
+        //               is fine (the scope only needs a tab of THIS window to anchor its batch and keep in view:
+        //               _DeactivateIdleTabsHere picks one).
+        //   origin    — where it came from, for the log ("tab menu", "session menu").
+        // Returns at the first co_await (fire-and-forget). Logs [nav] deactivate-idle-ask … / -answer … plus the batch's
+        // own deactivate-begin / -done pair. A safe_void_coroutine: an exception is logged by its terminate-net, never
+        // fatal. UI thread only.
+        safe_void_coroutine _DeactivateIdleTabsAsking(winrt::TerminalApp::Tab anchorTab, std::wstring origin);
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs"): park THIS window's idle tabs now — the idle scope of
+        // _DeactivateTabsFromMenu (its list read at this moment, its focused-tab rule, its begin / done log pair), anchored
+        // on `anchorTab` when it is in this window's strip, else on the focused tab, else on the first tab.
+        //   anchorTab — the preferred anchor (may be null, or a tab of another window — then it is not used).
+        // Returns nothing; a window with no tab at all logs one line and parks nothing. Throws what _DeactivateTabsFromMenu
+        // throws (winrt::hresult_error on a torn-down tree, std::bad_alloc). UI thread only.
+        void _DeactivateIdleTabsHere(const winrt::TerminalApp::Tab& anchorTab);
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs" in ALL windows): the receiving half — another window's
+        // "All windows" answer named `sessionId`, and its tab lives HERE (_RemoteSessionAction,
+        // kDeactivateIdleSessionAction). The session is judged again first: still live and Idle (one lean read), or it
+        // keeps running and the skip is logged — the answer was given seconds ago, and a session that started a turn since
+        // must not be cut off by it. Then the single-tab park path (_DeactivateTabsFromMenu, this-tab scope), so this
+        // window's own focused-tab rule and the park's own checks apply. Each session arrives as its own dispatcher item.
+        //   sessionId — the session to park.
+        // Returns false when this window does not host the session's tab (nothing touched); true otherwise, parked or not
+        // (the log says which). Throws what _DeactivateTabsFromMenu throws; the session-action sink contains it. UI thread
+        // only.
+        bool _DeactivateIdleSessionLocal(const std::wstring& sessionId);
+        // Agentmaster (deactivate — "Deactivate All Idle Tabs" in ALL windows): the session-action word that carries one
+        // idle session to the window hosting its tab (_RemoteSessionAction -> _DeactivateIdleSessionLocal); no argument.
+        // Distinct from every Telegram action word and from the session menu's two, so nothing else can send it by accident.
+        static constexpr const wchar_t* kDeactivateIdleSessionAction{ L"deactivate-idle-session" };
         // Agentmaster (session menu "Deactivate ▸" / "Close ▸" — the board card / tree row / side-panel card twins of the WT
         // tab menu's two submenus, AgentManagerContent::_MakeSessionScopeSubmenu): run ONE item of them for `sessionId`
         // exactly as that session's own tab menu would, in the window that HOSTS its tab — which need not be this one (the
@@ -2135,9 +2200,12 @@ namespace winrt::TerminalApp::implementation
         // as the argument), and that window runs the same _RunSessionMenuScopeHere. One case keeps the old "This Session"
         // cleanup instead: Close Tab of a session that no window can still host — its claude has exited and it is not a
         // dormant tab — archives the record in place (_ArchiveClaudeSession's dead branch), because no window would answer.
+        // And one scope is never routed: "Deactivate All Idle Tabs" reaches every idle tab, not the session's neighbors, so
+        // it runs in THIS window — the one the user clicked in — through _DeactivateIdleTabsAsking, which asks "This window
+        // / All windows" when other windows hold idle tabs too (2026-10-24; c6e501bb0 had sent it to the session's window).
         //   sessionId — the menu's session; empty is a no-op.
         //   close     — false: "Deactivate ▸" (park; no confirm by design, a turn in flight is cut off); true: "Close ▸".
-        //   scope     — Tab::kDeactivateScope* (0..7, the tab menu's own codes; 7 = the window's Idle tabs, Deactivate only)
+        //   scope     — Tab::kDeactivateScope* (0..7, the tab menu's own codes; 7 = the Idle tabs, Deactivate only)
         //               or kSessionMenuScopeFavoriteAllTabs (Close only); an unknown code, FavoriteAllTabs with Deactivate
         //               or the idle scope with Close does nothing but log.
         // Returns nothing: the outcome is in hooks.log ([nav] session-menu …, then the tab menu's own begin/done lines).
@@ -2200,8 +2268,11 @@ namespace winrt::TerminalApp::implementation
         // window-hosted actions. Runs `action` on the session's tab when THIS window hosts it ("start" = start a
         // dormant tab's claude in place; "screen" = answer the terminal's visible text through `reply`; "markunread";
         // "rename" = `arg` is the new title, through _RenameClaudeSession (Rule #11); "refresh-tags" /
-        // "refresh-favorite" = repaint after a remote store edit). Returns false, calling nothing, when this window
-        // does not host the session (the fan-out's other windows). UI thread; never throws (Rule #18 inside).
+        // "refresh-favorite" = repaint after a remote store edit). Also two non-bot words from other windows: the session
+        // menu's (kSessionMenuDeactivateAction / kSessionMenuCloseAction, -> _RunSessionMenuScopeHere) and
+        // kDeactivateIdleSessionAction ("Deactivate All Idle Tabs" answered "All windows", -> _DeactivateIdleSessionLocal).
+        // Returns false, calling nothing, when this window does not host the session (the fan-out's other windows). UI
+        // thread; never throws (Rule #18 inside).
         bool _RemoteSessionAction(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, const std::function<void(std::wstring)>& reply);
         /// <summary>
         /// Agentmaster (MESSAGING.md §5.4 / D27 / §21.23): open a session the Telegram bot asked for — resume / fork / a new

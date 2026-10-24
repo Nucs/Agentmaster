@@ -104,10 +104,12 @@ click back into the terminal; double-click jumps to a card's tab.
 - **E6 A session whose agent exited and that no window hosts** → Close ▸ Close Tab archives it in place
   (`… archived in place`); it leaves the list and stays in Sessions.
 - **E7 Deactivate All Idle Tabs on a card** (2026-10-24, NOT BUILT) → the tab menu's item (flows/07 TAB-02
-  phase 7) run from the card: the Idle sessions of the card's window park, every other one keeps running;
-  grayed while that window holds no Idle session to park; a card of ANOTHER window's session leaves it
-  enabled and that window parks its own Idle tabs. *Check:* [LOG] `[nav] session-menu deactivate idle <B8>`,
-  then `[nav] deactivate-done scope=idle parked=N`.
+  phase 7) run from the card, in the window whose side panel or page the card is on — whichever window hosts the
+  card's session (a card of ANOTHER window's session no longer hands the item to that window). Its Idle sessions
+  park, every other one keeps running; when other windows hold Idle tabs too, it asks first in this window
+  ("Deactivate idle tabs": This window (N) · All windows (M) · Cancel — flows/07 TAB-02 phase 8); grayed while no
+  window holds an Idle tab to park. *Check:* [LOG] `[nav] session-menu deactivate idle <B8>`, then
+  `[nav] deactivate-idle-ask from=session menu here=N elsewhere=M` and `[nav] deactivate-done scope=idle parked=N`.
 - **E8 The card menu closed with Esc, by any other item (Copy, Mark Unread, Favorite), or by a click outside it**
   (phase 8, NOT BUILT) → the same: B stays selected and the list stays. A click that only closed the menu (XAML
   gives it to no element) does not end the peek; the next click into the terminal does.

@@ -83,17 +83,35 @@ queue and runner mode — exactly a window-restored tab; entering or activating 
 6. **All Tabs** → every managed tab of THIS window parked; window 2 untouched.
 7. **Deactivate All Idle Tabs** (2026-10-24, NOT BUILT; Deactivate ▸'s last item, here and in the card / row
    menu — flows/02 SP-02 E7; test `test_deactivate_all_idle_tabs`, marked `needs_fix("TAB-F1")` until a release
-   holds it) → with T1 and T3 Idle (launched with no prompt) and T2 Waiting for you: from any tab of window 1,
-   T1 and T3 park and T2 keeps running; window 2 untouched. Running, Needs-approval, Error and Done sessions
-   keep running too. *Check:* [LOG] `[nav] deactivate-done scope=idle parked=2 skipped=0`.
+   holds it) → with T1 and T3 Idle (launched with no prompt), T2 Waiting for you and no Idle tab in any other
+   window: from any tab of window 1, T1 and T3 park at once — nothing asks, since "All windows" would park the
+   same tabs — and T2 keeps running; window 2 untouched. Running, Needs-approval, Error and Done sessions keep
+   running too. *Check:* [LOG] `[nav] deactivate-idle-answer this-window (no other window holds an idle tab;
+   nothing asked)`, then `[nav] deactivate-done scope=idle parked=2 skipped=0`.
+8. **This window or All windows** (2026-10-24, NOT BUILT; the user's "Add prompt asking if to deactivate This
+   window or All windows"; test `test_deactivate_idle_tabs_asks_which_windows`, `needs_fix("TAB-F1")`) → window 1
+   holds T1, T2 (Idle) and T4 (Waiting for you), window 2 holds T3 (Idle). From T4's menu the item asks first:
+   a dialog **Deactivate idle tabs** — "This window: 2 • All windows: 3." — with **This window (2)** (the
+   default) · **All windows (3)** · **Cancel**. *Cancel* parks nothing. *This window* parks T1 and T2; T3 and T4
+   keep running. Asked again (window 1 now holds no Idle tab): **This window (0)** is grayed and Cancel is the
+   default; *All windows (1)* parks T3 in window 2 (its focused tab: window 2 shows its Agent Manager page
+   first), and T4 keeps running. *Check:* [LOG] `[nav] deactivate-idle-ask from=tab menu here=2 elsewhere=1`,
+   `[nav] deactivate-idle-answer cancelled …` / `… this-window` / `… all-windows (1 idle session(s) handed to the
+   windows that host them)`; window 2 logs `[nav] deactivate-remote <T3> (an idle-tabs deactivate started in
+   another window)` and its own `deactivate-begin scope=this` / `deactivate-done … parked=1`.
 
 **Edge cases**
 - **E1 Gates:** Tabs to the Left grayed on the left-most tab, Tabs to the Right on the right-most, Other Tabs
   on a window's only tab; an enabled item can still park nothing (`parked=0`). Deactivate All Idle Tabs is
-  grayed while the window holds no Idle session it would park (phase 7 leaves none: T1 and T3 are dormant).
+  grayed while NO window holds an Idle session it would park (phase 8 leaves none: T1, T2 and T3 are dormant);
+  with Idle tabs in other windows only, it stays enabled and asks (phase 8's second question).
 - **E2 A running turn** in a folder-scoped tab of window 2 → cut off without asking (the tooltip warns "in
   EVERY window, without asking first").
 - **E3 Shell tabs in scope** → untouched (only managed sessions park).
+- **E4 A session that is busy again when the answer reaches its window** (phase 8, All windows) → it keeps
+  running; that window logs `[deactivate] <sid8> left running - another window's "Deactivate All Idle Tabs" (all
+  windows) named it, but it is no longer idle (<state>)`. The prompt's counts are read at the click (the other
+  windows' from the registry: Idle, started, not adopted), so a window may then park one fewer than it said.
 
 ---
 

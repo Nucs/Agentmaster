@@ -2108,12 +2108,27 @@ namespace winrt::TerminalApp::implementation
             }
             addScopeItem(L"All Tabs", L"Deactivate EVERY managed session tab in the window that hosts this session's tab \x2014 as if the app had just opened: all tabs parked dormant, each resuming when focused or activated. That window lands on its Agent Manager.", SessionMenuScope::AllTabs, true);
             // Deactivate All Idle Tabs (2026-10-24, the user's "Add to all menus 'Deactivate All Idle Tabs' under
-            // Deactivate"; the tab menu's twin, Tab::_AppendDeactivateMenuItems): every tab of the hosting window whose
-            // session is Idle — the window's sessions nobody is using, while a running turn, an unread answer or an open
-            // question keeps its tab running. Grayed, like the tab menu's, when this window holds no tab it would park
-            // (spot->idleTabs, the page's own list); for another window's session (no spot) it stays enabled and that
-            // window decides.
-            addScopeItem(L"Deactivate All Idle Tabs", L"Deactivate every session tab in the window that hosts this session's tab whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. Nothing asks first: each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::IdleTabs, !spot || spot->idleTabs > 0);
+            // Deactivate"; the tab menu's twin, Tab::_AppendDeactivateMenuItems): every tab whose session is Idle — the
+            // sessions nobody is using, while a running turn, an unread answer or an open question keeps its tab running.
+            // It acts in the window this menu is open in, whichever window hosts this session (the page never hands it to
+            // the session's window), and when other windows hold idle tabs too the page first asks "This window / All
+            // windows" (the user's "Add prompt asking if to deactivate This window or All windows", the same day). Grayed,
+            // like the tab menu's, while no window holds a tab it would park (_idleTabsProvider, the page's two lists); a
+            // provider that throws is logged and leaves it enabled — the click reads the states again.
+            bool idleTabsSomewhere = true;
+            if (_idleTabsProvider)
+            {
+                try
+                {
+                    idleTabsSomewhere = _idleTabsProvider();
+                }
+                catch (...)
+                {
+                    AgentLogCaughtException(L"session menu: the idle-tabs provider");
+                    idleTabsSomewhere = true;
+                }
+            }
+            addScopeItem(L"Deactivate All Idle Tabs", L"Deactivate every session tab whose session is Idle (the gray dot) \x2014 sessions that are running, waiting for you, need approval, show an error or are done keep running. When other windows hold idle tabs too, you are asked whether to park this window's or every window's. Each parked tab resumes its conversation when you focus or activate it.", SessionMenuScope::IdleTabs, idleTabsSomewhere);
             return sub;
         }
 

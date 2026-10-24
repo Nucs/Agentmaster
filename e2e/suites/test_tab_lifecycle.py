@@ -381,6 +381,9 @@ def test_deactivate_scopes(am, mock):
 DEACTIVATE_IDLE = "Deactivate All Idle Tabs"
 """Deactivate ▸'s last item since 2026-10-24 (test_tab_menu.py has the same constant for the submenu's list)."""
 
+IDLE_QUESTION = "Deactivate idle tabs"
+"""The title of the question DEACTIVATE_IDLE asks while other windows hold idle tabs too (2026-10-24)."""
+
 
 @pytest.mark.p1
 @pytest.mark.flow("TAB-02")
@@ -408,15 +411,100 @@ def test_deactivate_all_idle_tabs(am, mock):
     assert sub.enabled(DEACTIVATE_IDLE)
     Menu.dismiss_all(am)
     # 7. From t2's menu (t2 itself is not Idle): t1 and t3 park, t2 keeps running. t3 is the focused tab, so the
-    #    window shows its Agent Manager page before t3's control is swapped (the scope's focused-tab rule).
+    #    window shows its Agent Manager page before t3's control is swapped (the scope's focused-tab rule). One
+    #    window only: "All windows" would park the same tabs, so nothing asks (phase 8 has the question).
     mark = am.profile.hooks.mark()
     w.tabs.deactivate("t2", DEACTIVATE_IDLE)
     am.profile.hooks.wait(r"\[nav\] deactivate-done scope=idle parked=2 skipped=0", since=mark, timeout_s=20)
+    am.profile.hooks.wait(r"\[nav\] deactivate-idle-answer this-window \(no other window holds an idle tab; nothing asked\)",
+                          since=mark)
+    assert Dialog.find(am, title=IDLE_QUESTION) is None
     s["t1"].wait_parked(since=mark)
     s["t3"].wait_parked(since=mark)
     hold_true(lambda: s["t2"].running(), 2.0, what="t2 (Waiting for you) still running after the idle park")
     # E1: no Idle session is left that a park would take (t1 and t3 are dormant now), so the item is grayed.
     sub = w.tabs.context_menu("t2").submenu("Deactivate")
+    assert not sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TAB-02")
+@pytest.mark.needs_fix("TAB-F1")
+def test_deactivate_idle_tabs_asks_which_windows(am, mock):
+    """TAB-02 phase 8 and E1 (2026-10-24, the user's "Add prompt asking if to deactivate This window or All
+    windows"): while another window holds Idle tabs too, "Deactivate All Idle Tabs" asks first — a dialog "Deactivate
+    idle tabs" with This window (N) · All windows (M) · Cancel. Window 1 holds t1 and t2 (Idle, launched with no
+    prompt) and t4 (Waiting for you); window 2 holds t3 (Idle). Cancel parks nothing; This window parks t1 and t2
+    only; asked again with no Idle tab left in window 1, "This window (0)" is grayed and All windows parks window 2's
+    t3 (its only tab: window 2 shows its Agent Manager page first); then no window holds one and the item is grayed.
+    t4 keeps running throughout. 0.8.0 has neither the item nor the question, hence needs_fix("TAB-F1").
+
+    Args:
+        am: The app.
+        mock: The scripted model (t4's first turn).
+    """
+    s = {"t1": am.launch("t1", prompt=None), "t2": am.launch("t2", prompt=None), "t3": am.launch("t3", prompt=None),
+         "t4": am.launch("t4")}
+    w1 = am.window
+    w2 = w1.tabs.move_to_new_window("t3")
+    w1.tabs.wait_gone("t3")
+    for title in ("t1", "t2", "t3"):
+        s[title].wait_state("Idle", timeout_s=30)
+    s["t4"].wait_state("WaitingForInput", timeout_s=30)
+    for ses in s.values():
+        ses.wait_running()  # every claude runs first, so "parked" below means the question's answer parked it
+
+    def ask(buttons: list) -> Dialog:
+        """Choose the item from t4's tab menu (t4 is not Idle) and return the question it asks.
+
+        Args:
+            buttons: The button texts the dialog must show, in order (primary, secondary, close).
+        Returns:
+            The open Dialog.
+        Raises:
+            WaitTimeout: When no question appeared.
+            AssertionError: When its buttons differ.
+        """
+        w1.tabs.deactivate("t4", DEACTIVATE_IDLE)
+        dlg = Dialog.wait(am, title=IDLE_QUESTION, timeout_s=10)
+        assert dlg.buttons() == buttons, dlg.buttons()
+        return dlg
+
+    # 8a. Cancel parks nothing; the counts read "This window: 2 • All windows: 3.".
+    mark = am.profile.hooks.mark()
+    dlg = ask(["This window (2)", "All windows (3)", "Cancel"])
+    assert "This window: 2" in dlg.text() and "All windows: 3" in dlg.text(), dlg.text()
+    am.profile.hooks.wait(r"\[nav\] deactivate-idle-ask from=tab menu here=2 elsewhere=1", since=mark)
+    dlg.press("Cancel")
+    am.profile.hooks.wait(r"\[nav\] deactivate-idle-answer cancelled", since=mark)
+    hold_true(lambda: all(ses.running() for ses in s.values()), 2.0, what="every session still running after Cancel")
+    # 8b. This window: t1 and t2 park; window 2's t3 and the waiting t4 keep running.
+    mark = am.profile.hooks.mark()
+    ask(["This window (2)", "All windows (3)", "Cancel"]).press("This window (2)")
+    am.profile.hooks.wait(r"\[nav\] deactivate-idle-answer this-window", since=mark)
+    am.profile.hooks.wait(r"\[nav\] deactivate-done scope=idle parked=2 skipped=0", since=mark, timeout_s=20)
+    s["t1"].wait_parked(since=mark)
+    s["t2"].wait_parked(since=mark)
+    hold_true(lambda: s["t3"].running() and s["t4"].running(), 2.0, what="t3 (window 2) and t4 still running")
+    # 8c / E1: window 1 holds no Idle tab now but window 2 does, so the item stays enabled and asks again, with
+    #    "This window (0)" grayed; All windows hands t3 to window 2, which parks it.
+    sub = w1.tabs.context_menu("t4").submenu("Deactivate")
+    assert sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+    mark = am.profile.hooks.mark()
+    dlg = ask(["This window (0)", "All windows (1)", "Cancel"])
+    this_window = dlg.element().find(role="button", name="This window (0)")
+    assert this_window is not None and not this_window.enabled
+    dlg.press("All windows (1)")
+    am.profile.hooks.wait(r"\[nav\] deactivate-idle-answer all-windows \(1 idle session", since=mark)
+    am.profile.hooks.wait(rf"\[nav\] deactivate-remote {s['t3'].short} \(an idle-tabs deactivate started in another window\)",
+                          since=mark, timeout_s=20)
+    s["t3"].wait_parked(since=mark)
+    w2.manager.wait_showing()
+    hold_true(lambda: s["t4"].running(), 2.0, what="t4 (Waiting for you) still running")
+    # E1: no window holds an Idle tab a park would take now: the item is grayed.
+    sub = w1.tabs.context_menu("t4").submenu("Deactivate")
     assert not sub.enabled(DEACTIVATE_IDLE)
     Menu.dismiss_all(am)
 
