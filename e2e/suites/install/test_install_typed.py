@@ -70,38 +70,6 @@ def _typed_file_run(lane: install.Lane, *args: str) -> str:
     return " ".join(["powershell -NoProfile -ExecutionPolicy Bypass -File", f"'{lane.installer}'", *args])
 
 
-def _wait_screen(pid: int, pattern: str, timeout_s: float) -> str:
-    """Wait until a console's screen shows a regex.
-
-    The installer's lines are longer than a 120-column console (its "Agentmaster is running from …" line is ~190
-    characters), so they wrap; the screen is matched — and returned — with its whitespace collapsed to single spaces,
-    which reads a wrapped line whole wherever the wrap fell (console_text).
-
-    Args:
-        pid: A process of the console.
-        pattern: The regex (single spaces between words).
-        timeout_s: How long.
-    Returns:
-        The screen's text at that moment, whitespace collapsed.
-    Raises:
-        WaitTimeout: When it never showed (the message holds the screen's last rows).
-    """
-    seen = {"text": ""}
-
-    def shows() -> bool:
-        """Whether the screen shows the pattern now.
-
-        Returns:
-            True when it does.
-        """
-        seen["text"] = " ".join(install.console_text(pid).split())
-        return re.search(pattern, seen["text"]) is not None
-
-    wait_until(shows, timeout_s, interval_s=1.0, what=f"{pattern!r} on the console of pid {pid}",
-               describe=lambda: seen["text"][-1200:])
-    return seen["text"]
-
-
 def _tab_shell(app: install.AppProcess, timeout_s: float = 120.0) -> int:
     """The shell of the app's first tab, at its prompt.
 
@@ -196,15 +164,15 @@ def _through_a_tab(app: install.AppProcess, command: str, closes: str) -> tuple[
     shell = _tab_shell(app)
     typed = time.time()
     install.console_type(shell, command + "\r")
-    tab = _wait_screen(shell, r"its record: \S+\.log", 180)
+    tab = install.wait_console_text(shell, r"its record: \S+\.log", 180)
     assert "the step goes on in a new window" in tab, f"the tab does not say the step goes on in a new window:\n{tab[-1500:]}"
     record = Path(re.search(r"its record: (\S+\.log)", tab).group(1))
     run = _continued_run(typed)
-    asked = _wait_screen(run, r"Go on\? \[Y/n\]", 300)
+    asked = install.wait_console_text(run, r"Go on\? \[Y/n\]", 300)
     assert closes in asked, f"the continued run does not say {closes!r} before it asks:\n{asked[-1500:]}"
     answered = time.time()
     install.console_type(run, "\r")
-    done = _wait_screen(run, r"Press Enter to close this window", 600)
+    done = install.wait_console_text(run, r"Press Enter to close this window", 600)
     install.console_type(run, "\r")
     wait_until(lambda: not psutil.pid_exists(run), 60, what="the continued run's window to close after Enter")
     return answered, done, record
@@ -238,7 +206,7 @@ def test_the_installer_answered_in_console_windows(lane, kit, machine):
     # IS-05: the question in the window; Enter takes [1] Just for you.
     window = install.start_in_console(*_powershell_file(lane, "-ZipPath", str(kit.zip("0.8.1.0"))))
     try:
-        asked = _wait_screen(window.pid, r"Choice \[1/2/C\] \(Enter = 1\)", 180)
+        asked = install.wait_console_text(window.pid, r"Choice \[1/2/C\] \(Enter = 1\)", 180)
         assert "Where should Agentmaster be installed?" in asked and "[1] Just for you (recommended" in asked, asked[-1500:]
         install.console_type(window.pid, "\r")
         window.wait(timeout=600)
@@ -256,7 +224,7 @@ def test_the_installer_answered_in_console_windows(lane, kit, machine):
     app = install.wait_app(dest, timeout_s=120, newer_than=started)
     window = install.start_in_console(*_powershell_file(lane, "-Scope", "User", "-ZipPath", str(kit.zip("0.8.2.0"))))
     try:
-        asked = _wait_screen(window.pid, r"Go on\? \[Y/n\]", 300)
+        asked = install.wait_console_text(window.pid, r"Go on\? \[Y/n\]", 300)
         assert "It closes for the upgrade and starts again when the upgrade is done" in asked, asked[-1500:]
         answered = time.time()
         install.console_type(window.pid, "\r")
@@ -392,12 +360,12 @@ def test_ctrl_c_half_way_through_an_upgrade(lane, kit, machine):
     try:
         # The console is handed to the default terminal a moment after the start: the Ctrl+C is armed once the
         # installer's first step shows (long before its copy: the zip's extraction alone takes seconds).
-        _wait_screen(window.pid, r"==> ", 120)
+        install.wait_console_text(window.pid, r"==> ", 120)
         ctrl = install.console_ctrl_c_when(window.pid, dest, PADDING, timeout_s=600)
         _, err = ctrl.communicate(timeout=660)
         assert ctrl.returncode == 0, (f"no Ctrl+C was sent (helper exit {ctrl.returncode}; 5 = {PADDING} never appeared "
                                       f"in {dest}): {err.decode('utf-8', 'replace')[-400:]}")
-        screen = _wait_screen(window.pid, r"the install was stopped half way; putting the previous version back.*"
+        screen = install.wait_console_text(window.pid, r"the install was stopped half way; putting the previous version back.*"
                                           r"PS [A-Za-z]:\\\S*>", 300)
         assert "the previous version is back in place" in screen, f"the run does not say the version is back:\n{screen[-1500:]}"
     finally:

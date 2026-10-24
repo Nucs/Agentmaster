@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from amdriver import install
+from amdriver import fakegithub, install
 from amdriver.app import E2E_ROOT, _safe_name
 
 HERE = Path(__file__).resolve().parent
@@ -171,3 +171,42 @@ def machine(request, lane):
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "leftovers.txt").write_text("ConPTY hosts still alive after the drain (then killed):\n"
                                                + "\n".join(leftovers) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def fake_github(request, lane, machine):
+    """The `net` machine's fake GitHub, started for one test (amdriver.fakegithub): api.github.com, github.com and
+    raw.githubusercontent.com answered from 127.0.0.1:443 in this guest, its certificates made here in memory, its CA
+    trusted here for the test only.
+
+    After the test: a failed one's evidence gets the fake's request log, state and server log; then the server ends and
+    the machine changes are undone. A failed undo fails the test: under the "clean" isolation the next test would meet
+    the leftover CA or hosts block.
+
+    Args:
+        request: pytest's request (the test's outcome, its name).
+        lane: The lane (its PowerShell 7 makes the certificates).
+        machine: The clean machine (the fake starts after the check).
+    Yields:
+        The started FakeGitHub.
+    Raises:
+        RuntimeError: When the fake cannot start (after what it did was undone).
+        pytest.fail: When the undo after the test left something behind.
+    """
+    fake = fakegithub.FakeGitHub(E2E_ROOT / "w" / "fakegithub", lane.pwsh)
+    try:
+        fake.start()
+    except Exception as e:
+        problems = fake.stop()  # a half-done start can have trusted the CA or written the hosts block: take them back
+        raise RuntimeError(f"the fake GitHub did not start: {e}" + (f" (and the undo: {'; '.join(problems)})" if problems else "")) from e
+    yield fake
+    failed = any(getattr(getattr(request.node, f"rep_{when}", None), "failed", False) for when in ("setup", "call"))
+    if failed:
+        evidence = E2E_ROOT / "out" / "tests" / _safe_name(request.node.name) / "fakegithub"
+        evidence.mkdir(parents=True, exist_ok=True)
+        for leaf in ("requests.jsonl", "state.json", "server.log"):
+            if (fake.folder / leaf).exists():
+                shutil.copy2(fake.folder / leaf, evidence / leaf)
+    problems = fake.stop()
+    if problems:
+        pytest.fail("the fake GitHub's machine changes were not all undone: " + "; ".join(problems))

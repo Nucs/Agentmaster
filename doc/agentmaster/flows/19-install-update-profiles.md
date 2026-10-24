@@ -275,8 +275,8 @@ what it waits for.
 | IS-08 | the script-block form typed into a tab (the console-host path) | as IS-07; the tab's session holds nothing of the script afterwards | fresh | edges | same test as IS-07 (the upgrade closes that tab, so "holds nothing" is IS-10's check) |
 | IS-09 | `-Uninstall -Scope User` typed into a tab | the new window; removed; the data kept | fresh | edges | same test as IS-07 |
 | IS-10 | `& ([scriptblock]::Create(…))` and `… \| iex` in a Windows PowerShell 5.1 and a PowerShell 7 | the caller's `$ErrorActionPreference` kept; no function, `$script:` list, parameter variable or module left behind | fresh | edges, unit | `test_install_script.py::test_the_callers_powershell_keeps_nothing` |
-| IS-11 | `-Version 0.7.10` with a bogus `$env:GITHUB_TOKEN` | the token dropped and the request made again; `v0.7.10-prerelease` found | net | edges | planned: `net` |
-| IS-12 | `irm … \| iex`, no arguments, a current install | the latest resolved, the installed kind chosen, "Already up to date", nothing downloaded | net | edges | planned: `net` |
+| IS-11 | `-Version 0.7.10` with a bogus `$env:GITHUB_TOKEN` | the token dropped and the request made again; `v0.7.10-prerelease` found | net | edges | `test_install_update.py::test_a_refused_token_is_dropped` (the fake GitHub answers the token 401; its request log shows the retry without it and no download) |
+| IS-12 | `irm … \| iex`, no arguments, a current install | the latest resolved, the installed kind chosen, "Already up to date", nothing downloaded | net | edges | `test_install_update.py::test_irm_iex_with_a_current_install` (raw.githubusercontent.com served by the fake: the staged installer) |
 | IS-13 | Ctrl+C half way through an upgrade | the previous version back | fresh | unit | `test_install_typed.py::test_ctrl_c_half_way_through_an_upgrade` (the new version's large last file: `amdriver.install.console_ctrl_c_when` signals the installer's console the moment it appears in the folder, every other new file laid down) |
 | IS-14 | `-InstallDir .\relative` | made absolute (an elevated or signed-in-user step is another process) | fresh | unit | `test_install_script.py::test_install_dir_rules` |
 | IS-15 | `-InstallDir <a folder of other files>` | "… holds other files: Agentmaster goes into …\Agentmaster" | fresh | edges | same test |
@@ -353,14 +353,14 @@ what it waits for.
 
 | Id | Scenario | Expected | Machine | Checked by hand | e2e |
 |---|---|---|---|---|---|
-| IS-80 | ⚙ *Check for updates* on a copy stamped older, pre-releases on → *Update now* | the release's zip swapped in; the registration re-stamped; relaunched in ~12 s | net | real app, B1 | planned: a fake releases API, or `net` |
-| IS-81 | the startup prompt | before "Reopen your N windows?": *Update now* / *Postpone* + six choices; `[update] check (startup) … available` | net | A3–A5 | planned |
-| IS-82 | *Remind me next restart* / tomorrow / 3 · 7 · 30 days / skip | the latch / `updatePostponedUntilUnixMs` / `updateSkippedVersion` | net | — | planned |
+| IS-80 | ⚙ *Check for updates* on a copy stamped older, pre-releases on → *Update now* | the release's zip swapped in; the registration re-stamped; relaunched in ~12 s | net | real app, B1 | `test_install_update.py::test_update_now_from_the_cog` (a pre-release, the switch on; `.am-version` is restamped from the TAG: `0.8.2` over the zip's `0.8.2.0`) |
+| IS-81 | the startup prompt | before "Reopen your N windows?": *Update now* / *Postpone* + six choices; `[update] check (startup) … available` | net | A3–A5 | `test_install_update.py::test_the_startup_prompt_and_its_choices` (the prompt before any window of the app) |
+| IS-82 | *Remind me next restart* / tomorrow / 3 · 7 · 30 days / skip | the latch / `updatePostponedUntilUnixMs` / `updateSkippedVersion` | net | — | same test as IS-81 (each choice, then the next start; a skipped tag stays quiet, a newer one is offered) |
 | IS-83 | the all-users copy's in-app update | only the swap elevated; HKLM re-stamped; relaunched unelevated | net, uac | probe | planned |
 | IS-84 | another user runs the all-users copy during its update (A3) | the swap refused → [A] / [U] / [C]; [C] restarts the installed version with no re-offer; [U] installs just for this user on the same profile | net, std, uac | A3 | planned |
 | IS-85 | the MSIX package's update (A4) | the certificate question [A] / [U] / [C]; [C] restarts it with no prompt; [U] installs per user on the package's profile and removes the package | net, pkg | A4 | planned |
 | IS-86 | a demoted user updates the per-user install an administrator made (B1) | no prompt; updated in ~12 s; no set-aside folder left | net, demote | B1 | planned |
-| IS-87 | the swap fails half way (a locked file) | the old files back; the installed version started again; that run behaves as *Remind me next restart* | net | unit | planned |
+| IS-87 | the swap fails half way (a locked file) | the old files back; the installed version started again; that run behaves as *Remind me next restart* | net | unit | `test_install_update.py::test_a_failed_update_starts_the_old_version_again` (a file held open without delete sharing; the update window's key press) |
 | IS-88 | offline | the check fails quietly within 6 s; the app starts normally | fresh | — | `test_install_first_launch.py::test_install_just_for_you` (the installed copy's first start: the lane points `api.github.com` at 127.0.0.1) |
 
 ### F · Uninstall

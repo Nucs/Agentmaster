@@ -27,6 +27,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -1074,6 +1075,36 @@ def console_text(pid: int) -> str:
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
 
 
+def wait_console_text(pid: int, pattern: str, timeout_s: float) -> str:
+    """Wait until a console's screen shows a regex, matched on the screen with its whitespace collapsed to single
+    spaces: a line wider than the console wraps, and a wrap that falls on a space cannot be told from a line end
+    (console_text), so a phrase is found wherever its wrap fell.
+
+    Args:
+        pid: A process attached to the console.
+        pattern: The regex (single spaces between words).
+        timeout_s: How long.
+    Returns:
+        The screen's text at that moment, whitespace collapsed.
+    Raises:
+        WaitTimeout: When it never showed (the message holds the screen's last 1,200 characters).
+    """
+    seen = {"text": ""}
+
+    def shows() -> bool:
+        """Whether the screen shows the pattern now.
+
+        Returns:
+            True when it does.
+        """
+        seen["text"] = " ".join(console_text(pid).split())
+        return re.search(pattern, seen["text"]) is not None
+
+    wait_until(shows, timeout_s, interval_s=1.0, what=f"{pattern!r} on the console of pid {pid}",
+               describe=lambda: seen["text"][-1200:])
+    return seen["text"]
+
+
 def start_in_console(*argv: str, env: Optional[dict] = None) -> subprocess.Popen:
     """Start a console program in a NEW console window, the way a user opens one (its input is the keyboard: a
     question it asks waits for console_type).
@@ -1958,7 +1989,6 @@ def log_time_s(line: str) -> Optional[float]:
     Returns:
         The seconds since midnight, or None when the line has no stamp.
     """
-    import re
     m = re.match(r"^\[(\d\d):(\d\d):(\d\d)\.(\d\d\d)\]", line)
     if not m:
         return None
@@ -2070,4 +2100,7 @@ __all__ = ["Lane", "Kit", "ScriptRun", "RUNS", "MachineState", "InstallFacts", "
            "run_powershell", "clean_env", "start_like_explorer", "start_direct", "wait_app", "end_agentmaster",
            "wait_question", "no_question_for", "install_log_lines", "reset_machine", "collect_evidence", "user_install_dir",
            "machine_install_dir", "default_profile", "known_folder", "app_processes", "QUESTION", "PROFILE_PICKER",
-           "UNINSTALL_CONFIRM", "NOTHING_TO_UNINSTALL", "DIALOG_CLASS", "WaitTimeout"]
+           "UNINSTALL_CONFIRM", "NOTHING_TO_UNINSTALL", "DIALOG_CLASS", "WaitTimeout", "console_type", "console_text",
+           "wait_console_text", "start_in_console", "start_in_console_handling_ctrl_c", "console_ctrl_c_when",
+           "legacy_script_dir", "make_shortcut", "run_as_system", "stop_as_system", "process_session",
+           "profile_log_lines", "log_time_s"]
