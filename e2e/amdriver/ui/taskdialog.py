@@ -9,8 +9,9 @@ that has no XAML window yet — so they are found by WINDOW, not inside an app w
 
 UI Automation sees a task dialog's main instruction and content as text elements and each command link as a button.
 A command link's label is the text before the first line break of its TASKDIALOG_BUTTON text; Windows shows the rest as
-the link's note. Agentmaster marks the pre-selected option by the label itself ("… (recommended)"), which is what a user
-reads, so a test checks that instead of the keyboard focus.
+the link's note, which UI Automation gives as the button's HelpText (also its legacy Description), never as a text
+element or in the name (probed 2026-10-24: `Button.note`). Agentmaster marks the pre-selected option by the label itself
+("… (recommended)"), which is what a user reads, so a test checks that instead of the keyboard focus.
 
 ⚠ A task dialog's process may be another account's or elevated; with UAC off (the test desktops) every process of the
 signed-in administrator is elevated, so the suite reads and presses every dialog it starts.
@@ -39,14 +40,17 @@ class Button:
     """One button of a task dialog: a command link or a common button (OK, Cancel, Yes, No).
 
     Attributes:
-        name: Its whole UI Automation name.
+        name: Its whole UI Automation name (a command link's: its label alone).
         label: The name's first line — a command link's label without its note.
         element: The UI Automation element (a snapshot; press through TaskDialog.press, which reads it again).
+        note: A command link's note, the text Windows shows under its label (UI Automation's HelpText); "" for a
+            common button.
     """
 
     name: str
     label: str
     element: uia.Element
+    note: str = ""
 
 
 def _exe_dir_of(pid: int) -> Optional[Path]:
@@ -243,12 +247,13 @@ class TaskDialog:
         return texts[0] if texts else ""
 
     def text(self) -> str:
-        """Every text of the dialog and the names of its buttons, one per line — what a user can read in it.
+        """Every text of the dialog and the names of its buttons with their notes, one per line — what a user can read
+        in it.
 
         Returns:
             The text.
         """
-        return "\n".join(self.texts() + [b.name for b in self.buttons()])
+        return "\n".join(self.texts() + [b.name + (f"\n{b.note}" if b.note else "") for b in self.buttons()])
 
     def buttons(self) -> list[Button]:
         """The dialog's buttons in order: its command links, then its common buttons.
@@ -265,7 +270,7 @@ class TaskDialog:
             if not el.name:
                 continue  # the title bar's own buttons are unnamed on some builds
             label = el.name.replace("\r\n", "\n").split("\n", 1)[0].strip()
-            out.append(Button(el.name, label, el))
+            out.append(Button(el.name, label, el, el.help_text))
         return out
 
     def labels(self) -> list[str]:

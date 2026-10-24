@@ -93,7 +93,7 @@ python e2e/host/install_lane.py --plan                                          
 
 - **Never by e2e_run.py.** Outside the lane the install tests are deselected (no `C:\e2e\install-lane.json`, which only
   `provision.ps1 -Lane Install` writes and every Standard provisioning removes): a full run on a shared desktop shows
-  "23 deselected".
+  "30 deselected".
 - **Each scenario is ONE test**, listed in `suites/install/install_catalog.py` with its catalog ids, its flow and the
   machine it needs; the host plans its resets from that file, and a test missing from it fails the collection. Write a
   scenario as a life cycle (install → again → upgrade → uninstall) when its steps build on one another: each test costs
@@ -107,8 +107,13 @@ python e2e/host/install_lane.py --plan                                          
   str(zip))` (Windows PowerShell 5.1, or `edition="7"`; no console input, so a question takes its default),
   `MachineState.read()` (every install, entry, verb, PATH entry, icon, Active Setup, profile and process),
   `start_like_explorer(exe)` (a double-click), `start_direct(exe, *args, env=…)`, `wait_question(copy_dir)` → a
-  `TaskDialog` (`labels()`, `text()`, `press(r"^Install just for you")`), `wait_app(folder, newer_than=t)`,
-  `end_agentmaster()`, `install_log_lines()`.
+  `TaskDialog` (`labels()`, `buttons()[i].note` — a command link's note, UI Automation's HelpText —, `text()`,
+  `press(r"^Install just for you")`), `wait_app(folder, newer_than=t)`,
+  `end_agentmaster()`, `install_log_lines()`; typing like a user: `start_in_console(*argv)` (a new PowerShell window),
+  `console_type(pid, "text\r")` and `console_text(pid)` (keys into, and the screen of, a program's console — a window's,
+  or the shell's of an Agentmaster tab; focus untouched; a long line wraps, so match on `" ".join(text.split())`),
+  `console_ctrl_c_when(pid, folder, prefix)` (a Ctrl+C the moment such an entry appears; start the window with
+  `start_in_console_handling_ctrl_c`), `Kit.zip(version, extra={name: size})` (a zero-filled file in the layout).
 - **The oracle is the machine** — files, registry, shortcuts, processes — and the scripts' own words, never the app's
   view of itself. The test desktops run with UAC off: every start is elevated, so the question shows its "running with
   administrator rights" note.

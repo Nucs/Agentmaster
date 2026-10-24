@@ -211,7 +211,7 @@ class Kit:
                        stderr=subprocess.DEVNULL, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
         return dst / "Agentmaster.exe"
 
-    def zip(self, version: str, name: Optional[str] = None) -> Path:
+    def zip(self, version: str, name: Optional[str] = None, extra: Optional[dict[str, int]] = None) -> Path:
         """A release-shaped zip of the build: one top folder `agentmaster-<version>` holding the copy, stamped.
 
         Stored, not deflated: the installer extracts it on the same disk, and a 40 MB deflate costs seconds per zip.
@@ -219,12 +219,15 @@ class Kit:
         Args:
             version: The version in the name and in `.am-version` ("0.8.1.0").
             name: The file name (default `Agentmaster_<version>_x64.zip`, the name the installer reads the version from).
+            extra: Files added at the layout's root, name -> size in bytes, all zeros and deflated (512 MB cost ~0.5 MB
+                in the zip) — e.g. a large file that the installer copies last, which keeps its copy running for a
+                while (IS-13's Ctrl+C half way).
         Returns:
             The zip's path.
         Raises:
             OSError: When it cannot be written.
         """
-        return self._pack(self.lane.build, version, name or f"Agentmaster_{version}_x64.zip", manifest=None)
+        return self._pack(self.lane.build, version, name or f"Agentmaster_{version}_x64.zip", manifest=None, extra=extra)
 
     def old_zip(self, manifest: bool, version: str = "", name: Optional[str] = None) -> Path:
         """A release-shaped zip of the OLDER release the lane extracted (provision.ps1 -Old: v0.7.10 by default), with or
@@ -258,7 +261,8 @@ class Kit:
                 + "\n") if manifest else None
         return self._pack(source, version, name or f"Agentmaster_{version}_x64.zip", manifest=text)
 
-    def _pack(self, source: Path, version: str, file_name: str, manifest: Optional[str]) -> Path:
+    def _pack(self, source: Path, version: str, file_name: str, manifest: Optional[str],
+              extra: Optional[dict[str, int]] = None) -> Path:
         """Pack a layout like a release zip: one top folder `agentmaster-<version>`, `.am-version` stamped.
 
         Args:
@@ -266,6 +270,7 @@ class Kit:
             version: The version (the top folder's name and `.am-version`).
             file_name: The zip's file name.
             manifest: An `.am-manifest` text to add, or None to keep the layout's own (or none).
+            extra: Files to add at the layout's root, name -> size in bytes of zeros (deflated, written 1 MB at a time).
         Returns:
             The zip's path.
         Raises:
@@ -287,6 +292,14 @@ class Kit:
                     z.write(path, f"{top}/{rel}")
             if manifest is not None:
                 z.writestr(f"{top}/.am-manifest", manifest)
+            for leaf, size in (extra or {}).items():
+                info = zipfile.ZipInfo(f"{top}/{leaf}", date_time=time.localtime()[:6])
+                info.compress_type = zipfile.ZIP_DEFLATED
+                chunk = bytes(1 << 20)
+                with z.open(info, "w", force_zip64=size >= 1 << 31) as out:
+                    for _ in range(size // len(chunk)):
+                        out.write(chunk)
+                    out.write(bytes(size % len(chunk)))
         return target
 
 
@@ -816,6 +829,317 @@ def process_session(pid: int) -> Optional[int]:
     return None
 
 
+# ---- a program's console: keys in, screen out --------------------------------------------------------------------
+
+_CONSOLE_HELPER = r'''
+"""Type into, or read, ANOTHER process's console (the install lane's console_type / console_text).
+
+Run in a process of its own: it gives up its own console and attaches to the target's (AttachConsole), so neither the
+runner's console nor the target's window focus is touched. Keys go in as KEY_EVENT records (WriteConsoleInputW), which
+Read-Host and PSReadLine read like typing; the screen comes out of the host's buffer (ReadConsoleOutputCharacterW); a
+Ctrl+C is a console signal (GenerateConsoleCtrlEvent), never a key record (a written ^C key is only input).
+Usage: python console_helper.py type <pid> <text as hex UTF-16LE> | read <pid>
+       | ctrlc <pid> <folder> <name prefix> <timeout s>   (Ctrl+C to the console once the folder holds such an entry)
+       | launch <argv as hex UTF-8 JSON>                     (start a program in a new console, Ctrl+C handled; prints
+                                                               its process id)
+Exit codes: 0 done, 2 cannot attach, 3 no console handle, 4 a write, read or signal failed, 5 the awaited entry never
+appeared (no Ctrl+C sent).
+"""
+import ctypes
+import json
+import os
+import subprocess
+import sys
+import time
+from ctypes import wintypes
+
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+u = ctypes.WinDLL("user32", use_last_error=True)
+
+
+class KEY_EVENT_RECORD(ctypes.Structure):
+    """One key press or release (wincon.h KEY_EVENT_RECORD)."""
+    _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD), ("wVirtualKeyCode", wintypes.WORD),
+                ("wVirtualScanCode", wintypes.WORD), ("uChar", wintypes.WCHAR), ("dwControlKeyState", wintypes.DWORD)]
+
+
+class _EVENT(ctypes.Union):
+    """INPUT_RECORD's event union, padded to its largest member (16 bytes)."""
+    _fields_ = [("KeyEvent", KEY_EVENT_RECORD), ("_pad", ctypes.c_byte * 16)]
+
+
+class INPUT_RECORD(ctypes.Structure):
+    """One console input event (EventType 1 = KEY_EVENT)."""
+    _fields_ = [("EventType", wintypes.WORD), ("Event", _EVENT)]
+
+
+class COORD(ctypes.Structure):
+    """A character cell position."""
+    _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+
+class SMALL_RECT(ctypes.Structure):
+    """A rectangle of cells (the window inside the buffer)."""
+    _fields_ = [("Left", wintypes.SHORT), ("Top", wintypes.SHORT), ("Right", wintypes.SHORT), ("Bottom", wintypes.SHORT)]
+
+
+class CSBI(ctypes.Structure):
+    """CONSOLE_SCREEN_BUFFER_INFO: the buffer size, the cursor, the window."""
+    _fields_ = [("dwSize", COORD), ("dwCursorPosition", COORD), ("wAttributes", wintypes.WORD),
+                ("srWindow", SMALL_RECT), ("dwMaximumWindowSize", COORD)]
+
+
+k.CreateFileW.restype = wintypes.HANDLE
+u.VkKeyScanW.restype = ctypes.c_short  # a SHORT: -1 for a character no key types, else layout key + shift state
+u.VkKeyScanW.argtypes = [wintypes.WCHAR]
+GENERIC_RW, SHARE_RW, OPEN_EXISTING = 0xC0000000, 3, 3
+INVALID = wintypes.HANDLE(-1).value
+
+
+def console(name):
+    """A handle of the attached console's input or screen ("CONIN$" / "CONOUT$"); exits 3 when there is none."""
+    h = k.CreateFileW(name, GENERIC_RW, SHARE_RW, None, OPEN_EXISTING, 0, None)
+    if not h or h == INVALID:
+        sys.exit(3)
+    return h
+
+
+def records(text):
+    """The key-down and key-up records that type a text: each character with its layout's virtual key and shift
+    state (PSReadLine reads both), CR and LF as Enter (VK_RETURN, "\r")."""
+    out = []
+    for ch in text:
+        if ch in "\r\n":
+            vk, shift, ch = 0x0D, 0, "\r"
+        else:
+            scan = u.VkKeyScanW(ch)
+            vk, shift = (scan & 0xFF, (scan >> 8) & 0xFF) if scan != -1 else (0, 0)
+        state = 0x10 if shift & 1 else 0  # SHIFT_PRESSED
+        sc = u.MapVirtualKeyW(vk, 0) if vk else 0
+        for down in (True, False):
+            r = INPUT_RECORD()
+            r.EventType = 1  # KEY_EVENT
+            r.Event.KeyEvent = KEY_EVENT_RECORD(down, 1, vk, sc, ch, state)
+            out.append(r)
+    return out
+
+
+def launch(argv_hex):
+    """Start a program in a console of its own with Ctrl+C handled normally, and print its process id.
+
+    Windows hands a process's "ignore Ctrl+C" flag on to the processes it starts (a parent started with
+    CREATE_NEW_PROCESS_GROUP has it set), so a program started by a runner that ignores Ctrl+C would ignore the one a
+    test sends. This helper clears the flag for itself first; the program inherits the cleared flag.
+    """
+    k.SetConsoleCtrlHandler(None, False)
+    argv = json.loads(bytes.fromhex(argv_hex).decode("utf-8"))
+    child = subprocess.Popen(argv, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    sys.stdout.write(str(child.pid))
+    sys.exit(0)
+
+
+def ctrl_c_when(folder, prefix, timeout_s):
+    """(Attached to the target's console.) Wait until the folder holds an entry whose name starts with the prefix,
+    then send Ctrl+C to every process of the console; exit 5 when the deadline passes first (nothing sent)."""
+    k.SetConsoleCtrlHandler(None, True)  # this helper ignores the Ctrl+C it sends to the whole console
+    want = prefix.lower()
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        try:
+            if any(name.lower().startswith(want) for name in os.listdir(folder)):
+                break
+        except OSError:
+            pass  # the folder can be missing or replaced for a moment during an install: look again
+        if time.monotonic() > deadline:
+            sys.exit(5)
+        time.sleep(0.005)  # a 5 ms look: the signal lands within milliseconds of the entry's creation
+    sys.exit(0 if k.GenerateConsoleCtrlEvent(0, 0) else 4)  # CTRL_C_EVENT to every process sharing the console
+
+
+def attach(pid, seconds):
+    """Attach to the target's console, trying again for a while: a process just started in a new window has no console
+    to attach to until Windows has handed it to the default terminal (a moment after the start; seen 2026-10-24).
+    Exits 2 when it never succeeds, with the last Win32 error on stderr."""
+    deadline = time.monotonic() + seconds
+    while not k.AttachConsole(pid):
+        error = ctypes.get_last_error()
+        if time.monotonic() >= deadline:
+            sys.stderr.write(f"AttachConsole({pid}) failed: Win32 error {error}\n")
+            sys.exit(2)
+        time.sleep(0.1)
+
+
+def main():
+    """Run one verb: type the text, print the screen's rows, send a Ctrl+C when an entry appears, or launch."""
+    if sys.argv[1] == "launch":
+        launch(sys.argv[2])
+    verb, pid = sys.argv[1], int(sys.argv[2])
+    k.FreeConsole()
+    # type and read are polled by their callers (a failed read is ""), so only the one-shot Ctrl+C waits for a console.
+    attach(pid, 15.0 if verb == "ctrlc" else 0.0)
+    if verb == "ctrlc":
+        ctrl_c_when(sys.argv[3], sys.argv[4], sys.argv[5])
+    if verb == "type":
+        recs = records(bytes.fromhex(sys.argv[3]).decode("utf-16-le"))
+        arr = (INPUT_RECORD * len(recs))(*recs)
+        written = wintypes.DWORD()
+        ok = k.WriteConsoleInputW(console("CONIN$"), arr, len(recs), ctypes.byref(written))
+        sys.exit(0 if ok and written.value == len(recs) else 4)
+    h = console("CONOUT$")
+    info = CSBI()
+    if not k.GetConsoleScreenBufferInfo(h, ctypes.byref(info)):
+        sys.exit(4)
+    width, last = info.dwSize.X, max(info.dwCursorPosition.Y, info.srWindow.Bottom)
+    buf, n, out = ctypes.create_unicode_buffer(width), wintypes.DWORD(), []
+    for y in range(0, last + 1):
+        if not k.ReadConsoleOutputCharacterW(h, buf, width, COORD(0, y), ctypes.byref(n)):
+            sys.exit(4)
+        row = buf.value[:n.value]
+        # A row whose last cell is not blank was filled to the edge: the console wrapped a longer line there (or the
+        # line is exactly that long), so the line goes on in the next row and gets no line break. The console API keeps
+        # no wrap mark, so a wrap that falls on a space still ends its row; the tests collapse whitespace for that.
+        out.append(row if len(row) == width and row[-1:] != " " else row.rstrip() + "\n")
+    sys.stdout.buffer.write("".join(out).rstrip().encode("utf-8"))
+    sys.exit(0)
+
+
+main()
+'''
+
+
+def _console_helper_argv(*args: str) -> list[str]:
+    """The console helper's command line, its script written first (C:\\e2e\\w\\console_helper.py).
+
+    Args:
+        *args: Its verb and arguments.
+    Returns:
+        The command line's parts (this Python, the script, the arguments).
+    Raises:
+        OSError: When the script cannot be written.
+    """
+    import sys
+    script = E2E_ROOT / "w" / "console_helper.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_CONSOLE_HELPER, encoding="utf-8")
+    return [sys.executable, str(script), *args]
+
+
+def _console_helper(*args: str, env: Optional[dict] = None, cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+    """Run the console helper (a process of its own: it attaches to the target's console) and wait for it.
+
+    Args:
+        *args: Its verb and arguments.
+        env: Its environment (default: this process's) — what a program it launches inherits.
+        cwd: Its working folder (default: this process's) — likewise.
+    Returns:
+        The completed process (stdout = what a read or a launch returned).
+    """
+    # CREATE_NO_WINDOW gives the helper a console of its own without a window, which it frees before it attaches.
+    return subprocess.run(_console_helper_argv(*args), stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                          env=env, cwd=str(cwd) if cwd else None, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def console_type(pid: int, text: str) -> None:
+    """Type text into a process's console as key presses ("\\r" or "\\n" = Enter), the way a user types at it — focus
+    and window untouched: Read-Host, PSReadLine and the installer's questions read it like the keyboard.
+
+    Args:
+        pid: A process attached to the console (a shell, a script's PowerShell).
+        text: The text.
+    Returns:
+        None.
+    Raises:
+        RuntimeError: When the helper could not attach (the process has no console, or is gone) or the write failed.
+    """
+    r = _console_helper("type", str(pid), text.encode("utf-16-le").hex())
+    if r.returncode != 0:
+        raise RuntimeError(f"typing into the console of pid {pid} failed (helper exit {r.returncode}): "
+                           f"{r.stderr.decode('utf-8', 'replace')[-400:]}")
+
+
+def console_text(pid: int) -> str:
+    """The text of a process's console screen buffer, from its top to the cursor (or the window's bottom).
+
+    A line longer than the console is wide (the installer's are, in a 120-column tab) wraps into the next row; a row
+    filled to the edge is therefore joined to the next one without a line break, so a long path or message reads whole.
+    A wrap that falls on a space cannot be told from a line end: match on text with its whitespace collapsed
+    (`" ".join(text.split())`) when a phrase may wrap.
+
+    Args:
+        pid: A process attached to the console.
+    Returns:
+        The lines, right-trimmed, joined with newlines; "" when the console cannot be read (the process is gone).
+    """
+    r = _console_helper("read", str(pid))
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+
+
+def start_in_console(*argv: str, env: Optional[dict] = None) -> subprocess.Popen:
+    """Start a console program in a NEW console window, the way a user opens one (its input is the keyboard: a
+    question it asks waits for console_type).
+
+    The test desktops' default terminal is the Store Windows Terminal, so the window is a Windows Terminal tab; its
+    console still belongs to the started process, which is what console_type and console_text attach to.
+
+    Args:
+        *argv: The program and its arguments.
+        env: The environment (default: clean_env()).
+    Returns:
+        The process.
+    Raises:
+        OSError: When it cannot start.
+    """
+    return subprocess.Popen(list(argv), env=env if env is not None else clean_env(), cwd=str(E2E_ROOT),
+                            creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+
+def start_in_console_handling_ctrl_c(*argv: str, env: Optional[dict] = None) -> psutil.Process:
+    """Start a console program in a NEW console window, like start_in_console, with Ctrl+C handled normally — for a
+    test that sends it one (console_ctrl_c_when).
+
+    Windows hands a process's "ignore Ctrl+C" flag on to the processes it starts, and how the guest's runner was
+    started is not this suite's to know; the console helper clears the flag for itself and starts the program, which
+    inherits the cleared flag.
+
+    Args:
+        *argv: The program and its arguments.
+        env: The environment (default: clean_env()).
+    Returns:
+        The process (not a child of this one: wait for it through psutil).
+    Raises:
+        RuntimeError: When the helper could not start it.
+        psutil.NoSuchProcess: When it ended at once.
+    """
+    r = _console_helper("launch", json.dumps(list(argv)).encode("utf-8").hex(),
+                        env=env if env is not None else clean_env(), cwd=E2E_ROOT)
+    if r.returncode != 0 or not r.stdout.strip().isdigit():
+        raise RuntimeError(f"the console helper did not start {argv[0]} (exit {r.returncode}): "
+                           f"{r.stderr.decode('utf-8', 'replace')[-400:]}")
+    return psutil.Process(int(r.stdout.strip()))
+
+
+def console_ctrl_c_when(pid: int, folder: Path, name_prefix: str, timeout_s: float) -> subprocess.Popen:
+    """Press Ctrl+C in a process's console the moment a folder holds an entry whose name starts with a prefix — a
+    user's Ctrl+C at an exact point of a run (IS-13: half way through an upgrade's copy). Returns at once: the helper
+    attaches to the console, looks at the folder every 5 ms and then sends the signal (GenerateConsoleCtrlEvent) to every
+    process of that console.
+
+    Args:
+        pid: A process attached to the console (start it with start_in_console_handling_ctrl_c).
+        folder: The folder to watch.
+        name_prefix: The start of the awaited entry's name (case-insensitive).
+        timeout_s: How long the helper waits for the entry.
+    Returns:
+        The helper's process: its exit code is 0 when the Ctrl+C was sent, 5 when the entry never appeared (nothing
+        sent), 2 when it could not attach (the process is gone), 4 when the signal failed.
+    Raises:
+        OSError: When the helper cannot start.
+    """
+    return subprocess.Popen(_console_helper_argv("ctrlc", str(pid), str(folder), name_prefix, f"{timeout_s:.0f}"),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 # ---- the machine's state ------------------------------------------------------------------------------------------
 
 _KNOWN_FOLDERS = {
@@ -876,6 +1200,42 @@ def default_profile() -> Path:
         %USERPROFILE%\\.agentmaster.
     """
     return Path(os.environ.get("USERPROFILE", r"C:\Users\Docker")) / ".agentmaster"
+
+
+def legacy_script_dir() -> Path:
+    """Where the OLD install script (Install-Agentmaster.ps1 up to v0.7.10) put its copy: %LOCALAPPDATA%\\Programs\\
+    Agentmaster, with a Start-menu entry "Agentmaster (Portable)" but no registry entry and no install.path
+    (PortableInstall.h LegacyScriptInstallDir: the app and the current installer still look there).
+
+    Returns:
+        The folder.
+    """
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "Agentmaster"
+
+
+def make_shortcut(lnk: Path, target: Path) -> ScriptRun:
+    """Make a .lnk through WScript.Shell, the way the old install script made its "Agentmaster (Portable)" entry.
+
+    Args:
+        lnk: The shortcut file.
+        target: What it opens (its folder is the working folder).
+    Returns:
+        The PowerShell run (code 0 when the shortcut was saved). Appended to RUNS.
+    """
+    command = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{_ps_literal(lnk)}'); "
+               f"$s.TargetPath = '{_ps_literal(target)}'; $s.WorkingDirectory = '{_ps_literal(target.parent)}'; $s.Save()")
+    return run_powershell(["-Command", command], "5.1", timeout_s=60)
+
+
+def _ps_literal(value) -> str:
+    """A value's text for inside a PowerShell single-quoted string (a quote doubled; nothing else is special there).
+
+    Args:
+        value: A path or text.
+    Returns:
+        The text.
+    """
+    return str(value).replace("'", "''")
 
 
 def machine_install_dir() -> Path:
@@ -1301,6 +1661,7 @@ class MachineState:
         other_accounts: What the lane's other accounts hold: their profile folders and Agentmaster icons, and in their
             own registry the Apps & Features entry, the Active Setup marker, the verbs and the PATH (an unloaded hive is
             loaded for the read: _account_registry_leftovers). A leftover there is a leftover too.
+        legacy: The copy the old install script left in %LOCALAPPDATA%\\Programs\\Agentmaster (None when absent).
     """
 
     user: Optional[InstallFacts]
@@ -1318,6 +1679,7 @@ class MachineState:
     home_map: bool
     processes: list[AppProcess] = field(default_factory=list)
     other_accounts: list[str] = field(default_factory=list)
+    legacy: Optional[InstallFacts] = None
 
     @staticmethod
     def read() -> "MachineState":
@@ -1348,6 +1710,7 @@ class MachineState:
             home_map=(profile.parent / ".agentmaster.profiles").exists(),
             processes=app_processes(),
             other_accounts=_other_account_leftovers(),
+            legacy=InstallFacts.read(legacy_script_dir()),
         )
 
     def shortcuts_in(self, which: str) -> list[Shortcut]:
@@ -1388,6 +1751,8 @@ class MachineState:
             problems.append("the profile choice file %USERPROFILE%\\.agentmaster.profiles")
         problems += [f"a running {p.image} pid {p.pid} ({p.exe})" for p in self.processes]
         problems += self.other_accounts
+        if self.legacy:
+            problems.append(f"the old install script's copy in {self.legacy.dir}")
         return problems
 
     def to_json(self) -> str:

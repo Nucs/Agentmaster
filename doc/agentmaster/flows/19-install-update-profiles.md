@@ -269,15 +269,15 @@ what it waits for.
 | IS-02 | the same again | "Already up to date for this user"; nothing rewritten | fresh | edges | same test |
 | IS-03 | a newer zip over it, a user's own file in the folder | upgraded in place; the user's file kept; no `.am-previous-*` folder left; DisplayVersion re-stamped | fresh | edges | same test |
 | IS-04 | `-Uninstall -Scope User` | the shipped names, shortcuts, verbs, entry and PATH entry gone; the user's file, `profile.path` and `%USERPROFILE%\.agentmaster` kept | fresh | probe (pre-manifest), edges (typed into a tab) | same test |
-| IS-05 | interactive in a plain PowerShell window, Enter at the question | `[1] Just for you` taken; installed | fresh | probe | planned: typing into a console window from the suite |
-| IS-06 | `-Scope User` while the copy runs, typed into a separate window | "It closes for the upgrade and starts again …" → Enter → closed, upgraded, started again (its parent `explorer.exe`) | fresh | edges | planned: same |
-| IS-07 | typed into a TAB of the Agentmaster it upgrades | the tab says "the step goes on in a new window"; the window *Agentmaster installer* asks, closes the app, upgrades, starts it again; its record in `%TEMP%\Agentmaster-install` | fresh | edges | planned: same |
-| IS-08 | the script-block form typed into a tab (the console-host path) | as IS-07; the tab's session holds nothing of the script afterwards | fresh | edges | planned: same |
-| IS-09 | `-Uninstall -Scope User` typed into a tab | the new window; removed; the data kept | fresh | edges | planned: same |
+| IS-05 | interactive in a plain PowerShell window, Enter at the question | `[1] Just for you` taken; installed | fresh | probe | `test_install_typed.py::test_the_installer_answered_in_console_windows` (the keys typed into the window's console: `amdriver.install.console_type`) |
+| IS-06 | `-Scope User` while the copy runs, typed into a separate window | "It closes for the upgrade and starts again …" → Enter → closed, upgraded, started again (its parent `explorer.exe`) | fresh | edges | same test as IS-05 (the parent: `uac` — with UAC off the installer is elevated and starts the app through a one-shot task) |
+| IS-07 | typed into a TAB of the Agentmaster it upgrades | the tab says "the step goes on in a new window"; the window *Agentmaster installer* asks, closes the app, upgrades, starts it again; its record in `%TEMP%\Agentmaster-install` | fresh | edges | `test_install_typed.py::test_the_installer_typed_into_a_tab_of_the_copy_it_changes` (typed into the tab's shell's console: a nested `powershell -ExecutionPolicy Bypass -File …`, since a fresh tab's PowerShell runs no script file — Windows 11's Restricted default) |
+| IS-08 | the script-block form typed into a tab (the console-host path) | as IS-07; the tab's session holds nothing of the script afterwards | fresh | edges | same test as IS-07 (the upgrade closes that tab, so "holds nothing" is IS-10's check) |
+| IS-09 | `-Uninstall -Scope User` typed into a tab | the new window; removed; the data kept | fresh | edges | same test as IS-07 |
 | IS-10 | `& ([scriptblock]::Create(…))` and `… \| iex` in a Windows PowerShell 5.1 and a PowerShell 7 | the caller's `$ErrorActionPreference` kept; no function, `$script:` list, parameter variable or module left behind | fresh | edges, unit | `test_install_script.py::test_the_callers_powershell_keeps_nothing` |
 | IS-11 | `-Version 0.7.10` with a bogus `$env:GITHUB_TOKEN` | the token dropped and the request made again; `v0.7.10-prerelease` found | net | edges | planned: `net` |
 | IS-12 | `irm … \| iex`, no arguments, a current install | the latest resolved, the installed kind chosen, "Already up to date", nothing downloaded | net | edges | planned: `net` |
-| IS-13 | Ctrl+C half way through an upgrade | the previous version back | fresh | unit | planned: a Ctrl+C into the installer's console |
+| IS-13 | Ctrl+C half way through an upgrade | the previous version back | fresh | unit | `test_install_typed.py::test_ctrl_c_half_way_through_an_upgrade` (the new version's large last file: `amdriver.install.console_ctrl_c_when` signals the installer's console the moment it appears in the folder, every other new file laid down) |
 | IS-14 | `-InstallDir .\relative` | made absolute (an elevated or signed-in-user step is another process) | fresh | unit | `test_install_script.py::test_install_dir_rules` |
 | IS-15 | `-InstallDir <a folder of other files>` | "… holds other files: Agentmaster goes into …\Agentmaster" | fresh | edges | same test |
 | IS-16 | a second per-user copy elsewhere | refused, with how to move it; nothing written | fresh | edges | same test |
@@ -289,7 +289,7 @@ what it waits for.
 | IS-22 | that copy upgraded to a current build | the shared shortcuts gone, the Active Setup component written | old | edges | same test |
 | IS-23 | the older release again, without / with `-Force` | "Already up to date for all users" / downgraded: the component removed, the shared shortcuts back | old | edges | same test |
 | IS-24 | `-Scope Machine` with a release that has no manifest (v0.7.10 as published) | refused cleanly | old | probe | `test_install_old_releases.py::test_a_release_without_a_manifest` |
-| IS-25 | the all-users upgrade typed into a tab of the all-users copy | the new window, Go on?, closed, upgraded, started again | fresh | edges | planned: typing |
+| IS-25 | the all-users upgrade typed into a tab of the all-users copy | the new window, Go on?, closed, upgraded, started again | fresh | edges | `test_install_typed.py::test_the_all_users_upgrade_typed_into_a_tab` |
 | IS-26 | a standard account, `-ForCurrentAccount`, non-interactive, beside the all-users copy | "non-interactive: installing for scope User"; installed without rights; the note that its own copy takes over | std | edges | `test_install_accounts.py::test_another_account_runs_the_installer` |
 | IS-27 | a standard OTHER account, `-Scope User` | refused before anything is downloaded; `-ForCurrentAccount` installs for itself | std | probe | same test |
 | IS-28 | SYSTEM (a scheduled task), `-Scope User -Launch` | installed for the signed-in user through a phase in their session; the app runs as them | sys | probe | `test_install_system.py::test_system_installs_for_the_signed_in_user` |
@@ -314,14 +314,14 @@ what it waits for.
 | IS-47 | *Install for all users of this PC* (UAC off: no prompt) | IS-18's install; the user's own icons; the copy runs as the user | fresh | probe, real app (UAC Yes) | `…::test_install_for_all_users` |
 | IS-48 | *Install for all users*, UAC *No* | "cancelled at the UAC prompt", back to the question, nothing installed | uac | real app | planned: `uac` |
 | IS-49 | a per-user and an all-users install, both current | the per-user one recommended | fresh | probe | `test_install_first_launch.py::test_both_installs_current` |
-| IS-50 | *Install to a folder you pick…* | a non-empty folder → `<folder>\Agentmaster`; inside the copy → refused; Program Files without rights → refused, pointing at *for all users* | fresh | — | planned: the folder dialog |
+| IS-50 | *Install to a folder you pick…* | a non-empty folder → `<folder>\Agentmaster`; inside the copy → refused; Program Files without rights → refused, pointing at *for all users* | fresh | — | `test_install_first_launch.py::test_install_to_a_folder_you_pick` (the folder dialog through UI Automation; Program Files without rights needs `uac`) |
 | IS-51 | *Install here* | the registration only, no copy | fresh | — | `test_install_first_launch.py::test_install_here` |
 | IS-52 | another administrator, elevated, in the user's session | *Set it up for <user> (recommended)*; the copy restarts as the user (~13 s), who gets their own question; nothing installed for the administrator | adm2 | probe, real app | `test_install_accounts.py::test_another_administrator_sets_it_up_for_the_signed_in_user` |
 | IS-53 | another account without rights in the user's session | the warning with how to set it up for the signed-in user; its own install offered by name; nothing written | std | probe, real app | `test_install_accounts.py::test_another_account_sees_the_question` |
 | IS-54 | SYSTEM in session 0 | no question; nothing persisted | sys | probe | `test_install_system.py::test_a_copy_started_in_session_0` |
 | IS-55 | `AGENTMASTER_PROFILE` set, or `-Embedding` | no question | fresh | — | every other suite (each test sets the profile) |
 | IS-56 | a browser-marked zip extracted by Explorer | SmartScreen once (*More info* → *Run anyway*); the installed copy asks nothing more; no installed file keeps the mark (60 of 63 did before the fix) | human | real app | planned |
-| IS-57 | the copy `Install-Agentmaster.ps1` v0.7.10 made, then a newer copy | *Update the installed Agentmaster … the copy the install script made*; registered in that folder; *Agentmaster (Portable)* removed | fresh | A1 | planned |
+| IS-57 | the copy `Install-Agentmaster.ps1` v0.7.10 made, then a newer copy | *Update the installed Agentmaster … the copy the install script made*; registered in that folder; *Agentmaster (Portable)* removed | old | A1 | `test_install_first_launch.py::test_the_old_scripts_copy_is_updated` (the old script's result made by hand: it needs GitHub's API, which the lane blocks; the note is the link's UI Automation HelpText, `Button.note`) |
 | IS-58 | an installed MSIX package, then a portable copy | the question names it; *Install just for you* adopts its data; the checkbox (checked unless it runs) removes it, its consoles drained | pkg | — | planned: `pkg` |
 | IS-59 | a STANDARD signed-in user: *Install just for you* / *for all users* with an administrator's password | no prompt / the all-users install, the copy running as the user | std, uac, demote | real app | planned |
 | IS-60 | a standard signed-in user: *Run as administrator* with an administrator's password | the app runs as that administrator → *Set it up for <user>* → restarts as the user | std, uac, demote | real app | planned |
@@ -367,7 +367,7 @@ what it waits for.
 
 | Id | Scenario | Expected | Machine | Checked by hand | e2e |
 |---|---|---|---|---|---|
-| IS-90 | ⚙ → About → *Uninstall Agentmaster…* on a per-user install | the confirm names what goes; the app closes; everything but the data removed | fresh | real app | planned: the cog's About tab |
+| IS-90 | ⚙ → About → *Uninstall Agentmaster…* on a per-user install | the confirm names what goes; the app closes; everything but the data removed | fresh | real app | `test_install_coexistence.py::test_uninstall_from_the_cog` (the Standard lane's page objects on the installed copy's window) |
 | IS-91 | Apps & Features' command (`Agentmaster.exe --uninstall-portable`) on a per-user install | *Uninstall Agentmaster?* → *Uninstall*: everything but the data removed | fresh | probe | `test_install_coexistence.py::test_uninstall_from_apps_and_features` |
 | IS-92 | the same, *Cancel* | nothing removed | fresh | — | same test |
 | IS-93 | `--uninstall-portable` on a copy that is not an install | *Nothing to uninstall here*; nothing removed | fresh | probe | same test |
