@@ -182,7 +182,10 @@ the panel:
   card's session's own tab in the window that hosts it (`TerminalPage::_RunSessionMenuScope`), so on
   a GLOBAL list the card of another window's session acts in that window, and a Close there brings
   it to the front to ask. The strip items gray like the tab menu's when the tab is in this window;
-  for another window's tab they stay enabled. Selection flows BOTH
+  for another window's tab they stay enabled. Deactivate ▸ ends with **Deactivate All Idle Tabs**
+  (2026-10-24, NOT BUILT yet; the tab menu has it too, CLAUDE.md *Deactivate ▸*): every tab of that
+  window whose session is Idle (the gray dot) parks, every other one keeps running; grayed while
+  this window holds none to park (`SessionTabSpot::idleTabs`). Selection flows BOTH
   ways: the tab-switch funnel (`_SyncManagerSelectionToTab`) and the lens-changed push both
   select the card here, with same-id early-outs breaking the echo.
 - **The tab strip follows a click only on the Agent Manager page.** While the Manager page is on screen, a

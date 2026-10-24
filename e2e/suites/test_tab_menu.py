@@ -32,6 +32,10 @@ COPY_MENU = ["Session Id", "Copy Path", "Copy Branch Name", "Copy Current Prompt
 TRANSCRIPT_MENU = ["Show", "Default", "Max", "Full", "Compact", "Minimal"]
 DEACTIVATE_MENU = ["Deactivate Tab", "Tabs to the Left", "Tabs to the Right", "Other Tabs", "Of Same Folder",
                    "Other of Same Folder", "All Tabs"]
+DEACTIVATE_IDLE = "Deactivate All Idle Tabs"
+"""Deactivate ▸'s last item since 2026-10-24, after DEACTIVATE_MENU (no published release holds it yet; 0.8.0 ends at
+"All Tabs"). test_menu_fits_the_tab accepts the submenu with or without it, so it passes on both builds;
+test_tab_lifecycle.py::test_deactivate_all_idle_tabs (needs_fix "TAB-F1") proves the item."""
 CLOSE_MENU_SESSION = ["Close tabs to the left", "Close tabs to the right", "Close other tabs", "Of Same Folder",
                       "Other of Same Folder", "Close all tabs", "★ Favorite & close all tabs"]
 """Close ▸ on a session tab with one pane ("Close pane" shows only when the tab is split)."""
@@ -80,7 +84,9 @@ def test_menu_fits_the_tab(am, s1):
     assert copy.submenu("Transcript").names() == TRANSCRIPT_MENU
     menu.close()
     menu = w.tabs.context_menu("t1")
-    assert menu.submenu("Deactivate").names() == DEACTIVATE_MENU
+    deactivate_names = menu.submenu("Deactivate").names()
+    # 0.8.0's submenu ends at "All Tabs"; a build of the branch adds DEACTIVATE_IDLE after it (TAB-F1).
+    assert deactivate_names in (DEACTIVATE_MENU, DEACTIVATE_MENU + [DEACTIVATE_IDLE]), deactivate_names
     menu.close()
     menu = w.tabs.context_menu("t1")
     close = menu.submenu("Close")

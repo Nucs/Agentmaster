@@ -2143,6 +2143,7 @@ namespace winrt::TerminalApp::implementation
         static_assert(static_cast<int32_t>(SessionMenuScope::TabsAfter) == implementation::Tab::kDeactivateScopeTabsAfter, "the session menu's TabsAfter must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::SameFolder) == implementation::Tab::kDeactivateScopeSameFolder, "the session menu's SameFolder must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::OtherSameFolder) == implementation::Tab::kDeactivateScopeOtherSameFolder, "the session menu's OtherSameFolder must be the tab menu's code");
+        static_assert(static_cast<int32_t>(SessionMenuScope::IdleTabs) == implementation::Tab::kDeactivateScopeIdleTabs, "the session menu's IdleTabs must be the tab menu's code");
         static_assert(static_cast<int32_t>(SessionMenuScope::FavoriteAllTabs) == kSessionMenuScopeFavoriteAllTabs, "the session menu's FavoriteAllTabs must be the page's code");
         content->SetSessionMenuScopeHandler([weakThis](winrt::hstring id, SessionMenuVerb verb, SessionMenuScope scope) {
             if (auto self = weakThis.get())
@@ -2151,8 +2152,10 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // Where a session's tab sits in THIS window's strip (nullopt: another window hosts it, or no tab yet) — the content
-        // grays the menu's strip items from it exactly as the tab menu grays its own (Tab::_EnableMenuItems). Read on the UI
-        // thread each time a session menu opens; _claudeTabs + the strip are this window's own. A dead page answers nullopt.
+        // grays the menu's strip items from it exactly as the tab menu grays its own (Tab::_EnableMenuItems), and grays
+        // "Deactivate All Idle Tabs" when this window holds no tab that item would park (idleTabs: the click's own list,
+        // _IdleTabsToDeactivate, like the tab menu's flyout-open). Read on the UI thread each time a session menu opens;
+        // _claudeTabs + the strip are this window's own. A dead page answers nullopt.
         content->SetSessionTabSpotProvider([weakThis](const std::wstring& id) -> std::optional<implementation::AgentManagerContent::SessionTabSpot> {
             const auto self = weakThis.get();
             if (!self)
@@ -2166,7 +2169,7 @@ namespace winrt::TerminalApp::implementation
             {
                 return std::nullopt; // not hosted here, or the tab is mid-move and out of the strip this instant
             }
-            return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size() };
+            return implementation::AgentManagerContent::SessionTabSpot{ index, self->_tabs.Size(), static_cast<uint32_t>(self->_IdleTabsToDeactivate().size()) };
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())

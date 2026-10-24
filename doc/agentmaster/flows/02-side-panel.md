@@ -73,9 +73,10 @@ click back into the terminal; double-click jumps to a card's tab.
 6. **Deactivate ▸ on a card** (2026-10-23, NOT BUILT). *Do:* right-click B's card (B running, in this window,
    neither the left-most nor the right-most tab). *Expect:* **Deactivate ▸** directly above **Close ▸**, as in
    the tab menu, holding Deactivate Tab · Tabs to the Left · Tabs to the Right · Other Tabs · Of Same Folder ·
-   Other of Same Folder · All Tabs (no glyphs); **Deactivate Tab** parks B with no confirm, its tab kept,
-   exactly like the tab menu's item. *Check:* [LOG] `[nav] session-menu deactivate this <B8>`, then
-   `[nav] deactivate-begin scope=this` / `deactivate-done … parked=1`.
+   Other of Same Folder · All Tabs · Deactivate All Idle Tabs (no glyphs; the last item since 2026-10-24);
+   **Deactivate Tab** parks B with no confirm, its tab kept, exactly like the tab menu's item. *Check:* [LOG]
+   `[nav] session-menu deactivate this <B8>`, then `[nav] deactivate-begin scope=this` / `deactivate-done …
+   parked=1`.
 7. **Close ▸ lines up with it.** *Do:* open B's card menu's Close ▸. *Expect:* Close Tab · Tabs to the Left ·
    Tabs to the Right · Other Tabs · Of Same Folder · Other of Same Folder · All Tabs · ★ Favorite & Close All
    Tabs; **Tabs to the Right** asks once ("Close N tabs?") and closes only the tabs right of B's tab.
@@ -95,6 +96,11 @@ click back into the terminal; double-click jumps to a card's tab.
   tab`, then that window's `[nav] session-menu-remote …` and the tab menu's own lines.
 - **E6 A session whose agent exited and that no window hosts** → Close ▸ Close Tab archives it in place
   (`… archived in place`); it leaves the list and stays in Sessions.
+- **E7 Deactivate All Idle Tabs on a card** (2026-10-24, NOT BUILT) → the tab menu's item (flows/07 TAB-02
+  phase 7) run from the card: the Idle sessions of the card's window park, every other one keeps running;
+  grayed while that window holds no Idle session to park; a card of ANOTHER window's session leaves it
+  enabled and that window parks its own Idle tabs. *Check:* [LOG] `[nav] session-menu deactivate idle <B8>`,
+  then `[nav] deactivate-done scope=idle parked=N`.
 
 ---
 

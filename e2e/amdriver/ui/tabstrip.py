@@ -364,7 +364,8 @@ class TabStrip:
         Args:
             title: The tab whose menu is used (the anchor of the scope).
             scope: The submenu item: "Deactivate Tab", "Tabs to the Left", "Tabs to the Right", "Other Tabs",
-                "Of Same Folder", "Other of Same Folder", "All Tabs".
+                "Of Same Folder", "Other of Same Folder", "All Tabs", or (a build of the branch since 2026-10-24, not
+                0.8.0) "Deactivate All Idle Tabs".
         Returns:
             None.
         Raises:

@@ -378,6 +378,49 @@ def test_deactivate_scopes(am, mock):
     assert _shell_count(am) == shells
 
 
+DEACTIVATE_IDLE = "Deactivate All Idle Tabs"
+"""Deactivate ▸'s last item since 2026-10-24 (test_tab_menu.py has the same constant for the submenu's list)."""
+
+
+@pytest.mark.p1
+@pytest.mark.flow("TAB-02")
+@pytest.mark.needs_fix("TAB-F1")
+def test_deactivate_all_idle_tabs(am, mock):
+    """TAB-02 phase 7 and E1's content gate (2026-10-24): Deactivate ▸ ends with "Deactivate All Idle Tabs", which parks
+    every session of the window in the Idle state and nothing else — t1 and t3 are Idle (launched with no prompt), t2
+    is Waiting for you — and is grayed once no Idle session is left to park. A build of the branch holds the item; 0.8.0
+    does not (its submenu ends at "All Tabs"), hence needs_fix("TAB-F1").
+
+    Args:
+        am: The app.
+        mock: The scripted model (t2's first turn).
+    """
+    s = {"t1": am.launch("t1", prompt=None), "t2": am.launch("t2"), "t3": am.launch("t3", prompt=None)}
+    w = am.window
+    for title in ("t1", "t3"):
+        s[title].wait_state("Idle", timeout_s=30)
+    s["t2"].wait_state("WaitingForInput", timeout_s=30)
+    for ses in s.values():
+        ses.wait_running()  # every claude runs before the park, so "parked" below means this item parked it
+    # The item is the submenu's last one, after All Tabs, and enabled: two Idle sessions are there to park.
+    sub = w.tabs.context_menu("t2").submenu("Deactivate")
+    assert sub.names()[-2:] == ["All Tabs", DEACTIVATE_IDLE], sub.names()
+    assert sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+    # 7. From t2's menu (t2 itself is not Idle): t1 and t3 park, t2 keeps running. t3 is the focused tab, so the
+    #    window shows its Agent Manager page before t3's control is swapped (the scope's focused-tab rule).
+    mark = am.profile.hooks.mark()
+    w.tabs.deactivate("t2", DEACTIVATE_IDLE)
+    am.profile.hooks.wait(r"\[nav\] deactivate-done scope=idle parked=2 skipped=0", since=mark, timeout_s=20)
+    s["t1"].wait_parked(since=mark)
+    s["t3"].wait_parked(since=mark)
+    hold_true(lambda: s["t2"].running(), 2.0, what="t2 (Waiting for you) still running after the idle park")
+    # E1: no Idle session is left that a park would take (t1 and t3 are dormant now), so the item is grayed.
+    sub = w.tabs.context_menu("t2").submenu("Deactivate")
+    assert not sub.enabled(DEACTIVATE_IDLE)
+    Menu.dismiss_all(am)
+
+
 def _re(text: str) -> str:
     """A literal text as a regex.
 
