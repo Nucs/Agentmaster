@@ -249,14 +249,14 @@ def test_panel_state_survives_a_restart(am, s1):
 
 @pytest.mark.p1
 @pytest.mark.flow("SP-04")
-@pytest.mark.known_defect("SP-K2")
-def test_known_defect_sum_off_card_hover_opens_no_rich_card(am, s1):
-    """SP-K2 (expected failure once fixed): with Sum off, resting the pointer on a side-panel card opens NO rich
-    session card, while the same hover on the session's TAB opens one (the control half of this test). Measured on
-    0.8.0 in the test desktop (2026-10-23): nothing for 9 s, polled every 0.3 s; hooks.log says "cards show the rich
-    session tooltip".
-
-    The test asserts TODAY's behavior; when it starts failing, the defect is fixed: assert the card beside the panel.
+def test_sum_off_card_hover_opens_no_rich_card(am, s1):
+    """SP-04 phase 2 — SP-K2, a FEATURE (the user's ruling of 2026-10-24; the suite had filed it as a known defect on
+    2026-10-23): with Sum off, resting the pointer on a side-panel card opens NO rich session card, while the same
+    hover on the session's TAB opens one. The tab's half is this test's control: it proves the input reaches XAML's
+    tooltip service, so the card's silence is the app's behavior, not the test's. Measured on 0.8.0 and on the test
+    build 0.8.1.1 (2026-10-23, runs g1full and fixall-0811): no popup window of the app over the card for the whole
+    hold — although hooks.log still says "cards show the rich session tooltip" and SIDE_PANEL.md §2d describes the
+    card beside the panel (the code's hover host for such cards stays in place, unused).
 
     Args:
         am: The app.
@@ -271,4 +271,4 @@ def test_known_defect_sum_off_card_hover_opens_no_rich_card(am, s1):
     w.side_panel.set_sum(False)
     card = w.side_panel.card("t1")
     card.title_el.hover(glide=True, offset=(40, 8))
-    hold_true(lambda: not am.tooltips(), 8.0, what="no rich card over the side-panel card (expected: one)")
+    hold_true(lambda: not am.tooltips(), 8.0, what="no rich card over the side-panel card (SP-K2, a feature)")
