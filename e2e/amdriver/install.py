@@ -1,0 +1,1410 @@
+"""The install lane's driver: a test desktop's Agentmaster installs, read and made like a user makes them.
+
+The install scenarios (doc/agentmaster/flows/19-install-update-profiles.md, "Every install scenario") change the
+MACHINE — Program Files, HKCU and HKLM, shortcuts, the PATH, Active Setup — so they run only on a desktop the install
+lane prepared (E2E_TESTING.md §8.5): `e2e/guest/provision.ps1 -Lane Install` wrote C:\\e2e\\install-lane.json and
+extracted the build under test, `.portable` marker and all, to C:\\e2e\\kit\\build; the host's `install_lane.py` reset
+the desktop before the scenario and staged the scripts under test into C:\\e2e\\src\\kit.
+
+What a scenario does with it:
+    Lane.load()            the lane's facts (None on any other desktop: the scenarios are then deselected)
+    Kit.copy / Kit.zip     a FRESH portable copy, or a release-shaped zip, of the build stamped with a chosen version
+                           (the app reads its own version from `.am-version`; tools/install-qa's New-AmQaCopy did this)
+    run_installer          tools/Install-Agentmaster.ps1 in Windows PowerShell 5.1 or PowerShell 7, non-interactive
+    MachineState.read      every install, registration, shortcut, PATH entry, profile and process, in one snapshot
+    start_like_explorer    a double-click: Explorer starts the exe with its own token and environment
+    wait_question / ...    the copy's "Where should Agentmaster live?" (ui/taskdialog.py)
+    end_agentmaster        the GUI processes ended, their ConPTY hosts left to drain (never OpenConsole killed first)
+    collect_evidence       what a failed scenario leaves: the screen, every dialog, the state, the logs, the scripts' runs
+
+⚠ Only for a disposable desktop: nothing here asks before it installs, uninstalls or deletes, and `reset_machine`
+removes every Agentmaster install of every account (tools/install-qa/amqa-guest.ps1 `Reset-AmQa`).
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import shutil
+import subprocess
+import time
+import traceback
+import uuid
+import winreg
+import zipfile
+from ctypes import wintypes
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import psutil
+
+from . import win32
+from .app import _LEAKY_NAMES, _LEAKY_PREFIXES, MAIN_CLASS
+from .ui.dialogs import MessageBox
+from .ui.taskdialog import DIALOG_CLASS, TaskDialog
+from .waits import WaitTimeout, wait_until
+
+E2E_ROOT = Path(r"C:\e2e")
+LANE_FILE = E2E_ROOT / "install-lane.json"
+"""Written by provision.ps1 -Lane Install; its presence is what admits an install scenario."""
+SRC_KIT = E2E_ROOT / "src" / "kit"
+"""The scripts under test, staged by host/install_lane.py (Install-Agentmaster.ps1, amqa-guest.ps1)."""
+WINDOWS_POWERSHELL = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+"""Windows PowerShell 5.1 (every Windows 11 has it; the installer's README one-liner runs there)."""
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+"""Where Apps & Features reads its entries, under HKCU (a per-user install) and HKLM (the all-users one)."""
+USER_ENTRY = "Agentmaster"
+"""The per-user install's Apps & Features key name (PortableInstall.h)."""
+MACHINE_ENTRY = "AgentmasterAllUsers"
+"""The all-users install's key name since the evening of 2026-10-21 (kMachineUninstallKey)."""
+OLD_MACHINE_ENTRY = "Agentmaster"
+"""The all-users key name before that (read for an old registration)."""
+VERB_KEYS = ("Directory", r"Directory\Background", "Drive")
+"""The three right-click verbs ("Open in Agentmaster") each install registers: folders, folder backgrounds, drives."""
+ACTIVE_SETUP_KEY = r"SOFTWARE\Microsoft\Active Setup\Installed Components\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}"
+"""The all-users install's Active Setup component (kActiveSetupKey): StubPath `"<exe>" --register-user`."""
+QUESTION = "Where should Agentmaster live?"
+"""The portable copy's first-launch question (PortableInstall.h ShowInstallPrompt)."""
+PROFILE_PICKER = "Choose a profile for this installation"
+"""A kept-portable copy's profile question (ProfileBootstrap.h ShowProfilePicker, first launch)."""
+UNINSTALL_CONFIRM = "Uninstall Agentmaster?"
+"""`--uninstall-portable`'s confirmation on an install."""
+NOTHING_TO_UNINSTALL = "Nothing to uninstall here"
+"""`--uninstall-portable`'s answer on a copy that is not an install."""
+APP_IMAGES = ("Agentmaster.exe", "WindowsTerminal.exe")
+"""The GUI binary and its old-name forwarder (WindowsTerminalShim)."""
+
+
+# ---- the lane ---------------------------------------------------------------------------------------------------------
+
+@dataclass
+class Lane:
+    """The install lane's facts, as provision.ps1 wrote them.
+
+    Attributes:
+        isolation: "reset" (the host reset the desktop before this scenario), "clean" (one desktop for every scenario:
+            the machine fixture removes every install first) or "none" (nothing is removed).
+        kit: C:\\e2e\\kit (the build and the copies, stamps and zips made from it).
+        build: The pristine portable copy of the build under test (with `.portable`).
+        version: The build's own `.am-version` ("0.8.0.0").
+        zip: The zip the build came from.
+        pwsh: PowerShell 7's exe ("" when the lane installed none).
+        accounts: The lane's accounts file ("" when provision.ps1 made no second account: no -Accounts).
+        old: The older release as published (C:\\e2e\\kit\\old; "" without -Old).
+    """
+
+    isolation: str
+    kit: Path
+    build: Path
+    version: str
+    zip: Path
+    pwsh: str
+    accounts: str = ""
+    old: str = ""
+
+    @staticmethod
+    def load(path: Path = LANE_FILE) -> Optional["Lane"]:
+        """Read the lane file.
+
+        Args:
+            path: The file.
+        Returns:
+            The Lane, or None when the file is missing or unreadable (this desktop is not an install lane's).
+        """
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return None
+        if raw.get("lane") != "install":
+            return None
+        return Lane(isolation=str(raw.get("isolation") or "reset").lower(), kit=Path(raw["kit"]),
+                    build=Path(raw["build"]), version=str(raw.get("version") or ""), zip=Path(raw.get("zip") or ""),
+                    pwsh=str(raw.get("pwsh") or ""), accounts=str(raw.get("accounts") or ""),
+                    old=str(raw.get("old") or ""))
+
+    def account(self, kind: str = "std") -> "Account":
+        """A second local account the lane made (flows/19's Machine tag of that name).
+
+        Args:
+            kind: "std" (the standard account qastd).
+        Returns:
+            The Account.
+        Raises:
+            LookupError: When the lane made none (the host provisions -Accounts only for a scenario that needs one).
+        """
+        if not self.accounts or not Path(self.accounts).exists():
+            raise LookupError("the install lane made no second account (provision.ps1 -Accounts)")
+        raw = json.loads(Path(self.accounts).read_text(encoding="utf-8-sig"))
+        entry = raw.get(kind)
+        if not entry:
+            raise LookupError(f"the install lane made no {kind!r} account")
+        return Account(kind=kind, name=str(entry["name"]), accounts_file=Path(self.accounts))
+
+    @property
+    def installer(self) -> Path:
+        """tools/Install-Agentmaster.ps1 as staged for this run.
+
+        Returns:
+            Its path in the guest.
+        """
+        return SRC_KIT / "Install-Agentmaster.ps1"
+
+    @property
+    def qa_helpers(self) -> Path:
+        """tools/install-qa/amqa-guest.ps1 as staged (Get-AmQaState for evidence, Reset-AmQa for the clean isolation).
+
+        Returns:
+            Its path in the guest.
+        """
+        return SRC_KIT / "amqa-guest.ps1"
+
+
+class Kit:
+    """Portable copies and release-shaped zips of the build under test, each stamped with a version of the test's choice.
+
+    The app takes its own version from `.am-version` (PortableInstall.h `CurrentInstallVersion`), and the installer
+    takes a zip's from its name (`Agentmaster_<a.b.c.d>_<arch>.zip`) or that file, so a stamp is enough to make "a newer"
+    or "an older" copy of one build — the method of the manual QA (tools/install-qa `New-AmQaCopy`).
+
+    Attributes:
+        lane: The lane.
+        runs: Where copies go (C:\\e2e\\kit\\run).
+        zips: Where zips go (C:\\e2e\\kit\\zips).
+    """
+
+    def __init__(self, lane: Lane) -> None:
+        """Bind to the lane's build.
+
+        Args:
+            lane: The lane.
+        """
+        self.lane = lane
+        self.runs = lane.kit / "run"
+        self.zips = lane.kit / "zips"
+
+    def copy(self, version: str, name: str) -> Path:
+        """A FRESH pristine copy of the build — what a user has right after unzipping a release.
+
+        A copy that decided once (a stub, a kept-portable copy) never asks again, so every scenario step that needs
+        the question starts from a copy of its own.
+
+        Args:
+            version: The `.am-version` to stamp ("0.8.1.0").
+            name: The copy's folder name under C:\\e2e\\kit\\run.
+        Returns:
+            The copy's Agentmaster.exe.
+        Raises:
+            OSError: When the copy cannot be made (a process still runs from an old copy of that name).
+        """
+        dst = self.runs / name
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(self.lane.build, dst)
+        (dst / ".am-version").write_text(version + "\n", encoding="ascii")
+        # Every account may write it, like an unzip in a user's own folder: a copy another account cannot write is a
+        # MACHINE copy to it (Profiles::IsMachineCopyIn — no question at all), which a scenario of the other account
+        # must not meet by accident of this folder's ACL (New-AmQaCopy granted the same).
+        subprocess.run(["icacls", str(dst), "/grant", "*S-1-1-0:(OI)(CI)M", "/Q"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+        return dst / "Agentmaster.exe"
+
+    def zip(self, version: str, name: Optional[str] = None) -> Path:
+        """A release-shaped zip of the build: one top folder `agentmaster-<version>` holding the copy, stamped.
+
+        Stored, not deflated: the installer extracts it on the same disk, and a 40 MB deflate costs seconds per zip.
+
+        Args:
+            version: The version in the name and in `.am-version` ("0.8.1.0").
+            name: The file name (default `Agentmaster_<version>_x64.zip`, the name the installer reads the version from).
+        Returns:
+            The zip's path.
+        Raises:
+            OSError: When it cannot be written.
+        """
+        return self._pack(self.lane.build, version, name or f"Agentmaster_{version}_x64.zip", manifest=None)
+
+    def old_zip(self, manifest: bool, version: str = "", name: Optional[str] = None) -> Path:
+        """A release-shaped zip of the OLDER release the lane extracted (provision.ps1 -Old: v0.7.10 by default), with or
+        without a release manifest.
+
+        The older release ships no `.am-manifest` and its app knows no `--register-user`: as published it is the
+        release an all-users install refuses (IS-24) and a pre-manifest install's uninstall reads through the legacy
+        list (IS-95); given a manifest it is "an older app without --register-user" (IS-21–IS-23, the method of the
+        2026-10-22 evening QA).
+
+        Args:
+            manifest: Add an `.am-manifest` naming the layout's top-level names (what New-UnpackagedTerminalDistribution.ps1
+                -PortableMode writes since 2026-10-21).
+            version: The version to stamp ("" = the release's own `.am-version`).
+            name: The file name (default `Agentmaster_<version>_x64.zip`).
+        Returns:
+            The zip's path.
+        Raises:
+            LookupError: When the lane extracted no older release.
+            OSError: When the zip cannot be written.
+        """
+        if not self.lane.old or not (Path(self.lane.old) / "Agentmaster.exe").exists():
+            raise LookupError("the install lane extracted no older release (provision.ps1 -Old)")
+        source = Path(self.lane.old)
+        own = _first_value(source / ".am-version")
+        version = version or own or "0.7.10.0"
+        names = sorted(p.name for p in source.iterdir() if p.name not in (".e2e-source", ".am-manifest"))
+        if manifest:
+            names = sorted(set(names) | {".am-manifest"})
+        text = ("# Agentmaster portable distribution manifest - the top-level names this build ships.\n" + "\n".join(names)
+                + "\n") if manifest else None
+        return self._pack(source, version, name or f"Agentmaster_{version}_x64.zip", manifest=text)
+
+    def _pack(self, source: Path, version: str, file_name: str, manifest: Optional[str]) -> Path:
+        """Pack a layout like a release zip: one top folder `agentmaster-<version>`, `.am-version` stamped.
+
+        Args:
+            source: The layout folder.
+            version: The version (the top folder's name and `.am-version`).
+            file_name: The zip's file name.
+            manifest: An `.am-manifest` text to add, or None to keep the layout's own (or none).
+        Returns:
+            The zip's path.
+        Raises:
+            OSError: When the zip cannot be written.
+        """
+        self.zips.mkdir(parents=True, exist_ok=True)
+        target = self.zips / file_name
+        top = f"agentmaster-{version}"
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as z:
+            for path in sorted(source.rglob("*")):
+                rel = path.relative_to(source).as_posix()
+                if path.is_dir() or rel == ".e2e-source":
+                    continue  # folders come with their files; the lane's own stamp is no part of a release
+                if rel == ".am-version":
+                    z.writestr(f"{top}/.am-version", version + "\n")
+                elif rel == ".am-manifest" and manifest is not None:
+                    continue  # replaced below
+                else:
+                    z.write(path, f"{top}/{rel}")
+            if manifest is not None:
+                z.writestr(f"{top}/.am-manifest", manifest)
+        return target
+
+
+# ---- running the installer ----------------------------------------------------------------------------------------
+
+@dataclass
+class ScriptRun:
+    """One run of a PowerShell script or command.
+
+    Attributes:
+        what: The command line shown in reports.
+        code: The exit code.
+        output: stdout and stderr, merged, as text.
+        seconds: How long it took.
+    """
+
+    what: str
+    code: int
+    output: str
+    seconds: float
+
+    def tail(self, lines: int = 40) -> str:
+        """The output's last lines (for an assertion message).
+
+        Args:
+            lines: How many.
+        Returns:
+            The text.
+        """
+        return "\n".join(self.output.splitlines()[-lines:])
+
+    def __str__(self) -> str:
+        """The run as a report: the command, its exit code and time, and its output's tail.
+
+        Returns:
+            The text.
+        """
+        return f"{self.what}\n  exit {self.code} in {self.seconds:.1f} s\n" + "\n".join(
+            "  | " + line for line in self.tail().splitlines())
+
+
+RUNS: list[ScriptRun] = []
+"""Every script run of the current test, in order (the evidence writes them; the machine fixture empties it)."""
+
+
+def clean_env(extra: Optional[dict] = None, drop: tuple = ()) -> dict:
+    """The runner's environment without anything that could point a child at another profile or session.
+
+    Args:
+        extra: Variables to add.
+        drop: More variable names to remove.
+    Returns:
+        The environment.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith(_LEAKY_PREFIXES) and k.upper() not in _LEAKY_NAMES and k.upper() not in drop}
+    env.update(extra or {})
+    return env
+
+
+def powershell_exe(edition: str, lane: Optional[Lane] = None) -> Path:
+    """The PowerShell of an edition.
+
+    Args:
+        edition: "5.1" (Windows PowerShell) or "7" (PowerShell 7 of the lane).
+        lane: The lane (for "7").
+    Returns:
+        The exe.
+    Raises:
+        LookupError: When the lane installed no PowerShell 7.
+    """
+    if edition == "5.1":
+        return WINDOWS_POWERSHELL
+    if lane is not None and lane.pwsh and Path(lane.pwsh).exists():
+        return Path(lane.pwsh)
+    raise LookupError("this install lane has no PowerShell 7 (provision.ps1 -Pwsh)")
+
+
+def _decode(data: bytes) -> str:
+    """A redirected PowerShell's output as text.
+
+    Args:
+        data: The bytes (Windows PowerShell writes a redirected stream in the console's code page; the installer is
+            pure ASCII, and so are the guest's paths).
+    Returns:
+        The text.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("oem", "replace")
+
+
+def run_powershell(args: list[str], edition: str = "5.1", lane: Optional[Lane] = None, env: Optional[dict] = None,
+                   cwd: Optional[Path] = None, timeout_s: float = 900.0) -> ScriptRun:
+    """Run PowerShell with arguments, non-interactive, and record the run.
+
+    The run's standard input is empty (DEVNULL), so a question the script reaches takes its default and says which
+    (`Test-CanPrompt`), and `-NonInteractive` makes a prompt PowerShell itself would show fail instead of waiting. No
+    console window opens (CREATE_NO_WINDOW): the runner has none to share, and a visible one would take the foreground
+    from the dialogs a scenario reads.
+
+    Args:
+        args: PowerShell's arguments after `-NoProfile -NonInteractive -ExecutionPolicy Bypass`.
+        edition: "5.1" or "7".
+        lane: The lane (for "7").
+        env: The environment (default: clean_env()).
+        cwd: The working folder (default C:\\e2e).
+        timeout_s: How long it may take.
+    Returns:
+        The ScriptRun (also appended to RUNS).
+    Raises:
+        subprocess.TimeoutExpired: When it ran longer (the process is killed first).
+        LookupError: For edition "7" without PowerShell 7.
+    """
+    exe = powershell_exe(edition, lane)
+    argv = [str(exe), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", *args]
+    started = time.monotonic()
+    proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          env=env if env is not None else clean_env(), cwd=str(cwd or E2E_ROOT), timeout=timeout_s,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+    run = ScriptRun(what=" ".join(f'"{a}"' if " " in a else a for a in argv), code=proc.returncode,
+                    output=_decode(proc.stdout), seconds=time.monotonic() - started)
+    RUNS.append(run)
+    return run
+
+
+def run_installer(lane: Lane, *args: str, edition: str = "5.1", env: Optional[dict] = None,
+                  cwd: Optional[Path] = None, timeout_s: float = 900.0) -> ScriptRun:
+    """Run tools/Install-Agentmaster.ps1 as a FILE (`powershell -File …`), the way its README's local form runs it.
+
+    Args:
+        lane: The lane (the staged script).
+        *args: The script's parameters ("-Scope", "User", "-ZipPath", "…").
+        edition: "5.1" or "7".
+        env: The environment (default: clean_env()).
+        cwd: The working folder (a relative -InstallDir is taken from it).
+        timeout_s: How long it may take.
+    Returns:
+        The ScriptRun.
+    """
+    return run_powershell(["-File", str(lane.installer), *args], edition, lane, env, cwd, timeout_s)
+
+
+# ---- another account ----------------------------------------------------------------------------------------------
+
+@dataclass
+class Account:
+    """A second local account of the lane, started in the signed-in user's session ("Run as different user").
+
+    Attributes:
+        kind: The Machine tag ("std": a standard user).
+        name: The account name ("qastd").
+        accounts_file: The lane's accounts file (its password; readable by administrators only, never printed).
+    """
+
+    kind: str
+    name: str
+    accounts_file: Path
+
+    @property
+    def home(self) -> Path:
+        """The account's profile folder (made at its first start with -LoadUserProfile).
+
+        Returns:
+            C:\\Users\\<name>.
+        """
+        return Path(os.environ.get("SystemDrive", "C:") + "\\") / "Users" / self.name
+
+    @property
+    def profile(self) -> Path:
+        """The account's Default Agentmaster profile.
+
+        Returns:
+            C:\\Users\\<name>\\.agentmaster.
+        """
+        return self.home / ".agentmaster"
+
+    @property
+    def install_dir(self) -> Path:
+        """Where its own per-user install goes.
+
+        Returns:
+            C:\\Users\\<name>\\.agentmaster\\bin.
+        """
+        return self.profile / "bin"
+
+
+_RUN_AS = r"""
+param([string]$AccountsFile, [string]$Kind, [string]$Exe, [string]$ArgLine64, [string]$OutDir, [int]$Wait, [int]$TimeoutS)
+# Start a program as the lane's other account in THIS session (Start-Process -Credential: CreateProcessWithLogonW with
+# the account's profile loaded). All three standard streams go to files: without that, .NET hands the caller's own
+# pipes to the child and a caller that waits on them waits until the child ends (tools/install-qa README).
+$ErrorActionPreference = 'Stop'
+$acc = (Get-Content -Raw -LiteralPath $AccountsFile | ConvertFrom-Json).$Kind
+$cred = New-Object System.Management.Automation.PSCredential ($acc.name, (ConvertTo-SecureString $acc.password -AsPlainText -Force))
+# '-' stands for no arguments (an empty argument does not survive every command line on the way here).
+$argLine = if ($ArgLine64 -eq '-') { '' } else { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgLine64)) }
+New-Item -ItemType Directory -Force $OutDir | Out-Null
+$in = Join-Path $OutDir 'stdin.txt'; $out = Join-Path $OutDir 'stdout.txt'; $err = Join-Path $OutDir 'stderr.txt'
+Set-Content -LiteralPath $in -Value '' -Encoding ASCII
+$sp = @{ FilePath = $Exe; Credential = $cred; LoadUserProfile = $true; PassThru = $true; WorkingDirectory = $OutDir
+         RedirectStandardInput = $in; RedirectStandardOutput = $out; RedirectStandardError = $err }
+if ($argLine) { $sp.ArgumentList = $argLine }
+$p = Start-Process @sp
+# Read the handle at once: a Process that Start-Process returns reports no ExitCode later unless its handle was opened
+# while the process lived (a known .NET / PowerShell 5.1 trap).
+$null = $p.Handle
+if ($Wait -eq 0) { 'PID ' + $p.Id; exit 0 }
+if (-not $p.WaitForExit($TimeoutS * 1000)) { try { $p.Kill() } catch { }; 'TIMEOUT'; exit 3 }
+'EXIT ' + $p.ExitCode
+"""
+
+
+def _quote_arg(arg: str) -> str:
+    """One argument quoted the way CommandLineToArgvW splits it back (the rule every C/C++ program's argv follows).
+
+    Args:
+        arg: The argument.
+    Returns:
+        The argument as it goes on a command line.
+    """
+    if arg and not any(c in arg for c in ' \t"'):
+        return arg
+    out, backslashes = ['"'], 0
+    for c in arg:
+        if c == "\\":
+            backslashes += 1
+            continue
+        if c == '"':
+            out.append("\\" * (backslashes * 2 + 1) + '"')
+        else:
+            out.append("\\" * backslashes + c)
+        backslashes = 0
+    out.append("\\" * (backslashes * 2) + '"')
+    return "".join(out)
+
+
+_RUN_AS_COUNT = [0]
+"""How many run-as calls this process made (each gets an output folder of its own)."""
+
+
+def run_as(account: Account, exe: Path, *args: str, wait: bool = True, timeout_s: float = 600.0) -> ScriptRun:
+    """Run a program as the lane's other account in the signed-in user's session — "Run as different user".
+
+    The password never appears on a command line: a small PowerShell (run as the signed-in administrator) reads it
+    from the lane's accounts file and makes the credential. The arguments travel base64-encoded and are quoted with
+    CommandLineToArgvW's rules, since Start-Process passes one string as the command line as is.
+
+    Args:
+        account: The account.
+        exe: The program.
+        *args: Its arguments.
+        wait: Wait for it to end (its exit code and output in the ScriptRun); False returns at once with "PID <n>" as
+            the output (a GUI app).
+        timeout_s: How long a waited run may take (it is killed after).
+    Returns:
+        The ScriptRun: code = the program's exit code (3 = timed out; for wait=False the launcher's 0), output = its
+        stdout + stderr (or the PID line). Appended to RUNS.
+    Raises:
+        subprocess.TimeoutExpired: When the launcher itself hangs.
+    """
+    import base64
+    _RUN_AS_COUNT[0] += 1
+    out_dir = E2E_ROOT / "w" / "runas" / f"{os.getpid()}-{_RUN_AS_COUNT[0]}"
+    script = E2E_ROOT / "w" / "runas" / "run-as.ps1"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_RUN_AS, encoding="ascii")
+    line = " ".join(_quote_arg(a) for a in args)
+    launcher = [str(WINDOWS_POWERSHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                "-AccountsFile", str(account.accounts_file), "-Kind", account.kind, "-Exe", str(exe),
+                "-ArgLine64", base64.b64encode(line.encode("utf-8")).decode("ascii") or "-", "-OutDir", str(out_dir),
+                "-Wait", "1" if wait else "0", "-TimeoutS", str(int(timeout_s))]
+    started = time.monotonic()
+    proc = subprocess.run(launcher, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          env=clean_env(), cwd=str(E2E_ROOT), timeout=timeout_s + 120,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+    said = _decode(proc.stdout).strip()
+    code = proc.returncode
+    last = said.splitlines()[-1] if said else ""
+    if wait and last.startswith("EXIT "):
+        code = int(last.split()[1])
+    elif last == "TIMEOUT":
+        code = 3
+    output = said
+    for name in ("stdout.txt", "stderr.txt"):
+        f = out_dir / name
+        if f.exists():
+            output += f"\n--- {name}\n" + _decode(f.read_bytes())
+    run = ScriptRun(what=f"as {account.name}: {exe} {line}", code=code, output=output, seconds=time.monotonic() - started)
+    RUNS.append(run)
+    return run
+
+
+def start_as(account: Account, exe: Path, *args: str) -> int:
+    """Start a GUI program as the lane's other account in the signed-in user's session, without waiting for it.
+
+    Args:
+        account: The account.
+        exe: The program (an Agentmaster.exe).
+        *args: Its arguments.
+    Returns:
+        The started process's id.
+    Raises:
+        RuntimeError: When the start failed (the launcher's output is in the message).
+    """
+    run = run_as(account, exe, *args, wait=False, timeout_s=120)
+    line = next((ln for ln in run.output.splitlines() if ln.startswith("PID ")), None)
+    if run.code != 0 or line is None:
+        raise RuntimeError(f"could not start {exe} as {account.name}: {run}")
+    return int(line.split()[1])
+
+
+def run_installer_as(account: Account, lane: Lane, *args: str, timeout_s: float = 900.0) -> ScriptRun:
+    """Run tools/Install-Agentmaster.ps1 as the lane's other account (Windows PowerShell, as a file, no console input).
+
+    Args:
+        account: The account.
+        lane: The lane.
+        *args: The script's parameters.
+        timeout_s: How long it may take.
+    Returns:
+        The ScriptRun.
+    """
+    return run_as(account, WINDOWS_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                  str(lane.installer), *args, timeout_s=timeout_s)
+
+
+_ACCOUNT_STATE = r"""
+# What one account sees of Agentmaster: its own HKCU entries, PATH, icons, Active Setup marker and profile. Run AS that
+# account (run_as), so HKCU and the shell folders are its own.
+$o = [ordered]@{ user = "$env:USERDOMAIN\$env:USERNAME" }
+$k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster'
+$o.user_entry = $null
+if (Test-Path $k) { $e = Get-ItemProperty $k; $o.user_entry = [ordered]@{ DisplayName = $e.DisplayName; DisplayVersion = $e.DisplayVersion; InstallLocation = $e.InstallLocation; UninstallString = $e.UninstallString } }
+$verbs = [ordered]@{}
+foreach ($v in 'Directory', 'Directory\Background', 'Drive') {
+    $c = "HKCU:\Software\Classes\$v\shell\Agentmaster\command"
+    if (Test-Path -LiteralPath $c) { $verbs[$v] = [string](Get-Item -LiteralPath $c).GetValue('') }
+}
+$o.user_verbs = $verbs
+$o.user_path = @(([string][Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' | Where-Object { $_ -match 'agentmaster' })
+$sh = New-Object -ComObject WScript.Shell
+$links = @()
+foreach ($f in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+    if ($f -and (Test-Path -LiteralPath $f)) {
+        Get-ChildItem -LiteralPath $f -Filter 'Agentmaster*.lnk' -ErrorAction SilentlyContinue | ForEach-Object {
+            $links += [ordered]@{ path = $_.FullName; target = [string]$sh.CreateShortcut($_.FullName).TargetPath }
+        }
+    }
+}
+$o.shortcuts = $links
+$m = 'HKCU:\SOFTWARE\Microsoft\Active Setup\Installed Components\{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}'
+$o.active_setup_user = if (Test-Path $m) { [string](Get-Item $m).GetValue('Version') } else { $null }
+$o.profile = Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.agentmaster')
+'STATE ' + ($o | ConvertTo-Json -Compress -Depth 5)
+"""
+
+
+def account_state(account: Account) -> dict:
+    """What the lane's other account sees of Agentmaster (read AS that account: its HKCU, its shell folders).
+
+    Args:
+        account: The account.
+    Returns:
+        {"user", "user_entry", "user_verbs", "user_path", "shortcuts": [{"path", "target"}], "active_setup_user",
+        "profile"}.
+    Raises:
+        RuntimeError: When the read printed no STATE line (the run's output is in the message).
+    """
+    script = E2E_ROOT / "w" / "runas" / "account-state.ps1"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_ACCOUNT_STATE, encoding="ascii")
+    run = run_as(account, WINDOWS_POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                 str(script), timeout_s=180)
+    RUNS.pop()  # a read, not one of the scenario's runs
+    line = next((ln for ln in run.output.splitlines() if ln.startswith("STATE ")), None)
+    if line is None:
+        raise RuntimeError(f"no state read as {account.name}:\n{run}")
+    return json.loads(line[len("STATE "):])
+
+
+# ---- the machine's state ------------------------------------------------------------------------------------------
+
+_KNOWN_FOLDERS = {
+    "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "programs": "{A77F5D77-2E2B-44C3-A6A2-ABA601054A51}",
+    "public_desktop": "{C4AA340D-F20F-4863-AFEF-F87EF2E6BA25}",
+    "common_programs": "{0139D44E-6AFE-49F2-8690-3DAFCAE6FFB8}",
+}
+"""The shell folders an install puts icons in (KNOWNFOLDERID values)."""
+
+
+class _GUID(ctypes.Structure):
+    """A GUID for SHGetKnownFolderPath."""
+
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+def known_folder(name: str) -> Path:
+    """A shell folder of the signed-in user (or the machine's common one), as the app and the installer resolve it.
+
+    Args:
+        name: A _KNOWN_FOLDERS key.
+    Returns:
+        The folder.
+    Raises:
+        OSError: When the shell cannot resolve it.
+    """
+    u = uuid.UUID(_KNOWN_FOLDERS[name])
+    guid = _GUID.from_buffer_copy(u.bytes_le)
+    out = ctypes.c_wchar_p()
+    shell32 = ctypes.WinDLL("shell32")
+    shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(_GUID), wintypes.DWORD, wintypes.HANDLE,
+                                             ctypes.POINTER(ctypes.c_wchar_p)]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    hr = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(out))
+    try:
+        if hr != 0:
+            raise OSError(f"SHGetKnownFolderPath({name}) failed: 0x{hr & 0xFFFFFFFF:08X}")
+        return Path(out.value)
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(out)
+
+
+def user_install_dir() -> Path:
+    """The per-user install's default folder (the Default profile's `bin`).
+
+    Returns:
+        %USERPROFILE%\\.agentmaster\\bin.
+    """
+    return default_profile() / "bin"
+
+
+def default_profile() -> Path:
+    """The release identity's Default profile of the signed-in user.
+
+    Returns:
+        %USERPROFILE%\\.agentmaster.
+    """
+    return Path(os.environ.get("USERPROFILE", r"C:\Users\Docker")) / ".agentmaster"
+
+
+def machine_install_dir() -> Path:
+    """The all-users install's default folder.
+
+    Returns:
+        %ProgramW6432%\\Agentmaster.
+    """
+    return Path(os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles", r"C:\Program Files")) / "Agentmaster"
+
+
+def _read_values(hive, path: str) -> Optional[dict]:
+    """Every value of a registry key, 64-bit view.
+
+    Args:
+        hive: winreg.HKEY_CURRENT_USER or HKEY_LOCAL_MACHINE.
+        path: The key's path.
+    Returns:
+        {name: value} ("" for the default value), or None when the key does not exist.
+    """
+    try:
+        key = winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+    except OSError:
+        return None
+    values = {}
+    with key:
+        i = 0
+        while True:
+            try:
+                name, value, _kind = winreg.EnumValue(key, i)
+            except OSError:
+                break
+            values[name] = value
+            i += 1
+    return values
+
+
+def _verbs(hive) -> dict:
+    """The "Open in Agentmaster" verbs of a hive.
+
+    Args:
+        hive: winreg.HKEY_CURRENT_USER or HKEY_LOCAL_MACHINE.
+    Returns:
+        {"Directory": command, …} for each of VERB_KEYS that is registered.
+    """
+    found = {}
+    for k in VERB_KEYS:
+        cmd = _read_values(hive, rf"Software\Classes\{k}\shell\Agentmaster\command")
+        if cmd is not None:
+            found[k] = cmd.get("", "")
+    return found
+
+
+def _path_entries(hive, path: str) -> list[str]:
+    """A PATH value's entries.
+
+    Args:
+        hive: The hive.
+        path: The Environment key (HKCU\\Environment, or HKLM's Session Manager\\Environment).
+    Returns:
+        The non-empty entries, as stored (unexpanded).
+    """
+    values = _read_values(hive, path) or {}
+    raw = values.get("Path") or values.get("PATH") or ""
+    return [p for p in str(raw).split(";") if p.strip()]
+
+
+@dataclass
+class Shortcut:
+    """A .lnk file and what it starts.
+
+    Attributes:
+        path: The .lnk.
+        target: Its target (TargetPath).
+        arguments: Its arguments.
+        aumid: The AppUserModelID it carries (System.AppUserModel.ID), "" when none or unreadable.
+    """
+
+    path: str
+    target: str
+    arguments: str
+    aumid: str
+
+
+def read_shortcuts(folders: list[Path], pattern: str = "Agentmaster*.lnk") -> list[Shortcut]:
+    """The Agentmaster shortcuts in some folders, read through the Windows Shell (the same COM objects Explorer and the
+    installer's own WScript.Shell use).
+
+    Args:
+        folders: The folders (missing ones are skipped).
+        pattern: The file pattern.
+    Returns:
+        The shortcuts.
+    """
+    links = [p for folder in folders if folder.is_dir() for p in sorted(folder.glob(pattern))]
+    if not links:
+        return []
+    import comtypes.client  # late: only a lane run reads shortcuts, and the module is heavy
+    shell = comtypes.client.CreateObject("WScript.Shell", dynamic=True)
+    try:
+        app = comtypes.client.CreateObject("Shell.Application", dynamic=True)
+    except Exception:  # noqa: BLE001 - the AppUserModelID is a detail; the target still reads
+        app = None
+    out = []
+    for lnk in links:
+        try:
+            sc = shell.CreateShortcut(str(lnk))
+            target, arguments = str(sc.TargetPath or ""), str(sc.Arguments or "")
+        except Exception as error:  # noqa: BLE001 - one unreadable link is reported, the rest still read
+            target, arguments = f"(unreadable: {error})", ""
+        aumid = ""
+        if app is not None:
+            try:
+                item = app.NameSpace(str(lnk.parent)).ParseName(lnk.name)
+                aumid = str(item.ExtendedProperty("System.AppUserModel.ID") or "")
+            except Exception:  # noqa: BLE001 - reported as "" (no id), like a link that has none
+                aumid = ""
+        out.append(Shortcut(str(lnk), target, arguments, aumid))
+    return out
+
+
+@dataclass
+class InstallFacts:
+    """One folder that holds an Agentmaster.exe.
+
+    Attributes:
+        dir: The folder.
+        version: Its `.am-version` ("" when it has none).
+        install_path: `install.path`'s value line ("" when absent).
+        profile_path: `profile.path`'s value line ("" when absent).
+        portable: Whether `.portable` is there.
+        names: Every top-level name in the folder.
+        marked: The files that keep a download mark (a Zone.Identifier stream).
+    """
+
+    dir: str
+    version: str
+    install_path: str
+    profile_path: str
+    portable: bool
+    names: list[str]
+    marked: list[str]
+
+    @staticmethod
+    def read(folder: Path) -> Optional["InstallFacts"]:
+        """Read a folder.
+
+        Args:
+            folder: The folder.
+        Returns:
+            The facts, or None when it holds no Agentmaster.exe.
+        """
+        if not (folder / "Agentmaster.exe").exists():
+            return None
+        names = sorted(p.name for p in folder.iterdir())
+        marked = [p.name for p in folder.iterdir() if p.is_file() and _has_mark(p)]
+        return InstallFacts(str(folder), _first_value(folder / ".am-version"), _first_value(folder / "install.path"),
+                            _first_value(folder / "profile.path"), (folder / ".portable").exists(), names, marked)
+
+
+def _first_value(path: Path) -> str:
+    """A decision file's value: its first line that is neither empty nor a `#` comment (the app's own rule).
+
+    Args:
+        path: The file.
+    Returns:
+        The value, or "" when the file is missing or holds none.
+    """
+    try:
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                return line.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _has_mark(path: Path) -> bool:
+    """Whether a file keeps the browser's download mark.
+
+    Args:
+        path: The file.
+    Returns:
+        True when its Zone.Identifier stream exists.
+    """
+    try:
+        with open(f"{path}:Zone.Identifier", "rb"):
+            return True
+    except OSError:
+        return False
+
+
+@dataclass
+class AppProcess:
+    """A running Agentmaster.exe (or WindowsTerminal.exe).
+
+    Attributes:
+        pid: Its id.
+        image: Its image name.
+        exe: Its image path.
+        cmdline: Its command line, joined.
+        user: Its account ("" when unreadable).
+        created: Its start time (epoch seconds).
+    """
+
+    pid: int
+    image: str
+    exe: str
+    cmdline: str
+    user: str
+    created: float
+
+
+def _beside_agentmaster(exe: str) -> bool:
+    """Whether an image lies in an Agentmaster folder (beside an Agentmaster.exe): Agentmaster's old-name forwarder
+    WindowsTerminal.exe and its own OpenConsole.exe hosts do; the real Windows Terminal's do not. The test desktops'
+    image runs the real Windows Terminal as its default terminal — it hosts the console of the suite's own runner —
+    and on 2026-10-24 the first lane run took it for a leftover Agentmaster.
+
+    Args:
+        exe: The process's image path.
+    Returns:
+        True when an Agentmaster.exe sits beside it; False otherwise, also when the folder cannot be read (WindowsApps).
+    """
+    if not exe:
+        return False
+    try:
+        return (Path(exe).parent / "Agentmaster.exe").exists()
+    except OSError:
+        return False
+
+
+def app_processes(under: Optional[Path] = None) -> list[AppProcess]:
+    """The running Agentmaster GUI processes (and old-name forwarders), oldest first.
+
+    Args:
+        under: Only those whose image lies in this folder (None = any).
+    Returns:
+        The processes. A WindowsTerminal.exe counts only when it is Agentmaster's forwarder (_beside_agentmaster): the
+        real Windows Terminal is never one of them, so nothing here ends it.
+    """
+    root = str(under).rstrip("\\").lower() + "\\" if under is not None else None
+    found = []
+    for p in psutil.process_iter(["name", "exe", "cmdline", "username", "create_time"]):
+        try:
+            name = p.info["name"] or ""
+            if name.lower() not in (n.lower() for n in APP_IMAGES):
+                continue
+            exe = p.info["exe"] or ""
+            if name.lower() == "windowsterminal.exe" and not _beside_agentmaster(exe):
+                continue
+            if root is not None and not exe.lower().startswith(root):
+                continue
+            found.append(AppProcess(p.pid, name, exe, " ".join(p.info["cmdline"] or []), p.info["username"] or "",
+                                    p.info["create_time"] or 0.0))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return sorted(found, key=lambda a: a.created)
+
+
+OTHER_ACCOUNTS = ("qastd", "qaadmin")
+"""The second accounts the install QA uses (tools/install-qa/amqa-guest.ps1 `$AmQaAccounts`, provision.ps1 -Accounts)."""
+
+
+def _other_account_leftovers() -> list[str]:
+    """What the lane's other accounts hold of Agentmaster, as files: a profile folder, an Agentmaster icon.
+
+    Returns:
+        One line per leftover (none for an account that never signed in: it has no folder).
+    """
+    out = []
+    for name in OTHER_ACCOUNTS:
+        home = Path(os.environ.get("SystemDrive", "C:") + "\\") / "Users" / name
+        if (home / ".agentmaster").exists():
+            out.append(f"{name}'s profile {home / '.agentmaster'}")
+        for folder in (home / "Desktop", home / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs"):
+            try:
+                out += [f"{name}'s icon {lnk}" for lnk in folder.glob("Agentmaster*.lnk")]
+            except OSError:
+                continue
+    return out
+
+
+@dataclass
+class MachineState:
+    """Everything an install leaves on the machine, read in one go (the signed-in user's view, plus the machine's).
+
+    Attributes:
+        user: The per-user install in %USERPROFILE%\\.agentmaster\\bin (None when absent).
+        machine: The all-users install in Program Files (None when absent).
+        user_entry: HKCU Apps & Features `Agentmaster` (None when absent).
+        machine_entry: HKLM `AgentmasterAllUsers`, else the old `Agentmaster` (None when absent).
+        user_verbs: HKCU "Open in Agentmaster" verbs ({key: command}).
+        machine_verbs: HKLM ones.
+        user_path: The user PATH entries that mention agentmaster.
+        machine_path: The machine PATH entries that mention agentmaster.
+        shortcuts: The Agentmaster shortcuts of the user's desktop and Start menu, and the common ones.
+        active_setup: The HKLM Active Setup component's values (None when absent).
+        active_setup_user: The user's own marker of it, HKCU (None when absent).
+        default_profile: Whether %USERPROFILE%\\.agentmaster exists, and its top-level names.
+        home_map: Whether %USERPROFILE%\\.agentmaster.profiles exists.
+        processes: The running Agentmaster processes.
+        other_accounts: What the lane's other accounts hold, read as files (their profile folders and their Agentmaster
+            icons): a leftover there is a leftover too. Their registry needs a read AS them (account_state).
+    """
+
+    user: Optional[InstallFacts]
+    machine: Optional[InstallFacts]
+    user_entry: Optional[dict]
+    machine_entry: Optional[dict]
+    user_verbs: dict
+    machine_verbs: dict
+    user_path: list[str]
+    machine_path: list[str]
+    shortcuts: list[Shortcut]
+    active_setup: Optional[dict]
+    active_setup_user: Optional[dict]
+    default_profile: Optional[list[str]]
+    home_map: bool
+    processes: list[AppProcess] = field(default_factory=list)
+    other_accounts: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def read() -> "MachineState":
+        """Read the machine now.
+
+        Returns:
+            The snapshot.
+        """
+        hkcu, hklm = winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE
+        machine_entry = (_read_values(hklm, rf"{UNINSTALL_KEY}\{MACHINE_ENTRY}")
+                         or _read_values(hklm, rf"{UNINSTALL_KEY}\{OLD_MACHINE_ENTRY}"))
+        folders = [known_folder(k) for k in ("desktop", "programs", "public_desktop", "common_programs")]
+        profile = default_profile()
+        return MachineState(
+            user=InstallFacts.read(user_install_dir()),
+            machine=InstallFacts.read(machine_install_dir()),
+            user_entry=_read_values(hkcu, rf"{UNINSTALL_KEY}\{USER_ENTRY}"),
+            machine_entry=machine_entry,
+            user_verbs=_verbs(hkcu),
+            machine_verbs=_verbs(hklm),
+            user_path=[p for p in _path_entries(hkcu, "Environment") if "agentmaster" in p.lower()],
+            machine_path=[p for p in _path_entries(hklm, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+                          if "agentmaster" in p.lower()],
+            shortcuts=read_shortcuts(folders),
+            active_setup=_read_values(hklm, ACTIVE_SETUP_KEY),
+            active_setup_user=_read_values(hkcu, ACTIVE_SETUP_KEY),
+            default_profile=sorted(p.name for p in profile.iterdir()) if profile.is_dir() else None,
+            home_map=(profile.parent / ".agentmaster.profiles").exists(),
+            processes=app_processes(),
+            other_accounts=_other_account_leftovers(),
+        )
+
+    def shortcuts_in(self, which: str) -> list[Shortcut]:
+        """The shortcuts of one shell folder.
+
+        Args:
+            which: A _KNOWN_FOLDERS key ("desktop", "programs", "public_desktop", "common_programs").
+        Returns:
+            Those whose .lnk lies directly in it.
+        """
+        folder = str(known_folder(which)).rstrip("\\").lower()
+        return [s for s in self.shortcuts if str(Path(s.path).parent).rstrip("\\").lower() == folder]
+
+    def baseline_problems(self) -> list[str]:
+        """What keeps this machine from being a clean one (no Agentmaster anywhere) — the start of every scenario.
+
+        Returns:
+            One line per leftover; empty for a clean machine.
+        """
+        problems = []
+        if self.user:
+            problems.append(f"a per-user install in {self.user.dir}")
+        if self.machine:
+            problems.append(f"an all-users install in {self.machine.dir}")
+        if self.user_entry is not None:
+            problems.append(f"the HKCU Apps & Features entry {self.user_entry.get('InstallLocation')!r}")
+        if self.machine_entry is not None:
+            problems.append(f"the HKLM Apps & Features entry {self.machine_entry.get('InstallLocation')!r}")
+        problems += [f"the HKCU verb {k}" for k in self.user_verbs] + [f"the HKLM verb {k}" for k in self.machine_verbs]
+        problems += [f"the user PATH entry {p}" for p in self.user_path]
+        problems += [f"the machine PATH entry {p}" for p in self.machine_path]
+        problems += [f"the shortcut {s.path}" for s in self.shortcuts]
+        if self.active_setup is not None:
+            problems.append("the Active Setup component")
+        if self.default_profile is not None:
+            problems.append(f"the profile {default_profile()} ({len(self.default_profile)} entries)")
+        if self.home_map:
+            problems.append("the profile choice file %USERPROFILE%\\.agentmaster.profiles")
+        problems += [f"a running {p.image} pid {p.pid} ({p.exe})" for p in self.processes]
+        problems += self.other_accounts
+        return problems
+
+    def to_json(self) -> str:
+        """The snapshot as JSON (evidence).
+
+        Returns:
+            The text.
+        """
+        return json.dumps(asdict(self), indent=1, default=str)
+
+
+# ---- starting and ending the app ------------------------------------------------------------------------------------
+
+def start_like_explorer(exe: Path, cwd: Optional[Path] = None) -> None:
+    """Start an exe the way a double-click does: Explorer starts it, with Explorer's own token and environment.
+
+    `explorer.exe <file>` hands the file to the RUNNING shell and returns; the started process's parent is the desktop's
+    Explorer, not this runner, so nothing of the runner's environment (or its console) reaches the app.
+
+    Args:
+        exe: The exe.
+        cwd: The folder explorer.exe starts in (none needed).
+    Returns:
+        None.
+    Raises:
+        OSError: When explorer.exe cannot start.
+    """
+    subprocess.Popen(["explorer.exe", str(exe)], cwd=str(cwd or exe.parent), env=clean_env(),
+                     creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def start_direct(exe: Path, *args: str, env: Optional[dict] = None) -> subprocess.Popen:
+    """Start an exe with arguments, as a shortcut, a script or the Apps & Features entry does.
+
+    Args:
+        exe: The exe.
+        *args: Its arguments.
+        env: The environment (default: clean_env()).
+    Returns:
+        The process (its exit code is the forwarder's or the handed-off launch's).
+    Raises:
+        OSError: When it cannot start.
+    """
+    return subprocess.Popen([str(exe), *args], cwd=str(exe.parent), env=env if env is not None else clean_env(),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+REOPEN_PROMPT = r"^Reopen your \d+ previous Agentmaster windows\?"
+"""The start-up question of a profile whose last run left more than one window open (WindowEmperor.cpp)."""
+
+
+def wait_app(under: Path, timeout_s: float = 90.0, newer_than: float = 0.0, window: bool = True,
+             image: str = "Agentmaster.exe", answer_reopen: Optional[str] = "No") -> AppProcess:
+    """Wait for an Agentmaster to run from a folder (and, by default, to show its main window).
+
+    Two installs of one user share the Default profile, so a copy can start on a profile another copy left with several
+    windows open; it then asks "Reopen your N previous Agentmaster windows?" before any window shows (seen 2026-10-24:
+    the shared copy started with AGENTMASTER_NO_HANDOFF=1 after the user's own copy had two windows). The wait answers
+    that question like a user, by default No (one window).
+
+    Args:
+        under: The folder its image must lie in.
+        timeout_s: How long.
+        newer_than: Only a process started after this epoch time (an earlier instance of the same folder does not count).
+        window: Also wait for its CASCADIA_HOSTING_WINDOW_CLASS window (the app is up, past every startup question).
+        image: The image name.
+        answer_reopen: The button to press on the reopen question ("Yes" / "No"), or None to leave it (the wait then
+            times out while the question is up).
+    Returns:
+        The process.
+    Raises:
+        WaitTimeout: When none came; the message lists what ran.
+    """
+    def ready() -> Optional[AppProcess]:
+        """The process when it is there (and shows its window); the reopen question answered on the way.
+
+        Returns:
+            It, or None.
+        """
+        for p in app_processes(under):
+            if p.image.lower() != image.lower() or p.created < newer_than:
+                continue
+            if answer_reopen is not None:
+                box = MessageBox.find(p.pid, text_re=REOPEN_PROMPT)
+                if box is not None:
+                    box.press(answer_reopen)
+                    continue
+            if not window or any(w.cls == MAIN_CLASS and w.visible for w in win32.top_windows(p.pid)):
+                return p
+        return None
+
+    return wait_until(ready, timeout_s, interval_s=0.5, what=f"{image} from {under}" + (" with its window" if window else ""),
+                      describe=lambda: [(p.pid, p.exe) for p in app_processes()])
+
+
+def end_agentmaster(under: Optional[Path] = None, drain_s: float = 20.0) -> list[str]:
+    """End the running Agentmaster GUIs, then whatever their ConPTY hosts leave.
+
+    The GUI goes first and alone: its hosts then end their tabs' shells themselves (CTRL_CLOSE) and exit — a host
+    killed first orphans its tab's processes (CLAUDE.md, OBSERVER.md §13a). What is still alive after `drain_s` is
+    killed and reported: on a disposable desktop a leftover would break the next step's "is it running" checks.
+
+    Args:
+        under: Only the GUIs whose image lies in this folder (None = every Agentmaster).
+        drain_s: How long the hosts may take.
+    Returns:
+        A line per process killed after the drain (empty when the hosts ended by themselves).
+    """
+    victims = [p.pid for p in app_processes(under)]
+    procs = []
+    for pid in victims:
+        try:
+            pr = psutil.Process(pid)
+            pr.kill()
+            procs.append(pr)
+        except psutil.NoSuchProcess:
+            continue
+    psutil.wait_procs(procs, timeout=10)
+    deadline = time.monotonic() + drain_s
+    hosts: list[psutil.Process] = []
+    while time.monotonic() < deadline:
+        # Only Agentmaster's own hosts: the real Windows Terminal's OpenConsole.exe hosts the runner's own console.
+        hosts = [h for h in psutil.process_iter(["name", "exe"])
+                 if (h.info["name"] or "").lower() == "openconsole.exe" and _beside_agentmaster(h.info["exe"] or "")
+                 and (under is None or (h.info["exe"] or "").lower().startswith(str(under).lower()))]
+        if not hosts:
+            break
+        time.sleep(0.5)  # the hosts end their clients first (≤ 5 s per stubborn one), then themselves
+    leftovers = []
+    for h in hosts:
+        try:
+            leftovers.append(f"{h.pid} {h.info['exe']}")
+            h.kill()
+        except psutil.NoSuchProcess:
+            continue
+    return leftovers
+
+
+# ---- the dialogs of a first launch ----------------------------------------------------------------------------------
+
+def wait_question(copy_dir: Path, timeout_s: float = 60.0) -> TaskDialog:
+    """Wait for a copy's "Where should Agentmaster live?".
+
+    Args:
+        copy_dir: The copy's folder (its process's image lies there).
+        timeout_s: How long.
+    Returns:
+        The question.
+    """
+    return TaskDialog.wait(QUESTION, exe_dirs=[copy_dir], timeout_s=timeout_s)
+
+
+def no_question_for(copy_dir: Path, seconds: float) -> bool:
+    """Whether a copy shows no install question for a while (a decided copy never asks again).
+
+    Args:
+        copy_dir: The copy's folder.
+        seconds: How long to watch.
+    Returns:
+        True when no question appeared.
+    """
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if TaskDialog.find(QUESTION, exe_dirs=[copy_dir]) is not None:
+            return False
+        time.sleep(0.3)  # a watch for something that must NOT appear: every pass is a fresh look
+    return True
+
+
+def install_log_lines(profile: Optional[Path] = None) -> list[str]:
+    """The `[install]` lines of a profile's hooks.log (the first launch and the uninstall log there).
+
+    Args:
+        profile: The profile folder (default: the Default profile).
+    Returns:
+        The lines, oldest first.
+    """
+    log = (profile or default_profile()) / "hooks.log"
+    try:
+        text = win32.read_bytes_shared(log).decode("utf-8", "replace")
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if "[install]" in line]
+
+
+# ---- clean-up and evidence --------------------------------------------------------------------------------------
+
+def reset_machine(lane: Lane) -> ScriptRun:
+    """Remove every Agentmaster install, registration, shortcut, PATH entry, profile and process of the machine
+    (tools/install-qa/amqa-guest.ps1 `Reset-AmQa` — the manual QA's own clean-up), for the "clean" isolation.
+
+    Args:
+        lane: The lane (the staged helpers).
+    Returns:
+        The run (one line per removed item).
+    """
+    return run_powershell(["-Command", f". '{lane.qa_helpers}'; Reset-AmQa"], "5.1", lane, timeout_s=300)
+
+
+def collect_evidence(out_dir: Path, label: str = "", lane: Optional[Lane] = None) -> Path:
+    """Write what a failed scenario leaves behind.
+
+    Files (each best effort; a failing part writes its error into evidence-errors.txt):
+        screen.png      the desktop
+        dialogs.txt     every open Win32 dialog of an Agentmaster process, as UI Automation sees it
+        state.json      MachineState.read()
+        amqa-state.txt  tools/install-qa's Get-AmQaState (every account's installs, entries, verbs, links, processes)
+        runs.txt        every script run of the test: command, exit code, output
+        install.log     the `[install]` lines of the Default profile's hooks.log
+        installer\\      %TEMP%\\Agentmaster-install\\*.log (the installer's own records) and the app's update logs
+
+    Args:
+        out_dir: The folder (created).
+        label: A header line.
+        lane: The lane (for Get-AmQaState); None skips it.
+    Returns:
+        The folder.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    errors = []
+
+    def part(name: str, fn) -> None:
+        """Run one collector; record its failure instead of raising.
+
+        Args:
+            name: The collector's name.
+            fn: The collector.
+        Returns:
+            None.
+        """
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - evidence is best effort; the error is kept beside it
+            errors.append(f"--- {name}\n{traceback.format_exc()}")
+
+    def screen() -> None:
+        """The desktop's screenshot."""
+        from PIL import ImageGrab
+        ImageGrab.grab(all_screens=True).save(out_dir / "screen.png")
+
+    def dialogs() -> None:
+        """Every open dialog of an Agentmaster process."""
+        pids = [p.pid for p in app_processes()]
+        parts = [f"===== {d!r}\n{d.dump()}" for d in TaskDialog.all(pids=pids, title=None)] if pids else []
+        (out_dir / "dialogs.txt").write_text("\n\n".join(parts) or "(none)", encoding="utf-8")
+
+    def state() -> None:
+        """The machine's state."""
+        (out_dir / "state.json").write_text(MachineState.read().to_json(), encoding="utf-8")
+
+    def amqa() -> None:
+        """The QA kit's own report."""
+        if lane is None:
+            return
+        run = run_powershell(["-Command", f". '{lane.qa_helpers}'; Get-AmQaState"], "5.1", lane, timeout_s=120)
+        RUNS.pop()  # the report is evidence, not one of the test's runs
+        (out_dir / "amqa-state.txt").write_text(run.output, encoding="utf-8")
+
+    def runs() -> None:
+        """The test's script runs."""
+        (out_dir / "runs.txt").write_text("\n\n".join(str(r) + "\n--- full output ---\n" + r.output for r in RUNS)
+                                          or "(none)", encoding="utf-8")
+
+    def logs() -> None:
+        """The install lines and the installer's records."""
+        (out_dir / "install.log").write_text("\n".join(install_log_lines()) or "(none)", encoding="utf-8")
+        temp = Path(os.environ.get("TEMP", r"C:\Windows\Temp"))
+        dst = out_dir / "installer"
+        for folder in ("Agentmaster-install", "Agentmaster-update"):
+            src = temp / folder
+            if src.is_dir():
+                for f in src.glob("*.log"):
+                    dst.mkdir(exist_ok=True)
+                    shutil.copy2(f, dst / f"{folder}-{f.name}")
+
+    for name, fn in (("screen", screen), ("dialogs", dialogs), ("state", state), ("amqa", amqa), ("runs", runs),
+                     ("logs", logs)):
+        part(name, fn)
+    if errors or label:
+        (out_dir / "evidence-errors.txt").write_text((f"evidence for {label}\n" if label else "") + "\n".join(errors),
+                                                     encoding="utf-8")
+    return out_dir
+
+
+__all__ = ["Lane", "Kit", "ScriptRun", "RUNS", "MachineState", "InstallFacts", "Shortcut", "AppProcess", "run_installer",
+           "Account", "run_as", "start_as", "run_installer_as", "account_state", "OTHER_ACCOUNTS", "REOPEN_PROMPT",
+           "run_powershell", "clean_env", "start_like_explorer", "start_direct", "wait_app", "end_agentmaster",
+           "wait_question", "no_question_for", "install_log_lines", "reset_machine", "collect_evidence", "user_install_dir",
+           "machine_install_dir", "default_profile", "known_folder", "app_processes", "QUESTION", "PROFILE_PICKER",
+           "UNINSTALL_CONFIRM", "NOTHING_TO_UNINSTALL", "DIALOG_CLASS", "WaitTimeout"]

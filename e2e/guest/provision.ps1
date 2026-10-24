@@ -47,9 +47,41 @@
 .PARAMETER Force
     Redo every step even when its result is in place (re-extract the build, reinstall claude.exe, ...).
 
+.PARAMETER Lane
+    Standard (the default: everything above, for the suites that drive the app on a test profile) or Install (the
+    install lane, doc/agentmaster/E2E_TESTING.md s.8.5: the scenarios of flows/19 that install Agentmaster FOR REAL).
+    The install lane skips Claude Code, Git and the mock's user environment - no install scenario starts a session -
+    and adds two steps: 'kit' (the build under test extracted to C:\e2e\kit\build WITH its `.portable` marker, the
+    pristine portable copy every scenario copies and stamps) and 'lane' (C:\e2e\install-lane.json, the file whose
+    presence lets an install test run at all, plus api.github.com in the hosts guard so the installed app's startup
+    update check fails at once instead of spending GitHub's 60 requests an hour, which this PC shares with its
+    desktops).
+
+.PARAMETER Isolation
+    The install lane's isolation, written into install-lane.json for the tests: Reset (the host resets the desktop
+    before every scenario: the tests only check that the machine is clean), Clean (one desktop for every scenario:
+    each test first removes every Agentmaster install with tools\install-qa\amqa-guest.ps1's Reset-AmQa, then checks)
+    or None (nothing is removed: a scenario on a machine that is not clean fails at once). Ignored by the Standard lane.
+
+.PARAMETER Accounts
+    The install lane only: also make the other accounts the scenarios need (flows/19's Machine tags "std" and "adm2"):
+    the STANDARD local user `qastd` and the ADMINISTRATOR `qaadmin`, with generated passwords kept in
+    C:\e2e\qa-accounts.json readable by administrators only (the tests run as the signed-in administrator; the passwords
+    never leave the guest). An existing account gets a new password when that file is missing. A disposable desktop's
+    test accounts, not anybody's credentials.
+
+.PARAMETER Old
+    The install lane only: also extract an OLDER release (flows/19's Machine tag "old") to C:\e2e\kit\old, as
+    published: a build from before the release manifest and `--register-user` (v0.7.10 by default). The scenarios make
+    their zips of it with and without a manifest (amdriver.install.Kit.old_zip).
+
+.PARAMETER OldZip
+    A local path or an https URL of that older release's portable zip. Default: v0.7.10-prerelease's x64 zip.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File Z:\e2e\src\guest\provision.ps1
     powershell -NoProfile -ExecutionPolicy Bypass -File Z:\e2e\src\guest\provision.ps1 -AgentmasterZip Z:\e2e\builds\Agentmaster_0.8.1.0_x64.zip -Force
+    powershell -NoProfile -ExecutionPolicy Bypass -File Z:\e2e\src\guest\provision.ps1 -Lane Install -Isolation Reset -Pwsh
 
 .NOTES
     Exit code 0 when everything is in place; 1 on the first failed step (the error says which). Prints one
@@ -63,7 +95,14 @@ param(
     [string]$ClaudeVersion = '2.1.291',
     [switch]$Pwsh,
     [int]$MockPort = 8787,
-    [switch]$Force
+    [switch]$Force,
+    [ValidateSet('Standard', 'Install')]
+    [string]$Lane = 'Standard',
+    [ValidateSet('Reset', 'Clean', 'None')]
+    [string]$Isolation = 'Reset',
+    [switch]$Accounts,
+    [switch]$Old,
+    [string]$OldZip = 'https://github.com/Nucs/Agentmaster/releases/download/v0.7.10-prerelease/Agentmaster_0.7.10.0_x64.zip'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,14 +124,17 @@ function Step([string]$name, [scriptblock]$body) {
         None. A failure prints the step and rethrows, which ends the script with exit code 1 (the caller
         must know WHICH step failed, not just that something did).
     #>
+    # Each step's time goes on its line (not into the summary, which the host reads by its words): on a loaded PC a
+    # reset desktop's provisioning took 7 min, and which step costs what decides what is worth making faster.
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     try {
         $outcome = & $body
         if (-not $outcome) { $outcome = 'ok' }
-        Write-Output ("{0,-10} {1}" -f $name, $outcome)
+        Write-Output ("{0,-10} {1}  [{2:N1} s]" -f $name, $outcome, $clock.Elapsed.TotalSeconds)
         $summary[$name] = "$outcome"
     }
     catch {
-        Write-Output ("{0,-10} FAILED: {1}" -f $name, $_.Exception.Message)
+        Write-Output ("{0,-10} FAILED: {1}  [{2:N1} s]" -f $name, $_.Exception.Message, $clock.Elapsed.TotalSeconds)
         $summary[$name] = "FAILED: $($_.Exception.Message)"
         Write-Output ('PROVISION ' + ($summary | ConvertTo-Json -Compress))
         exit 1
@@ -151,11 +193,44 @@ function Get-Cached([string]$url, [string]$leaf) {
 
 New-Item -ItemType Directory -Force $Root, $Cache, "$Root\dumps", "$Root\out", "$Root\p", "$Root\c", "$Root\w" | Out-Null
 
-# ---- Agentmaster ------------------------------------------------------------------------------
-Step 'agentmaster' {
+$installLane = $Lane -eq 'Install'
+
+function Get-BuildZip {
+    <#
+    .SYNOPSIS
+        The local path of the Agentmaster zip under test (downloaded into the cache once when -AgentmasterZip is a URL).
+    .OUTPUTS
+        The zip's full path.
+    .NOTES
+        Throws when the zip is missing. Shared by the 'agentmaster' and the 'kit' steps, so both lanes test the same
+        build from the same cached download.
+    #>
     $zip = $AgentmasterZip
     if ($zip -match '^https?://') { $zip = Get-Cached $zip (Split-Path $zip -Leaf) }
     if (-not (Test-Path $zip)) { throw "no Agentmaster zip at $zip" }
+    return (Get-Item $zip).FullName
+}
+
+function Skip-InLane([string]$name, [string]$why) {
+    <#
+    .SYNOPSIS
+        Record a step the install lane leaves out, in the step's own output line and in the summary.
+    .PARAMETER name
+        The step's name (the summary key).
+    .PARAMETER why
+        Why the install lane needs nothing from it.
+    .OUTPUTS
+        None.
+    #>
+    $outcome = "skip (install lane): $why"
+    Write-Output ("{0,-10} {1}" -f $name, $outcome)
+    $summary[$name] = $outcome
+}
+
+# ---- Agentmaster ------------------------------------------------------------------------------
+# The install lane never runs this copy (each install scenario copies the pristine kit instead), so it skips it.
+if ($installLane) { Skip-InLane 'agentmaster' 'each scenario copies the kit instead' } else { Step 'agentmaster' {
+    $zip = Get-BuildZip
     $stamp = Join-Path "$Root\am" '.e2e-source'
     $want = "$((Get-Item $zip).FullName)|$((Get-Item $zip).Length)|$((Get-Item $zip).LastWriteTimeUtc.Ticks)"
     if ((Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $want) -and -not $Force) {
@@ -181,10 +256,10 @@ Step 'agentmaster' {
     Set-Content -Path $stamp -Value $want -Encoding ASCII
     $ver = if (Test-Path "$Root\am\.am-version") { (Get-Content "$Root\am\.am-version" -Raw).Trim() } else { 'unknown' }
     return "extracted $(Split-Path $zip -Leaf) (version $ver)"
-}
+} }
 
 # ---- Claude Code ------------------------------------------------------------------------------
-Step 'claude' {
+if ($installLane) { Skip-InLane 'claude' 'no install scenario starts a session' } else { Step 'claude' {
     $base = 'https://downloads.claude.ai/claude-code-releases'
     $ver = $ClaudeVersion
     if ($ver -in @('latest', 'stable')) { $ver = (Invoke-RestMethod "$base/$ver").ToString().Trim() }
@@ -206,10 +281,10 @@ Step 'claude' {
     }
     Copy-Item -Force $file $dest
     return "installed $ver"
-}
+} }
 
 # ---- Git (Claude Code's Bash tool) ------------------------------------------------------------
-Step 'git' {
+if ($installLane) { Skip-InLane 'git' 'no install scenario starts a session' } else { Step 'git' {
     if ((Test-Path "$Root\git\bin\bash.exe") -and -not $Force) { return 'skip: present' }
     $cached = Get-ChildItem $Cache -Filter 'PortableGit-*-64-bit.7z.exe' -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending | Select-Object -First 1
@@ -230,7 +305,7 @@ Step 'git' {
     Remove-Item -Force -ErrorAction SilentlyContinue $local
     if ($p.ExitCode -ne 0 -or -not (Test-Path "$Root\git\bin\bash.exe")) { throw "PortableGit extraction failed (exit $($p.ExitCode))" }
     return "extracted $($cached.Name)"
-}
+} }
 
 # ---- PowerShell 7 (optional) ------------------------------------------------------------------
 if ($Pwsh) {
@@ -283,6 +358,10 @@ Step 'venv' {
 Step 'hosts' {
     $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
     $names = @('api.anthropic.com', 'statsig.anthropic.com', 'console.anthropic.com', 'mcp-proxy.anthropic.com')
+    # The install lane: every installed copy checks GitHub for an update when it starts (Updater.h), and the
+    # 60 unauthenticated API requests an hour are shared by this PC and its desktops. Refused at once, the check
+    # ends quietly ("offline", flows/19 IS-88); a scenario that needs the real releases lifts the line itself.
+    if ($installLane) { $names += 'api.github.com' }
     $text = Get-Content $hostsFile -Raw -ErrorAction SilentlyContinue
     if ($null -eq $text) { $text = '' }
     $add = @($names | Where-Object { $text -notmatch "(?m)^127\.0\.0\.1\s+$([regex]::Escape($_))\s*$" })
@@ -293,7 +372,7 @@ Step 'hosts' {
 }
 
 # ---- User environment (registry) --------------------------------------------------------------
-Step 'userenv' {
+if ($installLane) { Skip-InLane 'userenv' 'the mock environment is for sessions' } else { Step 'userenv' {
     $vars = [ordered]@{
         ANTHROPIC_BASE_URL                       = "http://127.0.0.1:$MockPort"
         ANTHROPIC_AUTH_TOKEN                     = 'mock-token-not-a-secret'
@@ -323,7 +402,7 @@ Step 'userenv' {
     }
     if (-not $changed) { return 'skip: set' }
     return "set $($changed -join ', ')"
-}
+} }
 
 # ---- Crash dumps ------------------------------------------------------------------------------
 Step 'dumps' {
@@ -338,6 +417,132 @@ Step 'dumps' {
     }
     if (-not $done) { return 'skip: set' }
     return "set for $($done -join ', ')"
+}
+
+# ---- The install lane's kit and marker ----------------------------------------------------------
+$laneFile = "$Root\install-lane.json"
+if ($installLane) {
+    Step 'kit' {
+        $zip = Get-BuildZip
+        $kit = "$Root\kit"
+        $build = "$kit\build"
+        $stamp = Join-Path $kit '.e2e-source'
+        $want = "$zip|$((Get-Item $zip).Length)|$((Get-Item $zip).LastWriteTimeUtc.Ticks)"
+        if ((Test-Path "$build\Agentmaster.exe") -and (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $want) -and -not $Force) {
+            return "skip: $(Split-Path $zip -Leaf) already extracted"
+        }
+        # Never replace the kit under a copy that runs from it (its files are locked; a half-replaced kit is worse than none).
+        $running = Get-Process -Name Agentmaster -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$kit\*" }
+        if ($running) { throw "Agentmaster is running from $kit (pid $($running.Id -join ',')); close it first" }
+        if (Test-Path $kit) { Remove-Item -Recurse -Force $kit }
+        New-Item -ItemType Directory -Force $kit | Out-Null
+        $tmp = "$kit\extract"
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        # A release zip holds one top folder (agentmaster-<ver>\...); a hand-made zip may hold the files directly.
+        $exe = Get-ChildItem $tmp -Recurse -Filter Agentmaster.exe | Select-Object -First 1
+        if (-not $exe) { throw "no Agentmaster.exe inside $zip" }
+        Move-Item $exe.Directory.FullName $build
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        # The marker is what makes a copy's first launch ask "Where should Agentmaster live?" - the very thing the
+        # scenarios test - so the kit keeps it (the Standard lane removes it from C:\e2e\am). A zip made without
+        # -PortableMode has none and cannot stand for a release.
+        if (-not (Test-Path "$build\.portable")) { throw "the zip's copy has no .portable marker (made without New-UnpackagedTerminalDistribution.ps1 -PortableMode)" }
+        # A downloaded zip's mark would bring SmartScreen to every copy a scenario starts through Explorer (IS-56 tests
+        # the mark on purpose, on a zip of its own).
+        Get-ChildItem $build -Recurse -File | Unblock-File
+        Set-Content -Path $stamp -Value $want -Encoding ASCII
+        $ver = if (Test-Path "$build\.am-version") { (Get-Content "$build\.am-version" -Raw).Trim() } else { 'unknown' }
+        return "extracted $(Split-Path $zip -Leaf) to $build (version $ver)"
+    }
+    $accountsFile = "$Root\qa-accounts.json"
+    if ($Accounts) {
+        Step 'accounts' {
+            # The Machine tags "std" (a standard user) and "adm2" (a second administrator), the install QA's own names.
+            $plan = [ordered]@{ std = @{ name = 'qastd'; groups = @('S-1-5-32-545') }; adm2 = @{ name = 'qaadmin'; groups = @('S-1-5-32-545', 'S-1-5-32-544') } }
+            $present = @($plan.Values | Where-Object { Get-LocalUser -Name $_.name -ErrorAction SilentlyContinue })
+            if ($present.Count -eq $plan.Count -and (Test-Path $accountsFile) -and -not $Force) { return 'skip: qastd, qaadmin present' }
+            $json = [ordered]@{}
+            foreach ($tag in $plan.Keys) {
+                $name = $plan[$tag].name
+                # A generated password: 20 letters and digits from a cryptographic source, then one character of each
+                # class a complexity rule could ask for. It exists only here (a disposable desktop's test account).
+                $chars = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+                $bytes = New-Object byte[] 20
+                [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+                $pw = (-join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })) + 'a7#Q'
+                $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+                if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+                    Set-LocalUser -Name $name -Password $secure -PasswordNeverExpires $true
+                } else {
+                    New-LocalUser -Name $name -Password $secure -PasswordNeverExpires -AccountNeverExpires `
+                        -Description "Agentmaster e2e install lane: the '$tag' account" | Out-Null
+                }
+                # Users (S-1-5-32-545) for both; Administrators (S-1-5-32-544) only for adm2. With UAC off (the
+                # golden image), an administrator's start is elevated: "another administrator, elevated" (IS-52).
+                foreach ($sid in $plan[$tag].groups) { Add-LocalGroupMember -SID $sid -Member $name -ErrorAction SilentlyContinue }
+                $json[$tag] = [ordered]@{ name = $name; password = $pw }
+            }
+            [IO.File]::WriteAllText($accountsFile, ($json | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+            # Administrators and SYSTEM only: the tests run as the signed-in administrator, and no test account reads it.
+            $null = icacls $accountsFile /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F'
+            return "made qastd (standard) and qaadmin (administrator); their passwords in $accountsFile (administrators only)"
+        }
+    }
+    $oldDir = "$Root\kit\old"
+    if ($Old) {
+        Step 'oldkit' {
+            $zip = $OldZip
+            if ($zip -match '^https?://') { $zip = Get-Cached $zip (Split-Path $zip -Leaf) }
+            if (-not (Test-Path $zip)) { throw "no older Agentmaster zip at $zip" }
+            $stamp = Join-Path $oldDir '.e2e-source'
+            $want = "$((Get-Item $zip).FullName)|$((Get-Item $zip).Length)"
+            if ((Test-Path "$oldDir\Agentmaster.exe") -and (Test-Path $stamp) -and ((Get-Content $stamp -Raw).Trim() -eq $want) -and -not $Force) {
+                return "skip: $(Split-Path $zip -Leaf) already extracted"
+            }
+            if (Test-Path $oldDir) { Remove-Item -Recurse -Force $oldDir }
+            $tmp = "$Root\kit\old.extract"
+            if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+            Expand-Archive -Path $zip -DestinationPath $tmp -Force
+            $exe = Get-ChildItem $tmp -Recurse -Filter Agentmaster.exe | Select-Object -First 1
+            if (-not $exe) { throw "no Agentmaster.exe inside $zip" }
+            Move-Item $exe.Directory.FullName $oldDir
+            if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+            # As published: what it lacks (a manifest, --register-user) is what the scenarios test, so nothing is added.
+            Get-ChildItem $oldDir -Recurse -File | Unblock-File
+            Set-Content -Path $stamp -Value $want -Encoding ASCII
+            $ver = if (Test-Path "$oldDir\.am-version") { (Get-Content "$oldDir\.am-version" -Raw).Trim() } else { 'unknown' }
+            return "extracted $(Split-Path $zip -Leaf) to $oldDir (version $ver, manifest $(Test-Path "$oldDir\.am-manifest"))"
+        }
+    }
+    Step 'lane' {
+        $build = "$Root\kit\build"
+        $ver = if (Test-Path "$build\.am-version") { (Get-Content "$build\.am-version" -Raw).Trim() } else { '' }
+        $pwshExe = if (Test-Path "$Root\pwsh\pwsh.exe") { "$Root\pwsh\pwsh.exe" } else { '' }
+        $facts = [ordered]@{
+            lane        = 'install'
+            isolation   = $Isolation.ToLowerInvariant()
+            kit         = "$Root\kit"
+            build       = $build
+            version     = $ver
+            zip         = (Get-BuildZip)
+            pwsh        = $pwshExe
+            accounts    = $(if (Test-Path $accountsFile) { $accountsFile } else { '' })
+            old         = $(if (Test-Path "$oldDir\Agentmaster.exe") { $oldDir } else { '' })
+            provisioned = (Get-Date).ToString('o')
+        }
+        # UTF-8 without a BOM: Python's json reads it as is (5.1's -Encoding UTF8 would write a BOM).
+        [IO.File]::WriteAllText($laneFile, ($facts | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+        return "wrote $laneFile (isolation $Isolation, build $ver)"
+    }
+}
+else {
+    # A desktop the install lane prepared and nobody reset since must not let a later Standard run start the install
+    # scenarios (they install for real): the marker that admits them goes.
+    Step 'lane' {
+        if (-not (Test-Path $laneFile)) { return 'skip: no install lane marker' }
+        Remove-Item -Force $laneFile
+        return "removed $laneFile (the install scenarios stay deselected)"
+    }
 }
 
 Write-Output ('PROVISION ' + ($summary | ConvertTo-Json -Compress))
