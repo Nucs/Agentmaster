@@ -265,7 +265,9 @@ def print_plan(scenarios: list[dict], prepared: frozenset, isolation: str) -> No
     """
     minutes = sum(s.get("minutes", 2) for s in scenarios)
     if isolation == "reset":
-        per = ("a reset + provisioning before each (2-3 min on a quiet PC; ~15 min measured with three desktops "
+        # Measured 2026-10-24 (E2E_TESTING.md s.8.5): a reset 35-570 s by the PC's load, the lane's provisioning after
+        # it 78 s since Expand-Zip and the Defender exclusion of the test tooling (it was ~6.4 min).
+        per = ("a reset + provisioning before each (~2-3 min on a quiet PC, up to ~11 min with three more desktops "
                "running), one reset after all")
     else:
         per = "one provisioning; one guest run" + ("; each test cleans first" if isolation == "clean" else "")

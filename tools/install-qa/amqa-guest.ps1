@@ -249,16 +249,68 @@ function Reset-AmQa {
         # Stop-Process explorer) - a scenario that checks pins pins the app again through its taskbar button.
         Get-AmQaPins $a | ForEach-Object { Remove-Item -LiteralPath $_.Lnk -Force; "removed pin $($_.Lnk)" }
         $sid = Get-AmQaSid $a
-        if (-not $sid -or -not (Test-Path "Registry::HKEY_USERS\$sid")) { continue }
-        foreach ($k in 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', 'Software\Classes\Directory\shell\Agentmaster', 'Software\Classes\Directory\Background\shell\Agentmaster', 'Software\Classes\Drive\shell\Agentmaster', $AmQaActiveSetupSubkey) {
-            $rk = "Registry::HKEY_USERS\$sid\$k"
-            if (Test-Path $rk) { Remove-Item $rk -Recurse -Force; "removed HKCU($a)\$k" }
+        if (-not $sid) { continue }
+        # A user's HKCU is under HKEY_USERS\<sid> only while their hive is loaded (signed in, or a process of theirs
+        # runs). An account that ran a scenario minutes ago is usually unloaded again, and skipping it left its uninstall
+        # entry, verbs and PATH entry for a copy whose files were removed above (the e2e install lane, 2026-10-24: the
+        # next scenario started with qastd's registration). So its NTUSER.DAT is loaded for the clean-up and unloaded
+        # after; an account that never signed in has none and holds nothing.
+        $hive = "Registry::HKEY_USERS\$sid"
+        $classes = "$hive\Software\Classes"
+        $mounts = @()
+        if (-not (Test-Path $hive)) {
+            $dat = "C:\Users\$a\NTUSER.DAT"
+            if (-not (Test-Path -LiteralPath $dat)) { continue }
+            $m = "amqa-clean-$a"
+            $out = & reg.exe load "HKU\$m" $dat 2>&1
+            if ($LASTEXITCODE -ne 0) { "HKCU($a) NOT cleaned: its hive did not load ($out)"; continue }
+            $mounts += $m
+            $hive = "Registry::HKEY_USERS\$m"
+            # HKCU\Software\Classes (the right-click verbs) is a second hive, UsrClass.dat: inside NTUSER.DAT that key is
+            # only a link to HKEY_USERS\<sid>_Classes, which no profile load put there now. So the verbs are cleaned in
+            # that hive, loaded on its own.
+            $classes = $null
+            $cdat = "C:\Users\$a\AppData\Local\Microsoft\Windows\UsrClass.dat"
+            if (Test-Path -LiteralPath $cdat) {
+                $mc = "amqa-clean-$a-classes"
+                $out = & reg.exe load "HKU\$mc" $cdat 2>&1
+                if ($LASTEXITCODE -eq 0) { $mounts += $mc; $classes = "Registry::HKEY_USERS\$mc" }
+                else { "HKCU($a)\Software\Classes NOT cleaned: its hive did not load ($out)" }
+            }
         }
-        $env = "Registry::HKEY_USERS\$sid\Environment"
-        $p = (Get-ItemProperty $env -ErrorAction SilentlyContinue).Path
-        if ($p -and $p -match 'agentmaster') {
-            $kept = ($p -split ';' | Where-Object { $_ -and $_ -notmatch 'agentmaster' }) -join ';'
-            Set-ItemProperty $env -Name Path -Value $kept; "cleaned user PATH ($a)"
+        try {
+            foreach ($k in 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Agentmaster', $AmQaActiveSetupSubkey) {
+                $rk = "$hive\$k"
+                if (Test-Path $rk) { Remove-Item $rk -Recurse -Force; "removed HKCU($a)\$k" }
+            }
+            if ($classes) {
+                foreach ($k in 'Directory\shell\Agentmaster', 'Directory\Background\shell\Agentmaster', 'Drive\shell\Agentmaster') {
+                    $rk = "$classes\$k"
+                    if (Test-Path $rk) { Remove-Item $rk -Recurse -Force; "removed HKCU($a)\Software\Classes\$k" }
+                }
+            }
+            $env = "$hive\Environment"
+            $p = (Get-ItemProperty $env -ErrorAction SilentlyContinue).Path
+            if ($p -and $p -match 'agentmaster') {
+                $kept = ($p -split ';' | Where-Object { $_ -and $_ -notmatch 'agentmaster' }) -join ';'
+                Set-ItemProperty $env -Name Path -Value $kept; "cleaned user PATH ($a)"
+            }
+        }
+        finally {
+            # The registry provider keeps key handles until they are collected, and reg unload refuses a hive with an
+            # open handle; a hive left loaded would keep the account's next sign-in from loading its profile. The
+            # classes hive goes first (the reverse of the loads).
+            [array]::Reverse($mounts)
+            foreach ($m in $mounts) {
+                $unloaded = $false
+                for ($i = 0; $i -lt 10 -and -not $unloaded; $i++) {
+                    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+                    $null = & reg.exe unload "HKU\$m" 2>&1
+                    $unloaded = $LASTEXITCODE -eq 0
+                    if (-not $unloaded) { Start-Sleep -Milliseconds 300 }
+                }
+                if (-not $unloaded) { "HKCU($a) hive LEFT LOADED at HKU\$m (reg unload failed 10 times)" }
+            }
         }
     }
     if (Test-Path 'C:\Program Files\Agentmaster') { Remove-Item 'C:\Program Files\Agentmaster' -Recurse -Force -ErrorAction SilentlyContinue; 'removed C:\Program Files\Agentmaster' }
