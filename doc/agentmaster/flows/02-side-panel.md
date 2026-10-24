@@ -85,9 +85,13 @@ click back into the terminal; double-click jumps to a card's tab.
 8. **A card menu's action keeps the card and the list** (2026-10-24, NOT BUILT; SP-K3's fix). *Do:* 20+ sessions
    in this window, tab A selected (MOST ACTIVE: A's card at the top); scroll the list down; right-click the 5th
    visible card B (Waiting for you) → **Move to Idle/Done**. *Expect:* B's card stays selected and its state turns
-   Idle; the list does not scroll; the summary shows B. *Do:* click into A's terminal. *Expect:* the peek ends: A's
-   card selected and, with ⌖ on, scrolled into view. *Check:* [LOG] `[sidepanel] focus came back to the terminal
-   from a menu, a dialog or an overlay: the selection stays on <B8> (the focused tab shows <A8>; …)`.
+   Idle; the list does not scroll; the summary shows B. *Do:* right-click B's card again and close the menu WITHOUT a
+   choice (Esc; again, a click on the panel's count line). *Expect:* the same each time: B stays selected, the list
+   stays. *Do:* click into A's terminal. *Expect:* the peek ends: A's card selected and, with ⌖ on, scrolled into
+   view. *Check:* [LOG] after each close, `[sidepanel] focus came back to the terminal from <origin>, not by a click
+   into it: the selection stays on <B8> (the focused tab shows <A8>; …)` — `<origin>` says how the menu handed
+   focus back (`nowhere (…)` as read in WinUI's source, or the closed menu's own element); `e2e/suites/
+   test_side_panel.py::test_card_menu_keeps_the_peek` (`needs_fix("SP-K3")`).
 
 **Edge cases**
 - **E1 On the Agent Manager page** a card click also scrolls the tab strip to that session's tab (even a
@@ -112,9 +116,12 @@ click back into the terminal; double-click jumps to a card's tab.
   `[nav] deactivate-idle-ask from=session menu here=N elsewhere=M` and `[nav] deactivate-done scope=idle parked=N`.
 - **E8 The card menu closed with Esc, by any other item (Copy, Mark Unread, Favorite), or by a click outside it**
   (phase 8, NOT BUILT) → the same: B stays selected and the list stays. A click that only closed the menu (XAML
-  gives it to no element) does not end the peek; the next click into the terminal does.
+  gives it to no element) does not end the peek — even one on A's terminal; the next click into the terminal does.
 - **E9 Show Transcript from B's card menu, then Esc** (phase 8, NOT BUILT) → when the reading view closes, B is still
   selected and the list has not moved.
+- **E10 The window comes back to the foreground** (Alt+Tab away and back while peeking B; NOT BUILT) → B stays
+  selected: returning to the window is not a touch of the terminal (since the second version of SP-K3's fix; the
+  first version, 678f11056, followed there).
 
 ---
 
@@ -299,23 +306,34 @@ the same race.
 
 ### SP-K3 · A card menu's action selects the focused tab's card and jumps the list to it — FIXED in code 2026-10-24 (NOT BUILT into a release)
 > **P1** · Reported by the user on 2026-10-24: "if I right-click -> Move to Idle/Done then it should not select index
-> 0 (top item) and have the scroll jump to the top while the click was in a 5th or whatever index card in the list".
-> Read from the code and from WinUI's source; not yet reproduced by the e2e suite (SP-02 phase 8 and E8–E9 are its
-> checks). Present since the side panel's follow rule (0.7.9).
+> 0 (top item) and have the scroll jump to the top while the click was in a 5th or whatever index card in the list",
+> and again later that day: "When I deselect the right-click menu of sidemenu card, i think it also jumps" (closing
+> the menu without a choice). Read from the code and from WinUI's source; not yet reproduced by the e2e suite (SP-02
+> phase 8 and E8–E10 are its checks; `e2e/suites/test_side_panel.py::test_card_menu_keeps_the_peek`, `needs_fix`).
+> Present since the side panel's follow rule (0.7.9).
 > **The cause:** the card's context menu takes keyboard focus when it opens, and when it closes WinUI gives focus back
 > to the element that held it, the terminal (`CPopup::Close`). The terminal's `GotFocus` was one of the side panel's
-> two "back to work" signals (SIDE_PANEL.md §3), so every item of the menu, and its Esc, ended the peek of the card
-> the menu was opened on. The focused tab's card was selected instead and, with ⌖ on (the default), the list scrolled
-> to it, usually the top card (MOST ACTIVE / MOST RECENT put the session you work in first).
-> **The fix** (`TerminalPage.AgentSidePanel.cpp`, `SidePanelFocusArrivalEndsPeek`): the `GotFocus` follows only
-> focus that comes from the terminal column itself, the side panel's own controls or the window's activation. Focus
-> handed back by a menu, a flyout, a dialog, a popup or a page overlay keeps the peek, and so does focus from the title
-> bar's tab strip. A click into the terminal still ends a peek. What it was on 0.8.0:
+> two "back to work" signals (SIDE_PANEL.md §3), so every way of closing the menu — an item, Esc, a click outside it
+> — ended the peek of the card the menu was opened on. The focused tab's card was selected instead and, with ⌖ on
+> (the default), the list scrolled to it, usually the top card (MOST ACTIVE / MOST RECENT put the session you work in
+> first).
+> **The fix** (`TerminalPage.AgentSidePanel.cpp`, `SidePanelFocusArrivalEndsPeek`): the `GotFocus` follows only focus
+> that comes from the terminal column itself or from the side panel's own controls. Focus that arrives from NOWHERE —
+> how a closing light-dismiss menu hands it back: `CPopup::Close` moves focus off its leaving content first (onto the
+> popup itself, or nowhere) and only then restores the terminal — keeps the peek, and so does focus handed back by a
+> page overlay, focus from the title bar's tab strip and the window coming back to the foreground. A click into the
+> terminal still ends a peek; a click that only closes the menu never reaches the terminal (the popup root takes it).
+> **The first version** (678f11056, the same day, never built) treated focus from nowhere as the window regaining
+> activation and followed, so it fixed neither report; the second version keeps it (SIDE_PANEL.md §3 has the WinUI
+> reading). Every kept peek that would have moved the selection writes `[sidepanel] focus came back to the terminal
+> from <origin>, …` in hooks.log, `<origin>` naming how focus came back, so a test build shows which case a menu's
+> hand-back is. What it was on 0.8.0:
 
-Right-click any card below the focused tab's card → **Move to Idle/Done** (or any other item, or Esc): the card the
-menu was about is deselected, the focused tab's card is selected, and with ⌖ on the list jumps to that card. The
-same happens when **Show Transcript**'s reading view closes. **Repro:** 10+ sessions, the focused tab's card at the
-top, the list scrolled down, right-click a lower card → Move to Idle/Done. **Expected:** SP-02 phase 8.
+Right-click any card below the focused tab's card → **Move to Idle/Done** (or any other item, or Esc, or a click
+outside the menu): the card the menu was about is deselected, the focused tab's card is selected, and with ⌖ on the
+list jumps to that card. The same happens when **Show Transcript**'s reading view closes. **Repro:** 10+ sessions,
+the focused tab's card at the top, the list scrolled down, right-click a lower card → Move to Idle/Done (or Esc).
+**Expected:** SP-02 phase 8.
 
 ## Reclassified: not defects
 
