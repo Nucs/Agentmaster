@@ -8,17 +8,26 @@ unit tests pin every rule.
 
 Steps (separated by ``;``; arguments are JSON values or bare words):
 
-    say "<text>"                        a text block; the response goes on
-    think "<text>"                      a thinking block (a dummy signature is added when streamed)
+    say "<text>" | say size=<n>         a text block; the response goes on (size=<n>: n characters of numbered
+                                        filler lines instead of a text — a big answer without a big prompt)
+    think "<text>" | think size=<n>     a thinking block (a dummy signature is added when streamed)
     tool <Name> {json}                  a tool_use block; ENDS the response (stop_reason tool_use)
     tools [["Name", {json}], ...]       parallel tool_use blocks in one response; ends it
-    reply "<text>"                      a text block + end_turn; ENDS the script
+    reply "<text>" | reply size=<n>     a text block + end_turn; ENDS the script
     stream <chars> <ms>                 later text / thinking streams in chunks of <chars> every <ms>
     delay <dur>                         pause the stream ("500ms", "3s", or a bare number of ms)
-    hold <gate>                         pause until the test releases (or fails) the named gate
-    error <status> <type> "<msg>" [times=N]
+    hold <gate>                         pause until the test releases (or fails) the named gate; a started
+                                        stream sends a ping every 2 s meanwhile, so the connection never looks idle
+    stall <gate>                        go SILENT until the test releases (or fails) the named gate: the stream
+                                        is started (headers + message_start) and then sends no byte at all, no
+                                        ping — what Claude Code's stream idle watchdog notices (E2E_TESTING.md
+                                        §4.3); a client that gives up meanwhile is noticed and logged
+    error <status> <type> "<msg>" [times=N] [retry=no|yes] [retry_after=<s>]
                                         answer with an HTTP error; with times=N only the first N attempts
-                                        of the NEXT response fail, then it is served (a retried request)
+                                        of the NEXT response fail, then it is served (a retried request);
+                                        retry=no sends the API's `x-should-retry: false` (Claude Code then never
+                                        retries a 429 / 5xx), retry=yes `x-should-retry: true`; retry_after=<s>
+                                        the `retry-after` header (Claude Code gives up at once when it is over 60 s)
     drop [after=N]                      cut the connection (after N more SSE events of this response)
     stop <reason>                       override this response's stop_reason (max_tokens, refusal, ...)
     stop refusal [<category>] ["<explanation>"]
@@ -38,6 +47,8 @@ Steps (separated by ``;``; arguments are JSON values or bare words):
     ask "<question>" A,B[,C,D]          shorthand: an AskUserQuestion tool call with those options
     bash "<cmd>"                        shorthand: Bash {"command": cmd}
     write <path> "<text>"               shorthand: Write {"file_path": path, "content": text}
+    write <path> size=<n>               the same with n characters of filler as the content (a transcript that
+                                        grows by megabytes in one turn: the Write's input is written into it)
     edit <path> "<old>" "<new>"         shorthand: Edit {"file_path": path, "old_string": ..., "new_string": ...}
     read <path>                         shorthand: Read {"file_path": path}
     agent "<prompt>"                    shorthand: the subagent tool (Agent or Task, whichever the request
@@ -55,9 +66,20 @@ from typing import Any, Callable, Optional
 
 #: The words a script may use as step names; anything else is a ScriptError (fails loudly, never guessed).
 STEP_NAMES = frozenset({
-    "say", "think", "tool", "tools", "reply", "stream", "delay", "hold", "error", "drop", "stop", "usage",
+    "say", "think", "tool", "tools", "reply", "stream", "delay", "hold", "stall", "error", "drop", "stop", "usage",
     "title", "fast", "expect", "use", "ask", "bash", "write", "edit", "read", "agent", "next",
 })
+
+#: The options an `error` step accepts; any other ``key=value`` word on it is a typo and fails the script.
+ERROR_OPTIONS = frozenset({"times", "retry", "retry_after"})
+
+#: The largest `size=<n>` a script may ask for (characters). A filler is built in memory and sent in one SSE event,
+#: so the bound keeps a typo (an extra zero or three) from exhausting the mock's memory; 64 MB is far above anything
+#: a test needs (a transcript over the scanner's 1 MiB window takes 1-4 MB).
+MAX_FILLER_CHARS = 64 * 1024 * 1024
+
+#: The width of one filler line, its newline included.
+FILLER_LINE_CHARS = 80
 
 #: The refusal category a bare `stop refusal` reports (the one this PC's own refusals carried: cyber).
 DEFAULT_REFUSAL_CATEGORY = "cyber"
@@ -72,14 +94,25 @@ class ScriptError(ValueError):
     """A script that does not parse or plan (a typo must fail the test loudly, never run as a guess)."""
 
 
+class Quoted(str):
+    """A JSON string argument of a script (`"a=b"`), as opposed to a BARE word (`times=2`, `529`, `Left,Right`).
+
+    Only a bare word can be a ``key=value`` option: a quoted text that happens to hold "=" (`bash "FOO=1 make"`,
+    `say "x = 1"`) is the step's text. Before this type both came out of the parser as plain strings and such a text
+    was taken for an option (the step then reported a missing text). A Quoted compares equal to the same plain string
+    and serializes as one, so everything downstream (tool inputs, element texts, the unit tests' comparisons) is
+    unchanged; an argument list a caller builds by hand (plain strings) keeps the old rule.
+    """
+
+
 @dataclass
 class Element:
     """One item of a response's event plan, in order.
 
     Attributes:
-        kind: "text", "thinking", "tool_use" (content blocks), or "delay", "hold", "drop" (stream control).
+        kind: "text", "thinking", "tool_use" (content blocks), or "delay", "hold", "stall", "drop" (stream control).
         text: The text of a text / thinking block.
-        name: The tool's name (tool_use), or the gate's name (hold).
+        name: The tool's name (tool_use), or the gate's name (hold, stall).
         input: The tool's input object (tool_use).
         ms: The pause in milliseconds (delay).
         after: For drop: how many more SSE events to send before the cut (0 = cut here).
@@ -106,6 +139,8 @@ class Response:
         stop: The stop_reason ("tool_use" after tool calls, else "end_turn" unless a `stop` step changed it).
         fail: (status, type, message, times) of an `error` step: times None = every attempt fails (the
             response is the error), times N = the first N attempts fail, then the elements are served.
+        fail_headers: The HTTP headers the failing attempts carry ({"x-should-retry": "false"}, {"retry-after":
+            "120"}; empty = none). Kept apart from `fail`, whose 4-tuple the tests and the server unpack.
         usage: Overrides of the usage numbers ({"input_tokens": n, ...}).
         expect: A regex the tool result arriving WITH this response's request must match ("" = none).
         final: True when this response ends the turn (end_turn / a stop override other than tool_use);
@@ -117,6 +152,7 @@ class Response:
     elements: list = field(default_factory=list)
     stop: str = "end_turn"
     fail: Optional[tuple] = None
+    fail_headers: dict = field(default_factory=dict)
     usage: dict = field(default_factory=dict)
     expect: str = ""
     final: bool = True
@@ -239,13 +275,28 @@ def parse_steps(src: str) -> list[tuple[str, list]]:
                     value, i = decoder.raw_decode(s, i)
                 except ValueError as error:
                     raise ScriptError(f"step {name!r}: a JSON argument does not parse at {s[i:i + 30]!r}: {error}") from None
-                args.append(value)
+                # A quoted text is marked, so a "=" inside it can never make it an option (Quoted).
+                args.append(Quoted(value) if isinstance(value, str) else value)
             else:
                 word = re.match(r"[^\s;]+", s[i:]).group(0)
                 args.append(word)
                 i += len(word)
         steps.append((name, args))
     return steps
+
+
+def _is_option(a: Any) -> bool:
+    """Whether a step argument is a ``key=value`` option.
+
+    Args:
+        a: One argument as parse_steps returned it (a JSON value — a string one is Quoted — or a bare word), or as a
+            caller built it.
+    Returns:
+        True for a bare word holding "=" (not starting like a JSON object or array). A quoted text is never an option,
+        whatever it holds.
+    """
+    return (isinstance(a, str) and not isinstance(a, Quoted) and "=" in a
+            and not a.startswith(("{", "[")))
 
 
 def _options(args: list) -> dict:
@@ -258,7 +309,7 @@ def _options(args: list) -> dict:
     """
     out = {}
     for a in args:
-        if isinstance(a, str) and "=" in a and not a.startswith(("{", "[")):
+        if _is_option(a):
             k, _, v = a.partition("=")
             out[k.strip().lower()] = v.strip()
     return out
@@ -272,7 +323,7 @@ def _positional(args: list) -> list:
     Returns:
         The others, in order.
     """
-    return [a for a in args if not (isinstance(a, str) and "=" in a and not a.startswith(("{", "[")))]
+    return [a for a in args if not _is_option(a)]
 
 
 def _text_arg(name: str, args: list, index: int = 0) -> str:
@@ -295,6 +346,109 @@ def _text_arg(name: str, args: list, index: int = 0) -> str:
     return value
 
 
+def filler(n: int) -> str:
+    """Exactly `n` characters of numbered filler lines ("filler line 000001 ....\\n"), for `size=<n>`.
+
+    The lines are numbered so a reader of a transcript or a terminal can tell where a big block was cut, and they are
+    plain ASCII with no character Claude Code's input or its renderer treats specially. Deterministic: the same `n`
+    always gives the same text (a retried request gets the same answer, E2E_TESTING.md §4.3).
+
+    Args:
+        n: The length (0 gives "").
+    Returns:
+        The text; its last line is cut to fit (it then has no newline).
+    """
+    if n <= 0:
+        return ""
+    lines = []
+    total = 0
+    number = 0
+    while total < n:
+        number += 1
+        head = f"filler line {number:06d} "
+        line = head + "." * (FILLER_LINE_CHARS - 1 - len(head)) + "\n"
+        lines.append(line)
+        total += len(line)
+    return "".join(lines)[:n]
+
+
+def _size_option(name: str, opts: dict) -> Optional[int]:
+    """A step's `size=<n>` option.
+
+    Args:
+        name: The step (for the error).
+        opts: Its ``key=value`` options.
+    Returns:
+        The size in characters, or None when the step has no size option.
+    Raises:
+        ScriptError: When the value is not a whole number from 0 to MAX_FILLER_CHARS.
+    """
+    if "size" not in opts:
+        return None
+    try:
+        size = int(opts["size"])
+    except ValueError:
+        raise ScriptError(f"step {name!r}: size must be a whole number of characters, not {opts['size']!r}") from None
+    if not 0 <= size <= MAX_FILLER_CHARS:
+        raise ScriptError(f"step {name!r}: size must be 0..{MAX_FILLER_CHARS}, not {size}")
+    return size
+
+
+def _body_text(name: str, pos: list, opts: dict, index: int = 0) -> str:
+    """The text a step carries: its string argument, or `size=<n>` characters of filler — exactly one of the two.
+
+    Args:
+        name: The step (for the error).
+        pos: Its positional arguments.
+        opts: Its ``key=value`` options.
+        index: Which positional argument holds the text when no size is given.
+    Returns:
+        The text.
+    Raises:
+        ScriptError: When both or neither are given, or either is malformed (a size and a text together would leave
+            the reader guessing which one the step sends).
+    """
+    size = _size_option(name, opts)
+    if size is None:
+        return _text_arg(name, pos, index)
+    if index < len(pos):
+        raise ScriptError(f"step {name!r} takes a text OR size=<n>, not both")
+    return filler(size)
+
+
+def _error_headers(opts: dict) -> dict:
+    """The HTTP headers an `error` step's options ask for.
+
+    Args:
+        opts: The step's ``key=value`` options (already checked against ERROR_OPTIONS).
+    Returns:
+        {"x-should-retry": "false" | "true"} for retry=no | yes and {"retry-after": "<s>"} for retry_after=<s>; empty
+        when neither is given.
+    Raises:
+        ScriptError: On a retry value that is not yes / no, or a retry_after that is not a number of seconds >= 0.
+    """
+    headers: dict = {}
+    if "retry" in opts:
+        word = opts["retry"].lower()
+        if word in ("no", "false", "0"):
+            headers["x-should-retry"] = "false"
+        elif word in ("yes", "true", "1"):
+            headers["x-should-retry"] = "true"
+        else:
+            raise ScriptError(f"step 'error': retry must be yes or no, not {opts['retry']!r}")
+    if "retry_after" in opts:
+        raw = opts["retry_after"]
+        try:
+            seconds = float(raw)
+        except ValueError:
+            raise ScriptError(f"step 'error': retry_after must be a number of seconds, not {raw!r}") from None
+        if seconds < 0:
+            raise ScriptError(f"step 'error': retry_after must not be negative, not {raw!r}")
+        # The API sends whole seconds; a script's "1.5" is passed as written (Claude Code parses a float).
+        headers["retry-after"] = raw
+    return headers
+
+
 def expand_shorthand(name: str, args: list, tool_names: Optional[set] = None) -> tuple[str, list]:
     """Rewrite a shorthand step into a `tool` step.
 
@@ -312,7 +466,9 @@ def expand_shorthand(name: str, args: list, tool_names: Optional[set] = None) ->
     if name == "bash":
         return "tool", ["Bash", {"command": _text_arg(name, pos), "description": "e2e mock command"}]
     if name == "write":
-        return "tool", ["Write", {"file_path": _text_arg(name, pos, 0), "content": _text_arg(name, pos, 1)}]
+        # write <path> "<text>", or write <path> size=<n> (filler content: megabytes in one turn's transcript line).
+        return "tool", ["Write", {"file_path": _text_arg(name, pos, 0),
+                                  "content": _body_text(name, pos, _options(args), 1)}]
     if name == "edit":
         return "tool", ["Edit", {"file_path": _text_arg(name, pos, 0), "old_string": _text_arg(name, pos, 1),
                                  "new_string": _text_arg(name, pos, 2)}]
@@ -402,6 +558,7 @@ def _group(steps: list, src: str) -> Plan:
     chunk, chunk_ms = 0, 0
     pending_expect = ""
     pending_fail: Optional[tuple] = None
+    pending_fail_headers: dict = {}
 
     def close(stop: str, final: bool) -> None:
         """End the current response and start the next one.
@@ -425,11 +582,13 @@ def _group(steps: list, src: str) -> Plan:
         Returns:
             None.
         """
-        nonlocal pending_expect, pending_fail
+        nonlocal pending_expect, pending_fail, pending_fail_headers
         if pending_expect and not cur.expect:
             cur.expect, pending_expect = pending_expect, ""
         if pending_fail and cur.fail is None:
             cur.fail, pending_fail = pending_fail, None
+            # The headers travel with the failure they belong to (an `error … times=N retry_after=5`).
+            cur.fail_headers, pending_fail_headers = pending_fail_headers, {}
 
     for name, args in steps:
         pos, opts = _positional(args), _options(args)
@@ -461,12 +620,17 @@ def _group(steps: list, src: str) -> Plan:
         if name == "error":
             if len(pos) < 1:
                 raise ScriptError("step 'error' needs a status: error 529 overloaded_error \"msg\" [times=N]")
+            unknown = sorted(set(opts) - ERROR_OPTIONS)
+            if unknown:
+                # A misspelled option (retry_afer=…) must fail loudly instead of silently sending no header.
+                raise ScriptError(f"step 'error': unknown option(s) {unknown} (known: {sorted(ERROR_OPTIONS)})")
             try:
                 status = int(pos[0])
             except (TypeError, ValueError):
                 raise ScriptError(f"step 'error': not an HTTP status: {pos[0]!r}") from None
             etype = str(pos[1]) if len(pos) > 1 else "api_error"
             message = str(pos[2]) if len(pos) > 2 else "mock error"
+            headers = _error_headers(opts)
             times = opts.get("times")
             if times is None and len(pos) > 3:
                 times = pos[3]  # the spike's form: a fourth positional number
@@ -477,6 +641,7 @@ def _group(steps: list, src: str) -> Plan:
                     close("end_turn", True)
                 start_if_new()
                 cur.fail = (status, etype, message, None)
+                cur.fail_headers = headers
                 close("end_turn", True)
                 continue
             try:
@@ -486,6 +651,7 @@ def _group(steps: list, src: str) -> Plan:
             if cur.elements:
                 close("end_turn", True)
             pending_fail = (status, etype, message, n)
+            pending_fail_headers = headers
             continue
         if name == "next":
             # The END of a response without a tool call: what Claude Code continues by itself (a max_tokens
@@ -498,14 +664,16 @@ def _group(steps: list, src: str) -> Plan:
             continue
         start_if_new()
         if name in ("say", "think"):
-            cur.elements.append(Element("text" if name == "say" else "thinking", text=_text_arg(name, pos),
+            cur.elements.append(Element("text" if name == "say" else "thinking", text=_body_text(name, pos, opts),
                                         chunk=chunk, chunk_ms=chunk_ms))
         elif name == "delay":
             if not pos:
                 raise ScriptError("step 'delay' needs a duration")
             cur.elements.append(Element("delay", ms=_parse_duration(pos[0])))
-        elif name == "hold":
-            cur.elements.append(Element("hold", name=_text_arg(name, pos)))
+        elif name in ("hold", "stall"):
+            # Both wait for the named gate; a `stall` starts the stream first and then stays silent (no ping), so the
+            # silence is what the client sees — server.py's Stream.run.
+            cur.elements.append(Element(name, name=_text_arg(name, pos)))
         elif name == "drop":
             after = opts.get("after", "0")
             try:
@@ -559,7 +727,7 @@ def _group(steps: list, src: str) -> Plan:
                 cur.elements.append(Element("tool_use", name=tname, input=tinput))
             close("tool_use", False)
         elif name == "reply":
-            cur.elements.append(Element("text", text=_text_arg(name, pos), chunk=chunk, chunk_ms=chunk_ms))
+            cur.elements.append(Element("text", text=_body_text(name, pos, opts), chunk=chunk, chunk_ms=chunk_ms))
             close("end_turn", True)
             return result
         else:  # pragma: no cover - STEP_NAMES and this dispatch are kept in step by the unit tests

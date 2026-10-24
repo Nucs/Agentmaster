@@ -56,6 +56,17 @@ the turn by itself — nothing is deleted from the transcript.
    Provide the continuation's answer: the mock's default reply (`OK`) or a `[[mock …]]` scenario keyed on the
    continuation (§4.3 `use @continue-ok`).
 
+**Measured (2026-10-24, 0.8.0 + 2.1.291, probe q13; `e2e/suites/test_interrupted_work.py`):** a connection lost after
+"I will now" is NOT retried (Claude Code keeps the partial text and writes "API Error: Connection lost mid-response. The
+response above may be incomplete.") — error, the runner paused. Restart session logged `[api-error-rewind] <sid8>
+restart: rewound past "API Error: Connection lost mid-response. …" (server_error, …)`, appended ONE `last-prompt` line
+with `explicit: true` (the old claude's own exit re-stamp came before it), and the scanner released the error
+(`[recon-error-release] … (rewound past error -> Waiting)`); the new claude sent "Continue from where you left off."
+carrying the tool result, so the mock served the scripted turn's SECOND response again. The continuation needs no
+dedicated scenario: the turn's own next response answers it — and the test holds it at a second gate (`hold g; hold g2`:
+the first attempt is cut at `g`, then `g` is released) to see it running. A continuation that is answered at once
+leaves no running state behind: the turn is over before a scan sees it (probe q13: error → waiting-for-you).
+
 **Edge cases**
 - **E1 Setting off** (cog → Sessions → "Continue a turn that ended in an API error when its session is
   resumed") → no line; the restarted claude sits at the error.
@@ -127,6 +138,14 @@ focused). Window 2: E (Error, a final API error), F (Waiting, focused).
    10 s across both windows; C stays dormant. *Check:* [ENG] `started` flips; [LOG] one wake line each.
 4. **What they do.** *Expect:* A (cut-off) continues its turn; E continues if the rewind applies (INT-03);
    B's conversation comes back up (what Claude Code does with the dead question is its own).
+
+**Measured in one window (2026-10-24, probes q07 / q08; `test_session_state.py::
+test_a_turn_cut_off_by_the_app_ending_reads_error_then_the_restore_wake_continues_it`):** t1 mid-turn, t2 focused; after
+a kill or a quit the reopened window logged `[restore-wake] … restored; 1 busy tab(s) to wake once the tab every reopened
+window opens to has launched: <t1>(Error)`, then — t2's claude up (`… its focused tab finished launching …`, 10.8 s; or
+"its claude started but sent no hook in time", 16.4 s) — `[nav] activate-dormant <t1>` and `… done - woke 1 busy
+tab(s)`; t1 continued its cut-off turn. With no busy tab the window leaves the barrier at once (`left the wake barrier -
+no busy tab to wake here`). B (a question at the restart): the continued turn asks the question again (STA-07 E4).
 
 **Edge cases**
 - **E1 A pinned session** (Telegram `/pin`, Waiting by the pin hold) that was Running → woken.

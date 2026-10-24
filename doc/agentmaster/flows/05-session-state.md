@@ -2,8 +2,10 @@
 
 > Conventions and fixtures: [README.md](README.md). Spec: HOOKS.md *State machine*, *Cut-off turns*,
 > *Compaction*; OBSERVER.md §20; CLAUDE.md *Engine*, *The tab strip state dot*. The mock's script for Claude Code's
-> events: [`../E2E_TESTING.md`](../E2E_TESTING.md) §4.3 (`stop refusal`, `next`). The suite:
-> `e2e/suites/test_session_state.py` (README.md "The suite that runs these flows").
+> events: [`../E2E_TESTING.md`](../E2E_TESTING.md) §4.3 (`stop refusal`, `next`, `stall`, `error … retry=no`,
+> `retry_after=`, `size=`). The suite: `e2e/suites/test_session_state.py` (README.md "The suite that runs these
+> flows"). A status that lags a change Claude Code made without telling by up to ~30 s is ACCEPTED (the user's ruling
+> of 2026-10-24): *Reclassified: accepted delays* below.
 
 **What shipped.** 0.7.7: a retried API error recovers to Running; an over-1 MiB transcript line no longer
 strands Running. 0.7.9: no Running for hours after a quiet turn end (the catch-up read), no
@@ -90,16 +92,47 @@ thrashing **1**. The release's scanner reconciled, over its log: recon-stop 3,80
 | `error 400 "prompt is too long …" times=1` | PreCompact → a compaction agent (SubagentStop) → SessionStart(compact) → PostCompact → the turn sent again | running throughout → waiting-for-you | STA-14, STA-06 E4 |
 | `error 400 "prompt is too long …"` on every attempt | the same compaction, the 400 again, then "Prompt is too long" (status 400) | running → error, stop-on-error | STA-14 E2 |
 | `usage in=99000` with a 100K window | the same hooks mid-turn; the scripted steps are gone after it (the mock answers its default) | running throughout | STA-06 |
-| `/compact` | an empty UserPromptSubmit, PreCompact, SubagentStop, SessionStart, PostCompact (manual) | running; at PostCompact waiting-for-you, then **running again for ~30 s** (STA-K3) | STA-06 |
+| `/compact` | an empty UserPromptSubmit, PreCompact, SubagentStop, SessionStart, PostCompact (manual) | running; at PostCompact waiting-for-you, then **running again for ~30 s** (STA-K3, an accepted delay) | STA-06 |
 | Esc mid-stream / during a tool | "[Request interrupted by user]" / "… for tool use]"; no Stop hook | waiting-for-you ([recon-stop] interrupted), the interrupt hold | STA-12 |
-| Esc before any output | the prompt back in the box; nothing written | running ~30 s more (STA-K2), then waiting-for-you | STA-12 E1 |
+| Esc before any output | the prompt back in the box; nothing written after the prompt's own line (no marker, no Stop) | running until 30 s after the prompt's line (STA-K2, an accepted delay), then waiting-for-you; no interrupt hold, so a queued prompt is sent once the status held still (STA-K5) | STA-12 E1 |
 | A background Bash | the turn ends; its `<task-notification>` is a turn of its own (a UserPromptSubmit) | waiting-for-you → running → waiting-for-you; the notification not recorded as typed | STA-13 |
 | Any Agent call | ALWAYS asynchronous ("Async agent launched successfully", even with `run_in_background: false`): the turn ends at once, a notification turn follows | waiting-for-you while it works; running again once its work outlived the turn by 20 s | STA-05 |
-| A Stop hook that blocks once | `hook_blocking_error` + a "Stop hook feedback" user line; the turn continues | **waiting-for-you during the continuation**, running ~20 s later (STA-K4) | STA-13 |
+| A Stop hook that blocks once | `hook_blocking_error` + a "Stop hook feedback" user line; the turn continues | **waiting-for-you at the start of the continuation**, running ~20 s later (STA-K4, an accepted delay) | STA-13 |
 | `/exit` | SessionEnd (5 s budget) | done — or, when the hook was cancelled on the busy desktop, waiting-for-you for good (STA-K1) | STA-01 |
 | claude.exe killed right after a turn / mid-turn | nothing | **running** 20 s later and for good / running for good (STA-K1) | STA-11 |
 | `disableAllHooks` | no hook at all | running ([recon-run]) → waiting-for-you ([recon-stop]) | STA-16 |
 | `/model sonnet` | a "Switch model?" dialog; nothing written | no change | STA-15 |
+
+**More events, replayed (2026-10-24, probe runs stprobe4 and stprobe5; the mock gained `retry=` / `retry_after=` on
+`error`, `stall`, and `size=`):**
+
+| Event (mock / action) | Claude Code 2.1.291 | Agentmaster 0.8.0 | Flow |
+|---|---|---|---|
+| `error 429 … retry=no` (`x-should-retry: false`) | ONE attempt, then "API Error: Request rejected (429) · <the API's message>" | error, stop-on-error | STA-04 E8 |
+| `error 429 … retry_after=120` | ONE attempt: a `retry-after` over 60 s ends the retries (`api_request_retry_after_too_long`), the same message | error, stop-on-error | STA-04 E8 |
+| `error 429 … times=1 retry_after=4` | the retry exactly 4.0 s later (a `retry-after` up to 60 s is waited out) | running → waiting-for-you, never error | STA-04 E1 |
+| `error 500 … retry=no` | ONE attempt, "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. …" | error, stop-on-error | STA-04 E8 |
+| `error 529 … retry=no` | still THREE attempts (an overloaded error is retried before the header is read), "Repeated 529 Overloaded errors" | error | STA-04 E6 |
+| `say …; stall g` with the byte watchdog armed (15 s; see STA-04 E9) | 15 s after the last byte it closes the connection, keeps the partial text (its stop_reason made `end_turn`) and writes "API Error: The response stopped arriving. The response above may be incomplete." | running through the silence, then error | STA-04 E9 |
+| `stall g` before any output, the same watchdog | 15 s later it closes the connection and sends the request AGAIN (the retry stalls at the same gate until released) | running throughout, then waiting-for-you | STA-04 E9 |
+| `hold g` before any output (no byte, not even headers) with `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS=15000` | nothing: it waited 73 s for the first byte (that watchdog is not armed for a custom base URL) | running throughout | STA-04 E9 |
+| the app killed — or quit through its windows — while t1's turn runs (a tool result, then a held response), t2 focused | — | t1's dormant record: error at once (`[recon-cutoff] … stopped on a tool result and never finished; the tab is dormant`), its runner paused; the restore wake starts t1 10.8–16.4 s after the restore; its claude sends "Continue from where you left off." (the turn's next response) → running → waiting-for-you | STA-07, INT-04 |
+| the same with t1 the only (focused) tab | the focused claude starts at once and continues the turn | error first (the scanner judges the record before claude is up), then running → waiting-for-you | STA-07 |
+| an AskUserQuestion open when the app is killed | the resume drops the unanswered call and continues: the turn asks the question AGAIN | error (`… stopped on an unfinished assistant step`) → running → needs-approval | STA-07 E4 |
+| Deactivate mid-turn, then Activate Tab | the woken claude continues the turn | error while parked (cut-off, its runner paused) → running → waiting-for-you | STA-07 E5 |
+| Restart session mid-turn | the new claude starts at once and continues the turn | running throughout — no error (the cut-off rule needs a dormant tab) — then waiting-for-you | STA-07 E5 |
+| "Connection lost mid-response" after a tool result, then Restart session | the new claude continues the turn ("Continue from where you left off.") | error → `[api-error-rewind]` + one `last-prompt` line (`explicit: true`) → waiting-for-you (`[recon-error-release]`) → running → waiting-for-you | INT-01 |
+| `/clear` | a NEW conversation id on the same ConPTY | the tab follows it (`[nav] tab-swap`, managed provenance kept, `[lineage] <new> continues <old> (/clear …)`): idle, then the next prompt running → waiting-for-you | STA-10 |
+| a 50 s Bash call | nothing written while it runs | running all along (heartbeat busy) | STA-05 |
+| a background Bash of 60 s | the turn ends; a `shell` heartbeat while the job runs; its notification turn at the end | waiting-for-you, running again ~21 s later (`[recon-subagent] … presence=shell, outlived turn-end`), the notification turn, waiting-for-you | STA-05 E1 |
+| the Waiting-for-you timeout at 1 minute, a READ session | an idle Notification ~60 s after the turn | idle 59 s after the turn (`[decay-waiting] … read + waited 1m`) | STA-01 E1 |
+| the same, UNREAD (its turn ended while another tab was selected) | the same | waiting-for-you past the timeout; once read, idle within the timeout (from its last activity, which the idle Notification refreshed) | STA-01 E1 |
+| Esc on a question / on a permission prompt | "[Request interrupted by user for tool use]" (a refused Write writes nothing) | needs-approval → waiting-for-you, the interrupt hold | STA-12 E3 |
+| a 1.5 MB Write (the transcript grows to 3.2 MB, one line over 1 MiB), then the app restarted | — | the next turn: running → waiting-for-you as on a small transcript | STA-09 |
+| `claude --resume <id>` typed into a second (shell) tab | the same conversation in two processes, one transcript | one host: `[observer] duplicate conversation …`, `[discover] … not bound`; the session keeps its tab and its one card; a turn in the second tab moves its state too (the shared transcript) | STA-08 |
+| a prompt queued (runner Auto) while a Stop hook blocks the first stop; the continuation held 30 s | the continuation | the runner sends NOTHING into it (`[advance-skip] … status settle` at the first stop's Waiting; the Running ~20 s later restarts the wait); the queued prompt goes 40.5 s after the continuation's Stop | STA-13 phase 2, PQR-03 |
+| a prompt queued (runner Auto) while a turn is held, then Esc before any output | the prompt back in the box | waiting-for-you 18 s after the Esc; the queued prompt sent 66 s after the Esc, the draft swap stashing the user's restored prompt around the send (`[draft-swap] … prompt sent and the draft is back in the box`); no `[interrupt-hold]` | STA-12 E1, STA-K5 |
+| a prompt queued (runner Auto) at rest; 32 s later the user types a turn of their own | the user's turn | the queue settle (`queue settle`) never ran out: the typed turn's Running ("not ready") and its Waiting (`status settle`) restarted the wait; the queued prompt went 40.6 s after that Waiting, 55.9 s after the typed prompt | PQR-03 |
 
 Surfaces that must always agree for a session (each test checks all it can see): the tab's status dot
 (Running blue · Waiting goldenrod · Needs approval orange-red · Error crimson · Done green · Idle gray),
@@ -130,7 +163,11 @@ engine record ([ENG] census `state`), and Telegram's topic icon (F-TG).
 **Edge cases**
 - **E1 Waiting → Idle decay** only after the session was READ (visited) and the cog's Waiting-for-you
   timeout passed (**default 4320 min = 3 days** in code — CLAUDE.md's "60 min" is stale; slider 1 min–7 d,
-  free text, "Never"). An unread or Mark-Unread card keeps Waiting.
+  free text, "Never"). An unread or Mark-Unread card keeps Waiting. Measured (2026-10-24, the timeout at 1 minute):
+  a session read when its turn ended decayed to idle 59 s later (`[decay-waiting] <id> read + waited 1m (>= 1m) ->
+  Idle`); a session whose turn ended while another tab was selected kept waiting-for-you past the minute, and once
+  selected decayed within the timeout counted from its last activity (Claude Code's own idle Notification, ~60 s after
+  the turn, refreshed it).
 - **E2 Fast turn under 2 s** (`[[mock fast; reply "x"]]`) → the Stop reads stale; the scanner settles it to
   Waiting ~2.5 s later; no stuck Running.
 - **E3 Two quick prompts** (type-ahead during a running turn) → stays Running through the batch, one
@@ -220,8 +257,23 @@ Error as soon as work resumes.
   runs out, the final error reads Error with its message (STA-14 E5 has each class, as measured).
 - **E7 What put real sessions in Error** (this PC, "Claude Code's events, measured"): a prompt too long that compaction
   could not fix (STA-14 E2), refusals (STA-14 phase 3), usage / session limits (a 429 whose response headers say the
-  limit — the mock sends no headers yet), broken streams (E2; a server error mid-stream: STA-14 E5), 500s, not logged
-  in. Each must show its own message on the card.
+  limit — a subscription's path; the mock now sends headers, E8, but not the subscription's), broken streams (E2; a
+  server error mid-stream: STA-14 E5), 500s, not logged in. Each must show its own message on the card.
+- **E8 An error Claude Code will not retry** (measured 2026-10-24; the mock's `error … retry=no` / `retry_after=<s>`):
+  a 429 or a 500 whose response says `x-should-retry: false`, or a 429 whose `retry-after` is over 60 s (2.1.291 gives
+  up instead of waiting: `Lir = 60000`), ends the turn after ONE attempt — "API Error: Request rejected (429) · <the
+  API's message>", "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in
+  a moment. …" — error, stop-on-error. A `retry-after` up to 60 s is waited out exactly (4 s measured) and reads
+  running. A 529 is retried three times whatever its headers say (an overloaded error is retried before the header is
+  read).
+- **E9 A stream that goes silent** (measured 2026-10-24; the mock's `stall`: the response started, then no byte and no
+  ping). Claude Code's byte-level idle watchdog is armed only for Anthropic's own API (180 s there); the suite arms it
+  with the private switch `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` and `CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS` (floor
+  10 s; without the switch only the event-level watchdog runs, at least 300 s). After some text: the partial text is
+  kept and "API Error: The response stopped arriving. The response above may be incomplete." ends the turn — running
+  through the silence (the heartbeat stays busy), then error. Before any output: the request is sent again (running
+  throughout). A request with no answer at all (not even headers) waited 73 s with `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS`
+  set: that watchdog does not run against a custom base URL.
 
 ---
 
@@ -233,7 +285,9 @@ Error as soon as work resumes.
 teammate) keeps reading Running; it settles to Waiting only when the work is really over.
 
 **Phases**
-1. **Long tool call.** `[[mock bash "sleep 40"; reply "done"]]` (Git Bash `sleep`) → Running for 40 s.
+1. **Long tool call.** `[[mock bash "sleep 40"; reply "done"]]` (Git Bash `sleep`) → Running for 40 s. Measured with
+   `sleep 50` (2026-10-24): running all along — the transcript is silent while the tool runs and claude's heartbeat
+   says busy.
 2. **Subagent.** `[[mock agent "[[mock delay 30s; reply \"sub\"]]"; reply "parent"]]` → Running while the
    subagent writes its side file; Waiting after the parent's reply. ⚠ **Not reachable on 2.1.291 as the suite runs
    it:** every Agent call runs ASYNCHRONOUSLY — its tool result is "Async agent launched successfully" at once (even
@@ -247,7 +301,11 @@ teammate) keeps reading Running; it settles to Waiting only when the work is rea
    waiting-for-you while it works.
 
 **Edge cases**
-- **E1 claude's own heartbeat `busy` / `shell`** → holds Running; a quiet transcript is not a turn end.
+- **E1 claude's own heartbeat `busy` / `shell`** → holds Running; a quiet transcript is not a turn end. Measured
+  (2026-10-24) with a background Bash of 60 s: the turn ends waiting-for-you; ~21 s later, the job still running, the
+  heartbeat says `shell` and the session reads running again (`[recon-subagent] … (presence=shell, outlived turn-end,
+  Waiting -> Running)`; the held "has completed" toast is dropped: `[notify-drop] … re-lit running`), then the job's
+  notification turn, then waiting-for-you.
 - **E2 The flash ring** does not fire for the Running ↔ Waiting re-light caused by background work… only on a
   real needs-you edge.
 
@@ -263,7 +321,7 @@ teammate) keeps reading Running; it settles to Waiting only when the work is rea
    *Check:* [LOG] `[PreCompact]`, `[PostCompact]`; [TR] `compact_boundary` with `postTokens`. Measured (2.1.291):
    an EMPTY UserPromptSubmit starts it (`[ups] … chars=0 -> EMPTY`, then `[recon-run]`), then PreCompact, a
    SubagentStop (the compaction runs as an agent), SessionStart(compact) and PostCompact(manual) → Waiting — and 2 ms
-   later the scanner puts it back to **Running** for ~30 s (STA-K3).
+   later the scanner puts it back to **Running** for ~30 s (STA-K3, an accepted delay: it settles on Waiting by itself).
 2. **Auto-compaction during a turn.** *Do:* a turn whose `usage in=` crosses the auto-compact threshold,
    then continues. *Expect:* Running throughout (no Idle blip), the turn's accounting intact; the runner
    does not send during the window. Measured (2.1.291 runs Opus 5.5 with a window the mock's 190K usage does not
@@ -299,13 +357,31 @@ continue it.") — never a ready Idle the runner would send into.
 4. **Continue.** *Do:* enter the tab (claude resumes; with `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` it continues
    by itself) — or type `go on [[mock reply "ok"]]`. *Expect:* Running, then Waiting.
 
+**Measured (2026-10-24, 0.8.0 + 2.1.291, probe run stprobe4):** t1 mid-turn (a tool result, then a held response),
+t2 focused; the app killed — or quit through its windows — and started again. t1's dormant record read **error** within
+2 s (`[recon-cutoff] <id> (the last turn stopped on a tool result and never finished; the tab is dormant, so no process
+can be running it)`) and its runner paused (`[stop-on-error]`); once t2 had launched, the restore wake (INT-04) started
+t1 in place (`[nav] activate-dormant`, `[restore-wake] … done - woke 1 busy tab(s)`, 10.8–16.4 s after the restore);
+its claude sent "Continue from where you left off." — the mock served the turn's NEXT response — and the session read
+running (`[recon-subagent] … Error (the cut-off turn resumed) -> Running`), then waiting-for-you. With t1 the only
+(focused) tab the record still read error first (the scanner judges it before claude is up), then the same.
+
 **Edge cases**
-- **E1 Graceful quit mid-turn** → the same (the turn was cut off by the close).
+- **E1 Graceful quit mid-turn** → the same (the turn was cut off by the close). Measured: the same sequence.
 - **E2 A bare prompt with no reply** at the quit → Error only through the restore-time hint (an Esc before
   any reply leaves the same tail and is NOT an error otherwise).
 - **E3 A fork that never ran its own turn** → never cut off.
-- **E4 A question pending at the quit** → Error, not a stale Needs approval.
-- **E5 Deactivate or Restart mid-turn** → Error after the park/restart.
+- **E4 A question pending at the quit** → Error, not a stale Needs approval. Measured (killed with an AskUserQuestion
+  open): error (`… stopped on an unfinished assistant step`); the resumed claude drops the unanswered call and the
+  continued turn asks the question AGAIN — needs-approval; Enter answers it, waiting-for-you. Its request carries the
+  user's prompt and "Continue from where you left off." as ONE user message (the dropped call leaves two user texts in
+  a row, which Claude Code joins; run stcov1).
+- **E5 Deactivate or Restart mid-turn** → Error after the park/restart. Measured: Deactivate → error while parked
+  (cut-off, the runner paused); Activate Tab → the continuation → running → waiting-for-you. **Restart session reads
+  running throughout** — the new claude starts at once and continues the turn, so no process-less moment is ever judged
+  (no error) — then waiting-for-you. On the busy desktop (hooks 8–20 s) the new claude's SessionStart hook landed
+  AFTER the scanner had promoted the continuing turn to running and set the record idle for one scan (52 ms; the
+  card showed it for one 150 ms sample) — a blip, see *Reclassified: accepted delays*.
 - **E6 Claude's placeholder `No response requested.`** written over the cut-off at resume → does not make it
   a finished turn.
 
@@ -329,6 +405,15 @@ other tab says so; nothing hops, nothing leaks.
 3. **Close A.** *Expect:* the session can move to B (its claude then hosts it) — verify the takeover is
    single and stable.
 
+**Measured (2026-10-24, probe q25):** B's claude typed by hand (`claude.exe --resume <id>` from the session's folder,
+with the test's Claude config; a `+` tab's environment comes from the registry) — the observer kept ONE host:
+`[observer] duplicate conversation <id>: host tab wt=<A> (pid …), also running in wt=<B>` and `[discover] <id> wt=<B>
+(pid …) not bound: tab wt=<A> hosts the same …`; no re-home, no tab swap; the side panel listed the session once, B's
+tab showed Claude Code's own title (`✳ <title>`). **Phase 2 differs from "state follows A's claude only":** a turn in B
+writes the SAME transcript, and the scanner read it — the session went running → waiting-for-you during B's turn (a
+hook from B, had it any, would be dropped; the transcript has no writer field). It errs on the safe side (the runner
+sees a busy conversation), and it is documented, not filed; the user decides.
+
 **Edge cases**
 - **E1 A third tab running it** → still one host.
 - **E2 A Restart copy** (tab menu Restart in A while B runs it) → no hop loop.
@@ -347,6 +432,10 @@ other tab says so; nothing hops, nothing leaks.
 3. **One huge line.** A turn that writes a > 1 MiB tool result line (`write` a 2 MB file and `read` it back) →
    the state still settles.
 
+**Measured (2026-10-24, probe q24; the mock's `write <path> size=<n>`):** a 1.5 MB Write grew the transcript to 3.19 MB
+(the input and the result each hold the content: one line over 1 MiB); the app restarted, the scanner met it cold
+(first-sight tail window, catch-up), and the next turn read running at its prompt and waiting-for-you after it.
+
 ---
 
 ### STA-10 · `/clear` keeps the tab managed
@@ -359,6 +448,15 @@ other tab says so; nothing hops, nothing leaks.
    NOT `external`; Deactivate and Restart work on it.
 2. **Summary link.** *Expect:* the new session's summary lists the cleared conversation above a separator
    (15-transcripts TRN-06).
+
+**Measured (2026-10-24, probe q14):** `/clear` switched claude to a new conversation id on the same ConPTY; the tab
+followed it — `[rehome] <old> -> <new> (same tab, new conversation id)`, `[nav] tab-swap <old8> -> <new8>`, `[rehome]
+<new> inherits MANAGED provenance from <old>`, `[lineage] <new8> continues <old8> (/clear on ConPTY …)` — kept its title
+(`t1`, one side-panel card); the card read **idle** (a new conversation, no turn yet), and the next prompt ran in the
+fresh conversation (the mock saw the new id and a two-message context): running → waiting-for-you. Both records stay in
+sessions.json (the old one archived), neither `external`. In the full run (stcov1, hooks 8–20 s) the card read **done**
+for 3 s first: the old conversation's SessionEnd(reason clear) landed 0.3 s before the tab swap, and the card showed
+the old record (done) until the side panel followed the new one — a status lag, see *Reclassified: accepted delays*.
 
 ---
 
@@ -405,10 +503,15 @@ no Stop hook for it; the Prompt Queue Runner holds its next prompt until the use
 
 **Edge cases**
 - **E1 Esc before any output** (the request still unanswered) → Claude Code cancels it, puts the prompt back in the
-  box and writes NOTHING (no marker, no Stop): the session reads running ~30 s more (STA-K2), then waiting-for-you
-  (`[recon-stop-idle] … presence=idle`), the box's draft showing as dots.
+  box and writes nothing after the prompt's own line (no marker, no reply, no Stop): the session reads running until
+  30 s after that line (STA-K2, an accepted delay; 18–28 s after the Esc in the probes), then waiting-for-you
+  (`[recon-stop-idle] … presence=idle`), the box's draft showing as dots. Bound: waiting-for-you within
+  `ACCEPTED_LAG_S` (60 s) of the Esc. ⚠ No interrupt hold: the hold is taken only on the marker, so a queued prompt
+  is sent once the status has held still (STA-K5).
 - **E2 A double Esc** → the rewind menu; no state change (an error's rewind: STA-04 E3).
-- **E3 Esc on a question or a permission prompt** → the dialog closes, the turn ends; waiting-for-you.
+- **E3 Esc on a question or a permission prompt** → the dialog closes, the turn ends; waiting-for-you. Measured
+  (2026-10-24): both write "[Request interrupted by user for tool use]" — needs-approval → waiting-for-you
+  (`[recon-stop] … interrupted`), the runner's interrupt hold; a refused Write writes nothing.
 
 ---
 
@@ -428,9 +531,11 @@ recorded as something the user typed.
    line `<task-notification> …`; [LOG] its UserPromptSubmit `[ups] <sid8> chars=N … -> noise (not recorded)`.
 2. **A Stop hook that blocks.** *Do:* a user Stop hook (Claude Code's settings) that answers
    `{"decision": "block", "reason": "keep going"}` once; `[[mock say "first stop"; next; hold g; reply "continued"]]`,
-   the continuation held 20 s. *Expect:* running throughout — the turn goes on. **Today:** waiting-for-you during the
-   continuation (our own Stop hook already said "turn complete"), running again only ~20 s after the transcript's last
-   write (`[recon-subagent] … outlived turn-end`), then waiting-for-you (STA-K4). *Check:* [TR] `hook_blocking_error`,
+   the continuation held past the accepted lag. *Expect:* the turn goes on: the session may read waiting-for-you at
+   the start of the continuation (our own Stop hook already said "turn complete") — an accepted delay (STA-K4) — and
+   reads running within `ACCEPTED_LAG_S` (60 s) of the block (on 0.8.0 ~20 s after the transcript's last write,
+   `[recon-subagent] … outlived turn-end`), running until the continuation's own stop, then waiting-for-you; a queued
+   prompt is not sent into the continuation. *Check:* [TR] `hook_blocking_error`,
    the user line "Stop hook feedback:\nkeep going", then the continuation.
 3. **A message absorbed mid-turn** — STA-01 E3.
 
@@ -553,56 +658,141 @@ agent exited") when a turn was in flight — and the presence fact cleared. A fi
 `ProcessAlive(s.pid)`), and derive the end from a managed claude's exit (the observer logs `[activity] wt=… claude ->
 pwsh`).
 
-### STA-K2 · Esc before any output reads Running for ~30 s
-> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (probe stprobe2 q14) ·
-> `e2e/suites/test_session_state.py::test_known_defect_esc_before_any_output_reads_running_for_half_a_minute`
-> (`known_defect`)
+### STA-K5 · Esc before any output takes no interrupt hold: the runner sends the next queued prompt
+> **P2** · Found by the e2e suite on 2026-10-24 against 0.8.0 (probe stprobe5 r22) ·
+> `e2e/suites/test_session_state.py::test_known_defect_esc_before_any_output_takes_no_interrupt_hold` (`known_defect`)
+> · the interrupt hold: PQR-07 (03-prompt-queue-runner.md), DELIVERY.md §14 · not a delay: STA-K2 is the accepted lag
+> of the same Esc
+
+**What it is.** Every other Esc parks an Auto runner until the user's next message (`[interrupt-hold] <sid8> autorunner
+Full -> Off`), because the user stopped the turn to talk to the session. An Esc before the model sent anything does
+not: Claude Code writes no "[Request interrupted by user]" marker for it, and the hold is taken only on that marker
+(SessionScanner → `SessionRegistry::NoteInterrupt`). So once the status has settled on waiting-for-you (STA-K2) and
+held still for the 40 s settle window, the runner sends the next queued prompt. The draft swap keeps the user's
+restored prompt: it is stashed around the send and put back (`[draft-swap] <sid8> holding an unsent draft … clearing
+the box via Ctrl+S stash`, then `… prompt sent and the draft is back in the box, unsent`). Measured (r22): Esc 17 s
+into a held turn; waiting-for-you 18 s later; `[send] … #2` 40.5 s after that, 66 s after the Esc; no
+`[interrupt-hold]` line.
+
+**Expected.** The same as any other Esc: the runner parks until the user's next message (`[interrupt-hold]`), and
+sends nothing while the user's own prompt sits back in the box.
+
+**A possible fix.** The case is recognizable: a Running session whose transcript ends on the user's own prompt line
+with no reply, and whose input box then holds that same prompt (`SessionInfo::pendingInput` equal to the last
+prompt-carrying UserPromptSubmit's text) — Claude Code put it back. When the presence-idle release (`[recon-stop-idle]`)
+fires on such a tail, it could call `NoteInterrupt` with the release's time. (Not built; the owner rules whether this
+is a defect at all — the draft swap already keeps the user's prompt safe.)
+
+## Reclassified: accepted delays (not defects)
+
+> **The user's ruling (2026-10-24):** "The time delays are actually acceptable (STA-K*), document these as acceptable
+> and no reason to worry for 30s-ish status update delay. We sometimes use that delay for safety of pilot autorunner to
+> not spam a mistake sent during status change."
+
+STA-K2, STA-K3 and STA-K4 were filed by the e2e suite on 2026-10-23 as known defects. Each is a status that **lags** a
+change Claude Code made without telling Agentmaster — by ~20–30 s on 0.8.0 — and then settles on the right state by
+itself. **They are accepted behavior: a status up to ~30 s late is no reason to worry.** (STA-K1 is no lag — a killed
+claude reads Running FOR GOOD, and `/exit` whose SessionEnd hook was cancelled never reads Done — and stays a defect.)
+
+**Why the lag is safe, and why it is wanted.** The state engine waits for evidence before it believes a quiet moment
+(claude's heartbeat idle for 30 s before a Running turn with no reply is released; the busy heartbeat outliving the
+transcript by 20 s before a turn that goes on reads Running again), and the Prompt Queue Runner sends only into a
+status that has HELD STILL for 40 s (DELIVERY.md §16; every change restarts the wait). A status that is still moving —
+Running → Waiting → Running, or Waiting → Running → Waiting within the window — therefore never gets a queued prompt
+typed into it: the delay is part of what keeps the runner from sending a mistake during a status change. The cost of
+the lag is a dot, a card and a topic icon up to ~30 s late; the cost of believing the first quiet moment would be a
+prompt pasted into a turn that is still running, or a "has completed" toast for a turn that goes on.
+
+**What the suite asserts instead.** Each case has a bounded test (no `known_defect` marker): the state must settle
+within `ACCEPTED_LAG_S` (60 s — twice the measured lag, for a loaded PC) and settle on the right state, whichever way
+the engine gets there, so a faster engine passes too. A lag over the bound, or a status that never settles, is a
+defect.
+
+**The runner's side, measured (probe stprobe5, 2026-10-24, runner Auto, one prompt queued):**
+- *A Stop hook blocks the first stop* (STA-K4): the first stop's Waiting logs `[advance-skip] … status settle`, the
+  Running ~20 s later restarts the wait, and the queued prompt goes 40.5 s after the continuation's own Stop — never
+  into the continuation (held 30 s in the probe, 45 s in the test).
+  `test_session_state.py::test_the_runner_sends_nothing_into_a_blocked_stops_continuation`.
+- *The user types a turn while a prompt waits out its queue settle*: the typed turn's Running and Waiting each restart
+  the wait; the queued prompt goes 40.6 s after that Waiting (PQR-03).
+- *Esc before any output* (STA-K2): nothing is sent while the status moves; once it has held still the queued prompt
+  IS sent (66 s after the Esc), around the user's restored prompt — the interrupt hold is not taken (STA-K5: filed as
+  a defect, not a delay; the owner rules).
+
+**Two more transients of the same family, found after the ruling (run stcov1, 2026-10-24; not ruled on — listed for
+the owner).** Both come from a hook that lands late on a busy PC (8–20 s per hook on the test desktop; the release's
+exec-form hooks take well under a second, so a fast PC rarely shows them), both settle by themselves, and neither
+moves the runner (its 40 s settle window restarts on every change). The idle blip is an edge out of Running: on a tab
+that is not in front it may light the flash ring for a moment (the move back to Running clears it) and its toast is
+held while claude's heartbeat says busy, then dropped (CLAUDE.md *Engine*, NOTIFICATIONS.md; not measured here). The
+`/clear` case starts from Waiting: no edge out of Running.
+- *A late SessionStart after a Restart or a resume:* the restarted claude's SessionStart(resume) hook lands after the
+  scanner has already promoted the continuing turn to Running (claude's heartbeat is busy) and sets the record **idle**
+  for one scan — 52 ms after Restart session (STA-07 E5), 115 ms after a crash's resume (E4) — before the scanner
+  promotes it again. The card showed it for one 150 ms sample. The tests allow such a blip (`BLIP_S`, 1.5 s) and fail
+  an idle that holds.
+- *`/clear`:* the old conversation's SessionEnd(reason clear) lands before the tab follows the new conversation, so the
+  card reads **done** for ~3 s before idle (STA-10). The test allows a "done" before the idle, within
+  `ACCEPTED_LAG_S`.
+
+### STA-K2 · Esc before any output reads Running for ~30 s — ACCEPTED
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (probe stprobe2 q14) · **reclassified 2026-10-24** (the
+> user's ruling above) · `e2e/suites/test_session_state.py::test_esc_before_any_output_settles_waiting_within_the_accepted_lag`
+> (it replaced `test_known_defect_esc_before_any_output_reads_running_for_half_a_minute`)
 
 **What it is.** Esc while the model has sent nothing yet: Claude Code cancels the request, puts the prompt back in the
-input box and writes nothing to the transcript. The session keeps reading **running** until the presence-idle release
-(`[recon-stop-idle] … q=0 presence=idle`), then waiting-for-you: 28 s measured.
+input box and writes nothing after the prompt's own line (no interrupt marker, no reply, no Stop). The session keeps
+reading **running** until the presence-idle release (`[recon-stop-idle] … q=0 presence=idle`), then waiting-for-you:
+28 s after the Esc in q14, 18 s in r22 (the Esc came 17 s into the turn).
 
-**The cause.** The tail is a bare prompt with no reply, and a Running session with a cleared tail is released only
-after 30 s of quiet (`kScanPresenceIdleRunningQuiescenceMs`, the guard against an API-retry pause read as a turn end).
+**Why it lags.** The tail is a bare prompt with no reply, and a Running session with a cleared tail is released only
+after 30 s of quiet (`kScanPresenceIdleRunningQuiescenceMs`, the guard against an API-retry pause read as a turn end),
+counted from the transcript's last write — the prompt's own line. So it reads waiting-for-you ~30 s after the prompt
+was sent, or a scan after the Esc when the Esc came later than that.
 
-**Expected.** Waiting for you within a few seconds: claude's own heartbeat reads `idle` at once, and the prompt is
-back in the box (the pending-input monitor reads it as a draft) — two signals no API-retry pause gives.
+**Why it is accepted.** The session settles on waiting-for-you by itself, ~30 s later. A faster release was possible
+(claude's heartbeat reads `idle` at once, and the prompt back in the box is a draft — two signals no API-retry pause
+gives), but it would weaken the guard that keeps a retrying turn Running; while the status moves the runner sends
+nothing. (What the runner does once it has settled is a separate gap: STA-K5.)
 
-### STA-K3 · A manual /compact reads Running ~30 s after it ended
-> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (probes stprobe2 q09, stprobe3 r01) ·
-> `e2e/suites/test_session_state.py::test_known_defect_compact_reads_running_half_a_minute_after_it_ended`
-> (`known_defect`)
+### STA-K3 · A manual /compact reads Running ~30 s after it ended — ACCEPTED
+> **P2** · Found by the e2e suite on 2026-10-23 against 0.8.0 (probes stprobe2 q09, stprobe3 r01) · **reclassified
+> 2026-10-24** · `e2e/suites/test_session_state.py::test_compact_settles_waiting_within_the_accepted_lag` (it replaced
+> `test_known_defect_compact_reads_running_half_a_minute_after_it_ended`)
 
 **What it is.** `/compact` reads running while it compacts (correct), and its PostCompact(manual) sets waiting-for-you
 — then **2 ms later** the scanner sets running again (`[recon-subagent] <id> (presence=busy, Waiting -> Running)`),
 and the session stays running until the presence-idle release 30 s later (`[recon-stop-idle] … presence=idle`):
 waiting-for-you ~30 s after the compaction ended (r01: PostCompact at 21:24:56.98, waiting again at 21:25:27.33).
 
-**The cause.** When the PostCompact hook lands, claude's heartbeat still reads `busy` (it finishes the compaction's
+**Why it lags.** When the PostCompact hook lands, claude's heartbeat still reads `busy` (it finishes the compaction's
 hooks first), and the scanner's busy-heartbeat promotion fires on a Waiting session whose tail (the
 `<local-command-stdout>Compacted …` line) is not terminal; the release then needs the 30 s quiet of STA-K2.
 
-**Expected.** Waiting for you at the PostCompact (the compaction window's close is a turn end for the heartbeat
-promotion too: it should need a busy EDGE after the window closed, like the presence-resume belt's latch).
+**Why it is accepted.** The session settles on waiting-for-you by itself, ~30 s after the compaction; a prompt typed
+meanwhile works as at any other time, and the runner waits for the status to hold still.
 
-### STA-K4 · A Stop hook that blocks leaves the session Waiting for you while Claude Code continues
+### STA-K4 · A Stop hook that blocks reads Waiting for you at the start of the continuation — ACCEPTED
 > **P1** · Found by the e2e suite on 2026-10-23 against 0.8.0 (probes stprobe1 p20, stprobe2 q08, stprobe3 r02) ·
-> `e2e/suites/test_session_state.py::test_known_defect_a_blocking_stop_hook_reads_waiting_while_claude_continues`
-> (`known_defect`) · a Stop hook blocked 164 times in this PC's transcripts
+> **reclassified 2026-10-24** ·
+> `e2e/suites/test_session_state.py::test_a_blocking_stop_hooks_continuation_reads_running_within_the_accepted_lag`
+> (it replaced `test_known_defect_a_blocking_stop_hook_reads_waiting_while_claude_continues`) · a Stop hook blocked 164
+> times in this PC's transcripts
 
 **What it is.** A user's Stop hook answers `{"decision": "block", "reason": "…"}`, so Claude Code does not stop: it
 writes `hook_blocking_error` and the user line "Stop hook feedback:\n<reason>" and goes on with the SAME turn. But
 Agentmaster's own Stop hook ran beside it and already reported the turn complete: the session reads
-**waiting-for-you** while Claude Code works on the continuation. It reads running again only when the busy heartbeat
-has outlived the transcript's last write by 20 s (`[recon-subagent] … (presence=busy, outlived turn-end, Waiting ->
+**waiting-for-you** while Claude Code starts the continuation. It reads running again when the busy heartbeat has
+outlived the transcript's last write by 20 s (`[recon-subagent] … (presence=busy, outlived turn-end, Waiting ->
 Running)`), and waiting-for-you after the continuation's own Stop. Measured (r02, the continuation held 20 s):
-waiting-for-you from the first Stop for ~20 s, then running, then waiting-for-you. The runner's 40 s state-settle
-hold keeps it from sending into that window (DELIVERY.md §16), and the "has completed" toast is held while the
-heartbeat says busy — but the board, the tab dot, the side panel and Telegram's topic all say the turn ended.
+waiting-for-you from the first Stop for ~20 s, then running, then waiting-for-you. The "has completed" toast is held
+while the heartbeat says busy.
 
-**The cause.** Our Stop forwarder cannot know that another Stop hook blocks (the payload's `stop_hook_active` is
+**Why it lags.** Our Stop forwarder cannot know that another Stop hook blocks (the payload's `stop_hook_active` is
 false on the first stop), and the "Stop hook feedback" user line that follows is not read as the turn going on.
 
-**Expected.** Running throughout: the scanner can read the `hook_blocking_error` + "Stop hook feedback" lines written
-right after a Stop as the turn continuing (a Running promotion, like a prompt's), or the busy heartbeat right after
-the Stop as such.
+**Why it is accepted.** The session reads running again within the lag and ends waiting-for-you after the continuation;
+the runner's 40 s settle hold (counted from the first Stop's Waiting, restarted by the Running that follows) keeps any
+queued prompt out of the continuation — measured (probe r21): nothing sent while the continuation ran, the queued
+prompt sent 40.5 s after the continuation's Stop
+(`test_session_state.py::test_the_runner_sends_nothing_into_a_blocked_stops_continuation`).

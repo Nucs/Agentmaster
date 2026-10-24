@@ -33,12 +33,13 @@ them when present (`Card.selected`, `ManagerPage.selected_card`, `compose_button
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .. import inputs, uia, win32
-from ..waits import wait_until
+from ..waits import WaitTimeout, wait_until
 
 COLUMNS = ("Running", "Waiting-for-you", "Needs-approval", "Error", "Idle / Done", "External")
 """The board's column names, left to right (Error and External appear only with content)."""
@@ -748,20 +749,39 @@ class ManagerPage:
                  and bx - el.rect[0] < 260]
         return sorted(found, key=lambda el: el.rect[0])
 
-    def queue_prompt(self, text: str) -> None:
+    def queue_prompt(self, text: str, verify_s: float = 10.0) -> None:
         """Append a prompt to the selected session's queue: the compose box's text set through UI Automation (no
-        focus, so no unsent draft is pulled into it), then the envelope (Add to queue).
+        focus, so no unsent draft is pulled into it), then the envelope (Add to queue) — and confirm it through the
+        engine's own line `[nav] queue <sid8> "<label>"` (AgentManagerContent::_OnAddPrompt).
+
+        ⚠ The envelope does NOTHING, silently, when the page has no session selected or the box is empty. On 0.8.0 a
+        session launched from the page is not selected there until a tab switch (MGR-K1), so a test that launched its
+        session and opens the page from that same tab must select the session first (its board card's click); without
+        the confirmation such a test saw no prompt queued and read it as the runner's choice (2026-10-24, probes q21–q23).
 
         Args:
             text: The prompt (a mock script inside `[[mock …]]` is sent to the model as it is).
+            verify_s: How long to wait for the `[nav] queue` line (0 = do not confirm).
         Returns:
             None.
         Raises:
-            LookupError: When the Prompt Queue tab or its buttons are not showing.
+            LookupError: When the Prompt Queue tab or its buttons are not showing, or nothing was queued (no line).
         """
+        hooks = self.window.app.profile.hooks
+        mark = hooks.mark()
         box = self.compose_box()
         box.set_value(text)
         buttons = self.compose_buttons()
         if len(buttons) != 3:
             raise LookupError(f"expected the 3 compose icons left of the box, found {[b.line() for b in buttons]}")
         buttons[2].click()
+        if verify_s <= 0:
+            return
+        # The label the engine logs: the text's first 56 characters, line breaks as spaces.
+        label = text[:56].replace("\r", " ").replace("\n", " ")
+        try:
+            hooks.wait(r'\[nav\] queue [0-9a-f]{8} "' + re.escape(label) + '"', since=mark, timeout_s=verify_s)
+        except WaitTimeout:
+            raise LookupError(f"nothing was queued: no `[nav] queue … \"{label}\"` line within {verify_s} s — is a "
+                              "session selected on the page? (MGR-K1 on 0.8.0: a session launched from the page is not "
+                              "selected there until a tab switch; click its board card first)") from None

@@ -189,7 +189,9 @@ class MockClient:
                              since, timeout_s, f"turn with {text!r}")
 
     def release(self, gate: str) -> dict:
-        """Release a gate (a `hold` continues; also before it is reached).
+        """Release a gate (a `hold` / `stall` continues; also before it is reached). A gate failed or dropped before is
+        RE-OPENED as released: every later hold at it passes (how a test lets a retried or restarted turn through after
+        it failed the first attempt at that gate).
 
         Args:
             gate: Its name.
@@ -200,7 +202,8 @@ class MockClient:
         """
         return self._call("POST", f"/_mock/gate/{gate}/release")
 
-    def fail(self, gate: str, status: int = 529, etype: str = "overloaded_error", message: str = "mock failure") -> dict:
+    def fail(self, gate: str, status: int = 529, etype: str = "overloaded_error", message: str = "mock failure",
+             headers: Optional[dict] = None) -> dict:
         """Fail a gate with an API error.
 
         Args:
@@ -208,12 +211,17 @@ class MockClient:
             status: The HTTP status (used when the stream has not started).
             etype: The error type.
             message: The error message.
+            headers: HTTP headers of that error when the stream has not started ({"x-should-retry": "false"},
+                {"retry-after": "120"}); a started stream fails with an `error` event and can carry none.
         Returns:
             The answer.
         Raises:
             MockError: On failure.
         """
-        return self._call("POST", f"/_mock/gate/{gate}/fail", {"status": status, "type": etype, "message": message})
+        body = {"status": status, "type": etype, "message": message}
+        if headers:
+            body["headers"] = dict(headers)
+        return self._call("POST", f"/_mock/gate/{gate}/fail", body)
 
     def drop(self, gate: str) -> dict:
         """Cut the connection of the stream waiting at a gate.

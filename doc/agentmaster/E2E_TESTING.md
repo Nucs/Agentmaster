@@ -50,6 +50,21 @@
 > /compact reads Running ~30 s after it ended), STA-K4 (a blocking Stop hook leaves the session Waiting while Claude
 > Code continues the turn).
 >
+> **Session state, part 2 (2026-10-24):** the user ruled STA-K2–K4 accepted delays — "no reason to worry for
+> 30s-ish status update delay. We sometimes use that delay for safety of pilot autorunner to not spam a mistake sent
+> during status change" — so their known-defect tests became bounded ones (`ACCEPTED_LAG_S`, 60 s), and 19 new
+> tests (22 cases) cover errors Claude Code will not retry (`x-should-retry: false`, a `retry-after` over 60 s), a
+> silent stream (the byte watchdog), turns cut off by a kill, a quit or Deactivate and the restore wake, Restart
+> after a lost connection (INT-01, `test_interrupted_work.py`), `/clear`, one conversation in two tabs, a
+> multi-megabyte transcript, the Waiting-for-you timeout (read and unread), Esc on a question or a permission
+> prompt, and the runner across the delays. The mock gained `stall`, `error … retry= / retry_after=`, `size=`
+> and quoted arguments (§4.3). With the smoke test 49 of 52 passed on 0.8.0 in 61.8 min (run `stcov1`); the three
+> failures were timing the tests had not allowed for — a resumed claude joins the prompt and "Continue from where
+> you left off." into one message, a late SessionStart blips idle for one scan, a `/clear` reads done ~3 s before
+> the swap — and passed once allowed for (run `stcov2`, 3 of 3). One new finding: STA-K5 (Esc before any output
+> takes no interrupt hold, so the runner sends the next queued prompt once the status has settled; the owner
+> decides).
+>
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
 > lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part
@@ -268,26 +283,27 @@ that message — stateless, so a retried request gets the same answer.
 
 | Step | Meaning |
 |---|---|
-| `say "<text>"` | a text block; the response goes on |
+| `say "<text>"` | a text block; the response goes on. `say size=<n>`: n characters of numbered filler lines instead (a big answer without a big prompt; also `think`, `reply`) |
 | `think "<text>"` | a thinking block |
 | `tool <Name> {json}` | a tool_use block; ends the response (stop_reason `tool_use`); the next request of the turn gets the next step. The input is checked against the request's `tools[].input_schema` (required keys, types) — a typo fails loudly instead of confusing Claude Code |
 | `tools [<Name> {json}, …]` | parallel tool calls in one response |
 | `reply "<text>"` | text + `end_turn`; ends the script |
 | `stream <n> <ms>` | stream the next text in chunks of `n` characters every `ms` (realistic typing) |
 | `delay <dur>` | pause before the next block (`500ms`, `3s`) |
-| `hold <gate>` | stop streaming until the test releases the gate (§4.5) — a Running state of exactly the length the test wants |
-| `error <status> <type> "<msg>" [times=N]` | answer with an HTTP error; with `times=N` only the first N attempts fail, then the step proceeds |
+| `hold <gate>` | stop streaming until the test releases the gate (§4.5) — a Running state of exactly the length the test wants; a started stream sends a `ping` every 2 s meanwhile, so the connection never looks idle |
+| `stall <gate>` | go SILENT until the gate opens: the response is started (headers + `message_start`) and then no byte arrives, not even a ping — what Claude Code's stream idle watchdog notices (2.1.291: 15 s after the last byte it keeps the partial text and writes "API Error: The response stopped arriving …", or sends the request again when nothing was shown; the watchdog needs `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` + `CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS`, flows/05 STA-04 E9). A client that gives up meanwhile is noticed (the request is logged `client_gone`) |
+| `error <status> <type> "<msg>" [times=N] [retry=no\|yes] [retry_after=<s>]` | answer with an HTTP error; with `times=N` only the first N attempts fail, then the step proceeds. `retry=no` sends the API's `x-should-retry: false` (2.1.291 then never retries a 429 or a 5xx; a 529 still gets three tries), `retry=yes` `x-should-retry: true`; `retry_after=<s>` the `retry-after` header (2.1.291 waits it out up to 60 s and gives up at once above that). A misspelled option fails the script |
 | `drop [after=N]` | cut the connection after N events (no `message_stop`) |
 | `stop <reason>` | override the stop reason (`max_tokens`, `refusal`, `pause_turn`) |
 | `stop refusal [<category>] ["<explanation>"]` | a refusal with the API's `stop_details` `{type: refusal, category, explanation}` on `message_delta` (defaults: `cyber` and a fixed explanation) — Claude Code 2.1.291 reads them there to word its "… safeguards flagged this message" error |
 | `next` | end this response without a tool call (`end_turn`, or the `stop` given); the steps after it answer the NEXT request of the same turn — the ones Claude Code sends by itself: the continuation after `max_tokens`, a refusal's one retry (and its fallback-model retry), the turn a blocking Stop hook continues |
 | `usage in=<n> out=<n> cache_read=<n>` | the usage of this response (context displays, auto-compaction thresholds) |
 | `title "<t>"` | the title the `title` side request returns for this session |
-| shorthands | `ask "<question>" <opt1>,<opt2>` (AskUserQuestion), `bash "<cmd>"`, `write <path> "<text>"`, `edit <path> "<old>" "<new>"`, `read <path>`, `agent "<subagent prompt>"` |
+| shorthands | `ask "<question>" <opt1>,<opt2>` (AskUserQuestion), `bash "<cmd>"`, `write <path> "<text>"`, `write <path> size=<n>` (n characters of filler: the Write's input and result put twice that into the transcript — a multi-megabyte transcript in one turn), `edit <path> "<old>" "<new>"`, `read <path>`, `agent "<subagent prompt>"` |
 | `use @<scenario>` | splice a named scenario from the scenario folder (keeps prompts short) |
 | `expect "<regex>"` | the tool result this step receives must match; a mismatch is logged and fails the test (lets a test assert what Claude Code returned to the model) |
 
-A bare `[[mock some words]]` is `reply "some words"`. Without any script a `main` request gets
+A quoted argument is always the step's text, even when it holds `=` (`bash "FOO=1 make"`); only a bare `key=value` word is an option. A bare `[[mock some words]]` is `reply "some words"`. Without any script a `main` request gets
 `reply "OK"`: Agentmaster's own prompts (the restore wake's "Continue from where you left off.", a
 /handover's first message) need no scripting to complete.
 

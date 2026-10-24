@@ -224,6 +224,71 @@ class StateTimeline:
         ch = self.changes()
         return ch[-1].state if ch else ""
 
+    def elapsed(self) -> float:
+        """The timeline's clock now: seconds since start(), the scale every Change.t uses — so a test can note when
+        it acted (an Esc, a release) and compare that with when the state changed.
+
+        Returns:
+            The seconds (0.0 before start()).
+        """
+        return round(time.monotonic() - self._t0, 2) if self._t0 else 0.0
+
+    def settled_at(self, state: str, within_s: float, hold_s: float = 5.0, after_t: float = -1.0) -> float:
+        """Wait until the card shows a state AND keeps it for a while — a state the session settled on, not a brief
+        pass through it — and say when it entered it for good.
+
+        A status that LAGS (the accepted delays of flows/05, e.g. Running for ~30 s after an Esc before any output) is
+        asserted with this: the state must settle within a bound, whichever way the engine gets there.
+
+        Args:
+            state: The word ("waiting-for-you" …).
+            within_s: How long the whole wait may take.
+            hold_s: How long the state must stay before it counts as settled.
+            after_t: Only a change into the state LATER than this timeline time counts (-1 = any, including the state
+                shown at the start).
+        Returns:
+            The time (s since start) of the change into the settled state.
+        Raises:
+            WaitTimeout: When it did not settle in time (the message lists the timeline).
+        """
+        def settled():
+            """One look.
+
+            Returns:
+                The change time, or None while not settled.
+            """
+            ch = self.changes()
+            if not ch or ch[-1].state != state or ch[-1].t <= after_t:
+                return None
+            return ch[-1].t if self.elapsed() - ch[-1].t >= hold_s else None
+
+        return wait_until(settled, within_s, interval_s=0.1, what=f"{self.title!r} to settle on {state!r}",
+                          describe=self.describe)
+
+    def entered_after(self, state: str, after_t: float, within_s: float) -> float:
+        """Wait until the card ENTERS a state after a given timeline time (a change into it, not the state it already
+        showed) — e.g. "running again after the first stop".
+
+        Args:
+            state: The word.
+            after_t: The timeline time the change must come after.
+            within_s: How long.
+        Returns:
+            The time (s since start) of that change.
+        Raises:
+            WaitTimeout: When it did not (the message lists the timeline).
+        """
+        def entered():
+            """One look.
+
+            Returns:
+                The change time, or None.
+            """
+            return next((c.t for c in self.changes() if c.t > after_t and c.state == state), None)
+
+        return wait_until(entered, within_s, interval_s=0.1, what=f"{self.title!r} to enter {state!r} after "
+                          f"t={after_t:.1f}", describe=self.describe)
+
     def seen(self, state: str) -> bool:
         """Whether the state was shown at any time.
 

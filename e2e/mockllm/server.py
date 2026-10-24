@@ -10,8 +10,10 @@ Control API (loopback only, like everything here):
                                       the classified request log (the test's oracle of what reached the model)
     GET  /_mock/sessions              per-session counts
     GET  /_mock/gates                 every gate: open, waiting streams, outcome
-    POST /_mock/gate/<name>/release   a `hold` continues (also before it is reached)
-    POST /_mock/gate/<name>/fail      {"status": 529, "type": "...", "message": "..."} or {"drop": true}
+    POST /_mock/gate/<name>/release   a `hold` / `stall` continues (also before it is reached)
+    POST /_mock/gate/<name>/fail      {"status": 529, "type": "...", "message": "...", "headers": {...}} or
+                                      {"drop": true} ("headers": optional HTTP headers of an error answered
+                                      before the stream started, e.g. {"retry-after": "120"})
     GET  /_mock/expectations          the `expect` results
     POST /_mock/reset                 forget the log, gates, attempts, floors and expectations
     POST /_mock/config                {"floor_ms": n, "default_reply": "...", "title": "...", "models": [...]}
@@ -23,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import socket
 import threading
 import time
@@ -82,12 +85,13 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {"_raw": raw[:2000].decode("utf-8", "replace")}
 
-    def _json(self, status: int, obj: Any) -> None:
+    def _json(self, status: int, obj: Any, headers: Optional[dict] = None) -> None:
         """Answer with a whole JSON body.
 
         Args:
             status: The HTTP status.
             obj: The answer.
+            headers: More response headers (an error's `x-should-retry` / `retry-after`), or None.
         Returns:
             None.
         Raises:
@@ -98,6 +102,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
         self.send_header("request-id", "req_mock_" + uuid.uuid4().hex[:12])
+        for name, value in (headers or {}).items():
+            self.send_header(str(name), str(value))
         self.end_headers()
         self.wfile.write(data)
 
@@ -170,6 +176,10 @@ class Handler(BaseHTTPRequestHandler):
                 outcome = {"drop": True} if body.get("drop") else {
                     "status": int(body.get("status", 529)), "type": str(body.get("type", "overloaded_error")),
                     "message": str(body.get("message", "mock gate failure"))}
+                headers = body.get("headers")
+                if isinstance(headers, dict) and headers and "drop" not in outcome:
+                    # Sent with an error answered BEFORE the stream started (a started stream can carry no headers).
+                    outcome["headers"] = {str(k): str(v) for k, v in headers.items()}
             gate = st.open_gate(name, outcome)
             self._json(200, {"gate": name, "waiting": gate.waiting, "outcome": outcome})
         elif path == "/_mock/reset":
@@ -285,8 +295,11 @@ class Handler(BaseHTTPRequestHandler):
             status, etype, message, times = resp.fail
             attempt = st.attempt((session, the_plan.source, k))
             if times is None or attempt <= times:
-                st.end(entry, why=f"{why} attempt {attempt} (fail)", status=status, answer=f"error {status}")
-                self._json(status, self._api_error(status, etype, message))
+                fields = {"why": f"{why} attempt {attempt} (fail)", "status": status, "answer": f"error {status}"}
+                if resp.fail_headers:
+                    fields["headers"] = dict(resp.fail_headers)  # the log shows what Claude Code was told
+                st.end(entry, **fields)
+                self._json(status, self._api_error(status, etype, message), resp.fail_headers)
                 return
             why += f" attempt {attempt}"
         problems = [p for el in resp.elements if el.kind == "tool_use"
@@ -357,13 +370,16 @@ class Handler(BaseHTTPRequestHandler):
         for el in resp.elements:
             if el.kind == "delay":
                 time.sleep(el.ms / 1000.0)
-            elif el.kind == "hold":
-                outcome = _wait_gate(self.state, el.name, None)
+            elif el.kind in ("hold", "stall"):
+                # A whole message has nothing to send before it is complete, so a hold and a stall are the same
+                # here: silence until the gate opens (a client that gives up meanwhile ends the wait).
+                outcome = _wait_gate(self.state, el.name, lambda: _raise_if_peer_gone(self.connection))
                 if outcome and outcome.get("drop"):
                     self.close_connection = True
                     return
                 if outcome:
-                    self._json(outcome["status"], self._api_error(outcome["status"], outcome["type"], outcome["message"]))
+                    self._json(outcome["status"], self._api_error(outcome["status"], outcome["type"], outcome["message"]),
+                               outcome.get("headers"))
                     return
             elif el.kind == "drop":
                 self.close_connection = True
@@ -401,28 +417,64 @@ def _usage(resp: Response) -> dict:
     return usage
 
 
-def _wait_gate(state: MockState, name: str, ping: Optional[Callable[[], None]]) -> Optional[dict]:
+def _wait_gate(state: MockState, name: str, tick: Optional[Callable[[], None]]) -> Optional[dict]:
     """Wait until a gate opens.
 
     Args:
         state: The mock state.
         name: The gate's name.
-        ping: Called every PING_EVERY_S while waiting (a started stream sends a ping event; it raises
-            OSError when the client went away, which ends the wait), or None.
+        tick: Called every PING_EVERY_S while waiting, or None: a held started stream sends a ping event (which raises
+            OSError when the client went away), a stall only LOOKS whether the client went away (_raise_if_peer_gone)
+            — either way an OSError ends the wait.
     Returns:
         The gate's outcome (None = released normally).
     Raises:
-        OSError: From ping, when the client has gone away.
+        OSError: From tick, when the client has gone away.
     """
     gate = state.gate(name)
     state.wait_count(gate, +1)
     try:
         while not gate.opened.wait(PING_EVERY_S):
-            if ping:
-                ping()
+            if tick:
+                tick()
     finally:
         state.wait_count(gate, -1)
     return gate.outcome
+
+
+def _peer_gone(sock: socket.socket) -> bool:
+    """Whether the client closed its end of a connection, found WITHOUT writing to it (a stall must stay silent).
+
+    A closed connection reads as ready with zero bytes (or a reset). The client sends nothing else while it waits for
+    the answer to its request, so any readable byte means "still there" and is left in place (MSG_PEEK).
+
+    Args:
+        sock: The request's socket.
+    Returns:
+        True when the client is gone (or the socket can no longer be asked: treated as gone, which only ends a wait
+        early).
+    """
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        if not readable:
+            return False
+        return sock.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
+
+
+def _raise_if_peer_gone(sock: socket.socket) -> None:
+    """End a silent wait when the client has given up (Claude Code's stream idle watchdog aborts the request).
+
+    Args:
+        sock: The request's socket.
+    Returns:
+        None.
+    Raises:
+        ConnectionAbortedError: When the client closed the connection (do_POST then logs `client_gone`).
+    """
+    if _peer_gone(sock):
+        raise ConnectionAbortedError("the client closed the connection during a silent wait")
 
 
 class Stream:
@@ -430,7 +482,7 @@ class Stream:
 
     The stream starts LAZILY: headers and `message_start` go out with the first content block (or the first
     ping of a wait that follows content), so a `hold` or an `error` before any output can still answer with
-    a real HTTP error status.
+    a real HTTP error status. A `stall` starts it at once (the request is answered, then nothing arrives).
     """
 
     def __init__(self, handler: Handler, body: dict, resp: Response) -> None:
@@ -552,13 +604,33 @@ class Stream:
             if end - time.monotonic() > 0:
                 self.ping()
 
+    def _fail_started(self, outcome: dict) -> None:
+        """Fail a stream that has started: an `error` event, then the response ENDS (the last chunk).
+
+        This is the API's own way to fail a started stream. Cutting the socket right after the event instead raced
+        Claude Code's read: it then saw "Connection lost mid-response" or "Server error mid-response" depending on
+        which arrived first (measured 2026-10-23).
+
+        Args:
+            outcome: The failed gate's outcome ({"status", "type", "message"}; headers cannot be sent any more).
+        Returns:
+            None.
+        Raises:
+            OSError: When the client has gone away.
+        """
+        self.event("error", {"type": "error", "error": {"type": outcome["type"], "message": outcome["message"]}},
+                   count=False)
+        self.h.wfile.write(b"0\r\n\r\n")
+        self.h.wfile.flush()
+        self.h.close_connection = True
+
     def run(self) -> None:
         """Send the whole response.
 
         Returns:
             None.
         Raises:
-            OSError: When the client goes away (an interrupt in the TUI).
+            OSError: When the client goes away (an interrupt in the TUI, or its stream watchdog during a stall).
         """
         index = 0
         try:
@@ -566,24 +638,24 @@ class Stream:
                 if el.kind == "delay":
                     self._wait(el.ms / 1000.0)
                     continue
-                if el.kind == "hold":
-                    outcome = _wait_gate(self.h.state, el.name, self.ping)
+                if el.kind in ("hold", "stall"):
+                    if el.kind == "stall" and not self.started:
+                        # A stall is silence on an ANSWERED request: the headers and message_start go out first, so
+                        # the client's request is done and only its byte-level idle watchdog can notice the silence.
+                        self.start()
+                    # A hold pings while it waits once the stream has started; a stall sends nothing at all and only
+                    # looks whether the client gave up (its watchdog closes the connection).
+                    tick = self.ping if el.kind == "hold" else (lambda: _raise_if_peer_gone(self.h.connection))
+                    outcome = _wait_gate(self.h.state, el.name, tick)
                     if outcome and outcome.get("drop"):
                         raise Cut()
                     if outcome:
                         if not self.started:
                             self.h._json(outcome["status"], Handler._api_error(outcome["status"], outcome["type"],
-                                                                               outcome["message"]))
+                                                                               outcome["message"]),
+                                         outcome.get("headers"))
                             return
-                        # Mid-stream: the API's own way to fail a started stream — an `error` event, then the
-                        # response ENDS (the last chunk), as the API's does. Cutting the socket right after the event
-                        # instead raced Claude Code's read: it then saw "Connection lost mid-response" or "Server
-                        # error mid-response" depending on which arrived first (measured 2026-10-23).
-                        self.event("error", {"type": "error", "error": {"type": outcome["type"],
-                                                                        "message": outcome["message"]}}, count=False)
-                        self.h.wfile.write(b"0\r\n\r\n")
-                        self.h.wfile.flush()
-                        self.h.close_connection = True
+                        self._fail_started(outcome)
                         return
                     continue
                 if el.kind == "drop":

@@ -156,14 +156,14 @@ restart: `am.claude.seed(settings={...})` before `am.launch(...)` — each claud
 |---|---|---|
 | `window.tabs` | `titles()`, `items()` (title, selected, index), `selected()`, `find(title)`, `rename_box()` | `select(tab)`, `context_menu(tab)` → Menu, `rename(tab, new)`, `close(tab, answer)`, `deactivate(tab, scope)` (Deactivate ▸ …), `activate(tab)` (Activate Tab), `move_to_new_window(tab)` → MainWindow, `wait_tab / wait_gone / wait_selected`; a tab is a title or a `Tab` from `items()` |
 | `Menu` (`amdriver.ui.menus`) | `names()`, `items()` (name, enabled, is_sub, expanded), `has`, `enabled` | `choose(name)`, `submenu(name)` → Menu, `choose_path("Close", "Close other tabs")`, `close()`; `Menu.open_menus(app)`, `Menu.dismiss_all(app)` |
-| `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`, `queue_prompt(text)` (the compose row's Add to queue), `activate_all(scope)` (Activate All Tabs (N); `dormant_count()`); a Card: `click`, `double_click`, `right_click` |
+| `window.manager` | `showing()`, `home_name()`, `columns()` / `cards()` / `card(title)`, `tree_rows()` / `tree_row(label)`, `board_scope()`, `tree_scope()`, `right_pane_texts()` | `open()`, `click_home(count)`, `launch(folder)`, `type_folder`, `clear()`, `show_all()`, `toggle_board_scope()`, `show_tab("Prompt Queue")`, `queue_prompt(text)` (the compose row's Add to queue, confirmed by the engine's `[nav] queue` line — click the session's card first), `activate_all(scope)` (Activate All Tabs (N); `dormant_count()`); a Card: `click`, `double_click`, `right_click` |
 | `window.side_panel` | `cards()` / `card(title)` (title, state word), `titles()`, `count_line()`, `scope()`, `sum_on()`, `dock_side()`, `collapsed()`, `summary_title()` / `summary_texts()` | `button(name).click()` ('Sum', 'LOCAL', '⌖', '⇄', '«'), `toggle_scope()`, `set_sum(on)`, `open_launcher()` → LauncherCard (`box`, `folder_list`, `type_folder`, `launch`) |
 | `window.terminal` | `text()`, `lines()`, `input_box()` (Claude's box and its draft) | `focus()`, `type(text)`, `submit(prompt)`, `wait_input_box()`, `wait_text(regex)` |
 | `window.tags` / `window.specify` (`amdriver.ui.popups`) | the Tags panel: `texts()`, `count()` ('N of M tags'); the Specify card: `value()` | `wait_open()`; Tags: `add(name)`; Specify: `use(model)`, `press('Cancel')` |
 | `App` | `windows()`, `window` (the first window while it lives), `popups()`, `tooltips()`, `claude_processes()`, `profile`, `claude` | `launch(name, title=…)`, `new_window()`, `close(how='window'/'all')`, `kill()`, `start()`, `restart()` (F-RS) |
 | `Dialog` (`amdriver.ui.dialogs`) | `text()`, `buttons()` | `Dialog.wait(app, title=…)`, `press(name)`; `MessageBox` for Win32 boxes |
 | `Session` (`amdriver.session`) | `record()` (sessions.json), `title`, `state`, `claude_pids()`, `running()`, `tab()` | `select()`, `ask(prompt, wait="turn"/"sent"/"none")`, `wait_state(*states)`, `wait_running()`, `wait_parked(since=mark)` |
-| `StateTimeline` (`amdriver.timeline`) | a session's side-panel state word sampled every 150 ms in the background: `states()` (the sequence a user saw), `changes()` (with times), `current()`, `seen(state)`, `describe()`; `engine_events` / `engine_story(profile, id, hooks_mark, scanner_mark)` (the hook lines and scanner reconciliations behind it), `transcript_kinds(lines)` | `with StateTimeline(window, title) as tl:` … `tl.wait(state)`, `tl.wait_seen(state)`, `tl.hold(state, s)` (nothing else sampled meanwhile) |
+| `StateTimeline` (`amdriver.timeline`) | a session's side-panel state word sampled every 150 ms in the background: `states()` (the sequence a user saw), `changes()` (with times), `current()`, `seen(state)`, `describe()`; `engine_events` / `engine_story(profile, id, hooks_mark, scanner_mark)` (the hook lines and scanner reconciliations behind it), `transcript_kinds(lines)` | `with StateTimeline(window, title) as tl:` … `tl.wait(state)`, `tl.wait_seen(state)`, `tl.hold(state, s)` (nothing else sampled meanwhile), `tl.settled_at(state, within_s)` (the state shown AND kept: a settled state, not a pass through it), `tl.entered_after(state, t, within_s)`, `tl.elapsed()` (the timeline's clock, to note when the test acted) |
 
 **The oracles** — prefer one the app does not control (flows/README.md "Oracles"): the mock
 (`mock.prompts()`, `mock.requests(session=…)`: what reached the model, with `n_msgs`), the transcript
@@ -204,6 +204,17 @@ since=mark)`), then the UI.
 - **Claude Code 2.1.291 runs every Agent call in the background**, even with `run_in_background: false`: the `agent`
   shorthand ends the parent's turn at once, and the agent's completion comes back as a `<task-notification>` turn,
   which the mock answers past the script's end ("mock: script done").
+- **The Prompt Queue's envelope is silent without a selection.** On 0.8.0 a session launched from the page is not
+  selected there until a tab switch (MGR-K1), and Add to queue then does nothing: three probes of 2026-10-24 queued
+  nothing and looked like a runner that never sends. `queue_prompt` now confirms through `[nav] queue <sid8> "…"` and
+  fails loudly; click the session's board card first (`page.wait_card(title).click()`).
+- **A status may lag up to ~30 s** where Claude Code changes it without telling (Esc before any output, the end of a
+  manual `/compact`, a blocking Stop hook's continuation) — accepted behavior since 2026-10-24 (flows/05
+  *Reclassified: accepted delays*). Assert a bound (`ACCEPTED_LAG_S`, `tl.settled_at`), never the lag itself.
+- **A late hook can blip a state for one scan.** On the busy desktop (8–20 s per hook) a restarted claude's
+  SessionStart(resume) landed after the scanner had promoted the continuing turn to running, and the record read idle
+  for 52–115 ms; a `/clear`'s old SessionEnd showed done ~3 s before the tab followed the new conversation. Allow a
+  blip (`BLIP_S`, `_longest_stretch` in test_session_state.py) and fail a state that holds.
 
 - **A click is a hand's click.** The pointer rests ~150 ms on the target before the press, and the button is HELD
   ~60 ms. A press on arrival races the target's hover work, and a down and an up sent together are both queued
@@ -288,16 +299,22 @@ since=mark)`), then the UI.
 | TAB-K5 | TAB-10 E4 | With a shell tab in the window, a reopen whose focused tab was a Claude tab other than the last one starts the last Claude tab too (TAB-K2's mechanism) | `test_tab_menu.py::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab` |
 | ROB-K1 | ROB-11 | A reader holding `sessions.json` makes the save fail, with or without delete sharing (measured: the app's replace fails while any handle is open); nothing re-saves until the next change | `test_robustness.py::test_known_defect_a_reader_holding_sessions_json_loses_the_save` |
 | STA-K1 | STA-11 E3, STA-01 phase 5 | A claude that ends without its SessionEnd never reads Done; killed mid-turn (or within ~2 s after a turn) the session reads Running for good — its last `busy` heartbeat outlives the process, and the scanner's "work outlived the turn" rule trusts it | `test_session_state.py::test_known_defect_a_killed_claude_keeps_reading_running` |
-| STA-K2 | STA-12 E1 | Esc before any output: Claude Code puts the prompt back in the box and writes nothing; the session reads Running ~30 s more (the presence-idle release) | `test_session_state.py::test_known_defect_esc_before_any_output_reads_running_for_half_a_minute` |
-| STA-K3 | STA-06 phase 1 | A manual `/compact` reads Running ~30 s after it ended: PostCompact sets Waiting, and 2 ms later the still-`busy` heartbeat promotes Running again | `test_session_state.py::test_known_defect_compact_reads_running_half_a_minute_after_it_ended` |
-| STA-K4 | STA-13 phase 2 | A Stop hook that blocks: Claude Code continues the same turn, but the session reads Waiting for you (our Stop hook already ran) until the busy heartbeat outlives the turn by 20 s | `test_session_state.py::test_known_defect_a_blocking_stop_hook_reads_waiting_while_claude_continues` |
+| STA-K5 | STA-12 E1, PQR-07 | Esc before any output takes no interrupt hold (Claude Code writes no "[Request interrupted by user]" marker for it, and the hold is taken only on that marker): once the status has settled and held still, the runner sends the next queued prompt — 66 s after the Esc in the probe — the draft swap keeping the user's restored prompt around the send; every other Esc parks the runner until the user's next message (the owner decides whether it is a defect) | `test_session_state.py::test_known_defect_esc_before_any_output_takes_no_interrupt_hold` |
 
 TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
 filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a
 FEATURE: `test_tab_menu.py::test_a_shell_focused_reopen_starts_the_last_claude_tab` proves it (the last Claude tab
 starts, the first stays dormant). SP-K2 (SP-04: with Sum off, a side-panel card's hover opens no rich card, while the
 tab's hover does) was reclassified the same way on 2026-10-24: `test_side_panel.py::test_sum_off_card_hover_opens_no_rich_card`
-proves the feature.
+proves the feature. STA-K2, STA-K3 and STA-K4 (a status that lags ~20–30 s behind a change Claude Code made
+without telling: Esc before any output, the end of a manual `/compact`, a blocking Stop hook's continuation) were
+reclassified on 2026-10-24 as ACCEPTED DELAYS — the user: "no reason to worry for 30s-ish status update delay. We
+sometimes use that delay for safety of pilot autorunner to not spam a mistake sent during status change" — and
+bounded tests replace their known-defect tests (the state settles within `ACCEPTED_LAG_S`, 60 s):
+`test_session_state.py::test_esc_before_any_output_settles_waiting_within_the_accepted_lag`,
+`…::test_compact_settles_waiting_within_the_accepted_lag` and
+`…::test_a_blocking_stop_hooks_continuation_reads_running_within_the_accepted_lag`;
+`…::test_the_runner_sends_nothing_into_a_blocked_stops_continuation` proves the runner's side.
 
 **Checked both ways (2026-10-23).** Each `needs_fix` test fails on 0.8.0 on its defect (runs `nf-080`, `nf-080b`;
 TAB-K1's sweep on 6 of its 9 moments) and passes on the test build 0.8.1.1, a purged Release build whose `src/` equals
