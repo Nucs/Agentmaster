@@ -519,6 +519,104 @@ for the observer's repeats). The retirement is per session, so the same token st
 session. The older `[stale-end]` guard (a `SessionEnd` from a token that is no longer the record's) stays for
 supersedes nobody retired explicitly, such as an in-session re-home.
 
+### The pull reconcilers — every state the scanner synthesizes, and why each guard exists
+
+The scanner feeds the one state machine the events the hooks missed, as synthesized `HookMessage`s, and
+logs each in scanner.log under its tag. Claude's own heartbeat (`~/.claude/sessions/<pid>.json`,
+pid-validated: a fact, Rule #13) is an input beside the transcript tail. Most guards below are
+termination arguments: without them two synths would undo each other on every pass.
+
+| Tag (predicate, `SessionScanner.h`) | Fires when | Lands |
+|---|---|---|
+| `recon-run` (`ShouldSynthesizeRunning`) | a live append (a primed cursor, a fresh write) with a non-terminal tail while the session reads Idle, WaitingForInput or Error: a prompt hook missed or folded, or a retry after an API error | Running (an empty `UserPromptSubmit`, state-only) |
+| `recon-stop` (`ShouldSynthesizeStop`) | a terminal stop reason or a user-interrupt marker on a tail quiet ≥ 2 s, from Running or NeedsApproval | WaitingForInput (`quiescentStop`) |
+| `recon-stop-idle` (`ShouldSynthesizeStopFromPresenceIdle`) | the heartbeat reads `idle` while the tail is neither terminal nor interrupted and holds no pending interactive tool: a turn that ended with no Stop hook and no terminal line | WaitingForInput (`quiescentStop`) |
+| `recon-block` (`ShouldSynthesizeBlockedOnUser`) | an unanswered interactive tool_use (`AskUserQuestion`, `IsInteractiveTool`) on a quiet transcript, from Running | NeedsApproval |
+| `recon-block-presence` (`ShouldSynthesizeBlockedFromPresence`) | the heartbeat reads `waiting` (with its `waitingFor` detail), from Running or Idle | NeedsApproval |
+| `recon-resume` (`ShouldSynthesizeResumed`) | NeedsApproval, and the agent kept working (a live append, no pending interactive tool, no interrupt, a non-terminal tail), or the answer line arrived (`answeredPendingQuestion`) | Running (`PostToolUse`) |
+| `recon-resume-presence` (`ShouldSynthesizeResumedFromPresence`) | NeedsApproval, and the heartbeat moved from `waiting` to `busy` / `shell` on a tail that has not ended | Running |
+| `recon-subagent` (`ShouldSynthesizeRunningFromExternalWork`) | Idle or WaitingForInput while side files are written or the heartbeat reads `busy` / `shell` | Running (`PostToolUse`) |
+| `recon-error` (`ShouldSynthesizeError`) | the active leaf is an API-error line | Error |
+| `recon-error-release` (`ShouldReleaseErrorOnLeafMove`, `ShouldReleaseStaleError`) | a rewind moved the leaf off the error's branch, or the tail shows no error | WaitingForInput |
+| `recon-cutoff` (`ShouldSynthesizeCutOff`) | a turn that never finished and that no process can be running (*Cut-off turns*) | Error |
+| `decay-waiting` (`ShouldDecayWaitingToIdle`) | WaitingForInput past `waitingForYouTimeoutMinutes`, read by the user (no Mark Unread), with no working heartbeat | Idle |
+
+- **No pull path accepts `Done`.** An archived session is never reconciled.
+- **Tool results:** a pending NON-interactive tool (a long `Bash`) keeps Running; only an interactive one
+  blocks. `ParseTranscriptDelta`'s `ToolResult` marker is no run-repair turn event, so a bare tool result
+  never lights Running; it counts only as the answer to a pending question, in NeedsApproval.
+- **`recon-resume` and `recon-stop` are mutually exclusive** (the interrupt and terminal-tail guards). A
+  resume is synthesized as tool activity (`PostToolUse`), never as a `UserPromptSubmit`, which would count
+  a type-ahead prompt.
+- **`recon-stop-idle`'s floor depends on the state.** NeedsApproval waits `kScanPresenceIdleQuiescenceMs`
+  (5 s, longer than the 2 s stop quiescence, to outlast the ~2 s heartbeat refresh). A Running turn waits
+  `kScanPresenceIdleRunningQuiescenceMs` (30 s) and is never released while its tail holds a pending
+  (non-empty, non-terminal) stop reason: an API-retry pause mid-turn is no turn end, and a turn that just
+  started already reads `busy`. `PresenceIsAtRest` is `idle` only (`waiting`, `shell` and empty excluded).
+- **A question has three belts, because each one alone fails.** A session parked on an `AskUserQuestion`
+  must enter NeedsApproval and leave it the moment the user answers. (1) The heartbeat: claude rewrites its
+  presence file at every status change (its mtime equals `statusUpdatedAt`), with no transcript needed.
+  (2) The answer line (a `ToolResult` that clears a non-empty pending interactive tool). (3) `recon-block`
+  and the real `Notification` / `Stop` hooks. Hooks can drop, and a pending question's `tool_use` line can
+  stay unwritten for 10+ minutes, so `recon-block` alone could leave a question showing Running. The first
+  belt to fire wins; the others are no-ops through the one state machine.
+  - `recon-block-presence` never fires from WaitingForInput: `recon-stop` can fire from NeedsApproval on a
+    stale terminal tail and land Waiting, so a persistent `waiting` heartbeat would flap NeedsApproval ⇄
+    Waiting on every pass. Waiting is a "needs you" state already.
+  - `recon-resume-presence` needs the `waiting` → `busy` / `shell` EDGE (`ScanState::presenceWasWaiting`),
+    never "busy while NeedsApproval": the latch keeps it from undoing a NeedsApproval whose block never set
+    `waiting`. Whether a permission prompt sets `waiting` is unverified (`skipPermissions` auto-approves
+    them); the latch is right either way.
+  - Releasing on the answer makes "answered → a short reply → the turn ends" pass through Running, an edge
+    that would ring the flash ring again. `ShouldSuppressAnswerBlipFlash` (`kFlashMinRunSpanAfterAnswerMs`,
+    3 s) suppresses exactly that: a Running entered from NeedsApproval that ends in Idle or Waiting after an
+    observed span under 3 s. A longer run after the answer still rings.
+- **API errors.** Claude Code writes a synthetic assistant line (`model:"<synthetic>"`, top-level
+  `isApiErrorMessage:true`, an `apiErrorStatus`) for a rate or usage limit, "Prompt is too long", a 4xx /
+  5xx, a dropped or overloaded connection, an unknown model, an auth failure or a context overflow. The flag
+  is the signal, never the text ("API Error:" is not always there). The line's stop reason
+  (`stop_sequence`) looks terminal, so `recon-error` is checked before `recon-stop`. No hook carries an
+  error: the scanner is the only source of Error (`Notification{apiError=true}`). The message and status go
+  on the card (`SessionInfo::errorMessage` / `errorStatus`), and `stopOnError` pauses the session's runner.
+  - **The active leaf:** after an error Claude Code appends bookkeeping (a `system/turn_duration` child of the
+    error, an `away_summary`) and moves the `last-prompt` leaf marker onto it. The scanner keeps the error's
+    descendant frontier (`ScanState::errorBranchUuids`, fed by `ParseTranscriptDelta`'s `Kind::Node` lineage
+    events; `ApiErrorIsActiveLeaf`), so that forward move still reads as the error, and only a rewind to a leaf
+    off the frontier releases it.
+  - **A retry is race-proof:** its `UserPromptSubmit` can set Running while a pass in flight still parsed the
+    error tail. `recon-error` holds on `NewerPromptNotYetInTranscript` (bounded at
+    `kScanPromptLandingGraceMs`, 30 s: a retry that never reached the transcript re-asserts Error), and
+    `recon-run` accepts Error, so the pull side recovers too. A retry that fails again writes a new error line,
+    which moves the tail past the prompt's stamp.
+  - **`Done` never vetoes Error.** `Done` means only that `SessionEnd` fired, and Claude Code fires it when it
+    aborts a conversation fatally and stays up (an unknown `--model`: the error line, `SessionEnd`, then a live
+    input box asking for `/model`). An unrecovered error tail outranks the label; the move `Done` → Error rings
+    no toast and no flash ring, and restores the recovery edge, since `recon-run` accepts Error.
+  - **Never Error:** a tool failure (`tool_result.is_error`: Claude usually goes on), a process crash (Done), a
+    Codex session (its rollout records no error).
+- **External work keeps a session Running.** A subagent streams to a side file
+  (`<project>/<id>/subagents/agent-<agentId>.jsonl`, `isSidechain:true`, linked to the parent's `Agent`
+  tool_use by `<agentId>.meta.json`'s `toolUseId`) while the parent transcript stays quiet. Two signals mean
+  "still working": the newest write among `<id>/subagents/*.jsonl` and `<id>/tool-results/*`
+  (`ProcessInspect::SubagentActivityUnixMs`; files are enumerated, because Windows does not bump a folder's
+  mtime when a child file grows) and the heartbeat `busy` / `shell` (`PresenceIsWorking`; `PresenceIsBusy`
+  and `PresenceIsAtRest` stay the narrow turn predicates). Both feed the quiescence clock (a fresh side write
+  counts as a transcript write; a working heartbeat forces the quiet time to 0), so no quiescence synth demotes
+  a working session, and a working heartbeat blocks the Waiting → Idle decay.
+  - **Inside a turn** `recon-subagent` needs a non-terminal tail, and its side-file arm a write within
+    `kScanSubagentFreshMs` (15 s): a subagent's last write lands just before the parent's `end_turn`, and
+    `busy` lingers a tick after a real Stop, so a finished turn never bounces back to Running on that residue.
+  - **Work that outlives the turn** (a teammate writing `subagents/agent-a<name>-*.jsonl` for hours after the
+    lead's `end_turn`, a `run_in_background` agent, a shell job on the `shell` status) means Running. External
+    activity newer than the parent's last write by more than `kScanExternalWorkGraceMs` (20 s,
+    `static_assert`ed above the 15 s flush of a subagent dying after an Esc) promotes even on a terminal or
+    interrupted tail, and `recon-stop` holds on the same expression (`externalWorkOngoing`), so promotion and
+    demotion never alternate. A real Stop then reads Waiting for at most one scanner tick before the promotion
+    (the flash ring clears on the move back to Running). When the work quiets (side files 15 s stale, the
+    heartbeat off `busy` / `shell`), `recon-stop` settles the session.
+  - `TranscriptTimesIn` folds the newest side-file write into `convLastActivityUnixMs` (the "active … ago"
+    timing); `convApiActivityUnixMs`, which the ⚡ cache hint reads, does not.
+
 ### Cut-off turns — a turn that a shutdown cut off reads Error (2026-10-09, NOT BUILT yet)
 
 **The incident (release 0.6.8.18, session `c47e90a2`, 2026-10-09, local times).**
