@@ -224,7 +224,12 @@ function Reset-AmQa {
     .OUTPUTS
     One line per removed item.
     #>
-    Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "ended pid $($_.ProcessId)" }
+    # Only Agentmaster's own processes: a WindowsTerminal.exe counts when it is the old-name forwarder beside an
+    # Agentmaster.exe - never the real Windows Terminal, the image's default terminal, which may host the very console
+    # this runs in (the e2e install lane's runner: ending it ended the run).
+    Get-CimInstance Win32_Process -Filter "Name='Agentmaster.exe' OR Name='WindowsTerminal.exe'" |
+        Where-Object { $_.Name -eq 'Agentmaster.exe' -or ($_.ExecutablePath -and (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $_.ExecutablePath) 'Agentmaster.exe'))) } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "ended pid $($_.ProcessId)" }
     Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'am-update' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "ended updater pid $($_.ProcessId)" }
     Start-Sleep -Milliseconds 800
     # The MSIX packages, for every user (the agent runs elevated). Their profile data is removed below.

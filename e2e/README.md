@@ -78,6 +78,44 @@ counts, every failed test with the first line of its failure and its evidence fo
 (`--delete-after`, or the fleet's `delete_desktop`). The fleet token is read from the cluster into a variable and
 never printed; desktop tokens and noVNC links never go into logs, commits or the catalog.
 
+## The install lane (`suites/install/`)
+
+The install scenarios of [`flows/19`](../doc/agentmaster/flows/19-install-update-profiles.md) ("Every install
+scenario") install Agentmaster FOR REAL, so they run apart: a freshly reset desktop for EVERY scenario and one more reset
+after the last ([E2E_TESTING.md §8.5](../doc/agentmaster/E2E_TESTING.md)).
+
+```text
+python e2e/host/install_lane.py --desktop am-install-1 --create --delete-after -- -v    # every scenario
+python e2e/host/install_lane.py --desktop am-install-1 --only IS-01,IS-45 -- -v         # by catalog id or test name
+python e2e/host/install_lane.py --desktop am-install-1 --isolation clean -- -v          # one machine, cleaned per test
+python e2e/host/install_lane.py --plan                                                  # the plan only
+```
+
+- **Never by e2e_run.py.** Outside the lane the install tests are deselected (no `C:\e2e\install-lane.json`, which only
+  `provision.ps1 -Lane Install` writes and every Standard provisioning removes): a full run on a shared desktop shows
+  "11 deselected".
+- **Each scenario is ONE test**, listed in `suites/install/install_catalog.py` with its catalog ids, its flow and the
+  machine it needs; the host plans its resets from that file, and a test missing from it fails the collection. Write a
+  scenario as a life cycle (install → again → upgrade → uninstall) when its steps build on one another: each test costs
+  a reset and a provisioning (~2–3 min).
+- **Fixtures** (`suites/install/conftest.py`): `lane` (the lane's facts), `kit` (`kit.copy("0.8.1.0", "name")` — a
+  fresh portable copy stamped with that version; `kit.zip("0.8.2.0")` — a release-shaped zip), `machine` (the clean
+  machine, checked before the test; evidence after a failure; every Agentmaster ended after).
+- **The driver** (`amdriver/install.py`, `amdriver/ui/taskdialog.py`): `run_installer(lane, "-Scope", "User", "-ZipPath",
+  str(zip))` (Windows PowerShell 5.1, or `edition="7"`; no console input, so a question takes its default),
+  `MachineState.read()` (every install, entry, verb, PATH entry, icon, Active Setup, profile and process),
+  `start_like_explorer(exe)` (a double-click), `start_direct(exe, *args, env=…)`, `wait_question(copy_dir)` → a
+  `TaskDialog` (`labels()`, `text()`, `press(r"^Install just for you")`), `wait_app(folder, newer_than=t)`,
+  `end_agentmaster()`, `install_log_lines()`.
+- **The oracle is the machine** — files, registry, shortcuts, processes — and the scripts' own words, never the app's
+  view of itself. The test desktops run with UAC off: every start is elevated, so the question shows its "running with
+  administrator rights" note.
+- **Machine tags** (the catalog's `machine`): `std` and `adm2` make the host provision `-Accounts` (the standard user
+  `qastd`, the administrator `qaadmin`: `lane.account("std")`, then `install.run_as(account, exe, *args)`,
+  `start_as`, `run_installer_as`, and `account_state(account)` for what that account sees); `old` makes it provision
+  `-Old` (v0.7.10 as published: `kit.old_zip(manifest=True | False)`). A tag the lane cannot prepare yet (`uac`, `deny`,
+  `demote`, `net`, `pkg`, `sign-in`) makes the host skip the scenario and say so.
+
 ## Writing a scenario
 
 A test takes the `am` fixture — a running Agentmaster on a fresh profile and a fresh Claude Code config, its window

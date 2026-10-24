@@ -644,6 +644,108 @@ boot, provisioning) are reported apart from test failures.
 | realtime | nightly | pinned | production | the timing-sensitive subset (settle, spacing, lost-send, enter-retry) |
 | latest | nightly | latest | E2E timings | the whole suite |
 | renderer | weekly | pinned | E2E timings | the suite with `CLAUDE_CODE_NO_FLICKER=1` (Claude's ALT-buffer renderer: PENDING_INPUT.md §12) |
+| install | on demand, before a release that touches installing | — (no session) | production | flows/19's install scenarios, each on a freshly reset desktop (§8.5) |
+
+### 8.5 The install lane: a clean machine for every scenario (2026-10-24)
+
+**Why a lane of its own.** Every other suite isolates a test by its folders (a profile, a Claude config, work folders:
+§5.3), and the machine stays as provisioning left it. An install scenario changes the MACHINE: Program Files, HKCU and
+HKLM, the shortcuts, the PATH, Active Setup, the accounts, UAC. Two install scenarios on one machine would test each
+other's leftovers, and a desktop shared with the other suites would meet an installed Agentmaster where they expect none.
+So the scenarios of [`flows/19`](flows/19-install-update-profiles.md) ("Every install scenario", the catalog of every
+scenario the install work covered by hand) run in their own lane, with **a reset before every scenario and one more
+after the last** (the user's rule, 2026-10-24).
+
+**How it runs** (`e2e/host/install_lane.py`, built on `e2e_run.py`'s pieces):
+
+```text
+python e2e/host/install_lane.py --desktop am-install-1 --create --delete-after -- -v       # every scenario, reset each
+python e2e/host/install_lane.py --desktop am-install-1 --only IS-01,IS-40 -- -v            # some, by catalog id or test name
+python e2e/host/install_lane.py --desktop am-install-1 --isolation clean -- -v             # one machine, cleaned in the guest
+python e2e/host/install_lane.py --plan                                                     # the plan, nothing run
+```
+
+For each scenario of `e2e/suites/install/install_catalog.py` (pure data the host reads: the test, its catalog ids, its
+flow, the machine it needs): `reset_desktop` (a fresh overlay over the golden disk and a cold boot; the persist share,
+holding the staged suite, the download cache and earlier results, survives it) → `provision.ps1 -Lane Install` → that
+one test in the guest → its results into `Q:\agentmaster-e2e\runs\<run>\<nn>-<test>\`. Then one more `reset_desktop`
+and a Standard provisioning, so the desktop is what the other suites expect (`--no-reprovision`, `--no-final-reset`,
+`--delete-after` change that). The summary (`<run>\summary.txt`, `lane.json`) lists each scenario with its outcome and
+its reset, provisioning and test times. A desktop the run creates is itself a clean machine: its first scenario skips the
+reset.
+
+**The isolation modes** (`--isolation`, written into the lane file for the tests):
+
+| Mode | Between scenarios | For |
+|---|---|---|
+| `reset` (default) | the fleet's `reset_desktop` + the lane's provisioning | every real run |
+| `clean` | nothing on the host: one guest run of every scenario, each test first removes every Agentmaster install of every account (`tools\install-qa\amqa-guest.ps1` `Reset-AmQa`, the manual QA's clean-up) and then checks; the final reset still runs | iterating on the suite (minutes instead of a reset each) |
+| `none` | nothing at all; a scenario on a machine that is not clean fails at once | debugging one scenario on a desktop you watch |
+
+**Why a reset, not a snapshot.** A QEMU snapshot (`savevm` / `loadvm` through the monitor `tools\install-qa\qm.py`
+already talks to) would roll a desktop back in seconds, RAM and all. These VMs cannot take one, measured on 2026-10-24
+(`savevm am-install-probe` on the lane's own desktop, QEMU 11.1.0): **"Error: State blocked by non-migratable CPU device
+(invtsc flag)"** — dockur gives the guest an invariant TSC, which makes the VM non-migratable, and `savevm` writes a
+migration stream. Behind that block is a second one: the UEFI variables are a writable RAW pflash drive (`info block`:
+`pflash1 … /storage/windows.vars (raw)`), and QEMU refuses `savevm` while any writable drive cannot hold a snapshot (the
+overlay `data.qcow2` could). A snapshot would need the claude-desktops image changed (no `invtsc`, the variables in
+qcow2, or QMP's `snapshot-save` with a device list) — that repository, not this one. An offline `qemu-img snapshot` of
+the stopped overlay would still cost the cold boot a reset costs, and only save the provisioning.
+
+**The guards that keep the scenarios in their lane** (`e2e/suites/install/conftest.py`):
+
+1. *Deselected elsewhere.* `provision.ps1 -Lane Install` writes `C:\e2e\install-lane.json`; without it the install tests
+   are not even collected ("11 deselected" in a full run on a shared desktop). Every Standard provisioning removes the
+   file, so a desktop the lane prepared and nobody reset does not run them in the next ordinary run either.
+2. *Planned.* A test missing from the catalog fails the collection: the host plans its resets from the catalog.
+3. *Checked clean.* The `machine` fixture reads the machine first (`amdriver.install.MachineState`: the per-user and
+   all-users folders, both Apps & Features entries, the verbs, both PATHs, the icons of both desktops and Start menus,
+   Active Setup, the Default profile, running Agentmaster processes) and fails a scenario that does not start from
+   nothing, naming what was left. A failed scenario's evidence: the screen, every dialog of an Agentmaster process, the
+   state as JSON, the QA kit's `Get-AmQaState`, every script run with its output, the `[install]` lines and the
+   installer's own records.
+
+**What the lane's provisioning puts in place** (`-Lane Install`, §5.2's script): the venv, PowerShell 7 and the crash
+dumps as usual; no Claude Code, no Git and no mock environment (no scenario starts a session); the **kit** — the build
+under test extracted to `C:\e2e\kit\build` WITH its `.portable` marker (the Standard lane removes it from `C:\e2e\am`),
+from which each test makes fresh copies and release-shaped zips stamped with versions of its own (`Kit.copy`,
+`Kit.zip`: the app reads its version from `.am-version`, the installer from the zip's name); `api.github.com` in the
+hosts guard, so every installed copy's startup update check fails at once (flows/19 IS-88) instead of spending the 60
+GitHub API requests an hour this PC shares with its desktops. The host stages the scripts under test beside the suite:
+`tools\Install-Agentmaster.ps1` and `tools\install-qa\amqa-guest.ps1` (`Z:\e2e\src\kit\`).
+
+**The driver** (`e2e/amdriver/install.py`, `e2e/amdriver/ui/taskdialog.py`): the lane's facts, the kit, the installer
+run as a file in Windows PowerShell 5.1 or PowerShell 7 with no console input (a question takes its default and says so),
+the machine state, a start the way a double-click makes it (`explorer.exe <exe>`: Explorer's token and environment), the
+task dialogs Agentmaster shows before its first window (the install question, the profile picker, the uninstall
+confirmation: `#32770` windows titled "Agentmaster", their command links buttons named by their first line), the wait for
+an Agentmaster to run from a folder with its window up, and the end of every Agentmaster (the GUI first; the ConPTY
+hosts left to drain).
+
+**Other accounts (`std`, `adm2`, prepared).** `provision.ps1 -Lane Install -Accounts` (the host adds it when a
+scenario's Machine names `std` or `adm2`) makes the standard local user `qastd` and the administrator `qaadmin`, their
+generated passwords in `C:\e2e\qa-accounts.json` (administrators only; they never leave the guest). With UAC off,
+`qaadmin`'s start is elevated: "another administrator, elevated" (IS-52). `amdriver.install.run_as` / `start_as` / `run_installer_as` start a
+program as it in the signed-in user's session — "Run as different user": a PowerShell reads the password and calls
+`Start-Process -Credential -LoadUserProfile` with all three standard streams redirected to files, the arguments quoted
+by CommandLineToArgvW's rules — and `account_state` reads what that account sees (its HKCU entry, verbs, PATH, icons,
+Active Setup marker, profile) by running AS it.
+
+**An older release (`old`, prepared).** `provision.ps1 -Lane Install -Old` extracts v0.7.10 as published (no release
+manifest, no `--register-user`) to `C:\e2e\kit\old`; `Kit.old_zip(manifest=True)` stands for "an older app without
+`--register-user`" (the 2026-10-22 evening QA's method), `manifest=False` for the release an all-users install refuses.
+
+**Not automated yet** — the catalog's Machine tags the lane does not prepare (`install_catalog.PREPARED` holds `std`,
+`adm2` and `old`; the host skips a scenario that needs another, and says which):
+
+| Tag | What the lane would add |
+|---|---|
+| `uac` | EnableLUA on and a reboot by the host before the guest run (after it the elevated agent sees `\\host.lan\Data`, not `Z:` — run_suite.py would need that fallback); the consent and credential prompts answered through QEMU's monitor (`qm.py`) by a host-side broker that the guest asks through a request file in `Z:\e2e\out`, the folder the host already watches |
+| `deny`, `demote` | the policy values or the group change, then the same reboot |
+| `net` | the hosts line lifted for the test, and the API quota counted (60 an hour) — or a fake releases API: the updater's host is `api.github.com` over HTTPS (`Updater.h`), so it needs the hosts file plus a certificate the guest trusts, or an E2E override |
+| `pkg` | `mkmsix.ps1` on the host (a build's `.msix` re-signed with a throwaway certificate) and that certificate trusted by the provisioning |
+| `sign-in` | a scenario in two guest runs with a host reboot between them |
+| `human` | — (the taskbar's jump list, SmartScreen) |
 
 ---
 
@@ -755,7 +857,7 @@ where to check — are in [`flows/`](flows/README.md) (its *Infrastructure the f
 | CLI | CLI.md | none (runs in the guest against the test profile) |
 | Telegram | MESSAGING.md | a fake Bot API server + an API base override in E2E mode |
 | Codex | CLAUDE.md *Codex* | a fake OpenAI endpoint |
-| Updater, installers | Updater.h, PROFILES.md §2b/§2c | a fake GitHub releases API; `tools/install-qa` already drives the installers |
+| Updater, installers | Updater.h, PROFILES.md §2b/§2c | the install lane (§8.5, BUILT 2026-10-24: a reset desktop per scenario; flows/19's catalog of every install scenario); for the updater, a fake GitHub releases API; `tools/install-qa` drives the paths the lane does not yet (UAC prompts, packages) |
 
 ---
 
