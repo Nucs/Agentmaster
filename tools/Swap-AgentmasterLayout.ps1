@@ -20,7 +20,9 @@
     1. validate  - the layout's AppxManifest.xml names the SAME package (a dev layout can never
                    be registered over the release family or vice versa), every icon file it names
                    is present (a layout without Images\ runs fine but has a BLANK taskbar and Start
-                   icon), and it isn't the folder the package already runs from;
+                   icon), it isn't the folder the package already runs from, and the registered
+                   package is a loose registration (an INSTALLED one is refused unless
+                   -ReplaceInstalledPackage names its way back, see below);
     2. stamp     - write a version newer than the registered one into the layout's manifest
                    (development-mode re-registration refuses anything not newer; the build
                    itself always emits 0.0.1.0);
@@ -28,6 +30,8 @@
     4. drain     - wait for the old folder's OpenConsole.exe ConPTY hosts to exit on their own
                    (each is a process of the OLD package, so the register can't succeed before
                    they are gone);
+    4b. remove   - ONLY with -ReplaceInstalledPackage, when the package is an INSTALLED one (see
+                   below): Remove-AppxPackage the installed package, for this user only;
     5. register  - Add-AppxPackage -Register the new layout, which moves InstallLocation to it,
                    retried while Windows still reports the old package in use (0x80073D02);
     6. launch    - start the app by AUMID and wait for its new GUI process.
@@ -36,10 +40,29 @@
   with the number of tabs whose claude was running, because every host must end its tab's claude
   before it exits (about 1.5 minutes for 72 live hosts on a loaded machine, 2026-10-01).
 
-  Rollback: the old folder is left untouched. If step 5 still fails after its retries, the script
-  relaunches the still registered OLD version, so a failed swap costs a restart, never an outage.
-  To undo a successful swap later, run this script again with -LayoutDir pointing at the old
-  folder; it gets the next version number, just like any other swap.
+  An INSTALLED package is different: the signed MSIX of a GitHub release, which Get-AppxPackage
+  reports with IsDevelopmentMode False (SignatureKind Developer; a loose registration reads True /
+  None). Windows registers no loose layout over an installed package of the same family:
+  Add-AppxPackage -Register fails with 0x80073CFB, "The current user has already installed a
+  packaged version of this app. An unpackaged version cannot replace this." (measured 2026-10-24:
+  that swap stopped production, was refused at its register and relaunched the old version, and
+  every turn it had cut off was lost for nothing). So step 1 refuses an installed package, before
+  anything is stopped, unless -ReplaceInstalledPackage is given. With it, step 4b removes the
+  installed package between the drain and the register, and -RollbackBundle names the bundle that
+  brings it back.
+
+  Rollback: the old folder is left untouched. When anything fails after the stop - a register
+  that still fails after its retries, the removal, even the drain's process census (a WMI "Call
+  cancelled" there on 2026-10-21 ended the script with production stopped and nothing relaunched) -
+  the script brings the old version back up before it rethrows: it relaunches the still registered
+  OLD version, or, when step 4b already removed the installed package, reinstalls -RollbackBundle
+  and starts that. A failed swap costs a restart, never an outage (unless that reinstall fails too:
+  the script then prints the commands to run by hand). To undo a successful swap later, run this
+  script again with -LayoutDir pointing at the old folder; it gets the next version number, just
+  like any other swap. An installed package's folder cannot be registered again (Windows removes
+  it with the package), so after a -ReplaceInstalledPackage swap the undo is another loose layout,
+  or a reinstall of the bundle once the loose registration is removed (Install-Agentmaster.ps1
+  does that).
 
   The caller must hold the build-launch mutex (tools\am-lock.sh) around build + swap. This script
   doesn't take it, so a caller can hold one lock across both halves.
@@ -85,14 +108,37 @@
 
 .PARAMETER NoLaunch
   Register the new layout but don't start the app. The downtime then lasts until someone starts
-  it.
+  it. A rollback then starts nothing either (a reinstall of -RollbackBundle still runs).
+
+.PARAMETER ReplaceInstalledPackage
+  Allow the swap when the registered package is an INSTALLED one (IsDevelopmentMode False: the
+  signed MSIX of a GitHub release), by removing it in step 4b, after the drain and before the
+  register. Without this switch such a package is refused in step 1, before anything is stopped,
+  because Windows would refuse the register (0x80073CFB) only after the stop had cut off every
+  running turn. Removing the package for this user needs no administrator rights and loses no
+  state: Agentmaster keeps everything in its profile folder, and the package's own LocalState and
+  RoamingState are empty (checked 2026-10-24). It does drop what Windows ties to the installed
+  package: pins of the app to Start or the taskbar may have to be made again. Ignored, with a
+  note, when the package is a development registration (the register updates that in place).
+
+.PARAMETER RollbackBundle
+  Required with -ReplaceInstalledPackage when the package is installed: the .msixbundle (or .msix)
+  of the INSTALLED version, for example the release's Agentmaster_<version>.msixbundle that
+  Install-Agentmaster.ps1 leaves in %TEMP%\Agentmaster-install. Once step 4b has removed the
+  installed package, it is the only way back to that version, so step 1 checks it before anything
+  is stopped: the file exists, its signature is valid and its signer trusted on this machine
+  (Get-AuthenticodeSignature reads Valid; Add-AppxPackage refuses anything else), and its manifest
+  names the same package at the installed version. Any failure after the removal reinstalls it
+  (Add-AppxPackage -Path) and starts it.
 
 .OUTPUTS
   PSCustomObject with Package, OldVersion, OldLocation, NewVersion, NewLocation, StoppedPids,
   DrainSeconds, HostsLeft (old OpenConsole hosts still alive when the drain ended),
   RegisterSeconds (including any in-use retries), RegisterAttempts, NewPid (0 when not launched
-  or not seen within LaunchTimeoutSec) and DowntimeSeconds (from the GUI stop until the new GUI
-  process started; null when unknown).
+  or not seen within LaunchTimeoutSec), DowntimeSeconds (from the GUI stop until the new GUI
+  process started; null when unknown), RemovedPackage (the installed package step 4b removed, ''
+  when none) and RemoveSeconds. A failed swap throws instead of returning this object; its
+  rollback is in the printed lines ("rollback: ...", or "ROLLBACK FAILED" with the commands).
 
 .EXAMPLE
   # The whole hot deploy of the release package (hold the mutex around both lines):
@@ -112,6 +158,12 @@
   .\tools\Build-Agentmaster.ps1 -NoRestore -LayoutDir Q:\agentmaster-layouts\Debug-B
   .\tools\Swap-AgentmasterLayout.ps1 -LayoutDir Q:\agentmaster-layouts\Debug-B -PackageName AgentmasterDev
 
+.EXAMPLE
+  # Production runs the INSTALLED MSIX of a GitHub release (IsDevelopmentMode False): move it to a
+  # loose layout, with the bundle of the installed version as the way back.
+  .\tools\Swap-AgentmasterLayout.ps1 -LayoutDir Q:\agentmaster-layouts\Release -ReplaceInstalledPackage `
+      -RollbackBundle "$env:TEMP\Agentmaster-install\Agentmaster_0.8.0.0.msixbundle"
+
 .NOTES
   Throws (exit code 1 when run as a script) when:
     - the layout folder or its AppxManifest.xml is missing, or the manifest can't be parsed;
@@ -125,9 +177,14 @@
     - the calling process runs INSIDE the instance being stopped (see the self-hosting guard
       below). Run the swap from a shell outside it: the other identity's app, Windows Terminal,
       or a plain console;
+    - the registered package is an INSTALLED one (IsDevelopmentMode False) and
+      -ReplaceInstalledPackage is not given; or it is given and -RollbackBundle is missing, has no
+      valid trusted signature, or names another package or version than the installed one;
     - Add-AppxPackage -Register fails with anything other than "package in use", or still reports
-      the package in use when -RegisterRetrySec runs out. The old version is relaunched first,
-      then the error is rethrown.
+      the package in use when -RegisterRetrySec runs out. The old version is brought back first
+      (see Rollback), then the error is rethrown;
+    - anything else fails between the stop and the end of the register (the drain, step 4b's
+      removal): the same rollback runs first, then the error is rethrown.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -137,7 +194,9 @@ param(
     [ValidateRange(0, 600)][int]$DrainTimeoutSec = 120,
     [ValidateRange(0, 600)][int]$RegisterRetrySec = 120,
     [ValidateRange(1, 600)][int]$LaunchTimeoutSec = 60,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [switch]$ReplaceInstalledPackage,
+    [string]$RollbackBundle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -189,6 +248,113 @@ function Get-ProcessUnder([string]$Folder, [string[]]$Names) {
 function Test-PackageInUseError([System.Management.Automation.ErrorRecord]$ErrorRecord) {
     return ($ErrorRecord.Exception.HResult -eq 0x80073D02) -or
         ($ErrorRecord.Exception.Message -match '0x80073D02')
+}
+
+<#
+.SYNOPSIS
+  Get-ProcessUnder for the process censuses that run while the old version is STOPPED: a failed
+  query comes back as $null ("unknown") instead of a throw.
+.DESCRIPTION
+  On 2026-10-21 23:28 the drain's Get-CimInstance Win32_Process threw a WMI "Call cancelled" 17 s
+  after the GUI stop. Under $ErrorActionPreference = 'Stop' that ended the script before its
+  register, so nothing relaunched production and it stayed down for 12 minutes. A census only
+  measures progress (the drain waits on it; the register retry and the launch wait report it), so a
+  failed reading is simply taken again by the caller's loop. Each failure prints one line, which
+  also tells the reader that the census, not the swap, had trouble.
+.PARAMETER Folder
+  Passed on to Get-ProcessUnder.
+.PARAMETER Names
+  Passed on to Get-ProcessUnder.
+.PARAMETER What
+  Which census this is, for the printed line ('drain', 'register retry', ...).
+.OUTPUTS
+  The matching Win32_Process instances as ONE array object (empty when none match; the leading
+  comma keeps PowerShell from unrolling an empty array into $null), or $null when the query failed.
+#>
+function Get-ProcessUnderOrNull([string]$Folder, [string[]]$Names, [string]$What) {
+    try {
+        return , @(Get-ProcessUnder $Folder $Names)
+    }
+    catch {
+        Write-Step "$($What): the process census failed ($($_.Exception.Message)) - taking it again"
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+  Reads the package identity a .msixbundle or .msix file installs, without installing it.
+.DESCRIPTION
+  Both are zip files: a bundle carries AppxMetadata/AppxBundleManifest.xml (root <Bundle>), a single
+  package AppxManifest.xml (root <Package>), and both name the package in <Identity>. PowerShell's
+  XML adapter resolves elements by local name, so the manifests' default namespaces need no
+  namespace manager.
+.PARAMETER Path
+  The absolute path of the .msixbundle / .msix.
+.OUTPUTS
+  [pscustomobject] with Name and Version (strings, as the manifest writes them).
+.NOTES
+  Throws when the file is not a readable zip, or holds neither manifest.
+#>
+function Read-PackageFileIdentity([string]$Path) {
+    $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $zip.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+        if (-not $entry) { $entry = $zip.GetEntry('AppxManifest.xml') }
+        if (-not $entry) { throw "'$Path' holds neither AppxMetadata/AppxBundleManifest.xml nor AppxManifest.xml - not an .msixbundle or .msix." }
+        $reader = [IO.StreamReader]::new($entry.Open())
+        try { [xml]$xml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $zip.Dispose() }
+    $id = if ($xml.Bundle) { $xml.Bundle.Identity } else { $xml.Package.Identity }
+    return [pscustomobject]@{ Name = "$($id.Name)"; Version = "$($id.Version)" }
+}
+
+<#
+.SYNOPSIS
+  Brings the OLD version back up after a failure between the GUI stop and the end of the register,
+  at most once per run.
+.DESCRIPTION
+  Two cases. While the old registration is still in place (every swap of a loose registration, and
+  an installed package whose removal was never attempted or failed before taking effect), it relaunches
+  that registration by AUMID: the behavior this script always had for a failed register. Once step 4b
+  ATTEMPTED the removal of an installed package, the package may be gone, and then nothing can be
+  relaunched, so it first reinstalls -RollbackBundle (Add-AppxPackage -Path) and starts that. A
+  presence check that itself fails counts as "gone": reinstalling a version that is still installed
+  changes nothing, while relaunching one that is gone would leave the app down.
+  -NoLaunch suppresses the launch, never the reinstall. A failed reinstall or relaunch prints the
+  command to run by hand instead of throwing, so the caller still sees the ORIGINAL error.
+  Reads the script's state: $pkg, $oldDir, $oldVersion, $aumid, $bundlePath, $NoLaunch,
+  $script:removeAttempted; sets $script:rolledBack.
+#>
+function Invoke-SwapRollback {
+    if ($script:rolledBack) { return }
+    $script:rolledBack = $true
+    $restored = $false
+    if ($script:removeAttempted) {
+        $present = $false
+        try { $present = [bool](Get-AppxPackage -Name $PackageName | Where-Object { $_.PackageFullName -eq $pkg.PackageFullName }) }
+        catch { Write-Step "rollback: cannot tell whether $($pkg.PackageFullName) is still installed ($($_.Exception.Message)) - treating it as gone" }
+        if (-not $present) {
+            Write-Step "rollback: $($pkg.PackageFullName) is no longer installed - reinstalling it from $bundlePath"
+            try {
+                Add-AppxPackage -Path $bundlePath
+                Write-Step "rollback: reinstalled $oldVersion"
+                $restored = $true
+            }
+            catch {
+                Write-Step "ROLLBACK FAILED: the reinstall failed ($($_.Exception.Message)). $PackageName is NOT INSTALLED now. By hand: Add-AppxPackage -Path '$bundlePath', then Start-Process '$aumid'"
+                return
+            }
+        }
+    }
+    if (-not $oldDir -or $NoLaunch) {
+        if ($NoLaunch) { Write-Step 'rollback: not relaunched (-NoLaunch)' }
+        return
+    }
+    Write-Step ("rollback: relaunching the {0} {1}" -f $(if ($restored) { 'reinstalled' } else { 'still-registered' }), $oldVersion)
+    try { Start-Process $aumid }
+    catch { Write-Step "ROLLBACK: the relaunch failed ($($_.Exception.Message)) - start it by hand: Start-Process '$aumid'" }
 }
 
 # --- 1. validate -------------------------------------------------------------------------------
@@ -268,6 +434,43 @@ elseif ($Version -le $oldVersion) {
     throw "-Version $Version must be newer than the registered $oldVersion."
 }
 
+# An INSTALLED package (a GitHub release's signed MSIX, IsDevelopmentMode False) can't be replaced by
+# a loose layout. Windows refuses the register with 0x80073CFB, and it does so only after the stop
+# has cut off every running turn (2026-10-24 10:43). So it is refused HERE, before anything stops,
+# unless the caller asked for step 4b's removal and named the bundle that can bring the installed
+# version back. Under PowerShell 7 IsDevelopmentMode is a real Boolean (checked 2026-10-24); the
+# explicit -eq $false keeps a missing property from ever reading as "installed".
+$installedPackage = [bool]($pkg -and ($pkg.IsDevelopmentMode -eq $false))
+$bundlePath = ''
+$bundleSigner = ''
+if ($installedPackage) {
+    if (-not $ReplaceInstalledPackage) {
+        throw "'$PackageName' is an INSTALLED package ($($pkg.PackageFullName), SignatureKind $($pkg.SignatureKind), IsDevelopmentMode False) - the signed MSIX of a release, not a loose registration. Windows registers no loose layout over it (0x80073CFB, 'An unpackaged version cannot replace this'), so this swap would stop the app and fail. Nothing was stopped. To move it to a loose layout, rerun with -ReplaceInstalledPackage -RollbackBundle <the .msixbundle of $($pkg.Version)>, which removes the installed package between the drain and the register."
+    }
+    if (-not $RollbackBundle) {
+        throw "-ReplaceInstalledPackage needs -RollbackBundle: the .msixbundle of the installed $($pkg.Version) (Install-Agentmaster.ps1 leaves it in $env:TEMP\Agentmaster-install). Once the package is removed, only that bundle can bring this version back. Nothing was stopped."
+    }
+    $bundlePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RollbackBundle)
+    if (-not (Test-Path -LiteralPath $bundlePath -PathType Leaf)) {
+        throw "-RollbackBundle '$bundlePath' does not exist. Nothing was stopped."
+    }
+    # Valid = the signature checks out AND its signer is trusted on this machine, which is what
+    # Add-AppxPackage requires of a signed package; a bundle that reads anything else could not be
+    # reinstalled when it is needed.
+    $signature = Get-AuthenticodeSignature -LiteralPath $bundlePath
+    if ($signature.Status -ne 'Valid') {
+        throw "-RollbackBundle '$bundlePath' has no valid trusted signature ($($signature.Status): $($signature.StatusMessage)), so Add-AppxPackage could not reinstall it. Nothing was stopped."
+    }
+    $bundleSigner = "$($signature.SignerCertificate.Subject)"
+    $bundleIdentity = Read-PackageFileIdentity $bundlePath
+    if ($bundleIdentity.Name -ne $PackageName -or [version]$bundleIdentity.Version -ne $oldVersion) {
+        throw "-RollbackBundle '$bundlePath' holds $($bundleIdentity.Name) $($bundleIdentity.Version), not the installed $PackageName $oldVersion, so it could not put back what the removal takes away. Nothing was stopped."
+    }
+}
+elseif ($ReplaceInstalledPackage) {
+    Write-Step "note: -ReplaceInstalledPackage ignored - '$PackageName' is a development registration, which the register updates in place"
+}
+
 # The GUI images to stop come from the OLD layout's own manifest. That keeps the stop exact across
 # the WindowsTerminal.exe -> Agentmaster.exe rename; the fallback covers an unreadable manifest.
 $guiNames = @('Agentmaster.exe', 'WindowsTerminal.exe')
@@ -308,6 +511,9 @@ $aumid = "shell:appsFolder\$pfn!$appId"
 
 Write-Step "package  $PackageName  $oldVersion @ $(if ($oldDir) { $oldDir } else { '(not registered)' })"
 Write-Step "target   $Version @ $newDir"
+if ($installedPackage) {
+    Write-Step "remove   $($pkg.PackageFullName) (an INSTALLED package) after the drain; the way back is $bundlePath ($oldVersion, signed by $bundleSigner)"
+}
 Write-Step "running  $($guis.Count) GUI process(es) from the old folder: $(($guis | ForEach-Object { "$($_.Name)#$($_.ProcessId)" }) -join ', ')"
 
 # --- 2. stamp ----------------------------------------------------------------------------------
@@ -321,8 +527,12 @@ $result = [pscustomobject]@{
     Package = $PackageName; OldVersion = $oldVersion; OldLocation = $oldDir
     NewVersion = $Version; NewLocation = $newDir; StoppedPids = @($guiIds)
     DrainSeconds = 0.0; HostsLeft = 0; RegisterSeconds = 0.0; RegisterAttempts = 0; NewPid = 0
-    DowntimeSeconds = $null
+    DowntimeSeconds = $null; RemovedPackage = ''; RemoveSeconds = 0.0
 }
+# Invoke-SwapRollback's state: whether step 4b got as far as calling Remove-AppxPackage (from then on
+# the installed package may be gone), and whether a rollback already ran (it runs at most once).
+$script:removeAttempted = $false
+$script:rolledBack = $false
 if (-not $PSCmdlet.ShouldProcess("$PackageName GUI pid(s) $($guiIds -join ',')", 'stop, then re-register and relaunch')) {
     return $result
 }
@@ -332,14 +542,24 @@ foreach ($g in $guis) {
 }
 Write-Step "stopped  GUI pid(s) $($guiIds -join ', ')"
 
+# Everything from here to the end of the register runs with the old version STOPPED, so any failure
+# in it must bring the old version back up before it surfaces (Invoke-SwapRollback, in the catch at
+# the end of step 5). On 2026-10-21 a throw in the drain's census skipped the register's own
+# rollback, and production stayed down for 12 minutes with nobody told.
+try {
+
 # --- 4. drain ----------------------------------------------------------------------------------
 # The hosts exit by themselves once their GUI's pipes close (each ends its own clients with
-# CTRL_CLOSE). We only WAIT here and never kill them; see -DrainTimeoutSec for the reason.
+# CTRL_CLOSE). We only WAIT here and never kill them; see -DrainTimeoutSec for the reason. A census
+# that fails (Get-ProcessUnderOrNull returns $null) leaves the last good count in place and is
+# taken again a second later: it can only make the wait longer, never end it early.
 $drain = [Diagnostics.Stopwatch]::StartNew()
 $hosts = @()
 if ($oldDir) {
     do {
-        $hosts = @(Get-ProcessUnder $oldDir @('OpenConsole.exe'))
+        $census = Get-ProcessUnderOrNull $oldDir @('OpenConsole.exe') 'drain'
+        if ($null -eq $census) { Start-Sleep -Seconds 1; continue }
+        $hosts = $census
         if (-not $hosts) { break }
         Start-Sleep -Milliseconds 250
     } while ($drain.Elapsed.TotalSeconds -lt $DrainTimeoutSec)
@@ -347,6 +567,62 @@ if ($oldDir) {
 $result.DrainSeconds = [math]::Round($drain.Elapsed.TotalSeconds, 1)
 $result.HostsLeft = $hosts.Count
 Write-Step ("drained  old ConPTY hosts in {0:n1}s ({1} still alive)" -f $drain.Elapsed.TotalSeconds, $hosts.Count)
+
+# --- 4b. remove (an INSTALLED package, -ReplaceInstalledPackage) --------------------------------
+# Step 1 let an installed package through only with -ReplaceInstalledPackage and a checked
+# -RollbackBundle, so reaching this with $installedPackage means the caller asked for the removal.
+if ($installedPackage) {
+    # The removal ends whatever still runs of the old package, its ConPTY hosts included, and a host
+    # ended that way skips its CTRL_CLOSE broadcast: its tab's pwsh + claude.exe would live on, on a
+    # dead console (doc/agentmaster/OBSERVER.md section 13a). So hosts that outlived the drain get up
+    # to -RegisterRetrySec more to exit by themselves first.
+    if ($hosts.Count -gt 0) {
+        $extra = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            Start-Sleep -Milliseconds 500
+            $census = Get-ProcessUnderOrNull $oldDir @('OpenConsole.exe') 'drain before the removal'
+            if ($null -ne $census) { $hosts = $census }
+        } while ($hosts.Count -gt 0 -and $extra.Elapsed.TotalSeconds -lt $RegisterRetrySec)
+        $result.HostsLeft = $hosts.Count
+        Write-Step ("drained  {0:n1}s more before the removal ({1} host(s) still alive)" -f $extra.Elapsed.TotalSeconds, $hosts.Count)
+    }
+    # From the first Remove-AppxPackage call on, the installed package may be gone, and the rollback
+    # must then reinstall the bundle instead of relaunching (Invoke-SwapRollback reads this flag).
+    $script:removeAttempted = $true
+    $remove = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            Remove-AppxPackage -Package $pkg.PackageFullName
+            break
+        }
+        catch {
+            $removeError = $_
+            # "In use" clears by itself as the old package's last processes exit, like the
+            # register's refusal below; anything else is final.
+            if ((Test-PackageInUseError $removeError) -and $remove.Elapsed.TotalSeconds -lt $RegisterRetrySec) {
+                Write-Step 'remove: the old package is still in use - retrying'
+                Start-Sleep -Seconds 3
+                continue
+            }
+            Write-Step "REMOVE FAILED: $($removeError.Exception.Message)"
+            throw
+        }
+    }
+    # A bundle install also registers the bundle itself beside its main package (here
+    # Agentmaster_0.8.0.0_neutral_~_56k4f06dsfp9r beside ..._x64__...). Removing the main package
+    # normally takes the bundle with it (the usual way to uninstall a bundle-installed app), but an
+    # entry left behind would make the register fail with 0x80073CFB all the same, so whatever is
+    # still registered under the name is removed too.
+    $leftovers = @(Get-AppxPackage -Name $PackageName -PackageTypeFilter Main, Bundle)
+    foreach ($leftover in $leftovers) {
+        Write-Step "remove: $($leftover.PackageFullName) is still registered - removing it too"
+        Remove-AppxPackage -Package $leftover.PackageFullName
+    }
+    $remove.Stop()
+    $result.RemovedPackage = $pkg.PackageFullName
+    $result.RemoveSeconds = [math]::Round($remove.Elapsed.TotalSeconds, 1)
+    Write-Step ("removed  {0} in {1:n1}s" -f $pkg.PackageFullName, $remove.Elapsed.TotalSeconds)
+}
 
 # --- 5. register -------------------------------------------------------------------------------
 # Retried while Windows reports the OLD package still in use (0x80073D02). The drain above can end
@@ -368,23 +644,31 @@ while ($true) {
         $registerError = $_
         if ((Test-PackageInUseError $registerError) -and $reg.Elapsed.TotalSeconds -lt $RegisterRetrySec) {
             # The census only reports progress. The deployment's own answer decides, because a
-            # process of the old package can also live outside the old folder.
-            $left = @(if ($oldDir) { Get-ProcessUnder $oldDir @() })
-            Write-Step ("register attempt {0}: the old package is still in use ({1} process(es) left under the old folder) - retrying" -f $result.RegisterAttempts, $left.Count)
+            # process of the old package can also live outside the old folder. A failed census
+            # ($null) reads "unknown" here and does not stop the retry.
+            $left = if ($oldDir) { Get-ProcessUnderOrNull $oldDir @() 'register retry' } else { @() }
+            Write-Step ("register attempt {0}: the old package is still in use ({1} process(es) left under the old folder) - retrying" -f $result.RegisterAttempts, $(if ($null -eq $left) { 'unknown' } else { $left.Count }))
             Start-Sleep -Seconds 3
             continue
         }
-        # The failed update left the OLD registration in place, so bring the old version back up
-        # before surfacing the error. A failed swap then costs one restart, not an outage.
+        # A failed update leaves the OLD registration in place (and after step 4b the bundle can
+        # bring the removed one back), so bring the old version back up before surfacing the error.
+        # A failed swap then costs one restart, not an outage.
         Write-Step "REGISTER FAILED: $($registerError.Exception.Message)"
-        if ($oldDir -and -not $NoLaunch) {
-            Write-Step "rollback: relaunching the still-registered $oldVersion"
-            Start-Process $aumid
-        }
+        Invoke-SwapRollback
         throw
     }
 }
 $reg.Stop()
+
+}
+catch {
+    # Any failure from the drain to the end of the register: the old version comes back first (a
+    # no-op when the register's own failure path above already ran the rollback), then the ORIGINAL
+    # error surfaces.
+    Invoke-SwapRollback
+    throw
+}
 $result.RegisterSeconds = [math]::Round($reg.Elapsed.TotalSeconds, 1)
 $now = Get-AppxPackage -Name $PackageName | Select-Object -First 1
 Write-Step ("registered {0} @ {1} in {2:n1}s" -f $now.Version, $now.InstallLocation, $reg.Elapsed.TotalSeconds)
@@ -399,7 +683,10 @@ $wait = [Diagnostics.Stopwatch]::StartNew()
 $newGui = $null
 while (-not $newGui -and $wait.Elapsed.TotalSeconds -lt $LaunchTimeoutSec) {
     Start-Sleep -Milliseconds 200
-    $newGui = Get-ProcessUnder $newDir @($apps | ForEach-Object { Split-Path $_.Executable -Leaf }) | Select-Object -First 1
+    # The new version is registered and launched by now, so a failed census must not throw (the
+    # caller would read a failed swap); it is taken again on the next pass.
+    $found = Get-ProcessUnderOrNull $newDir @($apps | ForEach-Object { Split-Path $_.Executable -Leaf }) 'launch'
+    if ($found) { $newGui = $found | Select-Object -First 1 }
 }
 if ($newGui) {
     $result.NewPid = $newGui.ProcessId
