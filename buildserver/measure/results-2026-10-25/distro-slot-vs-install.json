@@ -1,0 +1,21 @@
+﻿{
+    "exitCode":  0,
+    "bootstrapSeconds":  15.2,
+    "installSeconds":  1675.6,
+    "usedOnC_GB":  14.59,
+    "usedOnD_GB":  3.93,
+    "sizesGB":  {
+                    "BuildTools":  3.89,
+                    "WindowsKits":  3.35,
+                    "VSShared":  0.2,
+                    "PackageCache":  0.93,
+                    "DotNet":  1.01
+                },
+    "cl":  "D:\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+    "msbuild":  "D:\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe",
+    "sdkIncludes":  [
+                        "10.0.22621.0",
+                        "10.0.26100.0"
+                    ],
+    "dotnetSdks":  "9.0.319 [C:\\Program Files\\dotnet\\sdk]"
+}

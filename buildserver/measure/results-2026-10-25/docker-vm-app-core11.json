@@ -1,0 +1,49 @@
+{
+  "unzipSeconds": 10.4,
+  "exe": "C:\\am\\agentmaster-0.8.0.0\\Agentmaster.exe",
+  "running": true,
+  "exitCode": null,
+  "windowTitle": "Administrator: Windows PowerShell",
+  "workingSetMB": 103,
+  "privateMB": 34,
+  "threads": 33,
+  "consoleChildren": [
+    "powershell.exe pid 8608 parent 1480",
+    "OpenConsole.exe pid 8656 parent 1004",
+    "powershell.exe pid 8264 parent 8608",
+    "OpenConsole.exe pid 1856 parent 7964",
+    "powershell.exe pid 6028 parent 7964"
+  ],
+  "availableBeforeMB": 6561,
+  "availableAfterMB": 6413,
+  "profileFiles": [
+    "agentmaster-hook.ps1",
+    "bridge.json",
+    "hooks-settings.json",
+    "hooks.log",
+    "open-windows.json",
+    "scanner.log",
+    "settings.json",
+    "elevated-state.json",
+    "settings.json",
+    "state.json",
+    "{c5bbb2b6-eaa6-400f-8c7a-145789a3c017}.json"
+  ],
+  "hooksLogTail": [
+    "[04:52:59.697] [sidepanel] built (window {c5bbb2b) width=0.220000 split=0.500000 expanded summary=shown scope=local scroll-to-tab=on dock=left",
+    "[04:52:59.697] [startup] side-panel [win {c5bbb2b]: 0ms (+929ms)",
+    "[04:52:59.697] [restore] 0 session(s) loaded as archived",
+    "[04:52:59.697] [startup] restore-sessions [win {c5bbb2b]: 0ms (+929ms)",
+    "[04:52:59.697] [startup] restore-window-tabs [win {c5bbb2b]: 0ms (+929ms)",
+    "[04:52:59.720] [tab-new] idx=0 tabs=1 \"Windows PowerShell\"",
+    "[04:52:59.720] [startup] complete-init [win {c5bbb2b]: 0ms (+952ms)",
+    "[04:52:59.720] [startup] first-layout TOTAL [win {c5bbb2b]: 110ms (+952ms)",
+    "[04:52:59.720] [startup] splash-watch begin (waiting for window to settle) [win {c5bbb2b] (+952ms)",
+    "[04:52:59.879] [ui-stall] watchdog armed (20s threshold, 5s cadence)",
+    "[04:52:59.884] [activity] wt=9f4eed92 - -> pwsh image=powershell.exe busy=0",
+    "[04:53:00.124] [startup] splash: foreground terminal connected [win {c5bbb2b]: 406ms (+1356ms)",
+    "[04:53:00.189] [overlay] observe badge kind=pwsh wt=9f4eed92-28db-4131-977e-2a88d2415a24",
+    "[04:53:00.549] [window-save] {c5bbb2b6-eaa6-400f-8c7a-145789a3c017} tabs=1 [sh,]",
+    "[04:53:01.480] [startup] splash dismissed (foreground terminal up + UI idle, smoothTicks=6) [win {c5bbb2b]: 1765ms (+2713ms)"
+  ]
+}

@@ -1,6 +1,7 @@
-# Agentmaster build server — design and plan (third revision)
+# Agentmaster build server — design and plan (fourth revision)
 
-> **Status: DESIGN ONLY. Nothing here is built.**
+> **Status: DESIGN ONLY. Nothing here is built.** The measurements of 2026-10-25 ran in throwaway test machines and
+> folders, which were removed afterwards (§16.8); their scripts are in [`measure/`](measure/README.md).
 >
 > **The request, 2026-10-24:** "Building and installing and using VM to run e2e is very complicated, and very very
 > resource heavy. We need a centralized server under buildserver/ that will use fastrun (K:/source/fastrun) to host two
@@ -25,10 +26,13 @@
 > release. D8. don't touch bot. D9. Defer D10. Defer D11. Defer D12. .NET 10 except for the e2e engine, python for
 > comfort like in cicd or scripts for setup and such."
 >
-> **This revision replaces the second (317c4d6eb) and the first (58a31fd7c).** Both are in git history. §1 maps each
-> answer to this design.
+> **The owner's answers to the third design's decisions, 2026-10-25:** "E1. be fluid allowing to allocate slot based
+> on availability x priority where the proxmox machine is higher priority. E2. dedicated folder E4. design the image to
+> best fit for a slot based on tiny11 E5. measure varieties / update the design/plan and measure ahead all numbers and
+> make decisions accordingly". E3 (the homelab changes for dock) was not answered and stays open (§14).
 >
-> Every number was measured on 2026-10-24 unless another date is given; §16 says how.
+> **This revision replaces the third (8a840e9c5)**, which replaced the second (317c4d6eb) and the first (58a31fd7c); all
+> three are in git history. Every number was measured on 2026-10-24 or 2026-10-25; §16 has the tables, §17 how.
 
 ## 0. In one page
 
@@ -39,60 +43,63 @@
 - later, **install** a build on this PC's dev or production instance, and **publish** a Release build as a GitHub
   release. A build is never a publish.
 
-Every request carries a resource estimate. The service starts a slot where the estimate fits; otherwise the request
-waits, up to its timeout. There are no approvals: what the service is told, it does.
+Every request says the least and the most it needs. The service starts a slot where the request fits best and sizes
+it to what is free between the two; otherwise the request waits, up to its timeout. There are no approvals.
 
-**How it runs.** Everything is lazy: nothing runs while nothing is asked; a request either starts what it needs in
-seconds or reuses a machine that is still up.
-- **fastrun is the slot manager on both sites:**
-  - **homepc:** a new fastrund node in Docker Desktop on this PC, an installation of its own. With no Kubernetes
-    here, its records are small JSON files on a Docker volume, each written atomically.
-  - **dock:** the cluster's fastrun (k3s), the second site. It runs Linux work today; Windows slots there need the
-    four homelab changes of §5.3.
-- **Windows work runs in Tiny11 Core 25H2 VMs** (dockur `core11`) that fastrun starts as slots and ends when done. One
-  image: e2e VMs boot it fresh; a build VM boots it plus a build layer and keeps a data disk with the warm trees, and
-  stays up 10 minutes for the next request ("the ready machine").
-- **The coordinator** is a fastrun app on the homepc node; idle, it runs no process. Its state is small JSON files on
-  the node's volume.
-- **A small Windows host agent** does what only Windows can: the git source on K:, the artifact store on Q:, the
-  installs, and Windows' own memory readings.
-- **Reused as they are:** Caddy (CT 104) for a LAN name, the registry, fastrun's CLI and API, the e2e engine
-  (Python), `tools\Build-Agentmaster.ps1`, `tools\Swap-AgentmasterLayout.ps1`.
+**How it runs.**
+- **Two sites, both fastrun:** dock (the k3s cluster's fastrun, priority 2) and homepc (this PC, priority 1). A request
+  goes to the site with the highest *priority × availability* (§3, E1).
+- **homepc's site is a WSL distro of its own, `buildserver`, whose disk is a file in the dedicated folder
+  `Q:\buildserver`** (§5.2, E2). fastrund runs inside it, and so do the VMs. Docker Desktop plays no part: the site
+  works while Docker Desktop is off.
+- **Windows work runs in VMs from three images, each made for its slot kind, all from Tiny11** (§4, E4): `am-e2e`
+  and `am-build` from Tiny11 Core, `am-install` from regular Tiny11.
+- **A slot's memory follows its need:** a VM boots at its ceiling and its balloon keeps it near what the guest uses.
+  Measured: 6 GB taken back in under 30 s and returned to Windows at once; 5 GB given back in 18 s.
+- **Lazy:** nothing runs while nothing is asked. The distro starts in under a second; a VM from its image is ready
+  in 30–44 s; a build VM stays up 10 minutes after its last request ("the ready machine").
 
-**What fastrun must gain** (§9, the owner's project): a file record store, persistent volumes, `/dev/kvm` for a VM
-slot, per-run limits, control of one run by its id with a graceful stop, and a capacity report.
-
-**What this evening's checks changed:**
-- **There is no local Kubernetes.** kubectl has one context, k3s (`https://192.168.50.150:6443`). Docker Desktop's
-  Kubernetes is off (`KubernetesEnabled = False`), and neither WSL distro runs k3s, kind or a fastrund. This PC was
-  checked with docker, PowerShell and wsl.
-- **Docker Desktop runs on WSL 2** (`WslEngineEnabled = True`, distro `docker-desktop`, kernel
-  `5.15.153.1-microsoft-standard-WSL2`). Every container on this PC, the claude-desktops Windows desktops included,
-  runs in that one Linux VM: 31.2 GB of RAM and 8 GB of swap (WSL's defaults), shared with the `Ubuntu` distro. The
-  plan uses nothing of WSL, but that VM is the homepc site's memory ceiling, and committed memory reaches the slots
-  through it (§7).
-- **The k3s side cannot run a Windows VM today** (§5.3): no `/dev/kvm` in the k3s LXCs, fastrund's pod is capped at
-  1 GiB for everything it starts, the nodes have 2.3–12 GB of free disk, and dock has 6.15 GB of RAM available.
-- **Disk is the binding constraint** (§8): Docker's data disk is 158.4 GB on C:, and 137.4 GB of it are two volumes
-  of another project, unused for ~7 weeks. C: has 53.5 GB free and also holds the 113 GB page file. Q: has 94.7 GB
-  free.
+**What the measurements decided (E5):**
+- **A VM's disk does ~2,000 random I/Os per second, whatever the attachment** (nested virtualization: KVM inside
+  WSL 2 inside Hyper-V, no APICv), **and compiling costs ~1.55× the host's time** at the same parallelism (the engine
+  harness: 107.5 s in the VM, 69.2–69.9 s on the host). Builds stay in VMs, as the owner chose (W4): the factor is the
+  price of a clean, isolated build machine; P0.4 measures a full build.
+- **A VM holds all of its RAM** (the guest zeroes its free memory within 1–2 minutes of boot) until the balloon takes
+  it back, so every VM slot has a balloon and the allocator counts balloon targets, not ceilings.
+- **homepc's real limits are Windows' free memory and WSL's 31.2 GB VM, not commit.** During the tests Windows had
+  2.5–8.9 GB available while commit had 33–44 GB free, and the WSL VM was full with other sessions' VMs in it.
+- **No data through Docker binds or pipes:** a bind of a Windows folder is 13–43× slower than the distro's own disk, a
+  guest never sees a file the host writes there, and a 12 GB image piped through `docker | wsl.exe` moved at 25 MB/s.
+  Disks live in the distro; images are made where they are used; the guest agent talks HTTP.
+- **dock had 6.0–7.1 GB available all week at 2–3 % CPU:** once E3's changes exist it takes e2e slots first; builds
+  never fit it.
+- **Tiny11 Core carries both jobs:** Agentmaster's portable zip runs on it, and VS 2022 Build Tools installs (exit 0,
+  28 minutes, 18.5 GB). ⚠ Its servicing worker then ran for over 30 minutes and slowed the compiles by up to 47 %, so
+  an image is sealed only with servicing idle.
+- **Disk stays the PC's tightest resource:** the images and the e2e slots fit in `Q:\buildserver`; a build VM (the
+  18.5 GB build layer plus 40–60 GB of its own) does not, until space is freed (W3).
 
 ## 1. The owner's answers, and what each changes
 
-| # | The question (second design) | The owner's answer | In this design |
+| # | The question | The owner's answer | In this design |
 |---|---|---|---|
-| D1 | the record store of a fastrund with no Kubernetes | a file store on disk: small JSONs on Docker's persistent storage, read and written atomically; the whole infra lazy | fastrund's records (§9 F1) and the coordinator's (§6) are JSON files on Docker volumes, written by temp file + flush + rename. Nothing runs while idle |
-| D2 | Tiny11 Core 25H2 as the base, the build tools only in a layer | yes | §4 |
-| D3 | the VM manager | separate: fastrun manages the slots, on this machine and on proxmox + k3s | fastrun runs the VMs as slots (§5, §9). claude-desktops' Windows host stays as it is, for Claude's own desktops, and is not used |
-| D4 | the dock side | no VM 100; Tiny11 when needed | VM 100 is out. Tiny11 slots on the k3s fastrun once §5.3's changes are made |
-| D5 | the memory settings | "Why WSL? we don't use WSL anywhere in the plan" | §7: Docker Desktop is WSL 2 here, so its VM is the site's ceiling. The plan changes no WSL setting; raising that VM's size is a later option, after measuring |
-| D6 | disk | "check" | measured on both sides (§8). Reclaim candidates are listed; nothing is deleted |
-| D7 | approvals | no grants; managed allocation by resource estimate; pending with a timeout; build → build id → tests or e2e on it; a build is not a publish | §2 (the operations), §3 (the allocation). No approval anywhere |
-| D8 | a Telegram bot | don't touch the bot | no bot, no Telegram |
-| D9 | Docker Desktop on demand | defer | deferred: the homepc site exists while Docker Desktop runs (it does not start at sign-in, `AutoStart = False`) |
-| D10 | the host native lane | defer | deferred |
-| D11 | the GitHub lane | defer | deferred, and `publish` with it |
-| D12 | the stack | .NET 10, except the e2e engine; Python for CI/CD-like and setup scripts | the coordinator, the agents and the CLI in .NET 10; the e2e engine stays Python (§10); the image and setup scripts in Python |
+| D1 | the record store | a file store on disk, small JSONs, read and written atomically; the whole infra lazy | §6: JSON files on the site's own disk (the distro's ext4 in `Q:\buildserver`), temp file + fsync + rename |
+| D2 | Tiny11 Core 25H2 as the base, build tools in a layer | yes | §4: Core is the base of `am-e2e` and `am-build`; the build tools are the build image's own |
+| D3 | the VM manager | fastrun on both sites | fastrun runs the VMs as slots (§5, §9); claude-desktops stays separate |
+| D4 | the dock side | no VM 100; Tiny11 when needed | Tiny11 slots on dock's fastrun once E3 is done |
+| D5 | memory settings | "Why WSL?" | WSL is the PC's only way to run Linux: the site is a distro of its own (§5.2), and WSL's VM is a measured limit (§7) |
+| D6 | disk | check | measured (§8, §16) |
+| D7 | approvals | none; allocation by estimate; pending with a timeout; build → build id → test / e2e | §2, §3 |
+| D8 | a Telegram bot | don't touch | none |
+| D9 | Docker Desktop on demand | defer | no longer needed: the site does not use Docker Desktop (§5.2) |
+| D10 | the host native lane | defer | still deferred; W4 (§14) asks whether builds belong there |
+| D11 | the GitHub lane | defer | deferred, with `publish` |
+| D12 | the stack | .NET 10; Python for setup and the e2e engine | unchanged (§10) |
+| E1 | the allocation | fluid, availability × priority, dock first | §3 |
+| E2 | where VM disks live | a dedicated folder | `Q:\buildserver` holds the site's distro disk and the artifact store (§5.2, §8) |
+| E3 | the homelab changes for dock's Windows slots | not answered | open (§14) |
+| E4 | the images | each designed for its slot, from Tiny11 | §4 |
+| E5 | reserves and budgets | measure varieties | §16; the reserves of §3.2 come from it |
 
 ## 2. Operations
 
@@ -101,86 +108,185 @@ id at once; `--wait` streams its events until it ends.
 
 | Operation | Takes | Gives | Runs in |
 |---|---|---|---|
-| `build` | a commit (uncommitted work only as an explicit snapshot commit), `Debug` or `Release`, identity `dev` or `release`, purge `auto` / `force` / `none`, an optional resource estimate | a **build id** and its artifacts: the package layout, the portable zip, the build log and binlog, a manifest (commit, configuration, identity, versions, the SHA-256 of each artifact) | the build VM (§5.1) |
-| `test` | a build id and a test kind: `m5` (the engine harness), `syntax` (the `/Zs` sweep), `installer` (`tools\tests\Test-AgentmasterInstaller.ps1`), more later | a result with its logs | the build VM, which holds the build's tree |
-| `e2e` | a build id and the suite's arguments (`-m …`, `-k …`, the lane) | the results: JUnit XML, the run's evidence, logs | fresh e2e VMs (§5.1); the e2e engine unchanged inside them (§10) |
-| `install` (later) | a build id and an instance (dev or production) | the swap's record | the host agent, through `Swap-AgentmasterLayout.ps1` |
-| `publish` (deferred with D11) | a Release build id and a version | a GitHub release | — |
+| `build` | a commit (uncommitted work only as an explicit snapshot commit), `Debug` or `Release`, identity `dev` or `release`, purge `auto` / `force` / `none`, optional sizes | a **build id** and its artifacts: the package layout, the portable zip, the build log and binlog, a manifest (commit, configuration, identity, versions, each artifact's SHA-256) | a build VM (§5.1) |
+| `test` | a build id and a kind: `m5`, `syntax` (the `/Zs` sweep), `installer`, more later | a result with its logs | the build VM that holds the build's tree |
+| `e2e` | a build id and the suite's arguments | JUnit XML, the run's evidence, logs | fresh `am-e2e` VMs; the install lane in `am-install` |
+| `install` (later) | a build id and an instance | the swap's record | the host agent, through `Swap-AgentmasterLayout.ps1` |
+| `publish` (deferred, D11) | a Release build id and a version | a GitHub release | — |
 
-- **A build id** names an immutable result, `b<yyyymmdd>-<n>` (e.g. `b20261024-7`); its record holds the commit,
-  configuration, identity and purge. Asking for a build that already exists (the same four) returns its id, or joins
-  it while it runs.
-- **Pending and timeouts:** a request waits until a slot fits it (§3), up to its wait timeout (defaults: build
-  60 min, test 30 min, e2e 120 min). Then it ends as `no-capacity`, naming what was short. A running request has a run
-  timeout too (build 3 h, test 1 h, e2e 2 h).
+- **A build id** names an immutable result, `b<yyyymmdd>-<n>`. A request for a build that exists (the same commit,
+  configuration, identity and purge) returns its id, or joins it while it runs.
+- **Pending and timeouts:** a request waits for a slot up to its wait timeout (build 60 min, test 30 min, e2e
+  120 min), then ends `no-capacity`, naming what was short. A running request has a run timeout (build 3 h, test 1 h,
+  e2e 2 h).
 - **Cancel** ends a request in any state and releases its slot.
 - **Who may instruct it:** anyone with a token. Claude sessions keep CLAUDE.md's rule: they ask the user before they
   ask the service for a build or an install.
 
-## 3. Allocation: a slot per estimate
+## 3. Allocation: fluid, by availability × priority (E1)
 
-- **Every request has an estimate:** guest memory, vCPUs, disk growth, its run timeout, and the locks it needs (a build
-  VM's data disk; an install's instance).
-  - The first estimates are §3.1's. After ten runs of a kind, the median peak of its last ten runs plus a margin
-    replaces them. A request may name its own.
-- **homepc fits a request when all of these hold:**
-  - Windows: free commit − reserve ≥ the slot's memory (the reserve: 16 GB, a setting; §7);
-  - Docker's VM: its memory − what runs in it (the slots and everything else, such as the claude-desktops VMs) ≥ the
-    slot's memory;
-  - CPU: the running slots' vCPUs + this one ≤ the site's budget (24 of the 32 threads, a setting);
-  - disk: the volume's free space − reserve ≥ the estimated growth, and C: keeps its 20 GB reserve (§7);
-  - its locks are free;
-  - no hold: a full-screen game (`SHQueryUserNotificationState` = `QUNS_RUNNING_D3D_FULL_SCREEN`) holds new slots.
-- **dock fits a request** when fastrund's capacity report (§9 F7) leaves room for the slot plus 2 GB.
-- **The order:** first come, first served. A request smaller than the free room may pass a larger one that waits,
-  until that one has waited 10 minutes.
-- **Enforcement:** fastrun holds the slot to its limits (cgroup memory, CPU, processes, timeout), and the VM's own size
-  (`RAM_SIZE`, `CPU_CORES`) is the estimate. No slot gets more than it was given.
-- **Pressure while slots run** (the host agent watches Windows, the coordinator decides): hold new slots, then shut
-  down an idle build VM, and only at the floor (free commit under 2 GB twice) stop the newest slot. Pausing a slot
-  instead comes with fastrun's freeze (§9 F6).
+### 3.1 What a request asks for
 
-### 3.1 First estimates
+A request names a **minimum** and a **preferred** amount of each resource: guest memory, vCPUs, disk growth; plus its
+run timeout and locks (a build VM's data disk, an install's instance). The first values per kind:
 
-| Request | Guest memory | vCPUs | Disk growth | Run timeout |
+| Kind | Memory min / preferred | vCPUs min / preferred | Disk | Why these |
 |---|---|---|---|---|
-| Debug build, 3 compilers | 12 GB, plus a 32 GB page file in the guest | 8 | ~25 GB the first time, little after | 3 h |
-| Release build, 3 compilers | 14 GB, plus the same page file | 8 | ~30 GB the first time | 3 h |
-| `m5` test | 4 GB | 2 | — | 1 h |
-| e2e VM | 8 GB (the e2e runner's default) | 6 | a few GB, deleted after | 2 h |
+| e2e VM (`am-e2e`) | 3 / 8 GB | 2 / 6 | an overlay, 1–3 GB, deleted | Tiny11 Core uses 1.4–1.9 GB at rest; Agentmaster with a tab adds ~150 MB; the e2e runner's default is 8 GB / 6 CPUs |
+| install-lane VM (`am-install`) | 3 / 6 GB | 2 / 4 | an overlay, deleted | the same guest plus Defender (~180 MB, measured by claude-desktops) |
+| build VM, Debug (`am-build`) | 8 / 16 GB | 4 / 8 | a kept data disk, ~35 GB the first time | native: a Debug build at 3 compilers took 8.7 GB of commit; the TerminalApp PCH is 1.8–2.3 GB per compiler |
+| build VM, Release | 8 / 16 GB | 4 / 8 | ~40 GB the first time | native: 7.8 GB of commit at 3 compilers |
+| `m5` / `syntax` test | runs in the build VM it tests | | | |
+| Linux job | 0.25 / 1 GB | 1 / 2 | — | |
 
-Native measurements behind them: a Debug build at 3 compilers took free commit from 22.9 to 14.2 GB (2026-10-21); a
-Release build from 34.1 to 26.3 GB (2026-10-24); the TerminalApp PCH is 1.8–2.3 GB per compiler. P0.4 measures them
-again inside a VM.
+After ten runs of a kind, its values come from them: minimum = the median of the guest's committed memory at rest +
+1 GB; preferred = the median peak + 1 GB. A request may name its own.
 
-## 4. The image: Tiny11 Core 25H2 in two layers
+### 3.2 What a site has free
 
-- **What Tiny11 Core is.** dockur lists `VERSION=core11`, "Tiny11 Core", a 3.0 GB download; its change #1513 moved
-  Tiny11 to 25H2. In tiny11builder's own words (`docs/usage.md`), Tiny11 removes the bundled apps, "Edge/WebView2 and
-  OneDrive binaries"; Core also deletes most of WinSxS, "removes WinRE and disables Windows Update and Defender. These
-  changes cannot be reversed. Use only for test VMs." No language, feature or update can be added afterwards.
-- **Built once** by the build server's own image script (`buildserver/image/`, Python, D12), on dockur's unattended
-  install, the way claude-desktops builds its golden image (claude-desktops itself is not used, D3). Two qcow2 disks
-  on Q:, the second over the first:
-  1. **`am-core11`, the base, which every VM boots:**
-     - the guest agent `amb-guest` (§10) as a service;
-     - Python 3.13 and the e2e runner's test tooling: PowerShell 7 and the runner's venv in `C:\e2e`, and crash dumps
-       on (WER LocalDumps), as `e2e/guest/provision.ps1` installs them after every reset today;
-     - **not in it:** `claude.exe` and Git. The Standard lane installs them per run from its cache. The install lane
-       runs without them today (no install scenario starts a session), and a `%USERPROFILE%\.local\bin\claude.exe`
-       would change what the app finds at its first start.
-  2. **`am-core11-build`, the build layer, which only build VMs boot:** VS 2022 Build Tools with the build subset of
-     the repository's `.vsconfig` (44 components with IDE parts; a build needs MSBuild, `VC.Tools.x86.x64`,
-     `Windows11SDK.22621`, `MSIX.Packaging`, `UWP.Support`, `NetFX.Native`, `Vcpkg` and the .NET SDK), Git and
-     .NET 10.
-     - **Why a layer:** a test machine with a compiler, the Windows SDK or a VC++ runtime installed can pass a test
-       that a user's PC fails, for example a portable zip that is missing a runtime DLL.
-- **Settings for both:** auto-logon, UAC off, updates off, no inbound firewall rule (the agent dials out).
-- **e2e on Tiny11 Core is not e2e on Windows 11.** A suite moves to `am-core11` only after P0.5 shows the same results
-  on both images. The install lane, which tests what Windows does around an installer, and a weekly run of every suite
-  stay on a full Windows 11 25H2 image (E4).
-- **It is proven before anything depends on it (P0.3, P0.5).** If Tiny11 Core cannot carry VS Build Tools, the build
-  or the app, the same two layers go on a full Windows 11 25H2 image; only the size and the idle memory change.
+Each value is *free minus a reserve*; the reserves were set from §16's measurements.
+
+**homepc** (the host agent reports Windows; fastrund reports the distro):
+- **memory** = min(Windows available − 6 GB, the WSL VM's MemAvailable − 2 GB, Windows' free commit − 16 GB)
+  + what our own running VMs can give back now (each one's balloon target minus its minimum, when its guest is not
+  using it).
+  - The 6 GB keeps the owner's own work fast: Windows had 2.5 GB available while three VMs ran during the tests.
+  - The WSL VM (31.2 GB) also holds Docker Desktop and everything other sessions run there: 13.5 GB of other
+    sessions' VMs at one point of the tests.
+  - Commit is the owner's "utilize committed memory": it had 33–44 GB free during the tests, so it binds last. A
+    slot marked *tolerant* (an idle build VM kept warm, a VM ballooned down to its minimum) may be admitted on commit
+    alone, beyond Windows' available memory; its cold pages then live in the page file. A running build or e2e is
+    never tolerant.
+- **vCPUs** = 24 − the running slots' vCPUs (24 of the 32 threads; a VM computes at 70–97 % of the host, §16.5).
+- **disk** = Q: free − 15 GB (other sessions' builds and e2e runs write 4–20 GB at a time on Q:).
+- **holds:** a full-screen game holds new slots (`QUNS_RUNNING_D3D_FULL_SCREEN`).
+
+**dock** (fastrund's capacity report, §9 F7):
+- **memory** = MemAvailable − 2 GB (6.0–7.1 GB available all week, median 6.3 GB);
+- **vCPUs** = 12 of 16 − the running slots' vCPUs (2–3 % busy all week);
+- **disk** = the node's free space − 5 GB;
+- Windows slots only after E3.
+
+### 3.3 The choice
+
+For each resource *r* of a request at a site with *A_r* free:
+
+```text
+fit_r        = 0                        if A_r < min_r
+             = min(1, A_r / preferred_r) otherwise
+availability = the smallest fit_r
+score        = priority(site) × availability        dock 2.0, homepc 1.0 (settings)
+```
+
+- The request goes to the highest score; a tie goes to the higher priority. When every score is 0 it waits, and is
+  scored again whenever a slot ends, a balloon shrinks, Windows frees memory, and every 15 s.
+- **The slot gets** memory = min(preferred, *A_mem*) and vCPUs = min(preferred, *A_cpu*): at least the minimum, at
+  most the preferred.
+- **What the product means:** dock wins while it can give at least half of what homepc can give in full
+  (0.5 × 2 = 1 × 1). So e2e VMs go to dock first, and builds, whose minimum is above dock's free memory, always land
+  on homepc.
+
+### 3.4 While a VM runs: the balloon
+
+- Every VM boots with RAM_SIZE = its preferred memory and a virtio balloon (`-device virtio-balloon-pci`, dockur's
+  `ARGUMENTS`; dockur's own balloon controller stays off).
+- Every 10 s the site sets the balloon's target to the guest's committed memory plus a headroom, between the slot's
+  minimum and its current grant. The headroom covers what the guest can add before the next step: 1 GB for an e2e
+  VM, 3 GB for a build VM (one more compiler loading the TerminalApp PCH adds 1.8–2.3 GB); a guest that outgrows its
+  target meanwhile pages to its own page file until the balloon gives memory back. The grant grows toward the
+  preferred size when the site has room, and shrinks toward the minimum under pressure.
+- **Measured on Tiny11 Core:** 8 → 3 GB in ~45 s and 8 → 2 GB in under 30 s; Windows' available memory rose by
+  nearly as much at once (3.27 → 8.90 GB; vmmemWSL's working set −4.95 GB, and its private bytes fell from 31.19 to
+  23.48 GB in the minutes after). Back up 3 → 8 GB in 18 s. `free-page-reporting` does nothing for a Windows guest.
+- Who sets it: fastrund, through the VM's QEMU monitor (§9 F8).
+
+### 3.5 Order, pressure
+
+- **Order:** first come, first served; a smaller request may pass a larger one that waits, until that one has waited
+  10 minutes.
+- **Pressure while slots run** (the host agent watches Windows): first shrink balloons toward their minimums, oldest
+  idle VM first; then hold new slots; then shut down an idle build VM; only at the floor (Windows available under
+  2 GB twice in a row) stop the newest slot.
+
+### 3.6 Worked example, with numbers measured during the tests on 2026-10-25
+
+homepc, after our test VM's balloon was set to 4 GB: Windows available 8.6 GB, the WSL VM's MemAvailable 11.1 GB,
+free commit 32.8 GB; that VM's minimum taken as 3 GB → memory = min(2.6, 9.1, 16.8) + 1 = **3.6 GB**. dock (the
+week's median): 6.3 − 2 = **4.3 GB**. vCPUs had room on both.
+
+| Request | homepc | dock (after E3) | Goes to |
+|---|---|---|---|
+| e2e VM (3 / 8 GB) | fit 0.45 → score 0.45 | fit 0.54 → score 1.08 | dock, at 4.3 GB |
+| e2e VM, before E3 | 0.45 | — | homepc, at 3.6 GB |
+| Debug build (8 / 16 GB) | 3.6 < min → 0 | 4.3 < min → 0 | waits; at its 60-minute timeout `no-capacity: memory` |
+
+## 4. Images: one per slot kind, all from Tiny11 (E4)
+
+### 4.1 The two Tiny11 builds
+
+- **Tiny11 Core** (dockur `VERSION=core11`, a 3.0 GB download): removes the bundled apps, OneDrive, WinRE and most of
+  the component store, and disables Windows Update and Defender. It cannot be serviced: no update, feature or
+  language can be added. dockur's ISO is the November 2025 build (Windows 11 Pro 26200.7171).
+- **Tiny11** (dockur `VERSION=tiny11`, 5.3 GB): removes the bundled apps, Edge and OneDrive; keeps Update, Defender,
+  WinRE and the Store, and stays serviceable.
+- **Measured on Tiny11 Core (§16.2):** installed in 12½ minutes (16½ with the download); 9.2 GB on disk; at rest
+  131 processes, 93 services, 1.4–1.9 GB of memory used; ready 30–44 s after the VM starts. Present: MSI and AppX
+  installs, BITS, Task Scheduler, winget, WebView2 122. Absent or off: Windows Update, Defender, the VC++ runtime,
+  Edge. **Agentmaster v0.8.0's portable zip runs on it** (window, side panel and a PowerShell tab drawn; 103 MB).
+  **VS 2022 Build Tools installs on it** (C++ and UWP with their recommended components, both SDKs, vcpkg, the .NET
+  SDK): exit 0, no reboot, 28 minutes with its 4.8 GB download, 18.5 GB. ⚠ Afterwards TiWorker (Windows' servicing
+  worker) kept one vCPU busy for over 30 minutes, until the TrustedInstaller service was stopped.
+- **A fresher base is possible:** Tiny11 Builder's own engine (ntdevlabs/tiny11builder) builds a Tiny11 ISO from
+  Microsoft's current Windows 11 ISO, with services disabled offline. claude-desktops was building exactly that on
+  2026-10-25 (`images/windows/build_tiny11.py`, its uncommitted work): the regular flavor with Update, Defender and
+  telemetry disabled offline. The build server's image script can use the same engine (pinned by commit) when
+  dockur's Core ISO is too old; it is not needed to start.
+
+### 4.2 The images
+
+| Image | Base | What it adds | Slot | Size (measured / expected) |
+|---|---|---|---|---|
+| `am-e2e` | a layer over the Tiny11 Core base (which holds the guest agent) | Python 3.13 with the e2e runner's venv and its wheel cache, PowerShell 7, PortableGit (what `e2e/guest/provision.ps1` installs after every reset today); crash dumps on (WER LocalDumps); the trims of §4.4 | e2e VMs | the base 9.2 GB (measured) + ~2 GB of layer |
+| `am-build` | a layer over the same base | VS 2022 Build Tools (C++, UWP, the 22621 and 26100 SDKs, vcpkg, the .NET SDK), Git, .NET 10; the trims of §4.4 | build VMs | the base + 18.5 GB of layer (measured with the workloads' recommended components; the build's own subset is smaller) |
+| `am-install` | Tiny11 (serviceable) | the guest agent and nothing else: Defender, SmartScreen and Windows Update stay as a user's Windows has them | the install lane | not measured yet (P0.3); ~13 GB expected |
+
+- **Why three and not one:** a test VM with a compiler, the Windows SDK or a VC++ runtime installed can pass a test
+  that a user's PC fails (a portable zip missing a runtime DLL), so e2e VMs never boot the build image; and the
+  install lane tests what Windows does around an installer (SmartScreen's "Run anyway", the mark of the web, UAC,
+  Apps & Features), which Tiny11 Core has switched off.
+- **Not in any image:** `claude.exe` (the Standard lane copies it per run from the store's cache, as today), Git's
+  credentials, any token.
+- **e2e on Tiny11 Core is not e2e on Windows 11:** a suite moves to `am-e2e` only after P0.5 shows the same results
+  there and on a full Windows 11; a weekly run of every suite stays on `am-install` (the closest to a user's Windows).
+
+### 4.3 How an image is made
+
+- **In place, on the site that uses it**, never copied through a pipe (a 12 GB copy through `docker … | wsl.exe …`
+  ran at 25 MB/s). The image script (`buildserver/image/`, Python, D12) runs dockur's unattended install in the
+  site's distro with an OEM folder: `install.bat` → `setup.ps1` installs what the image adds and registers the guest
+  agent; the VM then shuts down.
+- **The result is a read-only folder:** `data.qcow2`, the UEFI files (`windows.rom`, `windows.vars`), dockur's state
+  files and the empty marker `windows.boot`. ⚠ Without `windows.boot` (and without the install ISO) dockur takes the
+  folder for an unfinished install, deletes its disks and installs again (measured; `cleanupStorage` in dockur's
+  `install.sh`).
+- **Layers (D2):** Tiny11 Core is installed once as the base (with the guest agent); `am-e2e` and `am-build` are each a
+  qcow2 layer over it (`qemu-img create -b base/data.qcow2`), made by booting the base through the new layer and
+  installing what that image adds. Both images share the base's 9.2 GB.
+- **A slot boots a copy-on-write overlay over its image:** `qemu-img create -b <image>/data.qcow2` takes under a
+  second; the slot gets its own `windows.vars`. An e2e overlay is deleted with its slot; a build VM keeps its overlay
+  and its data disk until its image changes.
+- **dock makes its own copies** with the same script (12½ minutes for the base, measured on homepc), rather than
+  receiving 10+ GB over the LAN.
+
+### 4.4 Trims (for `am-e2e` and `am-build`)
+
+Tiny11 Core still runs services a test VM does not need. To disable in the image (P0.3 measures the saving): Windows
+Search (`WSearch` and the SearchHost UI), SysMain, DiagTrack, the print spooler, Delivery Optimization (`DoSvc`),
+geolocation (`lfsvc`), the connected-devices platform (`CDPSvc`, `CDPUserSvc`), Remote Desktop (`TermService`; dockur's
+console is VNC), Windows' widgets. **Kept:** text input (`TextInputManagementService`, the keyboard), push notifications
+(`WpnService`, `WpnUserService`: Agentmaster's toasts), themes, UI Automation, the balloon service (`BalloonService`).
+Also in the image: the time zone set to UTC (dockur's guest came up in Pacific time on a Jerusalem clock), a fixed
+page file, and power plan High performance.
 
 ## 5. Sites and slots
 
@@ -188,291 +294,389 @@ again inside a VM.
 
 | Kind | Boots | Disks | Life |
 |---|---|---|---|
-| `win-build` | the build layer | the image (read-only) + an OS overlay and a data disk, both kept per build VM | started by a request; stays up 10 min after its last step for the next one; then Windows shuts down and the run ends; its overlay is renewed when a layer changes |
-| `win-e2e` | the base (or the full image) | the image (read-only) + a throwaway overlay | one run, deleted in every outcome; an install-lane "reset" is a fresh slot |
+| `win-build` | `am-build` | the image (read-only) + its own overlay and raw data disk, both kept | started by a request; stays up 10 min after its last step; then Windows shuts down (8–14 s) and the run ends |
+| `win-e2e` | `am-e2e` (or `am-install` for the install lane) | the image (read-only) + a throwaway overlay | one run; deleted in every outcome; an install-lane "reset" is a fresh slot |
 | `linux` | a container | none, or a volume | the coordinator; small jobs |
 
-- **A VM slot is a run of one fastrun release, `am-win`** (the image `dockurr/windows:6.05`), started with:
-  - `/dev/kvm`, root and a writable root inside the slot (§9 F3);
-  - dockur's user-mode networking, `NETWORK=passt`: no `NET_ADMIN` and no `/dev/net/tun` (read in dockur's base
-    `qemus/qemu`, `src/network.sh`). The guest reaches the coordinator through it; nothing reaches the guest;
-  - volumes: the image folder (read-only), the slot's disks, and its exchange folder, which the guest sees as a share
-    (§9 F2);
-  - its limits = the estimate (§9 F4); env `RAM_SIZE`, `CPU_CORES` and the disks' names.
-- **The build VM's tree stays warm** on its data disk: one worktree per configuration, the NuGet and vcpkg caches, and
-  the guest's page file. Builds in it run one at a time. A second build VM, with a data disk of its own, starts only
-  when the budget has room for it.
+- **A VM slot is a run of one fastrun release, `am-win` (`dockurr/windows:6.05`)**, with `/dev/kvm`, dockur's
+  user-mode network (no `NET_ADMIN`, no `/dev/net/tun`), its disks and exchange folder as volumes (§9 F2, F3), its size
+  in `RAM_SIZE` / `CPU_CORES`, and its balloon (§3.4).
+- **A build VM's data disk is a sparse raw file** (D: in the guest) holding one worktree per configuration, the NuGet
+  and vcpkg caches and the guest's page file. With `discard=unmap`, what the guest deletes goes back to the distro
+  (measured: a 64 GB data disk held 92 MB after its test files were deleted).
 
-### 5.2 homepc (this PC)
+### 5.2 homepc: a WSL distro of its own (E2)
 
-- **The node:** fastrund in a Docker Desktop container, set up like the k3s pod (privileged, a read-only root, its
-  store, scratch, data and run folders on volumes, its own tokens file), with `--restart unless-stopped`. The lab of
-  2026-10-05 ran fastrund 0.3.0 this way on this PC (node `lab`).
-- **Its ports** are published to this PC only: the API `2100` and the activators `2101`–`2199`. The coordinator's
-  port is also open to Caddy (`192.168.50.5`) by one firewall rule, the catalog's pattern, for `https://build.local`.
-- **Capacity, measured:** 32 CPUs; Docker's VM 31.2 GB of RAM + 8 GB of swap, shared with the `Ubuntu` distro and the
-  claude-desktops desktops; `/dev/kvm` in the VM; Windows: 63.7 GB of RAM (18.7 GB free), a commit limit of 174.2 GB
-  (42.7 GB free), the page file 113 GB (17 GB used) on C:.
+**Measured options for where homepc's VM disks live (§16.6):**
+
+| Option | Disk speed (fio, O_DIRECT: random 4K write / read IOPS, sequential write / read) | Needs | Verdict |
+|---|---|---|---|
+| **A. A distro of its own, its disk `Q:\buildserver\wsl\ext4.vhdx`; fastrund and the VMs run inside it** | 64,092 / 87,624 IOPS; 4.75 / 7.20 GB/s | WSL (present); fastrund for it (§9 F9) | **chosen** |
+| B. fastrund in Docker Desktop, its data on that distro's disk through Docker Desktop's WSL integration | 52,439 / 99,667 IOPS; 1.55 / 4.32 GB/s (measured through Ubuntu, the integrated distro) | Docker Desktop running, integration turned on for the distro | works; ties the site to Docker Desktop, which does not start with Windows |
+| C. A Docker volume (inside `docker_data.vhdx` on C:) | 46,705 / 71,695 IOPS; 2.09 / 4.28 GB/s | — | no: not the dedicated folder; C: holds the page file; that VHDX is not sparse and never shrinks |
+| D. A bind of a Windows folder (`Q:\…` or `C:\…`) | 2,898–4,858 / 4,336–5,126 IOPS; 150–176 MB/s | — | no: 13–43× slower than A, and a guest never sees a file the host writes there |
+| E. Docker Desktop's whole disk moved to Q: | — | 158 GB | no: Q: had 31–70 GB free during the tests |
+
+- **The distro:** Alpine 3.22 from its minirootfs, imported with `wsl --import buildserver Q:\buildserver\wsl <tar>`.
+  Measured with the test distro: a cold start 0.52–0.79 s, a call into the running distro 0.33 s; `podman` and `crun`
+  installed in 7 s; the dockur image (578 MB) pulled in 12 s; a VM booted from an overlay ready in 44 s.
+- **Its disk becomes sparse only at a WSL restart.** WSL 2.3.24 offers `wsl --manage <distro> --set-sparse true`, but
+  refuses it while WSL's VM runs ("the vhdx is currently in use"), even for a distro just imported and never started,
+  and `fsutil sparse setflag` fails the same way (measured). WSL keeps every distro's disk attached while its VM runs,
+  and Docker Desktop keeps it running. So the switch, or `.wslconfig`'s `[experimental] sparseVhd=true` for disks
+  created afterwards, waits for one WSL restart, W1's. Until then the distro reuses the space it frees but does not
+  give it back to Q:.
+- **Networking:** every WSL distro shares one network namespace. Each slot gets its own (the proofs used rootful
+  podman's `slirp4netns`; rootful podman has no `pasta`), so the site adds no bridge and no firewall rule to the
+  namespace Docker Desktop also uses.
+- **cgroups:** WSL 2.3.24 mounts every controller on cgroup v1; its cgroup v2 hierarchy has none. fastrund then runs
+  with slot cgroups off ("spawner: no cgroup v2 here; slots stay in fastrund's cgroup", `Spawner.cs`): no per-run
+  limits and no freeze until W1. VM slots stay bounded by QEMU's `-m` and `-smp` and by the balloon.
+- **Who wakes it:** the host agent (§10), a logon task that is always up, starts the distro and fastrund when a
+  request arrives. After 10 minutes with no slot and no request it stops fastrund, and WSL then stops the distro by
+  itself (a distro with no process left is shut down).
+- **Its ports:** fastrund's API and activators listen in the distro; Windows reaches them through WSL's localhost
+  forwarding, and the LAN (Caddy, for `https://build.local`) through the host agent, which forwards one port opened to
+  Caddy (`192.168.50.5`) only.
+- **The coordinator lives here** (an app on this node, as in the third revision): the source (K:) and the artifact
+  store (Q:) are on this PC, so nothing can be built while it is off anyway.
 
 ### 5.3 dock (k3s)
 
-- **The cluster's fastrun 1.2.1** (three nodes) is the second site. It runs Linux slots today.
-- **A Windows slot there needs four changes, each measured missing today:**
-  1. `/dev/kvm` inside CT 113 / 114: absent, and their configs have no kvm line. `cgroup2.devices.allow=a` already
-     allows the device, so each needs one `lxc.mount.entry` and a restart of that node;
-  2. room in fastrund's pod: its memory limit is 1 GiB for everything it starts (requests 10m CPU, 32 MiB). VM slots
-     need it raised to their sizes;
-  3. disk: CT 113 has 11 GB free, CT 114 12 GB, CT 112 2.3 GB. A Tiny11 base (~10–15 GB) and an overlay need a new
-     mount point of ~40 GB from the thin pool, which is at 71.45 %; 40 GB takes it to ~76 %, and its alert starts at
-     80 %;
-  4. RAM: dock has 6.15 GB available (VM 100 holds 16 GiB; the LXCs and VM 105 most of the rest), 8 GB of swap with
-     1 GB used, KSM on (138 MiB merged now). One 4–6 GB e2e VM fits, with nothing to spare.
-- **So dock takes e2e slots only, one at a time,** after those changes (E3, the owner's go). Builds stay on homepc.
+- **The cluster's fastrun 1.2.1, priority 2.** It runs Linux slots today.
+- **Windows slots there need E3's four changes:** `/dev/kvm` in CT 113/114 (one `lxc.mount.entry` each and a restart
+  of that node); fastrund's pod memory limit (1 GiB for everything it starts) raised to a VM's size; ~20 GB of disk
+  for `am-e2e` (the base and its layer, ~11 GB) and its overlays (the nodes have 2.3–12 GB free; the thin pool is at
+  71.45 %, its alert at 80 %); and RAM: 6.0–7.1 GB available all week, so one e2e VM at 3–4 GB.
+- **dock never takes a build:** a build's minimum is above its free memory.
 
-### 5.4 claude-desktops
+### 5.4 Everything else in the WSL VM
 
-Separate (D3). Its Windows desktops share Docker's VM with the homepc site, so the allocator counts their memory as
-load it does not own, and never starts or stops them.
+claude-desktops' Windows desktops and other sessions' dockur VMs run in Docker Desktop's part of the same WSL VM
+(8.2 + 5.3 GB of them during the tests). The allocator sees them only as less free memory (the WSL VM's MemAvailable
+and Windows' available memory) and never starts or stops them.
 
-## 6. Records: small JSON files, written atomically
+## 6. Records: small JSON files, written atomically (D1)
 
-- **Where:** the Docker volume `buildserver-state` on the homepc node, mounted into the coordinator's slot (§9 F2).
-  fastrund's own records (§9 F1) live on the same disk, in its store volume.
-- **What:**
-  - `requests/<id>.json`: one per request (kind, inputs, estimate, state, times, slot, the result's summary), at most
-    64 KB;
-  - `builds/<build id>.json`: the manifest (commit, configuration, identity, the artifacts' paths and SHA-256);
-  - `slots/<slot id>.json`: what runs where, with its limits;
-  - `vms/<name>.json`: each kept build VM (its disks, the layer it was made from, its last use);
-  - `estimates.json`: the rolling peaks per kind; `config.json`: the reserves, budgets and timeouts;
-  - `requests/<id>.events.jsonl`: the request's events, one line each, appended (`O_APPEND`) and flushed per line.
-  - Build logs, binlogs and test evidence go to the artifact store on Q:, never into JSON.
-- **The write:** serialize → write `<name>.json.tmp-<pid>-<n>` in the same folder → `fsync` the file → `rename` it
-  over `<name>.json` (an atomic replace on Linux) → `fsync` the folder. A reader reads the whole file and never a
-  `.tmp-` file, so it sees the old version or the new one, never a mix. Start-up deletes `.tmp-` files a crash left.
-- **One writer:** the coordinator runs one instance (`--max-instances 1`) with one lock per record. Each record carries
-  a `version`; a write replaces only the version it read (compare-and-swap; a mismatch reads again and retries).
-- **Lazy:** the coordinator keeps nothing that the files don't hold, so it can stop between any two writes and start
-  again from them.
+- **Where:** `/srv/buildserver/records` on the distro's ext4 (in `Q:\buildserver\wsl\ext4.vhdx`), mounted into the
+  coordinator's slot (§9 F2). fastrund's own records (§9 F1) live on the same disk.
+- **What:** `requests/<id>.json` (kind, inputs, sizes, state, times, slot, a result summary; at most 64 KB),
+  `requests/<id>.events.jsonl` (one line per event, appended and flushed per line), `builds/<build id>.json` (the
+  manifest), `slots/<slot id>.json`, `vms/<name>.json` (each kept build VM: disks, image, last use),
+  `estimates.json`, `config.json` (reserves, priorities, timeouts). Logs, binlogs and evidence go to the store, never
+  into JSON.
+- **The write:** serialize → write `<name>.json.tmp-<pid>-<n>` in the same folder → fsync the file → rename it over
+  `<name>.json` → fsync the folder. A reader reads whole files and never a `.tmp-` file, so it sees the old version or
+  the new one. Start-up deletes `.tmp-` files a crash left.
+- **One writer:** the coordinator runs one instance (`--max-instances 1`), with a lock per record; each record carries
+  a `version`, and a write replaces only the version it read (compare-and-swap).
+- **Lazy:** the coordinator keeps nothing the files don't hold; it can stop between any two writes.
 
-## 7. Memory: commit, physical, and why WSL appears
+## 7. Memory: what a slot really costs
 
-**The chain on this PC (measured 2026-10-24 evening):**
+**The chain, measured on 2026-10-25:**
 
 ```text
-Windows    63.7 GB RAM (18.7 GB free); commit limit 174.2 GB (42.7 GB free) = RAM + page file 113 GB on C: (17 GB used)
- └ vmmemWSL  Docker Desktop's WSL 2 VM: commit 5.1 GB, working set 1.8 GB (Windows pages what Linux leaves cold)
-    └ Linux    31.2 GB RAM + 8 GB swap (WSL's defaults; one VM for docker-desktop and Ubuntu); KSM present, off
-       └ fastrund slots   cgroup limits: memory, CPU, processes
-          └ QEMU             the guest's RAM_SIZE
-             └ Windows guest  its own page file on its disk: MSVC's commit peaks land here
+Windows       63.7 GB of RAM; 2.5–8.9 GB available during the tests; commit 133–147 GB used of 177–190 GB
+ └ vmmemWSL     the WSL 2 VM: working set 18.1–25.5 GB, private bytes 23.5–31.2 GB; it follows what Linux uses
+    └ Linux      31.2 GB + 8 GB of swap (WSL's defaults), ONE VM for every distro: docker-desktop (with other
+                 sessions' VMs), Ubuntu, and the site's distro
+       └ fastrund slot
+          └ QEMU   resident = RAM_SIZE within 1–2 min of boot (the guest zeroes its free memory), until the balloon
+                   takes some back; + ~0.4 GB of QEMU
+             └ Windows guest  Tiny11 Core at rest: 1.4–1.9 GB used; its own page file takes MSVC's peaks
 ```
 
-- **Why WSL appears.** Docker Desktop's engine runs in WSL 2 here, so every container on this PC lives in that VM. The
-  plan uses no WSL feature and changes no WSL setting. But the VM's size (WSL's `memory=`, half of RAM by default) is
-  the homepc site's ceiling, and it is the path by which committed memory reaches the slots: the VM's memory is
-  charged to Windows as commit and paged by Windows (5.1 GB committed, 1.8 GB resident when measured).
-- **Using committed memory.** A slot's memory may exceed the free physical memory when free commit covers it (§3's
-  first test). Pages a guest never touches cost nothing; pages it touched and left cold go to the page file. Inside a
-  build VM, the guest's own page file takes MSVC's peaks.
-- **C: is the commit's disk.** The page file (113 GB, system-managed) lives on C:, which has 53.5 GB free, and Docker's
-  data disk is on C: too. When C: fills, the page file cannot grow, and the commit limit stops growing with it. So the
-  build server's disks grow on C: only within a budget (§8), and the coordinator keeps 20 GB free on C:, like the
-  commit reserve.
-- **Later, measured options** (not in the first phases): raise the VM's size if slots ever need more than ~25 GB at
-  once; turn KSM on in Docker's VM so e2e VMs booted from one image share pages. P0.6 measures both.
+- **A VM costs its whole RAM_SIZE unless ballooned:** 4.08 GB resident for a 4 GB guest, 8.07–8.46 GB for 8 GB.
+  Hence §3.4.
+- **Memory the balloon takes reaches Windows at once:** −6 GB of balloon gave Windows +5.6 GB of available memory
+  within 30 s; vmmemWSL's private bytes (its commit) fell with it.
+- **The page cache:** Linux keeps file cache until it needs the memory, and WSL counts it as used. QEMU opens its disks
+  with `cache=none`, so VM I/O adds none; big copies do (the 12 GB image copy pushed the WSL VM to its cap). The site
+  drops clean cache after large transfers.
+- **Not measured: KSM** (W2). It is one switch for the whole WSL VM (off today), and another session was measuring
+  memory in the same VM. Windows guests keep their free memory zeroed, so KSM may merge much of it.
+- **Raising WSL's 31.2 GB** (`.wslconfig` `memory=`) needs a restart of the WSL VM; it is not needed while the
+  balloons keep VMs near their use.
 
-## 8. Disk (D6: checked)
+## 8. Disk: the dedicated folder (E2)
 
-### 8.1 Measured, 2026-10-24 evening
+### 8.1 Layout
 
-| Where | Size / free | What holds it |
+```text
+Q:\buildserver\
+  wsl\ext4.vhdx            the site's distro disk (sparse from W1's restart on); inside it, /srv/buildserver:
+                             images/<name>/     each image: data.qcow2 + windows.* + windows.boot (read-only)
+                             slots/<id>/        an e2e slot's overlay (deleted with the slot)
+                             vms/<name>/        a kept build VM: overlay + raw data disk
+                             exchange/<slot>/   the guest's share: source bundles in, artifacts out
+                             records/           §6
+                             fastrun/           fastrund's store, scratch and data folders
+  store\                   artifacts as plain files (layouts, zips, logs, binlogs); 40 GB, oldest out first
+  git\agentmaster.git      the bare mirror the host agent keeps (the repository's packed history is 198 MB)
+```
+
+### 8.2 Budget
+
+| Item | Size | Measured / expected |
 |---|---|---|
-| C: | 1,862 GB, **53.5 GB free** | the page file (113 GB); Docker's data disk `docker_data.vhdx` 158.4 GB; Ubuntu's `ext4.vhdx` 37.4 GB |
-| inside Docker's data disk | images 25.9 GB (19.4 reclaimable), containers 4 GB, volumes 145.5 GB, build cache 0.2 GB | volumes: `rdpdoorway-win11-target` 68.7 GB and `rdpdoorway-win11-test` 68.7 GB (another project; their containers exited ~7 weeks ago), `claude-desktop-win-1-storage` 4.9 GB, BuildKit 2.3 GB |
-| Q: | 931.5 GB, **94.7 GB free** (112 GB in the afternoon) | the owner's data (AlphaVantage 206 GB, nautilus 98 GB, "Datacenter from C drive" 75 GB, ComfyUI 47 GB, ThetaData 47 GB, llm 44 GB, …) and Agentmaster's: `Q:\tmp` 78.3 GB (the build trees, 52 GB, and many `agentmaster-e2e-*` session folders), `Q:\claude-desktops` 64 GB, `Q:\agentmaster-e2e` 37.7 GB, `Q:\amwt-v067` 21.4 GB (a worktree from July), `Q:\am-build` 17.3 GB (July), `Q:\agentmaster-layouts` 4.4 GB |
-| K: | 447 GB, **11.6 GB free** | the source tree; nothing of the build server goes here |
-| k3s nodes | CT 112 7.8 GB (2.3 free), CT 113 24 GB (11 free), CT 114 40 GB (12 free) | fastrun stores 0.5 / 2.8 / 3.1 GB; local-path volumes (the registry 10 GiB, teleport 12 GiB, …) |
-| dock's thin pool | 794 GiB, 71.45 % used, oversubscribed | — |
+| the Tiny11 Core base, shared by `am-e2e` and `am-build` | 9.2 GB | measured |
+| the `am-e2e` layer | ~2 GB | expected (Python, PowerShell 7, PortableGit, the wheel cache) |
+| the `am-build` layer | 18.5 GB | measured: Build Tools with the workloads' recommended components (C: +14.6 GB, D: +3.9 GB) |
+| `am-install` | ~13 GB | expected (Tiny11's ISO is 5.3 GB) |
+| a build VM: overlay + data disk (two worktrees, the caches, the guest's page file) | ~40–60 GB | from the native trees: Debug ~25 GB, Release ~30 GB the first time |
+| e2e overlays | 1–3 GB each | deleted with the slot |
+| the store | 40 GB | a budget, oldest out first |
 
-### 8.2 The build server's budget
-
-| Item | Size | Where | Why there |
-|---|---|---|---|
-| the image: base + build layer | ~40 GB (to measure) | Q: (`Q:\buildserver\images`), mounted read-only | only read; the fleet's golden runs this way at ~125 MB/s |
-| a full 25H2 image (install lane, weekly run) | 14 GB | the fleet's file on Q:, read-only (E4) | one copy |
-| one build VM: OS overlay + data disk (two worktrees ~55 GB, caches ~5 GB, the guest's 32 GB page file) | ~100 GB | a volume inside Docker's data disk | a build's many small writes need ext4 on the virtual disk, not a Windows folder (P0.4 measures both) |
-| e2e overlays | a few GB each, deleted | Docker's data disk | — |
-| exchange folders (source bundles in, artifacts out) | ~5 GB | Q: (`Q:\buildserver\exchange`), mounted | the host agent reads them as files |
-| the artifact store | 40 GB, oldest out first | `Q:\buildserver\store` | installs and e2e zips are taken from it |
-| records | < 100 MB | a Docker volume | D1 |
-
-- **It does not fit today without reclaiming space** (E1): the build VM needs ~100 GB in Docker's data disk, which
-  is on C: (53.5 GB free, 20 GB of it kept for the page file), and Q: has 94.7 GB free.
-- **Reclaim candidates, each the owner's call; this design deletes nothing:**
-  1. the two `rdpdoorway-win11-*` volumes (137.4 GB in Docker's data disk), then a compaction of `docker_data.vhdx`,
-     which gives C: the space back;
-  2. 19.4 GB of unused Docker images;
-  3. the stock build trees in `Q:\tmp` (52 GB), once the build server has replaced hand builds;
-  4. session leftovers on Q: (`Q:\agentmaster-e2e` 37.7 GB, `Q:\tmp\agentmaster-e2e-*`, `Q:\amwt-v067` 21.4 GB,
-     `Q:\am-build` 17.3 GB).
-- **From then on the build server owns its space:** everything it makes lives under `Q:\buildserver` and its Docker
-  volumes, each item with a budget and oldest out first. Sessions stop leaving build outputs elsewhere.
+- **Today it does not all fit:** Q: had 31–70 GB free during the tests (another session's Tiny11 build was writing
+  ~40 GB there too), with 15 GB kept for other work. The e2e images, overlays and the store fit; a build VM does not
+  (W3).
+- **Space goes back in two steps:** what a guest deletes is unmapped in its disk file (`discard=unmap`; measured: a
+  64 GB data disk held 92 MB after its test files were deleted), and the distro's ext4 (mounted with `discard`) frees
+  it. Q: gets it back only once the VHDX is sparse (§5.2); before that, the distro keeps it for its next files.
 
 ## 9. What fastrun must gain (the owner's project)
 
 Read in `K:\source\fastrun`:
-- an app takes no limits ("an app's instances share the pod's memory and process limits", `AppReleases.cs`);
-- a run outlives its caller ("fastrun never cancels a run because its caller went away", `docs/progress.md`), but a
-  call sets only `args`, `env`, `stdin`, a shorter `timeout`, `idempotency_key`, `node` and `not_before`, and
-  `Runs.Stop` ends every run of a release on a node at once (`proto/fastrun/v1/fastrun.proto`);
+- an app takes no limits (`AppReleases.cs`); a run outlives its caller, but a call sets no per-run limits and
+  `Runs.Stop` ends every run of a release on a node (`proto/fastrun/v1/fastrun.proto`);
 - a slot gets no devices, and a writable root gets eleven capabilities (`Runtime.cs`);
-- with no ServiceAccount, releases, apps and schedules answer `UNAVAILABLE` (`Kube.cs`).
+- with no ServiceAccount, releases, apps and schedules answer `UNAVAILABLE` (`Kube.cs`);
+- with no cgroup v2 controllers, slots run in fastrund's own cgroup (`Spawner.cs`, `SetUpCgroups`).
 
 | # | Feature | Why | Done when |
 |---|---|---|---|
-| F1 | a file record store (`FASTRUN_RECORDS_DIR`), used when no ServiceAccount is mounted: the same calls as `Kube.cs` (Secrets: list by label selector, watch with bookmarks, get, create, replace by `resourceVersion`, delete; the Lease: get, create, replace), each record a JSON file written by §6's write, the counters in an atomically written file, watches in-process | releases, apps and schedules on the homepc node (D1) | fastrun's conformance test passes on a homepc node, and a `kill -9` in the middle of a write leaves every record readable |
-| F2 | volumes: named folders that outlive runs (`--volume name:/path[:ro]`), and mounts of node paths on an allow-list (`FASTRUN_BIND_ALLOW`) | the coordinator's records, a build VM's disks, the image folder, the exchange folders | a volume outlives runs, revisions and fastrund restarts |
-| F3 | VM slots: devices from a node allow-list (`FASTRUN_DEVICES_ALLOW=/dev/kvm`), root and a writable root, and capabilities from an allow-list if dockur needs more than the eleven | Tiny11 VMs | a dockur VM boots in a slot with `NETWORK=passt` |
-| F4 | per-run limits that may lower the release's: memory, CPU, processes | a slot sized to each request | a run with a lower limit is held to it |
-| F5 | one run by its id: a start returns the run's id at once; a watch streams that run's state; a stop of that run alone sends SIGTERM, waits a grace period, then kills | VM runs of hours; several VMs of one release at a time; Windows shuts down cleanly; the coordinator can idle out while a build runs | the coordinator restarts mid-build, finds its run by id, and stops it without touching the others |
-| F6 (later) | freeze and thaw a run (the cgroup freezer) | pause under pressure, resume at once | — |
-| F7 | capacity in the node status: memory total and available, CPUs, the running slots' limits | admission | — |
+| F1 | a file record store (`FASTRUN_RECORDS_DIR`) used when no ServiceAccount is mounted: the same calls as `Kube.cs`, each record a JSON file written as in §6, watches in-process | releases, apps and schedules on homepc (D1) | fastrun's conformance test passes on homepc, and a `kill -9` mid-write leaves every record readable |
+| F2 | volumes that outlive runs, and mounts of node paths on an allow-list | records, VM disks, images, exchange folders | a volume outlives runs, revisions and fastrund restarts |
+| F3 | VM slots: devices from an allow-list (`/dev/kvm`), root and a writable root, more capabilities from an allow-list if dockur needs them, and a network namespace of the slot's own with a user-mode uplink (slirp4netns or pasta) | Tiny11 VMs; each VM's passt binds its forwarded ports (3389) inside its slot, never in the namespace every WSL distro shares | two dockur VMs boot side by side in slots with user-mode networking |
+| F4 | per-run limits that may lower the release's: memory, CPU, processes | a slot sized per request | a run with a lower limit is held to it (needs cgroup v2 on homepc: W1) |
+| F5 | one run by its id: start returns the id; a watch streams its state; a stop of that run alone (SIGTERM, a grace period, then kill) | VM runs of hours; several VMs of one release; clean Windows shutdowns | the coordinator restarts mid-build, finds its run by id, and stops it alone |
+| F6 (later) | freeze and thaw a run | pause under pressure | needs cgroup v2 on homepc |
+| F7 | capacity in the node status: memory total and available, CPUs, the running slots' grants | admission (§3.2) | — |
+| F8 | a VM slot's memory control: set and read its balloon through QEMU's monitor socket in the slot | fluid slots (§3.4) | a slot's balloon follows a target the node sets |
+| F9 | a node in a WSL distro: fastrund without Kubernetes (F1) on WSL's kernel, its ports reachable from Windows | homepc (§5.2) | fastrund 1.2.x runs ad-hoc and release runs in the `buildserver` distro |
 
-On dock, also fastrund's pod memory limit and the LXC changes of §5.3.
+On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
 
 ## 10. The agents, the CLI and the e2e engine
 
-- **The guest agent** (`amb-guest`, .NET 10, a service in the base image) dials out to the coordinator through the
-  slot's user-mode network; nothing listens in the guest (P0.2 checks how the guest reaches the coordinator through
-  passt). It runs a request's steps:
-  - fetch the source bundle from the exchange share into the data disk's clone;
-  - build with `tools\Build-Agentmaster.ps1` of that commit;
-  - run a test, or the e2e engine's guest half;
-  - write artifacts to the exchange share, stream logs, and report the guest's memory and CPU.
-- **The host agent** (`amb-host`, .NET 10, a logon scheduled task outside every Agentmaster instance, like
-  `llm-bridge`):
-  - keeps a bare mirror of `K:\source\Agentmaster` on Q: and writes source bundles into exchange folders;
-  - moves artifacts from exchange folders into the store and checks their SHA-256;
-  - for `install` (later): copies a layout into a Q: slot and runs `Swap-AgentmasterLayout.ps1`;
-  - reports Windows' free commit, free physical memory, C:'s free space and a full-screen game.
+- **The guest agent** (`amb-guest`, .NET 10, in every image) **talks HTTP**: it dials the coordinator through the
+  VM's user-mode network and long-polls for its steps. ⚠ Never poll a share for instructions: the guest's SMB client
+  serves a folder listing from its lease cache, and dockur's Samba is never told of a file written behind its back
+  (measured: a host-written job file was never listed). The share stays for bulk files only (source bundles in,
+  artifacts out), opened by exact name. The agent's steps: fetch the source bundle into the data disk's clone; build
+  with that commit's `tools\Build-Agentmaster.ps1`; run a test or the e2e engine's guest half; write artifacts; stream
+  logs; report the guest's memory every 10 s (the balloon's input, §3.4).
+- **The host agent** (`amb-host`, .NET 10, a logon task outside every Agentmaster instance): the front door
+  (`localhost:2107`, and a LAN port for Caddy only); starts the distro and fastrund on demand; keeps the bare mirror;
+  copies artifacts from the exchange folders into `Q:\buildserver\store` and checks their SHA-256; reports Windows'
+  available memory, free commit, C: and Q: free space and a full-screen game every 5 s; later runs installs.
 - **The CLI `amb`** (.NET 10): `amb build release --at <commit>`, `amb test <build id> m5`,
   `amb e2e <build id> -- -m "not slow"`, `amb status`, `amb logs -f <id>`, `amb cancel <id>`,
-  `amb artifacts <build id>`. `--wait-max 270` exits 97 while the request still runs (the e2e runner's convention);
-  `--json` everywhere.
-- **The e2e engine stays Python** (D12):
-  - its guest half (`e2e/guest/provision.ps1`, `run_suite.py`) runs unchanged in an e2e slot;
-  - its host half gets the build server as a second transport beside claude-fleet: a slot instead of a desktop, a
-    fresh slot instead of a reset, the exchange folder instead of the persist folder.
+  `amb artifacts <build id>`; `--wait-max 270` exits 97 while the request still runs; `--json` everywhere.
+- **The e2e engine stays Python** (D12): its guest half runs unchanged in an e2e slot; its host half gets the build
+  server as a second transport beside claude-fleet (a slot instead of a desktop, a fresh slot instead of a reset).
 
 ## 11. Source in, artifacts out
 
-- **Builds come from commits, never from the live tree.** The host agent keeps a bare mirror
-  (`Q:\buildserver\git\agentmaster.git`; the repository's packed history is 198 MB) and fetches from
-  `K:\source\Agentmaster` by path. Uncommitted work builds only when asked, as a snapshot commit under
-  `refs/buildserver/snapshots/<id>`; no branch or HEAD moves.
-- **Into a VM:** a git bundle of what the VM's clone lacks, written into its exchange folder.
-- **Out of a VM:** the guest writes the layout, the zip and the logs to its exchange share; the host agent moves them
-  into the store and records their SHA-256 in the build's manifest.
-- **The build steps come from the commit** (its own `Build-Agentmaster.ps1`). The install steps come from the host
-  agent's versioned copy (`buildserver/steps/`), so installing an old build still uses today's swap script.
-- **Purge decisions:** the build-install skill's trigger files (`SessionModels.h`, `SessionRegistry.*`, any `.idl`,
-  widened for a TerminalControl `.idl`), new data members in a TerminalApp header, or `--purge force`; and one purge and
-  retry after a link error on a symbol the source defines.
+- **Builds come from commits, never from the live tree.** The host agent keeps the bare mirror
+  (`Q:\buildserver\git\agentmaster.git`), fetched from `K:\source\Agentmaster` by path. Uncommitted work builds only as
+  a snapshot commit under `refs/buildserver/snapshots/<id>`; no branch or HEAD moves.
+- **Into a VM:** a git bundle of what its clone lacks, written into its exchange folder.
+- **Out of a VM:** the guest writes the layout, zip and logs to its exchange share; the host agent moves them into the
+  store and records their SHA-256 in the build's manifest.
+- **The build steps come from the commit; the install steps from the host agent's versioned copy**
+  (`buildserver/steps/`).
+- **Purge decisions:** the build-install skill's triggers (`SessionModels.h`, `SessionRegistry.*`, any `.idl`, widened
+  for a TerminalControl `.idl`), new data members in a TerminalApp header, or `--purge force`; one purge and retry
+  after a link error on a symbol the source defines.
 
 ## 12. Life cycle and stability
 
+| Step | Measured |
+|---|---|
+| start the distro (cold / running) | 0.52–0.79 s / 0.33 s |
+| make a slot (overlay + a sparse data disk) | under 1 s |
+| VM start → guest agent ready | 30–44 s (75 s once, while Windows had 2.9 GB available); a changed VM configuration costs two extra reboots the first time (99 s) |
+| inside that: QEMU + UEFI, then from Windows' kernel: desktop, agent started, share answering | ~7 s; then 12.6–22.7 s, ~22 s, 24–32 s |
+| graceful stop (ACPI shutdown) | 7.6–9.9 s idle; 13.6 s with Agentmaster open |
+| image install (Tiny11 Core, ISO cached / with download) | 12½ / 16½ min |
+| VS Build Tools install in the image | 27.9 min, its 4.8 GB download included (exit 0, no reboot); then ⚠ 30+ min of servicing (TiWorker) unless stopped |
+
 - **A request's states:** `pending → starting → running → collecting → succeeded | failed | cancelled | no-capacity |
   lost`, each change an event line.
-- **Heartbeats:** the guest agent every 30 s. A slot silent for 3 minutes is stopped and its request marked `lost`;
-  a build is retried once.
-- **Restarts:** the coordinator reads its records and fastrund's runs (§9 F5) and carries on.
-- **The homelab is not needed** for homepc work once the dockur image is in the node's store.
-- **Docker Desktop not running:** the homepc site is down, and requests wait until their timeout. Who starts Docker
-  Desktop is D9, deferred.
+- **Heartbeats:** the guest agent every 10 s; a slot silent for 3 minutes is stopped and its request marked `lost`; a
+  build is retried once.
+- **Restarts:** the coordinator reads its records and fastrund's runs (F5) and carries on.
+- **The homelab is not needed** for homepc work once the dockur image is in the distro.
 - **Coexistence:** hand builds of the stock tree keep working; the allocator sees their memory as load it does not own.
 
 ## 13. Plan
 
-Each phase needs the owner's go to build and deploy, and ends with checks that a run proves.
+Each phase needs the owner's go to build and deploy, and ends with checks a run proves.
 
-**P0, proofs (no instance touched; each with a fallback):**
+**P0, proofs:**
 
-| # | Proof | Pass | Fallback |
-|---|---|---|---|
-| P0.1 | fastrund 1.2.1 in a Docker Desktop container: ad-hoc runs, its ports from Windows, its idle cost | runs answer; idle CPU and memory recorded | — |
-| P0.2 | a dockur VM as a fastrun slot, on a test build of fastrund with F2 + F3 prototyped: `NETWORK=passt`, `/dev/kvm`, the image mounted read-only; how the guest reaches the coordinator | Windows boots and the guest reaches a port of the node | run the VMs as plain Docker containers until F3 is done |
-| P0.3 | the two layers: Tiny11 Core 25H2 + the e2e tooling + the guest agent, then VS Build Tools over it | both install; sizes and idle memory recorded | the same layers on a full 25H2 image |
-| P0.4 | a build in the VM: Debug and Release, cold and incremental, 2–3 compilers, the guest page file; the data disk in a Docker volume and on a Q: mount | times within ~1.5× of native (to be agreed); no `C3859`; peaks recorded | — |
-| P0.5 | every e2e suite on the base and on the full 25H2 image, side by side | the same results, each difference explained | the full image for each suite that differs |
-| P0.6 | memory: vmmemWSL's commit and working set with slots running; a slot larger than free physical memory; KSM in Docker's VM with two e2e VMs | numbers recorded; no failure | lower budgets |
+| # | Proof | State on 2026-10-25 |
+|---|---|---|
+| P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | the distro, podman and dockur proven with a test distro; `--set-sparse` refused while WSL runs; fastrund in it not tried |
+| P0.2 | a dockur VM as a fastrun slot (F2, F3, F8 and F9 prototyped); the guest reaches the coordinator over HTTP | dockur in the distro proven with podman |
+| P0.3 | the three images: Tiny11 Core + the e2e kit + the trims; the build layer with the build's own component subset, sealed with servicing idle; Tiny11 for `am-install`; each one's size, idle memory and boot time | the base measured (§16.2); Build Tools installs on Tiny11 Core (exit 0, 28 min, 18.5 GB) |
+| P0.4 | builds in a VM: Debug and Release, cold and incremental, against native times | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs W3's space |
+| P0.5 | every e2e suite on `am-e2e` and on `am-install`, side by side | Agentmaster's portable zip runs on Tiny11 Core |
+| P0.6 | memory: balloons under load, KSM (W2), the reserves rechecked | the balloon and the memory chain measured |
 
 **The phases after P0:**
 
 | Phase | Delivers | Done when |
 |---|---|---|
-| **P1** (fastrun repo) | F1–F5, F7 | each feature's "done when" of §9 |
-| **P2** | the coordinator, its records, the host agent, the guest agent; `build` and `test`; the CLI | a Debug build of HEAD gets a build id and its artifacts while free commit stays above the reserve; two identical requests → one build; a request asked under pressure waits and starts by itself, or ends `no-capacity` at its timeout; nothing is written to K: |
-| **P3** | `e2e` on the image P0.5 chose per suite; the install lane on the full image; the weekly full run | a full suite from `amb e2e <build id>`; no slot left after a success, a failure or a cancel |
+| **P1** (fastrun repo) | F1–F5, F7–F9 | each feature's "done when" (§9) |
+| **P2** | the coordinator, its records, the host agent, the guest agent; `build` and `test`; the CLI | a Debug build of HEAD gets a build id and its artifacts while Windows keeps its 6 GB; two identical requests → one build; a request asked under pressure waits and starts by itself, or ends `no-capacity` at its timeout; nothing written to K: |
+| **P3** | `e2e` on the image P0.5 chose per suite; the install lane on `am-install`; the weekly full run | a full suite from `amb e2e <build id>`; no slot left after a success, a failure or a cancel |
 | **P4** | `install` | a dev install of a build id; an injected failure after the swap's stop rolls back |
-| **P5** | dock e2e slots (§5.3's changes) | an e2e run on dock while homepc builds |
-| deferred | `publish` and the GitHub lane (D11), Docker Desktop on demand (D9), the host native lane (D10), freeze (F6) | — |
+| **P5** | dock e2e slots (E3) | an e2e run lands on dock by its score while homepc builds |
+| deferred | `publish` (D11), the host native lane (D10, unless W4 says otherwise), freeze (F6) | — |
 
-## 14. Decisions still open
+## 14. Decisions
+
+**Made by the owner and the measurements:** E1 → §3; E2 → §5.2, §8; E4 → §4; E5 → §3.2 and §16.
+
+**Open:**
 
 | # | Decision | Recommendation |
 |---|---|---|
-| E1 | reclaim space: the two `rdpdoorway-win11-*` volumes and the unused images in Docker's data disk; later the stock build trees and the Q: leftovers | the volumes and images first (157 GB, nothing of Agentmaster's), then the rest after P2 |
-| E2 | where the build VM's disks live: Docker's data disk on C: (after E1), or that disk moved to Q: (Docker Desktop's disk image location) | C:, after E1, with the 20 GB reserve for the page file |
-| E3 | the homelab changes for dock e2e slots (§5.3) | after P3 |
-| E4 | the install lane's full 25H2 image: read the fleet's golden file, or build one of our own | read the fleet's file (one copy on Q:) |
-| E5 | the reserves and budgets: 16 GB of commit, 20 GB on C:, 24 vCPUs | set after P0.6 |
+| E3 | the homelab changes for dock's Windows slots (§5.3) | after P3; with its priority, dock then takes e2e first |
+| W1 | one restart of WSL's VM, which ends every container and other sessions' desktops: it brings cgroup v2 (for per-run limits and freeze on homepc: WSL 2.3.24 → 3.0.3, WSL dropped cgroup v1 in 2.5.1, together with a Docker Desktop that supports it; 4.35.1 here, from October 2024) and makes the site's disk sparse (§5.2) | not needed to start (VMs are bounded by QEMU and the balloon; the distro reuses its own free space). When wanted: at a quiet time, after reading both release notes |
+| W2 | KSM in the WSL VM | measure it when no other session measures memory there; then decide |
+| W3 | disk for builds: the `am-build` layer (18.5 GB) and a build VM (~40–60 GB) on Q:, which had 31–70 GB free during the tests, with 15 GB kept for other work | the third revision's reclaim list (the stock build trees in `Q:\tmp`, session leftovers on Q:); until then build requests wait or end `no-capacity: disk` |
+| W4 | builds in VMs or on the host (D10) | builds stay in VMs, as the owner chose: ~1.55× on compile work is the price of a clean, isolated build machine (a process starts in 23–31 ms there, in 109 ms on the host under Defender). The host lane (D10, deferred) is the fallback if P0.4's full build takes more than 2× the native time |
 
 ## 15. Risks
 
 | Risk | How it is contained |
 |---|---|
-| Tiny11 Core lacks something VS Build Tools, the build or the app needs, and cannot be serviced to add it | P0.3 / P0.5; the full 25H2 image is the same plan with a bigger disk |
-| a test passes on Tiny11 Core where a user's Windows 11 fails, or the reverse | P0.5's side-by-side run; the install lane and a weekly full run on the full image; no build tools in the image e2e VMs boot |
-| builds under nested virtualization (KVM inside WSL 2) are too slow | P0.4; hand builds of the stock tree remain until then |
-| the fastrun features take longer than planned | P0.2's fallback runs the VMs as plain Docker containers; the coordinator's design does not change |
-| Docker's data disk fills C: and starves the page file | the 20 GB C: reserve in admission; E1 and E2 |
-| Tiny11 Core gets no security updates | the VMs are LAN-only, take no inbound connection, live for one request or a few minutes after it, and run only this repository's code; the image is rebuilt when dockur ships a newer Tiny11 Core |
-| dock's thin pool fills | dock takes e2e slots only, after E3, with ~40 GB measured against the 80 % alert |
+| builds are slow in a VM: the guest's disk does ~2,000 random I/Os per second | measured 1.55× on compile work at equal parallelism; a build VM gets more vCPUs than the host's hand builds use (8 against 3–6 compilers); P0.4 measures a full build; above 2× builds take the host lane (D10) |
+| Tiny11 Core lacks something a build or the app needs, and cannot be serviced | measured: the app runs, and Build Tools installs (exit 0); ⚠ its servicing worker then ran for 30+ minutes, so the build image is sealed only with servicing idle (TrustedInstaller stopped, checked at the next boot) |
+| a test passes on Tiny11 Core where a user's Windows 11 fails, or the reverse | P0.5's side-by-side run; the install lane and a weekly run on `am-install`; no build tools in e2e images |
+| dockur's Core ISO is old (November 2025) and gets no updates | VMs are LAN-only, take no inbound connection, live for one request or a few minutes after it, and run only this repository's code; a fresh base from Tiny11 Builder's engine when needed (§4.1) |
+| the WSL VM fills (other sessions' VMs, page cache) | the allocator reads its free memory; balloons shrink first; the site drops clean cache after big copies |
+| dockur wipes an image folder without `windows.boot` | the image script writes the marker and checks it before every boot; images are read-only to slots |
+| the fastrun features take longer than planned | the proofs ran dockur under podman; the coordinator's design does not depend on how a slot starts |
+| dock's thin pool fills | dock takes e2e slots only, after E3, with ~20 GB counted against the 80 % alert |
 
-## 16. Evidence (2026-10-24)
+## 16. Measurements
 
-- **This PC:**
-  - `kubectl config get-contexts`: one context, server `https://192.168.50.150:6443` (k3s);
-  - `%APPDATA%\Docker\settings-store.json`: `WslEngineEnabled = True`, `KubernetesEnabled = False`,
-    `AutoStart = False`, `Cpus = 32`; `wsl -l -v`: `Ubuntu` and `docker-desktop`, both running, version 2; inside:
-    kernel `5.15.153.1-microsoft-standard-WSL2`, 31,952 MB of RAM and 8,192 MB of swap, `/dev/kvm` present,
-    `/sys/kernel/mm/ksm/run` = 0; no k3s, kind, minikube or fastrund in either distro;
-  - `Win32_OperatingSystem` / `Win32_PageFileUsage`: 63.7 GB of RAM, 18.7 GB free; commit limit 174.2 GB, 42.7 GB
-    free; page file 113,140 MB allocated, 17,055 MB used; `vmmemWSL`: private bytes 5.1 GB, working set 1.8 GB;
-  - drives: C: 53.5 GB free of 1,862 GB, Q: 94.7 GB of 931.5 GB, K: 11.6 GB of 447 GB; `docker_data.vhdx` 158.4 GB
-    and Ubuntu's `ext4.vhdx` 37.4 GB, both on C:; `docker system df -v` for the volumes; Q:'s top-level folders summed
-    file by file;
-  - `docker ps -a`: no fastrund container (only `fastrun-aot` and the BuildKit builder); a claude-desktops dockur
-    desktop running.
-- **dock**, read-only over SSH: `free -m` (6,152 MB available; swap 8,191 MB, 1,018 used), KSM `run=1`,
-  `pages_sharing=35370`; `lvs pve/data` 71.45 %; `pct config` of CTs 112–114 (8 / 10 / 10 GiB, swap 0, rootfs 8 / 24
-  / 40 GB) and `df` inside them; `/dev/kvm` on dock itself.
-- **k3s**, kubectl: fastrund's DaemonSet requests 10m CPU and 32 MiB, limits 1 GiB; node allocatable memory 8 / 10 /
-  10 GiB; `local-path` the only storage class; the PVCs.
-- **fastrun** (`K:\source\fastrun`): `Kube.cs` (Secrets and one Lease; "a local run outside k3s: then releases are
-  off"; `FASTRUN_KUBE_URL`), `Settings.cs` (limits clamped at 86,400 s, 64 GiB and 65,536 processes; the store,
-  scratch and data folders), `AppReleases.cs` (apps refuse limits), `Runtime.cs` (no devices; a writable root's
-  eleven capabilities), `proto/fastrun/v1/fastrun.proto` (`InvokeRequest` without per-run limits; `Runs.Stop`),
-  `deploy/k8s/fastrun.yaml` (the pod: privileged, host network, read-only root, its folders), `docs/progress.md`
-  ("fastrun never cancels a run because its caller went away"), and
-  `apps/yoinks/results/2026-10-05/lab-nodes.txt` ("fastrund 0.3.0 … starting on lab (127.0.0.1)").
-- **dockur:** `qemus/qemu` `src/network.sh` (master, read 2026-10-24): `NETWORK` = `passt` / `slirp` / `user`
-  selects user-mode networking; the bridge and macvtap modes need `NET_ADMIN` and `/dev/net/tun`.
-- **Tiny11:** dockur/windows's README (`core11`, 3.0 GB) and its change #1513; tiny11builder's README and
-  `docs/usage.md` (branch `winui-preview`).
-- **The homelab doc** (`K:\source\proxmox\CLAUDE.md`): dock (30 GiB, 8 GiB swap, KSM via ksmtuned), the LXCs'
-  configuration, the thin pool and `dock-pool-watch`'s 80 % alert, Caddy's workstation-service pattern (catalog,
-  docfx), the fastrun DaemonSet and its 1 GiB pod.
-- **e2e:** `e2e/host/e2e_run.py` (the claude-fleet transport, 8 GB / 6 CPUs by default), `e2e/guest/provision.ps1`
-  (what each lane installs), `e2e/README.md`.
+### 16.1 This PC (2026-10-25)
+
+- Windows 11 Pro 26200, i9-13900K (32 threads), 63.7 GB of RAM. During the tests: 2.5–8.9 GB available; commit
+  133.3–146.7 GB used of a 177.1–190.1 GB limit (the page file on C: grows and shrinks); C: 70.9–84.3 GB free; Q:
+  70.4 → 27 GB free (the test distro's disk grew to 30.8 GB; another session's Tiny11 build wrote ~13 GB); K: 10.3 GB.
+- WSL 2.3.24.0, kernel 5.15.153.1-2, no `.wslconfig`: one VM of 31.2 GB + 8 GB of swap for `docker-desktop`, `Ubuntu`
+  and the test distro; cgroups hybrid (all controllers on v1); `/dev/kvm` in every distro; KSM present and off;
+  `kvm_intel`: `nested=Y`, `enlightened_vmcs=Y`, `enable_apicv=N`.
+- Docker Desktop 4.35.1 (engine 27.3.1). Other sessions ran two dockur VMs of 8.2 and 5.3 GB during the tests.
+- vmmemWSL: working set 25.46 GB and private bytes 31.19 GB at the fullest; 18.06 / 23.48 GB after our VM gave 6 GB back.
+
+### 16.2 Tiny11 Core 25H2 in dockur 6.05 (QEMU 11.1.0), 4 vCPUs
+
+| What | Measured |
+|---|---|
+| ISO download (3.3 GB, archive.org) / check | 3 min 59 s / 9 s |
+| install, container start → guest agent ready | 16 min 34 s (12 min 26 s without the download); Windows' own record of that first boot: 203.6 s |
+| system disk (qcow2) after install / after four boots and an app | 9.2 GB / 12.1 GB |
+| Windows / WinSxS / page file | 7.79 GB / 0.39 GB / 1.4 GB (with 4 GB of RAM) |
+| at rest (4 GB guest, 389 s up) | 2,380 MB available, 1,427 MB committed, 131 processes, 93 services |
+| running and trimmable | WSearch, SysMain, DiagTrack, Spooler, DoSvc, lfsvc, CDPSvc, TermService, SearchHost, StartMenuExperienceHost, msedgewebview2 |
+| present | msiserver, AppXSvc, BITS, Task Scheduler, winget, WebView2 122.0.2365.106, BalloonService, .NET Framework 4.8.1 (release 533509), PowerShell 5.1 |
+| absent / off | Windows Update (disabled; UsoSvc gone), Defender (disabled), the VC++ runtime, Edge, hibernation; optional features cannot be listed |
+| Agentmaster v0.8.0 portable | unzip 10.4 s; runs and draws (window, side panel, PowerShell tab, badge); 103 MB working set, 34 MB private; the guest's available memory −148 MB |
+| VS 2022 Build Tools (the VCTools and UniversalBuildTools workloads with recommended components, SDKs 22621 + 26100, vcpkg, the .NET SDK) | exit 0, no reboot; bootstrapper 15.2 s, install 1,675.6 s (the 4.8 GB download at ~16 MB/s included); C: +14.59 GB (Program Files (x86) 15.6 GB, Windows Kits 3.35 GB of it; .NET SDK 9.0.319 1.01 GB; MSI package cache 0.93 GB; Windows Installer cache 0.67 GB), D: +3.93 GB (`D:\BuildTools`); MSVC 14.44.35207 (cl 19.44.35229), MSBuild; TiWorker then used 1,791 CPU-seconds until TrustedInstaller was stopped |
+
+### 16.3 Boot, stop, slot
+
+| What | Measured |
+|---|---|
+| VM start → agent ready, steady state | 30–44 s; 75 s once (boot main path 48.9 s by Windows' own record, while Windows had 2.9 GB available) |
+| phases from Windows' kernel (the Docker-volume VM, fourth boot) | desktop 12.6 s; the agent's first report at 24 s |
+| from an overlay in the test distro | 44 s (from the kernel: agent started 22.1 s, desktop 22.7 s, share answering 32.3 s) |
+| graceful stop | 7.6 s, 9.9 s idle; 13.6 s with Agentmaster open |
+| overlay + 64 GB sparse data disk | under 1 s |
+| copy of the 12.1 GB image, `docker … tar | wsl.exe … tar` | 480.6 s (25 MB/s) |
+
+### 16.4 Memory and the balloon
+
+| What | Measured |
+|---|---|
+| QEMU resident, 4 GB guest / 8 GB guest | 4.08 GB / 8.07–8.46 GB, within 1–2 min of boot |
+| balloon 8 → 3 GB / 8 → 2 GB | ~45 s / under 30 s; resident followed (3.07 GB) |
+| balloon 3 → 8 GB | 17.9 s; resident back to 8.07 GB at once |
+| what Windows got back from −6 GB | available 3.27 → 8.90 GB; vmmemWSL working set 25.46 → 20.51 GB |
+| `free-page-reporting=on` | no effect for a Windows guest |
+
+### 16.5 CPU, processes, files and compiling (guest: 4 vCPUs; host: 4 threads of 32)
+
+| Test | Host | Guest |
+|---|---|---|
+| managed SHA-256, 1 thread | 1,318 MB/s | 1,200–1,279 MB/s (91–97 %) |
+| managed SHA-256, 4 threads | 5,271 MB/s | 3,714–4,927 MB/s (70–93 %) |
+| `cmd.exe /c exit`, per process | 109 ms (Defender on the host) | 23–31 ms (no Defender) |
+| 5,000 files of 4 KB: create / read / delete per second | 2,012 / 17,033 / 10,174 (Q:) | 1,143–5,560 / 33,802–42,547 / 7,211–11,310 |
+| the engine harness: 63 C++20 files (62 objects + the link) at /MP4 | 69.9 s, 69.2 s (MSVC 19.44.35228) | 107.5 s with servicing stopped (1.55×; CPU 79 %, peak commit 3.9 GB); 115.6–158.2 s while TiWorker ran (CPU 96 %) |
+
+### 16.6 Disk
+
+**Host level** (fio in an Alpine container, 2 GB file, 15 s per test, O_DIRECT unless noted):
+
+| Where | random 4K write / read, QD32 | sequential 1M write / read, QD4 |
+|---|---|---|
+| a Docker volume (C:) | 46,705 / 71,695 IOPS | 2.09 / 4.28 GB/s |
+| the test distro's disk (Q:) | 64,092 / 87,624 IOPS | 4.75 / 7.20 GB/s |
+| an integrated distro's disk bound into a Docker Desktop container (Ubuntu, C:) | 52,439 / 99,667 IOPS (256 MB file, 10 s) | 1.55 / 4.32 GB/s |
+| a bind of `Q:\…` | 4,858 / 5,126 IOPS | 0.16 / 0.17 GB/s |
+| a bind of `C:\…` | 2,898 / 4,336 IOPS | 0.15 / 0.17 GB/s |
+| the host's own Q: (DiskSpd, OS cache off) | 75,724 / 135,619 IOPS | 975 / 6,072 MiB/s (one thread) |
+
+**In the guest** (DiskSpd, OS cache off, a 1 GB file written first so no read hits a hole):
+
+| Attachment | random 4K overwrite QD32 / QD1 | random 4K read QD32 / 4×8 | sequential fill |
+|---|---|---|---|
+| virtio-scsi, raw, cache=none, aio=native (dockur's defaults) | 2,249 / 1,877 IOPS | 1,537 / 1,658 IOPS | 329 MB/s |
+| virtio-scsi, qcow2 overlay, the same options | 2,035 / 1,700 IOPS | 2,024 IOPS | 353 MB/s |
+| virtio-scsi, raw, cache=writeback, aio=threads | 3,324 / 2,925 IOPS | 3,667 / 2,902 IOPS | 177 MB/s |
+| virtio-scsi with 4 queues, raw | 1,712 / 1,154 IOPS | 1,425 / 1,095 IOPS | 264 MB/s |
+| virtio-blk with 4 queues, raw | 2,107 / 1,763 IOPS | 1,937 / 1,873 IOPS | 222 MB/s |
+| the Docker-volume VM (qcow2 on C:), DiskSpd's own 2 GB file, writes into new space | 1,122–1,814 IOPS | (14,109–16,415: mostly holes) | 493 MiB/s at QD4 |
+
+Every attachment lands at ~1,100–3,700 IOPS, at any queue depth: each I/O pays its way through nested virtualization
+(`enable_apicv=N`), about 0.3–0.6 ms. Sequential work is fine; random work is the cost.
+
+### 16.7 dock (a week of Proxmox RRD, and SSH on 2026-10-24)
+
+32.8 GB of RAM, 26.6 GB used (median; 25.7–26.8) → 6.0–7.1 GB available; CPU 1.9–2.7 % of 16 threads; load
+0.30–0.76; swap 0.01–1.07 GB of 8 GB; iowait 0.16 %. 7-Zip: 55,384 MIPS on its 16 threads, as much as this PC's 32
+threads under their usual load (55,913).
+
+### 16.8 What the tests made, and removed afterwards
+
+- Made and removed: the Docker container and volume `bs-core11-install` and the fio volume `bsbench`; the test
+  distros `bs-measure` and `bs-sparse` (unregistered, their disks deleted); the folders `Q:\buildserver` (the image
+  copy, the VM disks, the tools, the results) and `C:\buildserver-bench`; a test folder in the Ubuntu distro. Q: was
+  back to 70.9 GB free afterwards.
+- Kept: the scripts in [`measure/`](measure/README.md) and the results in
+  [`measure/results-2026-10-25/`](measure/results-2026-10-25) (JSON, and a screenshot of Agentmaster on Tiny11 Core).
+- Not changed: either Agentmaster instance, fastrund, the homelab, any WSL or Docker Desktop setting; KSM stayed off.
+- A graceful stop of the build VM took 15.4 s (after the Build Tools install).
+
+## 17. Evidence
+
+- **The scripts:** [`measure/README.md`](measure/README.md), one per measurement.
+- **dockur:** its `/run/install.sh` (`hasBootMarker`, `cleanupStorage`), `/run/utils.sh` (`hasDisk`),
+  `environment.md` and `ballooning.md` (6.05); QEMU's command line read from the running container.
+- **Tiny11:** dockur's README (`core11` 3.0 GB, `tiny11` 5.3 GB); tiny11builder's `docs/usage.md`; claude-desktops'
+  `images/windows/build_tiny11.py` (read 2026-10-25, uncommitted work of another session).
+- **WSL:** `wsl --version`, `wsl --help` (`--manage --set-sparse`, `--move`); the release notes on GitHub: 2.5.1
+  "Remove cgroupv1 support", 2.6.2 a `wsl.conf` opt-in to cgroup v1 mounts, 3.0.3 the current release (2026-10-09).
+- **fastrun:** `Spawner.cs` (`SetUpCgroups`), `Kube.cs`, `Settings.cs`, `AppReleases.cs`, `Runtime.cs`,
+  `proto/fastrun/v1/fastrun.proto`, `deploy/k8s/fastrun.yaml`.
+- **The third revision's evidence** (2026-10-24) still holds for kubectl, Docker Desktop's settings, dock over SSH and
+  k3s; see 8a840e9c5.

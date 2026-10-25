@@ -1,0 +1,32 @@
+﻿{
+    "C":  {
+              "fillMBps":  352.9,
+              "overwriteRand4k":  {
+                                      "MiBps":  7.95,
+                                      "iops":  2034.87
+                                  },
+              "overwriteRand4kQ1":  {
+                                        "MiBps":  6.64,
+                                        "iops":  1700.36
+                                    },
+              "readRand4k":  {
+                                 "MiBps":  7.91,
+                                 "iops":  2024.13
+                             }
+          },
+    "D":  {
+              "fillMBps":  378.5,
+              "overwriteRand4k":  {
+                                      "MiBps":  7.73,
+                                      "iops":  1979.22
+                                  },
+              "overwriteRand4kQ1":  {
+                                        "MiBps":  6.76,
+                                        "iops":  1731.42
+                                    },
+              "readRand4k":  {
+                                 "MiBps":  6.94,
+                                 "iops":  1777.47
+                             }
+          }
+}

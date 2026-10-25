@@ -1,0 +1,11 @@
+{
+  "computer": "DESKTOP-M0THEG3",
+  "logicalCpus": 32,
+  "parallel": 4,
+  "compiler": "Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64",
+  "exitCode": 0,
+  "seconds": 69.2,
+  "objects": 62,
+  "exeMB": 13.0,
+  "outputTail": null
+}

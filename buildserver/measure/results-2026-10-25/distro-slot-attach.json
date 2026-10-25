@@ -1,0 +1,85 @@
+﻿{
+    "disks":  [
+                  "2 bs-d5-mq SAS RAW 16G",
+                  "3  SAS GPT 64G",
+                  "0  SAS GPT 64G",
+                  "1 bs-d3-wb-threads SAS RAW 16G",
+                  "4 bs-d4-blk SCSI RAW 16G"
+              ],
+    "bs-d3-wb-threads":  {
+                             "fillMBps":  176.7,
+                             "overwriteRand4k":  {
+                                                     "MiBps":  12.99,
+                                                     "iops":  3324.65
+                                                 },
+                             "overwriteRand4kQ1":  {
+                                                       "MiBps":  11.43,
+                                                       "iops":  2925.79
+                                                   },
+                             "readRand4k":  {
+                                                "MiBps":  14.32,
+                                                "iops":  3667.17
+                                            },
+                             "readRand4kT4":  {
+                                                  "MiBps":  11.34,
+                                                  "iops":  2902.91
+                                              }
+                         },
+    "bs-d5-mq":  {
+                     "fillMBps":  263.7,
+                     "overwriteRand4k":  {
+                                             "MiBps":  6.69,
+                                             "iops":  1712.54
+                                         },
+                     "overwriteRand4kQ1":  {
+                                               "MiBps":  4.51,
+                                               "iops":  1154.84
+                                           },
+                     "readRand4k":  {
+                                        "MiBps":  5.57,
+                                        "iops":  1425.89
+                                    },
+                     "readRand4kT4":  {
+                                          "MiBps":  4.28,
+                                          "iops":  1095.71
+                                      }
+                 },
+    "bs-d4-blk":  {
+                      "fillMBps":  221.9,
+                      "overwriteRand4k":  {
+                                              "MiBps":  8.23,
+                                              "iops":  2107.74
+                                          },
+                      "overwriteRand4kQ1":  {
+                                                "MiBps":  6.89,
+                                                "iops":  1763.51
+                                            },
+                      "readRand4k":  {
+                                         "MiBps":  7.57,
+                                         "iops":  1937
+                                     },
+                      "readRand4kT4":  {
+                                           "MiBps":  7.32,
+                                           "iops":  1873.09
+                                       }
+                  },
+    "baseline":  {
+                     "fillMBps":  329,
+                     "overwriteRand4k":  {
+                                             "MiBps":  8.79,
+                                             "iops":  2249.51
+                                         },
+                     "overwriteRand4kQ1":  {
+                                               "MiBps":  7.33,
+                                               "iops":  1877.43
+                                           },
+                     "readRand4k":  {
+                                        "MiBps":  6.01,
+                                        "iops":  1537.53
+                                    },
+                     "readRand4kT4":  {
+                                          "MiBps":  6.48,
+                                          "iops":  1658.56
+                                      }
+                 }
+}

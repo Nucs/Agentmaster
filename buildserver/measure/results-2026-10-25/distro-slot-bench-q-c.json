@@ -1,0 +1,45 @@
+﻿{
+    "host":  "DOCKERW-FJQLMMU",
+    "logicalCpus":  4,
+    "threads":  4,
+    "workDir":  "C:\\bs\\bench",
+    "cpu1":  {
+                 "MBps":  1279.3,
+                 "seconds":  0.8
+             },
+    "cpuN":  {
+                 "MBps":  4266.8,
+                 "slowestLoopSeconds":  0.96,
+                 "wallSeconds":  1.64
+             },
+    "process":  {
+                    "msPerProcess":  23.89
+                },
+    "smallFiles":  {
+                       "createPerSec":  1143,
+                       "readPerSec":  42547,
+                       "deletePerSec":  11161
+                   },
+    "disk":  {
+                 "randWrite4kForced":  {
+                                           "MiBps":  7.78,
+                                           "iops":  1992.9
+                                       },
+                 "randWrite4k":  {
+                                     "MiBps":  6.93,
+                                     "iops":  1773.57
+                                 },
+                 "randRead4k":  {
+                                    "MiBps":  57.48,
+                                    "iops":  14714.59
+                                },
+                 "seqWrite1m":  {
+                                    "MiBps":  976.08,
+                                    "iops":  976.08
+                                },
+                 "seqRead1m":  {
+                                   "MiBps":  5676.1,
+                                   "iops":  5676.1
+                               }
+             }
+}

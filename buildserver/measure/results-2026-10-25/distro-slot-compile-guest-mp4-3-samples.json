@@ -1,0 +1,343 @@
+﻿{
+    "peakCommittedMB":  null,
+    "minAvailableMB":  null,
+    "meanCpu":  0,
+    "samples":  [
+                    {
+                        "t":  "06:01:50",
+                        "committedMB":  6672,
+                        "availableMB":  2473,
+                        "cpu":  63,
+                        "topCpuTotal":  "TiWorker 1667s, System 454s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:01:53",
+                        "committedMB":  6449,
+                        "availableMB":  2720,
+                        "cpu":  93,
+                        "topCpuTotal":  "TiWorker 1670s, System 457s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:01:56",
+                        "committedMB":  6029,
+                        "availableMB":  3071,
+                        "cpu":  83,
+                        "topCpuTotal":  "TiWorker 1673s, System 461s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:01:59",
+                        "committedMB":  5886,
+                        "availableMB":  3321,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1676s, System 464s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:03",
+                        "committedMB":  5548,
+                        "availableMB":  3628,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1679s, System 467s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:06",
+                        "committedMB":  5540,
+                        "availableMB":  3570,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1682s, System 470s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:09",
+                        "committedMB":  5142,
+                        "availableMB":  3978,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1685s, System 473s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:12",
+                        "committedMB":  4492,
+                        "availableMB":  4543,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1689s, System 476s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:15",
+                        "committedMB":  3660,
+                        "availableMB":  5318,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1692s, System 479s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:19",
+                        "committedMB":  3413,
+                        "availableMB":  5867,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1695s, System 480s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:22",
+                        "committedMB":  3752,
+                        "availableMB":  5520,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1698s, System 480s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:25",
+                        "committedMB":  3533,
+                        "availableMB":  5711,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1701s, System 480s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:28",
+                        "committedMB":  3441,
+                        "availableMB":  5818,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1704s, System 480s, powershell 32s"
+                    },
+                    {
+                        "t":  "06:02:39",
+                        "committedMB":  3656,
+                        "availableMB":  5606,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1713s, System 481s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:02:48",
+                        "committedMB":  3670,
+                        "availableMB":  5595,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1721s, System 481s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:02:53",
+                        "committedMB":  3674,
+                        "availableMB":  5604,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1726s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:02:56",
+                        "committedMB":  3989,
+                        "availableMB":  5289,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1729s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:02:59",
+                        "committedMB":  3424,
+                        "availableMB":  5827,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1732s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:02",
+                        "committedMB":  3895,
+                        "availableMB":  5360,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1735s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:06",
+                        "committedMB":  3990,
+                        "availableMB":  5278,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1738s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:09",
+                        "committedMB":  3536,
+                        "availableMB":  5702,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1741s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:12",
+                        "committedMB":  3984,
+                        "availableMB":  5270,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1744s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:15",
+                        "committedMB":  3973,
+                        "availableMB":  5275,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1747s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:18",
+                        "committedMB":  3821,
+                        "availableMB":  5448,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1750s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:21",
+                        "committedMB":  3871,
+                        "availableMB":  5377,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1753s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:24",
+                        "committedMB":  4198,
+                        "availableMB":  5086,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1756s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:27",
+                        "committedMB":  3786,
+                        "availableMB":  5480,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1759s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:30",
+                        "committedMB":  4202,
+                        "availableMB":  5064,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1762s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:33",
+                        "committedMB":  3785,
+                        "availableMB":  5475,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1765s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:36",
+                        "committedMB":  3821,
+                        "availableMB":  5428,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1768s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:40",
+                        "committedMB":  4073,
+                        "availableMB":  5199,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1771s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:43",
+                        "committedMB":  3992,
+                        "availableMB":  5263,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1774s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:46",
+                        "committedMB":  3910,
+                        "availableMB":  5364,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1777s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:49",
+                        "committedMB":  3886,
+                        "availableMB":  5370,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1780s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:52",
+                        "committedMB":  3803,
+                        "availableMB":  5451,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1784s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:55",
+                        "committedMB":  3996,
+                        "availableMB":  5269,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1786s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:03:58",
+                        "committedMB":  3943,
+                        "availableMB":  5305,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1789s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:01",
+                        "committedMB":  3832,
+                        "availableMB":  5274,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:04",
+                        "committedMB":  3724,
+                        "availableMB":  5393,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:07",
+                        "committedMB":  3852,
+                        "availableMB":  5270,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:10",
+                        "committedMB":  4159,
+                        "availableMB":  4961,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:13",
+                        "committedMB":  4549,
+                        "availableMB":  4575,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:16",
+                        "committedMB":  4569,
+                        "availableMB":  4544,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 482s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:20",
+                        "committedMB":  3995,
+                        "availableMB":  5101,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 483s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:23",
+                        "committedMB":  4260,
+                        "availableMB":  4839,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 483s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:26",
+                        "committedMB":  4257,
+                        "availableMB":  4831,
+                        "cpu":  100,
+                        "topCpuTotal":  "TiWorker 1791s, System 483s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:29",
+                        "committedMB":  2975,
+                        "availableMB":  6055,
+                        "cpu":  33,
+                        "topCpuTotal":  "TiWorker 1791s, System 483s, powershell 33s"
+                    },
+                    {
+                        "t":  "06:04:32",
+                        "committedMB":  2636,
+                        "availableMB":  6214,
+                        "cpu":  52,
+                        "topCpuTotal":  "TiWorker 1791s, System 486s, powershell 33s"
+                    }
+                ]
+}

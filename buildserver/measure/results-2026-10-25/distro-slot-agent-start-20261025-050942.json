@@ -1,0 +1,18 @@
+﻿{
+    "now":  "2026-10-25T05:09:44.2745772-07:00",
+    "lastBoot":  "2026-10-25T05:09:10.5000000-07:00",
+    "uptimeSeconds":  34,
+    "shellAfterBootSeconds":  22.7,
+    "agentAfterBootSeconds":  22.1,
+    "shareAfterBootSeconds":  32.3,
+    "caption":  "Microsoft Windows 11 Pro",
+    "build":  "26200",
+    "ramTotalMB":  8187,
+    "ramFreeMB":  6441,
+    "commitMB":  1489,
+    "commitLimitMB":  10107,
+    "diskSizeGB":  63.75,
+    "diskFreeGB":  52.58,
+    "processes":  127,
+    "servicesRunning":  86
+}
