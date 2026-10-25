@@ -182,6 +182,11 @@ def e2e_check_steps() -> list[dict]:
          "args": ["/c", "type C:\\e2e\\am\\.am-version"]},
         {"id": "hosts", "kind": "run", "command": "cmd.exe", "timeoutS": 60,
          "args": ["/c", "findstr /i /c:api.anthropic.com C:\\Windows\\System32\\drivers\\etc\\hosts"]},
+        # The suite was written on 1600x900 claude-fleet desktops; the slot driver asks the VM for the same size.
+        {"id": "screen", "kind": "run", "command": "powershell.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command",
+                  "Add-Type -AssemblyName System.Windows.Forms; $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+                  "'screen {0}x{1}' -f $b.Width, $b.Height; if ($b.Width -ne 1600 -or $b.Height -ne 900) { exit 1 }"]},
     ]
 
 

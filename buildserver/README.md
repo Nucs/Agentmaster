@@ -2,7 +2,8 @@
 
 A service that builds, tests and e2e-runs Agentmaster on demand, in slots sized to what this PC (and later dock) has
 free. The design, the owner's decisions and every measured number are in [`DESIGN.md`](DESIGN.md); this file says what
-exists so far and how to use it. **Status (2026-10-25): P0.1 and P0.2 passed; Phase 1 runs on this PC: the site distro
+exists so far and how to use it. **Status (2026-10-25): P0.1, P0.2 and P0.5 passed (e2e on Tiny11 Core matched a full
+Windows 11 on 45 of 48 tests, the rest timing; the e2e image stays Core); Phase 1 runs on this PC: the site distro
 holds the images `am-base` (Tiny11 Core + the guest agent's bootstrap) and `am-e2e` (the e2e tooling), and
 `amb import` + `amb e2e` run a suite on a build in a fresh VM that leaves nothing behind whether the run passes, fails,
 is cancelled or loses its VM (DESIGN.md §13 "Phase 1 as built", §16.10).**
@@ -54,6 +55,8 @@ python buildserver/image/images.py list
   extracted.
 - ⚠ A boot passes the image's own dockur version (read from its `windows.base`): dockur reinstalls Windows over a slot
   whose `VERSION` differs (DESIGN.md §15).
+- Every slot's screen is 1600×900, the claude-fleet desktops' size the e2e suite was written against (dockur's own
+  default came up at ~1024×768); `images.py check` checks it.
 
 ## Build and test
 

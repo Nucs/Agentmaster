@@ -152,7 +152,8 @@ public static class Commands
 /// which slirp4netns maps to the distro's loopback (measured: without the option nothing answers there). Nothing is
 /// added to the network namespace WSL shares with Docker Desktop.</item>
 /// <item>A virtio balloon device is always attached (dockur's own balloon controller stays off: BALLOONING=N is its
-/// default); the coordinator sets it through QEMU's monitor (<c>hmp.py</c>).</item>
+/// default); the coordinator sets it through QEMU's monitor (<c>hmp.py</c>). The screen is 1600×900, the claude-fleet
+/// desktops' size (<see cref="QemuArguments"/>).</item>
 /// </list>
 /// </remarks>
 public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanSlotDriver> log) : ISlotDriver
@@ -165,6 +166,20 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         // podman warns on every call under WSL's cgroups v1; the warning would fill the logs.
         ["PODMAN_IGNORE_CGROUPSV1_WARNING"] = "1",
     };
+
+    /// <summary>QEMU's extra arguments for every slot (dockur's <c>ARGUMENTS</c>): the balloon device, and the screen
+    /// size the guest's display driver picks at boot.</summary>
+    /// <remarks>
+    /// <para>The balloon: dockur's own balloon controller stays off (BALLOONING=N is its default); the coordinator sets
+    /// the device's target through QEMU's monitor (<c>hmp.py</c>).</para>
+    /// <para>The screen: Windows' VirtIO GPU driver offers a fixed mode list plus the size the device announces in its
+    /// EDID, and picks that one at boot; <c>-global</c> sets it on dockur's own <c>-vga virtio</c> device. 1600×900 is
+    /// the claude-fleet desktops' size (claude-desktops fleet/windows_host.py), which the e2e suite was written against.
+    /// Without it a slot came up at ~1024×768 (a maximized window 995×721, measured 2026-10-25) and SP-06's side-panel
+    /// button was off screen.</para>
+    /// </remarks>
+    internal const string QemuArguments =
+        "-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on -global virtio-vga.xres=1600 -global virtio-vga.yres=900";
 
     /// <inheritdoc/>
     public string Name => "podman";
@@ -196,7 +211,7 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
             "-e", "DISK_FMT=qcow2",
             "-e", "NETWORK=user",
             "-e", "TZ=UTC",
-            "-e", "ARGUMENTS=-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on",
+            "-e", "ARGUMENTS=" + QemuArguments,
         ];
         if (spec.InstallVersion is not null)
         {

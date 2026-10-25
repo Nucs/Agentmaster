@@ -254,10 +254,12 @@ week's median): 6.3 − 2 = **4.3 GB**. vCPUs had room on both.
   that a user's PC fails (a portable zip missing a runtime DLL), so e2e VMs never boot the build image; and the
   install lane tests what Windows does around an installer (SmartScreen's "Run anyway", the mark of the web, UAC,
   Apps & Features), which Tiny11 Core has switched off.
-- **Not in any image:** `claude.exe` (the Standard lane copies it per run from the store's cache, as today), Git's
-  credentials, any token.
-- **e2e on Tiny11 Core is not e2e on Windows 11:** a suite moves to `am-e2e` only after P0.5 shows the same results
-  there and on a full Windows 11; a weekly run of every suite stays on `am-install` (the closest to a user's Windows).
+- **Not in any image:** Git's credentials, any token. `claude.exe` is in `am-e2e` as built (provision.ps1's pinned
+  2.1.291 in the layer's cache, `%USERPROFILE%\.local\bin`): it is a cache, not a pin, since a run that asks for
+  another version (`-ClaudeVersion`) gets it installed by the same provision step.
+- **e2e on Tiny11 Core matched a full Windows 11** (P0.5, §16.11: the same outcome on 45 of 48 tests, the 3 others
+  timing and one UI Automation error), so the suites run on `am-e2e`; a weekly run of every suite stays on
+  `am-install` (the closest to a user's Windows).
 
 ### 4.3 How an image is made
 
@@ -536,7 +538,7 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 |---|---|---|
 | P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | **passed 2026-10-25** (§16.9): the distro made by `site/sitectl.py create` in 11.5 s; production's fastrund image in it answers `/healthz` from Windows 0.36 s after `podman run`, runs ad-hoc scripts (the first 2.6 s after its start, then ~15 ms from Windows), 30 MB resident; found: Windows reaches it only at the distro's address, its HTTPS registry pulls fail (plain HTTP through Traefik works), slots run without cgroups |
 | P0.2 | the slot chain through the coordinator: a base image installed by a request, then booted through an overlay, one command through its guest agent, a graceful stop | **passed 2026-10-25** (§16.10): `am-base` made from Tiny11 Core in 13.1 min (the agent's hello after 751 s), booted and ready 43 s after the request, `ver` run, gone 9 s after the shutdown step; found: a boot must pass the image's own dockur `VERSION`, or dockur reinstalls Windows over the slot |
-| P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | Agentmaster's portable zip runs on Tiny11 Core |
+| P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | **passed 2026-10-25** (§16.11): the same build and 48 tests of six suites on `am-e2e` and on a claude-fleet desktop: the same outcome on 45; the 3 that differ are the TAB-K1 race's timing (two parametrized probes, a `needs_fix` defect of that build, on opposite sides in the two runs) and one UI Automation COM error on the full desktop. Test times equal (24.9 / 25.3 min). **`am-e2e` stays on Tiny11 Core** |
 | P0.4 | a full build in a VM: Debug, cold and incremental, against native (W4: over 2× native → the host lane) | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs ~55 GB of Q: while it runs (W3) |
 
 **Then two tracks in parallel:**
@@ -561,8 +563,8 @@ failed, cancelled, a lost VM) left no container, slot folder or share behind (§
 three ways: there is no host agent yet (the coordinator reads Windows' numbers through WSL's interop, and `amb` wakes it
 through `coordinator-up.sh`); the e2e engine's second transport is the guest agent's run step (run_suite.py and
 provision.ps1 run unchanged, with the slot's share mapped to Z:); and each slot has a liveness watch (a VM that stops by
-itself is given up within ~30 s), which the table did not list. Still owed for Phase 1's own scope: P0.5 (Core against a
-full Windows 11, side by side) and a full-suite run on `am-e2e`.
+itself is given up within ~30 s), which the table did not list. P0.5 passed (§16.11), so the e2e image stays on Tiny11
+Core. Still owed for Phase 1's own scope: a full-suite run on `am-e2e` (`--run-timeout`: it takes hours).
 
 ## 14. Decisions
 
@@ -732,6 +734,36 @@ the request's own events (`amb logs <id>`).
 | a lost VM: QEMU killed inside the slot during a 600 s step | `Lost` 29 s after the kill ("its VM stopped by itself"): the slot manager's liveness watch asks podman every 15 s and gives a slot up at the second "not running"; without it the silence limit (3 min) would have ended it, and during a boot only the hello timeout (10 min). Nothing left |
 | the site's disk | `ext4.vhdx` 23.4 GB on Q: holding 12.4 GB: it is not sparse (W1), so the 3.3 GB and 7.7 GB ISOs' blocks stay allocated; ext4 reuses them. Q: 26.1 GB free afterwards |
 | the guest's route to the coordinator | dockur's passt (guest 10.0.2.100, gateway 10.0.2.1) → the container's slirp4netns, which maps 10.0.2.2 to the distro's loopback → `0.0.0.0:2207` |
+| a request under pressure (an `images.py check` of `am-e2e` while a claude-fleet desktop held 8 GB) | `waiting: homepc: memory` for 20 min (Windows had 6.2–6.3 GB available: homepc's share 0.2 GB), then placed by itself 16 s after the desktop was deleted, with a partial grant (3.2 of its preferred 4 GB, score 0.80); ready in 60 s; the screen 1600×900; the VM stopped by itself 7 s after its shutdown step |
+
+### 16.11 P0.5: e2e on Tiny11 Core against a full Windows 11 (2026-10-25)
+
+The same build (`b20261025-1`: `Agentmaster_0.8.1.0_x64.zip`, SHA-256 `cc9e69c99828…`, from 8932908db) and the same six
+suites at e2e commit 8983169ac (`test_smoke`, `test_tab_menu`, `test_side_panel`, `test_accessibility`,
+`test_workspace`, `test_cli`: 48 tests), once in an `am-e2e` slot through `amb e2e` (request r20261025-101340-29b0e6),
+once on a claude-fleet desktop (`am-e2e-1`, the fleet's Tiny11 25H2 golden image) through `e2e/host/e2e_run.py`
+(run `p05-full-20261025`), one after the other, each at 8 GB / 6 vCPU. Compared by
+[`measure/p05_compare.py`](measure/p05_compare.py) (result: `measure/results-2026-10-25/p05-core-vs-full.json`).
+
+| What | `am-e2e` (Tiny11 Core) | claude-fleet desktop (Tiny11 25H2) |
+|---|---|---|
+| until the suite starts | 58 s (boot to the agent's hello 57 s, staging) + provision 35 s (only the build under test) | create 67 s + provision 185 s (every tool from the persist cache) |
+| the suite | 24.9 min of tests: 39 passed, 9 failed | 25.3 min of tests: 38 passed, 10 failed |
+| per test | the same within noise (e.g. 25.3 / 26.6 s, 47.3 / 45.5 s, 31.9 / 31.9 s) | |
+| after the suite | the VM did not stop by itself for 97 s (dockur's ACPI window; capped at 20 s since) | the desktop deleted |
+
+- **Same outcome on 45 of 48.** Both fail the same 7 `needs_fix` tests (TCM-K2, SP-K3, TAB-K3 ×2, A11Y-K1 ×3: fixes
+  that came after 8932908db) and `test_panel_state_survives_a_restart` (SP-06; the '«' button had no rectangle after
+  the restart on both, at either screen size), and pass the other 37.
+- **The 3 that differ:** `test_closing_one_of_two_windows_keeps_its_claude_tab[400]` and `[475]` probe the TAB-K1 race
+  at fixed delays after a tab switch; on this unfixed build the race was hit at 475 ms on Core and at 400 ms on the
+  full desktop: timing, not the image. `test_a_shell_focused_reopen_starts_the_last_claude_tab` failed on the full
+  desktop only, on a UI Automation COM error (`-2147220991`) while waiting for a dialog to close; it passed on Core.
+- **The screen size was not the cause, but it is fixed anyway:** the slots came up at ~1024×768 (dockur's default
+  EDID), the fleet's desktops at 1600×900; slots now get 1600×900 too (`PodmanSlotDriver.QemuArguments`), checked by
+  `images.py check`.
+- **Decision:** `am-e2e` stays a layer over Tiny11 Core (E4): nothing the suite does needed what Core leaves out, and
+  a Core slot is ready for its suite in 1.5 min against 4.2 for a fleet desktop.
 
 ## 17. Evidence
 

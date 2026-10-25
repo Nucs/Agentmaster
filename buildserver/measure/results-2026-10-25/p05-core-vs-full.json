@@ -1,0 +1,363 @@
+{
+  "tests": [
+    {
+      "test": "suites.test_accessibility::test_known_defect_a_hit_test_passes_through_a_dialog",
+      "core": "passed",
+      "coreSeconds": 3.352,
+      "full": "passed",
+      "fullSeconds": 3.242
+    },
+    {
+      "test": "suites.test_accessibility::test_the_large_paste_warning_is_readable",
+      "core": "failed",
+      "coreSeconds": 12.172,
+      "full": "failed",
+      "fullSeconds": 12.449
+    },
+    {
+      "test": "suites.test_accessibility::test_the_page_names_its_glyph_buttons_and_cards",
+      "core": "failed",
+      "coreSeconds": 19.68,
+      "full": "failed",
+      "fullSeconds": 20.109
+    },
+    {
+      "test": "suites.test_accessibility::test_the_quit_confirmation_is_readable",
+      "core": "failed",
+      "coreSeconds": 29.304,
+      "full": "failed",
+      "fullSeconds": 30.229
+    },
+    {
+      "test": "suites.test_accessibility::test_the_selection_is_readable_on_every_surface",
+      "core": "failed",
+      "coreSeconds": 44.643,
+      "full": "failed",
+      "fullSeconds": 45.396
+    },
+    {
+      "test": "suites.test_accessibility::test_the_tab_says_its_session_state",
+      "core": "failed",
+      "coreSeconds": 29.26,
+      "full": "failed",
+      "fullSeconds": 29.471
+    },
+    {
+      "test": "suites.test_cli::test_a_plain_shell_reads_the_installs_own_profile",
+      "core": "passed",
+      "coreSeconds": 1.019,
+      "full": "passed",
+      "fullSeconds": 1.543
+    },
+    {
+      "test": "suites.test_side_panel::test_card_context_menu",
+      "core": "passed",
+      "coreSeconds": 19.263,
+      "full": "passed",
+      "fullSeconds": 20.008
+    },
+    {
+      "test": "suites.test_side_panel::test_card_menu_keeps_the_peek",
+      "core": "failed",
+      "coreSeconds": 34.784,
+      "full": "failed",
+      "fullSeconds": 34.726
+    },
+    {
+      "test": "suites.test_side_panel::test_collapse_and_dock",
+      "core": "passed",
+      "coreSeconds": 20.039,
+      "full": "passed",
+      "fullSeconds": 20.425
+    },
+    {
+      "test": "suites.test_side_panel::test_follow_peek_and_jump",
+      "core": "passed",
+      "coreSeconds": 33.77,
+      "full": "passed",
+      "fullSeconds": 35.713
+    },
+    {
+      "test": "suites.test_side_panel::test_panel_lists_this_windows_sessions",
+      "core": "passed",
+      "coreSeconds": 43.976,
+      "full": "passed",
+      "fullSeconds": 43.81
+    },
+    {
+      "test": "suites.test_side_panel::test_panel_state_survives_a_restart",
+      "core": "failed",
+      "coreSeconds": 19.702,
+      "full": "failed",
+      "fullSeconds": 28.23
+    },
+    {
+      "test": "suites.test_side_panel::test_plus_card_launch_takes_one_click_with_its_menu_open",
+      "core": "passed",
+      "coreSeconds": 23.946,
+      "full": "passed",
+      "fullSeconds": 24.375
+    },
+    {
+      "test": "suites.test_side_panel::test_plus_launcher_card",
+      "core": "passed",
+      "coreSeconds": 25.446,
+      "full": "passed",
+      "fullSeconds": 24.8
+    },
+    {
+      "test": "suites.test_side_panel::test_sum_off_card_hover_opens_no_rich_card",
+      "core": "passed",
+      "coreSeconds": 28.731,
+      "full": "passed",
+      "fullSeconds": 29.414
+    },
+    {
+      "test": "suites.test_side_panel::test_sum_off_lets_the_cards_fill_the_panel",
+      "core": "passed",
+      "coreSeconds": 20.033,
+      "full": "passed",
+      "fullSeconds": 19.732
+    },
+    {
+      "test": "suites.test_smoke::test_launched_session_shows_on_every_surface",
+      "core": "passed",
+      "coreSeconds": 25.303,
+      "full": "passed",
+      "fullSeconds": 26.56
+    },
+    {
+      "test": "suites.test_tab_menu::test_a_shell_focused_reopen_starts_the_last_claude_tab",
+      "core": "passed",
+      "coreSeconds": 43.106,
+      "full": "failed",
+      "fullSeconds": 41.702
+    },
+    {
+      "test": "suites.test_tab_menu::test_close_other_tabs_asks_once",
+      "core": "passed",
+      "coreSeconds": 35.955,
+      "full": "passed",
+      "fullSeconds": 34.684
+    },
+    {
+      "test": "suites.test_tab_menu::test_close_tab_asks_and_keeps_the_session",
+      "core": "passed",
+      "coreSeconds": 40.632,
+      "full": "passed",
+      "fullSeconds": 39.852
+    },
+    {
+      "test": "suites.test_tab_menu::test_copy_puts_the_sessions_facts_on_the_clipboard",
+      "core": "passed",
+      "coreSeconds": 34.069,
+      "full": "passed",
+      "fullSeconds": 31.585
+    },
+    {
+      "test": "suites.test_tab_menu::test_fork_on_a_model_and_on_a_specified_model",
+      "core": "passed",
+      "coreSeconds": 42.081,
+      "full": "passed",
+      "fullSeconds": 40.696
+    },
+    {
+      "test": "suites.test_tab_menu::test_fork_session_branches_the_conversation",
+      "core": "passed",
+      "coreSeconds": 44.298,
+      "full": "passed",
+      "fullSeconds": 48.077
+    },
+    {
+      "test": "suites.test_tab_menu::test_known_defect_a_claude_focused_reopen_also_starts_the_last_claude_tab",
+      "core": "passed",
+      "coreSeconds": 32.531,
+      "full": "passed",
+      "fullSeconds": 39.225
+    },
+    {
+      "test": "suites.test_tab_menu::test_known_defect_blank_rename_shows_claudes_own_title",
+      "core": "passed",
+      "coreSeconds": 22.644,
+      "full": "passed",
+      "fullSeconds": 23.02
+    },
+    {
+      "test": "suites.test_tab_menu::test_menu_fits_the_tab",
+      "core": "passed",
+      "coreSeconds": 40.836,
+      "full": "passed",
+      "fullSeconds": 34.899
+    },
+    {
+      "test": "suites.test_tab_menu::test_move_tab_reorders_the_strip",
+      "core": "passed",
+      "coreSeconds": 39.856,
+      "full": "passed",
+      "fullSeconds": 43.066
+    },
+    {
+      "test": "suites.test_tab_menu::test_move_tab_to_new_window",
+      "core": "passed",
+      "coreSeconds": 23.769,
+      "full": "passed",
+      "fullSeconds": 21.774
+    },
+    {
+      "test": "suites.test_tab_menu::test_new_session_here_starts_a_fresh_session",
+      "core": "passed",
+      "coreSeconds": 28.912,
+      "full": "passed",
+      "fullSeconds": 27.659
+    },
+    {
+      "test": "suites.test_tab_menu::test_open_in_explorer_opens_the_folder",
+      "core": "passed",
+      "coreSeconds": 20.204,
+      "full": "passed",
+      "fullSeconds": 24.047
+    },
+    {
+      "test": "suites.test_tab_menu::test_position_decides_what_is_enabled",
+      "core": "passed",
+      "coreSeconds": 47.342,
+      "full": "passed",
+      "fullSeconds": 45.515
+    },
+    {
+      "test": "suites.test_tab_menu::test_rename_renames_the_session_everywhere",
+      "core": "passed",
+      "coreSeconds": 25.226,
+      "full": "passed",
+      "fullSeconds": 26.384
+    },
+    {
+      "test": "suites.test_tab_menu::test_restart_restores_the_renamed_tab_dormant",
+      "core": "passed",
+      "coreSeconds": 41.975,
+      "full": "passed",
+      "fullSeconds": 41.354
+    },
+    {
+      "test": "suites.test_tab_menu::test_restart_session_resumes_the_same_conversation",
+      "core": "passed",
+      "coreSeconds": 34.891,
+      "full": "passed",
+      "fullSeconds": 37.532
+    },
+    {
+      "test": "suites.test_tab_menu::test_show_transcript_mark_unread_favorite",
+      "core": "passed",
+      "coreSeconds": 39.305,
+      "full": "passed",
+      "fullSeconds": 43.253
+    },
+    {
+      "test": "suites.test_tab_menu::test_tags_from_the_tab_menu_take_the_keyboard",
+      "core": "failed",
+      "coreSeconds": 32.728,
+      "full": "failed",
+      "fullSeconds": 32.568
+    },
+    {
+      "test": "suites.test_tab_menu::test_triage_item_follows_the_state",
+      "core": "passed",
+      "coreSeconds": 31.862,
+      "full": "passed",
+      "fullSeconds": 31.937
+    },
+    {
+      "test": "suites.test_workspace::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs[250]",
+      "core": "passed",
+      "coreSeconds": 31.629,
+      "full": "passed",
+      "fullSeconds": 32.372
+    },
+    {
+      "test": "suites.test_workspace::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs[325]",
+      "core": "passed",
+      "coreSeconds": 32.013,
+      "full": "passed",
+      "fullSeconds": 32.403
+    },
+    {
+      "test": "suites.test_workspace::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs[400]",
+      "core": "passed",
+      "coreSeconds": 31.841,
+      "full": "passed",
+      "fullSeconds": 32.447
+    },
+    {
+      "test": "suites.test_workspace::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs[475]",
+      "core": "passed",
+      "coreSeconds": 32.054,
+      "full": "passed",
+      "fullSeconds": 32.196
+    },
+    {
+      "test": "suites.test_workspace::test_a_close_right_after_a_tab_switch_keeps_the_claude_tabs[550]",
+      "core": "passed",
+      "coreSeconds": 31.914,
+      "full": "passed",
+      "fullSeconds": 32.082
+    },
+    {
+      "test": "suites.test_workspace::test_close_all_windows_keeps_the_claude_tab",
+      "core": "passed",
+      "coreSeconds": 27.157,
+      "full": "passed",
+      "fullSeconds": 26.864
+    },
+    {
+      "test": "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[325]",
+      "core": "passed",
+      "coreSeconds": 41.044,
+      "full": "passed",
+      "fullSeconds": 41.14
+    },
+    {
+      "test": "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[400]",
+      "core": "passed",
+      "coreSeconds": 41.613,
+      "full": "failed",
+      "fullSeconds": 42.712
+    },
+    {
+      "test": "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[475]",
+      "core": "failed",
+      "coreSeconds": 41.857,
+      "full": "passed",
+      "fullSeconds": 41.516
+    },
+    {
+      "test": "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[None]",
+      "core": "passed",
+      "coreSeconds": 43.555,
+      "full": "passed",
+      "fullSeconds": 42.247
+    }
+  ],
+  "totals": {
+    "core": {
+      "passed": 39,
+      "failed": 9,
+      "error": 0,
+      "skipped": 0,
+      "absent": 0
+    },
+    "full": {
+      "passed": 38,
+      "failed": 10,
+      "error": 0,
+      "skipped": 0,
+      "absent": 0
+    }
+  },
+  "coreSeconds": 1491.3220000000001,
+  "fullSeconds": 1515.04,
+  "differ": [
+    "suites.test_tab_menu::test_a_shell_focused_reopen_starts_the_last_claude_tab",
+    "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[400]",
+    "suites.test_workspace::test_closing_one_of_two_windows_keeps_its_claude_tab[475]"
+  ]
+}
