@@ -309,9 +309,11 @@ public sealed class E2eJob : VmJob
             Directory.CreateDirectory(ShareFile(lease, "e2e/out"));
             context.Event("slot", $"staged build {build.Id} ({zip.Name}) and the suite from {suite}");
 
+            // The am-e2e layer ran provision.ps1 once with its cache on C: (Claude Code, Git, PowerShell 7, the venv's
+            // wheels): with the same cache here every step but the build under test finds itself in place and skips.
             await RunAsync(context, lease, new GuestStep("provision", StepKinds.Run, Command: "powershell.exe",
                 Args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", @"Z:\e2e\src\guest\provision.ps1",
-                    "-AgentmasterZip", $@"Z:\e2e\builds\{zip.Name}", "-Pwsh"],
+                    "-AgentmasterZip", $@"Z:\e2e\builds\{zip.Name}", "-Pwsh", "-Cache", @"C:\e2e\cache"],
                 TimeoutS: 1800), cancel).ConfigureAwait(false);
 
             List<string> args = [@"Z:\e2e\src\guest\run_suite.py", run, .. request.Inputs.SuiteArgs ?? ["-v"]];

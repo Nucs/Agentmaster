@@ -28,6 +28,9 @@ builder.Logging.AddSimpleConsole(o =>
     o.TimestampFormat = "yyyy-MM-ddTHH:mm:ss.fffZ ";
     o.UseUtcTimestamp = true;
 });
+// ASP.NET Core logs four lines per request at Information; guests long-poll every 25 s and heartbeat every 10 s, so the
+// log would be nothing but those. Its warnings and errors still come through.
+builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, AmbJsonLine.Default));
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(TimeProvider.System);

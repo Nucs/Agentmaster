@@ -117,7 +117,9 @@ public sealed class SlotSession
         {
             while (true)
             {
-                Task finished = await Task.WhenAny(pending.Task, Task.Delay(TimeSpan.FromSeconds(15), cancel))
+                // The silence check runs on the session's clock, and so do its waits: a check every 15 s of the SAME
+                // time the agent's calls are stamped with (a test's fake clock advances both at once).
+                Task finished = await Task.WhenAny(pending.Task, Task.Delay(TimeSpan.FromSeconds(15), Clock, cancel))
                     .ConfigureAwait(false);
                 if (finished == pending.Task)
                 {
@@ -139,7 +141,7 @@ public sealed class SlotSession
             }
             // Cleanup-on-cancel: give the agent its next heartbeat (10 s) to stop the step's process tree, and its
             // result a minute to arrive, so nothing the step started outlives the cancel.
-            await Task.WhenAny(pending.Task, Task.Delay(TimeSpan.FromMinutes(1), CancellationToken.None))
+            await Task.WhenAny(pending.Task, Task.Delay(TimeSpan.FromMinutes(1), Clock, CancellationToken.None))
                 .ConfigureAwait(false);
             throw;
         }
