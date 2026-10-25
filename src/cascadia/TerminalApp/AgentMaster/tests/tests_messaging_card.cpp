@@ -6,8 +6,8 @@
 //      🔄 Restart Session only in Error or after an exit (the user's rule of 2026-10-19) or ▶ Reactivate for a parked tab;
 //      ⚙ Session turns the keyboard into the Session page — ⑂ Fork and 🆕 New Session first (the user's placement), then
 //      🔄 Restart Session with 🔧 Resume Session beside it in Error, then every other button the card had before (the runner,
-//      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image and ◀ Back; the card's text names the state's
-//      action (🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab);
+//      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image, 📜 All Screen on a row of its own (§21.39) and
+//      ◀ Back; the card's text names the state's action (🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab);
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -212,11 +212,11 @@ void TestMessagingCard()
         CHECK(!HasData(main, L"c:queue:" + kCardSid) && !HasData(main, L"c:screen:" + kCardSid), "Main: the session's own buttons are on the other page");
 
         const Rows page = BuildCardButtonRows(kCardSid, f, CardPage::Session);
-        CHECK(page.size() == 6, "Session: six rows");
-        CHECK(page.size() == 6 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
+        CHECK(page.size() == 7, "Session: seven rows (21.39 added All Screen's own row)");
+        CHECK(page.size() == 7 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
                   page[0][1].second == L"c:newsession:" + kCardSid && page[0][1].first.find(L"New Session") != std::wstring::npos,
               "Session: Fork and New Session first, side by side (right after the cog's tap)");
-        CHECK(page.size() == 6 && page[1].size() == 1 && page[1][0].second == L"c:restart:" + kCardSid && page[1][0].first.find(L"Restart Session") != std::wstring::npos,
+        CHECK(page.size() == 7 && page[1].size() == 1 && page[1][0].second == L"c:restart:" + kCardSid && page[1][0].first.find(L"Restart Session") != std::wstring::npos,
               "Session: Restart Session next, alone while the session is not in Error");
         CHECK(HasData(page, L"c:runner:" + kCardSid) && HasLabel(page, L"Pause runner"), "Session: the runner button (Auto -> Pause runner)");
         CHECK(HasData(page, L"c:queue:" + kCardSid), "Session: Queue");
@@ -224,7 +224,13 @@ void TestMessagingCard()
         CHECK(HasData(page, L"c:transcript:" + kCardSid), "Session: Transcript");
         CHECK(HasData(page, L"c:screen:" + kCardSid) && HasLabel(page, L"Screen Text"), "Session: Screen Text (the old Screen's verb)");
         CHECK(HasData(page, L"c:screenimg:" + kCardSid) && HasLabel(page, L"Screen Image"), "Session: Screen Image");
-        CHECK(page.size() == 6 && page[5].size() == 1 && page[5][0].second == L"c:main:" + kCardSid && page[5][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
+        CHECK(page.size() == 7 && page[4].size() == 2 && page[4][0].second == L"c:screen:" + kCardSid && page[4][1].second == L"c:screenimg:" + kCardSid,
+              "Session: Screen Text and Screen Image keep their row (21.39 moved no existing button)");
+        CHECK(page.size() == 7 && page[5].size() == 1 && page[5][0].second == L"c:allscreen:" + kCardSid && page[5][0].first.find(L"All Screen") != std::wstring::npos &&
+                  page[5][0].first.rfind(L"\U0001F4DC", 0) == 0,
+              "Session: All Screen alone on its own row under the screen buttons, with the scroll emoji (21.39)");
+        CHECK(page.size() == 7 && page[6].size() == 1 && page[6][0].second == L"c:main:" + kCardSid && page[6][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
+        CHECK(!HasData(main, L"c:allscreen:" + kCardSid), "Main: no All Screen (it is a Session-page button)");
         CHECK(!HasData(page, L"c:panel:" + kCardSid) && !HasData(page, L"c:resume:" + kCardSid) && !HasData(page, L"c:reactivate:" + kCardSid),
               "Session of a waiting session: no cog, no Resume, no Reactivate");
 
@@ -245,7 +251,7 @@ void TestMessagingCard()
               "Error, Main: the cog, then Restart Session");
         CHECK(!HasData(errMain, L"c:resume:" + kCardSid) && !HasData(errMain, L"c:reactivate:" + kCardSid), "Error, Main: no Resume Session (it is on the Session page), no Reactivate");
         const Rows errPage = BuildCardButtonRows(kCardSid, ef, CardPage::Session);
-        CHECK(errPage.size() == 6 && errPage[1].size() == 2 && errPage[1][0].second == L"c:restart:" + kCardSid && errPage[1][1].second == L"c:resume:" + kCardSid &&
+        CHECK(errPage.size() == 7 && errPage[1].size() == 2 && errPage[1][0].second == L"c:restart:" + kCardSid && errPage[1][1].second == L"c:resume:" + kCardSid &&
                   errPage[1][1].first.find(L"Resume Session") != std::wstring::npos,
               "Error, Session: Restart Session and Resume Session side by side");
         CHECK(!HasData(errPage, L"c:reactivate:" + kCardSid), "Error, Session: no Reactivate");
@@ -258,7 +264,7 @@ void TestMessagingCard()
         CHECK(doneMain.size() == 1 && doneMain[0].size() == 2 && doneMain[0][1].second == L"c:restart:" + kCardSid, "Done, Main: the cog, then Restart Session");
         CHECK(!HasData(doneMain, L"c:reactivate:" + kCardSid), "Done, Main: no Reactivate beside Restart (the same restart)");
         const Rows donePage = BuildCardButtonRows(kCardSid, df, CardPage::Session);
-        CHECK(donePage.size() == 6 && donePage[1].size() == 1 && donePage[1][0].second == L"c:restart:" + kCardSid, "Done, Session: Restart Session alone");
+        CHECK(donePage.size() == 7 && donePage[1].size() == 1 && donePage[1][0].second == L"c:restart:" + kCardSid, "Done, Session: Restart Session alone");
         CHECK(!HasData(donePage, L"c:resume:" + kCardSid) && !HasData(donePage, L"c:reactivate:" + kCardSid), "Done, Session: no Resume, no Reactivate");
 
         // A parked tab: Reactivate beside the cog on Main (the button it had before; the rule names only Restart); the Session page
@@ -269,7 +275,7 @@ void TestMessagingCard()
               "parked, Main: the cog, then Reactivate");
         CHECK(!HasData(parkedMain, L"c:restart:" + kCardSid), "parked, Main: no Restart (not in Error, not exited)");
         const Rows parkedPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parked), CardPage::Session);
-        CHECK(parkedPage.size() == 6 && parkedPage[1].size() == 1 && parkedPage[1][0].second == L"c:restart:" + kCardSid, "parked, Session: Restart Session alone");
+        CHECK(parkedPage.size() == 7 && parkedPage[1].size() == 1 && parkedPage[1][0].second == L"c:restart:" + kCardSid, "parked, Session: Restart Session alone");
         CHECK(!HasData(parkedPage, L"c:reactivate:" + kCardSid) && !HasData(parkedPage, L"c:resume:" + kCardSid), "parked, Session: no Reactivate (Restart starts it), no Resume");
 
         // A parked tab in Error (a cut-off turn after a crash): the Error rule wins.

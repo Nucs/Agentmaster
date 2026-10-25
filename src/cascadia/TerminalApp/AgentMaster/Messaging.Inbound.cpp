@@ -29,6 +29,7 @@
 #include "SessionStore.h" // favorites, tags
 #include "TranscriptTurns.h" // RenderTranscriptTurnsFile
 #include "ScreenImage.h" // §21.24: RenderScreenSnapshotPng + ParseScreenSnapshot (the card's 🖼 Screen Image)
+#include "ConversationImage.h" // §21.39: RenderConversationImages (the card's 📜 All Screen: the whole conversation as tall pictures)
 
 namespace Agentmaster::Msg
 {
@@ -171,6 +172,10 @@ namespace Agentmaster::Msg
         // §21.24: a second picture of the same session within this window asks nothing new - a double tap must not draw and
         // send two photos on the chat's ~20-calls-a-minute budget. Short enough that a deliberate "again" a few seconds later works.
         constexpr int64_t kScreenImageTapGapMs = 3 * 1000;
+        // §21.39: at most this many CONVERSATIONS are drawn at once, process-wide. One takes seconds and hundreds of MB (measured
+        // 2026-10-25 in a scratch process: a 95 MB transcript peaked at ~315 MB of commit and took ~5.3 s for 6 parts, mostly the
+        // transcript's own parse - its Compact level peaked the same), so a second one waits for the first rather than doubling that.
+        constexpr int kConversationImageMaxRenders = 1;
     }
 
     // ===== updates ===========================================================================
@@ -1726,6 +1731,49 @@ namespace Agentmaster::Msg
             done(L"ok");
             return;
         }
+        if (name == L"allscreen")
+        {
+            // §21.39: the WHOLE conversation as tall pictures. Drawn from the TRANSCRIPT, not the terminal: a fullscreen Claude
+            // Code (the alternate screen) keeps no scrollback, so the terminal never holds more than one screen
+            // (ConversationImage.h). So no window is asked, and a parked tab or a closed session draws as well as a live one.
+            const auto level = LevelFromWord(detail::Lower(cmd.args));
+            if (!level)
+            {
+                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max]", false);
+                return;
+            }
+            if (s->kind != AgentKind::Claude)
+            {
+                // A Codex rollout is not a Claude Code transcript: the turns view (and so the picture) reads Claude Code's only.
+                _reply(threadId, L"All Screen draws Claude Code conversations; this session is not one.", false);
+                done(L"refused:not-claude");
+                return;
+            }
+            std::wstring path = ResolveClaudeTranscriptPath(sessionId);
+            if (path.empty() && !s->forkParentId.empty())
+            {
+                path = ResolveClaudeTranscriptPath(s->forkParentId); // a fork with no turn of its own shows its source (as /transcript does)
+            }
+            if (path.empty())
+            {
+                _reply(threadId, L"No transcript yet: the session has no conversation to draw.", false);
+                done(L"refused:no-transcript");
+                return;
+            }
+            {
+                // One drawing per session at a time: a second tap while the first one's parts are being drawn would draw and send
+                // the whole conversation twice on the chat's call budget. The worker unmarks the session when it ends.
+                std::lock_guard lk{ _mtx };
+                if (!_conversationImageSessions.insert(sessionId).second)
+                {
+                    _reply(threadId, L"This conversation's pictures are being drawn already; they come in a moment.", false);
+                    done(L"repeated");
+                    return;
+                }
+            }
+            done(_startConversationImage(sessionId, threadId, path, static_cast<int>(*level)));
+            return;
+        }
         if (name == L"reactivate")
         {
             // A typed command gets its answer in the thread (the card's button answers with a toast instead).
@@ -2663,6 +2711,15 @@ namespace Agentmaster::Msg
                 _runSessionCommand(sid, cmd, fake, threadId);
                 return;
             }
+            else if (verb == kCardVerbAllScreen)
+            {
+                // §21.39: 📜 All Screen - /allscreen at the Default level. No toast, as for 🖼 Screen Image (§21.28): the button stays
+                // busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer says the
+                // work goes on.
+                cmd.name = L"allscreen";
+                _runSessionCommand(sid, cmd, fake, threadId);
+                return;
+            }
             else
             {
                 answer(L"");
@@ -3324,6 +3381,129 @@ namespace Agentmaster::Msg
             _screenImageRenders.fetch_sub(1);
             LogSwallowedException(L"MessagingService::_startScreenImage");
             _reply(threadId, L"The picture could not be started (hooks.log says why).", false);
+        }
+    }
+
+    const wchar_t* MessagingService::_startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel)
+    {
+        // The poll thread (a typed /allscreen, a tapped 📜 All Screen): nothing here may wait for the drawing.
+        const auto unmark = [this, &sessionId]() {
+            std::lock_guard lk{ _mtx };
+            _conversationImageSessions.erase(sessionId);
+        };
+        if (_conversationImageRenders.fetch_add(1) >= kConversationImageMaxRenders)
+        {
+            _conversationImageRenders.fetch_sub(1);
+            unmark();
+            _reply(threadId, L"Another conversation is being drawn right now; ask again in a moment.", false);
+            return L"busy";
+        }
+        std::wstring title;
+        // The title only (the captions, the files' names), so the lean read: no queue is copied.
+        if (const auto s = _registry->GetWithoutQueue(sessionId))
+        {
+            title = s->title;
+        }
+        try
+        {
+            // §21.28: the worker carries the tapped 📜 All Screen along (`taps`: empty for a typed /allscreen) and queues every part
+            // inside a scope of them, so the button stays busy until the last picture - or the line saying why there is none - is in.
+            std::thread([self = weak_from_this(), sessionId, threadId, transcript, turnsLevel, title, taps = _holdTaps()]() noexcept {
+                const auto me = self.lock();
+                if (!me)
+                {
+                    return; // the service is gone (an app quit): its counter and marks went with it
+                }
+                const TapScope tapScope{ taps }; // never throws; the sends below hold the tap until Telegram answered them
+                try
+                {
+                    ConversationImageOptions options;
+                    options.level = static_cast<TurnsLevel>(turnsLevel);
+                    const bool defaultLevel = options.level == TurnsLevel::Default;
+                    const std::wstring levelName = TurnsLevelName(options.level);
+                    const std::wstring titleLine = TgTitleLine(title, 120).empty() ? ShortId(sessionId) : TgTitleLine(title, 120);
+                    // "conversation-Agentmaster.png", "conversation-Agentmaster-compact-2of4.png": the level only when it is not the
+                    // default, the part only when there are several.
+                    const std::wstring stem = L"conversation-" + SafeFileStem(title) + (defaultLevel ? std::wstring{} : L"-" + levelName);
+                    size_t sent = 0;
+                    size_t totalBytes = 0;
+                    options.onPart = [&](ConversationImagePart&& part) {
+                        // "📜 Agentmaster · conversation · 2/4 · turns 12–31": which part, and which turns it shows (a part's first
+                        // rows may be the path legend before turn 1, counted as turn 1 here).
+                        std::wstring caption = L"\U0001F4DC " + titleLine + L" \x00B7 conversation";
+                        if (!defaultLevel)
+                        {
+                            caption += L" (" + levelName + L")";
+                        }
+                        if (part.count > 1)
+                        {
+                            caption += L" \x00B7 " + std::to_wstring(part.index + 1) + L"/" + std::to_wstring(part.count);
+                        }
+                        if (part.lastTurn > 0)
+                        {
+                            const int first = (std::max)(1, part.firstTurn);
+                            caption += first == part.lastTurn ? L" \x00B7 turn " + std::to_wstring(first) :
+                                                                L" \x00B7 turns " + std::to_wstring(first) + L"\x2013" + std::to_wstring(part.lastTurn);
+                        }
+                        const std::wstring fileName = stem + (part.count > 1 ? L"-" + std::to_wstring(part.index + 1) + L"of" + std::to_wstring(part.count) : std::wstring{}) + L".png";
+                        totalBytes += part.picture.png.size();
+                        // A DOCUMENT, not a photo: Telegram shrinks a photo to 2,560 px on its long side (a tall picture would be
+                        // unreadable) and refuses one past 10,000 px of width + height; a document keeps every pixel, and its
+                        // viewer zooms. Queued now, so part 1 is on its way while part 2 is drawn (the outbox keeps their order).
+                        me->_sendDocument(threadId, fileName, std::move(part.picture.png), caption, SendPriority::Final);
+                        ++sent;
+                    };
+                    const ConversationImageResult r = RenderConversationImages(transcript, options);
+                    me->_log(L"[msg] conversation pictures of " + ShortId(sessionId) + L": " + levelName + L", " + std::to_wstring(sent) + L" of " + std::to_wstring(r.parts.size()) +
+                             L" part(s) sent, " + std::to_wstring(r.rows) + L" rows (" + std::to_wstring(r.droppedRows) + L" left out), " + std::to_wstring(r.grid.widthPx) + L" px wide, " +
+                             std::to_wstring(totalBytes / 1024) + L" KB, " + r.fontFamily + L", turns view " + std::to_wstring(r.turnsMs) + L" ms (" +
+                             std::to_wstring(r.markdownChars / 1024) + L" K chars), layout " + std::to_wstring(r.layoutMs) + L" ms, drawn in " + std::to_wstring(r.drawMs) + L" ms" +
+                             (r.error.empty() ? std::wstring{} : L" - failed: " + r.error));
+                    if (!r.error.empty())
+                    {
+                        me->_reply(threadId,
+                                   sent == 0 ? L"The conversation could not be drawn: " + TgEscapeHtml(r.error) :
+                                               L"The conversation's pictures stopped after part " + std::to_wstring(sent) + L": " + TgEscapeHtml(r.error),
+                                   false);
+                    }
+                    else if (r.droppedRows > 0)
+                    {
+                        // The first picture says it too (its top row); this line adds what to do about it.
+                        me->_reply(threadId,
+                                   L"The conversation is longer than " + std::to_wstring(r.parts.size()) + L" pictures hold: its first " + std::to_wstring(r.droppedRows) +
+                                       L" rows" + (r.droppedThroughTurn > 0 ? L" (through turn " + std::to_wstring(r.droppedThroughTurn) + L")" : std::wstring{}) +
+                                       L" are left out. " + (options.level > TurnsLevel::Compact ? L"/allscreen compact draws each turn shorter." : L""),
+                                   false);
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18: an exception escaping a std::thread would end the process.
+                    LogSwallowedException(L"MessagingService::_startConversationImage (worker)");
+                }
+                me->_conversationImageRenders.fetch_sub(1);
+                try
+                {
+                    std::lock_guard lk{ me->_mtx };
+                    me->_conversationImageSessions.erase(sessionId);
+                }
+                catch (...)
+                {
+                    // std::system_error from the lock: the mark stays, and the next request for this session hears "being drawn".
+                    LogSwallowedException(L"MessagingService::_startConversationImage (unmark)");
+                }
+            }).detach();
+            return L"ok";
+        }
+        catch (...)
+        {
+            // The thread could not start (std::system_error, std::bad_alloc copying its arguments): nothing is drawing, so the
+            // count goes back and the session is unmarked.
+            _conversationImageRenders.fetch_sub(1);
+            unmark();
+            LogSwallowedException(L"MessagingService::_startConversationImage");
+            _reply(threadId, L"The pictures could not be started (hooks.log says why).", false);
+            return L"failed";
         }
     }
 
@@ -5174,7 +5354,9 @@ namespace Agentmaster::Msg
                    // §21.32.4: the file links (on in the settings' FILE LINKS section).
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
-                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n"
+                   // §21.39: the card's 📜 All Screen, typed with a level.
+                   L"/allscreen [level] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
                    L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";

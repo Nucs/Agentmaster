@@ -118,7 +118,8 @@ configurable, backfill, the activity draft → P4 the Search agent and revive �
 - **N1** Codex and any non-Claude agent (D23); sessions that are not in a tab.
 - **N2** Sharing the fleet with other people (one owner per connection).
 - **N3** Mirroring the terminal's pixels; `/screen` sends its text. *(§21.24: 🖼 Screen Image draws ONE still picture of the
-  screen from its cells, on request — not a mirror.)*
+  screen from its cells, on request — not a mirror. §21.39: 📜 All Screen draws the WHOLE conversation, from its transcript,
+  as tall pictures in Claude Code's look.)*
 - **N4** Any always-on helper or cloud service: the bot runs in Agentmaster (D1).
 - **N5** Voice and files from the phone into a session (later, §7.6).
 
@@ -544,7 +545,7 @@ As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, ever
 [🔄 Restart Session] only for a session in Error or one whose claude exited, or [▶ Reactivate] for a parked tab.
 **⚙️ Session** turns the keyboard into the Session page: [⑂ Fork] [🆕 New Session] · [🔄 Restart Session] (+ [🔧 Resume
 Session] in Error) · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
-[🖼 Screen Image] · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
+[🖼 Screen Image] · [📜 All Screen] (§21.39) · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
 
 As built (§21.26): the STATE line comes first ("🟡 Waiting for you since 08:21", a 📌 at its end for a pinned session) and
 the title second ("📌 🟦 title", a chip in a rich card); every other line keeps its order under the title.
@@ -771,6 +772,8 @@ PC — the overlay's mail button), `/screen` (the visible terminal text, redacte
 menu (`setMyCommands`, one list for the whole chat) lists these. As built (§21.19), in every topic: `/search
 <words>` (a search sent to 🔎 Search) and `/search-tab` / `/search_tab` (Search goes first in the thread list).
 As built (§21.24): `/screenimage` (the screen as a picture — the card's 🖼 Screen Image).
+As built (§21.39): `/allscreen [minimal|compact|default|full|max]` (the whole conversation as tall pictures — the card's
+📜 All Screen).
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -5395,6 +5398,136 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 5. A tab whose claude was `/exit`ed shows ⏹, and ▶ Activate starts it again.
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
+
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; NOT BUILT yet)
+
+> The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
+> we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
+
+**Not from the terminal; from the transcript.**
+- This machine's Claude Code runs its fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`). Its whole
+  UI lives in the ALTERNATE screen buffer, which keeps no scrollback: a session's terminal holds one screen and nothing more,
+  and the conversation scrolls inside Claude Code. The classic renderer's scrollback would not do either: it is capped by
+  `historySize`, emptied by `/compact` and repainted on every resize.
+- The transcript holds every turn, also for a parked tab or a window that is not up. So the picture is drawn from it, and no
+  window is asked. TranscriptTurns renders the conversation turn by turn at a Copy ▸ Transcript level, following the fork /
+  plan-restart chain. MarkdownBlocks parses that Markdown. A new layout puts it on a terminal grid the way Claude Code draws
+  a conversation (`AgentMaster/ConversationImage.{h,cpp}`). The Screen Image renderer, extended to tall sheets, draws it
+  (`AgentMaster/ScreenImage.{h,cpp}`).
+
+**The button and the command.**
+- The Session page gets a row of its own under [🖥 Screen Text] [🖼 Screen Image]: **[📜 All Screen]**. Its callback is
+  `c:allscreen:<sid>` (48 bytes), and it runs `/allscreen` at the Default level. The page now has seven rows; no existing
+  button moved.
+- Typed: `/allscreen [minimal|compact|default|full|max]`, the `/transcript` levels. It is in the "/" menu and the help.
+- No toast: the button stays busy until the last picture is in (§21.28), as 🖼 Screen Image does.
+
+**What a picture looks like** (`BuildConversationSheet`; looked at on real sessions of this machine): 100 columns of a 12 px
+cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
+- **A turn** opens with a rule: `── Turn 3 · Oct 21 20:51 → last reply 23:13 ───…`, its number bold in Claude's orange. A fork
+  chain's sessions open with a heavier orange rule: `━━ Session 2 of 3 · a3a3a3a3 · forked from session 1 … ━━━`.
+- **The user's message** is Claude Code's prompt: `❯` and the text on a gray band across the row. A teammate's message looks
+  the same, with its `❯` in cyan under its `✉ name` line. "❯ User, typed while it worked (time)" keeps its line, dim italic.
+- **Claude's work:** `●` before each remark (white) and each tool call. A call's bullet is green when it went well, red when it
+  failed (`✗`), gray when no result came. The tool's name is bold and inline code lavender. `⎿` before what a call returned
+  (Full level) or the user's answer, dimmed. A compaction is an orange `✻`. The turns view's "(no tool calls)" is left out:
+  Claude Code shows nothing there.
+- **The reply** follows a white `●`, its Markdown kept: bold, italic, lists with their markers, headings bold, links
+  underlined in blue, code blocks on a darker band with their spaces.
+- **A subagent or teammate:** an orange `●`, its name bold and its details dimmed; its work is indented two columns under it.
+- The path legend, the session chain list and the turns view's notes are dimmed.
+- Words wrap between words; a word longer than a row is split; a wide glyph takes two cells; a combining mark rides on its
+  cell (`ClaudeCellWidth`, the widths the question previews use).
+
+**Tall pictures** (`MeasureTallScreenImageGrid`, `PlanTallImageParts`, `RenderTallScreenSnapshotPngs`):
+- **Parts.** A picture is at most 32,000 px tall: ~1,330 rows at the 24 px rows Cascadia Mono gets for a 12 px column. That
+  keeps a decoded part at ~158 MB of pixels; viewers decode a picture whole and scale a very tall one down. A part starts at a
+  turn when one lies in the last 40% of its room, else at a block in its last 15%, else where its room ends.
+- **The cap.** At most 10 parts (`kConversationImageMaxParts`; ten parts hold ~13,300 rows). A longer conversation keeps its
+  MOST RECENT rows. The first picture's top row then says how many earlier rows, through which turn, are left out, and the
+  thread gets a line adding "/allscreen compact draws each turn shorter".
+- **Memory.** The drawing goes through a 2,048 px strip, so memory does not grow with the picture, and each part is
+  PNG-encoded strip by strip (WIC `WritePixels`). A row is drawn in every strip it touches; two strip heights give the same
+  pixels (tested).
+- **Speed.** A run of printable ASCII in one color and face is drawn with ONE DirectWrite call. Every font a sheet uses is
+  monospace, so the run's glyphs land on their cells: the test finds 0 pixels differing from cell-by-cell drawing. Anything
+  else is drawn cell by cell, as the Screen Image draws it.
+
+**The send.** Each part goes as a DOCUMENT (`sendDocument`, silent, at the answers' priority), not as a photo. Telegram shrinks
+a photo to 2,560 px on its long side and refuses one past 10,000 px of width + height; a document keeps every pixel. A part
+is queued as soon as it is drawn, so part 1 travels while part 2 is drawn, and the outbox keeps their order. The caption
+reads `📜 <title> · conversation [(level)] [· 2/4] · turns 12–31`; the file is `conversation-<title>[-<level>][-2of4].png`.
+
+**Bounds.**
+- One conversation is drawn at a time, process-wide (`kConversationImageMaxRenders`). Another request then hears "Another
+  conversation is being drawn right now; ask again in a moment."
+- A second request for a session whose pictures are still being drawn hears "This conversation's pictures are being drawn
+  already; they come in a moment." (`_conversationImageSessions`).
+- A Codex session is refused ("All Screen draws Claude Code conversations; this session is not one."), and so is a session
+  with no transcript. A never-messaged fork draws its source's transcript, as `/transcript` does.
+
+**Measured** (2026-10-25, a scratch driver over this machine's transcripts, `/O2`; the time is the whole call):
+
+| Transcript | Level | Rows | Parts | PNG | Time |
+|---|---|---|---|---|---|
+| 4 MB, 1 turn | Default | 175 | 1 (1,232 × 4,232 px) | 768 KB | 0.5 s |
+| 2 MB, 4 agents | Default | 1,125 | 1 (1,232 × 27,032 px) | 5.0 MB | 0.9 s |
+| 5 MB, 15 turns | Full | 3,066 | 3 | 12.0 MB | 1.8 s |
+| 95 MB, 11 turns | Default | 6,945 | 6 | 33.5 MB | 5.2 s (turns view 1.3 s, layout 0.06 s, drawing 3.8 s) |
+| 95 MB, 11 turns | Compact | 801 | 1 | 2.7 MB | 1.7 s |
+
+Peak commit: ~315 MB for the 95 MB transcript at either level (mostly the transcript's own parse), 51–78 MB for the small ones.
+
+**Not changed, still open.**
+- Like `/screen` and 🖼 Screen Image, the pictures are NOT redacted (§9.6's redactor is not built).
+- The picture shows the turns view's content in Claude Code's look, not Claude Code's own screen. A call reads as the turns
+  view writes it ("Bash — what it does: `the command` · ok"), not as Claude Code's "Bash(command)" with its output's first
+  lines under it; a call's output shows only at the Full level (its first line).
+- A phone's Telegram viewer may scale a very tall document down; Telegram Desktop, or a gallery app after "Save", shows it at
+  full size. Not tried on a phone yet.
+- Telegram only: the PC has no All Screen (Copy ▸ Transcript and Show Transcript are its views of the whole conversation).
+- The parts go through the bot's ONE outbox, an upload at a time. While a big set uploads (34 MB for the largest session
+  measured), the other calls wait behind it, as they do behind 📤 Send as file (§21.32.4).
+
+**Tests.** `tests_conversation_image.cpp` → `TestConversationImage` (the m5 suite):
+- The planner: coverage, the turn and block preferences, the filled fallback past `maxParts`.
+- The tall renderer: REAL PNGs decoded again, with the part sizes and a colored cell at its row in each part; no seam
+  between strips; `onPart`; ASCII runs equal to the screen renderer's cells; the refusals.
+- The layout, on the turns view's own agents golden and on a hand-written document: the rules, the band, the bullets'
+  colors, the hidden labels and "(no tool calls)", an agent's indent, `⎿`, wrapping, wide glyphs, a code block, the cap's note.
+- `RenderConversationImages` end to end on a turns fixture.
+- The layout and end-to-end cases need cmark. Without the vcpkg cmark, `tests\conversation_image_stub.cpp` stands in for
+  `ConversationImage.cpp` and those cases report a skip.
+- `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen alone on its row, and no All Screen on Main.
+
+**Checked** (2026-10-25; NOT BUILT, nothing tried in Telegram):
+- The m5 suite, isolated (scratch outputs, a wiped scratch profile): 9,977 checks; the final run's only failures are the
+  three known `TestTaskbarBadge` ones. Three earlier runs each also failed one real-time scheduler check, a different one each
+  time (the load flake). Every new check passed in every run.
+- `cl /Zs` with the last Debug build's recorded command lines (the app's `/W3 /WX` plus `/we4189 /we4100 /we4242 /we4389
+  /we4244`) passes for: `ScreenImage.cpp`; `ConversationImage.cpp` (with `ScreenImage.cpp`'s line); `Messaging.Inbound.cpp`,
+  `Messaging.cpp`, `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`, `Engine.cpp`,
+  `MessagingSearchBridge.cpp`; and the PCH units `TerminalPage.AgentEngine.cpp` and `AgentManagerContent.Settings.cpp`.
+- Negative controls fail as they must: a planted unused local and a narrowing give C4189 and C4244; a probe on the new verb
+  gives C2338. The harness's no-cmark configuration (the stub) compiles at `/W3 /WX`.
+- ⚠ The messaging service gained data members (`_conversationImageRenders`, `_conversationImageSessions`), and a new unit
+  joins TerminalAppLib: the next build must purge (the build-install skill's §5.8).
+
+**Check after the build** (dev, with the bot):
+1. A session's card → ⚙️ Session: [📜 All Screen] alone under the two screen buttons. Tap it: the button stays busy, then one
+   or more documents `conversation-<title>….png` arrive in order, captioned with their part and turns. Opened, each shows
+   the conversation in Claude Code's look.
+2. hooks.log: `[msg] conversation pictures of <sid8>: default, N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
+   … KB, Cascadia Mono, turns view … ms (… K chars), layout … ms, drawn in … ms`, and `[nav] remote telegram /allscreen
+   <sid8> -> ok`.
+3. Two quick taps: the second answers "This conversation's pictures are being drawn already…". Two sessions at once: "Another
+   conversation is being drawn right now…" (`-> busy`).
+4. `/allscreen compact` in a long session: shorter pictures named `conversation-<title>-compact….png`. `/allscreen bogus`:
+   the usage line.
+5. A parked tab draws too (no window is asked). A Codex session: "All Screen draws Claude Code conversations; this session is
+   not one." (`-> refused:not-claude`).
+6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
+   readable.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
