@@ -31,6 +31,10 @@ public sealed class SlotSession
     private TaskCompletionSource<StepResult>? _pending;
     private string? _cancelRequested;
 
+    /// <summary>Why the slot is lost (its VM stopped by itself), or null while it lives; set once by
+    /// <see cref="Abandon"/>.</summary>
+    private volatile string? _lost;
+
     /// <summary>Opens a session for a slot.</summary>
     /// <param name="slotId">The slot's id.</param>
     /// <param name="token">The slot's one-time token; only its SHA-256 is kept.</param>
@@ -76,7 +80,7 @@ public sealed class SlotSession
     /// <param name="timeout">The longest wait (a VM's boot to ready took 30-75 s, measured).</param>
     /// <param name="cancel">Cancels the wait.</param>
     /// <returns>The hello.</returns>
-    /// <exception cref="SlotLostException">No hello within the timeout.</exception>
+    /// <exception cref="SlotLostException">No hello within the timeout, or the slot's VM stopped (<see cref="Abandon"/>).</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     public async Task<GuestHello> WaitHelloAsync(TimeSpan timeout, CancellationToken cancel)
     {
@@ -97,13 +101,17 @@ public sealed class SlotSession
     /// waited for up to a minute more so its process tree is gone before the slot is reused or stopped.</param>
     /// <returns>The step's result.</returns>
     /// <exception cref="InvalidOperationException">A step is already outstanding.</exception>
-    /// <exception cref="SlotLostException">The agent went silent.</exception>
+    /// <exception cref="SlotLostException">The agent went silent, or the slot's VM stopped (<see cref="Abandon"/>).</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     public async Task<StepResult> RunStepAsync(GuestStep step, TimeSpan silence, CancellationToken cancel)
     {
         TaskCompletionSource<StepResult> pending;
         lock (_gate)
         {
+            if (_lost is { } lost)
+            {
+                throw new SlotLostException(lost);
+            }
             if (_current is not null)
             {
                 throw new InvalidOperationException($"slot {SlotId}: step {_current.Id} is still outstanding");
@@ -213,6 +221,28 @@ public sealed class SlotSession
                 ? _cancelRequested
                 : null);
         }
+    }
+
+    /// <summary>Gives the slot up because its VM stopped by itself: the hello wait and the outstanding step fail at once
+    /// with <see cref="SlotLostException"/>, and every later step too.</summary>
+    /// <param name="reason">What was seen (it becomes the request's outcome).</param>
+    /// <remarks>Called by the slot manager's liveness watch. Without it a dead VM is noticed only by silence: 3 minutes
+    /// during a step, the whole hello timeout during a boot (10 minutes; 45 during an install). The first reason
+    /// wins; a later call changes nothing.</remarks>
+    public void Abandon(string reason)
+    {
+        lock (_gate)
+        {
+            if (_lost is not null)
+            {
+                return;
+            }
+            _lost = reason;
+            // Faulting the step's completion wakes RunStepAsync, whose finally then clears the step.
+            _pending?.TrySetException(new SlotLostException(reason));
+        }
+        _hello.TrySetException(new SlotLostException(reason));
+        _stepReady.Pulse();
     }
 
     /// <summary>Takes a batch of progress lines and hands them to the job's sink.</summary>

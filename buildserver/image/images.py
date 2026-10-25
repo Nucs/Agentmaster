@@ -6,6 +6,7 @@ DESIGN.md §3.2 keep the owner's PC usable while it installs) and its steps are 
     python buildserver/image/images.py base   [--name am-base] [--version core11]   # dockur's unattended install
     python buildserver/image/images.py smoke  [--image am-base]                     # boot, `cmd /c ver`, shut down
     python buildserver/image/images.py e2e    [--base am-base] [--name am-e2e]      # the e2e layer (Python + provision)
+    python buildserver/image/images.py check  [--image am-e2e]                      # boot it and check what it holds
     python buildserver/image/images.py list                                         # the images in the site
 
 The base holds only the guest agent's bootstrap (image/oem/: install.bat → setup.ps1 → bootstrap.ps1 at every logon);
@@ -141,6 +142,31 @@ def e2e_layer_steps() -> list[dict]:
     ]
 
 
+def e2e_check_steps() -> list[dict]:
+    """The checks of the e2e layer: every tool provision.ps1 installed answers from where the suite expects it, and the
+    hosts guard that keeps a stray call off the real API is in place. Each check is one step; its output is logged on
+    the request, and the first check that fails (a non-zero exit) fails the request with its name.
+
+    Returns:
+        The guest steps.
+    """
+    return [
+        {"id": "venv", "kind": "run", "command": "C:\\e2e\\venv\\Scripts\\python.exe", "timeoutS": 120,
+         "args": ["-c", "import sys, pytest, comtypes, psutil, PIL; "
+                        "print('python', sys.version.split()[0], 'pytest', pytest.__version__)"]},
+        # cmd expands %USERPROFILE% (the agent runs as the logged-on user, Docker).
+        {"id": "claude", "kind": "run", "command": "cmd.exe", "timeoutS": 120,
+         "args": ["/c", "%USERPROFILE%\\.local\\bin\\claude.exe --version"]},
+        {"id": "git", "kind": "run", "command": "C:\\e2e\\git\\bin\\bash.exe", "timeoutS": 60, "args": ["--version"]},
+        {"id": "pwsh", "kind": "run", "command": "C:\\e2e\\pwsh\\pwsh.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command", "'PowerShell ' + $PSVersionTable.PSVersion.ToString()"]},
+        {"id": "agentmaster", "kind": "run", "command": "cmd.exe", "timeoutS": 60,
+         "args": ["/c", "type C:\\e2e\\am\\.am-version"]},
+        {"id": "hosts", "kind": "run", "command": "cmd.exe", "timeoutS": 60,
+         "args": ["/c", "findstr /i /c:api.anthropic.com C:\\Windows\\System32\\drivers\\etc\\hosts"]},
+    ]
+
+
 def main(argv: list[str]) -> int:
     """Parses the command line and runs one command.
 
@@ -160,6 +186,8 @@ def main(argv: list[str]) -> int:
     e2e = sub.add_parser("e2e", help="make the e2e layer")
     e2e.add_argument("--base", default="am-base")
     e2e.add_argument("--name", default="am-e2e")
+    check = sub.add_parser("check", help="boot an image and check what it holds (the e2e layer's tools; else `ver`)")
+    check.add_argument("--image", default="am-e2e")
     sub.add_parser("list", help="list the images in the site")
     args = parser.parse_args(argv)
     if args.command == "list":
@@ -179,6 +207,12 @@ def main(argv: list[str]) -> int:
                                               "oemDir": str(HERE / "oem")}}
     elif args.command == "smoke":
         body = {"kind": "Smoke", "inputs": {"image": args.image}}
+    elif args.command == "check":
+        # A smoke run with the image kind's own checks as its steps (an image without checks gets the smoke's `ver`).
+        inputs: dict[str, object] = {"image": args.image}
+        if args.image.startswith("am-e2e"):
+            inputs["steps"] = e2e_check_steps()
+        body = {"kind": "Smoke", "inputs": inputs}
     else:
         body = {"kind": "Layer", "inputs": {
             "image": args.base, "newImage": args.name, "steps": e2e_layer_steps(),

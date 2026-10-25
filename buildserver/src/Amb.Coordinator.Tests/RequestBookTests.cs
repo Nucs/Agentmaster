@@ -125,6 +125,10 @@ public sealed class RequestBookTests : IDisposable
         (bool passed, string summary) = E2eJob.Summarize(status, 1);
         Assert.False(passed);
         Assert.Equal("49 tests: 46 passed, 1 failed, 0 errors, 2 skipped (exit 1)", summary);
-        Assert.StartsWith("exit 5; no status file", E2eJob.Summarize(Path.Combine(_root, "none.json"), 5).Summary);
+        Assert.StartsWith("exit 5: no tests were collected", E2eJob.Summarize(Path.Combine(_root, "none.json"), 5).Summary);
+        Assert.Contains("; no status file", E2eJob.Summarize(Path.Combine(_root, "none.json"), 5).Summary);
+        File.WriteAllText(status, """{"state": "done", "exit": 4, "tests": 0, "failures": 0, "errors": 0, "skipped": 0}""");
+        Assert.EndsWith("(exit 4: pytest's usage error (a test path that does not exist, an unknown option); see pytest.log in the results)",
+            E2eJob.Summarize(status, 4).Summary);
     }
 }

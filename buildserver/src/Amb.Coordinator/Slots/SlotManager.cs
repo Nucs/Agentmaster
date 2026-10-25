@@ -21,9 +21,11 @@ public sealed record SlotLease(SlotSpec Spec, SlotSession Session, string Handle
 /// (DESIGN.md §6: <c>slots/&lt;id&gt;.json</c>) and their guest sessions, through one <see cref="ISlotDriver"/>.
 /// </summary>
 /// <remarks>
-/// A coordinator that starts finds the slots an earlier run left (a crash, a restart) in the records and removes them:
-/// their requests are marked lost by the scheduler, so nothing would ever use them again, and a VM left running holds
-/// its whole RAM_SIZE until someone notices.
+/// <para>A coordinator that starts finds the slots an earlier run left (a crash, a restart) in the records and removes
+/// them: their requests are marked lost by the scheduler, so nothing would ever use them again, and a VM left running
+/// holds its whole RAM_SIZE until someone notices.</para>
+/// <para>Every started slot has a liveness watch until it is stopped (<see cref="StartWatch"/>): a VM that stops by
+/// itself is given up within ~30 s instead of at the silence limit or the hello timeout.</para>
 /// </remarks>
 public sealed class SlotManager
 {
@@ -34,6 +36,12 @@ public sealed class SlotManager
     private readonly TimeProvider _clock;
     private readonly ILogger<SlotManager> _log;
     private readonly ConcurrentDictionary<string, SlotRecord> _active = new(StringComparer.Ordinal);
+
+    /// <summary>The liveness watch of every started slot, by slot id (see <see cref="StartWatch"/>).</summary>
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _watches = new(StringComparer.Ordinal);
+
+    /// <summary>How often the liveness watch asks the driver whether a slot still runs.</summary>
+    public static readonly TimeSpan WatchInterval = TimeSpan.FromSeconds(15);
 
     /// <summary>Creates the manager.</summary>
     /// <param name="options">The settings (folders, the guest agent, the guest URL).</param>
@@ -136,7 +144,9 @@ public sealed class SlotManager
         {
             string handle = await _driver.StartAsync(spec, cancel).ConfigureAwait(false);
             Update(slotId, s => s with { Handle = handle });
-            return new SlotLease(spec, session, handle, _driver.GuestShareRoot(spec));
+            var lease = new SlotLease(spec, session, handle, _driver.GuestShareRoot(spec));
+            StartWatch(lease);
+            return lease;
         }
         catch
         {
@@ -167,6 +177,11 @@ public sealed class SlotManager
     public async Task StopAsync(SlotLease lease, bool graceful, bool keepShare = false, string? commitAs = null)
     {
         ArgumentNullException.ThrowIfNull(lease);
+        // The watch ends first: a stop on purpose (a graceful shutdown included) must never read as the VM dying.
+        if (_watches.TryRemove(lease.Spec.SlotId, out CancellationTokenSource? watch))
+        {
+            await watch.CancelAsync().ConfigureAwait(false);
+        }
         Update(lease.Spec.SlotId, s => s with { State = SlotState.Stopping });
         try
         {
@@ -188,6 +203,75 @@ public sealed class SlotManager
         {
             DeleteFolders(lease.Spec.SlotId, keepShare);
             MarkGone(lease.Spec.SlotId);
+        }
+    }
+
+    /// <summary>Starts a slot's liveness watch, so a slot whose VM stops by itself is given up at once.</summary>
+    /// <param name="lease">The slot.</param>
+    /// <remarks>
+    /// <para>Every <see cref="WatchInterval"/> the driver is asked whether the slot still runs. Two "not running"
+    /// answers in a row (so one failed <c>podman inspect</c> never ends a healthy slot) abandon its session
+    /// (<see cref="SlotSession.Abandon"/>): the job's hello wait or step then fails as lost within ~30 s, instead of
+    /// after the silence limit (3 min) or the whole hello timeout (10 min; 45 for an install). The job's own finally
+    /// block stops the slot as in every other outcome, which removes the dead container and the folders.</para>
+    /// <para>The token source is never disposed: it has no timer and no wait handle, and disposing it would race the
+    /// watch's last use of it.</para>
+    /// </remarks>
+    private void StartWatch(SlotLease lease)
+    {
+        var stop = new CancellationTokenSource();
+        _watches[lease.Spec.SlotId] = stop;
+        _ = WatchAsync(lease, stop);
+    }
+
+    /// <summary>The liveness watch's loop (<see cref="StartWatch"/>); it never throws.</summary>
+    /// <param name="lease">The slot.</param>
+    /// <param name="stop">Cancelled when the slot is stopped on purpose.</param>
+    /// <returns>A task that ends when the slot is stopped or given up.</returns>
+    private async Task WatchAsync(SlotLease lease, CancellationTokenSource stop)
+    {
+        string slotId = lease.Spec.SlotId;
+        int deadAnswers = 0;
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(WatchInterval, _clock, stop.Token).ConfigureAwait(false);
+                bool alive;
+                try
+                {
+                    alive = await _driver.IsAliveAsync(lease.Handle, stop.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is TimeoutException or InvalidOperationException
+                    or System.ComponentModel.Win32Exception or IOException)
+                {
+                    // A check that could not be made says nothing about the slot: it counts as neither answer.
+                    _log.LogWarning("slot {Slot}: its liveness check failed: {Error}", slotId, ex.Message);
+                    continue;
+                }
+                deadAnswers = alive ? 0 : deadAnswers + 1;
+                if (deadAnswers >= 2)
+                {
+                    string reason = $"slot {slotId}: its VM stopped by itself (the {_driver.Name} slot is not running)";
+                    _log.LogWarning("{Reason}", reason);
+                    lease.Session.Abandon(reason);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected control flow: the slot was stopped on purpose.
+        }
+        catch (Exception ex)
+        {
+            // Nobody awaits the watch, so nothing may escape it; a watch that died leaves the silence limit in charge.
+            _log.LogError(ex, "slot {Slot}: its liveness watch failed", slotId);
+        }
+        finally
+        {
+            // Only this watch's own entry: a stop removed it already, and nothing else can reuse the slot's id.
+            _watches.TryRemove(KeyValuePair.Create(slotId, stop));
         }
     }
 

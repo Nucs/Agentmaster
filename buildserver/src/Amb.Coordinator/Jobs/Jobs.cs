@@ -356,6 +356,7 @@ public sealed class E2eJob : VmJob
         context.Event("step", $"step suite: {step.Command} {string.Join(' ', args)}");
         StepResult result = await lease.Session.RunStepAsync(step, Silence, cancel).ConfigureAwait(false);
         context.Event("step", FormattableString.Invariant($"step suite: {result.Outcome} ({result.DurationSeconds / 60:0.0} min)"));
+        LogTails(context, result);
         return result;
     }
 
@@ -373,11 +374,26 @@ public sealed class E2eJob : VmJob
             int tests = Get("tests"), failures = Get("failures"), errors = Get("errors"), skipped = Get("skipped");
             int passed = tests - failures - errors - skipped;
             return (exitCode == 0, string.Create(CultureInfo.InvariantCulture,
-                $"{tests} tests: {passed} passed, {failures} failed, {errors} errors, {skipped} skipped (exit {exitCode})"));
+                $"{tests} tests: {passed} passed, {failures} failed, {errors} errors, {skipped} skipped (exit {exitCode}{ExitMeaning(exitCode)})"));
         }
         catch (Exception ex) when (ex is IOException or JsonException)
         {
-            return (false, $"exit {exitCode}; no status file ({ex.Message})");
+            return (false, $"exit {exitCode}{ExitMeaning(exitCode)}; no status file ({ex.Message})");
         }
     }
+
+    /// <summary>What a run_suite.py exit code means when the counts alone do not say it.</summary>
+    /// <param name="exitCode">The exit code (pytest's, or run_suite.py's own 99).</param>
+    /// <returns>": " and the meaning, or "" for 0 and 1 (all passed / some failed: the counts say so).</returns>
+    /// <remarks>Found 2026-10-25: a suite path that does not exist ended "0 tests: … (exit 4)", and the reason was only in
+    /// pytest.log inside the results zip (run_suite.py sends pytest's output there, not to the step's stdout).</remarks>
+    internal static string ExitMeaning(int exitCode) => exitCode switch
+    {
+        2 => ": pytest was interrupted",
+        3 => ": pytest's internal error",
+        4 => ": pytest's usage error (a test path that does not exist, an unknown option); see pytest.log in the results",
+        5 => ": no tests were collected (check -k / -m and the paths)",
+        99 => ": run_suite.py itself failed; see its status file",
+        _ => "",
+    };
 }
