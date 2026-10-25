@@ -20,6 +20,7 @@ amb status                                   # the coordinator, Windows' numbers
 amb import <portable zip> [--commit SHA]     # a hand-built zip or a GitHub release's zip becomes a build id (b<date>-<n>)
 amb builds                                   # the build ids
 amb e2e <build id> [--wait] -- suites/test_smoke.py -v     # a suite in a fresh am-e2e VM; pytest arguments after --
+amb e2e <build id> --run-timeout 480 -- -v                 # the whole suite (hours): a run timeout of its own
 amb logs <request id> [-f]                   # its events: placement, slot, steps, each step's output, progress
 amb list | show <id> | cancel <id>
 ```

@@ -116,22 +116,52 @@ public sealed class SlotWatchTests : IDisposable
     {
         SlotLease lease = await _slots.StartAsync(Request(), "am-e2e", Grant, CancellationToken.None);
         Assert.True(await AdvanceUntilAsync(() => _driver.Checks >= 1));
+        // The guest's shutdown step ended the VM: the stop finds it stopped and removes it.
+        _driver.Alive = false;
         await _slots.StopAsync(lease, graceful: true);
         int checks = _driver.Checks;
-        _driver.Alive = false;
         for (int i = 0; i < 10; i++)
         {
             _clock.Advance(SlotManager.WatchInterval);
             await Task.Delay(10);
         }
         Assert.Equal(checks, _driver.Checks);
+        Assert.Equal([false], _driver.StopsGraceful);
     }
 
-    /// <summary>Advances the clock one watch interval at a time until a condition holds (the watch's continuations run
-    /// on the thread pool, so each step gives them a moment).</summary>
+    /// <summary>A thrown-away slot whose Windows does not stop after its shutdown step is removed by force once
+    /// <see cref="SlotManager.SelfStopGrace"/> has passed, not after the driver's own 100-s graceful window.</summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task HungShutdownIsCappedForAThrownAwaySlot()
+    {
+        SlotLease lease = await _slots.StartAsync(Request(), "am-e2e", Grant, CancellationToken.None);
+        Task stop = _slots.StopAsync(lease, graceful: true);
+        // The fake driver says "running" throughout: only the grace ends the wait.
+        Assert.True(await AdvanceUntilAsync(() => stop.IsCompleted, TimeSpan.FromSeconds(1)));
+        await stop;
+        Assert.Equal([false], _driver.StopsGraceful);
+        Assert.Empty(_slots.Active);
+    }
+
+    /// <summary>A slot that becomes an image keeps the driver's full graceful stop (its disk must be consistent), and
+    /// its folder becomes the image.</summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task CommittedSlotKeepsTheFullGracefulStop()
+    {
+        SlotLease lease = await _slots.StartAsync(Request(), "am-new", Grant, CancellationToken.None, installVersion: "core11");
+        await _slots.StopAsync(lease, graceful: true, commitAs: "am-new");
+        Assert.Equal([true], _driver.StopsGraceful);
+        Assert.True(File.Exists(Path.Combine(_root, "images", "am-new", "data.qcow2")));
+    }
+
+    /// <summary>Advances the clock one step at a time until a condition holds (the manager's continuations run on the
+    /// thread pool, so each step gives them a moment).</summary>
     /// <param name="done">The condition.</param>
+    /// <param name="step">How far each step moves the clock; null = one watch interval.</param>
     /// <returns>True when it held within 200 steps.</returns>
-    private async Task<bool> AdvanceUntilAsync(Func<bool> done)
+    private async Task<bool> AdvanceUntilAsync(Func<bool> done, TimeSpan? step = null)
     {
         for (int i = 0; i < 200; i++)
         {
@@ -139,7 +169,7 @@ public sealed class SlotWatchTests : IDisposable
             {
                 return true;
             }
-            _clock.Advance(SlotManager.WatchInterval);
+            _clock.Advance(step ?? SlotManager.WatchInterval);
             await Task.Delay(10);
         }
         return done();
@@ -174,6 +204,9 @@ public sealed class SlotWatchTests : IDisposable
         /// <summary>The liveness checks made so far.</summary>
         public int Checks => Volatile.Read(ref _checks);
 
+        /// <summary>The <c>graceful</c> argument of every stop, in order (guarded by locking the list).</summary>
+        public List<bool> StopsGraceful { get; } = [];
+
         /// <inheritdoc/>
         public string Name => "fake";
 
@@ -184,14 +217,25 @@ public sealed class SlotWatchTests : IDisposable
         public string GuestShareRoot(SlotSpec spec) => spec.ExchangeDir;
 
         /// <inheritdoc/>
+        /// <remarks>Writes the two files a finished install leaves (dockur's disk and its windows.boot marker), so a
+        /// slot can be kept as an image.</remarks>
         public Task<string> StartAsync(SlotSpec spec, CancellationToken cancel)
         {
             Directory.CreateDirectory(spec.SlotDir);
+            File.WriteAllText(Path.Combine(spec.SlotDir, "data.qcow2"), "a stand-in disk");
+            File.WriteAllText(Path.Combine(spec.SlotDir, "windows.boot"), "");
             return Task.FromResult("fake-" + spec.SlotId);
         }
 
         /// <inheritdoc/>
-        public Task StopAsync(string handle, bool graceful, CancellationToken cancel) => Task.CompletedTask;
+        public Task StopAsync(string handle, bool graceful, CancellationToken cancel)
+        {
+            lock (StopsGraceful)
+            {
+                StopsGraceful.Add(graceful);
+            }
+            return Task.CompletedTask;
+        }
 
         /// <inheritdoc/>
         public Task<bool> IsAliveAsync(string handle, CancellationToken cancel)

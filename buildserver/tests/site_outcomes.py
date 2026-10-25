@@ -9,9 +9,9 @@ the cheapest boot), and checks after each that its slot left no container, no sl
 4. lost:      a 600 s step, the VM's QEMU killed once it runs -> Lost through the liveness watch, well before the
               3-minute silence limit
 
-Each scenario boots a VM (~45 s on am-base) and they run one after another: ~5 minutes in all. The coordinator must run
-(`python buildserver/site/sitectl.py up`); its admin token is read from the site and never printed. Other requests may
-run meanwhile: every check looks at this run's own slots only.
+Each scenario boots a VM (~45 s on am-base) and they run one after another: ~5 minutes in all. The coordinator is
+started when it does not answer (it exits by itself after 10 idle minutes), as `amb` does; its admin token is read
+from the site and never printed. Other requests may run meanwhile: every check looks at this run's own slots only.
 
     python buildserver/tests/site_outcomes.py [--image am-base] [--only passed,failed,cancelled,lost]
 
@@ -211,6 +211,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--only", default="passed,failed,cancelled,lost")
     args = parser.parse_args(argv)
     try:
+        images.ensure_coordinator()
         client = images.Coordinator(sitectl.admin_token())
     except sitectl.SiteError as exc:
         print(f"site_outcomes: {exc}", file=sys.stderr)

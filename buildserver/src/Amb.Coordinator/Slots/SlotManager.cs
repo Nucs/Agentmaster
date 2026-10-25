@@ -43,6 +43,10 @@ public sealed class SlotManager
     /// <summary>How often the liveness watch asks the driver whether a slot still runs.</summary>
     public static readonly TimeSpan WatchInterval = TimeSpan.FromSeconds(15);
 
+    /// <summary>How long a slot whose disks are thrown away may take to stop by itself after its guest's shutdown step,
+    /// before it is removed by force (see <see cref="StopAsync"/>).</summary>
+    public static readonly TimeSpan SelfStopGrace = TimeSpan.FromSeconds(20);
+
     /// <summary>Creates the manager.</summary>
     /// <param name="options">The settings (folders, the guest agent, the guest URL).</param>
     /// <param name="store">The record store.</param>
@@ -165,7 +169,10 @@ public sealed class SlotManager
 
     /// <summary>Stops a slot and removes everything it had: the driver's container, its folders, its session.</summary>
     /// <param name="lease">The slot.</param>
-    /// <param name="graceful">Shut Windows down first.</param>
+    /// <param name="graceful">The guest ran its shutdown step: let Windows finish shutting down first. For a slot that
+    /// becomes an image (<paramref name="commitAs"/>) that is the driver's full graceful stop, because the image's disk
+    /// must be consistent; for a slot whose disks are thrown away it is a wait of at most <see cref="SelfStopGrace"/>
+    /// for the VM to stop by itself, then removal by force (remarks).</param>
     /// <param name="keepShare">Keep the share's folder (a failed run's evidence that was not copied yet).</param>
     /// <param name="commitAs">Keep the slot's disks as a new read-only image of this name instead of deleting them (an
     /// install or a layer, after its guest shut down cleanly); null deletes them.</param>
@@ -174,6 +181,11 @@ public sealed class SlotManager
     /// <exception cref="ArgumentNullException"><paramref name="lease"/> is null.</exception>
     /// <exception cref="IOException">The slot's folder could not be moved into the images folder (only with
     /// <paramref name="commitAs"/>; the slot is gone either way).</exception>
+    /// <remarks>Why a thrown-away slot does not get the driver's graceful stop: its guest already started Windows'
+    /// forced shutdown (<c>shutdown /s /t 0 /f</c>), which ends the VM in 7–9 s (measured), and nothing on its disk is
+    /// kept (the results came through the share before the shutdown step). When that shutdown hangs, dockur's graceful
+    /// stop waits out its own 100-s ACPI window before it kills QEMU (measured 2026-10-25: 97 s at the end of a 25-min
+    /// e2e run, an 8 GB slot held the whole time); <see cref="SelfStopGrace"/> caps that at 20 s.</remarks>
     public async Task StopAsync(SlotLease lease, bool graceful, bool keepShare = false, string? commitAs = null)
     {
         ArgumentNullException.ThrowIfNull(lease);
@@ -185,7 +197,15 @@ public sealed class SlotManager
         Update(lease.Spec.SlotId, s => s with { State = SlotState.Stopping });
         try
         {
-            await _driver.StopAsync(lease.Handle, graceful, CancellationToken.None).ConfigureAwait(false);
+            if (graceful && commitAs is null)
+            {
+                await WaitForSelfStopAsync(lease).ConfigureAwait(false);
+                await _driver.StopAsync(lease.Handle, graceful: false, CancellationToken.None).ConfigureAwait(false);
+            }
+            else
+            {
+                await _driver.StopAsync(lease.Handle, graceful, CancellationToken.None).ConfigureAwait(false);
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
         {
@@ -203,6 +223,38 @@ public sealed class SlotManager
         {
             DeleteFolders(lease.Spec.SlotId, keepShare);
             MarkGone(lease.Spec.SlotId);
+        }
+    }
+
+    /// <summary>Waits, at most <see cref="SelfStopGrace"/>, for a slot whose guest is shutting down to stop by itself.</summary>
+    /// <param name="lease">The slot.</param>
+    /// <returns>A task that ends when the slot stopped, the grace ran out, or a check could not be made (the caller
+    /// removes the slot by force in every case).</returns>
+    private async Task WaitForSelfStopAsync(SlotLease lease)
+    {
+        DateTimeOffset started = _clock.GetUtcNow();
+        try
+        {
+            while (await _driver.IsAliveAsync(lease.Handle, CancellationToken.None).ConfigureAwait(false))
+            {
+                TimeSpan waited = _clock.GetUtcNow() - started;
+                if (waited >= SelfStopGrace)
+                {
+                    _log.LogWarning("slot {Slot}: Windows did not stop within {Seconds:0} s of its shutdown step; removing "
+                        + "the slot by force", lease.Spec.SlotId, waited.TotalSeconds);
+                    return;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1), _clock).ConfigureAwait(false);
+            }
+            _log.LogInformation("slot {Slot}: stopped by itself {Seconds:0.0} s after its shutdown step", lease.Spec.SlotId,
+                (_clock.GetUtcNow() - started).TotalSeconds);
+        }
+        catch (Exception ex) when (ex is TimeoutException or InvalidOperationException
+            or System.ComponentModel.Win32Exception or IOException)
+        {
+            // A check that cannot be made ends the wait: the forced removal that follows is safe either way.
+            _log.LogWarning("slot {Slot}: its stop could not be watched ({Error}); removing it by force", lease.Spec.SlotId,
+                ex.Message);
         }
     }
 

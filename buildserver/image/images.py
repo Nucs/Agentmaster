@@ -10,8 +10,8 @@ DESIGN.md §3.2 keep the owner's PC usable while it installs) and its steps are 
     python buildserver/image/images.py list                                         # the images in the site
 
 The base holds only the guest agent's bootstrap (image/oem/: install.bat → setup.ps1 → bootstrap.ps1 at every logon);
-layers add what their slot kind needs (E4). The coordinator must run (`python buildserver/site/sitectl.py up`); its
-admin token is read from the site and never printed.
+layers add what their slot kind needs (E4). The coordinator is started when it does not answer (it exits by itself after
+10 idle minutes), as `amb` does; its admin token is read from the site and never printed.
 
 Exit codes: 0 the request succeeded; 1 it ended otherwise (its outcome is printed); 2 usage or no coordinator.
 """
@@ -40,8 +40,26 @@ FINAL = ("Succeeded", "Failed", "Cancelled", "NoCapacity", "Lost")
 """The request states that end a request."""
 
 
+def ensure_coordinator() -> None:
+    """Starts the coordinator in the site unless it answers, as `amb` does.
+
+    The coordinator exits by itself after 10 minutes with nothing to do (the site is lazy, DESIGN.md §5.2), so a
+    script that runs after a pause would otherwise meet "connection refused".
+
+    Raises:
+        sitectl.SiteError: it did not start (its log's last lines are in the message).
+    """
+    try:
+        with urllib.request.urlopen(BASE_URL + "/healthz", timeout=5) as response:
+            if response.status == 200:
+                return
+    except OSError:
+        pass  # Expected when it idled out: start it below.
+    sitectl.up()
+
+
 class Coordinator:
-    """A minimal client of the coordinator's API (the CLI `amb` comes later; this keeps the image script standalone)."""
+    """A minimal client of the coordinator's API (`amb` is the full one; this keeps the Python tools standalone)."""
 
     def __init__(self, token: str) -> None:
         """Creates a client.
@@ -198,6 +216,7 @@ def main(argv: list[str]) -> int:
         print(out or "no images")
         return 0
     try:
+        ensure_coordinator()
         client = Coordinator(sitectl.admin_token())
     except sitectl.SiteError as exc:
         print(f"images: {exc}", file=sys.stderr)
