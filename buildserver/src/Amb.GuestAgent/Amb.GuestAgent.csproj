@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    amb-guest, the guest agent (buildserver/DESIGN.md §10): runs in every build-server VM, dials the coordinator over
+    HTTP, takes steps (run, fetch, expand, put, shutdown), and reports the guest's memory every 10 s.
+
+    Native AOT for win-x64: one ~10 MB file with no runtime to install, so Tiny11 Core (which carries .NET Framework only)
+    runs it as it is, and the slot's share can hand a new version to every boot. The image holds only a bootstrap that
+    copies the agent from the share and starts it (image/oem/), so changing the agent never means rebuilding an image.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>amb-guest</AssemblyName>
+    <RootNamespace>Amb.GuestAgent</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.0</Version>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Amb.Core\Amb.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    amb-hostfacts.exe: prints what Windows says of itself as one line of JSON (HostFactsReport): available memory, free
+    commit, the site drive's free space, and whether a full-screen game runs. The coordinator, which lives in the site
+    distro, runs it every 10 s through WSL's interop, because those Windows numbers bind homepc's capacity (DESIGN.md
+    §3.2) and Linux cannot read them.
+
+    Native AOT: a call costs tens of milliseconds, where `powershell.exe -c Get-CimInstance` would cost a second of CPU
+    every 10 s for as long as the site runs.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>amb-hostfacts</AssemblyName>
+    <RootNamespace>Amb.HostFacts</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Amb.Core\Amb.Core.csproj" />
+  </ItemGroup>
+</Project>
