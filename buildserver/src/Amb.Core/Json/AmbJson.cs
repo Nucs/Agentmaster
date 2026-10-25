@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Amb.Core.Allocation;
 using Amb.Core.Model;
+using Amb.Core.Protocol;
 using Amb.Core.Records;
 
 namespace Amb.Core.Json;
@@ -40,4 +41,17 @@ public sealed partial class AmbJson : JsonSerializerContext;
 [JsonSerializable(typeof(RequestEvent))]
 [JsonSerializable(typeof(Placement))]
 [JsonSerializable(typeof(SiteFree))]
+[JsonSerializable(typeof(SlotConfig))]
+[JsonSerializable(typeof(GuestHello))]
+[JsonSerializable(typeof(GuestHeartbeat))]
+[JsonSerializable(typeof(HeartbeatReply))]
+[JsonSerializable(typeof(GuestStep))]
+[JsonSerializable(typeof(StepResult))]
+[JsonSerializable(typeof(StepLog))]
+[JsonSerializable(typeof(CreateRequest))]
+[JsonSerializable(typeof(EventPage))]
+[JsonSerializable(typeof(CoordinatorStatus))]
+[JsonSerializable(typeof(HostFactsReport))]
+[JsonSerializable(typeof(List<RequestRecord>))]
+[JsonSerializable(typeof(List<BuildRecord>))]
 public sealed partial class AmbJsonLine : JsonSerializerContext;

@@ -19,6 +19,20 @@ public enum RequestKind
 
     /// <summary>Runs e2e suites on a build id's artifacts in fresh <c>am-e2e</c> VMs.</summary>
     E2e,
+
+    /// <summary>The slot chain's own check: boots one VM of an image, runs one command in it through the guest agent,
+    /// and shuts it down. Proves an image and the network path from guest to coordinator (DESIGN.md §13 P0.2); its
+    /// outcome carries the boot-to-ready time.</summary>
+    Smoke,
+
+    /// <summary>Makes a base image (DESIGN.md §4.3): dockur's unattended install of a Tiny11 build with the image's OEM
+    /// folder (which registers the guest agent's bootstrap); the install ends when the new guest's agent says hello, and
+    /// the VM's folder becomes the read-only image.</summary>
+    Install,
+
+    /// <summary>Makes a layer image (DESIGN.md §4.3, D2): boots an image through a new overlay, runs the request's steps
+    /// in it, shuts it down, and keeps the overlay as a new read-only image over the first.</summary>
+    Layer,
 }
 
 /// <summary>Where a request is in its life (DESIGN.md §12); every change is also an event line.</summary>
@@ -112,7 +126,32 @@ public sealed record RequestInputs
 
     /// <summary>Test: the test kind ("m5", "syntax", "installer").</summary>
     public string? TestKind { get; init; }
+
+    /// <summary>Install, layer: the new image's name (it must not exist yet).</summary>
+    public string? NewImage { get; init; }
+
+    /// <summary>Install: the dockur VERSION to install ("core11" for Tiny11 Core, "tiny11" for Tiny11).</summary>
+    public string? Version { get; init; }
+
+    /// <summary>Install: the OEM folder dockur copies to C:\OEM and runs (a path the coordinator can read).</summary>
+    public string? OemDir { get; init; }
+
+    /// <summary>Layer (and smoke, when given): the steps to run in the VM, in order; a failed step fails the request.</summary>
+    public IReadOnlyList<Protocol.GuestStep>? Steps { get; init; }
+
+    /// <summary>Files or folders to copy into the slot's share before the VM starts, so the steps can use them.</summary>
+    public IReadOnlyList<StageItem>? Stage { get; init; }
+
+    /// <summary>E2e: the e2e suite's folder to run (a path the coordinator can read); default: the coordinator's
+    /// configured copy of the repository's e2e folder.</summary>
+    public string? SuiteSource { get; init; }
 }
+
+/// <summary>One file or folder copied into a slot's share before its VM starts.</summary>
+/// <param name="Source">A path the coordinator can read: a Windows path (Q:\…, mapped to /mnt/q/… in the site) or a
+/// path in the site.</param>
+/// <param name="Target">Where it goes, relative to the share's root, with '/' as separator (e.g. "layer/python.exe").</param>
+public sealed record StageItem(string Source, string Target);
 
 /// <summary>
 /// One request as the coordinator records it (DESIGN.md §6: <c>requests/&lt;id&gt;.json</c>, at most 64 KB). Logs,

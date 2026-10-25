@@ -2,7 +2,13 @@
 
 A service that builds, tests and e2e-runs Agentmaster on demand, in slots sized to what this PC (and later dock) has
 free. The design, the owner's decisions and every measured number are in [`DESIGN.md`](DESIGN.md); this file says what
-exists so far and how to use it. **Status: Phase 0 of DESIGN.md §13 is under way; nothing serves requests yet.**
+exists so far and how to use it. **Status (2026-10-25): P0.1 passed; Phase 1's coordinator, guest agent and host-facts
+helper exist and pass their chain test on this PC without a VM; the images and a VM run are next.**
+
+**Phase 1, as built, differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
+Windows' numbers itself (it runs `amb-hostfacts.exe` through WSL's interop, which works from a daemon after the call that
+started it ended: measured), and the CLI will wake the site by starting the coordinator. The host agent's other duties
+(the bare mirror, copying artifacts to Windows, installs, a LAN port for Caddy) come with Phases 3 and 4.
 
 ## What exists
 
@@ -11,6 +17,20 @@ exists so far and how to use it. **Status: Phase 0 of DESIGN.md §13 is under wa
 | [`site/sitectl.py`](site/sitectl.py) | makes and inspects this PC's site: the WSL distro `buildserver`, its disk in `Q:\buildserver\wsl` (E2) | in use: the site was made with it on 2026-10-25 |
 | [`site/files/`](site/files) | the configuration it installs (`/etc/wsl.conf`, podman's `containers.conf`), each file documented | in use |
 | [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 passed (§16.9) |
+| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot model, the guest and API protocol, the atomic record store (§6) | 27 unit tests pass (`src/Amb.Core.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API, the scheduler (admission by priority × availability, wait and run timeouts, cancel), the guest broker, the jobs (import, smoke, install, layer, e2e), the slot manager and its drivers (podman + dockur, the stand-in of §13; local, for tests) | the local chain passes (`tests/local_chain.py`); not yet run in the site with a VM |
+| [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | the local chain passes |
+| [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | the local chain reads it |
+| [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
+
+## Build and test
+
+```text
+dotnet test buildserver/src/Buildserver.slnx            # build everything + the unit tests (output in Q:\tmp\buildserver-build)
+python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
+PATH="/c/Program Files (x86)/Microsoft Visual Studio/Installer:$PATH" \
+  dotnet publish buildserver/src/Amb.GuestAgent -c Release -o Q:\tmp\buildserver-build\publish\amb-guest   # Native AOT needs vswhere
+```
 
 ## The site
 
