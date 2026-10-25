@@ -513,7 +513,9 @@ On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
 - **A request's states:** `pending → starting → running → collecting → succeeded | failed | cancelled | no-capacity |
   lost`, each change an event line.
 - **Heartbeats:** the guest agent every 10 s; a slot silent for 3 minutes is stopped and its request marked `lost`; a
-  build is retried once.
+  build is retried once. A slot whose VM stops by itself is given up sooner: the slot manager asks its driver every
+  15 s whether it runs, and two "not running" answers in a row end the request `lost` (29 s after a killed QEMU,
+  measured).
 - **Restarts:** the coordinator reads its records and fastrund's runs (F5) and carries on.
 - **The homelab is not needed** for homepc work once the dockur image is in the distro.
 - **Coexistence:** hand builds of the stock tree keep working; the allocator sees their memory as load it does not own.
@@ -533,6 +535,7 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 | # | Proof | State |
 |---|---|---|
 | P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | **passed 2026-10-25** (§16.9): the distro made by `site/sitectl.py create` in 11.5 s; production's fastrund image in it answers `/healthz` from Windows 0.36 s after `podman run`, runs ad-hoc scripts (the first 2.6 s after its start, then ~15 ms from Windows), 30 MB resident; found: Windows reaches it only at the distro's address, its HTTPS registry pulls fail (plain HTTP through Traefik works), slots run without cgroups |
+| P0.2 | the slot chain through the coordinator: a base image installed by a request, then booted through an overlay, one command through its guest agent, a graceful stop | **passed 2026-10-25** (§16.10): `am-base` made from Tiny11 Core in 13.1 min (the agent's hello after 751 s), booted and ready 43 s after the request, `ver` run, gone 9 s after the shutdown step; found: a boot must pass the image's own dockur `VERSION`, or dockur reinstalls Windows over the slot |
 | P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | Agentmaster's portable zip runs on Tiny11 Core |
 | P0.4 | a full build in a VM: Debug, cold and incremental, against native (W4: over 2× native → the host lane) | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs ~55 GB of Q: while it runs (W3) |
 
@@ -551,6 +554,15 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 | **P4, the install lane, then `install`** | `am-install` from regular Tiny11; the install suites and a weekly full run on it; `install` of a build id through the swap script | a dev install of a build id; an injected failure after the swap's stop rolls back |
 | **P5, dock** (E3) | dock's e2e slots | an e2e run lands on dock by its score while homepc builds |
 | deferred | `publish` (D11), freeze (F6), the host lane unless P0.4 calls for it (D10) | — |
+
+**Phase 1 as built (2026-10-25; [`README.md`](README.md)):** its done-when holds on this PC: `amb e2e <build id>` ran
+the smoke suite on an imported 0.8.1.0 build in a fresh `am-e2e` VM and passed in 2 min 11 s, and each outcome (passed,
+failed, cancelled, a lost VM) left no container, slot folder or share behind (§16.10). It differs from the table in
+three ways: there is no host agent yet (the coordinator reads Windows' numbers through WSL's interop, and `amb` wakes it
+through `coordinator-up.sh`); the e2e engine's second transport is the guest agent's run step (run_suite.py and
+provision.ps1 run unchanged, with the slot's share mapped to Z:); and each slot has a liveness watch (a VM that stops by
+itself is given up within ~30 s), which the table did not list. Still owed for Phase 1's own scope: P0.5 (Core against a
+full Windows 11, side by side) and a full-suite run on `am-e2e`.
 
 ## 14. Decisions
 
@@ -576,6 +588,7 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 | dockur's Core ISO is old (November 2025) and gets no updates | VMs are LAN-only, take no inbound connection, live for one request or a few minutes after it, and run only this repository's code; a fresh base from Tiny11 Builder's engine when needed (§4.1) |
 | the WSL VM fills (other sessions' VMs, page cache) | the allocator reads its free memory; balloons shrink first; the site drops clean cache after big copies |
 | dockur wipes an image folder without `windows.boot` | the image script writes the marker and checks it before every boot; images are read-only to slots |
+| dockur reinstalls Windows over a slot whose `VERSION` differs from the one the image was installed from (it compares `VERSION` with `windows.base`; measured: a boot without it downloaded the 7.7 GB Windows 11 ISO) | the slot driver reads the version from the image's `windows.base` and refuses an image without one (`PodmanSlotDriver.ImageVersion`); a slot that never says hello is stopped and deleted at its hello timeout |
 | the fastrun features take longer than planned | the proofs ran dockur under podman; the coordinator's design does not depend on how a slot starts |
 | dock's thin pool fills | dock takes e2e slots only, after E3, with ~20 GB counted against the 80 % alert |
 
@@ -699,6 +712,26 @@ by [`measure/p01_fastrund.py`](measure/p01_fastrund.py) (result: `measure/result
 | fastrund idle, the 30 s right after the runs / resident memory | 14.7 ms of CPU per second (production's nodes: ~0.6 ms, its rule 36; not measured settled) / 30.3 MB |
 | `podman stop` (SIGTERM; fastrund ends its slots) | 0.22 s |
 | a process started by a `wsl.exe -e sh -c '… &'` call | ends with that call; a podman container (conmon) keeps running |
+
+### 16.10 Phase 1 on this PC: images, imports and e2e through the coordinator (2026-10-25)
+
+Every row is a request to `amb-coordinator` 0.1.0 in the site distro, with the podman + dockur slot driver; times are
+the request's own events (`amb logs <id>`).
+
+| What | Measured |
+|---|---|
+| the base image: `images.py base` (Install, VERSION=core11, 4 GB / 4 vCPU) | 13.1 min in all: the Tiny11 Core ISO (3.3 GB) downloaded in ~6 min, the unattended install, the OEM bootstrap's agent hello after 751 s, a graceful shutdown and the commit 38 s later; `am-base` = 9.8 GB of files (data.qcow2 9.2 GiB) |
+| a boot without `VERSION` (the first smoke run) | dockur printed "Detected that the VERSION variable was changed", moved the overlay to `backups/`, downloaded the 7.7 GB Windows 11 ISO and started its setup; cancelled after 5 min, slot gone within 1 s. Fixed: a boot passes the image's own version (`windows.base`) |
+| P0.2: `amb smoke --image am-base` (2 vCPU) | ready 43 s after the request (overlay < 1 s, boot, logon, bootstrap, hello); `ver` → 10.0.26200.7171; the slot gone 9 s after the shutdown step |
+| the e2e layer: `images.py e2e` (6 GB / 4 vCPU, score 0.50: 11.1 of its preferred 22 GB of disk) | 2.6 min: Python 3.13.9 downloaded in 6.8 s and installed in 26.1 s, provision.ps1 60.5 s, trims 5.4 s; `am-e2e` = 2.1 GB of files over `am-base` |
+| `images.py check --image am-e2e` | ready in 59 s; Python 3.13.9 + pytest 9.1.1, Claude Code 2.1.291, Git Bash 5.3.15, PowerShell 7.6.8, the hosts guard, the layer's default build 0.8.0.0 |
+| `amb import` of a 233 MB portable zip | 3 s: build `b20261025-1`, version 0.8.1.0 read from its `.am-version`, SHA-256 checked again when an e2e run stages it |
+| `amb e2e b20261025-1 -- suites/test_smoke.py -v` (8 GB / 6 vCPU) | **passed** in 2 min 11 s: ready 63 s, staging < 1 s, provision 34.8 s (only the build under test extracted, 16.0 s; every other step skipped from the layer's cache), the suite 25 s (the test 21.8 s), shutdown 7 s; results kept in the store (`requests/<id>/`: status, progress, the zip with pytest.log, junit.xml and the mock's requests); no container, slot folder or share left |
+| the same with a suite path that does not exist | `Failed` in 1 min 51 s (pytest exit 4), `amb` exit 1; nothing left |
+| `amb cancel` during `suites/test_prompt_queue_runner.py` (26 tests; the first passed in 79.1 s) | `Cancelled` 3–4 s after the cancel; nothing left (a cancelled run keeps its events, the progress lines included, not its files) |
+| a lost VM: QEMU killed inside the slot during a 600 s step | `Lost` 29 s after the kill ("its VM stopped by itself"): the slot manager's liveness watch asks podman every 15 s and gives a slot up at the second "not running"; without it the silence limit (3 min) would have ended it, and during a boot only the hello timeout (10 min). Nothing left |
+| the site's disk | `ext4.vhdx` 23.4 GB on Q: holding 12.4 GB: it is not sparse (W1), so the 3.3 GB and 7.7 GB ISOs' blocks stay allocated; ext4 reuses them. Q: 26.1 GB free afterwards |
+| the guest's route to the coordinator | dockur's passt (guest 10.0.2.100, gateway 10.0.2.1) → the container's slirp4netns, which maps 10.0.2.2 to the distro's loopback → `0.0.0.0:2207` |
 
 ## 17. Evidence
 

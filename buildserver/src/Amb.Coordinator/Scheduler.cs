@@ -217,6 +217,13 @@ public sealed class Scheduler : BackgroundService
             {
                 _book.Move(request.Id, RequestState.Lost, ex.Message, r => r with { Outcome = ex.Message });
             }
+            catch (StepFailedException ex)
+            {
+                // A step that failed is an outcome of the work, not a fault of the coordinator: its own words and exit
+                // code become the request's, with no exception type and no stack trace in the log.
+                _book.Move(request.Id, RequestState.Failed, ex.Message,
+                    r => r with { Outcome = ex.Message, ExitCode = ex.Result.ExitCode });
+            }
             catch (Exception ex)
             {
                 // Any other failure ends the request Failed with what happened; the scheduler itself carries on.

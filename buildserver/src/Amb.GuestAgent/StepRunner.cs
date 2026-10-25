@@ -299,9 +299,12 @@ internal sealed class StepRunner
     private StepResult Done(GuestStep step, int exitCode, string outcome) =>
         new(_slotId, step.Id, exitCode, outcome, 0);
 
-    /// <summary>The last <see cref="TailBytes"/> of a file as text.</summary>
+    /// <summary>The last <see cref="TailBytes"/> of a file as text, in whole lines.</summary>
     /// <param name="path">The file.</param>
     /// <returns>Its tail, or null when it is empty or cannot be read.</returns>
+    /// <remarks>The coordinator logs each line of a tail as an event, so a tail never starts with the cut-off end of a
+    /// line (or of a UTF-8 character): when the file is longer than the tail, everything up to the first line break is
+    /// dropped.</remarks>
     private static string? Tail(string path)
     {
         try
@@ -311,9 +314,15 @@ internal sealed class StepRunner
             {
                 return null;
             }
+            bool cut = stream.Length > TailBytes;
             stream.Position = Math.Max(0, stream.Length - TailBytes);
             using var reader = new StreamReader(stream, Encoding.UTF8);
-            return reader.ReadToEnd();
+            string text = reader.ReadToEnd();
+            if (cut && text.IndexOf('\n') is int newline and >= 0)
+            {
+                text = text[(newline + 1)..];
+            }
+            return text.Length == 0 ? null : text;
         }
         catch (IOException)
         {

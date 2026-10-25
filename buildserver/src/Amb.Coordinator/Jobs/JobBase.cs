@@ -17,8 +17,10 @@ public sealed record JobOutcome(bool Succeeded, string Outcome, int? ExitCode = 
 
 /// <summary>A step a guest agent ran and that failed; the job ends Failed with the step's own words.</summary>
 /// <param name="result">The step's result.</param>
+/// <remarks>The message is "step &lt;id&gt;: &lt;the agent's outcome&gt;" (e.g. "step provision: failed: exit code 1"), plus the
+/// end of its stderr; the scheduler records it as the request's outcome as it is.</remarks>
 public sealed class StepFailedException(StepResult result)
-    : Exception($"step {result.StepId} failed: {result.Outcome}" + (string.IsNullOrWhiteSpace(result.StderrTail)
+    : Exception($"step {result.StepId}: {result.Outcome}" + (string.IsNullOrWhiteSpace(result.StderrTail)
         ? ""
         : " | stderr: " + result.StderrTail.Trim()[^Math.Min(400, result.StderrTail.Trim().Length)..]))
 {
@@ -191,11 +193,42 @@ public abstract class VmJob : IJob
         StepResult result = await lease.Session.RunStepAsync(step, Silence, cancel).ConfigureAwait(false);
         context.Event("step", FormattableString.Invariant(
             $"step {step.Id}: {result.Outcome} ({result.DurationSeconds:0.0} s)"));
+        LogTails(context, result);
         if (result.ExitCode != 0)
         {
             throw new StepFailedException(result);
         }
         return result;
+    }
+
+    /// <summary>The most lines of each output stream's tail <see cref="LogTails"/> keeps per step.</summary>
+    private const int TailLines = 40;
+
+    /// <summary>Logs the end of a step's output as events, so the step's own words stay with its request.</summary>
+    /// <param name="context">The job's context.</param>
+    /// <param name="result">The step's result.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="context"/> or <paramref name="result"/> is null.</exception>
+    /// <remarks>The guest agent sends the last 4 KB of each stream, in whole lines; of those, the last
+    /// <see cref="TailLines"/> non-empty lines become "output" (stdout) and "stderr" events. The full output lives in the
+    /// guest's step folder, which goes with the slot, so these lines are the only copy that outlives it (found 2026-10-25:
+    /// the e2e layer's provision step was recorded as "ok (60.5 s)" alone, with its summary of what it installed lost).
+    /// </remarks>
+    protected static void LogTails(JobContext context, StepResult result)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(result);
+        foreach ((string kind, string? tail) in new[] { ("output", result.StdoutTail), ("stderr", result.StderrTail) })
+        {
+            if (string.IsNullOrWhiteSpace(tail))
+            {
+                continue;
+            }
+            string[] lines = tail.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (string line in lines.Skip(Math.Max(0, lines.Length - TailLines)))
+            {
+                context.Event(kind, $"{result.StepId}: {line}");
+            }
+        }
     }
 
     /// <summary>Copies the request's stage items into the slot's share before its guest uses them.</summary>
