@@ -335,9 +335,16 @@ page file, and power plan High performance.
 - **Who wakes it:** the host agent (§10), a logon task that is always up, starts the distro and fastrund when a
   request arrives. After 10 minutes with no slot and no request it stops fastrund, and WSL then stops the distro by
   itself (a distro with no process left is shut down).
-- **Its ports:** fastrund's API and activators listen in the distro; Windows reaches them through WSL's localhost
-  forwarding, and the LAN (Caddy, for `https://build.local`) through the host agent, which forwards one port opened to
-  Caddy (`192.168.50.5`) only.
+- **Its ports:** fastrund's API (2200; gRPC 2201, raw lane 2202: fastrun's free range 2200-2499) and activators listen
+  in the distro. **Windows reaches them at the distro's own address**, which changes at every start of WSL's VM, so the
+  host agent asks the distro for it (`ip -4 addr show eth0`) and asks again after a refused connection. WSL's localhost
+  forwarding is no way in: it passes only IPv4 listeners, and fastrund listens on the IPv6 wildcard (`:::2200`;
+  measured, §16.9). The LAN (Caddy, for `https://build.local`) reaches the site through the host agent, which forwards
+  one port opened to Caddy (`192.168.50.5`) only.
+- **Its registry:** fastrund pulls runtime images over plain HTTP through Traefik (`FASTRUN_REGISTRY_ENDPOINTS=
+  docker-registry.elibelash.com=http://docker-registry.local`), the way production pulls in-cluster: the static
+  fastrund image cannot complete a TLS handshake with `https://docker-registry.elibelash.com` from here (measured,
+  §16.9), while curl in the same distro verifies that certificate.
 - **The coordinator lives here** (an app on this node, as in the third revision): the source (K:) and the artifact
   store (Q:) are on this PC, so nothing can be built while it is off anyway.
 
@@ -513,29 +520,37 @@ On dock, also fastrund's pod memory limit and the LXC changes of §5.3 (E3).
 
 ## 13. Plan
 
-Each phase needs the owner's go to build and deploy, and ends with checks a run proves.
+Each phase needs the owner's go to build and deploy, and ends with checks a run proves. **The order** (proposed
+2026-10-25 and started the same day at the owner's "kindly begin implementing"): the proofs that could still change
+the design come first; the e2e lane comes before builds, because e2e fits this PC's memory and disk today and builds do
+not; and the Agentmaster side does not wait for fastrun's features. **The starting point** is what agents did by hand
+until now (`Q:\agentmaster-e2e`): private builds from a source cache checked against a commit, under the build lock and
+in a Job object (`sessionstart-build\build_controller.py`), packaged and checked with their PDBs, and e2e runs on
+claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-20261024`).
 
-**P0, proofs:**
+**Phase 0, the proofs that can change the design:**
 
-| # | Proof | State on 2026-10-25 |
+| # | Proof | State |
 |---|---|---|
-| P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | the distro, podman and dockur proven with a test distro; `--set-sparse` refused while WSL runs; fastrund in it not tried |
-| P0.2 | a dockur VM as a fastrun slot (F2, F3, F8 and F9 prototyped); the guest reaches the coordinator over HTTP | dockur in the distro proven with podman |
-| P0.3 | the three images: Tiny11 Core + the e2e kit + the trims; the build layer with the build's own component subset, sealed with servicing idle; Tiny11 for `am-install`; each one's size, idle memory and boot time | the base measured (§16.2); Build Tools installs on Tiny11 Core (exit 0, 28 min, 18.5 GB) |
-| P0.4 | builds in a VM: Debug and Release, cold and incremental, against native times | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs W3's space |
-| P0.5 | every e2e suite on `am-e2e` and on `am-install`, side by side | Agentmaster's portable zip runs on Tiny11 Core |
-| P0.6 | memory: balloons under load, KSM (W2), the reserves rechecked | the balloon and the memory chain measured |
+| P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | **passed 2026-10-25** (§16.9): the distro made by `site/sitectl.py create` in 11.5 s; production's fastrund image in it answers `/healthz` from Windows 0.36 s after `podman run`, runs ad-hoc scripts (the first 2.6 s after its start, then ~15 ms from Windows), 30 MB resident; found: Windows reaches it only at the distro's address, its HTTPS registry pulls fail (plain HTTP through Traefik works), slots run without cgroups |
+| P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | Agentmaster's portable zip runs on Tiny11 Core |
+| P0.4 | a full build in a VM: Debug, cold and incremental, against native (W4: over 2× native → the host lane) | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs ~55 GB of Q: while it runs (W3) |
 
-**The phases after P0:**
+**Then two tracks in parallel:**
+- **Track A, fastrun** (its repository, in a worktree of its own; tested on this PC's node and fastrun-next, never on
+  dock's production until Phase 5): F9 + F1 → F2 + F3 → F5 → F8 → F7. F4 and F6 wait for W1's cgroup v2.
+- **Track B, this repository:** the phases below. Until Track A's VM slots exist, Track B starts VMs through a
+  stand-in (rootful podman + dockur, what the proofs used) behind ONE slot interface; the fastrun driver replaces it in
+  Phase 2, so the finished system runs every slot on fastrun (D3).
 
 | Phase | Delivers | Done when |
 |---|---|---|
-| **P1** (fastrun repo) | F1–F5, F7–F9 | each feature's "done when" (§9) |
-| **P2** | the coordinator, its records, the host agent, the guest agent; `build` and `test`; the CLI | a Debug build of HEAD gets a build id and its artifacts while Windows keeps its 6 GB; two identical requests → one build; a request asked under pressure waits and starts by itself, or ends `no-capacity` at its timeout; nothing written to K: |
-| **P3** | `e2e` on the image P0.5 chose per suite; the install lane on `am-install`; the weekly full run | a full suite from `amb e2e <build id>`; no slot left after a success, a failure or a cancel |
-| **P4** | `install` | a dev install of a build id; an injected failure after the swap's stop rolls back |
-| **P5** | dock e2e slots (E3) | an e2e run lands on dock by its score while homepc builds |
-| deferred | `publish` (D11), the host native lane (D10, unless W4 says otherwise), freeze (F6) | — |
+| **P1, e2e on demand on this PC** | the image script, the Tiny11 Core base with the guest agent, the `am-e2e` layer; the guest agent (HTTP), the host agent (front door, wakes the distro, the store), a minimal coordinator (records, one site, §3.2's reserves; a VM boots at its grant), the CLI, the e2e engine's second transport; `amb import <zip>`: a hand-built zip or a GitHub release as a build id, so e2e works before builds exist | `amb e2e <build id>` runs a suite in a fresh VM and leaves nothing behind, in every outcome |
+| **P2, fluid memory, on fastrun** | balloons, pressure handling (§3.5), pending with timeouts, several VMs at once; KSM measured (W2); the slot driver switched to fastrun; the coordinator a fastrun app | two e2e VMs side by side while Windows keeps its 6 GB; a request under pressure waits and starts by itself, or ends `no-capacity` |
+| **P3, builds** (after P0.4, W3, W1) | the `am-build` layer sealed with servicing idle; build VMs kept 10 minutes; the mirror and bundles; artifacts into the store; `amb build`, `amb test m5\|syntax` | a Debug build of HEAD gets a build id and its artifacts; two identical requests → one build; nothing written to K:; `amb e2e <that id>` closes the loop |
+| **P4, the install lane, then `install`** | `am-install` from regular Tiny11; the install suites and a weekly full run on it; `install` of a build id through the swap script | a dev install of a build id; an injected failure after the swap's stop rolls back |
+| **P5, dock** (E3) | dock's e2e slots | an e2e run lands on dock by its score while homepc builds |
+| deferred | `publish` (D11), freeze (F6), the host lane unless P0.4 calls for it (D10) | — |
 
 ## 14. Decisions
 
@@ -666,6 +681,24 @@ threads under their usual load (55,913).
   [`measure/results-2026-10-25/`](measure/results-2026-10-25) (JSON, and a screenshot of Agentmaster on Tiny11 Core).
 - Not changed: either Agentmaster instance, fastrund, the homelab, any WSL or Docker Desktop setting; KSM stayed off.
 - A graceful stop of the build VM took 15.4 s (after the Build Tools install).
+
+### 16.9 P0.1: fastrund in the site distro (2026-10-25)
+
+The real site distro, made by [`site/sitectl.py`](site/sitectl.py) `create`, and production's fastrund image in it,
+by [`measure/p01_fastrund.py`](measure/p01_fastrund.py) (result: `measure/results-2026-10-25/p01-fastrund.json`).
+
+| What | Measured |
+|---|---|
+| `sitectl.py create`: Alpine 3.22.7's minirootfs fetched and checked / imported / packages + configuration | 1.1 s / 0.8 s / 9.7 s; the disk 0.25 GB; podman 5.6.2 (cgroups v1, cgroupfs, overlay) |
+| fastrund 1.2.1 (`fastrund:20261012-2`), privileged, host network, read-only root, releases off | API listening 15.7–50 ms after its start; the spawner "ready: cgroups off" ("no cgroup v2 here; slots stay in fastrund's cgroup") |
+| `/healthz` from Windows at the distro's address, after `podman run` | 0.36 s |
+| the same through Windows' localhost | refused: fastrund listens on `:::2200` (the IPv6 wildcard) and WSL 2.3.24's localhost forwarding passes only IPv4 listeners (a Python server on `0.0.0.0` was forwarded: 200 in 97 ms) |
+| runtime images pulled from `https://docker-registry.elibelash.com` | refused at once: "The SSL connection could not be established", with or without `SSL_CERT_FILE`, while curl in the distro verifies the certificate (Let's Encrypt, TLS 1.3) |
+| the same over plain HTTP through Traefik (`http://docker-registry.local`) | sh and bash ready 1.0–1.2 s after the start, .NET 3.7 s |
+| the first ad-hoc script / the next nine (from Windows, NAT) | 2.6 s after the start / 3.5–26.7 ms, median 15 ms; every exit 0; the slot's cgroup is fastrund's container (`/libpod_parent/libpod-…`) |
+| fastrund idle, the 30 s right after the runs / resident memory | 14.7 ms of CPU per second (production's nodes: ~0.6 ms, its rule 36; not measured settled) / 30.3 MB |
+| `podman stop` (SIGTERM; fastrund ends its slots) | 0.22 s |
+| a process started by a `wsl.exe -e sh -c '… &'` call | ends with that call; a podman container (conmon) keeps running |
 
 ## 17. Evidence
 

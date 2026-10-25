@@ -1,0 +1,174 @@
+{
+  "image": "docker-registry.elibelash.com/fastrund:20261012-2",
+  "checks": {
+    "healthz from Windows (the distro's address)": true,
+    "ad-hoc script runs": true
+  },
+  "pull_s": 0.39,
+  "distro_address": "172.23.87.90",
+  "healthz_from_windows_s": 0.36,
+  "healthz_via_windows_localhost": 0,
+  "listeners": [
+    ":::2201",
+    ":::2200",
+    ":::2202"
+  ],
+  "node_status_http": 200,
+  "node": {
+    "node": "homepc",
+    "version": "fastrund 1.2.1 (2026-10-12)",
+    "storeUsedBytes": "42856448",
+    "storeBudgetBytes": "8589934592",
+    "warmMemoryBytes": "0",
+    "warmBudgetBytes": "0",
+    "warmSlots": 6,
+    "scheduler": false,
+    "started": "2026-10-25T08:20:32.799302Z",
+    "storeItems": 2,
+    "storePinned": 2,
+    "address": "127.0.0.1",
+    "error": "",
+    "releases": 0,
+    "releasesSynced": false,
+    "releasesError": "releases are off (FASTRUN_RELEASES=0)",
+    "schedules": 0,
+    "schedulerHolder": "",
+    "schedulerError": "releases are off (FASTRUN_RELEASES=0)",
+    "apps": [],
+    "python": [],
+    "alertsConfigured": false,
+    "alertsRaised": "0",
+    "crun": "crun version 1.30.1",
+    "startMode": "fifo",
+    "instances": 0,
+    "spawner": {
+      "ready": true,
+      "problem": "",
+      "cgroups": false,
+      "live": 6,
+      "spawned": "6",
+      "failed": "0",
+      "lastSpawnUs": 1184.6,
+      "poolIpc": 16,
+      "poolTmp": 16,
+      "poolData": 16,
+      "poolCgroups": 0,
+      "poolPipes": 8,
+      "poolPrepared": 16,
+      "poolNet": 4,
+      "templates": 2,
+      "sharedTable": true,
+      "staging": "12 areas at fds 46-93, 4 free",
+      "coldPin": false,
+      "spinWaitUs": 300,
+      "trace": []
+    }
+  },
+  "artifact_put": {
+    "status": 201,
+    "s": 0.0218
+  },
+  "first_run_ready_s": 2.59,
+  "adhoc_runs": [
+    {
+      "n": 1,
+      "status": 200,
+      "client_s": 0.0153,
+      "exit_code": 0,
+      "timings": null,
+      "stdout": "hello from homepc\n5.15.153.1-microsoft-standard-WSL2\n15:name=systemd:/\n14:misc:/libpod_parent/libpod-eac132d7ee6ac90ba7dd7eed489b92a964dc17b7cb3f307ac06fd73878436613\n13:rdma:/libpod_parent/libpod-eac132d7ee6ac90ba7dd7eed489b92a964dc17b7cb3f307ac06fd73878436613\n12:pids:/libpod_parent/libpod-eac132d7ee6ac90ba7dd7eed489b92a964dc17b7cb3f307ac06fd738784366",
+      "stderr": ""
+    },
+    {
+      "n": 2,
+      "status": 200,
+      "client_s": 0.0147,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 3,
+      "status": 200,
+      "client_s": 0.0154,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 4,
+      "status": 200,
+      "client_s": 0.0147,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 5,
+      "status": 200,
+      "client_s": 0.0157,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 6,
+      "status": 200,
+      "client_s": 0.0155,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 7,
+      "status": 200,
+      "client_s": 0.0143,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 8,
+      "status": 200,
+      "client_s": 0.0148,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 9,
+      "status": 200,
+      "client_s": 0.0035,
+      "exit_code": 0,
+      "timings": null
+    },
+    {
+      "n": 10,
+      "status": 200,
+      "client_s": 0.0267,
+      "exit_code": 0,
+      "timings": null
+    }
+  ],
+  "idle": {
+    "cpu_ms_per_s": 14.667,
+    "rss_mb": 30.3
+  },
+  "log_tail": [
+    "2026-10-25T08:20:32.813Z tokens: 1 known (no token file, the admin token only)",
+    "2026-10-25T08:20:32.817Z fastrund 1.2.1 (2026-10-12) starting on homepc (127.0.0.1); API :2200; start mode Fifo; inline I/O on; token set",
+    "2026-10-25T08:20:32.819Z store /var/lib/fastrun-store: 0 items, 0 MiB of a 8192 MiB budget, indexed in 0.6 ms",
+    "2026-10-25T08:20:32.832Z instance ports: 2500-65535 less 6443-6444,7800-7899,10010,10248-10259,29642-29644,30000-32767 and fastrund's own ports; the kernel's ephemeral range 32768-60999 is left to outgoing connections: 31918 ports, handed out at random",
+    "2026-10-25T08:20:32.854Z crun version 1.30.1; API listening 55.1 ms after start (HTTP :2200, gRPC :2201, raw lane :2202 /run/fastrun-lane/lane.sock); 8 ad-hoc runtime(s), 0 release runtime(s), 1 token(s)",
+    "2026-10-25T08:20:32.929Z ERROR spawner: no cgroup v2 here; slots stay in fastrund's cgroup",
+    "2026-10-25T08:20:32.929Z spawner ready: cgroups off, pools of 16, staging 12 areas at fds 46-93, 12 free",
+    "2026-10-25T08:20:33.012Z alerts: no Secret at /etc/fastrun/alerts (bot-token, chat-id): alerts are logged, not sent",
+    "2026-10-25T08:20:33.874Z pulled docker-registry.elibelash.com/fastrun-sh:20261004-2 (sha256:6be7aeab1fbc): 2 layers, 20768 KiB, 21124 KiB unpacked, 857.8 ms (manifest + config 38.8 ms, layers in parallel 818.8 ms [5587 KiB fetched 580.1 applied 583.5; 15181 KiB fetched 853.9 applied 857.7], store 2.2 ms)",
+    "2026-10-25T08:20:33.876Z function adhoc-bash ready: image sha256:6be7aeab1fbc, pool 2, engine spawner, network none, runtime /.fastrun-runner --fifo-host /tmp/.fastrun-program /bin/bash",
+    "2026-10-25T08:20:33.876Z function adhoc-bash-net ready: image sha256:6be7aeab1fbc, pool 0, engine spawner, runtime /.fastrun-runner --fifo-host /tmp/.fastrun-program /bin/bash",
+    "2026-10-25T08:20:34.078Z pulled docker-registry.elibelash.com/fastrun-fn-sh:20261006-1 (sha256:aa8cead288af): 3 layers, 20505 KiB, 20704 KiB unpacked, 1065.4 ms (manifest + config 42.4 ms, layers in parallel 1023.0 ms [5587 KiB fetched 769.2 applied 775.2; 13901 KiB fetched 1060.1 applied 1063.8; 1017 KiB fetched 235.8 applied 1065.3], store 0.2 ms)",
+    "2026-10-25T08:20:34.079Z function adhoc-sh ready: image sha256:aa8cead288af, pool 2, engine spawner, network none, runtime /.fastrun-runner --fifo-host /tmp/.fastrun-program /bin/sh",
+    "2026-10-25T08:20:34.079Z function adhoc-sh-net ready: image sha256:aa8cead288af, pool 0, engine spawner, runtime /.fastrun-runner --fifo-host /tmp/.fastrun-program /bin/sh",
+    "2026-10-25T08:20:34.079Z function adhoc-exec ready: image sha256:aa8cead288af, pool 2, engine spawner, network none, runtime /.fastrun-runner --exec-host",
+    "2026-10-25T08:20:34.079Z function adhoc-exec-net ready: image sha256:aa8cead288af, pool 0, engine spawner, runtime /.fastrun-runner --exec-host",
+    "2026-10-25T08:20:35.323Z artifact ae94213197b7 (72 bytes) pushed in 168.2 ms (manifest check 7.9, blob 97.6, config 104.7, manifest 168.2)",
+    "2026-10-25T08:20:36.650Z pulled docker-registry.elibelash.com/fastrun-fn-dotnet:20261006-6 (sha256:f3b3ae350260): 6 layers, 92257 KiB, 92944 KiB unpacked, 3636.2 ms (manifest + config 41.1 ms, layers in parallel 3594.9 ms [8500 KiB fetched 1216.6 applied 1223.4; 2938 KiB fetched 1147.5 applied 1227.3; 10 KiB fetched 238.4 applied 1227.9; 80648 KiB fetched 3626.5 applied 3634.8; 3 KiB fetched 183.9 applied 3635.1; 157 KiB fetched 445.9 applied 3636.0], store 0.5 ms)",
+    "2026-10-25T08:20:36.651Z function adhoc-dotnet ready: image sha256:f3b3ae350260, pool 1, engine spawner, network none, runtime /usr/bin/dotnet /fn/fnhost.dll",
+    "2026-10-25T08:20:36.651Z function adhoc-dotnet-net ready: image sha256:f3b3ae350260, pool 0, engine spawner, runtime /usr/bin/dotnet /fn/fnhost.dll"
+  ],
+  "stop_s": 0.22,
+  "passed": true
+}
