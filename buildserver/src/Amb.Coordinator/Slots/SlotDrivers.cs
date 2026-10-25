@@ -146,6 +146,8 @@ public static class Commands
 /// <item>Every other file of the image folder (UEFI code and variables, dockur's state files, <c>windows.boot</c>) is
 /// copied into the slot: each slot gets its own UEFI variables. ⚠ Without <c>windows.boot</c> dockur takes the folder for
 /// an unfinished install and deletes its disks (measured), so a start without it is refused here.</item>
+/// <item>The version: a boot passes the VERSION the image was installed from (<see cref="ImageVersion"/>); with any other
+/// dockur moves the overlay aside and installs Windows afresh (measured), so a start without it is refused too.</item>
 /// <item>The network: <c>slirp4netns:allow_host_loopback=true</c>, so the guest reaches the coordinator at 10.0.2.2,
 /// which slirp4netns maps to the distro's loopback (measured: without the option nothing answers there). Nothing is
 /// added to the network namespace WSL shares with Docker Desktop.</item>
@@ -208,9 +210,12 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         }
         else
         {
+            // A boot: the SAME VERSION the image was installed from, or dockur takes the slot for a changed install and
+            // reinstalls over it (ImageVersion's remarks). Read before the overlay is made, so a bad image costs nothing.
+            string version = ImageVersion(spec.ImageDir);
             await PrepareOverlayAsync(spec, cancel).ConfigureAwait(false);
             string imagesRoot = Path.GetDirectoryName(spec.ImageDir)!;
-            args.AddRange(["-v", imagesRoot + ":" + imagesRoot + ":ro"]);
+            args.AddRange(["-e", "VERSION=" + version, "-v", imagesRoot + ":" + imagesRoot + ":ro"]);
         }
         args.Add(options.DockurImage);
         CommandResult run = await Commands.RunAsync("podman", args, TimeSpan.FromMinutes(2), cancel, env: Env)
@@ -221,6 +226,39 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         }
         log.LogInformation("slot {Slot}: container {Name} started ({Grant})", spec.SlotId, name, spec.Grant);
         return name;
+    }
+
+    /// <summary>The dockur VERSION an image was installed from, read from dockur's own record of it.</summary>
+    /// <param name="imageDir">The image's folder.</param>
+    /// <returns>The version ("core11" for an image whose <c>windows.base</c> says "core11.iso").</returns>
+    /// <exception cref="InvalidOperationException">The image has no <c>windows.base</c>, or it does not name an ISO by a
+    /// plain dockur version (letters, digits, '.', '_', '-').</exception>
+    /// <exception cref="IOException">The file could not be read.</exception>
+    /// <remarks>
+    /// <para>dockur writes the ISO's file name to <c>windows.base</c> when it installs (the canonical version: "11" is
+    /// recorded as "win11x64.iso", "core11" as "core11.iso"). At every start it compares that name with the ISO its
+    /// VERSION variable names, and on a mismatch it moves the disk to <c>backups/</c> and installs afresh, so a slot that
+    /// boots an image must pass the same VERSION.</para>
+    /// <para>⚠ Measured on 2026-10-25: a boot of am-base without VERSION (dockur's default is "11") downloaded the 7.7 GB
+    /// Windows 11 ISO into the slot and started its setup; no guest agent ever said hello. The image's layers keep their
+    /// base's <c>windows.base</c> (the slot copies it), so this reads right for a layer too.</para>
+    /// </remarks>
+    internal static string ImageVersion(string imageDir)
+    {
+        string file = Path.Combine(imageDir, "windows.base");
+        if (!File.Exists(file))
+        {
+            throw new InvalidOperationException($"image {Path.GetFileName(imageDir)} has no windows.base: the dockur "
+                + "version it was installed from is unknown, and a boot with another version would reinstall over it");
+        }
+        string iso = File.ReadAllText(file).Trim();
+        string version = iso.EndsWith(".iso", StringComparison.OrdinalIgnoreCase) ? iso[..^4] : "";
+        if (version.Length == 0 || !version.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-'))
+        {
+            throw new InvalidOperationException(
+                $"image {Path.GetFileName(imageDir)}'s windows.base does not name a dockur version's ISO: {iso}");
+        }
+        return version;
     }
 
     /// <summary>Makes a slot's overlay over its image and copies the image's other files (UEFI, dockur's state).</summary>

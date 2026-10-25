@@ -7,6 +7,9 @@ only way the distro is made or changed, so its state is reproducible from the re
     python buildserver/site/sitectl.py create      # download Alpine, import the distro, install and configure it
     python buildserver/site/sitectl.py provision   # re-apply packages, folders and configuration (idempotent)
     python buildserver/site/sitectl.py status      # what the site is now, as JSON
+    python buildserver/site/sitectl.py deploy      # publish the coordinator, guest agent, host-facts helper into it
+    python buildserver/site/sitectl.py up          # start the coordinator (a setsid daemon) unless it runs
+    python buildserver/site/sitectl.py down        # stop it gracefully (it cancels its jobs, which stop their slots)
     python buildserver/site/sitectl.py run -- podman ps   # one command inside the distro, as root
 
 Why each choice:
@@ -26,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +57,8 @@ PACKAGES = [
     "python3",         # the image script and the slot helpers run here (D12: Python for setup scripts)
     "curl",            # health checks of fastrund and the coordinator from inside the site
     "ca-certificates", # TLS to the registry and to Alpine's mirror
+    "libstdc++",       # the self-contained .NET runtime of amb-coordinator (linux-musl-x64) links it
+    "libgcc",          # likewise (libgcc_s)
 ]
 """What the site installs; every package is named with the reason the site needs it."""
 
@@ -75,6 +81,51 @@ SITE_FOLDERS = [
 
 FILES_DIR = Path(__file__).resolve().parent / "files"
 """The configuration files this script installs into the distro (each one documents itself)."""
+
+REPO = Path(__file__).resolve().parents[2]
+"""The repository's root (the build server's projects are under buildserver/src)."""
+
+PUBLISH_ROOT = Path(r"Q:\tmp\buildserver-build\publish")
+"""Where `deploy` publishes the binaries (every build writes to Q:, never to K:)."""
+
+WINDOWS_BIN = Path(r"Q:\buildserver\bin")
+"""The site's Windows-side folder: amb-hostfacts.exe must be a Windows file for WSL's interop to run it fast."""
+
+COORDINATOR_PORT = 2207
+"""amb-coordinator's port in the site (IPv4, so Windows reaches it at 127.0.0.1 through localhost forwarding too)."""
+
+COORDINATOR_UP = """#!/bin/sh
+# Starts amb-coordinator as a daemon unless it runs already (written by buildserver/site/sitectl.py `deploy`).
+# setsid gives it a session of its own: a process left in the session of the wsl.exe call that started it ends with that
+# call (measured 2026-10-25). The wait for /healthz afterwards also gives setsid the moment it needs to detach before
+# this script's own call returns.
+set -eu
+dir=/srv/buildserver/coordinator
+pidfile=$dir/amb-coordinator.pid
+mkdir -p "$dir"
+if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  echo "running $(cat "$pidfile")"
+  exit 0
+fi
+export AMB_ROOT=/srv/buildserver
+export AMB_LISTEN=http://0.0.0.0:2207
+export AMB_GUEST_URL=http://10.0.2.2:2207
+export AMB_HOSTFACTS=/mnt/q/buildserver/bin/amb-hostfacts.exe
+export DOTNET_gcServer=0
+(setsid /srv/buildserver/bin/coordinator/amb-coordinator >> "$dir/coordinator.log" 2>&1 < /dev/null & echo $! > "$pidfile")
+i=0
+while [ $i -lt 60 ]; do
+  if curl -sf -o /dev/null http://127.0.0.1:2207/healthz; then
+    echo "started $(cat "$pidfile")"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 0.5
+done
+echo "amb-coordinator did not answer within 30 s; see $dir/coordinator.log" >&2
+exit 1
+"""
+"""The site's start script for the coordinator (installed as /srv/buildserver/bin/coordinator-up.sh)."""
 
 
 class SiteError(RuntimeError):
@@ -381,6 +432,169 @@ def status(root: Path) -> dict[str, object]:
     return report
 
 
+def _dotnet_publish(project: str, out: Path, extra: list[str]) -> None:
+    """Publishes one of the build server's projects (Release) into a folder on Q:.
+
+    Args:
+        project: the project's folder name under buildserver/src (e.g. "Amb.Coordinator").
+        out: the output folder (emptied first, so no stale file of an older publish is deployed).
+        extra: more `dotnet publish` arguments (the runtime, self-contained, single-file).
+
+    Raises:
+        SiteError: the publish failed (its last lines are in the message).
+    """
+    shutil.rmtree(out, ignore_errors=True)
+    env = dict(os.environ)
+    # Native AOT's link step looks for vswhere.exe on PATH; Git Bash's PATH lacks the Visual Studio Installer folder.
+    env["PATH"] = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer" + os.pathsep + env.get("PATH", "")
+    done = subprocess.run(["dotnet", "publish", str(REPO / "buildserver" / "src" / project), "-c", "Release", "-nologo",
+                           "-v", "q", "-o", str(out), *extra], capture_output=True, timeout=1800, env=env, check=False)
+    if done.returncode != 0:
+        tail = (done.stdout + done.stderr).decode("utf-8", "replace").strip().splitlines()[-15:]
+        raise SiteError(f"dotnet publish {project} failed:\n" + "\n".join(tail))
+
+
+def _to_mnt(path: Path) -> str:
+    """Turns a Windows path into the path the distro sees it at (WSL's automount).
+
+    Args:
+        path: an absolute Windows path, e.g. Q:\\tmp\\x.
+
+    Returns:
+        "/mnt/q/tmp/x".
+    """
+    text = str(path)
+    return "/mnt/" + text[0].lower() + text[2:].replace("\\", "/")
+
+
+def deploy() -> dict[str, object]:
+    """Publishes the coordinator, the guest agent and the host-facts helper, and installs them into the site.
+
+    - amb-coordinator: linux-musl-x64, self-contained, single file (the distro has no .NET), into
+      /srv/buildserver/bin/coordinator/;
+    - amb-guest.exe: Native AOT, into /srv/buildserver/bin/ (the coordinator copies it into every slot's share);
+    - amb-hostfacts.exe: Native AOT, into Q:\\buildserver\\bin\\ (a Windows file, so WSL's interop runs it natively);
+    - hmp.py (the QEMU monitor helper the balloon uses) and coordinator-up.sh, into /srv/buildserver/bin/.
+    A running coordinator keeps its old files open; `down` then `up` makes it use the new ones.
+
+    Returns:
+        The deployed files' sizes.
+
+    Raises:
+        SiteError: a publish or a copy failed.
+    """
+    coordinator = PUBLISH_ROOT / "amb-coordinator-linux"
+    guest = PUBLISH_ROOT / "amb-guest"
+    hostfacts = PUBLISH_ROOT / "amb-hostfacts"
+    _dotnet_publish("Amb.Coordinator", coordinator,
+                    ["-r", "linux-musl-x64", "--self-contained", "-p:PublishSingleFile=true",
+                     "-p:DebugType=none", "-p:GenerateDocumentationFile=false"])
+    _dotnet_publish("Amb.GuestAgent", guest, [])
+    _dotnet_publish("Amb.HostFacts", hostfacts, [])
+    WINDOWS_BIN.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(hostfacts / "amb-hostfacts.exe", WINDOWS_BIN / "amb-hostfacts.exe")
+    hmp = REPO / "buildserver" / "measure" / "hmp.py"
+    script = "\n".join([
+        "rm -rf /srv/buildserver/bin/coordinator.new",
+        f"cp -r '{_to_mnt(coordinator)}' /srv/buildserver/bin/coordinator.new",
+        "rm -rf /srv/buildserver/bin/coordinator.old",
+        "[ -d /srv/buildserver/bin/coordinator ] && mv /srv/buildserver/bin/coordinator /srv/buildserver/bin/coordinator.old || true",
+        "mv /srv/buildserver/bin/coordinator.new /srv/buildserver/bin/coordinator",
+        "chmod 0755 /srv/buildserver/bin/coordinator/amb-coordinator",
+        f"cp '{_to_mnt(guest)}/amb-guest.exe' /srv/buildserver/bin/amb-guest.exe",
+        f"cp '{_to_mnt(hmp)}' /srv/buildserver/bin/hmp.py",
+        _install_file_script_text(COORDINATOR_UP, "/srv/buildserver/bin/coordinator-up.sh", "0755"),
+        "du -sk /srv/buildserver/bin/coordinator | awk '{print \"coordinator_kb=\"$1}'",
+        "stat -c 'guest_bytes=%s' /srv/buildserver/bin/amb-guest.exe",
+    ])
+    out = in_distro(script, timeout=600).stdout.decode("utf-8", "replace")
+    facts: dict[str, object] = {"hostfacts": str(WINDOWS_BIN / "amb-hostfacts.exe")}
+    for line in out.splitlines():
+        key, _, value = line.partition("=")
+        if value:
+            facts[key] = int(value) if value.isdigit() else value
+    return facts
+
+
+def _install_file_script_text(content: str, target: str, mode: str) -> str:
+    """Builds the shell lines that write a text into a file of the distro (like `_install_file_script`, from a string).
+
+    Args:
+        content: the file's text.
+        target: its absolute path in the distro.
+        mode: the octal mode to give it.
+
+    Returns:
+        The shell lines.
+
+    Raises:
+        SiteError: the text contains the here-document's end marker.
+    """
+    marker = "AMB_SITE_FILE_END"
+    if marker in content:
+        raise SiteError(f"{target}: the content contains the marker {marker}")
+    return (f"cat > '{target}.tmp' <<'{marker}'\n{content}{'' if content.endswith(chr(10)) else chr(10)}{marker}\n"
+            f"chmod {mode} '{target}.tmp'\nmv -f '{target}.tmp' '{target}'\n")
+
+
+def up() -> dict[str, object]:
+    """Starts the coordinator in the site unless it runs, and says how Windows reaches it.
+
+    Returns:
+        What coordinator-up.sh said, the distro's address, and whether Windows' localhost reaches the coordinator.
+
+    Raises:
+        SiteError: it did not start (its log's last lines are in the message).
+    """
+    done = in_distro("/srv/buildserver/bin/coordinator-up.sh\n", timeout=120, check=False)
+    if done.returncode != 0:
+        log = in_distro("tail -n 30 /srv/buildserver/coordinator/coordinator.log\n", timeout=60, check=False)
+        raise SiteError("the coordinator did not start:\n" + log.stdout.decode("utf-8", "replace"))
+    address = in_distro("ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1\n", timeout=30).stdout.decode().strip()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{COORDINATOR_PORT}/healthz", timeout=5) as response:
+            localhost = response.status == 200
+    except OSError:
+        localhost = False
+    return {"coordinator": done.stdout.decode().strip(), "distro_address": address,
+            "windows_localhost_reaches_it": localhost}
+
+
+def down() -> str:
+    """Stops the coordinator gracefully (SIGTERM: it cancels its jobs, which stop their slots).
+
+    Returns:
+        What happened ("stopped <pid>", "not running").
+
+    Raises:
+        SiteError: wsl.exe failed.
+    """
+    out = in_distro(
+        "pidfile=/srv/buildserver/coordinator/amb-coordinator.pid\n"
+        "if [ -f \"$pidfile\" ] && kill -0 \"$(cat \"$pidfile\")\" 2>/dev/null; then\n"
+        "  pid=$(cat \"$pidfile\"); kill -TERM \"$pid\"\n"
+        "  i=0; while kill -0 \"$pid\" 2>/dev/null && [ $i -lt 600 ]; do sleep 0.5; i=$((i+1)); done\n"
+        "  rm -f \"$pidfile\"; echo \"stopped $pid\"\n"
+        "else echo 'not running'; fi\n", timeout=330).stdout.decode().strip()
+    return out
+
+
+def admin_token() -> str:
+    """Reads the coordinator's admin token from the site (callers keep it in memory; nothing prints it).
+
+    Returns:
+        The token.
+
+    Raises:
+        SiteError: the coordinator never started, so there is no token yet.
+    """
+    done = in_distro("cat /srv/buildserver/coordinator/admin.token\n", timeout=30, check=False)
+    token = done.stdout.decode().strip()
+    if done.returncode != 0 or len(token) < 32:
+        raise SiteError("no admin token yet: start the coordinator once (`up`)")
+    return token
+
+
 def main(argv: list[str]) -> int:
     """Parses the command line and runs one command.
 
@@ -396,6 +610,9 @@ def main(argv: list[str]) -> int:
     sub.add_parser("create", help="make the distro from nothing")
     sub.add_parser("provision", help="re-apply packages, folders and configuration")
     sub.add_parser("status", help="describe the site as JSON")
+    sub.add_parser("deploy", help="publish the coordinator, guest agent and host-facts helper into the site")
+    sub.add_parser("up", help="start the coordinator unless it runs")
+    sub.add_parser("down", help="stop the coordinator gracefully")
     run = sub.add_parser("run", help="run one command inside the distro as root")
     run.add_argument("cmd", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -406,6 +623,12 @@ def main(argv: list[str]) -> int:
             print(json.dumps(provision(), indent=2))
         elif args.command == "status":
             print(json.dumps(status(args.root), indent=2))
+        elif args.command == "deploy":
+            print(json.dumps(deploy(), indent=2))
+        elif args.command == "up":
+            print(json.dumps(up(), indent=2))
+        elif args.command == "down":
+            print(down())
         elif args.command == "run":
             cmd = [c for c in args.cmd if c != "--"]
             if not cmd:

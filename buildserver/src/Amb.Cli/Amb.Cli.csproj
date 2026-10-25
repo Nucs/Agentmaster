@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    amb, the build server's command line (buildserver/DESIGN.md §10): import a build, run e2e on it, smoke-test an
+    image, watch, list, cancel. It talks to the coordinator in the site over HTTP (127.0.0.1:2207, through WSL's
+    localhost forwarding), wakes the site when the coordinator does not answer, and reads the admin token from the site.
+
+    Native AOT for win-x64: a CLI that Claude sessions call often must start in milliseconds, not the ~70 ms of a JIT
+    start (fastrun's CLI measured 0.37-0.71 s per command for exactly that reason).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>amb</AssemblyName>
+    <RootNamespace>Amb.Cli</RootNamespace>
+    <PublishAot>true</PublishAot>
+    <Version>0.1.0</Version>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Amb.Core\Amb.Core.csproj" />
+  </ItemGroup>
+</Project>

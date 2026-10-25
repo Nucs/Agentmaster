@@ -5,4 +5,6 @@
   <Project Path="Amb.GuestAgent/Amb.GuestAgent.csproj" />
   <Project Path="Amb.HostFacts/Amb.HostFacts.csproj" />
   <Project Path="Amb.Coordinator/Amb.Coordinator.csproj" />
+  <Project Path="Amb.Coordinator.Tests/Amb.Coordinator.Tests.csproj" />
+  <Project Path="Amb.Cli/Amb.Cli.csproj" />
 </Solution>
