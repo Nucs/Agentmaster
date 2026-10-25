@@ -29,7 +29,8 @@ here is part of the build server: they are the measurements' proof, kept so that
 | [`ksm-test.sh`](ksm-test.sh) | KSM's savings on idle Windows VMs (not run: KSM is one switch for the whole WSL VM, and another session was measuring memory in it) | a WSL distro, as root |
 | [`oem/`](oem) | the image's measurement agent: `install.bat` → `setup.ps1` registers `agent.ps1` as a logon task; the agent runs `jobs\<n>.ps1` from the share and writes `results\` | every guest |
 | [`guest/`](guest) | the jobs: `facts.ps1` (what Tiny11 Core contains), `bench-c.ps1`, `bench-disks.ps1`, `alloc.ps1` (new space vs overwrites), `attach.ps1` (four QEMU disk attachments), `app-portable.ps1` (Agentmaster v0.8.0 portable), `vs-install.ps1` (VS 2022 Build Tools), `compile.ps1` / `compile-sampled.ps1` / `compile-quiet.ps1` (the compile benchmark in the guest: twice, with memory and CPU samples, and with Windows' servicing stopped), `update-agent.ps1` | a guest, through the agent |
-| [`results-2026-10-25/`](results-2026-10-25) | every result file the numbers in DESIGN.md §16 come from: `docker-vm-*` (the VM in Docker Desktop), `distro-slot-*` (the slot in the test distro), `host-*` (this PC), and the screenshot of Agentmaster on Tiny11 Core | — |
+| [`p01_fastrund.py`](p01_fastrund.py) | proof P0.1 (DESIGN.md §16.9): production's fastrund image in the REAL site distro (`buildserver`, made by `../site/sitectl.py`), releases off: `/healthz` from Windows, ad-hoc script runs, idle CPU and memory; the registry credentials come from Docker Desktop's credential store and are never printed | Windows (it drives the distro through wsl.exe) |
+| [`results-2026-10-25/`](results-2026-10-25) | every result file the numbers in DESIGN.md §16 come from: `docker-vm-*` (the VM in Docker Desktop), `distro-slot-*` (the slot in the test distro), `host-*` (this PC), `p01-fastrund.json` (P0.1), and the screenshot of Agentmaster on Tiny11 Core | — |
 
 ## Traps met on the way (each one is in DESIGN.md too)
 
@@ -53,3 +54,11 @@ here is part of the build server: they are the measurements' proof, kept so that
 - **`wsl --manage <distro> --set-sparse true` is refused while WSL's VM runs** ("the vhdx is currently in use"), even
   right after `wsl --import`, and so is `fsutil sparse setflag`; with Docker Desktop keeping WSL up, it needs a WSL
   restart.
+- **WSL's localhost forwarding passes only IPv4 listeners:** fastrund listens on `:::2200` and is reachable from
+  Windows only at the distro's own address (`ip -4 addr show eth0` in the distro; it changes with every start of WSL's
+  VM).
+- **The static fastrund image cannot do TLS to the registry from here** ("The SSL connection could not be established"),
+  while curl in the same distro verifies the certificate; plain HTTP through Traefik (`http://docker-registry.local`,
+  given as `FASTRUN_REGISTRY_ENDPOINTS`) works.
+- **A process started by `wsl.exe -e sh -c '… &'` ends when that call returns:** start anything that must keep running
+  as a podman container (conmon keeps it), never as a background job of a wsl.exe call.
