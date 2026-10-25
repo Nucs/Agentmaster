@@ -1,0 +1,74 @@
+﻿{
+    "freeGB":  37.98,
+    "topLevel":  [
+                     {
+                         "folder":  "C:\\Program Files (x86)",
+                         "GB":  15.61
+                     },
+                     {
+                         "folder":  "C:\\Windows",
+                         "GB":  9.07
+                     },
+                     {
+                         "folder":  "C:\\Program Files",
+                         "GB":  1.9
+                     },
+                     {
+                         "folder":  "C:\\ProgramData",
+                         "GB":  1.16
+                     },
+                     {
+                         "folder":  "C:\\Users",
+                         "GB":  0.39
+                     },
+                     {
+                         "folder":  "C:\\am",
+                         "GB":  0.07
+                     },
+                     {
+                         "folder":  "C:\\System Volume Information",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\$Recycle.Bin",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\Recovery",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\Documents and Settings",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\bs",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\alloc",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\PerfLogs",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\OEM",
+                         "GB":  0
+                     },
+                     {
+                         "folder":  "C:\\inetpub",
+                         "GB":  0
+                     }
+                 ],
+    "WindowsInstaller":  0.67,
+    "WinSxS":  0.39,
+    "PackageCache":  0.93,
+    "ProgramDataVS":  0.05,
+    "UserTemp":  0.25,
+    "WindowsTemp":  0,
+    "pageFileMB":  [
+                       "C:\\pagefile.sys 1920"
+                   ]
+}

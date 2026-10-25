@@ -1,0 +1,45 @@
+{
+  "host": "DESKTOP-M0THEG3",
+  "logicalCpus": 32,
+  "threads": 4,
+  "workDir": "Q:\\buildserver\\_measure\\hostbench",
+  "cpu1": {
+    "MBps": 1318.4,
+    "seconds": 0.78
+  },
+  "cpuN": {
+    "MBps": 5270.5,
+    "slowestLoopSeconds": 0.78,
+    "wallSeconds": 1.25
+  },
+  "process": {
+    "msPerProcess": 109.26
+  },
+  "smallFiles": {
+    "createPerSec": 2012,
+    "readPerSec": 17033,
+    "deletePerSec": 10174
+  },
+  "disk": {
+    "randWrite4kForced": {
+      "MiBps": 296.38,
+      "iops": 75873.71
+    },
+    "randWrite4k": {
+      "MiBps": 295.8,
+      "iops": 75724.02
+    },
+    "randRead4k": {
+      "MiBps": 529.76,
+      "iops": 135618.76
+    },
+    "seqWrite1m": {
+      "MiBps": 974.75,
+      "iops": 974.75
+    },
+    "seqRead1m": {
+      "MiBps": 6071.8,
+      "iops": 6071.8
+    }
+  }
+}

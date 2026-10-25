@@ -1,0 +1,301 @@
+﻿{
+    "tiWorkerBefore":  [
+                           "TiWorker pid 8712 cpu 1791s"
+                       ],
+    "idleAfterSeconds":  11,
+    "busyBefore":  [
+                       "System 494s",
+                       "powershell 34s",
+                       "Memory Compression 29s",
+                       "explorer 26s",
+                       "powershell 22s",
+                       "svchost 14s"
+                   ],
+    "peakCommittedMB":  3855,
+    "minAvailableMB":  4820,
+    "meanCpu":  79,
+    "samples":  [
+                    {
+                        "t":  "06:06:15",
+                        "committedMB":  1907,
+                        "availableMB":  6646,
+                        "cpu":  25
+                    },
+                    {
+                        "t":  "06:06:19",
+                        "committedMB":  1920,
+                        "availableMB":  6637,
+                        "cpu":  38
+                    },
+                    {
+                        "t":  "06:06:22",
+                        "committedMB":  1942,
+                        "availableMB":  6621,
+                        "cpu":  52
+                    },
+                    {
+                        "t":  "06:06:25",
+                        "committedMB":  1954,
+                        "availableMB":  6612,
+                        "cpu":  43
+                    },
+                    {
+                        "t":  "06:06:28",
+                        "committedMB":  1915,
+                        "availableMB":  6636,
+                        "cpu":  51
+                    },
+                    {
+                        "t":  "06:06:31",
+                        "committedMB":  1919,
+                        "availableMB":  6629,
+                        "cpu":  79
+                    },
+                    {
+                        "t":  "06:06:34",
+                        "committedMB":  1921,
+                        "availableMB":  6628,
+                        "cpu":  94
+                    },
+                    {
+                        "t":  "06:06:37",
+                        "committedMB":  1924,
+                        "availableMB":  6624,
+                        "cpu":  75
+                    },
+                    {
+                        "t":  "06:06:41",
+                        "committedMB":  1935,
+                        "availableMB":  6619,
+                        "cpu":  68
+                    },
+                    {
+                        "t":  "06:06:44",
+                        "committedMB":  1935,
+                        "availableMB":  6619,
+                        "cpu":  75
+                    },
+                    {
+                        "t":  "06:06:47",
+                        "committedMB":  1937,
+                        "availableMB":  6618,
+                        "cpu":  52
+                    },
+                    {
+                        "t":  "06:06:50",
+                        "committedMB":  1895,
+                        "availableMB":  6637,
+                        "cpu":  43
+                    },
+                    {
+                        "t":  "06:06:53",
+                        "committedMB":  1895,
+                        "availableMB":  6639,
+                        "cpu":  31
+                    },
+                    {
+                        "t":  "06:06:56",
+                        "committedMB":  1901,
+                        "availableMB":  6637,
+                        "cpu":  37
+                    },
+                    {
+                        "t":  "06:06:59",
+                        "committedMB":  1897,
+                        "availableMB":  6646,
+                        "cpu":  36
+                    },
+                    {
+                        "t":  "06:07:02",
+                        "committedMB":  1900,
+                        "availableMB":  6638,
+                        "cpu":  37
+                    },
+                    {
+                        "t":  "06:07:06",
+                        "committedMB":  1898,
+                        "availableMB":  6643,
+                        "cpu":  64
+                    },
+                    {
+                        "t":  "06:07:09",
+                        "committedMB":  1935,
+                        "availableMB":  6615,
+                        "cpu":  43
+                    },
+                    {
+                        "t":  "06:07:12",
+                        "committedMB":  2258,
+                        "availableMB":  6331,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:15",
+                        "committedMB":  2781,
+                        "availableMB":  5800,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:18",
+                        "committedMB":  2522,
+                        "availableMB":  6129,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:21",
+                        "committedMB":  3151,
+                        "availableMB":  5540,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:24",
+                        "committedMB":  2633,
+                        "availableMB":  6029,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:27",
+                        "committedMB":  3078,
+                        "availableMB":  5593,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:30",
+                        "committedMB":  2974,
+                        "availableMB":  5709,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:33",
+                        "committedMB":  3263,
+                        "availableMB":  5417,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:36",
+                        "committedMB":  3038,
+                        "availableMB":  5640,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:39",
+                        "committedMB":  3511,
+                        "availableMB":  5173,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:42",
+                        "committedMB":  3143,
+                        "availableMB":  5530,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:45",
+                        "committedMB":  3360,
+                        "availableMB":  5330,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:48",
+                        "committedMB":  3240,
+                        "availableMB":  5442,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:51",
+                        "committedMB":  3307,
+                        "availableMB":  5385,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:54",
+                        "committedMB":  3282,
+                        "availableMB":  5403,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:07:57",
+                        "committedMB":  3315,
+                        "availableMB":  5375,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:00",
+                        "committedMB":  3328,
+                        "availableMB":  5370,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:03",
+                        "committedMB":  3098,
+                        "availableMB":  5588,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:06",
+                        "committedMB":  3373,
+                        "availableMB":  5329,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:09",
+                        "committedMB":  3219,
+                        "availableMB":  5479,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:12",
+                        "committedMB":  3256,
+                        "availableMB":  5438,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:15",
+                        "committedMB":  3522,
+                        "availableMB":  5191,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:18",
+                        "committedMB":  3848,
+                        "availableMB":  4869,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:21",
+                        "committedMB":  3824,
+                        "availableMB":  4886,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:25",
+                        "committedMB":  3138,
+                        "availableMB":  5534,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:28",
+                        "committedMB":  3855,
+                        "availableMB":  4820,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:31",
+                        "committedMB":  3681,
+                        "availableMB":  4998,
+                        "cpu":  100
+                    },
+                    {
+                        "t":  "06:08:34",
+                        "committedMB":  2404,
+                        "availableMB":  6262,
+                        "cpu":  50
+                    },
+                    {
+                        "t":  "06:08:37",
+                        "committedMB":  2138,
+                        "availableMB":  6304,
+                        "cpu":  27
+                    }
+                ]
+}

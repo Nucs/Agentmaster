@@ -1,0 +1,34 @@
+﻿{
+    "host":  "DOCKERW-FJQLMMU",
+    "logicalCpus":  4,
+    "threads":  4,
+    "workDir":  "C:\\bs\\bench",
+    "cpu1":  {
+                 "MBps":  988.5,
+                 "seconds":  0.26
+             },
+    "cpuN":  {
+                 "MBps":  1011.8,
+                 "seconds":  1.01
+             },
+    "process":  {
+                    "msPerProcess":  30.66
+                },
+    "smallFiles":  {
+                       "createPerSec":  5341,
+                       "readPerSec":  37452,
+                       "deletePerSec":  9951
+                   },
+    "disk":  {
+                 "randWrite4k":  {
+                                     "MiBps":  4.97,
+                                     "iops":  1271.9
+                                 },
+                 "randRead4k":  {
+                                    "MiBps":  55.11,
+                                    "iops":  14108.93
+                                },
+                 "seqWrite1m":  "failed: WARNING: single-threaded test, -si ignored",
+                 "seqRead1m":  "failed: WARNING: single-threaded test, -si ignored"
+             }
+}
