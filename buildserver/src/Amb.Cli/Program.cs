@@ -13,6 +13,8 @@ using Amb.Core.Protocol;
 //   amb import <zip> [--commit SHA] [--wait] [--wait-max S]
 //   amb smoke [--image am-base] [--wait] [--wait-max S]
 //   amb e2e <build id> [--image am-e2e] [--suite PATH] [--wait] [--wait-max S] [-- pytest arguments]
+//   import, smoke and e2e also take --run-timeout MIN and --wait-timeout MIN (1-1440; else the kind's defaults, e.g.
+//   e2e 120 / 120: the whole e2e suite needs a longer run timeout).
 //   --json on any command prints the coordinator's JSON instead of the text form; AMB_URL overrides the address.
 //
 // Exit codes: 0 succeeded (or accepted, without --wait); 1 the request ended otherwise; 2 usage; 97 still running when
@@ -83,7 +85,8 @@ internal sealed class Options
     public HashSet<string> Flags { get; } = new(StringComparer.Ordinal);
 
     /// <summary>The options that take a value; every other "-x" is a flag.</summary>
-    private static readonly HashSet<string> WithValue = ["--image", "--suite", "--commit", "--limit", "--wait-max"];
+    private static readonly HashSet<string> WithValue =
+        ["--image", "--suite", "--commit", "--limit", "--wait-max", "--run-timeout", "--wait-timeout"];
 
     /// <summary>Parses the arguments.</summary>
     /// <param name="args">The process's arguments.</param>
@@ -127,6 +130,26 @@ internal sealed class Options
 
     /// <summary>Whether --json was given.</summary>
     public bool Json => Flags.Contains("--json");
+
+    /// <summary>Reads a minutes option (--run-timeout, --wait-timeout).</summary>
+    /// <param name="name">The option.</param>
+    /// <param name="minutes">The value: null when the option was not given.</param>
+    /// <returns>False when it was given but is not a whole number of minutes from 1 to 1440 (the caller reports a usage
+    /// error: a 0 would end the request at once, and a typo must not become the kind's default silently).</returns>
+    public bool TryMinutes(string name, out int? minutes)
+    {
+        minutes = null;
+        if (!Values.TryGetValue(name, out string? text))
+        {
+            return true;
+        }
+        if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int value) && value is >= 1 and <= 1440)
+        {
+            minutes = value;
+            return true;
+        }
+        return false;
+    }
 }
 
 /// <summary>The CLI's commands: each prints and returns its exit code.</summary>
@@ -315,6 +338,14 @@ internal static class Commands
                 Console.Error.WriteLine("amb import <zip> | amb smoke [--image I] | amb e2e <build id> [-- pytest args]");
                 return 2;
         }
+        // The kind's defaults (DESIGN.md §2) fit a suite or two; a long run (the whole e2e suite takes hours) or a
+        // request that may wait for a busy PC sets its own.
+        if (!options.TryMinutes("--run-timeout", out int? runMinutes) || !options.TryMinutes("--wait-timeout", out int? waitMinutes))
+        {
+            Console.Error.WriteLine("amb: --run-timeout and --wait-timeout take whole minutes, 1 to 1440");
+            return 2;
+        }
+        body = body with { RunTimeoutMinutes = runMinutes, WaitTimeoutMinutes = waitMinutes };
         (HttpStatusCode status, RequestRecord? created, string text) = await client.PostAsync("requests", body,
             AmbJsonLine.Default.CreateRequest, AmbJsonLine.Default.RequestRecord, cancel);
         if (created is null)
