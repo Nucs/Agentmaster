@@ -3559,6 +3559,7 @@ namespace Agentmaster::Msg
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
         L"reactivate", L"recreate", L"verbose",
         L"screenimage", // §21.24: the terminal's screen as a picture (the card's 🖼 Screen Image; /screen is the text)
+        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max] (the card's 📜 All Screen)
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
@@ -4751,7 +4752,7 @@ namespace Agentmaster::Msg
     enum class CardPage
     {
         Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
-        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · ◀ Back
+        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen · ◀ Back
     };
 
     /// <summary>What the card's buttons depend on, read from the session at render time (CardButtonFactsFor).</summary>
@@ -4797,6 +4798,11 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kCardVerbResume = L"resume";
     /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
     inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
+    /// <summary>
+    /// 📜 All Screen (§21.39): the topic's /allscreen at the Default level - the WHOLE conversation, drawn from the transcript in
+    /// Claude Code's look, as tall pictures. "c:allscreen:" with a 36-character id is 48 bytes of Telegram's 64.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";
 
     /// <summary>The callback data of a card button: "c:&lt;verb&gt;:&lt;session id&gt;".</summary>
     /// <param name="verb">The verb (kCardVerb*, or one of the older verbs).</param>
@@ -4817,7 +4823,9 @@ namespace Agentmaster::Msg
     /// inline keyboard. MAIN is one row: ⚙ Session, and beside it 🔄 Restart Session for a session in Error or one whose claude
     /// exited (the user's rule of 2026-10-19: Restart shows outside the Session page only then), or ▶ Reactivate for a parked
     /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
-    /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; and ◀ Back.
+    /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen alone
+    /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
+    /// buttons keep their places); and ◀ Back.
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -4869,6 +4877,8 @@ namespace Agentmaster::Msg
                          { L"\U0001F4C4 Transcript", CardCallbackData(L"transcript", sessionId) } });
         rows.push_back({ { L"\U0001F5A5 Screen Text", CardCallbackData(L"screen", sessionId) },
                          { L"\U0001F5BC Screen Image", CardCallbackData(kCardVerbScreenImage, sessionId) } });
+        // §21.39: under the two screen buttons it extends (the visible screen -> the whole conversation), on a row of its own.
+        rows.push_back({ { L"\U0001F4DC All Screen", CardCallbackData(kCardVerbAllScreen, sessionId) } });
         rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbMainPage, sessionId) } });
         return rows;
     }

@@ -1479,6 +1479,31 @@ namespace Agentmaster::Msg
         /// <param name="snapshot">The window's answer: the serialized snapshot, or "" when the screen could not be read.</param>
         void _startScreenImage(const std::wstring& sessionId, int64_t threadId, std::wstring snapshot);
         /// <summary>
+        /// 📜 All Screen and /allscreen (§21.39): the session's WHOLE conversation drawn from its transcript as tall pictures in
+        /// Claude Code's look (ConversationImage.h), sent into the topic as PNG documents in order - a document keeps every pixel,
+        /// where Telegram would shrink a tall photo to 2,560 px and refuse one past 10,000 px of width + height. Everything runs
+        /// on a worker thread of its own: reading the transcript (and the chain it continues) and drawing take seconds for a
+        /// long conversation (~5 s for a 95 MB transcript in 6 parts, measured). Each part is queued as soon as it is drawn, so
+        /// the first one is on its way while the rest are drawn.
+        /// </summary>
+        /// <param name="sessionId">The session (it is marked in `_conversationImageSessions` by the caller, and unmarked here when the work ends).</param>
+        /// <param name="threadId">The topic the pictures go to.</param>
+        /// <param name="transcript">The transcript to draw (the caller resolved it: a never-messaged fork passes its source's).</param>
+        /// <param name="turnsLevel">The TurnsLevel's numeric value (TranscriptTurns.h: stable) - how much of each turn is drawn.</param>
+        /// <returns>
+        /// The outcome for the command's [nav] line: "ok" (the worker runs), "busy" (another conversation is being drawn: the
+        /// thread was told to ask again) or "failed" (the thread could not start: logged, the thread told). On every outcome but
+        /// "ok" the session is unmarked here.
+        /// </returns>
+        /// <remarks>
+        /// At most kConversationImageMaxRenders conversations are drawn at once, process-wide: a long one holds hundreds of MB while
+        /// it is read and drawn (a 95 MB transcript peaked at ~315 MB of commit, measured). A request past that, or a second one for
+        /// a session whose pictures are still being drawn, is answered in the thread.
+        /// §21.28: the worker carries the calling scope's taps (a tapped 📜 All Screen) and queues every part inside a scope of them,
+        /// so the button stays busy until the last picture - or the line saying why there is none - is in.
+        /// </remarks>
+        const wchar_t* _startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel);
+        /// <summary>
         /// Sends a picture into a topic as a PHOTO (sendPhoto, silent, at `prio`); when Telegram refuses it as a photo (a size
         /// it will not take as one, a picture it cannot read), the same bytes go again as a document, in its place.
         /// </summary>
@@ -2252,6 +2277,14 @@ namespace Agentmaster::Msg
         // §21.24, under `_mtx`: when each session's screen picture was last asked for (WallMs). A second request within
         // kScreenImageTapGapMs asks nothing new: a double tap must not draw and send two pictures on the chat's call budget.
         std::unordered_map<std::wstring, int64_t> _screenImageTapMs;
+        // §21.39: the conversations being drawn right now (_startConversationImage's worker threads) - at most
+        // kConversationImageMaxRenders at once. Its own count, not _screenImageRenders: one conversation takes seconds and hundreds of
+        // MB, and it must not hold back the quick screen pictures and question previews that share that one.
+        std::atomic<int> _conversationImageRenders{ 0 };
+        // §21.39, under `_mtx`: the sessions whose conversation pictures are being drawn. A second 📜 All Screen for one of them
+        // is answered "already being drawn" instead of drawing and sending the whole conversation twice; the worker removes the
+        // session when it ends (pictures sent, or the reason why not posted).
+        std::unordered_set<std::wstring> _conversationImageSessions;
 
         /// <summary>
         /// §21.17, under `_mtx`: a thread the user opened that no session owns yet, and its PICKER — since §21.25 its WIZARD

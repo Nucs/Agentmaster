@@ -241,6 +241,9 @@
          shared with TerminalControl's ControlCore.cpp) and its PNG renderer. -->
     <ClInclude Include="AgentMaster\ScreenSnapshot.h" />
     <ClInclude Include="AgentMaster\ScreenImage.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.39): the card's All Screen - the whole conversation laid out like Claude Code
+         draws it, from the transcript's turns view, and drawn as tall PNG parts. -->
+    <ClInclude Include="AgentMaster\ConversationImage.h" />
     <ClInclude Include="MessagingSearchBridge.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
@@ -572,6 +575,11 @@
     <!-- Agentmaster (MESSAGING.md section 21.24): the Screen Image renderer - Direct2D + DirectWrite into a WIC bitmap, encoded
          as PNG on the Telegram service's worker thread. Plain C++ + COM, no PCH; it links its libraries by #pragma. -->
     <ClCompile Include="AgentMaster\ScreenImage.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.39): the All Screen pipeline - the turns view (TranscriptTurns), its Markdown
+         (MarkdownBlocks, cmark), the Claude Code-like layout and the tall renderer. Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\ConversationImage.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="MessagingSearchBridge.cpp">

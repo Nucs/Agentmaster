@@ -23,13 +23,24 @@
 // Plain C++ + Win32/COM (no WinRT, no PCH): the Telegram service calls it on a worker thread of its own, and the m5
 // harness renders and decodes real pictures with it (tests_messaging_card.cpp). It links d2d1, dwrite, windowscodecs and
 // ole32 through its own #pragma comment lines.
+//
+// TALL pictures (MESSAGING.md section 21.39 - the card's "All Screen"): a sheet of any height (a whole conversation laid out
+// on the grid, ConversationImage.h) is drawn with a FIXED cell into one or more PNG parts of a bounded height
+// (RenderTallScreenSnapshotPngs). It goes through a strip of a few thousand pixels, so memory stays the same however tall the
+// picture is, and each part is PNG-encoded strip by strip as it is drawn. Runs of plain ASCII in one style are drawn with one
+// DirectWrite call each (every candidate font is monospace, so the run's glyphs land on the cells exactly): a conversation is
+// hundreds of thousands of cells, and one call per cell would take seconds.
 
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "ScreenSnapshot.h"
 
@@ -135,4 +146,168 @@ namespace Agentmaster
     /// throw site and reported as "an exception while drawing the screen").
     /// </remarks>
     ScreenImage RenderScreenSnapshotPng(const ScreenSnapshot& snapshot, const ScreenImageOptions& options = {}) noexcept;
+
+    // ===== TALL pictures (MESSAGING.md section 21.39): a sheet of any height, drawn as PNG parts of a bounded height =====
+
+    /// <summary>
+    /// How a TALL sheet is drawn: a FIXED cell (a tall sheet is laid out at a chosen width, so there is no width budget to fit)
+    /// and pictures of a bounded height. The defaults suit a phone: 100 columns of 12 px make a 1,232 px wide picture, about a
+    /// phone's own width, so it reads at 1:1 without zooming.
+    /// </summary>
+    /// <remarks>
+    /// The part height is a compromise, not a hard limit of PNG. A taller picture is still a valid file, but viewers decode a
+    /// picture whole (1,232 x 32,000 px is ~158 MB of pixels), and many of them scale a very tall one down until it is
+    /// unreadable. 32,000 px is about 1,330 rows (Cascadia Mono's row is 24 px at a 12 px cell), roughly 25 phone screens.
+    /// </remarks>
+    struct TallScreenImageOptions
+    {
+        int cellWidthPx{ 12 }; // every cell this wide; the font is sized so its advance is exactly this (ComputeScreenImageGrid)
+        int paddingPx{ 16 }; // the margin around each part, in the sheet's background
+        int maxPartHeightPx{ 32000 }; // a part is at most this tall, its padding included; a taller sheet becomes several parts
+        int stripHeightPx{ 2048 }; // the drawing's working height: memory is width x this x 4 bytes, however tall the part is
+    };
+
+    /// <summary>The tallest sheet RenderTallScreenSnapshotPngs draws (rows). A conversation's sheet is capped far below it; the bound only refuses garbage.</summary>
+    inline constexpr int kTallSnapshotMaxRows = 200000;
+
+    // ----- where a part may END: one value per sheet row, for the row a part would start with (PlanTallImageParts) -----
+
+    /// <summary>A part starting at this row would cut a block in two: used only when nothing better is near.</summary>
+    inline constexpr uint8_t kTallCutAny = 0;
+    /// <summary>A block starts at this row: a part may start here cleanly.</summary>
+    inline constexpr uint8_t kTallCutBlock = 1;
+    /// <summary>A turn starts at this row: the best place for a part to start.</summary>
+    inline constexpr uint8_t kTallCutTurn = 2;
+
+    /// <summary>
+    /// Splits a tall sheet into parts of at most `rowsPerPart` rows, each part starting where it reads best: at a TURN within
+    /// the last 40% of the window a part may fill, else at a BLOCK within its last 15%, else exactly where the window ends.
+    /// Pure, so the m5 suite checks it without drawing.
+    /// </summary>
+    /// <param name="totalRows">The sheet's rows (0 = no parts).</param>
+    /// <param name="rowsPerPart">The most rows one part holds (a value below 1 counts as 1).</param>
+    /// <param name="cuts">kTallCut* for each row: the row a part would START with (shorter than the sheet = kTallCutAny for the rest).</param>
+    /// <param name="maxParts">The most parts wanted (0 = any number). When cutting at good places would need more, every part is filled instead.</param>
+    /// <returns>(first row, row count) per part, in order; together they cover [0, totalRows) exactly once.</returns>
+    /// <exception cref="std::bad_alloc">If the plan cannot be allocated.</exception>
+    /// <remarks>
+    /// The preference costs at most 40% of a part's room, so a plan can need more parts than a filled one. When `maxParts` is
+    /// given and the preferring plan exceeds it, the parts are filled to rowsPerPart instead, which needs exactly
+    /// ceil(totalRows / rowsPerPart) of them. Making totalRows fit maxParts x rowsPerPart is the caller's job.
+    /// </remarks>
+    inline std::vector<std::pair<int, int>> PlanTallImageParts(int totalRows, int rowsPerPart, const std::vector<uint8_t>& cuts, size_t maxParts = 0)
+    {
+        const int perPart = rowsPerPart < 1 ? 1 : rowsPerPart;
+        const auto cutAt = [&cuts](int row) noexcept -> uint8_t {
+            return row >= 0 && static_cast<size_t>(row) < cuts.size() ? cuts[static_cast<size_t>(row)] : kTallCutAny;
+        };
+        const auto plan = [&](bool prefer) {
+            std::vector<std::pair<int, int>> parts;
+            int start = 0;
+            while (start < totalRows)
+            {
+                if (totalRows - start <= perPart)
+                {
+                    parts.emplace_back(start, totalRows - start);
+                    break;
+                }
+                const int limit = start + perPart; // a part ending right before this row is exactly full
+                int next = limit;
+                if (prefer)
+                {
+                    // Search back from the full window: first for a turn in its last 40%, then for a block in its last 15%.
+                    // `row > start` keeps every part at least one row long, so the loop always moves on.
+                    const int turnFloor = start + (perPart * 6) / 10;
+                    const int blockFloor = start + (perPart * 85) / 100;
+                    int found = -1;
+                    for (int row = limit; row > start && row >= turnFloor; --row)
+                    {
+                        if (cutAt(row) >= kTallCutTurn)
+                        {
+                            found = row;
+                            break;
+                        }
+                    }
+                    for (int row = limit; found < 0 && row > start && row >= blockFloor; --row)
+                    {
+                        if (cutAt(row) >= kTallCutBlock)
+                        {
+                            found = row;
+                        }
+                    }
+                    if (found > start)
+                    {
+                        next = found;
+                    }
+                }
+                parts.emplace_back(start, next - start);
+                start = next;
+            }
+            return parts;
+        };
+        auto parts = plan(true);
+        if (maxParts > 0 && parts.size() > maxParts)
+        {
+            parts = plan(false); // the good places cost too many parts: fill each one instead
+        }
+        return parts;
+    }
+
+    /// <summary>One PNG of a tall sheet: the sheet's rows [firstRow, firstRow + rowCount), with the padding around them.</summary>
+    struct TallImagePart
+    {
+        std::string png; // the PNG file's bytes ("" once the part was handed to the caller's onPart)
+        int firstRow{ 0 }; // the sheet row the part starts with
+        int rowCount{ 0 }; // how many sheet rows it shows
+        int widthPx{ 0 }; // the picture's width (every part of one sheet has the same)
+        int heightPx{ 0 }; // the picture's height: rowCount x the cell height plus the padding on both sides
+    };
+
+    /// <summary>A tall sheet's pictures, or why there are none.</summary>
+    struct TallScreenImage
+    {
+        std::vector<TallImagePart> parts; // in order; empty when `error` says why
+        ScreenImageGrid grid; // the cell and the font size (widthPx = every part's width; heightPx = 0: each part has its own)
+        std::wstring fontFamily; // the family the text was drawn in
+        std::wstring error; // "" on success; else what failed. Parts drawn before a failure are still in `parts` (or were handed over).
+    };
+
+    /// <summary>
+    /// The grid a tall sheet of `cols` columns would be drawn on: the font the system has (the face asked for, else the
+    /// monospace fallbacks of RenderScreenSnapshotPng), the fixed cell of options.cellWidthPx, the font size whose advance is
+    /// exactly that cell, and the cell height. Nothing is drawn. The caller needs the cell HEIGHT before it lays a sheet out:
+    /// it decides how many rows fit into one part, so how much of a long conversation fits into the parts it may send.
+    /// </summary>
+    /// <param name="fontFace">The family to try first ("" = the fallbacks only).</param>
+    /// <param name="cols">The sheet's columns (at least 1).</param>
+    /// <param name="options">The cell and the padding.</param>
+    /// <param name="fontFamily">The family that will be used.</param>
+    /// <param name="error">Why there is no grid (the grid is then all 0).</param>
+    /// <returns>The grid (its heightPx is one row's picture: the cell height plus the padding); every field 0 on failure. Never throws.</returns>
+    ScreenImageGrid MeasureTallScreenImageGrid(const std::wstring& fontFace, int cols, const TallScreenImageOptions& options, std::wstring& fontFamily, std::wstring& error) noexcept;
+
+    /// <summary>
+    /// Draws a TALL sheet as PNG parts (PlanTallImageParts cuts it; see the top comment for how it is drawn). Blocks for the
+    /// drawing and the encoding - seconds for a long conversation - so it is called on a worker thread, never on a UI thread.
+    /// </summary>
+    /// <param name="sheet">The sheet: 1..kScreenSnapshotMaxCols columns, 1..kTallSnapshotMaxRows rows (each row's cells left to right, trailing blanks may be absent).</param>
+    /// <param name="cuts">kTallCut* per row (PlanTallImageParts); empty = cut anywhere.</param>
+    /// <param name="maxParts">The most parts wanted (PlanTallImageParts; 0 = any number).</param>
+    /// <param name="options">The cell, the padding and the part height.</param>
+    /// <param name="onPart">
+    /// Called with each part as soon as it is encoded (its PNG MOVED in), with the part's index and the plan's part count, so a
+    /// caller can send part 1 while part 2 is drawn; `parts` then keeps the metadata with an empty `png`. Empty = keep every
+    /// part's bytes in `parts`. It runs on the calling thread; an exception it throws ends the drawing (reported in `error`).
+    /// </param>
+    /// <returns>The parts, the grid and the font, or the reason in `error`. Never throws.</returns>
+    /// <remarks>
+    /// COM is initialized for the call's length as RenderScreenSnapshotPng does it. A row is drawn in every strip it touches,
+    /// with a cell of margin for glyphs that reach past their row (an italic overhang, a taller fallback glyph); a strip starts
+    /// on a whole pixel, so a row drawn in two strips gets the same pixels in both, and no seam shows where they meet.
+    /// </remarks>
+    TallScreenImage RenderTallScreenSnapshotPngs(const ScreenSnapshot& sheet,
+                                                 const std::vector<uint8_t>& cuts,
+                                                 size_t maxParts,
+                                                 const TallScreenImageOptions& options,
+                                                 const std::function<void(TallImagePart&& part, size_t index, size_t count)>& onPart = {}) noexcept;
 }
