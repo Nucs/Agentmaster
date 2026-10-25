@@ -1,0 +1,37 @@
+<Project>
+  <!--
+    The build posture of every build-server project (buildserver/DESIGN.md §10; D12: .NET 10).
+
+    - Warnings are errors, and the XML documentation file is generated: a public member without a doc comment (CS1591)
+      fails the build, which enforces the owner's rule that every member is documented. Internal and private members
+      are documented by hand to the same standard.
+    - Invariant globalization: the services parse and print machine text only (JSON, paths, numbers), and the guest
+      agent runs on Tiny11 Core, whose ICU data is not guaranteed; culture-dependent formatting would be a bug here.
+    - Nullable references on: a record field that may be missing says so in its type.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    Every build writes to Q:, never to K: (the owner's rule of 2026-10-19: K: is a nearly full, DRAM-less SATA SSD).
+    Each project's obj\ and bin\ go to Q:\tmp\buildserver-build\<project>\, beside the Agentmaster build trees in Q:\tmp.
+    Set here because Directory.Build.props is imported before Microsoft.Common.props defaults these paths; a machine
+    without a Q: drive (or AmbBuildRoot set to something else) keeps them where it says.
+  -->
+  <PropertyGroup Condition="'$(AmbBuildRoot)' == '' and Exists('Q:\')">
+    <AmbBuildRoot>Q:\tmp\buildserver-build\</AmbBuildRoot>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(AmbBuildRoot)' != ''">
+    <BaseIntermediateOutputPath>$(AmbBuildRoot)$(MSBuildProjectName)\obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(AmbBuildRoot)$(MSBuildProjectName)\bin\</BaseOutputPath>
+  </PropertyGroup>
+</Project>

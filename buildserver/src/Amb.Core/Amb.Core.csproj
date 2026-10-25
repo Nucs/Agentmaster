@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The build server's shared core: the request and build model, the allocation rules of DESIGN.md §3, and the
+    atomic JSON record store of §6. No I/O beyond the record store's own files, so every rule here is unit-tested
+    without a VM, a distro or a network.
+
+    AllowUnsafeBlocks: the record store fsyncs a folder on Linux through libc (LibraryImport generates the marshalling,
+    which uses stackalloc for the UTF-8 path).
+    IsAotCompatible: the guest agent links this library and is published with Native AOT.
+  -->
+  <PropertyGroup>
+    <RootNamespace>Amb.Core</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+</Project>

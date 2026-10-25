@@ -1,0 +1,5 @@
+<Solution>
+  <!-- The build server's .NET 10 projects (buildserver/DESIGN.md §10). Build: dotnet build buildserver/src/Buildserver.slnx -->
+  <Project Path="Amb.Core/Amb.Core.csproj" />
+  <Project Path="Amb.Core.Tests/Amb.Core.Tests.csproj" />
+</Solution>
