@@ -11,7 +11,10 @@
 //   3. the layout (ConversationImage.h BuildConversationSheet) on the turns view's own goldens (tests\turns\expected) and on a
 //      hand-written document: the turn rule, the prompt band, the bullets' colors, the hidden labels, an agent's indent, the
 //      "⎿" rows, wrapping (words whole, a long word split, wide glyphs), a code block's band and spaces, the row cap's note;
-//   4. end to end (RenderConversationImages) on a turns fixture transcript.
+//      and a ```diff block as "File diffs" draws it (3c): the gutter's numbers counted from the hunk headers, the green and red
+//      bands, the ellipsis between hunks, a quoted git diff's dim file header vs a lone "--- " line (a removed "-- " line),
+//      a "\ No newline" note, a long line broken at the edge on its band;
+//   4. end to end (RenderConversationImages) on a turns fixture transcript, and again with File diffs (two more rows).
 // Sections 3 and 4 need MarkdownBlocks (cmark): without the vcpkg cmark of a full build they report a skip, like
 // TestMarkdownBlocks. The service's half (the button, the worker thread, sendDocument) needs Telegram: the live check is the
 // dev bot (MESSAGING.md §21.39 "Check after the build").
@@ -222,6 +225,31 @@ namespace
             {
                 return r;
             }
+        }
+        return -1;
+    }
+
+    /// <summary>The cell where `needle` starts in a row (found in the row's text, its cells' text joined), so its colors can be read.</summary>
+    /// <param name="row">The row.</param>
+    /// <param name="needle">The text to find.</param>
+    /// <returns>The index of the cell holding the needle's first character, or -1 when the row does not hold it.</returns>
+    /// <exception cref="std::bad_alloc">If the row's text cannot be built.</exception>
+    int ConvCellIndexOf(const std::vector<ScreenCell>& row, std::wstring_view needle)
+    {
+        const size_t at = ConvRowText(row).find(needle);
+        if (at == std::wstring::npos)
+        {
+            return -1;
+        }
+        // A cell may hold more than one UTF-16 unit (a surrogate pair, a combining mark): walk the cells, not the text.
+        size_t units = 0;
+        for (size_t i = 0; i < row.size(); ++i)
+        {
+            if (units == at)
+            {
+                return static_cast<int>(i);
+            }
+            units += row[i].text.size();
         }
         return -1;
     }
@@ -608,6 +636,121 @@ void TestConversationImage()
         CHECK(empty.snapshot.rows == 1 && empty.snapshot.lines.size() == 1, "layout: an empty document is one blank row");
     }
 
+    // ===== 3c. the layout of a ```diff block ("File diffs"): numbers, bands, hunks, a git header, notes, wrapping =====
+    {
+        // A call's change as TranscriptTurns' editDiffs writes it (two hunks; the second's numbers need 4 digits), then a reply
+        // quoting a git diff (its file header before the hunk, a long added line), then a diff without hunk headers (the
+        // turns view's old_string / new_string fallback) that removes a SQL comment, with a "\ No newline" note.
+        const std::wstring doc =
+            L"### Turn 1 \x00B7 now\n\n"
+            L"**\x276F User**\n> fix it\n\n"
+            L"**\x25CF Claude**\n"
+            L"- **Edit** `C:/w/app.py` \x00B7 ok\n"
+            L"  - ```diff\n"
+            L"    @@ -3,2 +3,3 @@\n"
+            L"     import sys\n"
+            L"    -print('hi')\n"
+            L"    +print('hello')\n"
+            L"    +print('bye')\n"
+            L"    @@ -1040,1 +1041,1 @@\n"
+            L"    -x = 1\n"
+            L"    +x = 2\n"
+            L"    ```\n"
+            L"- **Edit** `C:/w/q.sql` \x00B7 ok\n"
+            L"  - ```diff\n"
+            L"    --- old comment\n"
+            L"    +-- new comment\n"
+            L"    \\ No newline at end of file\n"
+            L"    ```\n\n"
+            L"> fixed\n"
+            L">\n"
+            L"> ```diff\n"
+            L"> diff --git a/x.sql b/x.sql\n"
+            L"> index 1234567..89abcde 100644\n"
+            L"> --- a/x.sql\n"
+            L"> +++ b/x.sql\n"
+            L"> @@ -1 +1 @@\n"
+            L"> -old\n"
+            L"> +new line that is long enough to wrap past the forty columns\n"
+            L"> ```\n";
+        const int cols = 40;
+        const ConversationSheet sheet = ConvLayout(doc, cols);
+        const auto& lines = sheet.snapshot.lines;
+        bool fits = true;
+        for (const auto& row : lines)
+        {
+            fits = fits && ConvRowWidth(row) <= cols;
+        }
+        CHECK(!lines.empty() && fits, "diff: every row of a sheet with diffs stays within its columns");
+        const auto rowAt = [&lines](int r) -> const std::vector<ScreenCell>& { return lines[static_cast<size_t>(r)]; };
+
+        // The first hunk: the header draws nothing; a context row is plain, numbered in the new file, under the result corner.
+        CHECK(ConvFindRow(sheet, L"@@") < 0, "diff: a hunk header draws no row");
+        const int context = ConvFindRow(sheet, L"   3   import sys");
+        CHECK(context > 0 && ConvCellIndexOf(rowAt(context), L"\x23BF") >= 0 && rowAt(context).back().bg == kConvBg,
+              "diff: the block's first row hangs under the call's result corner; a context line is plain, numbered 3 (4-digit gutter)");
+        const int number = context > 0 ? ConvCellIndexOf(rowAt(context), L"3   import") : -1;
+        CHECK(number > 0 && rowAt(context)[static_cast<size_t>(number)].fg == kConvDim, "diff: the line number is dim");
+
+        // A removed line: the old file's number, the red band from the number to the sheet's edge, the text bright.
+        const int removed = ConvFindRow(sheet, L"   4 - print('hi')");
+        const int removedText = removed > 0 ? ConvCellIndexOf(rowAt(removed), L"print('hi')") : -1;
+        const int removedNumber = removed > 0 ? ConvCellIndexOf(rowAt(removed), L"   4 - ") : -1;
+        CHECK(removed == context + 1 && removedText > 0 && rowAt(removed)[static_cast<size_t>(removedText)].bg == kConvDiffRemovedBg &&
+                  rowAt(removed)[static_cast<size_t>(removedText)].fg == kConvBright && rowAt(removed).back().bg == kConvDiffRemovedBg &&
+                  ConvRowWidth(rowAt(removed)) == cols,
+              "diff: a removed line sits on the red band across the row, its text bright, numbered in the old file (4)");
+        CHECK(removedNumber > 0 && rowAt(removed)[static_cast<size_t>(removedNumber)].bg == kConvDiffRemovedBg && rowAt(removed)[0].bg == kConvBg &&
+                  ConvCellIndexOf(rowAt(removed), L"\x23BF") < 0,
+              "diff: the band starts at the gutter (the containers' cells keep the sheet's color), and only the block's first row has the corner");
+
+        // Added lines: the new file's numbers (4, 5), the green band.
+        const int added = ConvFindRow(sheet, L"   4 + print('hello')");
+        const int added2 = ConvFindRow(sheet, L"   5 + print('bye')");
+        CHECK(added == removed + 1 && added2 == added + 1 && rowAt(added).back().bg == kConvDiffAddedBg && rowAt(added2).back().bg == kConvDiffAddedBg,
+              "diff: added lines sit on the green band, numbered in the new file (4, 5)");
+
+        // The second hunk: announced by a dim vertical ellipsis, numbered from its own header.
+        const int gap = ConvFindRow(sheet, L"\x22EE");
+        const int second = ConvFindRow(sheet, L"1040 - x = 1");
+        CHECK(gap == added2 + 1 && second == gap + 1 && ConvCellIndexOf(rowAt(gap), L"\x22EE") >= 0 &&
+                  rowAt(gap)[static_cast<size_t>(ConvCellIndexOf(rowAt(gap), L"\x22EE"))].fg == kConvDim && ConvFindRow(sheet, L"1041 + x = 2") == second + 1,
+              "diff: a second hunk follows a dim vertical ellipsis and counts from its own header (1040 / 1041)");
+
+        // Without hunk headers: no numbers; a lone "--- " line is a REMOVED "-- " line (not a file header); a note is dim italic.
+        const int comment = ConvFindRow(sheet, L"    - -- old comment");
+        const int commentText = comment > 0 ? ConvCellIndexOf(rowAt(comment), L"-- old comment") : -1;
+        CHECK(commentText > 0 && rowAt(comment)[static_cast<size_t>(commentText)].bg == kConvDiffRemovedBg && rowAt(comment)[static_cast<size_t>(commentText)].fg == kConvBright,
+              "diff: without hunk headers a line is drawn unnumbered, and a lone --- line is a removed -- line, not a header");
+        const int newComment = ConvFindRow(sheet, L"    + -- new comment");
+        CHECK(newComment == comment + 1 && rowAt(newComment).back().bg == kConvDiffAddedBg, "diff: the added comment follows, unnumbered, on the green band");
+        const int note = ConvFindRow(sheet, L"No newline at end of file");
+        const int noteText = note > 0 ? ConvCellIndexOf(rowAt(note), L"\\ No newline") : -1;
+        CHECK(note == newComment + 1 && noteText > 0 && rowAt(note)[static_cast<size_t>(noteText)].fg == kConvDim &&
+                  (rowAt(note)[static_cast<size_t>(noteText)].flags & kScreenCellItalic) != 0 && rowAt(note).back().bg == kConvBg,
+              "diff: a \\ No newline note is dim italic, on no band");
+
+        // A quoted git diff: its file header is dim and unnumbered, the hunk counts from 1 (a 3-digit gutter at least).
+        const int header = ConvFindRow(sheet, L"diff --git a/x.sql b/x.sql");
+        const int headerText = header > 0 ? ConvCellIndexOf(rowAt(header), L"diff --git") : -1;
+        CHECK(headerText > 0 && rowAt(header)[static_cast<size_t>(headerText)].fg == kConvDim && rowAt(header).back().bg == kConvBg &&
+                  ConvFindRow(sheet, L"index 1234567") == header + 1 && ConvFindRow(sheet, L"--- a/x.sql") == header + 2 && ConvFindRow(sheet, L"+++ b/x.sql") == header + 3,
+              "diff: a quoted git diff's file header (diff, index, the ---/+++ pair) is dim and on no band");
+        const int old = ConvFindRow(sheet, L"  1 - old");
+        CHECK(old == header + 4 && rowAt(old).back().bg == kConvDiffRemovedBg, "diff: the quoted diff's hunk starts at line 1 (a 3-digit gutter)");
+
+        // A long line breaks at the edge; the next row keeps the band and a blank gutter, so the text lines up under itself.
+        const int longLine = ConvFindRow(sheet, L"  1 + new line that is");
+        CHECK(longLine == old + 1 && static_cast<size_t>(longLine + 1) < lines.size() && rowAt(longLine + 1).back().bg == kConvDiffAddedBg &&
+                  ConvRowWidth(rowAt(longLine + 1)) == cols && ConvFindRow(sheet, L"columns") > longLine,
+              "diff: a line longer than the sheet breaks at the edge and goes on, on its band, under its text");
+        const int wrapText = longLine > 0 ? ConvCellIndexOf(rowAt(longLine), L"new line") : -1;
+        const int wrapGutter = longLine > 0 && static_cast<size_t>(longLine + 1) < lines.size() && wrapText > 0 ? wrapText - 1 : -1;
+        CHECK(wrapGutter > 0 && static_cast<size_t>(wrapGutter) < rowAt(longLine + 1).size() && rowAt(longLine + 1)[static_cast<size_t>(wrapGutter)].text == L" " &&
+                  rowAt(longLine + 1)[static_cast<size_t>(wrapGutter)].bg == kConvDiffAddedBg && rowAt(longLine + 1)[static_cast<size_t>(wrapText)].text != L" ",
+              "diff: the continuation row's gutter is blank on the band, its text starting in the text's column");
+    }
+
     // ===== 4. end to end: a turns fixture transcript drawn as pictures =====
     {
         const fs::path transcript = ConvHarnessDir() / L"turns" / L"fixture_session.jsonl";
@@ -630,6 +773,18 @@ void TestConversationImage()
         ConvDecoded d;
         CHECK(ConvDecodePng(first, d) && d.width == static_cast<UINT>(kConversationImageCols * 12 + 32), "end to end: its first picture is a PNG of 100 cells of 12 px plus the padding");
         std::wprintf(L"    fixture_session: %d rows, %d turn(s), %zu part(s), %zu chars of turns view, %ls\n", r.rows, r.turns, parts, r.markdownChars, r.fontFamily.c_str());
+        // "File diffs" on the same session: its one file change (a Write that created scan.py, two lines) becomes a diff block,
+        // drawn as exactly two more rows (the hunk header draws none), and nothing else changes size.
+        ConversationImageOptions withDiffs;
+        withDiffs.utc = true;
+        withDiffs.editDiffs = true;
+        const ConversationImageResult diffs = RenderConversationImages(transcript, withDiffs);
+        CHECK(diffs.error.empty() && diffs.rows == r.rows + 2 && diffs.markdownChars > r.markdownChars && diffs.turns == r.turns,
+              "end to end: File diffs draws the session's created file as two more rows (its added lines)");
+        if (diffs.rows != r.rows + 2)
+        {
+            std::wprintf(L"    with File diffs: %d rows (without: %d), error [%ls]\n", diffs.rows, r.rows, diffs.error.c_str());
+        }
         const ConversationImageResult missing = RenderConversationImages(ConvHarnessDir() / L"turns" / L"no-such-transcript.jsonl", ConversationImageOptions{});
         CHECK(missing.parts.empty() && !missing.error.empty(), "end to end: a transcript that is not there is refused with a reason");
     }

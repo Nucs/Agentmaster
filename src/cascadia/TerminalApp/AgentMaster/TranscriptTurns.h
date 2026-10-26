@@ -55,6 +55,8 @@
 // summary panel's "whole conversation" view. It reuses the port's chain walk (fork + plan restart)
 // and adds the links only Agentmaster can know (a /clear in the same tab, a /handover origin) — a
 // default-constructed walk is exactly the reference's, so the Copy ▸ Transcript goldens are untouched.
+// ONE option is not part of the port either: TurnsOptions::editDiffs (📜 All Screen's file diffs). No
+// level and no preset sets it, so with it off every render is still the reference's, byte for byte.
 
 #pragma once
 
@@ -118,6 +120,14 @@ namespace Agentmaster
         bool agents = true; // an entry per subagent / teammate a call spawned, read from its own transcript
         bool peerMessages = true; // a message from a teammate or another session is shown as theirs (✉ <name>), not the user's
         bool fullWrite = false; // the full content written by each Write call, in a code block
+        // --- Agentmaster-only (NOT in the reference: off in every level, so the goldens never see it) ---
+        // The change each file-changing call made (Edit, MultiEdit, Write, NotebookEdit), as a unified-diff block under its
+        // line: Claude Code's own hunks from the result (toolUseResult.structuredPatch, with line numbers), a new file's content
+        // as added lines, else the call's old_string / new_string. With the call list off (Minimal, Compact) the file-changing
+        // calls are listed anyway, each with its diff - the option means "show the file changes, whatever else the level
+        // hides". A Write's diff replaces fullWrite's content block (the same lines, said once). For 📜 All Screen's "File
+        // diffs" (MESSAGING.md section 21.39); Copy > Transcript never sets it.
+        bool editDiffs = false;
         // --- correctness rules (on in every preset; off only to inspect raw behavior) ---
         bool liveBranch = true; // follow only the live branch (a rewound prompt and what it produced are dropped)
         bool skipTaskNotices = true; // Claude Code's background-task notices are not user input

@@ -4920,6 +4920,146 @@ namespace Agentmaster
                     return Code(Flat(rows[0], 100)) + more;
                 }
 
+                // ---- Agentmaster, NOT in the reference: TurnsOptions::editDiffs (📜 All Screen's "File diffs", MESSAGING.md
+                // section 21.39). No level sets it, so nothing below runs for Copy > Transcript or the goldens. ----
+
+                /// <summary>Whether a call changes a file, and so can carry a diff: Edit, MultiEdit, Write, NotebookEdit.</summary>
+                /// <param name="op">The call.</param>
+                /// <returns>True for one of those tools (whether it went through is EditDiffText's question).</returns>
+                static bool IsFileChangeCall(const TurnOp& op) noexcept
+                {
+                    return op.name == L"Edit" || op.name == L"MultiEdit" || op.name == L"Write" || op.name == L"NotebookEdit";
+                }
+
+                /// <summary>
+                /// The change a file-changing call made, as unified-diff text ("@@ -a,b +c,d @@" hunk headers, then lines that start
+                /// with ' ', '-' or '+'), read in this order:
+                ///   1. the result's toolUseResult.structuredPatch - Claude Code's OWN hunks, the very lines its TUI draws, with their
+                ///      line numbers (Edit, MultiEdit, a Write over an existing file);
+                ///   2. a new file (Write, structuredPatch empty): its content, every line added, from line 1;
+                ///   3. no hunks recorded (an older Claude Code): the call's own old_string / new_string (each edit of a MultiEdit;
+                ///      a NotebookEdit's new_source), with no hunk header, so no line numbers.
+                /// </summary>
+                /// <param name="op">The call.</param>
+                /// <returns>The diff text, or nullopt for a call that changed nothing to show: not a file change, no result yet
+                /// (interrupted, still running), or refused (an error result means the file was not written).</returns>
+                /// <exception cref="std::bad_alloc">If the text cannot be built (the render's own net contains it).</exception>
+                static std::optional<std::wstring> EditDiffText(const TurnOp& op)
+                {
+                    if (!IsFileChangeCall(op) || op.resultTs.empty() || op.isError)
+                    {
+                        return std::nullopt;
+                    }
+                    std::wstring out;
+                    const Value* patch = JGet(op.tur, L"structuredPatch");
+                    if (IsArr(patch))
+                    {
+                        for (const Value& hunk : patch->arr)
+                        {
+                            if (!IsObj(&hunk))
+                            {
+                                continue;
+                            }
+                            // The numbers through SafeInt: a field of an unexpected type reads as 0 instead of failing the render.
+                            const auto number = [&hunk](const wchar_t* key) { return std::to_wstring(SafeInt(JGet(&hunk, key)).value_or(0)); };
+                            out += L"@@ -" + number(L"oldStart") + L"," + number(L"oldLines") + L" +" + number(L"newStart") + L"," + number(L"newLines") + L" @@\n";
+                            const Value* rows = JGet(&hunk, L"lines");
+                            if (!IsArr(rows))
+                            {
+                                continue;
+                            }
+                            for (const Value& row : rows->arr)
+                            {
+                                if (IsStr(&row))
+                                {
+                                    out += row.str;
+                                    out += L'\n';
+                                }
+                            }
+                        }
+                    }
+                    if (!out.empty())
+                    {
+                        return out;
+                    }
+                    if (op.name == L"Write")
+                    {
+                        // A new file: Claude Code records no hunks, only the content (the result's, else the call's own).
+                        const Value* content = JGet(op.tur, L"content");
+                        if (!IsStr(content))
+                        {
+                            content = JGet(op.inp, L"content");
+                        }
+                        if (IsStr(content) && !content->str.empty())
+                        {
+                            const auto rows = PySplitLines(content->str);
+                            out = L"@@ -0,0 +1," + std::to_wstring(rows.size()) + L" @@\n";
+                            for (const auto& row : rows)
+                            {
+                                out += L'+';
+                                out += row;
+                                out += L'\n';
+                            }
+                        }
+                        return out.empty() ? std::nullopt : std::optional<std::wstring>{ std::move(out) };
+                    }
+                    // No hunks: the strings the call itself carried, removed then added (no numbers: no header).
+                    const auto replaced = [&out](const Value* from, const Value* to) {
+                        if (!IsStr(from) || !IsStr(to))
+                        {
+                            return;
+                        }
+                        for (const auto& row : PySplitLines(from->str))
+                        {
+                            out += L'-';
+                            out += row;
+                            out += L'\n';
+                        }
+                        for (const auto& row : PySplitLines(to->str))
+                        {
+                            out += L'+';
+                            out += row;
+                            out += L'\n';
+                        }
+                    };
+                    if (op.name == L"Edit")
+                    {
+                        replaced(JGet(op.inp, L"old_string"), JGet(op.inp, L"new_string"));
+                    }
+                    else if (op.name == L"MultiEdit")
+                    {
+                        const Value* edits = JGet(op.inp, L"edits");
+                        if (IsArr(edits))
+                        {
+                            for (const Value& edit : edits->arr)
+                            {
+                                if (IsObj(&edit))
+                                {
+                                    replaced(JGet(&edit, L"old_string"), JGet(&edit, L"new_string"));
+                                }
+                            }
+                        }
+                    }
+                    else if (op.name == L"NotebookEdit")
+                    {
+                        const Value* source = JGet(op.inp, L"new_source");
+                        if (IsStr(source))
+                        {
+                            for (const auto& row : PySplitLines(source->str))
+                            {
+                                out += L'+';
+                                out += row;
+                                out += L'\n';
+                            }
+                        }
+                    }
+                    if (out.empty())
+                    {
+                        return std::nullopt;
+                    }
+                    return out;
+                }
+
                 // asked(): the question an AskUserQuestion call asked, for a reply shown without its call.
                 static std::wstring Asked(const TurnOp& op)
                 {
@@ -5091,6 +5231,18 @@ namespace Agentmaster
                                 lines.push_back(L"- " + said);
                             }
                         }
+                        if (_opt.editDiffs)
+                        {
+                            // Agentmaster (editDiffs, not in the reference): the level hides the calls, but the file changes show
+                            // anyway - each file-changing call's own line, then its diff - since the option means "whatever else the
+                            // level hides".
+                            if (auto diff = EditDiffText(*ev.op))
+                            {
+                                const TurnOp& op = *ev.op;
+                                lines.push_back(L"- " + OpSummary(op) + (_opt.opMeta ? OpMeta(op) : std::wstring{}));
+                                lines.push_back(IndentedBlock(*diff, L"diff", _opt.nestedBlocks));
+                            }
+                        }
                     }
                     else if (ev.kind == TurnEvent::Kind::Op)
                     {
@@ -5110,13 +5262,20 @@ namespace Agentmaster
                                 lines.push_back(IndentedBlock(command->str, L"bash", _opt.nestedBlocks));
                             }
                         }
-                        if (_opt.fullWrite && op.name == L"Write")
+                        // Agentmaster (editDiffs, not in the reference): the call's change as a diff, read once here. A Write's diff
+                        // takes the place of fullWrite's content block below - the same lines, shown once.
+                        const std::optional<std::wstring> diff = _opt.editDiffs ? EditDiffText(op) : std::nullopt;
+                        if (_opt.fullWrite && op.name == L"Write" && !diff)
                         {
                             const Value* content = JGet(op.inp, L"content");
                             if (IsStr(content))
                             {
                                 lines.push_back(IndentedBlock(content->str, FenceLanguageFor(StrOr(JGet(op.inp, L"file_path"))), _opt.nestedBlocks));
                             }
+                        }
+                        if (diff)
+                        {
+                            lines.push_back(IndentedBlock(*diff, L"diff", _opt.nestedBlocks));
                         }
                         // A call whose agent has its own entry: the entry holds what came back. A delivered
                         // SendMessage: its result is routing metadata, and its line says who it went to.
@@ -5187,6 +5346,7 @@ namespace Agentmaster
                     bool hasCompaction = false;
                     bool hasAnswers = false;
                     bool hasInputs = false;
+                    bool hasDiffs = false; // Agentmaster (editDiffs): a file change to show, so a timeline even at a level without calls
                     for (const TurnEvent& ev : turn.events)
                     {
                         hasCompaction = hasCompaction || ev.kind == TurnEvent::Kind::Compact;
@@ -5195,8 +5355,14 @@ namespace Agentmaster
                         {
                             hasAnswers = true;
                         }
+                        // The exact test (EditDiffText, not just the tool's name): a change with nothing to show must not open an
+                        // empty timeline, which would print "(no remarks)" where the level shows nothing.
+                        if (_opt.editDiffs && !hasDiffs && ev.kind == TurnEvent::Kind::Op && IsFileChangeCall(*ev.op) && EditDiffText(*ev.op))
+                        {
+                            hasDiffs = true;
+                        }
                     }
-                    if (_opt.ops || _opt.narration || (_opt.compactions && hasCompaction) || hasAnswers || hasInputs)
+                    if (_opt.ops || _opt.narration || (_opt.compactions && hasCompaction) || hasAnswers || hasInputs || hasDiffs)
                     {
                         std::vector<std::wstring> timeline;
                         for (const TurnEvent& ev : turn.events)
