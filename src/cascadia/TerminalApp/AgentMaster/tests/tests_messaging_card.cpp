@@ -6,8 +6,10 @@
 //      🔄 Restart Session only in Error or after an exit (the user's rule of 2026-10-19) or ▶ Reactivate for a parked tab;
 //      ⚙ Session turns the keyboard into the Session page — ⑂ Fork and 🆕 New Session first (the user's placement), then
 //      🔄 Restart Session with 🔧 Resume Session beside it in Error, then every other button the card had before (the runner,
-//      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image, 📜 All Screen on a row of its own (§21.39) and
+//      the queue, the pin, the transcript, the screen as text), 🖼 Screen Image, 📜 All Screen ▸ on a row of its own (§21.39) and
 //      ◀ Back; the card's text names the state's action (🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab);
+//   1b. §21.39's level picker (the ALL SCREEN page 📜 All Screen ▸ opens: five levels, the default one starred, Back to the
+//      Session page), the level words and verbs, and the default level's setting (Full unless the cog says another);
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -298,7 +300,7 @@ void TestMessagingCard()
         bool twoARow = true;
         for (const SessionInfo* s : { &waiting, &error, &exited, &parked, &parkedError })
         {
-            for (const CardPage p : { CardPage::Main, CardPage::Session })
+            for (const CardPage p : { CardPage::Main, CardPage::Session, CardPage::AllScreen })
             {
                 for (const auto& row : BuildCardButtonRows(kCardSid, CardButtonFactsFor(*s), p))
                 {
@@ -316,7 +318,74 @@ void TestMessagingCard()
         CHECK(twoARow, "at most two buttons a row (a phone keeps the labels whole)");
         CHECK(CardCallbackData(kCardVerbNewSession, kCardSid).size() == 49 && CardCallbackData(L"reactivate", kCardSid).size() == 49 &&
                   CardCallbackData(L"transcript", kCardSid).size() == 49,
-              "the longest data (c:newsession:, c:reactivate:, c:transcript: + a 36-character id) is 49 bytes");
+              "the longest data of the Main and Session pages (c:newsession:, c:reactivate:, c:transcript: + a 36-character id) is 49 bytes");
+        CHECK(CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Compact), kCardSid).size() == 56 && CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Minimal), kCardSid).size() == 56 &&
+                  CardCallbackData(CardAllScreenLevelVerb(TurnsLevel::Default), kCardSid).size() == 56,
+              "the All Screen picker's longest data (c:allscreen-compact: / -minimal: / -default: + a 36-character id) is 56 bytes of 64");
+    }
+
+    // ===== 1b. MESSAGING.md 21.39 - All Screen's level picker (the ALL SCREEN page) and its default level =====
+    {
+        // The words, the setting's reading and the button verbs.
+        bool words = true;
+        for (const auto& choice : kAllScreenLevels)
+        {
+            words = words && AllScreenLevelFromWord(choice.word) == choice.level && AllScreenLevelWord(choice.level) == choice.word &&
+                    ParseCardAllScreenLevelVerb(CardAllScreenLevelVerb(choice.level)) == choice.level;
+        }
+        CHECK(words, "All Screen: every level's word, verb and level map to each other");
+        CHECK(std::size(kAllScreenLevels) == 5 && kAllScreenLevels[0].level == TurnsLevel::Minimal && kAllScreenLevels[4].level == TurnsLevel::Max,
+              "All Screen: the five transcript levels, least to most");
+        CHECK(!AllScreenLevelFromWord(L"") && !AllScreenLevelFromWord(L"FULL") && !AllScreenLevelFromWord(L"fu") && !AllScreenLevelFromWord(L"fullest"),
+              "All Screen: an empty, upper-case or partial word names no level (typed text is lower-cased first)");
+        CHECK(kAllScreenDefaultLevel == TurnsLevel::Full && AllScreenLevelSetting(L"") == TurnsLevel::Full && AllScreenLevelSetting(L"bogus") == TurnsLevel::Full &&
+                  AllScreenLevelSetting(L"a-word-much-longer-than-any-level-name") == TurnsLevel::Full,
+              "All Screen: the default level is Full, and an empty, unknown or overlong stored word reads as Full");
+        CHECK(AllScreenLevelSetting(L"compact") == TurnsLevel::Compact && AllScreenLevelSetting(L"Max") == TurnsLevel::Max,
+              "All Screen: a stored word picks its level, in any case");
+        CHECK(!ParseCardAllScreenLevelVerb(kCardVerbAllScreen) && !ParseCardAllScreenLevelVerb(L"allscreen-") && !ParseCardAllScreenLevelVerb(L"allscreen-bogus") &&
+                  !ParseCardAllScreenLevelVerb(L"screenimg"),
+              "All Screen: the bare verb (it opens the picker) and malformed ones name no level");
+
+        // The Session page's button opens the picker: its label says so with the arrow.
+        const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
+        const Rows session = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::Session);
+        CHECK(session.size() == 7 && session[5].size() == 1 && session[5][0].second == L"c:allscreen:" + kCardSid && session[5][0].first.size() > 1 &&
+                  session[5][0].first.back() == L'\x25B8',
+              "All Screen: the Session page's button opens the picker (its label ends with the page arrow)");
+
+        // The picker: one level a row, least to most, the default (Full) with the star, then Back to the Session page.
+        const Rows picker = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreen);
+        CHECK(picker.size() == 6, "All Screen picker: five levels and Back");
+        bool oneARow = picker.size() == 6;
+        bool ordered = picker.size() == 6;
+        for (size_t i = 0; i < 5 && i < picker.size(); ++i)
+        {
+            oneARow = oneARow && picker[i].size() == 1;
+            ordered = ordered && !picker[i].empty() && picker[i][0].second == L"c:allscreen-" + std::wstring{ kAllScreenLevels[i].word } + L":" + kCardSid &&
+                      picker[i][0].first.find(kAllScreenLevels[i].label) != std::wstring::npos && picker[i][0].first.find(kAllScreenLevels[i].hint) != std::wstring::npos;
+        }
+        CHECK(oneARow && ordered, "All Screen picker: one level a row, least to most, each with its name, its hint and its verb");
+        CHECK(picker.size() == 6 && picker[3][0].first.rfind(L"\x2605 ", 0) == 0 && picker[0][0].first.rfind(L"\U0001F4DC ", 0) == 0 && picker[4][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+              "All Screen picker: the default level (Full) wears the star, the others the scroll");
+        CHECK(picker.size() == 6 && picker[5].size() == 1 && picker[5][0].second == L"c:panel:" + kCardSid && picker[5][0].first.find(L"Back") != std::wstring::npos,
+              "All Screen picker: Back returns to the Session page (not to Main)");
+        CardButtonFacts compact = CardButtonFactsFor(waiting);
+        compact.allScreenLevel = TurnsLevel::Compact; // the cog's setting, as the service sets it
+        const Rows compactPicker = BuildCardButtonRows(kCardSid, compact, CardPage::AllScreen);
+        CHECK(compactPicker.size() == 6 && compactPicker[1][0].first.rfind(L"\x2605 ", 0) == 0 && compactPicker[3][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+              "All Screen picker: the star follows the default level the cog sets");
+        CHECK(BuildCardButtonRows(kCardSid, CardButtonFactsFor(CardSession(SessionState::Error)), CardPage::AllScreen).size() == 6,
+              "All Screen picker: the same five levels whatever the session's state");
+
+        // The setting round-trips through settings.json; an older file without it reads as Full.
+        const AppSettings defaults;
+        AppSettings set;
+        set.messagingAllScreenLevel = L"compact";
+        const AppSettings again = AppSettingsFromJson(ToJson(set));
+        const AppSettings blank = AppSettingsFromJson(json::Value::MkObj());
+        CHECK(defaults.messagingAllScreenLevel == L"full" && again.messagingAllScreenLevel == L"compact" && blank.messagingAllScreenLevel == L"full",
+              "All Screen: the default level setting round-trips; absent, it is full");
     }
 
     // ===== 2. the card's line for the state's action =====

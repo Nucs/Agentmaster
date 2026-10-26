@@ -3131,12 +3131,17 @@ namespace Agentmaster
         //  - messagingRichMessages (§21.11): send Claude's Markdown (replies, remarks, plans, the history's narrative)
         //    as Telegram RICH messages (Bot API 10.1: tables, headings, lists render). Default ON; off = the HTML
         //    conversion of §10.3, which has no tables (for a Telegram app too old to show rich messages).
+        //  - messagingAllScreenLevel (§21.39): 📜 All Screen's DEFAULT transcript level word (minimal / compact / default /
+        //    full / max): what a bare /allscreen draws, and the level the card's level picker marks with ★. Default "full",
+        //    the user's rule of 2026-10-26; an empty or unknown word reads as full (Msg::AllScreenLevelSetting). Applied
+        //    live (MessagingService::Apply): the next /allscreen and the next render of a picker use it.
         bool messagingEnabled{ false };
         std::wstring messagingTelegramOwnerId{};
         uint32_t messagingIdleGraceMinutes{ 10 };
         std::wstring messagingSearchThinking{ L"high" };
         bool messagingVerbose{ false };
         bool messagingRichMessages{ true };
+        std::wstring messagingAllScreenLevel{ L"full" };
 
         // Agentmaster (MESSAGING.md §21.32.4 — the Telegram FILE LINKS; the cog's MESSAGING tab, FILE LINKS). Claude's
         // file:///K:/... links become links a phone downloads: <base>/station-<station>/<session key>/<path>, served by a

@@ -1736,10 +1736,13 @@ namespace Agentmaster::Msg
             // §21.39: the WHOLE conversation as tall pictures. Drawn from the TRANSCRIPT, not the terminal: a fullscreen Claude
             // Code (the alternate screen) keeps no scrollback, so the terminal never holds more than one screen
             // (ConversationImage.h). So no window is asked, and a parked tab or a closed session draws as well as a live one.
-            const auto level = LevelFromWord(detail::Lower(cmd.args));
+            // The level: the one named (a level button of the card's picker names one), else the cog's default (§21.39: Full
+            // unless set otherwise) - NOT LevelFromWord's Default, which /transcript keeps for a bare /transcript.
+            const TurnsLevel defaultLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
+            const auto level = cmd.args.empty() ? std::optional<TurnsLevel>{ defaultLevel } : AllScreenLevelFromWord(detail::Lower(cmd.args));
             if (!level)
             {
-                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max]", false);
+                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max] \x2014 bare, it draws " + std::wstring{ AllScreenLevelWord(defaultLevel) } + L" (the default level, set in the cog's Messaging tab).", false);
                 return;
             }
             if (s->kind != AgentKind::Claude)
@@ -2713,10 +2716,21 @@ namespace Agentmaster::Msg
             }
             else if (verb == kCardVerbAllScreen)
             {
-                // §21.39: 📜 All Screen - /allscreen at the Default level. No toast, as for 🖼 Screen Image (§21.28): the button stays
-                // busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer says the
-                // work goes on.
+                // §21.39: 📜 All Screen ▸ opens the level picker (the ALL SCREEN page) on the message the button sits on - a page
+                // flip like ⚙ Session's, nothing posted. (The verb's first build drew at once: an old card's button now opens
+                // the picker, which draws nothing unasked.)
+                answer(L"");
+                _showCardPage(sid, messageId, CardPage::AllScreen);
+                return;
+            }
+            else if (const auto level = ParseCardAllScreenLevelVerb(verb); level)
+            {
+                // §21.39: a level of the picker - /allscreen <level>. No toast, as for 🖼 Screen Image (§21.28): the tapped level
+                // stays busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer says
+                // the work goes on. The picker stays on the card (◀ Back leaves it): another level is one tap away, and no edit is
+                // spent flipping the keyboard back.
                 cmd.name = L"allscreen";
+                cmd.args = std::wstring{ AllScreenLevelWord(*level) };
                 _runSessionCommand(sid, cmd, fake, threadId);
                 return;
             }
@@ -3277,8 +3291,8 @@ namespace Agentmaster::Msg
                 }
             }
         }
-        LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) + (page == CardPage::Session ? L" session" : L" main") +
-               (cardOwner.empty() ? L" (a copy of the card)" : L""));
+        LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) +
+               (page == CardPage::Session ? L" session" : (page == CardPage::AllScreen ? L" allscreen" : L" main")) + (cardOwner.empty() ? L" (a copy of the card)" : L""));
         if (!cardOwner.empty())
         {
             // The card's hash covers its buttons, so the new page is an edit (or a re-post, when the card was due for one) -
@@ -3468,11 +3482,15 @@ namespace Agentmaster::Msg
                     }
                     else if (r.droppedRows > 0)
                     {
-                        // The first picture says it too (its top row); this line adds what to do about it.
+                        // The first picture says it too (its top row); this line adds what to do about it: a shorter level of the
+                        // card's picker (§21.39 - Full, the default, keeps the most per turn, so a long session hits the cap first).
+                        const wchar_t* shorter = options.level >= TurnsLevel::Full ?
+                                                     L" A shorter level draws more of it: Default or Compact in \U0001F4DC All Screen \x25B8 (or /allscreen compact)." :
+                                                     (options.level == TurnsLevel::Default ? L" Compact draws more of it: \U0001F4DC All Screen \x25B8 Compact (or /allscreen compact)." : L"");
                         me->_reply(threadId,
                                    L"The conversation is longer than " + std::to_wstring(r.parts.size()) + L" pictures hold: its first " + std::to_wstring(r.droppedRows) +
                                        L" rows" + (r.droppedThroughTurn > 0 ? L" (through turn " + std::to_wstring(r.droppedThroughTurn) + L")" : std::wstring{}) +
-                                       L" are left out. " + (options.level > TurnsLevel::Compact ? L"/allscreen compact draws each turn shorter." : L""),
+                                       L" are left out." + shorter,
                                    false);
                     }
                 }
@@ -5355,8 +5373,8 @@ namespace Agentmaster::Msg
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n"
-                   // §21.39: the card's 📜 All Screen, typed with a level.
-                   L"/allscreen [level] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   // §21.39: the card's 📜 All Screen ▸ (a level picker), typed with a level or bare (the cog's default level, Full).
+                   L"/allscreen [level] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
                    L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";

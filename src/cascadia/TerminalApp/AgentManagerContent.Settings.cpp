@@ -1272,6 +1272,23 @@ namespace winrt::TerminalApp::implementation
         _setMsgRich.Header(winrt::box_value(L"Send Claude's Markdown as rich messages (tables, headings)"));
         AgentSetTip(_setMsgRich, L"On (the default): Claude's replies, remarks and plans go as Telegram rich messages, which show its tables, headings, lists and code blocks as Claude wrote them. Off: the older HTML conversion, which shows a table as plain text \x2014 for a Telegram app too old to show rich messages. A rich message Telegram refuses goes as HTML anyway.");
         panel.Children().Append(_setMsgRich);
+        // §21.39: 📜 All Screen's default level. One item per Msg::kAllScreenLevels entry, in its order, so an item's index is the
+        // table's row on load and on Save; the built-in default (Full) says so, as the other boxes' placeholders do.
+        _setMsgAllScreenLevel = ComboBox{};
+        _setMsgAllScreenLevel.Header(winrt::box_value(L"All Screen's default transcript level"));
+        for (const auto& choice : ::Agentmaster::Msg::kAllScreenLevels)
+        {
+            std::wstring item{ choice.label };
+            item += L" \x2014 ";
+            item += choice.hint;
+            if (choice.level == ::Agentmaster::Msg::kAllScreenDefaultLevel)
+            {
+                item += L" (the default)";
+            }
+            _setMsgAllScreenLevel.Items().Append(winrt::box_value(winrt::hstring{ item }));
+        }
+        AgentSetTip(_setMsgAllScreenLevel, L"The level \U0001F4DC All Screen draws when none is picked \x2014 a bare /allscreen in a topic \x2014 and the one the card's level picker (\x2699 Session \x2192 \U0001F4DC All Screen \x25B8) marks with \x2605. Minimal: your messages and each turn's final reply. Compact: + compactions, your answers, the slash commands you ran, each agent's brief and report. Default: + every tool call on one line, and Claude's remarks between calls. Full (the default): + each Bash call's exact command, the first line each call returned, how long each took. Max: + every written file's content and a stats line per turn. More detail draws taller pictures: a conversation longer than 10 pictures keeps its latest part. Applies at once.");
+        panel.Children().Append(_setMsgAllScreenLevel);
         // §21.32.4: FILE LINKS — Claude's links to files on this PC made openable from the phone. Every box is a plain setting
         // (nothing secret: the session keys' secret lives in Credential Manager and is made by the service on first use).
         panel.Children().Append(SettingsSeparator(L"FILE LINKS"));
@@ -3202,6 +3219,20 @@ namespace winrt::TerminalApp::implementation
             // §21.11: the topics' default mode, the rich switch, the secretary bot's token (masked placeholder only).
             _setMsgVerbose.IsOn(_appSettings.messagingVerbose);
             _setMsgRich.IsOn(_appSettings.messagingRichMessages);
+            if (_setMsgAllScreenLevel)
+            {
+                // §21.39: the stored word's row (an empty or unknown word shows the built-in default, Full, as the service reads it).
+                const auto level = ::Agentmaster::Msg::AllScreenLevelSetting(_appSettings.messagingAllScreenLevel);
+                int32_t row = 0;
+                for (int32_t i = 0; i < static_cast<int32_t>(std::size(::Agentmaster::Msg::kAllScreenLevels)); ++i)
+                {
+                    if (::Agentmaster::Msg::kAllScreenLevels[i].level == level)
+                    {
+                        row = i;
+                    }
+                }
+                _setMsgAllScreenLevel.SelectedIndex(row);
+            }
             _msgForgetSecretaryToken = false;
             _setMsgSecretaryToken.Password(L"");
             const std::wstring storedSecretary = ::Agentmaster::Msg::MessagingService::ReadStoredSecretaryToken(::Agentmaster::AgentmasterStateDir());
@@ -3996,6 +4027,14 @@ namespace winrt::TerminalApp::implementation
             _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
             _appSettings.messagingVerbose = _setMsgVerbose.IsOn(); // §21.11
             _appSettings.messagingRichMessages = _setMsgRich.IsOn();
+            if (_setMsgAllScreenLevel)
+            {
+                // §21.39: the picked row's word; no pick (an empty box) keeps the built-in default's word, never "".
+                const int32_t row = _setMsgAllScreenLevel.SelectedIndex();
+                _appSettings.messagingAllScreenLevel = row >= 0 && row < static_cast<int32_t>(std::size(::Agentmaster::Msg::kAllScreenLevels)) ?
+                                                           std::wstring{ ::Agentmaster::Msg::kAllScreenLevels[row].word } :
+                                                           std::wstring{ ::Agentmaster::Msg::AllScreenLevelWord(::Agentmaster::Msg::kAllScreenDefaultLevel) };
+            }
         }
         if (_setMsgFilesMode)
         {

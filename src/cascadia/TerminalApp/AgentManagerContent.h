@@ -1422,6 +1422,9 @@ namespace winrt::TerminalApp::implementation
         // its token goes to Credential Manager on Save like the topics bot's; empty = keep the stored one.
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVerbose{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgRich{ nullptr };
+        // MESSAGING.md §21.39: 📜 All Screen's default transcript level (AppSettings::messagingAllScreenLevel): what a bare /allscreen
+        // draws and the level the card's picker marks with ★. Its items are Msg::kAllScreenLevels in order (index = row).
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgAllScreenLevel{ nullptr };
         winrt::Windows::UI::Xaml::Controls::PasswordBox _setMsgSecretaryToken{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _setMsgSecretaryForget{ nullptr };
         bool _msgForgetSecretaryToken{ false }; // "Forget secretary token" was clicked: Save removes it

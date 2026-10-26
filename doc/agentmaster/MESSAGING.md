@@ -545,7 +545,8 @@ As built (§21.24): the buttons are two PAGES, two buttons a row. **Main**, ever
 [🔄 Restart Session] only for a session in Error or one whose claude exited, or [▶ Reactivate] for a parked tab.
 **⚙️ Session** turns the keyboard into the Session page: [⑂ Fork] [🆕 New Session] · [🔄 Restart Session] (+ [🔧 Resume
 Session] in Error) · [⏸ Pause runner / ▶ Runner auto] [📋 Queue] · [📌 Pin / Unpin] [📄 Transcript] · [🖥 Screen Text]
-[🖼 Screen Image] · [📜 All Screen] (§21.39) · [◀ Back]. **More ▸** stays the `/commands` (§21.2).
+[🖼 Screen Image] · [📜 All Screen ▸] (§21.39: it opens a third page, the level picker) · [◀ Back]. **More ▸** stays the
+`/commands` (§21.2).
 
 As built (§21.26): the STATE line comes first ("🟡 Waiting for you since 08:21", a 📌 at its end for a pinned session) and
 the title second ("📌 🟦 title", a chip in a rich card); every other line keeps its order under the title.
@@ -773,7 +774,7 @@ menu (`setMyCommands`, one list for the whole chat) lists these. As built (§21.
 <words>` (a search sent to 🔎 Search) and `/search-tab` / `/search_tab` (Search goes first in the thread list).
 As built (§21.24): `/screenimage` (the screen as a picture — the card's 🖼 Screen Image).
 As built (§21.39): `/allscreen [minimal|compact|default|full|max]` (the whole conversation as tall pictures — the card's
-📜 All Screen).
+📜 All Screen ▸; bare, the default level: full unless the cog sets another).
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -5399,10 +5400,13 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production; its level picker of 2026-10-26 in no build yet)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
+>
+> The user's follow-up (2026-10-26), after trying it on dev: "I want All Screen to actually have a second menu where we pick
+> the transcript levels we have existing where default is full or can be set in settings"
 
 **Not from the terminal; from the transcript.**
 - This machine's Claude Code runs its fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`). Its whole
@@ -5416,11 +5420,30 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   (`AgentMaster/ScreenImage.{h,cpp}`).
 
 **The button and the command.**
-- The Session page gets a row of its own under [🖥 Screen Text] [🖼 Screen Image]: **[📜 All Screen]**. Its callback is
-  `c:allscreen:<sid>` (48 bytes), and it runs `/allscreen` at the Default level. The page now has seven rows; no existing
-  button moved.
-- Typed: `/allscreen [minimal|compact|default|full|max]`, the `/transcript` levels. It is in the "/" menu and the help.
-- No toast: the button stays busy until the last picture is in (§21.28), as 🖼 Screen Image does.
+- The Session page gets a row of its own under [🖥 Screen Text] [🖼 Screen Image]: **[📜 All Screen ▸]** (`c:allscreen:<sid>`,
+  48 bytes). The page now has seven rows; no existing button moved. In its first build (7c7397861, dev 0.0.1.36) the button
+  drew at the Default level at once; since the follow-up it opens the level picker below. A card posted by that build opens
+  the picker too: the verb is the same.
+- **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): one level a row,
+  least to most, each with a hint of what it adds, then [◀ Back] to the Session page:
+
+  | Button | Draws |
+  |---|---|
+  | 📜 Minimal · prompts & replies | your messages and each turn's final reply |
+  | 📜 Compact · + answers & agents | + compactions, your answers, the slash commands you ran, each agent's brief and report |
+  | 📜 Default · + every tool call | + every tool call on one line, and Claude's remarks between calls |
+  | ★ Full · + commands & output | + each Bash call's exact command, the first line each call returned, how long each took |
+  | 📜 Max · + written files | + every written file's content and a stats line per turn |
+
+  A level's data is `c:allscreen-<word>:<sid>` (56 bytes at most) and runs `/allscreen <word>`. The tapped level stays busy
+  until the last picture is in (§21.28); the picker stays on the card, so another level is one tap away, and ◀ Back leaves it.
+  A card that starts to ring goes back to Main, as from the Session page (§21.24).
+- **The default level** wears ★ in place of 📜: **Full**, the user's rule, unless the cog's Messaging tab sets another
+  ("All Screen's default transcript level", `messagingAllScreenLevel`: `minimal` / `compact` / `default` / `full` / `max`;
+  an empty or unknown word reads as full). It applies at once (`MessagingService::Apply` → `_allScreenLevel`): the next bare
+  `/allscreen` draws it and the next render of a picker moves the ★.
+- Typed: `/allscreen [minimal|compact|default|full|max]`, the `/transcript` levels; a bare `/allscreen` draws the default
+  level (not `/transcript`'s Default). It is in the "/" menu and the help.
 
 **What a picture looks like** (`BuildConversationSheet`; looked at on real sessions of this machine): 100 columns of a 12 px
 cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
@@ -5445,7 +5468,8 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
   turn when one lies in the last 40% of its room, else at a block in its last 15%, else where its room ends.
 - **The cap.** At most 10 parts (`kConversationImageMaxParts`; ten parts hold ~13,300 rows). A longer conversation keeps its
   MOST RECENT rows. The first picture's top row then says how many earlier rows, through which turn, are left out, and the
-  thread gets a line adding "/allscreen compact draws each turn shorter".
+  thread gets a line naming a shorter level of the picker (Default or Compact after Full or Max, Compact after Default).
+  Full, the default, keeps the most per turn: the largest session measured passes the cap at Full (below).
 - **Memory.** The drawing goes through a 2,048 px strip, so memory does not grow with the picture, and each part is
   PNG-encoded strip by strip (WIC `WritePixels`). A row is drawn in every strip it touches; two strip heights give the same
   pixels (tested).
@@ -5475,8 +5499,17 @@ reads `📜 <title> · conversation [(level)] [· 2/4] · turns 12–31`; the fi
 | 5 MB, 15 turns | Full | 3,066 | 3 | 12.0 MB | 1.8 s |
 | 95 MB, 11 turns | Default | 6,945 | 6 | 33.5 MB | 5.2 s (turns view 1.3 s, layout 0.06 s, drawing 3.8 s) |
 | 95 MB, 11 turns | Compact | 801 | 1 | 2.7 MB | 1.7 s |
+| 4 MB, 1 turn | Full | 369 | 1 (1,232 × 8,888 px) | 1.6 MB | 1.0 s (2026-10-26) |
+| 2 MB, 4 agents | Full | 1,723 | 2 | 7.1 MB | 2.3 s (2026-10-26) |
+| 95 MB, 11 turns | Full | 17,295 → 13,320 kept | 10 (the cap; turns 1–3 left out) | 57 MB | 12.4 s (2026-10-26) |
 
-Peak commit: ~315 MB for the 95 MB transcript at either level (mostly the transcript's own parse), 51–78 MB for the small ones.
+Peak commit: ~315 MB for the 95 MB transcript at any level (mostly the transcript's own parse), 51–78 MB for the small ones.
+
+**Seen live** (dev 0.0.1.36, 2026-10-26 17:27, the user's tap): `[msg] conversation pictures of 2b655223: default, 1 of 1
+part(s) sent, 631 rows (0 left out), 1232 px wide, 2630 KB, Cascadia Mono, turns view 4875 ms (38 K chars), layout 1125 ms,
+drawn in 2468 ms`; the tap's answer came 12.2 s after the tap (`tap c:allscreen: answer queued 12219 ms after the tap (its
+work is in)`). That is a Debug build: the scratch driver's `/O2` build laid 1,125 rows out in 16 ms (the table above), where
+this Debug run took 1,125 ms for 631.
 
 **Not changed, still open.**
 - Like `/screen` and 🖼 Screen Image, the pictures are NOT redacted (§9.6's redactor is not built).
@@ -5498,7 +5531,10 @@ Peak commit: ~315 MB for the 95 MB transcript at either level (mostly the transc
 - `RenderConversationImages` end to end on a turns fixture.
 - The layout and end-to-end cases need cmark. Without the vcpkg cmark, `tests\conversation_image_stub.cpp` stands in for
   `ConversationImage.cpp` and those cases report a skip.
-- `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen alone on its row, and no All Screen on Main.
+- `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen ▸ alone on its row, and no All Screen on Main;
+  and (1b, the picker) the five levels' words, verbs and settings reading (empty, unknown or overlong → Full; any case),
+  the picker's rows (one level a row, least to most, names, hints and verbs, ★ on Full, the ★ following a set default, Back to
+  the Session page, the same for every state), the 56-byte data, and the setting's round trip through settings.json.
 
 **Checked** (2026-10-25, before any build; in dev since 0.0.1.36, nothing tried in Telegram yet):
 - The m5 suite, isolated (scratch outputs, a wiped scratch profile): 9,977 checks; the final run's only failures are the
@@ -5513,17 +5549,30 @@ Peak commit: ~315 MB for the 95 MB transcript at either level (mostly the transc
 - ⚠ The messaging service gained data members (`_conversationImageRenders`, `_conversationImageSessions`), and a new unit
   joins TerminalAppLib: the next build must purge (the build-install skill's §5.8).
 
+**Checked, the level picker** (2026-10-26; in no build yet):
+- The m5 suite, isolated: 10,139 checks; the only failures are the three known `TestTaskbarBadge` ones.
+- `cl /Zs` with the recorded Debug lines passes for `Messaging.Inbound.cpp`, `Messaging.cpp`, `Persistence.cpp`,
+  `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`, `Engine.cpp`, `MessagingSearchBridge.cpp`,
+  `ConversationImage.cpp`, and the PCH units `AgentManagerContent.Settings.cpp`, `AgentManagerContent.cpp` and
+  `TerminalPage.AgentEngine.cpp`; a probe asserting the opposite of the new table's Full row fails with exactly C2338.
+- ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h` and the messaging service (`_allScreenLevel`) gained members:
+  the next build must purge.
+
 **Check after the build** (dev, with the bot):
-1. A session's card → ⚙️ Session: [📜 All Screen] alone under the two screen buttons. Tap it: the button stays busy, then one
-   or more documents `conversation-<title>….png` arrive in order, captioned with their part and turns. Opened, each shows
-   the conversation in Claude Code's look.
-2. hooks.log: `[msg] conversation pictures of <sid8>: default, N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
+1. A session's card → ⚙️ Session: [📜 All Screen ▸] alone under the two screen buttons. Tap it: the keyboard flips to the
+   picker — five levels, ★ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`). Tap a level: it stays
+   busy, then one or more documents `conversation-<title>[-<level>]….png` arrive in order, captioned with their part and
+   turns. Opened, each shows the conversation in Claude Code's look. ◀ Back returns to the Session page.
+1b. The cog's Messaging tab → "All Screen's default transcript level" → Compact → Save: the picker's ★ moves to Compact at the
+   card's next render, and a bare `/allscreen` draws Compact (the level is in the hooks.log line).
+2. hooks.log: `[msg] conversation pictures of <sid8>: <level>, N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
    … KB, Cascadia Mono, turns view … ms (… K chars), layout … ms, drawn in … ms`, and `[nav] remote telegram /allscreen
-   <sid8> -> ok`.
+   <sid8> -> ok`. (Seen on dev 0.0.1.36 before the picker; above.)
 3. Two quick taps: the second answers "This conversation's pictures are being drawn already…". Two sessions at once: "Another
    conversation is being drawn right now…" (`-> busy`).
 4. `/allscreen compact` in a long session: shorter pictures named `conversation-<title>-compact….png`. `/allscreen bogus`:
-   the usage line.
+   the usage line, naming the default level. A bare `/allscreen` in a very long session: Full passes the 10-picture cap, and
+   the thread gets "… are left out. A shorter level draws more of it: Default or Compact in 📜 All Screen ▸ …".
 5. A parked tab draws too (no window is asked). A Codex session: "All Screen draws Claude Code conversations; this session is
    not one." (`-> refused:not-claude`).
 6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
