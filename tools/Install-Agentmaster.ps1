@@ -571,17 +571,105 @@ function Get-AmPackage {
 
 <#
 .SYNOPSIS
+    The profile folder an MSIX package's install uses: the folder its own choice names in ~\.agentmaster.profiles (its
+    "<family>=<folder>" line), else its per-identity default (%USERPROFILE%\.agentmaster-dev for the AgentmasterDev
+    family, %USERPROFILE%\.agentmaster for every other one).
+.PARAMETER FamilyName
+    The package family name, e.g. Agentmaster_56k4f06dsfp9r.
+.OUTPUTS
+    [string] the folder.
+.NOTES
+    Throws when the map exists but cannot be read ([IO.File]::ReadAllLines): a profile that cannot be looked up is
+    never guessed for a step that writes into it.
+#>
+function Get-AmPackageProfileDir {
+    param([string]$FamilyName)
+    $map = Join-Path $env:USERPROFILE '.agentmaster.profiles'
+    if (Test-Path -LiteralPath $map) {
+        $prefix = "$FamilyName="
+        foreach ($line in [IO.File]::ReadAllLines($map)) {
+            if ($line.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and $line.Length -gt $prefix.Length) { return $line.Substring($prefix.Length).Trim() }
+        }
+    }
+    if ($FamilyName -like 'AgentmasterDev_*') { return (Join-Path $env:USERPROFILE '.agentmaster-dev') }
+    return (Join-Path $env:USERPROFILE '.agentmaster')
+}
+
+<#
+.SYNOPSIS
+    Keep the files an MSIX package holds in its own storage before the package is removed: Remove-AppxPackage deletes
+    %LOCALAPPDATA%\Packages\<family>\ with it.
+.DESCRIPTION
+    Agentmaster keeps its state in the profile folder, outside the package, so that storage is normally empty (measured
+    2026-10-26 on a production package used for months: no file in LocalState, RoamingState or LocalCache). Nothing
+    guarantees it: Agentmaster v0.1.0 and v0.1.1 kept Windows Terminal's own settings.json / state.json in LocalState
+    (the <profile>\terminal\ redirect came with v0.2.0), and a process running inside the package that creates a file
+    under AppData has it redirected into LocalCache. Every such file is copied into
+    <profile>\package-data\<family>-<yyyyMMdd-HHmmss>\<LocalState|RoamingState|LocalCache>\, and Windows Terminal's
+    settings found in LocalState also seed <profile>\terminal\ when it holds none (copy-if-absent: what the package's own
+    first launch on a later version does, SeedTerminalSettings). Nothing is created when the storage holds no file.
+.PARAMETER Package
+    The Get-AppxPackage object about to be removed.
+.OUTPUTS
+    [string] the folder the files were kept in, or '' when there was nothing to keep.
+.NOTES
+    Throws when the profile cannot be looked up (Get-AmPackageProfileDir) or a file cannot be copied: the caller then
+    does NOT remove the package, so its files stay where they are.
+#>
+function Save-AmPackageData {
+    param($Package)
+    if (-not $Package -or -not $env:LOCALAPPDATA) { return '' }
+    $family = [string]$Package.PackageFamilyName
+    $root = Join-Path (Join-Path $env:LOCALAPPDATA 'Packages') $family
+    $parts = @()
+    foreach ($name in 'LocalState', 'RoamingState', 'LocalCache') {
+        $dir = Join-Path $root $name
+        if ((Test-Path -LiteralPath $dir) -and @(Get-ChildItem -LiteralPath $dir -Recurse -Force -File -ErrorAction SilentlyContinue).Count -gt 0) { $parts += $name }
+    }
+    if ($parts.Count -eq 0) { return '' }
+    $profileDir = Get-AmPackageProfileDir -FamilyName $family
+    # A folder of its own, never an earlier one: a second removal in the same second gets "-1", "-2", ...
+    $base = Join-Path $profileDir 'package-data'
+    $stamp = "$family-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $dest = Join-Path $base $stamp
+    for ($n = 1; Test-Path -LiteralPath $dest; $n++) { $dest = Join-Path $base "$stamp-$n" }
+    New-Item -ItemType Directory -Force -Path $dest -ErrorAction Stop | Out-Null
+    foreach ($name in $parts) {
+        # A destination that does not exist yet receives the folder itself, under this name, with all it holds.
+        Copy-Item -LiteralPath (Join-Path $root $name) -Destination (Join-Path $dest $name) -Recurse -Force -ErrorAction Stop
+    }
+    # Windows Terminal's settings of a package that predates the profile redirect: the profile's terminal\ folder gets
+    # them when it holds none (the app's SeedTerminalSettingsFromDir rule: copy-if-absent, the same three files).
+    $terminal = Join-Path $profileDir 'terminal'
+    foreach ($leaf in 'settings.json', 'state.json', 'elevated-state.json') {
+        $from = Join-Path (Join-Path $root 'LocalState') $leaf
+        $to = Join-Path $terminal $leaf
+        if ((Test-Path -LiteralPath $from) -and -not (Test-Path -LiteralPath $to)) {
+            New-Item -ItemType Directory -Force -Path $terminal -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $from -Destination $to -ErrorAction Stop
+        }
+    }
+    Write-Ok ("kept the package's own files (" + ($parts -join ', ') + ") in $dest")
+    return $dest
+}
+
+<#
+.SYNOPSIS
     Remove a registered package for THIS user (per-user removal, no administrator rights), after closing
-    the instances that run from it. Its data (the profile folder) lives outside the package and is kept.
+    the instances that run from it. Its data (the profile folder) lives outside the package and is kept, and so
+    does any file of the package's own storage (Save-AmPackageData, before the removal).
 .PARAMETER Package
     The Get-AppxPackage object.
 .NOTES
-    Throws when Remove-AppxPackage fails.
+    Throws when a file of the package's own storage cannot be kept (the package then stays), or when
+    Remove-AppxPackage fails.
 #>
 function Remove-AmPackage {
     param($Package)
     if (-not $Package) { return }
     if ($Package.InstallLocation) { Stop-ProcessesUnder -DirPath $Package.InstallLocation }
+    # After the stop (nothing holds the files any more) and before the removal, which deletes the package's storage.
+    $null = Save-AmPackageData -Package $Package
     Remove-AppxPackage -Package $Package.PackageFullName -ErrorAction Stop
     Write-Ok ("removed the package " + $Package.PackageFullName)
 }
@@ -2897,7 +2985,7 @@ function Read-AmPhaseRecord {
 $script:AmCoreFunctionNames = @(
     'Write-Step', 'Write-Ok', 'Write-Warn', 'Write-Info', 'Resolve-AmPath', 'Initialize-Net', 'Import-AppxModule', 'Get-OSArch',
     'Test-Admin', 'Test-CanElevate', 'Get-AmIdentity', 'Get-FileSha256', 'Test-CertInMachineStore',
-    'Test-CertTrustedMachine', 'Approve-SigningCert', 'Get-VCLibs', 'Get-AmPackage', 'Remove-AmPackage',
+    'Test-CertTrustedMachine', 'Approve-SigningCert', 'Get-VCLibs', 'Get-AmPackage', 'Get-AmPackageProfileDir', 'Save-AmPackageData', 'Remove-AmPackage',
     'Test-AmPathUnder', 'Get-AmConsoleHostExe', 'Get-AmAncestorExes', 'Test-AmHostedIn', 'Stop-ProcessesUnder',
     'Get-AmKnownProfileFolders', 'Test-AmProfileHolder', 'Remove-AmTreeGuarded', 'Get-AmForeignEntries', 'Move-AmFolderInTheWay',
     'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
@@ -4148,6 +4236,13 @@ function Remove-BlockingInstall {
     }
     if (-not $go) { Write-Warn "Left the existing install in place; nothing changed."; return $false }
     Write-Step "Uninstalling the conflicting install"
+    # Remove-AppxPackage deletes the package's own storage too: any file in it is kept in the profile first
+    # (Save-AmPackageData). A file that cannot be kept leaves the package where it is.
+    try { $null = Save-AmPackageData -Package $pkg }
+    catch {
+        Write-Warn "Left the existing install in place: its own files could not be kept first ($($_.Exception.Message))."
+        return $false
+    }
     Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
     Write-Ok "uninstalled"
     return $true

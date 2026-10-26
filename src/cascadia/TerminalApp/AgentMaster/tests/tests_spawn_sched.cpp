@@ -5494,6 +5494,145 @@ void TestPortableInstall()
     std::filesystem::remove_all(std::filesystem::path{ exeDir }, ec);
 }
 
+// Agentmaster (PROFILES.md §2d, the 2026-10-26 install audit): the two ways an install could still lose the user's data
+// without deleting their profile. (1) Removing an MSIX package deletes its own storage (%LOCALAPPDATA%\Packages\<family>):
+// KeepPackageDataIn copies whatever it holds into the package's profile first, and a copy that fails keeps the package.
+// (2) The home map (~\.agentmaster.profiles) read failing OPEN: a locked map read as "no choice", so a startup saved the
+// default over every install's choice and an install pointed its copy at the Default profile. ReadChoiceFileChecked tells
+// unreadable from missing, SaveChoiceIn refuses to rewrite an unreadable map, PackageProfileDirFor refuses to guess.
+// Scratch folders only: the real map is never written, and the lookup that reads ChoiceFilePath() runs under a scratch
+// USERPROFILE that is put back at the end.
+void TestInstallKeepsPackageDataAndMap()
+{
+    namespace PI = ::Agentmaster::PortableInstall;
+    namespace P = ::Agentmaster::Profiles;
+    namespace fs = std::filesystem;
+    std::wprintf(L"Install keeps package data + the profile map fails closed (PROFILES.md 2d):\n");
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const fs::path root = fs::path{ tmp } / (L"am-install-keep-" + NewSessionId());
+    fs::create_directories(root);
+    // Raw bytes in and out: the cases are byte patterns (a BOM, a nested file), so no text API touches them.
+    const auto write = [](const fs::path& p, std::string_view bytes) {
+        fs::create_directories(p.parent_path());
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto read = [](const fs::path& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+
+    // ---- the home map: parse, missing vs unreadable, the refused rewrite ----
+    {
+        std::map<std::wstring, std::wstring> m;
+        P::ParseChoiceBytes("\xEF\xBB\xBF# Agentmaster profile map: <package family name|Unpackaged>=<profile folder>\nAgentmaster_x=C:\\a\r\n\nbad line\n=nokey\nnoval=\nAgentmasterDev_x=D:\\b  \n", m);
+        CHECK(m.size() == 2 && m[L"Agentmaster_x"] == L"C:\\a" && m[L"AgentmasterDev_x"] == L"D:\\b",
+              "map: parse - a BOM'd header stays a comment, junk lines are skipped, CR and trailing spaces trimmed");
+        const fs::path map = root / L"map.txt";
+        std::map<std::wstring, std::wstring> out;
+        CHECK(P::ReadChoiceFileChecked(map.wstring(), out) == P::ChoiceFileState::Missing && out.empty(), "map: no file is Missing");
+        write(map, "# map\nAgentmaster_56k4f06dsfp9r=C:\\data\\am\nAgentmasterDev_56k4f06dsfp9r=C:\\data\\dev\n");
+        CHECK(P::ReadChoiceFileChecked(map.wstring(), out) == P::ChoiceFileState::Read && out.size() == 2, "map: a file is Read");
+        // Held with no sharing (another program): Unreadable after the budget, with the error.
+        HANDLE lock = ::CreateFileW(map.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        unsigned long err = 0;
+        CHECK(P::ReadChoiceFileChecked(map.wstring(), out, 100, &err) == P::ChoiceFileState::Unreadable && out.empty() && err == ERROR_SHARING_VIOLATION,
+              "map: a map held with no sharing is Unreadable (sharing violation) - never an empty Read");
+        CHECK(P::ReadChoiceFile(map.wstring()).empty(), "map: the plain reader still answers empty (display only)");
+        CHECK(!P::SaveChoiceIn(map.wstring(), L"Unpackaged", L"C:\\new"), "map: a rewrite of a map that cannot be read is refused");
+        ::CloseHandle(lock);
+        const std::string after = read(map);
+        CHECK(after.find("Agentmaster_56k4f06dsfp9r=C:\\data\\am") != std::string::npos && after.find("Unpackaged") == std::string::npos,
+              "map: ... and the map keeps every install's line");
+        CHECK(P::SaveChoiceIn(map.wstring(), L"Unpackaged", L"C:\\new") && P::ReadChoiceFile(map.wstring()).size() == 3, "map: once readable, a save keeps the other lines and adds its own");
+        // A lock that ends inside the budget is ridden out.
+        lock = ::CreateFileW(map.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        std::thread releaser([lock]() {
+            ::Sleep(150);
+            ::CloseHandle(lock);
+        });
+        const auto ridden = P::ReadChoiceFileChecked(map.wstring(), out, 3000);
+        releaser.join();
+        CHECK(ridden == P::ChoiceFileState::Read && out.size() == 3, "map: a lock that ends inside the budget is ridden out");
+    }
+
+    // ---- the package's own storage, kept before a removal ----
+    {
+        CHECK(PI::detail::PackageFamilyFromFullName(L"Agentmaster_0.8.0.0_x64__56k4f06dsfp9r") == L"Agentmaster_56k4f06dsfp9r", "package family: from a full name");
+        CHECK(PI::detail::PackageFamilyFromFullName(L"AgentmasterDev_0.0.1.35_x64__56k4f06dsfp9r") == L"AgentmasterDev_56k4f06dsfp9r", "package family: the dev identity");
+        CHECK(PI::detail::PackageFamilyFromFullName(L"NoUnderscore").empty() && PI::detail::PackageFamilyFromFullName(L"_x").empty() && PI::detail::PackageFamilyFromFullName(L"a_").empty(),
+              "package family: not a full name -> empty");
+        SYSTEMTIME t{};
+        t.wYear = 2026;
+        t.wMonth = 10;
+        t.wDay = 26;
+        t.wHour = 9;
+        t.wMinute = 5;
+        t.wSecond = 7;
+        CHECK(PI::detail::PackageDataFolderLeaf(L"Agentmaster_x", t, 0) == L"Agentmaster_x-20261026-090507" && PI::detail::PackageDataFolderLeaf(L"Agentmaster_x", t, 2) == L"Agentmaster_x-20261026-090507-2",
+              "package data: the folder name");
+
+        const fs::path packages = root / L"Packages";
+        const std::wstring family = L"Agentmaster_56k4f06dsfp9r";
+        const fs::path storage = packages / family;
+        const fs::path profile = root / L"profile";
+        std::wstring kept, error;
+        fs::create_directories(storage / L"LocalState");
+        fs::create_directories(storage / L"LocalCache" / L"Local" / L"Microsoft");
+        CHECK(PI::detail::KeepPackageDataIn(packages.wstring(), family, profile.wstring(), kept, error) && kept.empty() && error.empty() && !fs::exists(profile / L"package-data"),
+              "package data: an empty storage (the normal case) keeps nothing and makes no folder");
+        CHECK(PI::detail::KeepPackageDataIn(packages.wstring(), L"Agentmaster_none", profile.wstring(), kept, error) && kept.empty(), "package data: a package with no storage at all keeps nothing");
+        write(storage / L"LocalState" / L"settings.json", "{\"v\":\"0.1\"}");
+        write(storage / L"LocalState" / L"state.json", "{\"v\":\"0.1-state\"}");
+        write(storage / L"LocalCache" / L"Local" / L"Tool" / L"cfg.txt", "made inside the package");
+        write(profile / L"terminal" / L"state.json", "{\"own\":1}");
+        CHECK(PI::detail::KeepPackageDataIn(packages.wstring(), family, profile.wstring(), kept, error) && !kept.empty(), "package data: files are kept");
+        CHECK(read(fs::path{ kept } / L"LocalState" / L"settings.json") == "{\"v\":\"0.1\"}" && read(fs::path{ kept } / L"LocalCache" / L"Local" / L"Tool" / L"cfg.txt") == "made inside the package",
+              "package data: ... every file, nested ones included, byte for byte");
+        CHECK(fs::path{ kept }.parent_path() == profile / L"package-data" && fs::path{ kept }.filename().wstring().rfind(family + L"-", 0) == 0, "package data: in <profile>\\package-data\\<family>-<stamp>");
+        CHECK(read(profile / L"terminal" / L"settings.json") == "{\"v\":\"0.1\"}" && read(profile / L"terminal" / L"state.json") == "{\"own\":1}",
+              "package data: Windows Terminal's settings seed the profile's terminal folder, never over its own");
+        CHECK(fs::exists(storage / L"LocalState" / L"settings.json"), "package data: the storage itself is untouched (the removal is the caller's)");
+        std::wstring kept2;
+        CHECK(PI::detail::KeepPackageDataIn(packages.wstring(), family, profile.wstring(), kept2, error) && !kept2.empty() && kept2 != kept, "package data: a second keep gets a folder of its own");
+        // A file that cannot be copied: false, so the caller leaves the package installed.
+        const HANDLE held = ::CreateFileW((storage / L"LocalState" / L"settings.json").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        std::wstring kept3;
+        const bool ok3 = PI::detail::KeepPackageDataIn(packages.wstring(), family, profile.wstring(), kept3, error);
+        ::CloseHandle(held);
+        CHECK(!ok3 && !error.empty(), "package data: a file that cannot be copied fails the keep (the package then stays)");
+    }
+
+    // ---- the package's profile, looked up without guessing (a scratch USERPROFILE, put back at the end) ----
+    {
+        wchar_t saved[1024]{};
+        const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", saved, 1024);
+        const std::wstring savedHome{ saved, n < 1024 ? n : 0 };
+        const fs::path home = root / L"home";
+        fs::create_directories(home);
+        ::SetEnvironmentVariableW(L"USERPROFILE", home.c_str());
+        std::wstring dir;
+        CHECK(PI::PackageProfileDirFor(L"Agentmaster_56k4f06dsfp9r", dir) && dir == (home / L".agentmaster").wstring(), "package profile: no map -> the release default");
+        CHECK(PI::PackageProfileDirFor(L"AgentmasterDev_56k4f06dsfp9r", dir) && dir == (home / L".agentmaster-dev").wstring(), "package profile: no map -> the dev default for the dev family");
+        write(home / L".agentmaster.profiles", "# map\nAgentmaster_56k4f06dsfp9r=E:\\moved\\am\n");
+        CHECK(PI::PackageProfileDirFor(L"Agentmaster_56k4f06dsfp9r", dir) && dir == L"E:\\moved\\am", "package profile: the family's own line");
+        std::wstring userDir;
+        CHECK(PI::TryUserInstallProfileDir(userDir) && userDir == L"E:\\moved\\am", "user install: the package's choice (the same data after the switch)");
+        const HANDLE lock = ::CreateFileW((home / L".agentmaster.profiles").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        std::wstring untouched = L"unchanged";
+        const bool looked = PI::PackageProfileDirFor(L"Agentmaster_56k4f06dsfp9r", untouched);
+        const bool userLooked = PI::TryUserInstallProfileDir(untouched);
+        ::CloseHandle(lock);
+        CHECK(!looked && !userLooked && untouched == L"unchanged", "package profile: a map that cannot be read is never guessed (the install then refuses)");
+        ::SetEnvironmentVariableW(L"USERPROFILE", savedHome.empty() ? nullptr : savedHome.c_str());
+    }
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}
+
 // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): interrupting a turn (Esc) must PARK the Tests
 // Autorunner so the turn-end the interrupt produces can never auto-send the next queued prompt into
 // the session the user just stopped to talk to; the user's NEXT message resumes the parked mode; a

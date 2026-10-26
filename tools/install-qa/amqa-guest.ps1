@@ -211,6 +211,27 @@ function Get-AmQaState {
     }
 }
 
+function Assert-AmQaDisposableDesktop {
+    <#
+    .SYNOPSIS
+    Refuse to go on unless this machine is a disposable test desktop.
+    .DESCRIPTION
+    Reset-AmQa removes every Agentmaster package of every user, the all-users install, the QA accounts' profiles and
+    Agentmaster's scheduled tasks: right on a test desktop that its next reset throws away, a loss on any other PC (the
+    2026-10-26 audit, PROFILES.md 2d: nothing stopped it from running on the developer's own machine). A claude-desktops
+    guest carries its agent in C:\ProgramData\claude-desktop, and the e2e install lane's provisioning writes
+    C:\e2e\install-lane.json; a real PC has neither. AMQA_RESET_ANYWHERE=1 is the deliberate override for another kind of
+    throwaway machine.
+    .OUTPUTS
+    None.
+    .NOTES
+    Throws when the machine carries neither mark and the override is not set.
+    #>
+    if ((Test-Path -LiteralPath 'C:\ProgramData\claude-desktop') -or (Test-Path -LiteralPath 'C:\e2e\install-lane.json') -or $env:AMQA_RESET_ANYWHERE -eq '1') { return }
+    throw ('Reset-AmQa refused: this is not a disposable test desktop (no C:\ProgramData\claude-desktop, no C:\e2e\install-lane.json). ' +
+        'It removes every Agentmaster install, package and QA profile of this machine. Set AMQA_RESET_ANYWHERE=1 only on a machine about to be thrown away.')
+}
+
 function Reset-AmQa {
     <#
     .SYNOPSIS
@@ -221,9 +242,15 @@ function Reset-AmQa {
     (%LOCALAPPDATA%\Programs\Agentmaster) and the profiles of the QA accounts, the all-users install,
     the HKLM / each loaded HKCU uninstall entry, the right-click verbs, the PATH entries, the
     shortcuts, the taskbar pin files, the Active Setup component and each loaded hive's marker. The QA copies under C:\amqa stay (each scenario still starts from a FRESH copy of them).
+    It refuses to run anywhere but a disposable test desktop (Assert-AmQaDisposableDesktop, its first statement).
     .OUTPUTS
     One line per removed item.
+    .NOTES
+    Throws (and removes nothing) outside a disposable test desktop.
     #>
+    # FIRST, before anything is stopped or removed: only on a disposable test desktop (Assert-AmQaDisposableDesktop throws
+    # anywhere else, and nothing below runs).
+    Assert-AmQaDisposableDesktop
     # Only Agentmaster's own processes: a WindowsTerminal.exe counts when it is the old-name forwarder beside an
     # Agentmaster.exe - never the real Windows Terminal, the image's default terminal, which may host the very console
     # this runs in (the e2e install lane's runner: ending it ended the run).
