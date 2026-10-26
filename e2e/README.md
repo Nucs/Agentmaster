@@ -139,7 +139,6 @@ python e2e/host/install_lane.py --plan                                          
   `AM_E2E_FLEET_URL=http://127.0.0.1:7790/mcp AM_E2E_FLEET_TOKEN_FILE='Q:\claude-desktops\windows\host\token'` reaches this
   PC's Windows host directly (E2E_TESTING.md §8.5).
 
-
 ## Writing a scenario
 
 A test takes the `am` fixture — a running Agentmaster on a fresh profile and a fresh Claude Code config, its window
