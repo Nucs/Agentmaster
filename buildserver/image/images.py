@@ -6,6 +6,7 @@ DESIGN.md §3.2 keep the owner's PC usable while it installs) and its steps are 
     python buildserver/image/images.py base   [--name am-base] [--version core11]   # dockur's unattended install
     python buildserver/image/images.py smoke  [--image am-base]                     # boot, `cmd /c ver`, shut down
     python buildserver/image/images.py e2e    [--base am-base] [--name am-e2e]      # the e2e layer (Python + provision)
+    python buildserver/image/images.py build-image [--base am-base] [--name am-build]   # the build layer (Build Tools)
     python buildserver/image/images.py check  [--image am-e2e]                      # boot it and check what it holds
     python buildserver/image/images.py list                                         # the images in the site
 
@@ -38,6 +39,13 @@ PYTHON_URL = "https://www.python.org/ftp/python/3.13.9/python-3.13.9-amd64.exe"
 
 FINAL = ("Succeeded", "Failed", "Cancelled", "NoCapacity", "Lost")
 """The request states that end a request."""
+
+DOWNLOAD_CACHE = Path(r"Q:\buildserver\cache\dl")
+"""Pinned downloads kept on this PC for image builds (PowerShell 7, PortableGit): staged into a layer slot's share when
+present, so a rebuilt image does not fetch them again; the steps check each file's SHA-256 either way."""
+
+GIB = 1024
+"""MiB per GiB (the coordinator's resources are in MiB)."""
 
 
 def ensure_coordinator() -> None:
@@ -190,6 +198,80 @@ def e2e_check_steps() -> list[dict]:
     ]
 
 
+def build_layer_steps() -> list[dict]:
+    """The steps that make the build layer over the base (DESIGN.md §4.2: VS 2022 Build Tools with the C++ and UWP
+    workloads, both SDKs and vcpkg; PowerShell 7, Git, the VSSetup module, long paths; the trims; a seal with Windows'
+    servicing idle). Each step is a script in image/steps (staged into the slot's share), so the request's events time
+    and report each part.
+
+    Returns:
+        The guest steps.
+    """
+    def script(step_id: str, name: str, timeout_s: int) -> dict:
+        """One step that runs a staged PowerShell script.
+
+        Args:
+            step_id: the step's id (its events are named by it).
+            name: the script's file name in image/steps.
+            timeout_s: the step's timeout.
+
+        Returns:
+            The guest step.
+        """
+        return {"id": step_id, "kind": "run", "command": "powershell.exe", "timeoutS": timeout_s,
+                "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f"Z:\\image\\steps\\{name}"]}
+
+    return [
+        # The install took 28 min with its 4.8 GB download (measured); 90 min covers a slow download.
+        script("buildtools", "install-buildtools.ps1", 5400),
+        script("tools", "install-tools.ps1", 1200),
+        script("trims", "trims.ps1", 600),
+        # The seal waits up to 20 min for servicing to go idle, in 30-s samples.
+        script("seal", "seal.ps1", 1800),
+        {"id": "cleanup", "kind": "run", "command": "powershell.exe", "timeoutS": 600,
+         "args": ["-NoProfile", "-Command", "Remove-Item -Recurse -Force C:\\amb\\dl -ErrorAction SilentlyContinue; "
+                  "Remove-Item -Recurse -Force C:\\amb\\steps -ErrorAction SilentlyContinue; exit 0"]},
+    ]
+
+
+def build_check_steps() -> list[dict]:
+    """The checks of the build layer: every tool a build runs answers from where the build looks for it, Build Tools
+    is found the way tools\\OpenConsole.psm1 finds it (VSSetup), and Windows' servicing stays idle after a boot (a busy
+    TiWorker would take a vCPU from every build).
+
+    Returns:
+        The guest steps.
+    """
+    # A literal path: the checks quote their paths in single quotes, where PowerShell expands no variable.
+    kits = "C:\\Program Files (x86)\\Windows Kits\\10"
+    return [
+        {"id": "msbuild", "kind": "run", "command": "cmd.exe", "timeoutS": 120,
+         "args": ["/c", "dir /b /s C:\\BuildTools\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe"]},
+        {"id": "cl", "kind": "run", "command": "powershell.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command",
+                  "$c = Get-ChildItem C:\\BuildTools\\VC\\Tools\\MSVC -Recurse -Filter cl.exe | "
+                  "Where-Object FullName -like '*Hostx64\\x64*' | Select-Object -First 1; "
+                  "if (-not $c) { exit 1 }; $c.FullName"]},
+        {"id": "sdks", "kind": "run", "command": "powershell.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command",
+                  f"$f = @('{kits}\\Include\\10.0.22621.0\\um\\windows.h', '{kits}\\Include\\10.0.26100.0\\um\\windows.h', "
+                  f"'{kits}\\bin\\10.0.22621.0\\x64\\MakeAppx.exe', 'C:\\BuildTools\\VC\\vcpkg\\vcpkg.exe'); "
+                  "$f | ForEach-Object { '{0} {1}' -f (Test-Path $_), $_ }; "
+                  "if (@($f | Where-Object { -not (Test-Path $_) }).Count) { exit 1 }"]},
+        {"id": "pwsh", "kind": "run", "command": "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command", "'PowerShell ' + $PSVersionTable.PSVersion.ToString()"]},
+        {"id": "git", "kind": "run", "command": "C:\\Program Files\\Git\\cmd\\git.exe", "timeoutS": 60, "args": ["--version"]},
+        {"id": "vssetup", "kind": "run", "command": "powershell.exe", "timeoutS": 120,
+         "args": ["-NoProfile", "-Command",
+                  "Import-Module (Get-ChildItem C:\\BuildServer\\psmodules\\VSSetup -Recurse -Filter VSSetup.psd1 | "
+                  "Select-Object -First 1).FullName; $i = Get-VSSetupInstance -All | Select-VSSetupInstance -Latest "
+                  "-Product * -Require 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; if (-not $i) { exit 1 }; "
+                  "'{0} {1}' -f $i.InstallationPath, $i.InstallationVersion"]},
+        {"id": "servicing", "kind": "run", "command": "powershell.exe", "timeoutS": 300,
+         "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "Z:\\image\\steps\\seal.ps1", "-MaxMinutes", "1"]},
+    ]
+
+
 def main(argv: list[str]) -> int:
     """Parses the command line and runs one command.
 
@@ -209,7 +291,10 @@ def main(argv: list[str]) -> int:
     e2e = sub.add_parser("e2e", help="make the e2e layer")
     e2e.add_argument("--base", default="am-base")
     e2e.add_argument("--name", default="am-e2e")
-    check = sub.add_parser("check", help="boot an image and check what it holds (the e2e layer's tools; else `ver`)")
+    build = sub.add_parser("build-image", help="make the build layer (VS 2022 Build Tools, PowerShell 7, Git)")
+    build.add_argument("--base", default="am-base")
+    build.add_argument("--name", default="am-build")
+    check = sub.add_parser("check", help="boot an image and check what it holds (a layer's tools; else `ver`)")
     check.add_argument("--image", default="am-e2e")
     sub.add_parser("list", help="list the images in the site")
     args = parser.parse_args(argv)
@@ -236,7 +321,23 @@ def main(argv: list[str]) -> int:
         inputs: dict[str, object] = {"image": args.image}
         if args.image.startswith("am-e2e"):
             inputs["steps"] = e2e_check_steps()
+        elif args.image.startswith("am-build"):
+            # The servicing check runs the layer's own seal script, so the steps folder goes into the share too.
+            inputs["steps"] = build_check_steps()
+            inputs["stage"] = [{"source": str(HERE / "steps"), "target": "image/steps"}]
         body = {"kind": "Smoke", "inputs": inputs}
+    elif args.command == "build-image":
+        stage = [{"source": str(HERE / "steps"), "target": "image/steps"},
+                 {"source": str(REPO / ".PowershellModules" / "VSSetup"), "target": "image/psmodules/VSSetup"}]
+        if DOWNLOAD_CACHE.is_dir():
+            stage.append({"source": str(DOWNLOAD_CACHE), "target": "image/dl"})
+        body = {"kind": "Layer",
+                "inputs": {"image": args.base, "newImage": args.name, "steps": build_layer_steps(), "stage": stage},
+                # The layer grows ~18.5 GB (measured), plus the downloads while it installs; the install likes vCPUs.
+                "resources": {"min": {"memoryMiB": 4 * GIB, "vcpus": 2, "diskMiB": 24 * GIB},
+                              "preferred": {"memoryMiB": 8 * GIB, "vcpus": 8, "diskMiB": 28 * GIB}},
+                # Build Tools (up to 90 min with a slow download) + the tools + a seal of up to 30 min.
+                "runTimeoutMinutes": 180}
     else:
         body = {"kind": "Layer", "inputs": {
             "image": args.base, "newImage": args.name, "steps": e2e_layer_steps(),

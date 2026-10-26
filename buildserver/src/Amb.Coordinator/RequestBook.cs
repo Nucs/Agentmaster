@@ -130,8 +130,11 @@ public sealed class RequestBook
                 throw new RequestRejectedException("an import needs inputs.source (a path this PC can read)");
             case RequestKind.E2e when !Ids.IsSafe(inputs.BuildId):
                 throw new RequestRejectedException("an e2e request needs inputs.buildId (an existing build id)");
-            case RequestKind.Build or RequestKind.Test:
-                throw new RequestRejectedException($"{ask.Kind} is not served yet (DESIGN.md §13: builds come in Phase 3)");
+            case RequestKind.Test:
+                throw new RequestRejectedException("Test is not served yet (DESIGN.md §13: `amb test` comes after the build MVP)");
+            case RequestKind.Build:
+                inputs = NormalizeBuild(inputs);
+                break;
             case RequestKind.Install when !Ids.IsSafe(inputs.NewImage) || string.IsNullOrEmpty(inputs.Version)
                 || string.IsNullOrEmpty(inputs.OemDir):
                 throw new RequestRejectedException("an install needs inputs.newImage, inputs.version and inputs.oemDir");
@@ -169,6 +172,41 @@ public sealed class RequestBook
         Event(record.Id, "state", $"accepted: {record.Kind}", RequestState.Pending);
         QueueChanged.Pulse();
         return record;
+    }
+
+    /// <summary>Checks a build request's inputs and fills its defaults, so its record says exactly what is built.</summary>
+    /// <param name="inputs">The inputs as asked.</param>
+    /// <returns>The inputs with the commit in lower case and the configuration, identity and purge in their canonical
+    /// spelling ("Release" / "Debug", "dev" / "release", "none" / "force"; defaults Release, dev, none).</returns>
+    /// <exception cref="RequestRejectedException">The commit is not a full 40-hex SHA-1, or a value is unknown.</exception>
+    /// <remarks>A full SHA only, never a ref: a branch moves, and a build id names immutable bytes, so `amb build` resolves
+    /// HEAD or a branch on the caller's side and sends the commit it means.</remarks>
+    internal static RequestInputs NormalizeBuild(RequestInputs inputs)
+    {
+        string commit = (inputs.Commit ?? "").Trim().ToLowerInvariant();
+        if (commit.Length != 40 || !commit.All(char.IsAsciiHexDigitLower))
+        {
+            throw new RequestRejectedException("a build needs inputs.commit: a full 40-character commit SHA (resolve a ref first)");
+        }
+        string configuration = (inputs.Configuration ?? "Release").Trim().ToLowerInvariant() switch
+        {
+            "release" => "Release",
+            "debug" => "Debug",
+            _ => throw new RequestRejectedException($"inputs.configuration must be Release or Debug, not {inputs.Configuration}"),
+        };
+        string identity = (inputs.Identity ?? "dev").Trim().ToLowerInvariant() switch
+        {
+            "dev" => "dev",
+            "release" => "release",
+            _ => throw new RequestRejectedException($"inputs.identity must be dev or release, not {inputs.Identity}"),
+        };
+        string purge = (inputs.Purge ?? "none").Trim().ToLowerInvariant() switch
+        {
+            "none" => "none",
+            "force" => "force",
+            _ => throw new RequestRejectedException($"inputs.purge must be none or force, not {inputs.Purge}"),
+        };
+        return inputs with { Commit = commit, Configuration = configuration, Identity = identity, Purge = purge };
     }
 
     /// <summary>Reads a request's record.</summary>

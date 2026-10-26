@@ -87,7 +87,8 @@ public sealed class SlotManager
                 continue;
             }
             _log.LogWarning("slot {Slot} ({Request}) was left by an earlier run: removing it", slot.Id, slot.RequestId);
-            await _driver.StopAsync(slot.Handle, graceful: false, cancel).ConfigureAwait(false);
+            // A kept VM's disks are reused by the next build: its leftover is shut down, never killed mid-write.
+            await _driver.StopAsync(slot.Handle, graceful: slot.Kept, cancel).ConfigureAwait(false);
             DeleteFolders(slot.Id);
             MarkGone(slot.Id);
             removed++;
@@ -102,22 +103,31 @@ public sealed class SlotManager
     /// <param name="cancel">Cancels the start (the half-made slot is removed).</param>
     /// <param name="installVersion">For an install slot: the dockur VERSION to install; null to boot an image.</param>
     /// <param name="oemDir">For an install slot: the OEM folder dockur runs at the end of the install.</param>
+    /// <param name="keptVm">For a kept VM (a build VM): its name; the slot then uses the VM's own folder under
+    /// <c>vms/</c> (made with its overlay at the first start, reused afterwards) instead of a throwaway one.</param>
+    /// <param name="dataDiskGiB">For a kept VM: the size of its raw data disk (made at the first start).</param>
     /// <returns>The lease; the caller must <see cref="StopAsync"/> it in every outcome.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="keptVm"/> is not a safe name.</exception>
     /// <exception cref="InvalidOperationException">The driver could not start it, or the guest agent is missing.</exception>
     /// <exception cref="IOException">A folder or file could not be made.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     public async Task<SlotLease> StartAsync(RequestRecord request, string image, Resources grant, CancellationToken cancel,
-        string? installVersion = null, string? oemDir = null)
+        string? installVersion = null, string? oemDir = null, string? keptVm = null, int? dataDiskGiB = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (keptVm is not null && !Ids.IsSafe(keptVm))
+        {
+            throw new ArgumentException($"not a safe VM name: {keptVm}", nameof(keptVm));
+        }
         if (!File.Exists(_options.GuestAgentPath))
         {
             throw new InvalidOperationException($"no guest agent at {_options.GuestAgentPath}");
         }
         string slotId = Ids.NewSlotId(_clock.GetUtcNow());
-        var spec = new SlotSpec(slotId, image, grant, Path.Combine(_options.SlotsDir, slotId),
-            Path.Combine(_options.ExchangeDir, slotId), Path.Combine(_options.ImagesDir, image), installVersion, oemDir);
+        string slotDir = keptVm is null ? Path.Combine(_options.SlotsDir, slotId) : Path.Combine(_options.VmsDir, keptVm);
+        var spec = new SlotSpec(slotId, image, grant, slotDir, Path.Combine(_options.ExchangeDir, slotId),
+            Path.Combine(_options.ImagesDir, image), installVersion, oemDir, Kept: keptVm is not null, DataDiskGiB: dataDiskGiB);
         string token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         // The share first: the guest agent and its slot.json must be there before the VM's logon task looks for them.
         string amb = Path.Combine(spec.ExchangeDir, "amb");
@@ -139,6 +149,7 @@ public sealed class SlotManager
             Driver = _driver.Name,
             Handle = "",
             TokenSha256 = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(token))),
+            Kept = spec.Kept,
             CreatedAt = _clock.GetUtcNow(),
         };
         _store.Write("slots", slotId, record, 0, AmbJson.Default.EnvelopeSlotRecord);
@@ -154,7 +165,8 @@ public sealed class SlotManager
         }
         catch
         {
-            // Cleanup-on-failure: a slot that never started still has a share, a record and a session.
+            // Cleanup-on-failure: a slot that never started still has a share, a record and a session (a kept VM's own
+            // folder stays: it holds the disks the next build boots).
             _broker.Close(slotId);
             DeleteFolders(slotId);
             MarkGone(slotId);
@@ -197,7 +209,13 @@ public sealed class SlotManager
         Update(lease.Spec.SlotId, s => s with { State = SlotState.Stopping });
         try
         {
-            if (graceful && commitAs is null)
+            if (lease.Spec.Kept)
+            {
+                // A kept VM's disks are booted again by the next build: always the driver's full graceful stop (an
+                // ACPI shutdown, then a kill after 120 s), even when the job gave up on its guest.
+                await _driver.StopAsync(lease.Handle, graceful: true, CancellationToken.None).ConfigureAwait(false);
+            }
+            else if (graceful && commitAs is null)
             {
                 await WaitForSelfStopAsync(lease).ConfigureAwait(false);
                 await _driver.StopAsync(lease.Handle, graceful: false, CancellationToken.None).ConfigureAwait(false);

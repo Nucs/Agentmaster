@@ -111,6 +111,23 @@ api.MapGet("/builds/{id}", (string id, RecordStore store) =>
     Ids.IsSafe(id) && store.Read("builds", id, AmbJson.Default.EnvelopeBuildRecord) is { } build
         ? Results.Ok(build.Value)
         : Results.Text("no such build", statusCode: 404));
+// A build's file, streamed from the store (`amb fetch` copies it to Q: and checks its SHA-256 against the manifest). Only
+// a name the build's manifest lists is served, so no path a caller makes up can reach outside the store.
+api.MapGet("/builds/{id}/artifacts/{name}", (string id, string name, RecordStore store, CoordinatorOptions options) =>
+{
+    if (!Ids.IsSafe(id) || store.Read("builds", id, AmbJson.Default.EnvelopeBuildRecord) is not { } build)
+    {
+        return Results.Text("no such build", statusCode: 404);
+    }
+    ArtifactRef? artifact = build.Value.Artifacts.FirstOrDefault(a => a.Name == name);
+    string? path = artifact is null ? null : Path.GetFullPath(Path.Combine(options.StoreDir, artifact.StorePath));
+    if (path is null || !path.StartsWith(Path.GetFullPath(options.StoreDir) + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+        || !File.Exists(path))
+    {
+        return Results.Text($"build {id} has no file {name}", statusCode: 404);
+    }
+    return Results.File(path, "application/octet-stream", artifact!.Name, enableRangeProcessing: true);
+});
 api.MapGet("/status", (RequestBook book, SlotManager slots, HostCapacity capacity) =>
     Results.Ok(new CoordinatorStatus(version, startedAt, [capacity.HomepcFree()], book.Active, slots.Active, capacity.Last)));
 api.MapPost("/capacity/homepc", (HostFactsReport report, HostCapacity capacity) =>

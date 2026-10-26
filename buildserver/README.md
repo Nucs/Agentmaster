@@ -17,6 +17,10 @@ and 4. Slots run through the podman + dockur stand-in until fastrun's VM slots e
 ## Use it
 
 ```text
+amb build [<rev>] [--config Release|Debug] [--identity dev|release] [--purge none|force] [--wait]
+                                             # build a commit (default HEAD of K:\source\Agentmaster) in the build VM
+amb artifacts <build id>                     # a build's files: portable zip, layout zip, symbols zip, build log, build.json
+amb fetch <build id> [--kind KIND|all] [--to DIR]   # copy them to Q:\buildserver\out\<build id> (never K:), SHA-checked
 amb status                                   # the coordinator, Windows' numbers, homepc's free share, active requests
 amb import <portable zip> [--commit SHA]     # a hand-built zip or a GitHub release's zip becomes a build id (b<date>-<n>)
 amb builds                                   # the build ids
@@ -36,12 +40,37 @@ amb list | show <id> | cancel <id>
 - A run's results stay in the site's store: `/srv/buildserver/store/requests/<id>/` (`<id>.status.json`,
   `<id>.progress.jsonl`, `<id>.zip` with pytest.log, junit.xml, the mock's requests and each failed test's evidence).
 
+## Builds
+
+`amb build` builds a **commit**, never the working tree: it resolves `<rev>` (default HEAD) in `K:\source\Agentmaster`
+(`AMB_REPO` overrides) and sends the full SHA. A build id names immutable bytes, so commit first.
+
+- **Where it runs:** the kept build VM `build-1` (image `am-build`: Tiny11 Core + VS 2022 Build Tools 17.14, MSVC 14.44,
+  SDKs 22621 and 26100, vcpkg, PowerShell 7, Git). Its overlay and its data disk D: (a sparse 128 GiB raw file) live in
+  `/srv/buildserver/vms/build-1` and outlive each build, so the next build of a worktree is incremental. One build at a
+  time: the next request waits (`waiting: the build VM is busy with …`).
+- **The source:** the site's bare mirror (`/srv/buildserver/git/agentmaster.git`) fetches the repository's branches and
+  tags from K: by path (it only reads K:); the VM gets a git bundle of what its worktree lacks (the whole history the
+  first time, ~140 MB; then only the new commits) plus the `refs/claude-agent-sdk-cpp` submodule's.
+- **The build:** in `D:\src\<config>-<identity>`, the commit's own `tools\Build-Agentmaster.ps1` (restore, DuckDB,
+  vcpkg's binary cache on D:), `/m` and `CL_MPCount` picked from the VM's memory (2 × 2 below 10 GB). `--purge force`
+  deletes the worktree's build outputs first (a clean build); `none` builds incrementally.
+- **The artifacts** (`amb artifacts <id>`): the portable zip (`New-UnpackagedTerminalDistribution.ps1 -PortableMode`,
+  as release.yml makes it; e2e-ready), the layout as a zip (for an install through the swap script), the symbols zip,
+  `build.log` / `build.log.err` and `build.json`, each with its SHA-256 in the build's manifest.
+- **The same request twice** (commit, configuration, identity, purge) returns the first build's id at once.
+- **A failed build** ends `Failed` with the end of its log; the whole log is kept in `store/requests/<id>/build.log`.
+- **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's
+  page cache counts as used memory for Windows, so after big copies it can help to drop it
+  (`python buildserver/site/sitectl.py run -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`).
+
 ## The images
 
 ```text
 python buildserver/image/images.py base  [--name am-base] [--version core11]   # dockur's unattended install (13 min)
 python buildserver/image/images.py smoke [--image am-base]                     # boot, `cmd /c ver`, shut down
 python buildserver/image/images.py e2e   [--base am-base] [--name am-e2e]      # the e2e layer (3 min)
+python buildserver/image/images.py build-image [--base am-base] [--name am-build]   # the build layer (25 min)
 python buildserver/image/images.py check [--image am-e2e]                      # boot it and check what it holds
 python buildserver/image/images.py list
 ```
@@ -53,6 +82,10 @@ python buildserver/image/images.py list
   (Claude Code, PortableGit, PowerShell 7, the venv, the hosts guard, the mock's environment, crash dumps), then
   `image/steps/trims.ps1`. An e2e run calls provision.ps1 again with the same cache, so only the build under test is
   extracted.
+- **`am-build`:** a qcow2 layer over `am-base` (22.3 GB of files, 24.6 min to make): VS 2022 Build Tools in
+  `C:\BuildTools` (`image/steps/install-buildtools.ps1`, the measured arguments), PowerShell 7.6.8 and PortableGit
+  2.56.0.3 (pinned, SHA-256-checked, staged from `Q:\buildserver\cache\dl`), the VSSetup module, long paths, the trims,
+  and a seal that waits for Windows' servicing to be idle. `images.py check --image am-build` checks each tool.
 - ⚠ A boot passes the image's own dockur version (read from its `windows.base`): dockur reinstalls Windows over a slot
   whose `VERSION` differs (DESIGN.md §15).
 - Every slot's screen is 1600×900, the claude-fleet desktops' size the e2e suite was written against (dockur's own

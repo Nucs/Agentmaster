@@ -81,9 +81,16 @@ public sealed class JobContext
     /// <param name="message">The line.</param>
     public void Event(string kind, string message) => Book.Event(Request.Id, kind, message);
 
-    /// <summary>Moves the request to Running (its work began: the guest said hello, or an import started).</summary>
+    /// <summary>Moves the request to Running (its work began: the guest said hello, or an import started); when it runs
+    /// already (a build runs from its source fetch on), the line is still logged, as an event.</summary>
     /// <param name="message">The event's line.</param>
-    public void MarkRunning(string message) => Book.Move(Request.Id, RequestState.Running, message);
+    public void MarkRunning(string message)
+    {
+        if (Book.Move(Request.Id, RequestState.Running, message) is null)
+        {
+            Event("state", message);
+        }
+    }
 
     /// <summary>Moves the request to Collecting (its work ended; its results are being kept).</summary>
     /// <param name="message">The event's line.</param>
@@ -135,17 +142,19 @@ public abstract class VmJob : IJob
     /// <param name="cancel">Cancels the start.</param>
     /// <param name="installVersion">For an install: the dockur VERSION.</param>
     /// <param name="oemDir">For an install: the OEM folder.</param>
+    /// <param name="keptVm">For a build: the kept VM whose disks the slot boots (SlotManager.StartAsync).</param>
+    /// <param name="dataDiskGiB">For a build: the kept VM's data disk size.</param>
     /// <returns>The lease; the caller stops it in a finally block.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="context"/> is null.</exception>
     /// <exception cref="InvalidOperationException">The slot could not be started.</exception>
     /// <exception cref="SlotLostException">No hello within <see cref="HelloTimeout"/>.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
     protected async Task<SlotLease> StartAndWaitAsync(JobContext context, string image, CancellationToken cancel,
-        string? installVersion = null, string? oemDir = null)
+        string? installVersion = null, string? oemDir = null, string? keptVm = null, int? dataDiskGiB = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         SlotLease lease = await context.Slots.StartAsync(context.Request, image, context.Grant, cancel, installVersion,
-            oemDir).ConfigureAwait(false);
+            oemDir, keptVm, dataDiskGiB).ConfigureAwait(false);
         try
         {
             context.Book.Patch(context.Request.Id, r => r with { SlotId = lease.Spec.SlotId });

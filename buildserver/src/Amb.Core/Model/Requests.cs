@@ -124,6 +124,11 @@ public sealed record RequestInputs
     /// <summary>Build: "dev" or "release" (the package identity).</summary>
     public string? Identity { get; init; }
 
+    /// <summary>Build: "none" (an incremental build in the build VM's kept tree) or "force" (the tree's build outputs
+    /// are deleted first: a clean build). Part of a build's identity: a request for a commit already built with the
+    /// same configuration, identity and purge returns that build id.</summary>
+    public string? Purge { get; init; }
+
     /// <summary>Test: the test kind ("m5", "syntax", "installer").</summary>
     public string? TestKind { get; init; }
 

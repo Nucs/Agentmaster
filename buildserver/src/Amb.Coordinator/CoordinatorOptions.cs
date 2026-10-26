@@ -46,6 +46,32 @@ public sealed record CoordinatorOptions
     /// /mnt/k/source/Agentmaster/e2e: the repository's own e2e folder, as WSL's automount shows it).</summary>
     public required string E2eSourceDir { get; init; }
 
+    /// <summary>The repository builds are made from (<c>AMB_SOURCE_REPO</c>; default /mnt/k/source/Agentmaster, the
+    /// owner's checkout as WSL's automount shows it). Only read: the site's bare mirror fetches its branches and tags from
+    /// it, so a build never sees uncommitted work and nothing is ever written to K: (DESIGN.md §11).</summary>
+    public string SourceRepo { get; init; } = "/mnt/k/source/Agentmaster";
+
+    /// <summary>The image build VMs boot (<c>AMB_BUILD_IMAGE</c>; default am-build).</summary>
+    public string BuildImage { get; init; } = "am-build";
+
+    /// <summary>The kept build VM's name: one VM, so builds run one at a time (the scheduler holds the next one).</summary>
+    public string BuildVmName { get; init; } = "build-1";
+
+    /// <summary>The build VM's raw data disk, in GiB (<c>AMB_BUILD_DATA_DISK_GIB</c>; default 128). A sparse file: only what
+    /// the guest writes takes space (a Release tree with its caches ~25-40 GB, DESIGN.md §8.2), and what it deletes is
+    /// returned (discard=unmap).</summary>
+    public int BuildDataDiskGiB { get; init; } = 128;
+
+    /// <summary>The build job's guest scripts, deployed with the coordinator (<c>&lt;root&gt;/bin/steps/build</c>, from the
+    /// repository's buildserver/steps/build): staged into every build slot's share.</summary>
+    public string BuildStepsDir => Path.Combine(Root, "bin", "steps", "build");
+
+    /// <summary>The folder of kept build VMs: each VM's overlay, UEFI files and raw data disk.</summary>
+    public string VmsDir => Path.Combine(Root, "vms");
+
+    /// <summary>The folder of the bare mirrors (the repository and its submodule) builds are bundled from.</summary>
+    public string GitDir => Path.Combine(Root, "git");
+
     /// <summary>homepc's reserves (DESIGN.md §3.2).</summary>
     public HomepcReserves Reserves { get; init; } = new();
 
@@ -92,6 +118,11 @@ public sealed record CoordinatorOptions
             IdleExitMinutes = env("AMB_IDLE_EXIT_MINUTES") is { Length: > 0 } m
                 ? int.Parse(m, NumberStyles.None, CultureInfo.InvariantCulture)
                 : 10,
+            SourceRepo = env("AMB_SOURCE_REPO") is { Length: > 0 } s ? s : "/mnt/k/source/Agentmaster",
+            BuildImage = env("AMB_BUILD_IMAGE") is { Length: > 0 } b ? b : "am-build",
+            BuildDataDiskGiB = env("AMB_BUILD_DATA_DISK_GIB") is { Length: > 0 } dd
+                ? int.Parse(dd, NumberStyles.None, CultureInfo.InvariantCulture)
+                : 128,
         };
     }
 }

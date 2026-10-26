@@ -146,11 +146,19 @@ public sealed class Scheduler : BackgroundService
                 Start(_book.Move(request.Id, RequestState.Starting, "started (no slot needed)"));
                 continue;
             }
+            if (request.Kind == RequestKind.Build && BusyBuild(request.Id) is { } busy)
+            {
+                // One kept build VM, so one build at a time: this one waits for it (an identical request then finds
+                // the first one's build and returns its id at once).
+                Hold(request, now, $"the build VM is busy with {busy}");
+                continue;
+            }
+            ResourceRequest resources = EffectiveResources(request);
             SiteFree homepc = _capacity.HomepcFree();
-            Placement? placement = Allocator.Choose(request.Resources, [homepc]);
+            Placement? placement = Allocator.Choose(resources, [homepc]);
             if (placement is null)
             {
-                string shortage = Allocator.ExplainShortage(request.Resources, [homepc]);
+                string shortage = Allocator.ExplainShortage(resources, [homepc]);
                 if (now - request.CreatedAt > request.WaitTimeout)
                 {
                     _book.Move(request.Id, RequestState.NoCapacity, $"no-capacity after {request.WaitTimeout.TotalMinutes:0} min: {shortage}",
@@ -174,6 +182,52 @@ public sealed class Scheduler : BackgroundService
                 FormattableString.Invariant($"placed on {placement.Site} (score {placement.Score:0.00}): {placement.Grant}"),
                 r => r with { Site = placement.Site, Grant = placement.Grant, Outcome = null }));
         }
+    }
+
+    /// <summary>The build request that holds the build VM now (starting, running or collecting), other than one.</summary>
+    /// <param name="except">The request asking.</param>
+    /// <returns>Its id, or null when the VM is free.</returns>
+    private string? BusyBuild(string except) =>
+        _book.Active.FirstOrDefault(r => r.Kind == RequestKind.Build && r.State != RequestState.Pending && r.Id != except)?.Id;
+
+    /// <summary>Keeps a request pending for a reason (recorded once), or ends it no-capacity when it waited too long.</summary>
+    /// <param name="request">The request.</param>
+    /// <param name="now">The pass's time.</param>
+    /// <param name="reason">What it waits for.</param>
+    /// <exception cref="IOException">A record could not be written.</exception>
+    private void Hold(RequestRecord request, DateTimeOffset now, string reason)
+    {
+        if (now - request.CreatedAt > request.WaitTimeout)
+        {
+            _book.Move(request.Id, RequestState.NoCapacity, $"no-capacity after {request.WaitTimeout.TotalMinutes:0} min: {reason}",
+                r => r with { Outcome = "no-capacity: " + reason });
+            return;
+        }
+        string waiting = "waiting: " + reason;
+        if (request.Outcome != waiting)
+        {
+            _book.Patch(request.Id, r => r with { Outcome = waiting });
+            _book.Event(request.Id, "placement", waiting);
+        }
+    }
+
+    /// <summary>What a request needs now: a build whose kept VM has its disks already adds only the growth of a build,
+    /// not the first build's whole tree.</summary>
+    /// <param name="request">The request (its Resources are set).</param>
+    /// <returns>The resources to admit it by.</returns>
+    /// <remarks>Without this a repeat build would ask for the first build's 35 GB of disk every time, and wait for space
+    /// it never uses (the kept VM's disks hold the trees already, inside the site's disk).</remarks>
+    private ResourceRequest EffectiveResources(RequestRecord request)
+    {
+        ResourceRequest asked = request.Resources!;
+        if (request.Kind != RequestKind.Build
+            || !File.Exists(Path.Combine(_options.VmsDir, _options.BuildVmName, PodmanSlotDriver.DataDiskFile)))
+        {
+            return asked;
+        }
+        long min = Math.Min(asked.Min.DiskMiB, Resources.Gib(5));
+        long preferred = Math.Max(min, Math.Min(asked.Preferred.DiskMiB, Resources.Gib(10)));
+        return new ResourceRequest(asked.Min with { DiskMiB = min }, asked.Preferred with { DiskMiB = preferred });
     }
 
     /// <summary>Starts a request's job on the thread pool, with its run timeout, and records how it ended.</summary>
@@ -251,6 +305,7 @@ public sealed class Scheduler : BackgroundService
         RequestKind.Install => new InstallJob(),
         RequestKind.Layer => new LayerJob(),
         RequestKind.E2e => new E2eJob(),
+        RequestKind.Build => new BuildJob(),
         _ => throw new NotSupportedException($"{kind} is not served yet"),
     };
 }
