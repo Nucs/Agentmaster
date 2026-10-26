@@ -806,6 +806,9 @@ namespace Agentmaster::Msg
             // §21.11: the default mode of the topics and the rich-message switch apply to the next message (live).
             _defaultVerbose.store(settings.messagingVerbose);
             _richMessages.store(settings.messagingRichMessages);
+            // §21.39: 📜 All Screen's default level, live: the next bare /allscreen draws it, and the next render of a card's level
+            // picker marks it (an empty or unknown word reads as Full).
+            _allScreenLevel.store(static_cast<int>(AllScreenLevelSetting(settings.messagingAllScreenLevel)));
             int64_t owner = 0;
             for (const wchar_t c : settings.messagingTelegramOwnerId)
             {
@@ -3369,8 +3372,12 @@ namespace Agentmaster::Msg
     {
         // Card buttons use STABLE callback data ("c:<verb>:<session id>", at most 49 bytes of the 64 allowed): each verb acts
         // on the session's CURRENT state (a toggle reads it first), so a stale button cannot do something old (M5 is about
-        // answers and queue items, which use tokens). §21.24: two pages - BuildCardButtonRows lays them out.
-        markupOut = _buttons(BuildCardButtonRows(sessionId, facts, page));
+        // answers and queue items, which use tokens). §21.24: two pages - BuildCardButtonRows lays them out. §21.39: and the ALL
+        // SCREEN page, whose ★ marks the cog's default level - a setting, not a fact of the session, so it is set here for every
+        // caller (the card's hash covers the buttons: a changed default re-edits a card that shows the picker, and no other).
+        CardButtonFacts withLevel = facts;
+        withLevel.allScreenLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
+        markupOut = _buttons(BuildCardButtonRows(sessionId, withLevel, page));
         return {};
     }
 
@@ -3443,7 +3450,7 @@ namespace Agentmaster::Msg
                     { L"summary", L"the session's summary" },
                     { L"screen", L"the terminal's visible text" },
                     { L"screenimage", L"the terminal's screen as a picture" }, // §21.24 (the card's 🖼 Screen Image)
-                    { L"allscreen", L"the whole conversation as tall pictures [minimal|compact|default|full|max]" }, // §21.39 (the card's 📜 All Screen)
+                    { L"allscreen", L"the whole conversation as tall pictures [minimal|compact|default|full|max] (bare: the default level)" }, // §21.39 (the card's 📜 All Screen ▸)
                     { L"download", L"a file's download link: /download <path>" }, // §21.32.4 (the file links)
                     { L"status", L"the session's card / the fleet" },
                     { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19

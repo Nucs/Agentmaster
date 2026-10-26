@@ -3559,7 +3559,7 @@ namespace Agentmaster::Msg
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
         L"reactivate", L"recreate", L"verbose",
         L"screenimage", // §21.24: the terminal's screen as a picture (the card's 🖼 Screen Image; /screen is the text)
-        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max] (the card's 📜 All Screen)
+        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max]; bare = the cog's default level (the card's 📜 All Screen ▸)
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
@@ -4748,12 +4748,95 @@ namespace Agentmaster::Msg
     /// (a re-post keeps it; a card that starts to RING - a session that now needs the user - goes back to Main, where the
     /// state's own action is, and a page opened after that is kept), and a typed /status copy starts on Main and flips by
     /// itself. Nothing persists: after a restart every card is on Main again.
+    /// §21.39: a third page, ALL SCREEN, is the level picker 📜 All Screen ▸ opens from the Session page (the user's request of
+    /// 2026-10-26: "a second menu where we pick the transcript levels"); its ◀ Back returns to the Session page.
     /// </remarks>
     enum class CardPage
     {
         Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
-        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen · ◀ Back
+        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ◀ Back
+        AllScreen, // §21.39: one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ★) · ◀ Back (to Session)
     };
+
+    // ===== 📜 All Screen's levels (§21.39) ======================================================
+
+    /// <summary>
+    /// The level 📜 All Screen draws when none is named - a bare /allscreen - and the one its level picker marks with ★: FULL,
+    /// the user's rule of 2026-10-26 ("default is full or can be set in settings"). The cog's "All Screen's default level"
+    /// (AppSettings::messagingAllScreenLevel) overrides it; an empty or unknown stored word reads as this (AllScreenLevelSetting).
+    /// </summary>
+    inline constexpr TurnsLevel kAllScreenDefaultLevel = TurnsLevel::Full;
+
+    /// <summary>One level as 📜 All Screen offers it (the level picker's button, /allscreen's argument, the settings value).</summary>
+    struct AllScreenLevelChoice
+    {
+        TurnsLevel level; // the Copy > Transcript level it draws (TranscriptTurns.h)
+        std::wstring_view word; // its word: the settings value, /allscreen's argument and the button verb's suffix ("full")
+        std::wstring_view label; // its name on the button, as the PC's Copy > Transcript menu names it ("Full")
+        std::wstring_view hint; // what it adds to the level before it, short enough for a phone's button ("+ commands & output")
+    };
+
+    /// <summary>
+    /// The five levels in the picker's order, least to most (TurnsLevel's own numeric order). The words are TurnsLevelName's, so
+    /// /allscreen and /transcript take the same arguments; the hints follow kTranscriptCopyMenu's descriptions (AgentCopyActions.h).
+    /// </summary>
+    inline constexpr AllScreenLevelChoice kAllScreenLevels[] = {
+        { TurnsLevel::Minimal, L"minimal", L"Minimal", L"prompts & replies" },
+        { TurnsLevel::Compact, L"compact", L"Compact", L"+ answers & agents" },
+        { TurnsLevel::Default, L"default", L"Default", L"+ every tool call" },
+        { TurnsLevel::Full, L"full", L"Full", L"+ commands & output" },
+        { TurnsLevel::Max, L"max", L"Max", L"+ written files" },
+    };
+
+    /// <summary>The level a word names: one of kAllScreenLevels' words, exactly (a caller lower-cases typed text first).</summary>
+    /// <param name="word">The word ("full").</param>
+    /// <returns>The level, or nullopt for an empty or unknown word.</returns>
+    inline std::optional<TurnsLevel> AllScreenLevelFromWord(std::wstring_view word) noexcept
+    {
+        for (const auto& choice : kAllScreenLevels)
+        {
+            if (choice.word == word)
+            {
+                return choice.level;
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// <summary>
+    /// The default level a stored setting means (AppSettings::messagingAllScreenLevel): its level, or kAllScreenDefaultLevel when
+    /// the word is empty or unknown - so a hand-edited settings.json falls back to Full instead of to nothing.
+    /// </summary>
+    /// <param name="stored">The stored word (any case: "Full" counts).</param>
+    /// <returns>The level.</returns>
+    inline TurnsLevel AllScreenLevelSetting(std::wstring_view stored) noexcept
+    {
+        wchar_t lower[16]{};
+        if (stored.size() >= std::size(lower))
+        {
+            return kAllScreenDefaultLevel; // longer than any level's word
+        }
+        for (size_t i = 0; i < stored.size(); ++i)
+        {
+            lower[i] = static_cast<wchar_t>(std::towlower(stored[i]));
+        }
+        return AllScreenLevelFromWord(std::wstring_view{ lower, stored.size() }).value_or(kAllScreenDefaultLevel);
+    }
+
+    /// <summary>A level's word ("full"), the inverse of AllScreenLevelFromWord.</summary>
+    /// <param name="level">The level (an out-of-range value reads as kAllScreenDefaultLevel's word).</param>
+    /// <returns>The word.</returns>
+    inline std::wstring_view AllScreenLevelWord(TurnsLevel level) noexcept
+    {
+        for (const auto& choice : kAllScreenLevels)
+        {
+            if (choice.level == level)
+            {
+                return choice.word;
+            }
+        }
+        return AllScreenLevelWord(kAllScreenDefaultLevel);
+    }
 
     /// <summary>What the card's buttons depend on, read from the session at render time (CardButtonFactsFor).</summary>
     struct CardButtonFacts
@@ -4763,6 +4846,9 @@ namespace Agentmaster::Msg
         bool reactivatable{ false }; // SessionIsReactivatable: a parked tab, a session in Error, or a claude that exited - ▶ Reactivate is offered for a parked tab only (the other two show 🔄 Restart Session, which does the same for them)
         bool error{ false }; // the session is in Error: 🔄 Restart Session on Main, 🔧 Resume Session beside it on the Session page (§21.24)
         bool done{ false }; // claude exited (Done): 🔄 Restart Session on Main too (the user's rule of 2026-10-19)
+        // §21.39: the default level (the cog's setting, not the session's): its button on the ALL SCREEN page wears ★. Not read
+        // from the session - CardButtonFactsFor leaves the built-in default, and the service sets the setting's (_cardMarkupFor).
+        TurnsLevel allScreenLevel{ kAllScreenDefaultLevel };
     };
 
     /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, and whether its state has an action of its own (an error, an exit, a parked tab).</summary>
@@ -4799,10 +4885,43 @@ namespace Agentmaster::Msg
     /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
     inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
     /// <summary>
-    /// 📜 All Screen (§21.39): the topic's /allscreen at the Default level - the WHOLE conversation, drawn from the transcript in
-    /// Claude Code's look, as tall pictures. "c:allscreen:" with a 36-character id is 48 bytes of Telegram's 64.
+    /// 📜 All Screen ▸ (§21.39, the Session page): opens the ALL SCREEN page, the level picker, on the message the button sits
+    /// on - the WHOLE conversation is drawn from the transcript in Claude Code's look, as tall pictures, at the level picked
+    /// there. "c:allscreen:" with a 36-character id is 48 bytes of Telegram's 64.
     /// </summary>
+    /// <remarks>
+    /// The verb's first build (7c7397861, in dev 0.0.1.36) drew at the Default level at once; a card posted by that build that
+    /// still shows the old button now opens the picker instead - the newer meaning, and harmless (nothing is drawn unasked).
+    /// </remarks>
     inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";
+    /// <summary>
+    /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;. The longest,
+    /// "c:allscreen-compact:" / "c:allscreen-minimal:" / "c:allscreen-default:" with a 36-character id, is 56 bytes of 64.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbAllScreenLevelPrefix = L"allscreen-";
+
+    /// <summary>The card verb of one level's button on the ALL SCREEN page ("allscreen-full").</summary>
+    /// <param name="level">The level.</param>
+    /// <returns>The verb.</returns>
+    /// <exception cref="std::bad_alloc">If the verb cannot be allocated.</exception>
+    inline std::wstring CardAllScreenLevelVerb(TurnsLevel level)
+    {
+        std::wstring verb{ kCardVerbAllScreenLevelPrefix };
+        verb += AllScreenLevelWord(level);
+        return verb;
+    }
+
+    /// <summary>The level a card verb names when it is a level button of the ALL SCREEN page ("allscreen-max" -> Max).</summary>
+    /// <param name="verb">The verb of a card button's data.</param>
+    /// <returns>The level, or nullopt for any other verb (a bare "allscreen" included: that one opens the page).</returns>
+    inline std::optional<TurnsLevel> ParseCardAllScreenLevelVerb(std::wstring_view verb) noexcept
+    {
+        if (verb.size() <= kCardVerbAllScreenLevelPrefix.size() || verb.substr(0, kCardVerbAllScreenLevelPrefix.size()) != kCardVerbAllScreenLevelPrefix)
+        {
+            return std::nullopt;
+        }
+        return AllScreenLevelFromWord(verb.substr(kCardVerbAllScreenLevelPrefix.size()));
+    }
 
     /// <summary>The callback data of a card button: "c:&lt;verb&gt;:&lt;session id&gt;".</summary>
     /// <param name="verb">The verb (kCardVerb*, or one of the older verbs).</param>
@@ -4823,9 +4942,11 @@ namespace Agentmaster::Msg
     /// inline keyboard. MAIN is one row: ⚙ Session, and beside it 🔄 Restart Session for a session in Error or one whose claude
     /// exited (the user's rule of 2026-10-19: Restart shows outside the Session page only then), or ▶ Reactivate for a parked
     /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
-    /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen alone
+    /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen ▸ alone
     /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
-    /// buttons keep their places); and ◀ Back.
+    /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the request of 2026-10-26) is the level picker 📜 All
+    /// Screen ▸ opens: one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default
+    /// level (facts.allScreenLevel) wearing ★ in place of 📜, then ◀ Back to the Session page.
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -4861,6 +4982,22 @@ namespace Agentmaster::Msg
             rows.push_back(std::move(row));
             return rows;
         }
+        if (page == CardPage::AllScreen)
+        {
+            // §21.39: one level a row - "📜 Full · + commands & output" is too long for two a row on a phone, and the hint is
+            // what tells the five apart. The default level wears ★ instead of 📜: the one a bare /allscreen draws.
+            for (const auto& choice : kAllScreenLevels)
+            {
+                std::wstring label = choice.level == facts.allScreenLevel ? L"\x2605 " : L"\U0001F4DC ";
+                label += choice.label;
+                label += L" \x00B7 ";
+                label += choice.hint;
+                rows.push_back({ { std::move(label), CardCallbackData(CardAllScreenLevelVerb(choice.level), sessionId) } });
+            }
+            // Back to where the picker was opened from (⚙ Session's page), not to Main.
+            rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbSessionPage, sessionId) } });
+            return rows;
+        }
         // The user's placement (2026-10-18): ⑂ Fork and 🆕 New Session come right after ⚙ Session is tapped, at the top of its page.
         rows.push_back({ { L"\x2442 Fork", CardCallbackData(kCardVerbFork, sessionId) },
                          { L"\U0001F195 New Session", CardCallbackData(kCardVerbNewSession, sessionId) } });
@@ -4877,8 +5014,9 @@ namespace Agentmaster::Msg
                          { L"\U0001F4C4 Transcript", CardCallbackData(L"transcript", sessionId) } });
         rows.push_back({ { L"\U0001F5A5 Screen Text", CardCallbackData(L"screen", sessionId) },
                          { L"\U0001F5BC Screen Image", CardCallbackData(kCardVerbScreenImage, sessionId) } });
-        // §21.39: under the two screen buttons it extends (the visible screen -> the whole conversation), on a row of its own.
-        rows.push_back({ { L"\U0001F4DC All Screen", CardCallbackData(kCardVerbAllScreen, sessionId) } });
+        // §21.39: under the two screen buttons it extends (the visible screen -> the whole conversation), on a row of its own; the
+        // ▸ says it opens a page (the level picker), as "More ▸" does.
+        rows.push_back({ { L"\U0001F4DC All Screen \x25B8", CardCallbackData(kCardVerbAllScreen, sessionId) } });
         rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbMainPage, sessionId) } });
         return rows;
     }

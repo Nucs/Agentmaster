@@ -176,6 +176,9 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - `messagingVerbose` (false): new topics show the whole session (true) or the conversation only; a topic
   overrides it (`/verbose`).
 - `messagingRichMessages` (true): Claude's Markdown goes as Telegram rich messages.
+- `messagingAllScreenLevel` (`full`): 📜 All Screen's default transcript level (`minimal` / `compact` / `default` / `full` /
+  `max`): what a bare `/allscreen` draws and the level the card's level picker marks with ★; an empty or unknown word reads
+  as `full`. Applied live (MESSAGING.md §21.39).
 - File links: `messagingFileLinksMode` (`off` / home network / through `cc.sysd.cc`),
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
   `messagingFileLinkHostedBase` (empty = `https://cc.sysd.cc`), `messagingFileLinksExclude` (folders
