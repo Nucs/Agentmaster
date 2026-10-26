@@ -2293,7 +2293,7 @@ namespace Agentmaster::Msg
         // session when it ends (pictures sent, or the reason why not posted).
         std::unordered_set<std::wstring> _conversationImageSessions;
         // §21.39: 📜 All Screen's default level (a TurnsLevel's value; AppSettings::messagingAllScreenLevel, read by Apply - Full
-        // unless the cog says another): what a bare /allscreen draws, and the level the card's ALL SCREEN page marks with ★
+        // unless the cog says another): what a bare /allscreen draws, and the level the card's ALL SCREEN page marks with ⭐
         // (_cardMarkupFor). Atomic: Apply writes it (engine init, a cog Save) while the poll thread and the card renders read it.
         std::atomic<int> _allScreenLevel{ static_cast<int>(kAllScreenDefaultLevel) };
 

@@ -379,9 +379,9 @@ void TestMessagingCard()
         // then Back to the Session page.
         const Rows picker = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreen);
         CHECK(picker.size() == 7, "All Screen picker: the File diffs box, five levels and Back");
-        CHECK(picker.size() == 7 && picker[0].size() == 1 && picker[0][0].first.rfind(L"\x2610 ", 0) == 0 && picker[0][0].first.find(L"File diffs") != std::wstring::npos &&
+        CHECK(picker.size() == 7 && picker[0].size() == 1 && picker[0][0].first.rfind(L"\x2B1C ", 0) == 0 && picker[0][0].first.find(L"File diffs") != std::wstring::npos &&
                   picker[0][0].second == L"c:allscreen+d:" + kCardSid,
-              "All Screen picker: the first row is the UNCHECKED File diffs box, and its tap shows the checked picker");
+              "All Screen picker: the first row is the UNCHECKED File diffs box (the empty-box emoji U+2B1C), and its tap shows the checked picker");
         bool oneARow = picker.size() == 7;
         bool ordered = picker.size() == 7;
         for (size_t i = 0; i < 5 && i + 1 < picker.size(); ++i)
@@ -392,15 +392,15 @@ void TestMessagingCard()
                       row[0].first.find(kAllScreenLevels[i].label) != std::wstring::npos && row[0].first.find(kAllScreenLevels[i].hint) != std::wstring::npos;
         }
         CHECK(oneARow && ordered, "All Screen picker: one level a row, least to most, each with its name, its hint and its verb (no diffs)");
-        CHECK(picker.size() == 7 && picker[4][0].first.rfind(L"\x2605 ", 0) == 0 && picker[1][0].first.rfind(L"\U0001F4DC ", 0) == 0 && picker[5][0].first.rfind(L"\U0001F4DC ", 0) == 0,
-              "All Screen picker: the default level (Full) wears the star, the others the scroll");
+        CHECK(picker.size() == 7 && picker[4][0].first.rfind(L"\x2B50 ", 0) == 0 && picker[1][0].first.rfind(L"\U0001F4DC ", 0) == 0 && picker[5][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+              "All Screen picker: the default level (Full) wears the star EMOJI (U+2B50), the others the scroll");
         CHECK(picker.size() == 7 && picker[6].size() == 1 && picker[6][0].second == L"c:panel:" + kCardSid && picker[6][0].first.find(L"Back") != std::wstring::npos,
               "All Screen picker: Back returns to the Session page (not to Main)");
 
         // The checked picker: the box checked (its tap shows the unchecked one), every level carrying +d, the same star and Back.
         const Rows checked = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::AllScreenDiffs);
-        CHECK(checked.size() == 7 && checked[0][0].first.rfind(L"\x2611 ", 0) == 0 && checked[0][0].second == L"c:allscreen:" + kCardSid,
-              "All Screen picker, checked: the box shows checked, and its tap shows the unchecked picker");
+        CHECK(checked.size() == 7 && checked[0][0].first.rfind(L"\x2611\xFE0F ", 0) == 0 && checked[0][0].second == L"c:allscreen:" + kCardSid,
+              "All Screen picker, checked: the box shows checked (U+2611 + U+FE0F: drawn as the emoji everywhere), and its tap shows the unchecked picker");
         bool allDiffs = checked.size() == 7;
         for (size_t i = 0; i < 5 && i + 1 < checked.size(); ++i)
         {
@@ -408,13 +408,30 @@ void TestMessagingCard()
                        checked[i + 1][0].first == picker[i + 1][0].first;
         }
         CHECK(allDiffs, "All Screen picker, checked: every level's data carries +d (the box as shown), its label unchanged");
-        CHECK(checked.size() == 7 && checked[4][0].first.rfind(L"\x2605 ", 0) == 0 && checked[6][0].second == L"c:panel:" + kCardSid,
+        CHECK(checked.size() == 7 && checked[4][0].first.rfind(L"\x2B50 ", 0) == 0 && checked[6][0].second == L"c:panel:" + kCardSid,
               "All Screen picker, checked: the same star and the same Back");
+        // Every mark on both pages is an EMOJI (the user's words of 2026-10-26: the empty box "to match the checked checkbox", "the
+        // star of full should be emoji"): neither the text box U+2610 nor the text star U+2605 comes back, and the checked box
+        // keeps its U+FE0F.
+        bool noTextGlyphs = true;
+        for (const Rows* page : { &picker, &checked })
+        {
+            for (const auto& row : *page)
+            {
+                for (const auto& button : row)
+                {
+                    const std::wstring& label = button.first;
+                    noTextGlyphs = noTextGlyphs && label.find(L'\x2610') == std::wstring::npos && label.find(L'\x2605') == std::wstring::npos &&
+                                   (label.find(L'\x2611') == std::wstring::npos || label.find(L"\x2611\xFE0F") != std::wstring::npos);
+                }
+            }
+        }
+        CHECK(noTextGlyphs, "All Screen picker: no text-glyph box or star on either page, and the checked box always carries U+FE0F");
 
         CardButtonFacts compact = CardButtonFactsFor(waiting);
         compact.allScreenLevel = TurnsLevel::Compact; // the cog's setting, as the service sets it
         const Rows compactPicker = BuildCardButtonRows(kCardSid, compact, CardPage::AllScreen);
-        CHECK(compactPicker.size() == 7 && compactPicker[2][0].first.rfind(L"\x2605 ", 0) == 0 && compactPicker[4][0].first.rfind(L"\U0001F4DC ", 0) == 0,
+        CHECK(compactPicker.size() == 7 && compactPicker[2][0].first.rfind(L"\x2B50 ", 0) == 0 && compactPicker[4][0].first.rfind(L"\U0001F4DC ", 0) == 0,
               "All Screen picker: the star follows the default level the cog sets");
         CHECK(BuildCardButtonRows(kCardSid, CardButtonFactsFor(CardSession(SessionState::Error)), CardPage::AllScreen).size() == 7,
               "All Screen picker: the same box and five levels whatever the session's state");

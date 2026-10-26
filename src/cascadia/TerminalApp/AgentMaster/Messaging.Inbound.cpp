@@ -2740,7 +2740,7 @@ namespace Agentmaster::Msg
             }
             else if (verb == kCardVerbAllScreenDiffs)
             {
-                // §21.39: the picker's ☐ File diffs was tapped - the same picker with the box checked (its ☑ names the unchecked
+                // §21.39: the picker's ⬜ File diffs was tapped - the same picker with the box checked (its ☑️ names the unchecked
                 // page again). A page flip; nothing is drawn until a level is picked.
                 answer(L"");
                 _showCardPage(sid, messageId, CardPage::AllScreenDiffs);
@@ -2749,13 +2749,19 @@ namespace Agentmaster::Msg
             else if (const auto pick = ParseCardAllScreenLevelVerb(verb); pick)
             {
                 // §21.39: a level of the picker - /allscreen <level>, with "diffs" when the button sat on the checked page (its
-                // data says so: what the card showed is what is drawn). No toast, as for 🖼 Screen Image (§21.28): the tapped
-                // level stays busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer
-                // says the work goes on. The picker stays on the card (◀ Back leaves it): another level is one tap away, and no
-                // edit is spent flipping the keyboard back.
+                // data says so: what the card showed is what is drawn). No toast, as for 🖼 Screen Image (§21.28): the tap's answer
+                // still waits until the last picture is in (the worker carries the tap), and past the hold's limit it says the work
+                // goes on.
                 cmd.name = L"allscreen";
                 cmd.args = std::wstring{ AllScreenLevelWord(pick->level) } + (pick->diffs ? L" diffs" : L"");
                 _runSessionCommand(sid, cmd, fake, threadId);
+                // Then the card goes back to MAIN at once (the user's rule of 2026-10-26: "after picking which, reset menu to main
+                // view") - the same page flip as ◀ Back, at an answer's priority, so it lands before the first picture. After the
+                // drawing started or after a refusal alike ("being drawn already", a Codex session): either way the pick is done,
+                // and the thread says what came of it. The flip takes the tapped button away, and with it the spinner §21.28 keeps
+                // on it: the keyboard flipping is the tap's visible answer, and the pictures (or the line saying why there are
+                // none) follow in the thread.
+                _showCardPage(sid, messageId, CardPage::Main);
                 return;
             }
             else

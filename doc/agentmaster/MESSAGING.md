@@ -5404,7 +5404,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37; not in production)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37; their emoji marks and the reset to Main after a pick, of 2026-10-26, in no build yet; not in production)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5414,6 +5414,9 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 >
 > And (2026-10-26): "can in that second menu have a checkbox for file diffs which is overriding if we show file edits to be
 > included regardless the level. by default false (use the selected lvl's default)"
+>
+> And, after trying the picker on dev 0.0.1.37 (2026-10-26): "1. put emoji of empty checkbox to match the checked checkbox
+> 2. the star of full should be emoji 3. after picking which, reset menu to main view"
 
 **Not from the terminal; from the transcript.**
 - This machine's Claude Code runs its fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`). Its whole
@@ -5436,31 +5439,40 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 
   | Button | Draws |
   |---|---|
-  | ☐ File diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
+  | ⬜ File diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
   | 📜 Minimal · prompts & replies | your messages and each turn's final reply |
   | 📜 Compact · + answers & agents | + compactions, your answers, the slash commands you ran, each agent's brief and report |
   | 📜 Default · + every tool call | + every tool call on one line, and Claude's remarks between calls |
-  | ★ Full · + commands & output | + each Bash call's exact command, the first line each call returned, how long each took |
+  | ⭐ Full · + commands & output | + each Bash call's exact command, the first line each call returned, how long each took |
   | 📜 Max · + written files | + every written file's content and a stats line per turn |
 
-  A level's data is `c:allscreen-<word>:<sid>` (56 bytes at most) and runs `/allscreen <word>`. The tapped level stays busy
-  until the last picture is in (§21.28); the picker stays on the card, so another level is one tap away, and ◀ Back leaves it.
+  Every mark is an emoji (the fourth request): the boxes ⬜ (U+2B1C) and ☑️ (U+2611 + U+FE0F: alone, U+2611 may be drawn as a
+  text glyph, like the cog's U+2699) look alike, and the default level's ⭐ (U+2B50) sits beside the others' 📜. The text
+  glyphs of the first build, ☐ (U+2610, which has no emoji form) and ★ (U+2605), looked out of place among them.
+
+  A level's data is `c:allscreen-<word>:<sid>` (56 bytes at most) and runs `/allscreen <word>`. **Then the card goes back to
+  its Main page** at once (the fourth request, "after picking which, reset menu to main view"): the same page flip as ◀ Back,
+  at an answer's priority, so it lands before the first picture; after a refusal too ("being drawn already", a Codex
+  session), since the pick is done either way and the thread says what came of it. The flip takes the tapped button away,
+  and with it the spinner §21.28 keeps on a tapped button: the keyboard flipping is the visible answer, and the pictures (or
+  the line saying why there are none) follow. The tap's answer itself still waits for them (no toast; past §21.28's 9 s the
+  answer says the work goes on). Another level is three taps away again (⚙ Session → 📜 All Screen ▸ → the level).
   A card that starts to ring goes back to Main, as from the Session page (§21.24).
-- **File diffs** (the third request): Telegram has no checkbox, so the box is a button whose ☐ / ☑ shows the state and whose
-  tap edits the card into the picker in the other state: ☐ (`c:allscreen+d:<sid>`, 50 bytes) shows the checked page
-  (`CardPage::AllScreenDiffs`, `☑ File diffs · at every level`), whose ☑ (`c:allscreen:<sid>`) shows the unchecked one again.
-  Each tap names the page it shows, so a double tap never flips twice. Nothing remembers the box: the picker always opens
-  unchecked, the user's "by default false".
+- **File diffs** (the third request): Telegram has no checkbox, so the box is a button whose ⬜ / ☑️ shows the state and whose
+  tap edits the card into the picker in the other state: ⬜ (`c:allscreen+d:<sid>`, 50 bytes) shows the checked page
+  (`CardPage::AllScreenDiffs`, `☑️ File diffs · at every level`), whose ☑️ (`c:allscreen:<sid>`) shows the unchecked one
+  again. Each tap names the page it shows, so a double tap never flips twice. Nothing remembers the box: the picker always
+  opens unchecked, the user's "by default false" (and a pick leaves the picker, above).
   - **Unchecked:** each level draws its own default. No level draws diffs by itself; Max shows each Write's whole content.
   - **Checked:** every level draws each file change as a diff under its call (`TurnsOptions::editDiffs`, below). Minimal and
     Compact hide the calls, so there the file-changing calls are listed for it, each with its diff, and nothing else.
   - A level button on the checked page carries the box in its data (`c:allscreen-<word>+d:<sid>`, 58 bytes at most: the
     longest of all) and runs `/allscreen <word> diffs`: what the card showed is what is drawn. The page flip logs
     `[nav] remote telegram card-page <sid8> allscreen+diffs`.
-- **The default level** wears ★ in place of 📜: **Full**, the user's rule, unless the cog's Messaging tab sets another
+- **The default level** wears ⭐ in place of 📜: **Full**, the user's rule, unless the cog's Messaging tab sets another
   ("All Screen's default transcript level", `messagingAllScreenLevel`: `minimal` / `compact` / `default` / `full` / `max`;
   an empty or unknown word reads as full). It applies at once (`MessagingService::Apply` → `_allScreenLevel`): the next bare
-  `/allscreen` draws it and the next render of a picker moves the ★.
+  `/allscreen` draws it and the next render of a picker moves the ⭐.
 - Typed: `/allscreen [minimal|compact|default|full|max] [diffs]`, the `/transcript` levels; a bare `/allscreen` draws the
   default level (not `/transcript`'s Default). `diffs` (or `diff`) is the checked box; the words come in any order and any case
   (`ParseAllScreenArgs`); two levels or an unknown word get the usage line. It is in the "/" menu and the help.
@@ -5594,10 +5606,13 @@ this Debug run took 1,125 ms for 631.
   its Default golden plus one diff. `TestTranscriptTurns` checks that neither the preset nor any level sets `editDiffs`.
 - `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen ▸ alone on its row, and no All Screen on Main;
   and (1b, the picker) the five levels' words, verbs and settings reading (empty, unknown or overlong → Full; any case),
-  the picker's rows (the box first, then one level a row, least to most, names, hints and verbs, ★ on Full, the ★ following a
-  set default, Back to the Session page, the same for every state), the checked page (☑, the levels' `+d` verbs, the same
-  labels), the verbs' round trip with and without the box and their refusals, `ParseAllScreenArgs` (any order and case,
-  `diff` too, two levels or an unknown word refused), the 58-byte data, and the setting's round trip through settings.json.
+  the picker's rows (the box first, then one level a row, least to most, names, hints and verbs, ⭐ on Full, the ⭐ following a
+  set default, Back to the Session page, the same for every state), the checked page (☑️, the levels' `+d` verbs, the same
+  labels), every mark an emoji on both pages (⬜ U+2B1C, ☑ with U+FE0F, ⭐ U+2B50; no text box U+2610 or text star U+2605),
+  the verbs' round trip with and without the box and their refusals, `ParseAllScreenArgs` (any order and case, `diff` too,
+  two levels or an unknown word refused), the 58-byte data, and the setting's round trip through settings.json.
+- Not in the suite: the reset to Main after a pick lives in the service's button handler, which needs Telegram (the live
+  check below, 1).
 
 **Checked** (2026-10-25, before any build; in dev since 0.0.1.36, nothing tried in Telegram yet):
 - The m5 suite, isolated (scratch outputs, a wiped scratch profile): 9,977 checks; the final run's only failures are the
@@ -5640,15 +5655,28 @@ this Debug run took 1,125 ms for 631.
   and the messaging service's members changed above: a build over older intermediates must purge (dev
   0.0.1.37's was a clean build).
 
+**Checked, the emoji marks and the reset to Main** (2026-10-26; in no build yet):
+- The m5 suite, isolated: 10,271 checks, all 55 goldens byte-identical; the only failures are the three known
+  `TestTaskbarBadge` ones. The card checks pin ⬜ U+2B1C, ☑ U+2611 + U+FE0F and ⭐ U+2B50, and that neither text glyph
+  (U+2610, U+2605) comes back on either page.
+- `cl /Zs` with the recorded Debug lines passes for `Messaging.Inbound.cpp` (the handler), `Messaging.cpp`,
+  `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`, `Messaging.Status.cpp`, `Engine.cpp`,
+  `SessionSearchTools.cpp`, `Persistence.cpp`, `MessagingSearchBridge.cpp`, and the PCH units
+  `AgentManagerContent.Settings.cpp` (the cog's tooltip names the ⭐), `AgentManagerContent.cpp`, `TerminalPage.AgentEngine.cpp`.
+- No data member changed here (labels, one handler call, comments; `SessionModels.h` only in a comment); the purge the
+  `/status` commit (§21.40) asks for covers the next build anyway.
+
 **Check after the build** (dev, with the bot):
 1. A session's card → ⚙️ Session: [📜 All Screen ▸] alone under the two screen buttons. Tap it: the keyboard flips to the
-   picker — ☐ File diffs, five levels, ★ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`). Tap a
-   level: it stays busy, then one or more documents `conversation-<title>-<level>….png` arrive in order, captioned with their
-   level, part and turns. Opened, each shows the conversation in Claude Code's look. ◀ Back returns to the Session page.
-1b. The cog's Messaging tab → "All Screen's default transcript level" → Compact → Save: the picker's ★ moves to Compact at the
+   picker — ⬜ File diffs, five levels, ⭐ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`); the
+   ⬜ and the ⭐ are drawn as emoji, like the 📜 beside them. Tap a level: the card's keyboard goes back to Main at once
+   (`[nav] remote telegram card-page <sid8> main`), then one or more documents `conversation-<title>-<level>….png` arrive in
+   order, captioned with their level, part and turns. Opened, each shows the conversation in Claude Code's look. ◀ Back (on
+   the picker) still returns to the Session page.
+1b. The cog's Messaging tab → "All Screen's default transcript level" → Compact → Save: the picker's ⭐ moves to Compact at the
    card's next render, and a bare `/allscreen` draws Compact (the level is in the hooks.log line).
-1c. File diffs: the picker opens with ☐ File diffs; tap it: the card shows ☑ File diffs · at every level (hooks.log
-   `[nav] remote telegram card-page <sid8> allscreen+diffs`); tap ☑: back to ☐. Checked, tap Minimal in a session that edited
+1c. File diffs: the picker opens with ⬜ File diffs; tap it: the card shows ☑️ File diffs · at every level, the two boxes alike
+   (hooks.log `[nav] remote telegram card-page <sid8> allscreen+diffs`); tap ☑️: back to ⬜. Checked, tap Minimal in a session that edited
    files: the documents are `conversation-<title>-minimal-diffs….png`, captioned `(minimal + diffs)`, and show only the
    prompts, the replies and each file change with its numbered lines on green / red bands. Tap Full checked: every call, each
    Edit / Write with its diff. `/allscreen compact diffs` typed: the same as the checked Compact; `/allscreen full compact`:
@@ -5656,8 +5684,9 @@ this Debug run took 1,125 ms for 631.
 2. hooks.log: `[msg] conversation pictures of <sid8>: <level>[+diffs], N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
    … KB, Cascadia Mono, turns view … ms (… K chars), layout … ms, drawn in … ms`, and `[nav] remote telegram /allscreen
    <sid8> -> ok`. (Seen on dev 0.0.1.36 before the picker; above.)
-3. Two quick taps: the second answers "This conversation's pictures are being drawn already…". Two sessions at once: "Another
-   conversation is being drawn right now…" (`-> busy`).
+3. A second request while the pictures are drawn (the picker opened again and a level tapped — the first pick took the card
+   back to Main — or `/allscreen` typed twice): "This conversation's pictures are being drawn already…", and the card goes
+   back to Main all the same. Two sessions at once: "Another conversation is being drawn right now…" (`-> busy`).
 4. `/allscreen compact` in a long session: shorter pictures named `conversation-<title>-compact….png`. `/allscreen bogus`:
    the usage line, naming the default level. A bare `/allscreen` in a very long session: Full passes the 10-picture cap, and
    the thread gets "… are left out. A shorter level draws more of it: Default or Compact in 📜 All Screen ▸ …".

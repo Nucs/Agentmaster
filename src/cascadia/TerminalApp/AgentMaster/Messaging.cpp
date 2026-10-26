@@ -3373,7 +3373,7 @@ namespace Agentmaster::Msg
         // Card buttons use STABLE callback data ("c:<verb>:<session id>", at most 49 bytes of the 64 allowed): each verb acts
         // on the session's CURRENT state (a toggle reads it first), so a stale button cannot do something old (M5 is about
         // answers and queue items, which use tokens). §21.24: two pages - BuildCardButtonRows lays them out. §21.39: and the ALL
-        // SCREEN page, whose ★ marks the cog's default level - a setting, not a fact of the session, so it is set here for every
+        // SCREEN page, whose ⭐ marks the cog's default level - a setting, not a fact of the session, so it is set here for every
         // caller (the card's hash covers the buttons: a changed default re-edits a card that shows the picker, and no other).
         CardButtonFacts withLevel = facts;
         withLevel.allScreenLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
