@@ -58,6 +58,10 @@ public sealed record SlotRecord
     /// <summary>When it was started (UTC).</summary>
     public required DateTimeOffset CreatedAt { get; init; }
 
+    /// <summary>A kept VM's slot (a build VM): its disks live in the VM's own folder and are reused, so even a leftover
+    /// of an earlier run is stopped gracefully, never killed mid-write.</summary>
+    public bool Kept { get; init; }
+
     /// <summary>When its guest agent last called (UTC); a slot silent for 3 minutes is stopped and its request marked
     /// lost (DESIGN.md §12).</summary>
     public DateTimeOffset? LastHeartbeatAt { get; init; }

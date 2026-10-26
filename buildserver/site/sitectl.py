@@ -59,6 +59,7 @@ PACKAGES = [
     "ca-certificates", # TLS to the registry and to Alpine's mirror
     "libstdc++",       # the self-contained .NET runtime of amb-coordinator (linux-musl-x64) links it
     "libgcc",          # likewise (libgcc_s)
+    "git",             # the source mirror and the bundles a build VM fetches its commit from (DESIGN.md §11)
 ]
 """What the site installs; every package is named with the reason the site needs it."""
 
@@ -71,6 +72,7 @@ SITE_FOLDERS = [
     "/srv/buildserver/store",             # artifacts the site keeps (zips, logs), by build id
     "/srv/buildserver/cache",             # downloads (ISOs, installers) reused across images
     "/srv/buildserver/bin",               # the coordinator and helper scripts deployed into the site
+    "/srv/buildserver/git",               # the bare mirrors of the repository and its submodule (DESIGN.md §11)
     "/srv/buildserver/fastrun/store",     # fastrund's node store (FASTRUN_STORE_DIR)
     "/srv/buildserver/fastrun/data",      # fastrund's logs (FASTRUN_DATA_DIR)
     "/srv/buildserver/fastrun/scratch",   # fastrund's scratch folders (FASTRUN_SCRATCH_DIR)
@@ -474,7 +476,8 @@ def deploy() -> dict[str, object]:
       /srv/buildserver/bin/coordinator/;
     - amb-guest.exe: Native AOT, into /srv/buildserver/bin/ (the coordinator copies it into every slot's share);
     - amb-hostfacts.exe: Native AOT, into Q:\\buildserver\\bin\\ (a Windows file, so WSL's interop runs it natively);
-    - hmp.py (the QEMU monitor helper the balloon uses) and coordinator-up.sh, into /srv/buildserver/bin/.
+    - hmp.py (the QEMU monitor helper the balloon uses) and coordinator-up.sh, into /srv/buildserver/bin/;
+    - buildserver/steps (the build job's guest scripts) into /srv/buildserver/bin/steps, replaced whole.
     A running coordinator keeps its old files open; `down` then `up` makes it use the new ones.
 
     Returns:
@@ -503,6 +506,10 @@ def deploy() -> dict[str, object]:
         "chmod 0755 /srv/buildserver/bin/coordinator/amb-coordinator",
         f"cp '{_to_mnt(guest)}/amb-guest.exe' /srv/buildserver/bin/amb-guest.exe",
         f"cp '{_to_mnt(hmp)}' /srv/buildserver/bin/hmp.py",
+        # The build job's guest scripts, versioned with the coordinator that stages them (DESIGN.md §11).
+        "rm -rf /srv/buildserver/bin/steps.new",
+        f"cp -r '{_to_mnt(REPO / 'buildserver' / 'steps')}' /srv/buildserver/bin/steps.new",
+        "rm -rf /srv/buildserver/bin/steps && mv /srv/buildserver/bin/steps.new /srv/buildserver/bin/steps",
         _install_file_script_text(COORDINATOR_UP, "/srv/buildserver/bin/coordinator-up.sh", "0755"),
         "du -sk /srv/buildserver/bin/coordinator | awk '{print \"coordinator_kb=\"$1}'",
         "stat -c 'guest_bytes=%s' /srv/buildserver/bin/amb-guest.exe",

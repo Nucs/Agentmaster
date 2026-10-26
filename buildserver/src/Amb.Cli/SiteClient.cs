@@ -64,6 +64,69 @@ internal sealed class SiteClient : IDisposable
             Content = body is null ? null : JsonContent.Create(body, bodyType),
         }, type, cancel).ConfigureAwait(false);
 
+    /// <summary>Downloads a file the API serves into a local file, hashing it on the way.</summary>
+    /// <param name="path">The path under /api/v1/.</param>
+    /// <param name="target">The local file (written through "&lt;target&gt;.part", renamed only once its hash matched).</param>
+    /// <param name="expectedSha256">The SHA-256 the build's manifest records, lowercase hex.</param>
+    /// <param name="cancel">Cancels the copy.</param>
+    /// <returns>Null when the file arrived whole; else what went wrong (the partial file is deleted).</returns>
+    /// <exception cref="SiteUnavailableException">The coordinator could not be reached.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> was cancelled.</exception>
+    /// <remarks>Called after a GET of the build's record, which woke the site and checked the token, so there is no
+    /// retry here. No timeout either: HttpClient's 60 s covers only the answer's headers; a 250 MB body takes what it
+    /// takes.</remarks>
+    internal async Task<string?> DownloadAsync(string path, string target, string expectedSha256, CancellationToken cancel)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "api/v1/" + path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token(refresh: false));
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancel).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new SiteUnavailableException($"the coordinator does not answer: {ex.Message}");
+        }
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                return $"{(int)response.StatusCode} {await response.Content.ReadAsStringAsync(cancel).ConfigureAwait(false)}";
+            }
+            string part = target + ".part";
+            using var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            try
+            {
+                await using (Stream body = await response.Content.ReadAsStreamAsync(cancel).ConfigureAwait(false))
+                await using (var file = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, true))
+                {
+                    byte[] buffer = new byte[1 << 20];
+                    int read;
+                    while ((read = await body.ReadAsync(buffer, cancel).ConfigureAwait(false)) > 0)
+                    {
+                        sha.AppendData(buffer, 0, read);
+                        await file.WriteAsync(buffer.AsMemory(0, read), cancel).ConfigureAwait(false);
+                    }
+                }
+                string actual = Convert.ToHexStringLower(sha.GetHashAndReset());
+                if (actual != expectedSha256)
+                {
+                    File.Delete(part);
+                    return $"SHA-256 {actual} is not the manifest's {expectedSha256}";
+                }
+                File.Move(part, target, overwrite: true);
+                return null;
+            }
+            catch
+            {
+                // Cleanup-on-failure: a partial file must never be mistaken for the artifact.
+                File.Delete(part);
+                throw;
+            }
+        }
+    }
+
     /// <summary>Sends a call, waking the site or refreshing the token once when needed.</summary>
     /// <typeparam name="T">The answer's type.</typeparam>
     /// <param name="make">Makes the request (a request can be sent once, so a retry needs a new one).</param>

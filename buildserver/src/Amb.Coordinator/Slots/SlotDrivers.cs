@@ -16,8 +16,13 @@ namespace Amb.Coordinator.Slots;
 /// slot that boots an existing image through an overlay.</param>
 /// <param name="OemDir">For an install slot: the folder dockur copies to C:\OEM and runs (install.bat) at the end of
 /// the unattended install.</param>
+/// <param name="Kept">A kept VM's slot (a build VM): <paramref name="SlotDir"/> is the VM's own folder under
+/// <c>vms/</c>, which outlives the slot. Its overlay is made only when the folder has none yet, so the next boot finds
+/// the same disk; and it is always stopped with the driver's full graceful stop, because its disks are reused.</param>
+/// <param name="DataDiskGiB">When set: a raw data disk of this size (a sparse file, <c>data-disk.raw</c> in the slot
+/// folder, made when missing) is attached as a second disk; the guest formats it as D: at its first boot.</param>
 public sealed record SlotSpec(string SlotId, string Image, Resources Grant, string SlotDir, string ExchangeDir,
-    string ImageDir, string? InstallVersion = null, string? OemDir = null);
+    string ImageDir, string? InstallVersion = null, string? OemDir = null, bool Kept = false, int? DataDiskGiB = null);
 
 /// <summary>
 /// Starts and stops slots. ONE interface for the stand-in (podman + dockur) and, later, fastrun's VM slots (DESIGN.md
@@ -181,6 +186,18 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
     internal const string QemuArguments =
         "-device virtio-balloon-pci,id=balloon0,deflate-on-oom=on -global virtio-vga.xres=1600 -global virtio-vga.yres=900";
 
+    /// <summary>The raw data disk's file name in a slot folder.</summary>
+    public const string DataDiskFile = "data-disk.raw";
+
+    /// <summary>QEMU's arguments that attach a slot's raw data disk (the measured attachment of
+    /// buildserver/measure/run-slot.sh: a virtio-scsi controller of its own, a raw sparse file, O_DIRECT, discard).</summary>
+    /// <remarks>discard=unmap passes the guest's TRIMs through, so what a build deletes (a purged tree) is punched out of
+    /// the sparse file again (measured: a 64 GB data disk held 92 MB after its files were deleted).</remarks>
+    internal const string DataDiskArguments =
+        " -device virtio-scsi-pci,id=ambdata -drive file=/storage/" + DataDiskFile
+        + ",id=ambdata0,format=raw,cache=none,aio=native,discard=unmap,if=none"
+        + " -device scsi-hd,drive=ambdata0,bus=ambdata.0,rotation_rate=1";
+
     /// <inheritdoc/>
     public string Name => "podman";
 
@@ -196,6 +213,12 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
         ArgumentNullException.ThrowIfNull(spec);
         Directory.CreateDirectory(spec.SlotDir);
         string name = ContainerPrefix + spec.SlotId;
+        string arguments = QemuArguments;
+        if (spec.DataDiskGiB is int dataGiB)
+        {
+            EnsureDataDisk(Path.Combine(spec.SlotDir, DataDiskFile), dataGiB);
+            arguments += DataDiskArguments;
+        }
         List<string> args =
         [
             "run", "-d", "--name", name,
@@ -211,7 +234,7 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
             "-e", "DISK_FMT=qcow2",
             "-e", "NETWORK=user",
             "-e", "TZ=UTC",
-            "-e", "ARGUMENTS=" + QemuArguments,
+            "-e", "ARGUMENTS=" + arguments,
         ];
         if (spec.InstallVersion is not null)
         {
@@ -228,7 +251,11 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
             // A boot: the SAME VERSION the image was installed from, or dockur takes the slot for a changed install and
             // reinstalls over it (ImageVersion's remarks). Read before the overlay is made, so a bad image costs nothing.
             string version = ImageVersion(spec.ImageDir);
-            await PrepareOverlayAsync(spec, cancel).ConfigureAwait(false);
+            // A kept VM boots the overlay it has: a new one would throw away every build tree it holds.
+            if (!(spec.Kept && File.Exists(Path.Combine(spec.SlotDir, "data.qcow2"))))
+            {
+                await PrepareOverlayAsync(spec, cancel).ConfigureAwait(false);
+            }
             string imagesRoot = Path.GetDirectoryName(spec.ImageDir)!;
             args.AddRange(["-e", "VERSION=" + version, "-v", imagesRoot + ":" + imagesRoot + ":ro"]);
         }
@@ -274,6 +301,22 @@ public sealed class PodmanSlotDriver(CoordinatorOptions options, ILogger<PodmanS
                 $"image {Path.GetFileName(imageDir)}'s windows.base does not name a dockur version's ISO: {iso}");
         }
         return version;
+    }
+
+    /// <summary>Makes a slot's raw data disk unless it exists: a sparse file of the given size.</summary>
+    /// <param name="path">The disk file.</param>
+    /// <param name="giB">Its virtual size.</param>
+    /// <exception cref="IOException">The file could not be made.</exception>
+    /// <remarks>Setting the length of a new file on ext4 allocates nothing (a sparse file), so a 128 GiB disk costs only
+    /// what the guest writes. An existing disk is never resized or touched: it holds a kept VM's build trees.</remarks>
+    internal static void EnsureDataDisk(string path, int giB)
+    {
+        if (File.Exists(path))
+        {
+            return;
+        }
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        file.SetLength(giB * 1024L * 1024L * 1024L);
     }
 
     /// <summary>Makes a slot's overlay over its image and copies the image's other files (UEFI, dockur's state).</summary>

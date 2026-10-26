@@ -15,7 +15,7 @@ public enum BuildSource
 
 /// <summary>One file a build id holds, kept in the store and named by its SHA-256 in the manifest.</summary>
 /// <param name="Name">The file's name in the build (e.g. "Agentmaster_0.8.1.1_x64.zip").</param>
-/// <param name="Kind">What it is: "portable-zip", "layout", "build-log", "binlog", "symbols".</param>
+/// <param name="Kind">What it is: "portable-zip", "layout-zip", "symbols-zip", "build-log", "build-json".</param>
 /// <param name="Bytes">Its size.</param>
 /// <param name="Sha256">Its SHA-256, lowercase hex: every consumer checks it before use.</param>
 /// <param name="StorePath">Its path relative to the store's root (<c>builds/&lt;build id&gt;/&lt;name&gt;</c>).</param>
@@ -47,6 +47,13 @@ public sealed record BuildRecord
 
     /// <summary>"dev" or "release", when known.</summary>
     public string? Identity { get; init; }
+
+    /// <summary>A build: "none" or "force" (see <see cref="RequestInputs.Purge"/>); null for an import.</summary>
+    public string? Purge { get; init; }
+
+    /// <summary>A build: how long the build itself took (the build step alone, not the boot or the packaging), in
+    /// seconds; null for an import.</summary>
+    public double? BuildSeconds { get; init; }
 
     /// <summary>The version the artifact carries (a portable zip's <c>.am-version</c>), when it has one.</summary>
     public string? Version { get; init; }
