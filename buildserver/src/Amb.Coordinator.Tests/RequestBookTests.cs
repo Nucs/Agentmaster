@@ -67,6 +67,19 @@ public sealed class RequestBookTests : IDisposable
         Assert.Single(book.Events(created.Id, events.Count - 1));
     }
 
+    /// <summary>An event is one line without NULs: UTF-16 output read as UTF-8 (MakePri's warnings in a build's package
+    /// step) arrives with a NUL beside every character, and a multi-line message is folded.</summary>
+    [Fact]
+    public void EventLinesAreCleaned()
+    {
+        RequestBook book = Book();
+        RequestRecord created = book.Create(new CreateRequest(RequestKind.Smoke));
+        book.Event(created.Id, "output", "package: \0W\0A\0R\0N\0I\0N\0G\0");
+        book.Event(created.Id, "error", "first\r\nsecond");
+        Assert.Equal(["package: WARNING", "first | second"],
+            book.Events(created.Id, 0).Where(e => e.Kind != "state").Select(e => e.Message));
+    }
+
     /// <summary>A reopened book knows every request that had not ended, and nothing that had.</summary>
     [Fact]
     public void ReopenedBookKeepsTheActiveOnes()

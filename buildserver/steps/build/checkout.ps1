@@ -10,10 +10,12 @@
 
     1. The repository: unless -Bundle is empty (the clone holds the commit already), the bundle is verified first; one
        whose prerequisite commits the clone lacks (an incremental bundle for a clone that was made anew) exits 3, and the
-       coordinator sends the whole history instead. Then the bundle's ref is fetched and the commit checked out,
-       detached and forced (the tree's own build outputs are ignored files, which a checkout leaves alone).
-    2. The submodule (refs\claude-agent-sdk-cpp): its own clone inside the worktree, fed from its bundle the same way,
-       checked out at the commit the superproject pins.
+       coordinator sends the whole history instead. With no bundle, a clone that lacks the commit exits 3 the same way.
+       Then the bundle's ref is fetched and the commit checked out, detached and forced (the tree's own build outputs
+       are ignored files, which a checkout leaves alone).
+    2. The submodule (refs\claude-agent-sdk-cpp): its own clone inside the worktree (each worktree has one; the
+       coordinator records its commit per worktree), fed from its bundle the same way, checked out at the commit the
+       superproject pins.
     3. The VSSetup module: tools\OpenConsole.psm1 finds Build Tools with it and would otherwise download it from the
        PowerShell Gallery into the clone's .PowershellModules at the first build; the am-build image carries a copy.
 
@@ -42,8 +44,9 @@
     One line per part, then "CHECKOUT {json}".
 
 .NOTES
-    PowerShell 7. Exit codes: 0 checked out; 1 a git command failed; 2 HEAD is not the requested commit afterwards;
-    3 the bundle needs commits the clone lacks (the coordinator retries with a full bundle).
+    PowerShell 7. Exit codes: 0 checked out; 1 a git command failed (its message on standard error); 2 HEAD is not
+    the requested commit afterwards; 3 the bundle needs commits the clone lacks, or no bundle came and the clone lacks
+    the commit (the coordinator retries with the whole history).
 #>
 param(
     [Parameter(Mandatory)][string]$Worktree,
@@ -72,7 +75,10 @@ function Invoke-Git {
     param([string]$Repo, [string[]]$GitArgs)
     $out = & $git -C $Repo @GitArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Output "git $($GitArgs -join ' ') failed ($LASTEXITCODE): $out"
+        # Standard error, never the pipeline: callers pipe this function to Out-Null, which swallowed the reason and
+        # left the request with a bare "exit code 1" (the first Debug build's checkout, 2026-10-26). The guest agent
+        # keeps the step's stderr tail as the request's "stderr" events.
+        [Console]::Error.WriteLine("git $($GitArgs -join ' ') in $Repo failed ($LASTEXITCODE): $out")
         exit 1
     }
     return $out
@@ -91,7 +97,8 @@ function Update-Clone {
     .PARAMETER Sha
         The commit to check out.
     .OUTPUTS
-        None; exits 3 when the bundle needs commits the clone lacks.
+        None; exits 3 when the bundle needs commits the clone lacks, or when no bundle came and the clone lacks the
+        commit.
     #>
     param([string]$Repo, [string]$BundlePath, [string]$Ref, [string]$Sha)
     if (-not (Test-Path (Join-Path $Repo '.git'))) {
@@ -106,6 +113,16 @@ function Update-Clone {
             exit 3
         }
         Invoke-Git $Repo @('fetch', '-q', '--no-tags', $BundlePath, "+${Ref}:refs/amb/build") | Out-Null
+    }
+    else {
+        # No bundle means the coordinator's record says this clone holds the commit already. A record can be wrong
+        # about a clone it never saw (a data disk made anew, a new worktree): exit 3 makes the coordinator send the
+        # whole history, where a checkout of a missing commit would only fail.
+        & $git -C $Repo cat-file -e "${Sha}^{commit}" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Output "$Repo lacks $Sha and no bundle came"
+            exit 3
+        }
     }
     Invoke-Git $Repo @('checkout', '-q', '--force', '--detach', $Sha) | Out-Null
 }

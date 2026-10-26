@@ -97,6 +97,25 @@ public sealed class BuildTests : IDisposable
         Assert.Equal(BundleMode.Full, SourceMirror.PlanBundle(Commit, null, basisInMirror: false, commitReachableFromBasis: false));
     }
 
+    /// <summary>The VM's record keeps each worktree's submodule commit apart: a new worktree finds no basis for its own
+    /// submodule clone, however many other worktrees hold it (the first Debug build's checkout failed when one VM-wide
+    /// entry said its empty clone held the commit), and an older record's VM-wide entry goes at the next checkout.</summary>
+    [Fact]
+    public void SubmoduleBasisIsPerWorktree()
+    {
+        string sdk = new('5', 40);
+        var legacy = new Dictionary<string, string>(StringComparer.Ordinal) { ["release-dev"] = Commit, [BuildJob.LegacySdkKey] = sdk };
+        Dictionary<string, string> afterRelease = BuildJob.RecordCommits(legacy, "release-dev", Commit, sdk);
+        Assert.False(afterRelease.ContainsKey(BuildJob.LegacySdkKey));
+        Assert.Equal(sdk, afterRelease[BuildJob.SdkKey("release-dev")]);
+        Assert.False(afterRelease.ContainsKey(BuildJob.SdkKey("debug-dev")));
+        Assert.NotEqual(BuildJob.SdkKey(BuildJob.WorktreeKey("Release", "dev")), BuildJob.SdkKey(BuildJob.WorktreeKey("Debug", "dev")));
+        Dictionary<string, string> afterDebug = BuildJob.RecordCommits(afterRelease, "debug-dev", Commit, sdk);
+        Assert.Equal(sdk, afterDebug[BuildJob.SdkKey("debug-dev")]);
+        Assert.Equal(sdk, afterDebug[BuildJob.SdkKey("release-dev")]);
+        Assert.False(BuildJob.RecordCommits(afterDebug, "debug-dev", Commit, sdkCommit: null).ContainsKey(BuildJob.SdkKey("debug-dev")));
+    }
+
     /// <summary>The build's parallelism grows with the VM's memory and never exceeds its vCPUs.</summary>
     [Fact]
     public void ParallelityFollowsTheMemory()

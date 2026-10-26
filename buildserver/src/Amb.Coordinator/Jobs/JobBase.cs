@@ -232,7 +232,10 @@ public abstract class VmJob : IJob
             {
                 continue;
             }
-            string[] lines = tail.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // NULs go before the split, so a line that held nothing else (UTF-16 output read as UTF-8: MakePri's in the
+            // package step) is dropped as empty instead of logged as a bare "<step>: ".
+            string[] lines = tail.Replace("\0", "", StringComparison.Ordinal)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             foreach (string line in lines.Skip(Math.Max(0, lines.Length - TailLines)))
             {
                 context.Event(kind, $"{result.StepId}: {line}");

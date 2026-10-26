@@ -146,6 +146,12 @@ public sealed class Scheduler : BackgroundService
                 Start(_book.Move(request.Id, RequestState.Starting, "started (no slot needed)"));
                 continue;
             }
+            if (request.Kind == RequestKind.Build && BuildExists(request))
+            {
+                // Its build exists: the job only returns the id, so it needs no slot, no memory and no build VM.
+                Start(_book.Move(request.Id, RequestState.Starting, "started (its build exists: no slot needed)"));
+                continue;
+            }
             if (request.Kind == RequestKind.Build && BusyBuild(request.Id) is { } busy)
             {
                 // One kept build VM, so one build at a time: this one waits for it (an identical request then finds
@@ -183,6 +189,15 @@ public sealed class Scheduler : BackgroundService
                 r => r with { Site = placement.Site, Grant = placement.Grant, Outcome = null }));
         }
     }
+
+    /// <summary>Whether a build request names a build that exists (BuildJob.FindExisting): it is then answered without a
+    /// slot.</summary>
+    /// <param name="request">The build request.</param>
+    /// <returns>True when its commit, configuration, identity and purge were built already.</returns>
+    /// <exception cref="IOException">The records could not be read.</exception>
+    private bool BuildExists(RequestRecord request) =>
+        request.Inputs is { Commit: { } commit, Configuration: { } configuration, Identity: { } identity, Purge: { } purge }
+        && BuildJob.FindExisting(_store, commit, configuration, identity, purge) is not null;
 
     /// <summary>The build request that holds the build VM now (starting, running or collecting), other than one.</summary>
     /// <param name="except">The request asking.</param>
@@ -249,6 +264,12 @@ public sealed class Scheduler : BackgroundService
             try
             {
                 JobOutcome outcome = await job.RunAsync(context, cancel.Token).ConfigureAwait(false);
+                // A job that answered before it ever marked itself running (no slot, nothing to wait for) would leave its
+                // request in Starting forever: the life allows no move from Starting to Succeeded, so it passes Running.
+                if (outcome.Succeeded && _book.Get(request.Id)?.State == RequestState.Starting)
+                {
+                    _book.Move(request.Id, RequestState.Running, "answered at once");
+                }
                 _book.Move(request.Id, outcome.Succeeded ? RequestState.Succeeded : RequestState.Failed, outcome.Outcome,
                     r => r with
                     {

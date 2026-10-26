@@ -2,17 +2,20 @@
 
 A service that builds, tests and e2e-runs Agentmaster on demand, in slots sized to what this PC (and later dock) has
 free. The design, the owner's decisions and every measured number are in [`DESIGN.md`](DESIGN.md); this file says what
-exists so far and how to use it. **Status (2026-10-25): P0.1, P0.2 and P0.5 passed (e2e on Tiny11 Core matched a full
-Windows 11 on 45 of 48 tests, the rest timing; the e2e image stays Core); Phase 1 runs on this PC: the site distro
-holds the images `am-base` (Tiny11 Core + the guest agent's bootstrap) and `am-e2e` (the e2e tooling), and
+exists so far and how to use it. **Status (2026-10-26): P0.1, P0.2, P0.4 and P0.5 passed. Phase 1 runs on this PC: the
+site distro holds the images `am-base` (Tiny11 Core + the guest agent's bootstrap) and `am-e2e` (the e2e tooling), and
 `amb import` + `amb e2e` run a suite on a build in a fresh VM that leaves nothing behind whether the run passes, fails,
-is cancelled or loses its VM (DESIGN.md §13 "Phase 1 as built", §16.10).**
+is cancelled or loses its VM (DESIGN.md §13 "Phase 1 as built", §16.10). Phase 3's MVP runs too: `amb build` builds a
+commit in the kept build VM (image `am-build`) into a build id whose portable zip `amb e2e` runs and `amb fetch` copies
+to Q:; a cold Release build takes 38 min of build, an incremental one 6–8 min, 1.17× and 1.31× the native time, so
+builds stay in VMs (DESIGN.md §13 "Phase 3's MVP as built", §16.12).**
 
-**Phase 1, as built, differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
+**As built, it differs from DESIGN.md §10 in one way:** there is no always-on host agent yet. The coordinator reads
 Windows' numbers itself (it runs `amb-hostfacts.exe` through WSL's interop, which works from a daemon after the call that
-started it ended: measured), and the CLI wakes the site by starting the coordinator (`coordinator-up.sh`). The host
-agent's other duties (the bare mirror, copying artifacts to Windows, installs, a LAN port for Caddy) come with Phases 3
-and 4. Slots run through the podman + dockur stand-in until fastrun's VM slots exist (Track A, DESIGN.md §13).
+started it ended: measured), and the CLI wakes the site by starting the coordinator (`coordinator-up.sh`). Of the host
+agent's other duties, the coordinator keeps the bare mirror itself (in the distro) and `amb fetch` copies artifacts to
+Windows through the API; installs and a LAN port for Caddy come with Phase 4. Slots run through the podman + dockur
+stand-in until fastrun's VM slots exist (Track A, DESIGN.md §13).
 
 ## Use it
 
@@ -58,8 +61,20 @@ amb list | show <id> | cancel <id>
 - **The artifacts** (`amb artifacts <id>`): the portable zip (`New-UnpackagedTerminalDistribution.ps1 -PortableMode`,
   as release.yml makes it; e2e-ready), the layout as a zip (for an install through the swap script), the symbols zip,
   `build.log` / `build.log.err` and `build.json`, each with its SHA-256 in the build's manifest.
-- **The same request twice** (commit, configuration, identity, purge) returns the first build's id at once.
+- **The same request twice** (commit, configuration, identity, purge) returns the first build's id at once, without a
+  slot; one that comes while the first still builds waits for the VM, then answers with the first's id.
 - **A failed build** ends `Failed` with the end of its log; the whole log is kept in `store/requests/<id>/build.log`.
+- **How long** (DESIGN.md §16.12): the first build of a worktree is cold: Release 38 min of build (NuGet, DuckDB,
+  vcpkg from source, every project) plus ~5 min of boot, checkout and packaging; Debug 20.6 min of build, 23.9 min in
+  all. A later build of that worktree builds only what changed: 6–8 min of build, 10–12 min in all (the VM's boot
+  27–38 s, the checkout seconds, the packaging ~2.7 min). The VM shuts down after each build; its disks stay.
+- **What each build keeps:** ~0.6 GB in the store for a Release build (the portable zip and the layout zip, ~200 MB
+  each, the symbols zip ~175 MB, the log), ~0.3 GB for a Debug one; nothing deletes builds yet, so the site's disk
+  grows with every build id.
+- **Debug builds** (`--config Debug`) build and package the same way, in their own worktree (`D:\src\debug-dev`;
+  `b20261026-4`: a 124 MB portable zip). ⚠ Their binaries need `ucrtbased.dll`, the debug UCRT that only the Windows
+  SDK installs, so a Debug portable zip does not run on a PC without the SDK, `am-e2e` included: `amb e2e` takes
+  Release builds.
 - **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's
   page cache counts as used memory for Windows, so after big copies it can help to drop it
   (`python buildserver/site/sitectl.py run -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`).
@@ -94,9 +109,15 @@ python buildserver/image/images.py list
 ## Build and test
 
 ```text
-dotnet test buildserver/src/Buildserver.slnx            # build everything + 53 unit tests (output in Q:\tmp\buildserver-build)
+dotnet test buildserver/src/Buildserver.slnx            # build everything + 64 unit tests (output in Q:\tmp\buildserver-build)
 python buildserver/tests/local_chain.py                 # the chain without a VM (Q:\tmp\buildserver-test, removed after)
+python buildserver/tests/site_outcomes.py               # Phase 1's done-when on the real site: e2e passed, failed, cancelled, lost VM
+python buildserver/tests/site_build.py                  # the build MVP's done-when on the real site (it builds: ask first)
 ```
+
+- `site_build.py` builds `--rev` (default HEAD) with `amb build --wait`, then checks the manifest, an identical
+  request (same id, no second build), `amb e2e` on the build, `amb fetch`, that no slot is left and that K: was only
+  read; 7 checks, exit 0 when all pass. `--config`, `--identity` and `--purge` pass through.
 
 ## The site
 
@@ -129,11 +150,14 @@ python buildserver/site/sitectl.py run -- podman ps
 |---|---|---|
 | [`site/sitectl.py`](site/sitectl.py) | makes, deploys into and inspects this PC's site: the WSL distro `buildserver`, its disk in `Q:\buildserver\wsl` (E2) | in use |
 | [`site/files/`](site/files) | the configuration it installs (`/etc/wsl.conf`, podman's `containers.conf`), each file documented | in use |
-| [`image/`](image) | the image kit: `images.py`, the OEM bootstrap (`oem/`), the layer steps (`steps/`) | `am-base` and `am-e2e` made with it |
-| [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 passed (§16.9) |
-| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot model, the guest and API protocol, the atomic record store (§6) | 27 unit tests (`src/Amb.Core.Tests`) |
-| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API, the scheduler (admission by priority × availability, wait and run timeouts, cancel), the guest broker, the jobs (import, smoke, install, layer, e2e), the slot manager and its drivers (podman + dockur; local, for tests) | runs in the site; 26 unit tests (`src/Amb.Coordinator.Tests`) |
+| [`image/`](image) | the image kit: `images.py`, the OEM bootstrap (`oem/`), the layer steps (`steps/`) | `am-base`, `am-e2e` and `am-build` made with it |
+| [`steps/build/`](steps/build) | the build VM's steps, run with the image's PowerShell 7: `prepare-disk.ps1` (D:), `checkout.ps1` (the worktree from git bundles), `build.ps1` (the commit's own `tools\Build-Agentmaster.ps1`), `package.ps1` (the portable zip, the layout zip, the symbols, `build.json`); `sitectl.py deploy` copies them into the site, and each build stages them into its share | in use |
+| [`measure/`](measure/README.md) | the measurements and proofs behind DESIGN.md §16, with their raw results | P0.1 (§16.9), P0.5's comparison (§16.11) and P0.4's native half (§16.12) |
+| [`src/Amb.Core`](src/Amb.Core) | the shared core: the allocation rule (§3), the request / build / slot / VM model, the guest and API protocol, the atomic record store (§6) | 27 unit tests (`src/Amb.Core.Tests`) |
+| [`src/Amb.Coordinator`](src/Amb.Coordinator) | `amb-coordinator`: the API (artifacts streamed by name), the scheduler (admission by priority × availability, wait and run timeouts, cancel, one build at a time, existing builds answered without a slot), the guest broker, the jobs (import, smoke, install, layer, e2e, build), the source mirror and its bundles, the slot manager and its drivers (podman + dockur, kept VMs with a data disk; local, for tests) | runs in the site; 37 unit tests (`src/Amb.Coordinator.Tests`) |
 | [`src/Amb.GuestAgent`](src/Amb.GuestAgent) | `amb-guest.exe` (Native AOT, 7 MB): the agent in every VM; hello, heartbeat with the guest's memory, one step at a time by long poll (run, fetch, expand, put, shutdown) | in every slot |
 | [`src/Amb.HostFacts`](src/Amb.HostFacts) | `amb-hostfacts.exe` (Native AOT): Windows' available memory, free commit, Q: free space and a full-screen game, as one line of JSON; the coordinator runs it every 10 s through WSL's interop | in use |
 | [`src/Amb.Cli`](src/Amb.Cli) | `amb.exe`: the command line above | in use |
 | [`tests/local_chain.py`](tests/local_chain.py) | the whole chain on this PC without a VM: the coordinator with the local slot driver, the real guest agent, the real API | 15 checks pass |
+| [`tests/site_outcomes.py`](tests/site_outcomes.py) | Phase 1's done-when on the real site: e2e runs that pass, fail, are cancelled and lose their VM, each leaving nothing behind | 14 checks passed (2026-10-25) |
+| [`tests/site_build.py`](tests/site_build.py) | the build MVP's done-when on the real site: a build of HEAD, its manifest, an identical request, e2e on the build, fetch, no slot left, K: only read | 7 checks passed (2026-10-26, `b20261026-3`) |
