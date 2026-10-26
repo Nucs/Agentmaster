@@ -12,7 +12,8 @@
 > **Where each part runs** (checked 2026-10-26 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
 > through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.36 (a Debug build
-> of a8d8b97a2 by the build server, since 2026-10-26) holds everything through §21.39; §21.32–§21.32.3 and §21.36 are
+> of a8d8b97a2 by the build server, since 2026-10-26) holds everything through §21.39 but its level picker and File diffs
+> (in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5400,13 +5401,16 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production; its level picker of 2026-10-26 in no build yet)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production; its level picker and File diffs of 2026-10-26 in no build yet)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
 >
 > The user's follow-up (2026-10-26), after trying it on dev: "I want All Screen to actually have a second menu where we pick
 > the transcript levels we have existing where default is full or can be set in settings"
+>
+> And (2026-10-26): "can in that second menu have a checkbox for file diffs which is overriding if we show file edits to be
+> included regardless the level. by default false (use the selected lvl's default)"
 
 **Not from the terminal; from the transcript.**
 - This machine's Claude Code runs its fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`). Its whole
@@ -5424,11 +5428,12 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   48 bytes). The page now has seven rows; no existing button moved. In its first build (7c7397861, dev 0.0.1.36) the button
   drew at the Default level at once; since the follow-up it opens the level picker below. A card posted by that build opens
   the picker too: the verb is the same.
-- **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): one level a row,
-  least to most, each with a hint of what it adds, then [◀ Back] to the Session page:
+- **The level picker** (the card's third page, `CardPage::AllScreen`; MessagingModels.h `kAllScreenLevels`): the File diffs
+  box, then one level a row, least to most, each with a hint of what it adds, then [◀ Back] to the Session page:
 
   | Button | Draws |
   |---|---|
+  | ☐ File diffs · the level's default | (a box, not a drawing: a tap checks it, below) |
   | 📜 Minimal · prompts & replies | your messages and each turn's final reply |
   | 📜 Compact · + answers & agents | + compactions, your answers, the slash commands you ran, each agent's brief and report |
   | 📜 Default · + every tool call | + every tool call on one line, and Claude's remarks between calls |
@@ -5438,12 +5443,37 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
   A level's data is `c:allscreen-<word>:<sid>` (56 bytes at most) and runs `/allscreen <word>`. The tapped level stays busy
   until the last picture is in (§21.28); the picker stays on the card, so another level is one tap away, and ◀ Back leaves it.
   A card that starts to ring goes back to Main, as from the Session page (§21.24).
+- **File diffs** (the third request): Telegram has no checkbox, so the box is a button whose ☐ / ☑ shows the state and whose
+  tap edits the card into the picker in the other state: ☐ (`c:allscreen+d:<sid>`, 50 bytes) shows the checked page
+  (`CardPage::AllScreenDiffs`, `☑ File diffs · at every level`), whose ☑ (`c:allscreen:<sid>`) shows the unchecked one again.
+  Each tap names the page it shows, so a double tap never flips twice. Nothing remembers the box: the picker always opens
+  unchecked, the user's "by default false".
+  - **Unchecked:** each level draws its own default. No level draws diffs by itself; Max shows each Write's whole content.
+  - **Checked:** every level draws each file change as a diff under its call (`TurnsOptions::editDiffs`, below). Minimal and
+    Compact hide the calls, so there the file-changing calls are listed for it, each with its diff, and nothing else.
+  - A level button on the checked page carries the box in its data (`c:allscreen-<word>+d:<sid>`, 58 bytes at most: the
+    longest of all) and runs `/allscreen <word> diffs`: what the card showed is what is drawn. The page flip logs
+    `[nav] remote telegram card-page <sid8> allscreen+diffs`.
 - **The default level** wears ★ in place of 📜: **Full**, the user's rule, unless the cog's Messaging tab sets another
   ("All Screen's default transcript level", `messagingAllScreenLevel`: `minimal` / `compact` / `default` / `full` / `max`;
   an empty or unknown word reads as full). It applies at once (`MessagingService::Apply` → `_allScreenLevel`): the next bare
   `/allscreen` draws it and the next render of a picker moves the ★.
-- Typed: `/allscreen [minimal|compact|default|full|max]`, the `/transcript` levels; a bare `/allscreen` draws the default
-  level (not `/transcript`'s Default). It is in the "/" menu and the help.
+- Typed: `/allscreen [minimal|compact|default|full|max] [diffs]`, the `/transcript` levels; a bare `/allscreen` draws the
+  default level (not `/transcript`'s Default). `diffs` (or `diff`) is the checked box; the words come in any order and any case
+  (`ParseAllScreenArgs`); two levels or an unknown word get the usage line. It is in the "/" menu and the help.
+
+**The diffs** (`TurnsOptions::editDiffs`, TranscriptTurns.h; Agentmaster's own option, not the reference's: no level and no
+preset sets it, so Copy ▸ Transcript and its goldens never see it). Each file-changing call (Edit, MultiEdit, Write,
+NotebookEdit) gets a ```` ```diff ```` block under its line (`EditDiffText`), read in this order:
+1. Claude Code's own hunks, the result's `toolUseResult.structuredPatch`: the very lines its TUI draws, with their line
+   numbers (Edit, MultiEdit, a Write over an existing file);
+2. a created file (a Write with no hunks): its content as added lines from line 1 (`@@ -0,0 +1,N @@`);
+3. no hunks recorded (an older Claude Code): the call's own `old_string` / `new_string` (each edit of a MultiEdit, in order;
+   a NotebookEdit's `new_source` as added lines), without a hunk header, so without numbers.
+
+A refused call (an error result: the file was not written) and one with no result (interrupted, still running) get none, and
+a level that hides the calls then lists nothing for them, never an empty timeline. At Max a Write's diff takes the place of its
+content block (the same lines, said once). A subagent's or teammate's changes show where its entry does: Compact and up.
 
 **What a picture looks like** (`BuildConversationSheet`; looked at on real sessions of this machine): 100 columns of a 12 px
 cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
@@ -5458,6 +5488,16 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
 - **The reply** follows a white `●`, its Markdown kept: bold, italic, lists with their markers, headings bold, links
   underlined in blue, code blocks on a darker band with their spaces.
 - **A subagent or teammate:** an orange `●`, its name bold and its details dimmed; its work is indented two columns under it.
+- **A file change** (File diffs; any ```` ```diff ```` block, so also a diff quoted in a message; `LayoutDiffBlock`) is drawn
+  as Claude Code draws one, under the call's `⎿`:
+  - Each line gets a gutter: its number (the new file's for an added or context line, the old file's for a removed one,
+    counted from the hunk headers; 3 digits at least, wider when a number needs it), then its mark.
+  - An added line sits on Claude Code's green band (rgb 34, 92, 43, `kConvDiffAddedBg`), a removed one on its red band
+    (rgb 122, 41, 54, `kConvDiffRemovedBg`), from the number to the sheet's edge; a context line is plain.
+  - The hunk headers draw nothing; a second hunk follows a dim `⋮`. A line longer than the row breaks at the edge and goes
+    on, on its band, under its own text. Without hunk headers the gutter stays blank.
+  - A quoted git diff's file header (a `diff` or `index` line, a `---` line with the `+++` line under it, before a file's
+    first hunk) is dim; a lone `--- x` is the removed line `-- x` (a removed SQL comment). A `\ No newline` note is dim italic.
 - The path legend, the session chain list and the turns view's notes are dimmed.
 - Words wrap between words; a word longer than a row is split; a wide glyph takes two cells; a combining mark rides on its
   cell (`ClaudeCellWidth`, the widths the question previews use).
@@ -5468,7 +5508,8 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
   turn when one lies in the last 40% of its room, else at a block in its last 15%, else where its room ends.
 - **The cap.** At most 10 parts (`kConversationImageMaxParts`; ten parts hold ~13,300 rows). A longer conversation keeps its
   MOST RECENT rows. The first picture's top row then says how many earlier rows, through which turn, are left out, and the
-  thread gets a line naming a shorter level of the picker (Default or Compact after Full or Max, Compact after Default).
+  thread gets a line naming a shorter level of the picker (Default or Compact after Full or Max, Compact after Default), and,
+  with File diffs checked, "Without File diffs the pictures are shorter too."
   Full, the default, keeps the most per turn: the largest session measured passes the cap at Full (below).
 - **Memory.** The drawing goes through a 2,048 px strip, so memory does not grow with the picture, and each part is
   PNG-encoded strip by strip (WIC `WritePixels`). A row is drawn in every strip it touches; two strip heights give the same
@@ -5480,7 +5521,9 @@ cell in Cascadia Mono, on Campbell's colors, 1,232 px wide.
 **The send.** Each part goes as a DOCUMENT (`sendDocument`, silent, at the answers' priority), not as a photo. Telegram shrinks
 a photo to 2,560 px on its long side and refuses one past 10,000 px of width + height; a document keeps every pixel. A part
 is queued as soon as it is drawn, so part 1 travels while part 2 is drawn, and the outbox keeps their order. The caption
-reads `📜 <title> · conversation [(level)] [· 2/4] · turns 12–31`; the file is `conversation-<title>[-<level>][-2of4].png`.
+reads `📜 <title> · conversation (<level>[ + diffs]) [· 2/4] · turns 12–31`; the file is
+`conversation-<title>-<level>[-diffs][-2of4].png`. The level is always named (until File diffs, it was left out for Default):
+the default is the cog's choice, so a bare caption would not say which level it is.
 
 **Bounds.**
 - One conversation is drawn at a time, process-wide (`kConversationImageMaxRenders`). Another request then hears "Another
@@ -5502,8 +5545,12 @@ reads `📜 <title> · conversation [(level)] [· 2/4] · turns 12–31`; the fi
 | 4 MB, 1 turn | Full | 369 | 1 (1,232 × 8,888 px) | 1.6 MB | 1.0 s (2026-10-26) |
 | 2 MB, 4 agents | Full | 1,723 | 2 | 7.1 MB | 2.3 s (2026-10-26) |
 | 95 MB, 11 turns | Full | 17,295 → 13,320 kept | 10 (the cap; turns 1–3 left out) | 57 MB | 12.4 s (2026-10-26) |
+| 14 MB, 3 turns, 209 file changes | Default | 1,158 | 1 | 5.5 MB | 1.2 s (2026-10-26) |
+| the same | Default + File diffs | 9,595 | 8 | 35.5 MB | 7.4 s (turns view 0.5 s, layout 0.08 s, drawing 6.9 s; 2026-10-26) |
 
-Peak commit: ~315 MB for the 95 MB transcript at any level (mostly the transcript's own parse), 51–78 MB for the small ones.
+Peak commit: ~315 MB for the 95 MB transcript at any level (mostly the transcript's own parse), 51–78 MB for the small ones,
+134 MB for the 14 MB one with File diffs. File diffs can multiply a session that wrote much: there, 8× the rows (whole new
+files are drawn line by line), and its 36 MB of parts hold the bot's one outbox for as long as they upload.
 
 **Seen live** (dev 0.0.1.36, 2026-10-26 17:27, the user's tap): `[msg] conversation pictures of 2b655223: default, 1 of 1
 part(s) sent, 631 rows (0 left out), 1232 px wide, 2630 KB, Cascadia Mono, turns view 4875 ms (38 K chars), layout 1125 ms,
@@ -5528,13 +5575,26 @@ this Debug run took 1,125 ms for 631.
   between strips; `onPart`; ASCII runs equal to the screen renderer's cells; the refusals.
 - The layout, on the turns view's own agents golden and on a hand-written document: the rules, the band, the bullets'
   colors, the hidden labels and "(no tool calls)", an agent's indent, `⎿`, wrapping, wide glyphs, a code block, the cap's note.
-- `RenderConversationImages` end to end on a turns fixture.
+- The layout of a ```` ```diff ```` block (3c, a 40-column sheet): the numbers from the hunk headers (4 digits when one needs
+  them), the bands from the gutter to the edge, the corner on the block's first row only, the `⋮` between hunks, unnumbered
+  lines without headers, the lone `---` line as a removed line, the dim italic note, a quoted git diff's dim header, a long
+  line broken at the edge on its band with a blank gutter.
+- `RenderConversationImages` end to end on a turns fixture, and again with File diffs: exactly two more rows (its created
+  file's two lines).
 - The layout and end-to-end cases need cmark. Without the vcpkg cmark, `tests\conversation_image_stub.cpp` stands in for
   `ConversationImage.cpp` and those cases report a skip.
+- `tests_turns.cpp` → `TestTranscriptTurnsEditDiffs` (File diffs' Markdown), on a synthetic transcript with every way a change
+  is recorded: off, no level draws a diff; on, each level has exactly the 5 diffs (not the refused or the unanswered Edit),
+  each block as written (the hunk with its header, the created file from line 1, the strings without hunks, a MultiEdit's
+  edits in order, a NotebookEdit's source); below Max only lines are ADDED to the level's own render; Minimal lists just the
+  file changes and opens no empty timeline; Max shows a Write once, as its diff; the reference's session fixture renders as
+  its Default golden plus one diff. `TestTranscriptTurns` checks that neither the preset nor any level sets `editDiffs`.
 - `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen ▸ alone on its row, and no All Screen on Main;
   and (1b, the picker) the five levels' words, verbs and settings reading (empty, unknown or overlong → Full; any case),
-  the picker's rows (one level a row, least to most, names, hints and verbs, ★ on Full, the ★ following a set default, Back to
-  the Session page, the same for every state), the 56-byte data, and the setting's round trip through settings.json.
+  the picker's rows (the box first, then one level a row, least to most, names, hints and verbs, ★ on Full, the ★ following a
+  set default, Back to the Session page, the same for every state), the checked page (☑, the levels' `+d` verbs, the same
+  labels), the verbs' round trip with and without the box and their refusals, `ParseAllScreenArgs` (any order and case,
+  `diff` too, two levels or an unknown word refused), the 58-byte data, and the setting's round trip through settings.json.
 
 **Checked** (2026-10-25, before any build; in dev since 0.0.1.36, nothing tried in Telegram yet):
 - The m5 suite, isolated (scratch outputs, a wiped scratch profile): 9,977 checks; the final run's only failures are the
@@ -5558,14 +5618,38 @@ this Debug run took 1,125 ms for 631.
 - ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h` and the messaging service (`_allScreenLevel`) gained members:
   the next build must purge.
 
+**Checked, File diffs** (2026-10-26; in no build yet):
+- The m5 suite, isolated: 10,198 checks, every new one passing in each of three runs, all 55 goldens byte-identical. The only
+  failures are the three known `TestTaskbarBadge` ones; one run also failed one real-time scheduler check (the load flake),
+  which a rerun of the same exe passed.
+- A negative control (mutated copies in the scratchpad, the repo untouched): with a refused Edit given a diff and a lone `---`
+  line read as a header, exactly the ten checks aimed at them fail (seven `TurnsEditDiffs`, three `diff:`).
+- `cl /Zs` with the recorded Debug lines passes for `TranscriptTurns.cpp`, `ConversationImage.cpp`, `Messaging.Inbound.cpp`,
+  `Messaging.cpp`, `Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp`, `Engine.cpp`,
+  `SessionSearchTools.cpp`, `MessagingSearchBridge.cpp`, and the PCH units `AgentManagerContent.Settings.cpp`,
+  `AgentManagerContent.cpp`, `TerminalPage.AgentEngine.cpp`, `AgentTabOverlay.Actions.cpp`, `AgentTranscriptOverlay.cpp`
+  (every unit that includes a changed header). Probes through the same line: an unused local gives C4189, a false
+  `static_assert` on the new suffix C2338, and true ones on the band colors, the verb and `editDiffs`' default pass. The
+  harness's no-cmark configuration compiles at `/W3 /WX`.
+- Looked at (the scratch driver, `/O2`): a synthetic session at Default with File diffs, and a real hunk of this machine (its
+  numbers 23–45, context, added lines, long lines broken at the edge) — Claude Code's own diff look.
+- ⚠ `TurnsOptions` gained a member (`TranscriptTurns.h`, included through `MessagingModels.h` by most of the messaging units)
+  and the messaging service's members changed above: the next build must purge.
+
 **Check after the build** (dev, with the bot):
 1. A session's card → ⚙️ Session: [📜 All Screen ▸] alone under the two screen buttons. Tap it: the keyboard flips to the
-   picker — five levels, ★ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`). Tap a level: it stays
-   busy, then one or more documents `conversation-<title>[-<level>]….png` arrive in order, captioned with their part and
-   turns. Opened, each shows the conversation in Claude Code's look. ◀ Back returns to the Session page.
+   picker — ☐ File diffs, five levels, ★ Full, ◀ Back (hooks.log `[nav] remote telegram card-page <sid8> allscreen`). Tap a
+   level: it stays busy, then one or more documents `conversation-<title>-<level>….png` arrive in order, captioned with their
+   level, part and turns. Opened, each shows the conversation in Claude Code's look. ◀ Back returns to the Session page.
 1b. The cog's Messaging tab → "All Screen's default transcript level" → Compact → Save: the picker's ★ moves to Compact at the
    card's next render, and a bare `/allscreen` draws Compact (the level is in the hooks.log line).
-2. hooks.log: `[msg] conversation pictures of <sid8>: <level>, N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
+1c. File diffs: the picker opens with ☐ File diffs; tap it: the card shows ☑ File diffs · at every level (hooks.log
+   `[nav] remote telegram card-page <sid8> allscreen+diffs`); tap ☑: back to ☐. Checked, tap Minimal in a session that edited
+   files: the documents are `conversation-<title>-minimal-diffs….png`, captioned `(minimal + diffs)`, and show only the
+   prompts, the replies and each file change with its numbered lines on green / red bands. Tap Full checked: every call, each
+   Edit / Write with its diff. `/allscreen compact diffs` typed: the same as the checked Compact; `/allscreen full compact`:
+   the usage line.
+2. hooks.log: `[msg] conversation pictures of <sid8>: <level>[+diffs], N of N part(s) sent, <rows> rows (0 left out), 1232 px wide,
    … KB, Cascadia Mono, turns view … ms (… K chars), layout … ms, drawn in … ms`, and `[nav] remote telegram /allscreen
    <sid8> -> ok`. (Seen on dev 0.0.1.36 before the picker; above.)
 3. Two quick taps: the second answers "This conversation's pictures are being drawn already…". Two sessions at once: "Another

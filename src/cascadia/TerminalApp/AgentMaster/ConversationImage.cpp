@@ -893,9 +893,284 @@ namespace Agentmaster
             Agent, // a subagent's or teammate's entry ("● name · ...")
         };
 
+        /// <summary>Reads a unified-diff hunk header ("@@ -12,3 +14,5 @@ any text"): where the hunk starts in the old and the new file.</summary>
+        /// <param name="line">The header line (it starts with "@@").</param>
+        /// <param name="oldStart">The old file's first line of the hunk (unchanged when the header does not parse).</param>
+        /// <param name="newStart">The new file's first line of the hunk (unchanged when the header does not parse).</param>
+        /// <returns>True when both numbers were read; false for "@@ @@" or a malformed header (the hunk is then drawn without numbers).</returns>
+        bool ParseHunkHeader(std::wstring_view line, int& oldStart, int& newStart) noexcept
+        {
+            // At most 9 digits a number: a line number never needs more, and the bound keeps the int far from overflow.
+            const auto readNumber = [line](size_t& i, int& value) noexcept {
+                int v = 0;
+                size_t digits = 0;
+                while (i < line.size() && line[i] >= L'0' && line[i] <= L'9' && digits < 9)
+                {
+                    v = v * 10 + (line[i] - L'0');
+                    ++i;
+                    ++digits;
+                }
+                if (digits == 0)
+                {
+                    return false;
+                }
+                value = v;
+                return true;
+            };
+            if (line.substr(0, 2) != L"@@")
+            {
+                return false;
+            }
+            size_t i = line.find(L'-', 2);
+            int oldValue = 0;
+            if (i == std::wstring_view::npos || !readNumber(++i, oldValue))
+            {
+                return false;
+            }
+            i = line.find(L'+', i);
+            int newValue = 0;
+            if (i == std::wstring_view::npos || !readNumber(++i, newValue))
+            {
+                return false;
+            }
+            oldStart = oldValue;
+            newStart = newValue;
+            return true;
+        }
+
+        /// <summary>
+        /// A ```diff block as Claude Code draws a file change (TranscriptTurns' editDiffs hunks, or a diff quoted in a message): one
+        /// row per line (a long line breaks at the edge, under the text), led by a gutter with the line's number (the new file's
+        /// for an added or context line, the old file's for a removed one, counted from the hunk headers; blank without them)
+        /// and its mark. An ADDED line sits on Claude Code's green band, a REMOVED one on its red band, a context line plain; the
+        /// hunk headers draw nothing, a second hunk is announced by a dim vertical ellipsis. A quoted git diff's file header -
+        /// before a file's first hunk, a "diff" or "index" line and a "--- a/x" line together with the "+++ b/x" line under it -
+        /// is dim, not a change; alone, "--- x" is a REMOVED line "-- x" (a diff without hunk headers, as the turns view's
+        /// old_string / new_string fallback writes it, can remove a SQL comment).
+        /// </summary>
+        /// <param name="w">The writer.</param>
+        /// <param name="b">The code block (info "diff").</param>
+        /// <param name="outer">The cells before the gutter: the block's containers (a call's result corner, an agent's indent).</param>
+        /// <exception cref="std::bad_alloc">If a row cannot be built.</exception>
+        void LayoutDiffBlock(SheetWriter& w, const MdBlock& b, const Prefix& outer)
+        {
+            std::vector<std::wstring_view> lines;
+            {
+                std::wstring_view rest{ b.code };
+                for (;;)
+                {
+                    const size_t nl = rest.find(L'\n');
+                    lines.push_back(rest.substr(0, nl));
+                    if (nl == std::wstring_view::npos)
+                    {
+                        break;
+                    }
+                    rest.remove_prefix(nl + 1);
+                }
+            }
+            const auto startsWith = [](std::wstring_view line, std::wstring_view head) noexcept { return line.substr(0, head.size()) == head; };
+            // What each line is, decided once for both passes below (they must agree, or the gutter is sized for numbers the
+            // rows never draw).
+            enum class DiffLine : uint8_t
+            {
+                Hunk, // "@@ -a,b +c,d @@": where the next lines sit in the two files; draws no row
+                Header, // a quoted git diff's file header: dim, no number
+                Added, // "+...": the new file's line
+                Removed, // "-...": the old file's line
+                Note, // "\ No newline at end of file": about the line above, not a line of either file
+                Context, // " ...": a line of both files (or an empty line: the turns view's block writes a blank one trimmed)
+            };
+            std::vector<DiffLine> kinds;
+            kinds.reserve(lines.size());
+            {
+                // Before a file's first hunk, where a quoted git diff names its files. A "diff " line can start no change, so it
+                // opens the next file of a multi-file diff, whose "---" / "+++" pair is then a header again.
+                bool beforeHunk = true;
+                for (size_t i = 0; i < lines.size(); ++i)
+                {
+                    const auto line = lines[i];
+                    if (startsWith(line, L"@@"))
+                    {
+                        kinds.push_back(DiffLine::Hunk);
+                        beforeHunk = false;
+                    }
+                    else if (startsWith(line, L"diff "))
+                    {
+                        kinds.push_back(DiffLine::Header);
+                        beforeHunk = true;
+                    }
+                    else if (beforeHunk && startsWith(line, L"index "))
+                    {
+                        kinds.push_back(DiffLine::Header);
+                    }
+                    else if (beforeHunk && startsWith(line, L"--- ") && i + 1 < lines.size() && startsWith(lines[i + 1], L"+++ "))
+                    {
+                        // Only as a pair: a lone "--- x" is the removed line "-- x".
+                        kinds.push_back(DiffLine::Header);
+                        kinds.push_back(DiffLine::Header);
+                        ++i;
+                    }
+                    else if (!line.empty() && line[0] == L'+')
+                    {
+                        kinds.push_back(DiffLine::Added);
+                    }
+                    else if (!line.empty() && line[0] == L'-')
+                    {
+                        kinds.push_back(DiffLine::Removed);
+                    }
+                    else if (!line.empty() && line[0] == L'\\')
+                    {
+                        kinds.push_back(DiffLine::Note);
+                    }
+                    else
+                    {
+                        kinds.push_back(DiffLine::Context);
+                    }
+                }
+            }
+            // Each line's number, counted from its hunk's header: the new file's for an added or context line, the old file's for
+            // a removed one, 0 (drawn blank) for a header or a note and in a hunk whose header gave no numbers (a start of 0
+            // stays 0). The largest decides the gutter's width, so every row lines up (3 digits at least, as Claude Code's own).
+            std::vector<int> numbers(lines.size(), 0);
+            int widest = 0;
+            {
+                int oldLine = 0;
+                int newLine = 0;
+                for (size_t i = 0; i < lines.size(); ++i)
+                {
+                    switch (kinds[i])
+                    {
+                    case DiffLine::Hunk:
+                        if (!ParseHunkHeader(lines[i], oldLine, newLine))
+                        {
+                            oldLine = 0;
+                            newLine = 0;
+                        }
+                        break;
+                    case DiffLine::Added:
+                        numbers[i] = newLine;
+                        newLine += newLine > 0 ? 1 : 0;
+                        break;
+                    case DiffLine::Removed:
+                        numbers[i] = oldLine;
+                        oldLine += oldLine > 0 ? 1 : 0;
+                        break;
+                    case DiffLine::Context:
+                        numbers[i] = newLine;
+                        newLine += newLine > 0 ? 1 : 0;
+                        oldLine += oldLine > 0 ? 1 : 0;
+                        break;
+                    case DiffLine::Header:
+                    case DiffLine::Note:
+                        break;
+                    }
+                    widest = (std::max)(widest, numbers[i]);
+                }
+            }
+            int digits = 1;
+            for (int v = widest; v >= 10; v /= 10)
+            {
+                ++digits;
+            }
+            digits = (std::max)(digits, 3);
+            // The rows.
+            bool firstRow = true; // the block's first row takes the containers' first-row cells (a result corner)
+            bool sawHunk = false; // a hunk of this file was drawn: the next one is announced by the ellipsis
+            for (size_t i = 0; i < lines.size(); ++i)
+            {
+                if (kinds[i] == DiffLine::Hunk)
+                {
+                    if (sawHunk)
+                    {
+                        // Between two hunks: the lines in between are not shown, and a dim vertical ellipsis says so.
+                        Prefix gap;
+                        gap.first = firstRow ? outer.first : outer.rest;
+                        gap.rest = outer.rest;
+                        AppendBlanks(gap.first, digits + 3, kConvBg);
+                        AppendBlanks(gap.rest, digits + 3, kConvBg);
+                        TextStyle style;
+                        style.cut = kTallCutAny;
+                        w.Text({ Span{ std::wstring(1, L'\x22EE'), kConvDim, 0 } }, gap, style);
+                        firstRow = false;
+                    }
+                    sawHunk = true;
+                    continue;
+                }
+                uint32_t bg = kConvBg;
+                uint32_t fg = kConvText;
+                uint8_t flags = 0;
+                wchar_t mark = L' ';
+                std::wstring_view text = lines[i];
+                switch (kinds[i])
+                {
+                case DiffLine::Header:
+                    fg = kConvDim; // a quoted git diff's file header: not a change
+                    sawHunk = false; // the next hunk is this file's first: no ellipsis before it
+                    break;
+                case DiffLine::Added:
+                    bg = kConvDiffAddedBg;
+                    fg = kConvBright;
+                    mark = L'+';
+                    text.remove_prefix(1);
+                    break;
+                case DiffLine::Removed:
+                    bg = kConvDiffRemovedBg;
+                    fg = kConvBright;
+                    mark = L'-';
+                    text.remove_prefix(1);
+                    break;
+                case DiffLine::Note:
+                    fg = kConvDim; // "\ No newline at end of file": a note about the line above, not a line
+                    flags = kScreenCellItalic;
+                    break;
+                case DiffLine::Context:
+                case DiffLine::Hunk: // (handled above)
+                    // The leading blank is the diff's mark. Only a blank is taken: a line without one (a hand-written diff in a
+                    // message) is drawn whole rather than losing its first character.
+                    if (!text.empty() && text[0] == L' ')
+                    {
+                        text.remove_prefix(1);
+                    }
+                    break;
+                }
+                Prefix prefix;
+                prefix.first = firstRow ? outer.first : outer.rest;
+                prefix.rest = outer.rest;
+                // The gutter: the number right-aligned, then the mark between blanks - on the line's band, so a change reads as
+                // one colored row from its number to the sheet's edge.
+                const std::wstring numberText = numbers[i] > 0 ? std::to_wstring(numbers[i]) : std::wstring{};
+                AppendBlanks(prefix.first, (std::max)(0, digits - static_cast<int>(numberText.size())), bg);
+                for (const wchar_t c : numberText)
+                {
+                    prefix.first.push_back(MakeCell(std::wstring(1, c), kConvDim, bg));
+                }
+                prefix.first.push_back(MakeCell(L" ", kConvText, bg));
+                prefix.first.push_back(MakeCell(std::wstring(1, mark), kConvBright, bg));
+                prefix.first.push_back(MakeCell(L" ", kConvText, bg));
+                AppendBlanks(prefix.rest, digits + 3, bg);
+                TextStyle style;
+                style.bg = bg;
+                style.fill = true;
+                style.wrapWords = false;
+                style.cut = firstRow ? kTallCutBlock : kTallCutAny;
+                w.Text({ Span{ std::wstring{ text }, fg, flags } }, prefix, style);
+                firstRow = false;
+            }
+            if (b.truncated)
+            {
+                Prefix note;
+                note.first = firstRow ? outer.first : outer.rest;
+                note.rest = outer.rest;
+                TextStyle style;
+                style.cut = kTallCutAny;
+                w.Text({ Span{ L"\x2026 (cut here: the change is longer than " + std::to_wstring(kConversationBlockMaxChars) + L" characters)", kConvDim, kScreenCellItalic } }, note, style);
+            }
+        }
+
         /// <summary>
         /// Lays out one block of a message, a reply or a note: a paragraph or a heading as wrapped text, a code block on its band
-        /// keeping its spaces, a rule as a line across the room left.
+        /// keeping its spaces (a ```diff block as Claude Code draws a file change: LayoutDiffBlock), a rule as a line across the
+        /// room left.
         /// </summary>
         /// <param name="w">The writer.</param>
         /// <param name="b">The block.</param>
@@ -907,6 +1182,12 @@ namespace Agentmaster
         {
             ClampPrefix(prefix.first);
             ClampPrefix(prefix.rest);
+            if (b.kind == MdBlockKind::Code && b.info == L"diff")
+            {
+                // A file change (§21.39 "File diffs") or a diff in a message: Claude Code's own diff look, numbers and bands.
+                LayoutDiffBlock(w, b, prefix);
+                return;
+            }
             if (b.kind == MdBlockKind::Code)
             {
                 // A code block keeps its spaces and breaks at the edge; it sits on the code band unless it is inside a band
@@ -1314,8 +1595,11 @@ namespace Agentmaster
         {
             const auto now = []() noexcept { return static_cast<int64_t>(::GetTickCount64()); };
             const int64_t started = now();
-            // 1. The conversation turn by turn (the chain it continues included), as Copy > Transcript renders it.
-            const auto markdown = RenderTranscriptTurnsFile(transcript, TurnsOptionsForLevel(options.level), options.utc);
+            // 1. The conversation turn by turn (the chain it continues included), as Copy > Transcript renders it - plus, with
+            // "File diffs", every file change as a diff (TurnsOptions::editDiffs: Agentmaster's own option, which no level sets).
+            TurnsOptions turns = TurnsOptionsForLevel(options.level);
+            turns.editDiffs = turns.editDiffs || options.editDiffs;
+            const auto markdown = RenderTranscriptTurnsFile(transcript, turns, options.utc);
             out.turnsMs = now() - started;
             if (!markdown || markdown->empty())
             {

@@ -3559,7 +3559,7 @@ namespace Agentmaster::Msg
         L"newsession", L"interrupt", L"takedraft", L"idle", L"board", L"pauseall", L"resumeall", L"cc", L"status", L"card",
         L"reactivate", L"recreate", L"verbose",
         L"screenimage", // §21.24: the terminal's screen as a picture (the card's 🖼 Screen Image; /screen is the text)
-        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max]; bare = the cog's default level (the card's 📜 All Screen ▸)
+        L"allscreen", // §21.39: the whole conversation as tall pictures [minimal|compact|default|full|max] [diffs]; bare = the cog's default level (the card's 📜 All Screen ▸)
         L"search-tab", L"search_tab", // §21.19: jump to the 🔎 Search topic from any topic (kSearchTabCommands)
         L"search", // §21.19: /search <words> asks the Search topic's agent from any topic; a bare /search jumps (kSearchCommand)
         L"steer", // §21.33: /steer <message> sends the words NOW, into a running turn too (kSteerCommand, MessagingSteer.h)
@@ -4755,7 +4755,8 @@ namespace Agentmaster::Msg
     {
         Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
         Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ◀ Back
-        AllScreen, // §21.39: one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ★) · ◀ Back (to Session)
+        AllScreen, // §21.39: ☐ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ★) · ◀ Back (to Session)
+        AllScreenDiffs, // §21.39: the same picker with ☑ File diffs checked - its levels draw every file change as a diff, whatever the level
     };
 
     // ===== 📜 All Screen's levels (§21.39) ======================================================
@@ -4821,6 +4822,68 @@ namespace Agentmaster::Msg
             lower[i] = static_cast<wchar_t>(std::towlower(stored[i]));
         }
         return AllScreenLevelFromWord(std::wstring_view{ lower, stored.size() }).value_or(kAllScreenDefaultLevel);
+    }
+
+    /// <summary>
+    /// What one 📜 All Screen request draws: a level, and whether every file change is drawn as a diff whatever the level ("File
+    /// diffs", the picker's checkbox and /allscreen's "diffs" word; the user's request of 2026-10-26: "by default false (use the
+    /// selected lvl's default)" - no level draws diffs by itself).
+    /// </summary>
+    struct AllScreenPick
+    {
+        TurnsLevel level{ kAllScreenDefaultLevel }; // the transcript level
+        bool diffs{ false }; // true = file diffs at any level (ConversationImageOptions::editDiffs); false = the level's own default
+    };
+
+    /// <summary>
+    /// Reads /allscreen's arguments: at most one level word and the word "diffs" (or "diff"), in any order and any case; nothing
+    /// = the default level without diffs. Pure, so the m5 suite checks it.
+    /// </summary>
+    /// <param name="args">The command's arguments ("", "compact", "full diffs", "Diffs").</param>
+    /// <param name="defaultLevel">The level drawn when no level is named (the cog's default: AppSettings::messagingAllScreenLevel).</param>
+    /// <returns>The request, or nullopt for anything else (an unknown word, two levels): the caller answers with the usage line.</returns>
+    /// <exception cref="std::bad_alloc">If a word cannot be copied.</exception>
+    inline std::optional<AllScreenPick> ParseAllScreenArgs(std::wstring_view args, TurnsLevel defaultLevel)
+    {
+        AllScreenPick pick;
+        pick.level = defaultLevel;
+        bool levelNamed = false;
+        size_t i = 0;
+        while (i < args.size())
+        {
+            while (i < args.size() && std::iswspace(args[i]))
+            {
+                ++i;
+            }
+            const size_t start = i;
+            while (i < args.size() && !std::iswspace(args[i]))
+            {
+                ++i;
+            }
+            if (start == i)
+            {
+                break;
+            }
+            std::wstring word{ args.substr(start, i - start) };
+            for (auto& c : word)
+            {
+                c = static_cast<wchar_t>(std::towlower(c));
+            }
+            if (word == L"diffs" || word == L"diff")
+            {
+                pick.diffs = true;
+            }
+            else if (const auto level = AllScreenLevelFromWord(word); level && !levelNamed)
+            {
+                pick.level = *level;
+                levelNamed = true;
+            }
+            else
+            {
+                return std::nullopt; // an unknown word, or a second level: say how instead of guessing which one was meant
+            }
+        }
+        return pick;
     }
 
     /// <summary>A level's word ("full"), the inverse of AllScreenLevelFromWord.</summary>
@@ -4895,32 +4958,60 @@ namespace Agentmaster::Msg
     /// </remarks>
     inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";
     /// <summary>
-    /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;. The longest,
-    /// "c:allscreen-compact:" / "c:allscreen-minimal:" / "c:allscreen-default:" with a 36-character id, is 56 bytes of 64.
+    /// The picker with ☑ File diffs checked (CardPage::AllScreenDiffs): what the unchecked box's button opens. Its checked box's
+    /// button is kCardVerbAllScreen again (unchecked). Each tap NAMES the page it shows, so a double tap never flips twice, and a
+    /// copy of the card (whose page nobody remembers) gets the right one. "c:allscreen+d:" with a 36-character id is 50 bytes.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbAllScreenDiffs = L"allscreen+d";
+    /// <summary>
+    /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;; on the checked
+    /// page it ends with kAllScreenDiffsSuffix ("allscreen-full+d" = /allscreen full diffs) - the button carries the box as it
+    /// was SHOWN, so what the user saw is what is drawn. The longest, "c:allscreen-compact+d:" (or -minimal / -default) with a
+    /// 36-character id, is 58 bytes of Telegram's 64.
     /// </summary>
     inline constexpr std::wstring_view kCardVerbAllScreenLevelPrefix = L"allscreen-";
+    /// <summary>The ending of a level verb (and of kCardVerbAllScreenDiffs) that means "File diffs" is checked.</summary>
+    inline constexpr std::wstring_view kAllScreenDiffsSuffix = L"+d";
 
-    /// <summary>The card verb of one level's button on the ALL SCREEN page ("allscreen-full").</summary>
+    /// <summary>The card verb of one level's button on the ALL SCREEN page ("allscreen-full", "allscreen-full+d").</summary>
     /// <param name="level">The level.</param>
+    /// <param name="diffs">Whether the button sits on the checked page (File diffs on).</param>
     /// <returns>The verb.</returns>
     /// <exception cref="std::bad_alloc">If the verb cannot be allocated.</exception>
-    inline std::wstring CardAllScreenLevelVerb(TurnsLevel level)
+    inline std::wstring CardAllScreenLevelVerb(TurnsLevel level, bool diffs = false)
     {
         std::wstring verb{ kCardVerbAllScreenLevelPrefix };
         verb += AllScreenLevelWord(level);
+        if (diffs)
+        {
+            verb += kAllScreenDiffsSuffix;
+        }
         return verb;
     }
 
-    /// <summary>The level a card verb names when it is a level button of the ALL SCREEN page ("allscreen-max" -> Max).</summary>
+    /// <summary>The request a card verb names when it is a level button of the ALL SCREEN page ("allscreen-max+d" -> Max with diffs).</summary>
     /// <param name="verb">The verb of a card button's data.</param>
-    /// <returns>The level, or nullopt for any other verb (a bare "allscreen" included: that one opens the page).</returns>
-    inline std::optional<TurnsLevel> ParseCardAllScreenLevelVerb(std::wstring_view verb) noexcept
+    /// <returns>The level and the box, or nullopt for any other verb (a bare "allscreen" or "allscreen+d" included: those open the page).</returns>
+    inline std::optional<AllScreenPick> ParseCardAllScreenLevelVerb(std::wstring_view verb) noexcept
     {
         if (verb.size() <= kCardVerbAllScreenLevelPrefix.size() || verb.substr(0, kCardVerbAllScreenLevelPrefix.size()) != kCardVerbAllScreenLevelPrefix)
         {
             return std::nullopt;
         }
-        return AllScreenLevelFromWord(verb.substr(kCardVerbAllScreenLevelPrefix.size()));
+        std::wstring_view word = verb.substr(kCardVerbAllScreenLevelPrefix.size());
+        AllScreenPick pick;
+        if (word.size() > kAllScreenDiffsSuffix.size() && word.substr(word.size() - kAllScreenDiffsSuffix.size()) == kAllScreenDiffsSuffix)
+        {
+            pick.diffs = true;
+            word.remove_suffix(kAllScreenDiffsSuffix.size());
+        }
+        const auto level = AllScreenLevelFromWord(word);
+        if (!level)
+        {
+            return std::nullopt;
+        }
+        pick.level = *level;
+        return pick;
     }
 
     /// <summary>The callback data of a card button: "c:&lt;verb&gt;:&lt;session id&gt;".</summary>
@@ -4944,9 +5035,10 @@ namespace Agentmaster::Msg
     /// tab. SESSION holds ⑂ Fork · 🆕 New Session; 🔄 Restart Session, with 🔧 Resume Session beside it in Error (the user's
     /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen ▸ alone
     /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
-    /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the request of 2026-10-26) is the level picker 📜 All
-    /// Screen ▸ opens: one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default
-    /// level (facts.allScreenLevel) wearing ★ in place of 📜, then ◀ Back to the Session page.
+    /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the requests of 2026-10-26) is the level picker 📜 All
+    /// Screen ▸ opens: first the "File diffs" checkbox (☐ on ALL SCREEN, ☑ on ALL SCREEN DIFFS: a tap shows the other page),
+    /// then one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default level
+    /// (facts.allScreenLevel) wearing ★ in place of 📜, then ◀ Back to the Session page.
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -4982,17 +5074,24 @@ namespace Agentmaster::Msg
             rows.push_back(std::move(row));
             return rows;
         }
-        if (page == CardPage::AllScreen)
+        if (page == CardPage::AllScreen || page == CardPage::AllScreenDiffs)
         {
-            // §21.39: one level a row - "📜 Full · + commands & output" is too long for two a row on a phone, and the hint is
-            // what tells the five apart. The default level wears ★ instead of 📜: the one a bare /allscreen draws.
+            // §21.39 (the request of 2026-10-26): "File diffs" first, a checkbox Telegram has no widget for - a button whose box
+            // shows the state and whose tap shows the picker in the other state. It sits above the levels because it changes
+            // what each of them draws. Unchecked = each level's own default (none draws diffs); checked = diffs at every level.
+            const bool diffs = page == CardPage::AllScreenDiffs;
+            rows.push_back({ { diffs ? L"\x2611 File diffs \x00B7 at every level" : L"\x2610 File diffs \x00B7 the level's default",
+                               CardCallbackData(diffs ? kCardVerbAllScreen : kCardVerbAllScreenDiffs, sessionId) } });
+            // One level a row - "📜 Full · + commands & output" is too long for two a row on a phone, and the hint is what tells
+            // the five apart. The default level wears ★ instead of 📜: the one a bare /allscreen draws. Each level's data carries
+            // the box as shown (CardAllScreenLevelVerb's "+d"), so a tap draws exactly what the card said.
             for (const auto& choice : kAllScreenLevels)
             {
                 std::wstring label = choice.level == facts.allScreenLevel ? L"\x2605 " : L"\U0001F4DC ";
                 label += choice.label;
                 label += L" \x00B7 ";
                 label += choice.hint;
-                rows.push_back({ { std::move(label), CardCallbackData(CardAllScreenLevelVerb(choice.level), sessionId) } });
+                rows.push_back({ { std::move(label), CardCallbackData(CardAllScreenLevelVerb(choice.level, diffs), sessionId) } });
             }
             // Back to where the picker was opened from (⚙ Session's page), not to Main.
             rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbSessionPage, sessionId) } });

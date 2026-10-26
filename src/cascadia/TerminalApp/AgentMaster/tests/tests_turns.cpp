@@ -205,6 +205,14 @@ void TestTranscriptTurns()
               "TranscriptTurns: Max = Full + Write contents + a stats line per turn");
         const TurnsOptions bogus = TurnsOptionsForLevel(static_cast<TurnsLevel>(42));
         CHECK(bogus.ops == def.ops && bogus.fullBash == def.fullBash && bogus.notes == def.notes, "TranscriptTurns: an out-of-range level reads as Default");
+        // Agentmaster's own editDiffs (All Screen's "File diffs", TestTranscriptTurnsEditDiffs) belongs to no level: every level
+        // still renders the reference's text, so the goldens below stay the contract.
+        bool anyLevelDiffs = latest.editDiffs;
+        for (const TurnsLevel level : { TurnsLevel::Minimal, TurnsLevel::Compact, TurnsLevel::Default, TurnsLevel::Full, TurnsLevel::Max })
+        {
+            anyLevelDiffs = anyLevelDiffs || TurnsOptionsForLevel(level).editDiffs;
+        }
+        CHECK(!anyLevelDiffs, "TranscriptTurns: neither the preset nor any level turns on Agentmaster's editDiffs");
         CHECK(std::wstring{ TurnsLevelName(TurnsLevel::Minimal) } == L"minimal" && std::wstring{ TurnsLevelName(TurnsLevel::Default) } == L"default" &&
                   std::wstring{ TurnsLevelName(TurnsLevel::Max) } == L"max",
               "TranscriptTurns: level names");
@@ -320,6 +328,235 @@ void TestTranscriptTurns()
         }
     }
     std::wprintf(L"  %d of %d goldens match\n", matched, total);
+}
+
+namespace
+{
+    // ---- File diffs (TurnsOptions::editDiffs): a synthetic transcript ----
+
+    // Two turns of file changes, every way Claude Code records one: a Read (no change), an Edit with Claude Code's own
+    // hunks (toolUseResult.structuredPatch), a Write that created its file (no hunks: the content), an Edit refused with an
+    // error, an Edit and a MultiEdit whose results carry no hunks (an older Claude Code: the call's own old_string /
+    // new_string), a NotebookEdit (its new_source) and a closing reply; then a turn whose Edit never got a result. The
+    // paths use forward slashes, so no JSON escape doubles a backslash. The raw strings use the delimiter J: the JSON holds
+    // a close parenthesis right before a quote (the end of print('hi')), which would end a raw string without one.
+    // Returns the transcript's bytes (18 lines).
+    std::string EditDiffsTranscript()
+    {
+        return R"J({"type":"user","uuid":"d01","parentUuid":null,"isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:00.000Z","message":{"role":"user","content":"Fix the greeting"}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d02","parentUuid":"d01","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:01.000Z","message":{"id":"m1","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"C:/w/app.py"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d03","parentUuid":"d02","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r1","content":"1\timport os"}]},"toolUseResult":{"type":"text","file":{"filePath":"C:/w/app.py","content":"import os","numLines":1,"startLine":1,"totalLines":1}}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d04","parentUuid":"d03","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:03.000Z","message":{"id":"m2","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"C:/w/app.py","old_string":"print('hi')","new_string":"print('hello')\nprint('bye')"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d05","parentUuid":"d04","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e1","content":"The file C:/w/app.py has been updated."}]},"toolUseResult":{"filePath":"C:/w/app.py","oldString":"print('hi')","newString":"print('hello')\nprint('bye')","structuredPatch":[{"oldStart":3,"oldLines":2,"newStart":3,"newLines":3,"lines":[" import sys","-print('hi')","+print('hello')","+print('bye')"]}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d06","parentUuid":"d05","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:05.000Z","message":{"id":"m3","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"C:/w/notes.txt","content":"one\ntwo\n"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d07","parentUuid":"d06","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"w1","content":"File created successfully at: C:/w/notes.txt"}]},"toolUseResult":{"type":"create","filePath":"C:/w/notes.txt","content":"one\ntwo\n","structuredPatch":[]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d08","parentUuid":"d07","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:07.000Z","message":{"id":"m4","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e2","name":"Edit","input":{"file_path":"C:/w/locked.py","old_string":"x = 1","new_string":"x = 2"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d09","parentUuid":"d08","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:08.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e2","content":"<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>","is_error":true}]},"toolUseResult":"Error: File has not been read yet. Read it first before writing to it."})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d10","parentUuid":"d09","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:09.000Z","message":{"id":"m5","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e3","name":"Edit","input":{"file_path":"C:/w/old.py","old_string":"a = 1","new_string":"a = 2"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d11","parentUuid":"d10","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:10.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e3","content":"The file C:/w/old.py has been updated."}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d12","parentUuid":"d11","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:11.000Z","message":{"id":"m6","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e4","name":"MultiEdit","input":{"file_path":"C:/w/multi.py","edits":[{"old_string":"p = 1","new_string":"p = 2"},{"old_string":"q = 1","new_string":"q = 3"}]}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d13","parentUuid":"d12","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:12.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e4","content":"Applied 2 edits to C:/w/multi.py"}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d14","parentUuid":"d13","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:13.000Z","message":{"id":"m7","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"n1","name":"NotebookEdit","input":{"notebook_path":"C:/w/nb.ipynb","cell_id":"c1","new_source":"x = 1\ny = 2"}}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d15","parentUuid":"d14","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:14.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"n1","content":"Updated cell c1"}]}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d16","parentUuid":"d15","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:00:15.000Z","message":{"id":"m8","role":"assistant","model":"claude-test-1","stop_reason":"end_turn","content":[{"type":"text","text":"Greeting fixed."}]}})J"
+               "\n"
+               R"J({"type":"user","uuid":"d17","parentUuid":"d16","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:05:00.000Z","message":{"role":"user","content":"Now the farewell"}})J"
+               "\n"
+               R"J({"type":"assistant","uuid":"d18","parentUuid":"d17","isSidechain":false,"sessionId":"dddddddd-0000-4000-8000-0000000000d1","timestamp":"2026-01-02T10:05:01.000Z","message":{"id":"m9","role":"assistant","model":"claude-test-1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"e5","name":"Edit","input":{"file_path":"C:/w/app.py","old_string":"bye","new_string":"farewell"}}]}})J"
+               "\n";
+    }
+
+    // A render's lines, split at '\n' (a trailing newline gives an empty last line, on both sides of a compare alike).
+    std::vector<std::wstring> SplitTurnsLines(const std::wstring& text)
+    {
+        std::vector<std::wstring> lines;
+        size_t start = 0;
+        for (;;)
+        {
+            const size_t nl = text.find(L'\n', start);
+            lines.push_back(text.substr(start, nl == std::wstring::npos ? std::wstring::npos : nl - start));
+            if (nl == std::wstring::npos)
+            {
+                return lines;
+            }
+            start = nl + 1;
+        }
+    }
+
+    // Whether every line of `base` is in `grown`, in the same order: lines may be ADDED between them, none removed or
+    // changed - "the option only adds to the level's own render". (A greedy walk decides a subsequence exactly.)
+    bool TurnsLinesKeptInOrder(const std::wstring& base, const std::wstring& grown)
+    {
+        const auto want = SplitTurnsLines(base);
+        size_t found = 0;
+        for (const auto& line : SplitTurnsLines(grown))
+        {
+            if (found < want.size() && line == want[found])
+            {
+                ++found;
+            }
+        }
+        return found == want.size();
+    }
+
+    // How many times `part` occurs in `text` (non-overlapping).
+    size_t CountTurnsOccurrences(const std::wstring& text, std::wstring_view part)
+    {
+        size_t count = 0;
+        for (size_t at = text.find(part); at != std::wstring::npos; at = text.find(part, at + part.size()))
+        {
+            ++count;
+        }
+        return count;
+    }
+}
+
+// Agentmaster (TurnsOptions::editDiffs - 📜 All Screen's "File diffs", MESSAGING.md section 21.39): NOT part of the port, so
+// no golden covers it; this pins what it adds on a synthetic transcript and on the reference's session fixture. Off, every
+// level renders exactly its own text (no diff anywhere). On, each file change that went through is a ```diff block under its
+// call: Claude Code's own hunks with their header, a created file's content as added lines from 1, the call's own strings
+// when no hunks were recorded (Edit, each edit of a MultiEdit), a NotebookEdit's new source; a refused or unanswered call
+// gets none. Below Max the option only ADDS lines; at Minimal and Compact it lists the file-changing calls the level hides
+// (and nothing else, never an empty timeline); at Max a Write's diff takes the place of its content block.
+void TestTranscriptTurnsEditDiffs()
+{
+    std::wprintf(L"\n[TranscriptTurns] File diffs (editDiffs, All Screen): every file change as a diff, at every level\n");
+    const auto lines = ParseTranscriptJsonl(EditDiffsTranscript());
+    CHECK(lines.size() == 18, "TurnsEditDiffs: the synthetic transcript parses to its 18 lines");
+    const auto render = [&lines](TurnsLevel level, bool diffs) {
+        TurnsOptions opts = TurnsOptionsForLevel(level);
+        opts.editDiffs = diffs;
+        return RenderTranscriptTurns(lines, opts, /*utc*/ true);
+    };
+    const auto has = [](const std::wstring& text, std::wstring_view part) { return text.find(part) != std::wstring::npos; };
+    // A failed check prints the render it judged, line by line and escaped, so the failure reads without a debugger.
+    const auto expect = [](bool ok, const char* label, const std::wstring& text) {
+        CHECK(ok, label);
+        if (!ok)
+        {
+            for (const auto& line : SplitTurnsLines(text))
+            {
+                std::wprintf(L"      | %ls\n", EscapeForConsole(line).c_str());
+            }
+        }
+    };
+
+    // The blocks, as each level with calls writes them (the call's line, then its diff as a nested item).
+    const std::wstring editDiff = L"- **Edit** `C:/w/app.py` \x00B7 ok\n"
+                                  L"  - ```diff\n"
+                                  L"    @@ -3,2 +3,3 @@\n"
+                                  L"     import sys\n"
+                                  L"    -print('hi')\n"
+                                  L"    +print('hello')\n"
+                                  L"    +print('bye')\n"
+                                  L"    ```\n";
+    const std::wstring writeDiff = L"- **Write** `C:/w/notes.txt` (2 lines) \x00B7 created\n"
+                                   L"  - ```diff\n"
+                                   L"    @@ -0,0 +1,2 @@\n"
+                                   L"    +one\n"
+                                   L"    +two\n"
+                                   L"    ```\n";
+    const std::wstring fallbackDiff = L"- **Edit** `C:/w/old.py` \x00B7 ok\n"
+                                      L"  - ```diff\n"
+                                      L"    -a = 1\n"
+                                      L"    +a = 2\n"
+                                      L"    ```\n";
+    const std::wstring multiDiff = L"- **MultiEdit** `C:/w/multi.py` \x00B7 ok\n"
+                                   L"  - ```diff\n"
+                                   L"    -p = 1\n"
+                                   L"    +p = 2\n"
+                                   L"    -q = 1\n"
+                                   L"    +q = 3\n"
+                                   L"    ```\n";
+    const std::wstring notebookDiff = L"  - ```diff\n"
+                                      L"    +x = 1\n"
+                                      L"    +y = 2\n"
+                                      L"    ```\n";
+
+    // ---- off: every level is its own text; on: below Max, only lines added ----
+    static const std::pair<const char*, TurnsLevel> kLevels[] = {
+        { "minimal", TurnsLevel::Minimal },
+        { "compact", TurnsLevel::Compact },
+        { "default", TurnsLevel::Default },
+        { "full", TurnsLevel::Full },
+        { "max", TurnsLevel::Max },
+    };
+    for (const auto& [name, level] : kLevels)
+    {
+        const std::wstring off = render(level, false);
+        const std::wstring on = render(level, true);
+        expect(!off.empty() && !has(off, L"```diff"), ("TurnsEditDiffs: off, the " + std::string{ name } + " render has no diff").c_str(), off);
+        expect(CountTurnsOccurrences(on, L"```diff") == 5, ("TurnsEditDiffs: on, the " + std::string{ name } + " render has the 5 diffs (not the refused or the unanswered Edit)").c_str(), on);
+        if (level != TurnsLevel::Max)
+        {
+            expect(TurnsLinesKeptInOrder(off, on), ("TurnsEditDiffs: on, the " + std::string{ name } + " render only adds lines to the level's own").c_str(), on);
+        }
+    }
+
+    // ---- Default: each way a change is recorded ----
+    {
+        const std::wstring on = render(TurnsLevel::Default, true);
+        expect(has(on, editDiff), "TurnsEditDiffs: an Edit shows Claude Code's own hunk (header, context, removed, added)", on);
+        expect(has(on, writeDiff), "TurnsEditDiffs: a Write that created its file shows the content as added lines from line 1", on);
+        expect(has(on, L"- **Edit** `C:/w/locked.py` \x00B7 \x2717 error\n- **Edit** `C:/w/old.py` \x00B7 ok\n"), "TurnsEditDiffs: a refused Edit (an error result) shows no diff", on);
+        expect(has(on, fallbackDiff), "TurnsEditDiffs: an Edit without recorded hunks shows its old_string / new_string, no header", on);
+        expect(has(on, multiDiff), "TurnsEditDiffs: a MultiEdit without recorded hunks shows each edit's strings in order", on);
+        expect(has(on, notebookDiff), "TurnsEditDiffs: a NotebookEdit shows its new source as added lines", on);
+        expect(has(on, L"- **Edit** `C:/w/app.py` \x00B7 no result\n\n> (no text"), "TurnsEditDiffs: an Edit that never got a result shows no diff", on);
+    }
+
+    // ---- Minimal: the file changes the level hides are listed, nothing else is ----
+    {
+        const std::wstring off = render(TurnsLevel::Minimal, false);
+        const std::wstring on = render(TurnsLevel::Minimal, true);
+        expect(!has(off, L"**Edit**") && !has(off, L"**Write**"), "TurnsEditDiffs: off, Minimal lists no calls (the level's own)", off);
+        expect(has(on, editDiff) && has(on, writeDiff) && has(on, fallbackDiff) && has(on, multiDiff) && has(on, notebookDiff),
+               "TurnsEditDiffs: on, Minimal lists each file change that went through, with its diff", on);
+        expect(!has(on, L"**Read**") && !has(on, L"locked.py") && !has(on, L"no result"), "TurnsEditDiffs: on, Minimal lists no other call, no refused or unanswered Edit", on);
+        expect(!has(on, L"(no remarks)") && has(on, L"**\x25CF Claude**\n> (no text"), "TurnsEditDiffs: on, a Minimal turn with no change to show opens no timeline", on);
+    }
+
+    // ---- Max: a Write's diff takes the place of its content block ----
+    {
+        const std::wstring plainWrite = L"  - ```\n    one\n    two\n    ```\n";
+        const std::wstring writeBlock = L"  - ```diff\n    @@ -0,0 +1,2 @@\n    +one\n    +two\n    ```\n";
+        const std::wstring off = render(TurnsLevel::Max, false);
+        const std::wstring on = render(TurnsLevel::Max, true);
+        expect(has(off, plainWrite), "TurnsEditDiffs: off, Max shows the Write's content block (the level's own)", off);
+        expect(has(on, writeBlock) && !has(on, plainWrite), "TurnsEditDiffs: on, Max shows the Write once, as its diff", on);
+    }
+
+    // ---- the reference's session fixture: its Write (a created scan.py) as a diff, the golden otherwise kept ----
+    {
+        const fs::path root = TurnsHarnessDir() / L"turns";
+        const std::string bytes = ReadTurnsFileBytes(root / L"fixture_session.jsonl");
+        const std::wstring golden = WidenTurnsUtf8(ReadTurnsFileBytes(root / L"expected" / L"fixture_session-default.md"));
+        CHECK(!bytes.empty() && !golden.empty(), "TurnsEditDiffs: tests\\turns holds fixture_session.jsonl and its Default golden");
+        if (!bytes.empty() && !golden.empty())
+        {
+            TurnsOptions opts = TurnsOptionsForLevel(TurnsLevel::Default);
+            opts.editDiffs = true;
+            const std::wstring on = RenderTranscriptTurns(ParseTranscriptJsonl(bytes), opts, /*utc*/ true);
+            expect(has(on, L"- **Write** `scratchpad\\scan.py` (2 lines) \x00B7 created\n  - ```diff\n    @@ -0,0 +1,2 @@\n    +print('scan')\n    +print('done')\n    ```\n"),
+                   "TurnsEditDiffs: the fixture's created scan.py is drawn as two added lines", on);
+            expect(TurnsLinesKeptInOrder(golden, on) && CountTurnsOccurrences(on, L"```diff") == 1, "TurnsEditDiffs: the fixture's render is its golden plus that one diff", on);
+        }
+    }
 }
 
 namespace

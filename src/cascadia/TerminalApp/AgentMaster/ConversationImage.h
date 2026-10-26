@@ -80,6 +80,10 @@ namespace Agentmaster
     inline constexpr uint32_t kConvLink = 0x6CB6FF;
     /// <summary>The marker of a list item inside a message.</summary>
     inline constexpr uint32_t kConvMarker = 0xA0A0A0;
+    /// <summary>The band behind an ADDED line of a diff: Claude Code's own dark-theme color (rgb 34, 92, 43).</summary>
+    inline constexpr uint32_t kConvDiffAddedBg = 0x225C2B;
+    /// <summary>The band behind a REMOVED line of a diff: Claude Code's own dark-theme color (rgb 122, 41, 54).</summary>
+    inline constexpr uint32_t kConvDiffRemovedBg = 0x7A2936;
 
     /// <summary>
     /// The width a conversation is laid out at. 100 columns: Claude Code's text wraps near there on a laptop, and 100 cells of
@@ -153,6 +157,10 @@ namespace Agentmaster
     struct ConversationImageOptions
     {
         TurnsLevel level{ TurnsLevel::Default }; // how much of each turn is drawn (the Copy > Transcript levels)
+        // §21.39 "File diffs": true = every file change (Edit, MultiEdit, Write, NotebookEdit) is drawn as a diff under its call,
+        // whatever the level (TurnsOptions::editDiffs; at Minimal and Compact the file-changing calls are listed for it); false =
+        // the level's own default, which shows no diffs (only Max shows each Write's whole content).
+        bool editDiffs{ false };
         int cols{ kConversationImageCols }; // the sheet's width in cells
         size_t maxParts{ kConversationImageMaxParts }; // the most pictures (at least 1)
         TallScreenImageOptions image; // the cell, the padding and the part height

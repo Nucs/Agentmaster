@@ -138,6 +138,7 @@ int wmain()
     TestCompactionLifecycle();
     TestConversationFollowup();
     TestTranscriptTurns(); // the Copy > Transcript levels vs the transcript_turns.py goldens (tests_turns.cpp)
+    TestTranscriptTurnsEditDiffs(); // All Screen's "File diffs": every file change as a diff, at every level (tests_turns.cpp)
     TestSummaryConversation(); // the summary's numbered conversation list, pure (tests_turns.cpp)
     TestConversationUpstream(); // the summary's whole conversation: the chain walk end to end (tests_turns.cpp)
     TestMarkdownBlocks(); // the transcript overlay's Markdown flattener — a skip without the vcpkg cmark (tests_markdown.cpp)

@@ -1737,12 +1737,15 @@ namespace Agentmaster::Msg
             // Code (the alternate screen) keeps no scrollback, so the terminal never holds more than one screen
             // (ConversationImage.h). So no window is asked, and a parked tab or a closed session draws as well as a live one.
             // The level: the one named (a level button of the card's picker names one), else the cog's default (§21.39: Full
-            // unless set otherwise) - NOT LevelFromWord's Default, which /transcript keeps for a bare /transcript.
+            // unless set otherwise) - NOT LevelFromWord's Default, which /transcript keeps for a bare /transcript. "diffs" (the
+            // picker's checked File diffs) draws every file change as a diff, whatever the level.
             const TurnsLevel defaultLevel = static_cast<TurnsLevel>(_allScreenLevel.load());
-            const auto level = cmd.args.empty() ? std::optional<TurnsLevel>{ defaultLevel } : AllScreenLevelFromWord(detail::Lower(cmd.args));
-            if (!level)
+            const auto pick = ParseAllScreenArgs(cmd.args, defaultLevel);
+            if (!pick)
             {
-                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max] \x2014 bare, it draws " + std::wstring{ AllScreenLevelWord(defaultLevel) } + L" (the default level, set in the cog's Messaging tab).", false);
+                _reply(threadId, L"Usage: /allscreen [minimal|compact|default|full|max] [diffs] \x2014 bare, it draws " + std::wstring{ AllScreenLevelWord(defaultLevel) } +
+                                     L" (the default level, set in the cog's Messaging tab); \x201C" L"diffs\x201D adds every file change as a diff, whatever the level.",
+                       false);
                 return;
             }
             if (s->kind != AgentKind::Claude)
@@ -1774,7 +1777,7 @@ namespace Agentmaster::Msg
                     return;
                 }
             }
-            done(_startConversationImage(sessionId, threadId, path, static_cast<int>(*level)));
+            done(_startConversationImage(sessionId, threadId, path, static_cast<int>(pick->level), pick->diffs));
             return;
         }
         if (name == L"reactivate")
@@ -2723,14 +2726,23 @@ namespace Agentmaster::Msg
                 _showCardPage(sid, messageId, CardPage::AllScreen);
                 return;
             }
-            else if (const auto level = ParseCardAllScreenLevelVerb(verb); level)
+            else if (verb == kCardVerbAllScreenDiffs)
             {
-                // §21.39: a level of the picker - /allscreen <level>. No toast, as for 🖼 Screen Image (§21.28): the tapped level
-                // stays busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer says
-                // the work goes on. The picker stays on the card (◀ Back leaves it): another level is one tap away, and no edit is
-                // spent flipping the keyboard back.
+                // §21.39: the picker's ☐ File diffs was tapped - the same picker with the box checked (its ☑ names the unchecked
+                // page again). A page flip; nothing is drawn until a level is picked.
+                answer(L"");
+                _showCardPage(sid, messageId, CardPage::AllScreenDiffs);
+                return;
+            }
+            else if (const auto pick = ParseCardAllScreenLevelVerb(verb); pick)
+            {
+                // §21.39: a level of the picker - /allscreen <level>, with "diffs" when the button sat on the checked page (its
+                // data says so: what the card showed is what is drawn). No toast, as for 🖼 Screen Image (§21.28): the tapped
+                // level stays busy until the last picture is in (the worker carries the tap), and past the hold's limit the answer
+                // says the work goes on. The picker stays on the card (◀ Back leaves it): another level is one tap away, and no
+                // edit is spent flipping the keyboard back.
                 cmd.name = L"allscreen";
-                cmd.args = std::wstring{ AllScreenLevelWord(*level) };
+                cmd.args = std::wstring{ AllScreenLevelWord(pick->level) } + (pick->diffs ? L" diffs" : L"");
                 _runSessionCommand(sid, cmd, fake, threadId);
                 return;
             }
@@ -3292,7 +3304,9 @@ namespace Agentmaster::Msg
             }
         }
         LogNav(L"remote telegram card-page " + ShortId(cardOwner.empty() ? sessionId : cardOwner) +
-               (page == CardPage::Session ? L" session" : (page == CardPage::AllScreen ? L" allscreen" : L" main")) + (cardOwner.empty() ? L" (a copy of the card)" : L""));
+               (page == CardPage::Session ? L" session" :
+                                            (page == CardPage::AllScreen ? L" allscreen" : (page == CardPage::AllScreenDiffs ? L" allscreen+diffs" : L" main"))) +
+               (cardOwner.empty() ? L" (a copy of the card)" : L""));
         if (!cardOwner.empty())
         {
             // The card's hash covers its buttons, so the new page is an edit (or a re-post, when the card was due for one) -
@@ -3398,7 +3412,7 @@ namespace Agentmaster::Msg
         }
     }
 
-    const wchar_t* MessagingService::_startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel)
+    const wchar_t* MessagingService::_startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs)
     {
         // The poll thread (a typed /allscreen, a tapped 📜 All Screen): nothing here may wait for the drawing.
         const auto unmark = [this, &sessionId]() {
@@ -3422,7 +3436,7 @@ namespace Agentmaster::Msg
         {
             // §21.28: the worker carries the tapped 📜 All Screen along (`taps`: empty for a typed /allscreen) and queues every part
             // inside a scope of them, so the button stays busy until the last picture - or the line saying why there is none - is in.
-            std::thread([self = weak_from_this(), sessionId, threadId, transcript, turnsLevel, title, taps = _holdTaps()]() noexcept {
+            std::thread([self = weak_from_this(), sessionId, threadId, transcript, turnsLevel, editDiffs, title, taps = _holdTaps()]() noexcept {
                 const auto me = self.lock();
                 if (!me)
                 {
@@ -3433,22 +3447,21 @@ namespace Agentmaster::Msg
                 {
                     ConversationImageOptions options;
                     options.level = static_cast<TurnsLevel>(turnsLevel);
-                    const bool defaultLevel = options.level == TurnsLevel::Default;
+                    options.editDiffs = editDiffs; // §21.39 "File diffs": every file change as a diff, whatever the level
                     const std::wstring levelName = TurnsLevelName(options.level);
+                    // What was drawn, in every caption and file name: the level always (the default is the cog's choice, so a bare
+                    // name would not say which), and "+ diffs" when File diffs was checked.
+                    const std::wstring drawn = levelName + (editDiffs ? L" + diffs" : L"");
                     const std::wstring titleLine = TgTitleLine(title, 120).empty() ? ShortId(sessionId) : TgTitleLine(title, 120);
-                    // "conversation-Agentmaster.png", "conversation-Agentmaster-compact-2of4.png": the level only when it is not the
-                    // default, the part only when there are several.
-                    const std::wstring stem = L"conversation-" + SafeFileStem(title) + (defaultLevel ? std::wstring{} : L"-" + levelName);
+                    // "conversation-Agentmaster-full.png", "conversation-Agentmaster-compact-diffs-2of4.png": the part only when there
+                    // are several.
+                    const std::wstring stem = L"conversation-" + SafeFileStem(title) + L"-" + levelName + (editDiffs ? L"-diffs" : L"");
                     size_t sent = 0;
                     size_t totalBytes = 0;
                     options.onPart = [&](ConversationImagePart&& part) {
-                        // "📜 Agentmaster · conversation · 2/4 · turns 12–31": which part, and which turns it shows (a part's first
-                        // rows may be the path legend before turn 1, counted as turn 1 here).
-                        std::wstring caption = L"\U0001F4DC " + titleLine + L" \x00B7 conversation";
-                        if (!defaultLevel)
-                        {
-                            caption += L" (" + levelName + L")";
-                        }
+                        // "📜 Agentmaster · conversation (full + diffs) · 2/4 · turns 12–31": what was drawn, which part, and which
+                        // turns it shows (a part's first rows may be the path legend before turn 1, counted as turn 1 here).
+                        std::wstring caption = L"\U0001F4DC " + titleLine + L" \x00B7 conversation (" + drawn + L")";
                         if (part.count > 1)
                         {
                             caption += L" \x00B7 " + std::to_wstring(part.index + 1) + L"/" + std::to_wstring(part.count);
@@ -3468,7 +3481,7 @@ namespace Agentmaster::Msg
                         ++sent;
                     };
                     const ConversationImageResult r = RenderConversationImages(transcript, options);
-                    me->_log(L"[msg] conversation pictures of " + ShortId(sessionId) + L": " + levelName + L", " + std::to_wstring(sent) + L" of " + std::to_wstring(r.parts.size()) +
+                    me->_log(L"[msg] conversation pictures of " + ShortId(sessionId) + L": " + levelName + (editDiffs ? L"+diffs" : L"") + L", " + std::to_wstring(sent) + L" of " + std::to_wstring(r.parts.size()) +
                              L" part(s) sent, " + std::to_wstring(r.rows) + L" rows (" + std::to_wstring(r.droppedRows) + L" left out), " + std::to_wstring(r.grid.widthPx) + L" px wide, " +
                              std::to_wstring(totalBytes / 1024) + L" KB, " + r.fontFamily + L", turns view " + std::to_wstring(r.turnsMs) + L" ms (" +
                              std::to_wstring(r.markdownChars / 1024) + L" K chars), layout " + std::to_wstring(r.layoutMs) + L" ms, drawn in " + std::to_wstring(r.drawMs) + L" ms" +
@@ -3487,10 +3500,11 @@ namespace Agentmaster::Msg
                         const wchar_t* shorter = options.level >= TurnsLevel::Full ?
                                                      L" A shorter level draws more of it: Default or Compact in \U0001F4DC All Screen \x25B8 (or /allscreen compact)." :
                                                      (options.level == TurnsLevel::Default ? L" Compact draws more of it: \U0001F4DC All Screen \x25B8 Compact (or /allscreen compact)." : L"");
+                        // With File diffs checked the diffs take room too: unchecking it draws more of the conversation as well.
                         me->_reply(threadId,
                                    L"The conversation is longer than " + std::to_wstring(r.parts.size()) + L" pictures hold: its first " + std::to_wstring(r.droppedRows) +
                                        L" rows" + (r.droppedThroughTurn > 0 ? L" (through turn " + std::to_wstring(r.droppedThroughTurn) + L")" : std::wstring{}) +
-                                       L" are left out." + shorter,
+                                       L" are left out." + shorter + (editDiffs ? L" Without File diffs the pictures are shorter too." : L""),
                                    false);
                     }
                 }
@@ -5373,8 +5387,9 @@ namespace Agentmaster::Msg
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
                    L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n"
-                   // §21.39: the card's 📜 All Screen ▸ (a level picker), typed with a level or bare (the cog's default level, Full).
-                   L"/allscreen [level] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   // §21.39: the card's 📜 All Screen ▸ (a level picker with a File diffs box), typed with a level or bare (the cog's
+                   // default level, Full), and "diffs" for every file change as a diff.
+                   L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
                    L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";

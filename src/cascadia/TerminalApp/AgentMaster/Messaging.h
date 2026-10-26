@@ -1490,6 +1490,8 @@ namespace Agentmaster::Msg
         /// <param name="threadId">The topic the pictures go to.</param>
         /// <param name="transcript">The transcript to draw (the caller resolved it: a never-messaged fork passes its source's).</param>
         /// <param name="turnsLevel">The TurnsLevel's numeric value (TranscriptTurns.h: stable) - how much of each turn is drawn.</param>
+        /// <param name="editDiffs">§21.39 "File diffs": true = every file change drawn as a diff whatever the level (the picker's
+        /// checked box, /allscreen's "diffs"); false = the level's own default. It shows in the captions and the files' names.</param>
         /// <returns>
         /// The outcome for the command's [nav] line: "ok" (the worker runs), "busy" (another conversation is being drawn: the
         /// thread was told to ask again) or "failed" (the thread could not start: logged, the thread told). On every outcome but
@@ -1502,7 +1504,7 @@ namespace Agentmaster::Msg
         /// §21.28: the worker carries the calling scope's taps (a tapped 📜 All Screen) and queues every part inside a scope of them,
         /// so the button stays busy until the last picture - or the line saying why there is none - is in.
         /// </remarks>
-        const wchar_t* _startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel);
+        const wchar_t* _startConversationImage(const std::wstring& sessionId, int64_t threadId, const std::wstring& transcript, int turnsLevel, bool editDiffs);
         /// <summary>
         /// Sends a picture into a topic as a PHOTO (sendPhoto, silent, at `prio`); when Telegram refuses it as a photo (a size
         /// it will not take as one, a picture it cannot read), the same bytes go again as a document, in its place.

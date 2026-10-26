@@ -3450,7 +3450,7 @@ namespace Agentmaster::Msg
                     { L"summary", L"the session's summary" },
                     { L"screen", L"the terminal's visible text" },
                     { L"screenimage", L"the terminal's screen as a picture" }, // §21.24 (the card's 🖼 Screen Image)
-                    { L"allscreen", L"the whole conversation as tall pictures [minimal|compact|default|full|max] (bare: the default level)" }, // §21.39 (the card's 📜 All Screen ▸)
+                    { L"allscreen", L"the whole conversation as tall pictures [minimal|compact|default|full|max] [diffs] (bare: the default level)" }, // §21.39 (the card's 📜 All Screen ▸)
                     { L"download", L"a file's download link: /download <path>" }, // §21.32.4 (the file links)
                     { L"status", L"the session's card / the fleet" },
                     { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19
