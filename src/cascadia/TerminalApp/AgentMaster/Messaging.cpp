@@ -3452,7 +3452,7 @@ namespace Agentmaster::Msg
                     { L"screenimage", L"the terminal's screen as a picture" }, // §21.24 (the card's 🖼 Screen Image)
                     { L"allscreen", L"the whole conversation as tall pictures [minimal|compact|default|full|max] [diffs] (bare: the default level)" }, // §21.39 (the card's 📜 All Screen ▸)
                     { L"download", L"a file's download link: /download <path>" }, // §21.32.4 (the file links)
-                    { L"status", L"the session's card / the fleet" },
+                    { L"status", L"Claude Code's status and plan usage (after the session's card / the bot's line)" }, // §21.40
                     { L"search", L"ask the \U0001F50E Search agent from any topic: /search <words>" }, // §21.19
                     // §21.19: a menu command's name holds only a-z, 0-9 and "_" (Telegram refuses the WHOLE list otherwise), so
                     // the user's /search-tab is listed in the form a tap sends; typed, /search-tab works the same.

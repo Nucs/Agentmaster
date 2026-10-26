@@ -171,6 +171,7 @@ int wmain()
     TestMessagingFiles(); // MESSAGING.md §21.32.4 — the Telegram file links: the key, the paths, the rewrite, the linked set, the server end to end (tests_messaging_files.cpp)
     TestMessagingSteer(); // MESSAGING.md §21.33 — /steer, the words sent NOW: the command, the decision, the texts, the prompt, the watch (tests_messaging_steer.cpp)
     TestTuiMenus(); // MESSAGING.md §21.34 — /add-dir's dialog answered from Telegram: the screen, the press, the result, the card, the delivery fixes (tests_tuimenus.cpp)
+    TestClaudeStatus(); // MESSAGING.md §21.40 — /status shows what Claude Code's own /status shows: the readers, the transcript fold, the report's layout, the file read, the child runner (tests_claude_status.cpp)
     TestAskQuestion(); // MESSAGING.md §21.30 — Claude's AskUserQuestion answered from Telegram: the answers, the card, the ask pipe (tests_ask.cpp)
     TestLaunchPresets(); // HARNESSES.md — PRESETS: templates, tiers, the launchArgs snapshot, the compile, refusals, menus (tests_presets.cpp)
     TestTabCloseSuccessor();

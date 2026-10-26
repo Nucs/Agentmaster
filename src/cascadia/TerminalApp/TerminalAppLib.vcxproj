@@ -230,6 +230,11 @@
     <!-- Agentmaster (MESSAGING.md section 21.34): a local command's dialog answered from Telegram (/add-dir) - the screen parser,
          the window's press decision, the transcript's result, the card's text and buttons (header-only, pure). -->
     <ClInclude Include="AgentMaster\TuiMenus.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.40): /status shows what Claude Code's own /status shows - the transcript's status
+         facts, the headless account and usage reads (ClaudeStatus.h, pure + the OS half's declarations) and the report's
+         layout (MessagingStatus.h, header-only, pure). -->
+    <ClInclude Include="AgentMaster\ClaudeStatus.h" />
+    <ClInclude Include="AgentMaster\MessagingStatus.h" />
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the Telegram FILE LINKS - the pure rules (the link, the session key, the
          linked set, the request parsing; header-only) and the server's interface (no Windows header). -->
     <ClInclude Include="AgentMaster\MessagingFileLinks.h" />
@@ -557,6 +562,15 @@
     <!-- Agentmaster (MESSAGING.md section 21.34): the service's menu cards - the watch of a /add-dir a topic queued, the screen
          reads that find its dialog, the card, its buttons and the default pressed after a minute. Plain C++, no PCH. -->
     <ClCompile Include="AgentMaster\Messaging.Menus.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.40): the service's /status report (its worker thread) and the OS half of
+         ClaudeStatus.h - the hidden claude children that print the account and the plan usage, their cache, the transcript read.
+         Plain C++, no PCH. -->
+    <ClCompile Include="AgentMaster\Messaging.Status.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\ClaudeStatus.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's

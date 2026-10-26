@@ -200,6 +200,11 @@ namespace Agentmaster::Msg
         // answered or the time is up, and must never run on a window's UI thread: the service calls it on a worker thread of
         // its own. Empty = no window step (the launch goes to the engine's choice of window).
         std::function<std::vector<WindowCensus>(uint32_t timeoutMs)> windowCensus;
+        // §21.40: the native claude.exe the engine launches sessions with (Engine::claudeExePath; "" = Claude Code not found), for
+        // /status's account and plan usage, which Claude Code prints itself (ClaudeStatusProbe). Called on the poll thread when a
+        // report starts (_startClaudeStatusReport hands the path to the report's worker). Empty = /status reports no account and
+        // no usage ("Claude Code was not found on this PC").
+        std::function<std::wstring()> claudeExe;
     };
 
     // ===== the service ========================================================================
@@ -2897,5 +2902,29 @@ namespace Agentmaster::Msg
 
         /// <summary>The /add-dir watches of this run, oldest first. Under `_mtx`; cleared at a start and at a change of bot.</summary>
         std::vector<MenuWatch> _menuWatches;
+
+        // ----- §21.40: /status shows what Claude Code's own /status shows — its Status tab, the account, the plan usage
+        //       (Messaging.Status.cpp; the pure half is MessagingStatus.h + ClaudeStatus.h) -----
+
+        /// <summary>
+        /// /status's REPORT (§21.40), after the reply the command already gave (a session's card copy; the bot's own line in the
+        /// 🔎 Search topic and the main view). For a session it is the dialog's Status tab out of band — the transcript's facts
+        /// (ReadClaudeTranscriptStatusFile), claude's heartbeat — plus the account (claude auth status --text) and the plan usage
+        /// (claude -p /usage) as Claude Code prints them; for the fleet (`sessionId` empty) the account and the plan usage alone.
+        /// Everything slow runs on a worker thread of its own (the usage alone takes ~6 s; a big transcript a second or more):
+        /// this only checks, claims a report slot (at most kClaudeStatusMaxReports at once — past it the thread is told to ask
+        /// again) and starts the worker, which replies to `replyTo` with one or two messages. A session that is not Claude Code's
+        /// gets one line instead. §21.28: the worker carries the calling scope's taps, so a button that asks for a report stays busy
+        /// until it is in. Poll thread.
+        /// </summary>
+        /// <param name="sessionId">The session ("" = the fleet report).</param>
+        /// <param name="threadId">The topic the report goes to (0 = the chat's main view).</param>
+        /// <param name="replyTo">The /status message the report answers (0 = none).</param>
+        /// <returns>The outcome for the command's [nav] line: "report" (the worker runs), "not-claude", "busy" or "failed".</returns>
+        /// <remarks>
+        /// Never throws: a failure to start the worker is logged (Rule #18), its slot given back, and the thread told. The worker's
+        /// own failures are contained the same way and end with a line in the thread.
+        /// </remarks>
+        const wchar_t* _startClaudeStatusReport(const std::wstring& sessionId, int64_t threadId, int64_t replyTo) noexcept;
     };
 }
