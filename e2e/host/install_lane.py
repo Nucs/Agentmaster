@@ -62,6 +62,13 @@ KIT_FILES = {
 """The scripts under test and the QA kit's guest helpers, staged into Z:\\e2e\\src\\kit (the guest's C:\\e2e\\src\\kit)."""
 READY_TIMEOUT_S = 300.0
 """How long a reset desktop's agent may take to answer its first command."""
+PACKAGE_RELEASE = "v0.7.0"
+"""The release whose MSIX bundle the "pkg" machine stages: the release package the owner had installed (2026-10-26) when
+a portable copy's "Install just for you" reset their profile."""
+PACKAGE_ASSETS = ("Agentmaster_0.7.0.0.msixbundle", "Agentmaster.cer")
+"""That release's bundle and the certificate it is signed with (CN=Agentmaster, self-signed: the guest trusts it)."""
+PACKAGE_CACHE = Path(r"Q:\agentmaster-e2e\cache\pkg-0.7.0")
+"""Where the host keeps the downloaded assets (once; never under K:, CLAUDE.md "Every build writes to Q:")."""
 
 
 def load_catalog() -> tuple[list[dict], frozenset]:
@@ -119,6 +126,39 @@ def stage_kit(persist: Path) -> None:
     kit.mkdir(parents=True, exist_ok=True)
     for name, source in KIT_FILES.items():
         shutil.copy2(source, kit / name)
+
+
+def stage_package_kit(persist: Path) -> Path:
+    """Stage the "pkg" machine's release package into the kit: PACKAGE_RELEASE's msixbundle and certificate, downloaded
+    from GitHub into PACKAGE_CACHE once and copied into Z:\\e2e\\src\\kit\\pkg-0.7.0 (the guest's run copies it to
+    C:\\e2e\\src\\kit\\pkg-0.7.0, where the tests look).
+
+    The folder is made new when it is missing and filled before the guest looks: a NEW file the host drops into an
+    EXISTING folder of the share stays invisible to the guest for over a minute (the share's directory lease), while a
+    new folder shows at once (measured 2026-10-24).
+
+    Args:
+        persist: The desktop's persist folder.
+    Returns:
+        The staged folder.
+    Raises:
+        OSError / urllib.error.URLError: When an asset cannot be downloaded or copied.
+    """
+    import urllib.request  # noqa: PLC0415 - only the pkg machine downloads
+
+    PACKAGE_CACHE.mkdir(parents=True, exist_ok=True)
+    for name in PACKAGE_ASSETS:
+        cached = PACKAGE_CACHE / name
+        if not cached.exists():
+            url = f"https://github.com/Nucs/Agentmaster/releases/download/{PACKAGE_RELEASE}/{name}"
+            partial = cached.with_name(name + ".part")
+            urllib.request.urlretrieve(url, partial)  # nosec - a fixed github.com release URL of this repo
+            partial.replace(cached)
+    target = persist / "e2e" / "src" / "kit" / "pkg-0.7.0"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in PACKAGE_ASSETS:
+        shutil.copy2(PACKAGE_CACHE / name, target / name)
+    return target
 
 
 def wait_ready(fleet: er.Fleet, desktop: str, timeout_s: float = READY_TIMEOUT_S) -> float:
@@ -337,6 +377,8 @@ def main(argv: list[str]) -> int:
         er.log(f"staging the suite and the scripts under test into {persist}")
         er.stage(persist)
         stage_kit(persist)
+        if any("pkg" in s.get("machine", []) for s in runnable):
+            er.log(f"staging the {PACKAGE_RELEASE} release package (the pkg machine) into {stage_package_kit(persist)}")
         wait_s = args.scenario_max_min * 60
         if args.isolation == "reset":
             for n, s in enumerate(runnable, 1):

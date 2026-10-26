@@ -150,6 +150,13 @@ def test_install_just_for_you(lane, kit, machine):
         f"the elevated start's note is missing (UAC is off on the test desktops: every start is elevated)\n{text}"
 
     question.press(r"^Install just for you")
+    # IS-104: installed elsewhere, the copy asks whether its folder may go (Keep here: the stub is checked below).
+    leftover = install.answer_leftover_question(exe.parent, delete=False)
+    assert leftover.labels[:2] and re.match(r"^Delete the downloaded copy \(recommended\)$", leftover.labels[0]) and \
+        re.match(r"^Keep it$", leftover.labels[1]), f"the leftover question offers {leftover.labels}"
+    flat = " ".join(leftover.text.split())
+    assert _norm(install.user_install_dir()) in _norm(flat) and _norm(exe.parent) in _norm(flat) and "Recycle Bin" in flat, \
+        f"the leftover question does not name the install, the copy and the Recycle Bin:\n{leftover.text}"
     app = install.wait_app(install.user_install_dir(), timeout_s=180, newer_than=started)
     _gone(exe.parent)
     state = install.MachineState.read()
@@ -286,8 +293,18 @@ def test_a_newer_copy_updates_and_an_older_one_hands_over(lane, kit, machine):
     assert re.fullmatch(rf"Update the installed Agentmaster \(v{_v('0.8.1.0')} {ARROW} v{_v('0.8.2.0')}\) \(recommended\)",
                         first), f"first option {first!r}; all: {question.labels()}"
     question.press(r"^Update the installed Agentmaster")
+    # IS-105: the copy that updated the install is of no use now: "Delete the downloaded copy" sends its folder to the
+    # Recycle Bin once its process ended (a hidden PowerShell waits for it) — recoverable, never a plain delete.
+    install.answer_leftover_question(newer.parent, delete=True)
     install.wait_app(dest, timeout_s=180, newer_than=started)
     _gone(newer.parent)
+    wait_until(lambda: not newer.parent.exists(), 90, interval_s=1.0, what=f"the downloaded copy {newer.parent} to be removed")
+    recycled = install.run_powershell(["-Command", "(New-Object -ComObject Shell.Application).NameSpace(10).Items() | "
+                                                   "ForEach-Object { $_.Name }"])
+    assert newer.parent.name in recycled.output.split(), f"the copy is not in the Recycle Bin: {recycled.output[-500:]}"
+    assert (newer.parent.parent).exists(), "the folder around the copy went too (it is not an extraction folder)"
+    lines = install.install_log_lines()
+    assert any("leftover copy:" in ln and "chose to delete it" in ln for ln in lines), f"no leftover-copy line: {lines[-8:]}"
     state = install.MachineState.read()
     assert state.user is not None and state.user.version == "0.8.2.0", f"not updated: {state.user}"
     assert (dest / "mine.txt").exists(), "the update removed the user's own file"
@@ -301,6 +318,7 @@ def test_a_newer_copy_updates_and_an_older_one_hands_over(lane, kit, machine):
     assert re.fullmatch(rf"Use the installed Agentmaster \(v{_v('0.8.2.0')}\) \(recommended\)", first), \
         f"first option {first!r}; all: {question.labels()}"
     question.press(r"^Use the installed Agentmaster")
+    install.answer_leftover_question(older.parent, delete=False)  # kept: it stays a stub that forwards launches
     install.wait_app(dest, timeout_s=120, newer_than=started)
     _gone(older.parent)
     stub = install.InstallFacts.read(older.parent)
@@ -339,6 +357,7 @@ def test_install_for_all_users(lane, kit, machine):
     copy_exe = kit.copy("0.8.1.0", "allusers")
     question, started = _start_copy(copy_exe)
     question.press(r"^Install for all users of this PC")
+    install.answer_leftover_question(copy_exe.parent, delete=False, timeout_s=240)  # after the elevated install's window
     install.wait_app(dest, timeout_s=240, newer_than=started)
     _gone(copy_exe.parent)
     state = install.MachineState.read()
@@ -522,7 +541,12 @@ def test_install_to_a_folder_you_pick(lane, kit, machine):
     question.press(r"^Install to a folder you pick")
     _pick_folder(exe.parent, target)
     dest = target / "Agentmaster"
+    # No "Delete the downloaded copy?" here: the copy holds `sub`, which the download did not bring, so its folder is
+    # never offered for deletion (PortableInstall.h JudgeLeftoverCopy) — the installed copy starts without the question.
     install.wait_app(dest, timeout_s=180, newer_than=started)
+    lines = install.install_log_lines()
+    assert any("leftover copy:" in ln and "is not offered for deletion" in ln and "holds sub" in ln for ln in lines), \
+        f"no leftover-copy verdict naming the user's folder in the copy: {lines[-8:]}"
     facts = install.InstallFacts.read(dest)
     assert facts is not None and facts.version == "0.8.1.0", f"no install in {dest}: {facts}"
     assert facts.install_path == "installed", f"install.path {facts.install_path!r} in {dest}"
@@ -572,6 +596,7 @@ def test_the_old_scripts_copy_is_updated(lane, kit, machine):
     assert re.match(re.escape(str(legacy)) + r"\s+—\s+the copy the install script made", first.note, re.IGNORECASE), \
         f"the first option's note does not name the old script's copy: {first.note!r}"
     question.press(r"^Update the installed Agentmaster")
+    install.answer_leftover_question(exe.parent, delete=False)
     install.wait_app(legacy, timeout_s=180, newer_than=started)
     _gone(exe.parent)
     facts = install.InstallFacts.read(legacy)

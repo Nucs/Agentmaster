@@ -726,6 +726,182 @@ $script:AmSetAsidePrefix = '.am-previous-'
 # shared icons: a user without administrator rights can neither remove nor re-point one (measured; PROFILES.md 2c).
 $script:AmActiveSetupId = '{F8D18BA4-7DD1-4F04-8EE0-C9C7342F3264}'
 
+# ---- the user's state is never touched ------------------------------------------------------------------
+# The owner's rule of 2026-10-26 (a portable copy's "Install just for you" into %USERPROFILE%\.agentmaster\bin, beside
+# the profile the user had worked in, left the app "as if the .agentmaster folder was reset"): no install, update or
+# uninstall deletes, empties or moves a folder that holds Agentmaster state - "they contain states the user MUST NOT
+# LOSE". Every recursive delete below goes through Remove-AmTreeGuarded, and a destination folder in the way is renamed
+# aside and kept (Move-AmFolderInTheWay), never mixed into. PortableInstall.h applies the same rules (RemoveTreeGuarded,
+# SetAsideFolderInTheWay, ProfileBootstrap.h PathHoldsProfileNow).
+
+<#
+.SYNOPSIS
+    The folders that hold - or are chosen to hold - an Agentmaster profile of the account running this code: the
+    defaults (%USERPROFILE%\.agentmaster, %USERPROFILE%\.agentmaster-dev), every folder ~\.agentmaster.profiles names,
+    and AGENTMASTER_PROFILE (ProfileBootstrap.h KnownProfileFolders, the same list).
+.DESCRIPTION
+    A folder that does not exist yet is listed too: a path that WILL hold state is protected the same.
+.OUTPUTS
+    [string[]] the folders as written (unnormalized).
+.NOTES
+    Never throws: an unreadable map adds nothing.
+#>
+function Get-AmKnownProfileFolders {
+    $out = New-Object System.Collections.Generic.List[string]
+    if ($env:USERPROFILE) {
+        $out.Add((Join-Path $env:USERPROFILE '.agentmaster'))
+        $out.Add((Join-Path $env:USERPROFILE '.agentmaster-dev'))
+        $map = Join-Path $env:USERPROFILE '.agentmaster.profiles'
+        if (Test-Path -LiteralPath $map) {
+            try {
+                foreach ($line in [IO.File]::ReadAllLines((Resolve-AmPath $map))) {
+                    $t = $line.Trim()
+                    if (-not $t -or $t.StartsWith('#')) { continue }
+                    $eq = $t.IndexOf('=')
+                    if ($eq -gt 0 -and $eq -lt $t.Length - 1) { $out.Add($t.Substring($eq + 1).Trim()) }
+                }
+            } catch {
+                Write-Info "the profile map could not be read ($($_.Exception.Message)); its folders are not listed"
+            }
+        }
+    }
+    if ($env:AGENTMASTER_PROFILE) { $out.Add($env:AGENTMASTER_PROFILE) }
+    return $out.ToArray()
+}
+
+<#
+.SYNOPSIS
+    True when deleting or moving $Path would take Agentmaster state with it (ProfileBootstrap.h PathHoldsProfileNow, the
+    same rule): $Path is a known profile folder (Get-AmKnownProfileFolders) or a folder above one, its own name starts
+    with .agentmaster, or a folder directly inside it does.
+.DESCRIPTION
+    A path BELOW a profile - the per-user install folder <profile>\bin and what lies in it - is not covered: what an
+    installer may delete there is limited by the shipped-names rule (Get-AmShippedNames).
+.PARAMETER Path
+    The file or folder about to be deleted or moved. A relative or empty one counts as protected: what cannot be placed
+    is never acted on.
+.OUTPUTS
+    [bool]
+.NOTES
+    Never throws: a folder that cannot be listed is judged by its path alone.
+#>
+function Test-AmProfileHolder {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $true }
+    try { $full = [IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { return $true }
+    if ((Split-Path -Leaf $full) -like '.agentmaster*') { return $true }
+    foreach ($p in (Get-AmKnownProfileFolders)) {
+        try { $pf = [IO.Path]::GetFullPath($p).TrimEnd('\') } catch { continue }
+        # The folder itself, or one above it (a drive root "C:" continues as "C:\...").
+        if ($pf -ieq $full -or $pf.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    if (Test-Path -LiteralPath $full -PathType Container) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $full -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($child.Name -like '.agentmaster*') { return $true }
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Delete a file or folder that an install step owns - only strictly inside $Within, and never anything that holds
+    Agentmaster state (Test-AmProfileHolder). PortableInstall.h RemoveTreeGuarded, the same door.
+.PARAMETER Path
+    What to delete.
+.PARAMETER Within
+    The folder the step works in (an install folder, its download folder): nothing outside it is ever deleted.
+.PARAMETER Strict
+    Throw when the delete itself fails (a file in use); without it a failure is reported and $false returned.
+.OUTPUTS
+    [bool] true when deleted (or already gone); false when refused or, without -Strict, when it failed.
+.NOTES
+    A refusal never throws, also with -Strict: it is the rule working, not an error - the item stays as it is.
+#>
+function Remove-AmTreeGuarded {
+    param([string]$Path, [string]$Within, [switch]$Strict)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $true }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $root = if ($Within) { [IO.Path]::GetFullPath($Within).TrimEnd('\') } else { '' }
+    if (-not $root -or -not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warn "refused to delete $full : it is not inside $root"
+        return $false
+    }
+    if (Test-AmProfileHolder $full) {
+        Write-Warn "refused to delete $full : it holds Agentmaster profile data (a profile folder, or a .agentmaster folder)"
+        return $false
+    }
+    try {
+        Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+        return $true
+    } catch {
+        if ($Strict) { throw }
+        Write-Warn "could not delete $full : $($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    The top-level entries of $Dir that are NOT an Agentmaster install's leftovers: what an install would otherwise mix
+    its files into (PortableInstall.h ForeignEntriesIn, the same rule).
+.DESCRIPTION
+    Leftovers an install may lay its files in beside: the preserved names (settings\, profile\, profile.path,
+    install.path - never touched by a lay-in), the version / manifest / portable markers, and an interrupted upgrade's
+    set-aside folder. What an uninstall leaves (profile.path, a profile) is the common case.
+.PARAMETER Dir
+    The install destination.
+.OUTPUTS
+    [string[]] the foreign names (empty for a missing or empty folder).
+#>
+function Get-AmForeignEntries {
+    param([string]$Dir)
+    $own = @($script:AmPreservedNames) + @('.am-version', '.am-manifest', '.portable')
+    $foreign = @()
+    foreach ($e in @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue)) {
+        if ($own -contains $e.Name) { continue }
+        if ($e.Name.StartsWith($script:AmSetAsidePrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $foreign += $e.Name
+    }
+    return $foreign
+}
+
+<#
+.SYNOPSIS
+    Rename a destination folder that is in the way of an install (it holds files that are not an Agentmaster install's)
+    to "<name>.before-install-<yyyyMMdd-HHmmss>" in the same parent, and return the new path: one rename, nothing
+    copied, overwritten or deleted - the folder is KEPT (PortableInstall.h SetAsideFolderInTheWay, the same rule).
+.PARAMETER Dir
+    The folder (it exists).
+.OUTPUTS
+    [string] the folder's new full path.
+.NOTES
+    Throws, with nothing changed, for a folder that holds Agentmaster state (Test-AmProfileHolder: renaming a profile
+    would point every install that uses it at an empty folder), when the rename fails (a file in it is in use), or when
+    50 names are taken.
+#>
+function Move-AmFolderInTheWay {
+    param([string]$Dir)
+    $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\')
+    if (Test-AmProfileHolder $full) {
+        throw "$full holds Agentmaster data (a profile). It is left as it is: pick another folder to install to."
+    }
+    $parent = Split-Path -Parent $full
+    $leaf = Split-Path -Leaf $full
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    for ($i = 0; $i -lt 50; $i++) {
+        $target = Join-Path $parent ("$leaf.before-install-$stamp" + $(if ($i) { "-$i" } else { '' }))
+        if (Test-Path -LiteralPath $target) { continue }
+        try {
+            [IO.Directory]::Move($full, $target)
+        } catch {
+            throw "$full holds files that are not Agentmaster's, and it could not be renamed to keep them ($($_.Exception.Message)). Nothing was changed: close what uses it, or pick another folder."
+        }
+        return $target
+    }
+    throw "$full could not be renamed: every name for it is taken. Nothing was changed: pick another folder."
+}
+
 <#
 .SYNOPSIS
     True when $Name is a plain top-level entry name a manifest may list (no separator, drive or stream
@@ -811,7 +987,8 @@ function Get-AmShippedNames {
 .OUTPUTS
     [string[]] the names that were removed.
 .NOTES
-    Never throws for a single entry (a locked file is reported and skipped); the caller checks the result.
+    Never throws for a single entry (a locked file is reported and skipped; one that holds Agentmaster state is refused
+    by Remove-AmTreeGuarded and reported); the caller checks the result.
 #>
 function Remove-AmEntries {
     param([string]$Dir, [string[]]$Names)
@@ -821,12 +998,7 @@ function Remove-AmEntries {
         if ($script:AmPreservedNames -contains $n) { continue }
         $p = Join-Path $Dir $n
         if (-not (Test-Path -LiteralPath $p)) { continue }
-        try {
-            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
-            $removed += $n
-        } catch {
-            Write-Warn "could not remove $p : $($_.Exception.Message)"
-        }
+        if (Remove-AmTreeGuarded -Path $p -Within $Dir) { $removed += $n }
     }
     return $removed
 }
@@ -852,6 +1024,10 @@ function Remove-AmEntries {
     carry none, and a marked helper started through the shell (elevate-shim.exe) would meet a SmartScreen
     prompt of its own (measured in a test desktop on 2026-10-21: 60 of 63 installed files kept the mark).
     The user's own files in the folder keep theirs.
+    A destination that holds no Agentmaster.exe but files of someone else's (Get-AmForeignEntries) is never mixed
+    into: the whole folder is renamed aside and kept (Move-AmFolderInTheWay, "<name>.before-install-<time>") and the
+    layout goes into a fresh folder; one that holds a profile is refused (the owner's rule of 2026-10-26). Every delete
+    goes through Remove-AmTreeGuarded.
 .PARAMETER SourceDir
     The extracted layout (the folder holding Agentmaster.exe).
 .PARAMETER DestDir
@@ -859,15 +1035,26 @@ function Remove-AmEntries {
 .NOTES
     Throws when a move or the copy fails - after the previous version was put back - or when the result holds
     no Agentmaster.exe. When even the put-back fails, the error names the set-aside folder that still holds
-    the previous version's files. Clearing a mark is best effort and never fails the install.
+    the previous version's files. Throws, with nothing changed, when a folder in the way holds a profile or cannot be
+    renamed. Clearing a mark is best effort and never fails the install.
 #>
 function Install-AmLayout {
     param([string]$SourceDir, [string]$DestDir)
+    # Someone else's files in the destination: keep them, under another name, before anything is laid in.
+    if ((Test-Path -LiteralPath $DestDir -PathType Container) -and -not (Get-AppExe $DestDir)) {
+        $foreign = @(Get-AmForeignEntries -Dir $DestDir)
+        if ($foreign.Count -gt 0) {
+            $kept = Move-AmFolderInTheWay -Dir $DestDir
+            $shown = ($foreign | Select-Object -First 5) -join ', '
+            if ($foreign.Count -gt 5) { $shown += ', ...' }
+            Write-Warn "$DestDir already held $($foreign.Count) item(s) that are not Agentmaster's ($shown): kept, the folder was renamed to $kept"
+        }
+    }
     New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
     # A set-aside folder an earlier run could not delete (a file in it was still in use) is ours: it goes now.
     foreach ($stale in @(Get-ChildItem -LiteralPath $DestDir -Directory -Force -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name.StartsWith($script:AmSetAsidePrefix, [StringComparison]::OrdinalIgnoreCase) })) {
-        Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        $null = Remove-AmTreeGuarded -Path $stale.FullName -Within $DestDir
     }
     $old = @(Get-AmShippedNames -Dir $DestDir)
     $sources = @(Get-ChildItem -LiteralPath $SourceDir -Force | Where-Object { $script:AmPreservedNames -notcontains $_.Name -and $_.Name -notlike '*.tmp' })
@@ -918,7 +1105,9 @@ function Install-AmLayout {
             $null = Restore-AmSetAside -DestDir $DestDir -AsideDir $aside -Laid $laid.ToArray() -Moved $moved.ToArray()
         }
     }
-    if (Test-Path -LiteralPath $aside) { Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction SilentlyContinue }
+    # The previous version's set-aside folder holds only names it shipped: it goes (a file still in use keeps it for the
+    # next run, which deletes it above).
+    if (Test-Path -LiteralPath $aside) { $null = Remove-AmTreeGuarded -Path $aside -Within $DestDir }
 }
 
 <#
@@ -944,7 +1133,7 @@ function Restore-AmSetAside {
     foreach ($n in $Laid) {
         $p = Join-Path $DestDir $n
         if (-not (Test-Path -LiteralPath $p)) { continue }
-        try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop } catch { Write-Warn "could not remove the partly copied $p : $($_.Exception.Message)" }
+        try { $null = Remove-AmTreeGuarded -Path $p -Within $DestDir -Strict } catch { Write-Warn "could not remove the partly copied $p : $($_.Exception.Message)" }
     }
     $all = $true
     foreach ($n in $Moved) {
@@ -956,7 +1145,7 @@ function Restore-AmSetAside {
         }
     }
     if ($all) {
-        if (Test-Path -LiteralPath $AsideDir) { Remove-Item -LiteralPath $AsideDir -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $AsideDir) { $null = Remove-AmTreeGuarded -Path $AsideDir -Within $DestDir }
         Write-Ok 'the previous version is back in place'
     }
     return $all
@@ -1849,7 +2038,7 @@ function Uninstall-AmCopy {
     # A set-aside folder an interrupted upgrade left behind (Install-AmLayout) holds only Agentmaster's own files.
     foreach ($stale in @(Get-ChildItem -LiteralPath $full -Directory -Force -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name.StartsWith($script:AmSetAsidePrefix, [StringComparison]::OrdinalIgnoreCase) })) {
-        Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        $null = Remove-AmTreeGuarded -Path $stale.FullName -Within $full
     }
     $decision = Join-Path $full 'install.path'
     if (Test-Path -LiteralPath $decision) { Remove-Item -LiteralPath $decision -Force -ErrorAction SilentlyContinue }
@@ -1857,7 +2046,10 @@ function Uninstall-AmCopy {
     # longer registered (Invoke-AmMachineCopyUserCommand).
     if ($handedTo) { $null = Invoke-AmMachineCopyUserCommand -MachineDir $handedTo -Targets $Targets }
     $left = @(Get-ChildItem -LiteralPath $full -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-    if ($left.Count -eq 0) {
+    if ($left.Count -eq 0 -and (Test-AmProfileHolder $full)) {
+        # Empty, but a .agentmaster folder (an install made INTO a profile folder): it is never removed, even empty.
+        Write-Ok "kept the empty folder $full (an Agentmaster profile folder is never removed)"
+    } elseif ($left.Count -eq 0) {
         Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
         Write-Ok 'removed the folder'
     } else {
@@ -2022,7 +2214,7 @@ function Invoke-AmPhaseAsUser {
     $code = Invoke-AmAsUser -UserSid $Identity.MainUserSid -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
                 -Arguments "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ps1`"" -Wait
     $result = Read-AmPhaseRecord -PhaseDir $phaseDir
-    Remove-Item -LiteralPath $phaseDir -Recurse -Force -ErrorAction SilentlyContinue
+    $null = Remove-AmTreeGuarded -Path $phaseDir -Within (Split-Path -Parent $phaseDir)
     return [pscustomobject]@{ Code = $code; Result = $result }
 }
 
@@ -2425,7 +2617,7 @@ function Invoke-AmUserInstall {
             # Captured: its [bool] must not join this function's own output (the exe path).
             $nowRegistered = Install-AmUserCopy -LayoutDir $root -DestDir $dest -Version $Version -ProfileDir $ProfileDir
         } finally {
-            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            $null = Remove-AmTreeGuarded -Path $work -Within $env:TEMP
         }
         # Older versions of this script made "Agentmaster (Portable).lnk"; once the folder it leads to is
         # registered, the standard Agentmaster.lnk replaces it (a folder kept portable keeps its old entry).
@@ -2475,7 +2667,7 @@ function Invoke-AmMachineInstall {
             $root = Expand-AmZip -ZipPath $ZipPath -WorkDir $work
             Install-AmMachineCopy -LayoutDir $root -DestDir $dest -Version $Version -Force:$Force -OwnSids $OwnSids
         } finally {
-            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            $null = Remove-AmTreeGuarded -Path $work -Within $env:TEMP
         }
     }
     $exe = Join-Path $dest 'Agentmaster.exe'
@@ -2570,7 +2762,7 @@ function Invoke-AmElevatedPhase {
         else { Write-Warn "the step that needs administrator rights could not start: $($_.Exception.Message)" }
     }
     $result = Read-AmPhaseRecord -PhaseDir $phaseDir
-    Remove-Item -LiteralPath $phaseDir -Recurse -Force -ErrorAction SilentlyContinue
+    $null = Remove-AmTreeGuarded -Path $phaseDir -Within (Split-Path -Parent $phaseDir)
     return [pscustomobject]@{ Code = $code; Result = $result }
 }
 
@@ -2636,7 +2828,9 @@ $script:AmCoreFunctionNames = @(
     'Write-Step', 'Write-Ok', 'Write-Warn', 'Write-Info', 'Resolve-AmPath', 'Initialize-Net', 'Import-AppxModule', 'Get-OSArch',
     'Test-Admin', 'Test-CanElevate', 'Get-AmIdentity', 'Get-FileSha256', 'Test-CertInMachineStore',
     'Test-CertTrustedMachine', 'Approve-SigningCert', 'Get-VCLibs', 'Get-AmPackage', 'Remove-AmPackage',
-    'Test-AmPathUnder', 'Get-AmConsoleHostExe', 'Get-AmAncestorExes', 'Test-AmHostedIn', 'Stop-ProcessesUnder', 'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
+    'Test-AmPathUnder', 'Get-AmConsoleHostExe', 'Get-AmAncestorExes', 'Test-AmHostedIn', 'Stop-ProcessesUnder',
+    'Get-AmKnownProfileFolders', 'Test-AmProfileHolder', 'Remove-AmTreeGuarded', 'Get-AmForeignEntries', 'Move-AmFolderInTheWay',
+    'Test-SafeManifestName', 'Read-AmManifest', 'Get-AmShippedNames', 'Remove-AmEntries',
     'Install-AmLayout', 'Restore-AmSetAside', 'Get-AppExe', 'Get-AmLayoutRoot', 'Get-AmInstallDecision', 'Set-AmInstallDecision',
     'Get-AmUserProfileDir', 'Set-AmProfilePointer', 'Test-AmDirWritable', 'Get-AmRegistrationTargets',
     'Send-AmEnvironmentChange', 'Format-AmVersion', 'Get-AmRegistrationName', 'Test-AmShortcutInto',
@@ -3164,7 +3358,7 @@ function Invoke-PortableUpdate {
             "New-Item -ItemType Directory -Force -Path " + (& $q $work) + " | Out-Null`r`n" +
             "`$root = Expand-AmZip -ZipPath " + (& $q $zip) + " -WorkDir " + (& $q $work) + "`r`n" +
             "Install-AmLayout -SourceDir `$root -DestDir " + (& $q $PortableDir) + "`r`n" +
-            "Remove-Item -LiteralPath " + (& $q $work) + " -Recurse -Force -ErrorAction SilentlyContinue`r`n" +
+            "`$null = Remove-AmTreeGuarded -Path " + (& $q $work) + " -Within " + (& $q $Dir) + "`r`n" +
             $(if ($num) { "[IO.File]::WriteAllText((Join-Path " + (& $q $PortableDir) + " '.am-version'), " + (& $q $num) + ")`r`n" } else { '' }) +
             "if ((Get-AmInstallDecision -Dir " + (& $q $PortableDir) + ") -eq 'machine') { foreach (`$n in (Register-AmInstall -Scope Machine -Dir " + (& $q $PortableDir) + " -Version " + (& $q $num) + ")) { Write-Warn `$n } }`r`n" +
             "Write-Ok 'installed'"
@@ -3180,7 +3374,7 @@ function Invoke-PortableUpdate {
             $choice = Read-MachineUpdateChoice -Code $r.Code
             if ($choice -eq 'admin') { Write-Step 'Asking for administrator approval again'; continue }
             # A swap that failed after its expansion leaves its work folder behind (it is removed only at its end).
-            Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            $null = Remove-AmTreeGuarded -Path $work -Within $Dir
             if ($choice -eq 'user') { Invoke-UserInstallInstead -ZipPath $zip; return }
             Write-Warn 'Cancelled - the installed version stays, and starts again.'
             Start-Sleep -Seconds 2

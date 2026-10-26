@@ -1029,6 +1029,151 @@ namespace Agentmaster::Profiles
         return it == entries.end() ? std::wstring{} : it->second;
     }
 
+    // ------------------------------------------------------------- profile protection ----
+    //
+    // The owner's rule of 2026-10-26 (a portable copy's "Install just for you" into %USERPROFILE%\.agentmaster\bin, beside
+    // the profile of the 0.7.0 package the user had worked in, left the app "as if the .agentmaster folder was reset"):
+    // NO install, update or uninstall may delete, empty or move a folder that holds Agentmaster state — "they contain
+    // states the user MUST NOT LOSE". A folder in the way is renamed aside (kept), never deleted. These helpers decide
+    // which folders are such state; PortableInstall.h (detail::RemoveTreeGuarded, the install's destination rule) and the
+    // PowerShell install core (Test-AmProfileHolder, the same rule) refuse to touch them.
+
+    // PURE: whether a folder's NAME marks it as Agentmaster state: `.agentmaster` itself and every `.agentmaster…` name
+    // (`.agentmaster-dev`, a `.agentmaster.backup-…` a user or a past run kept), case-insensitively — also one that no
+    // home map names any more, which is exactly the folder a rule keyed on known paths would miss.
+    //   leaf    — a folder's last path segment (no separators).
+    //   returns — true for a `.agentmaster*` name; false for an empty name.
+    //   throws  — nothing.
+    inline bool IsAgentmasterStateLeaf(std::wstring_view leaf) noexcept
+    {
+        constexpr std::wstring_view prefix{ L".agentmaster" };
+        if (leaf.size() < prefix.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < prefix.size(); ++i)
+        {
+            const wchar_t c = leaf[i];
+            if ((c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c - L'A' + L'a') : c) != prefix[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Every folder that holds — or is chosen to hold — an Agentmaster profile of the account running this process: the
+    // per-identity defaults (~/.agentmaster, ~/.agentmaster-dev), every folder the home map (~/.agentmaster.profiles)
+    // names (each install's own choice, the MSIX package's included), and AGENTMASTER_PROFILE (the running profile, which
+    // the prelude exports). A folder that does not exist yet is listed too: a path that WILL hold state is protected
+    // the same. Reads only; no UI.
+    //   returns — the folders as written (unnormalized), duplicates possible; never empty while %USERPROFILE% resolves.
+    //   throws  — std::bad_alloc only (ReadChoiceFile absorbs a missing or unreadable map).
+    inline std::vector<std::wstring> KnownProfileFolders()
+    {
+        std::vector<std::wstring> out{ DefaultReleaseProfileDir(), DefaultDevProfileDir() };
+        for (const auto& entry : ReadChoiceFile(ChoiceFilePath()))
+        {
+            out.push_back(entry.second); // every install's chosen folder, whatever its key
+        }
+        if (auto env = detail::GetEnvVar(L"AGENTMASTER_PROFILE"); !env.empty())
+        {
+            out.push_back(std::move(env));
+        }
+        return out;
+    }
+
+    // PURE: whether deleting or moving `path` would take Agentmaster state with it: `path` IS one of `profiles` or an
+    // ANCESTOR of one (removing C:\Users\me removes C:\Users\me\.agentmaster), or its own name is a `.agentmaster*` name
+    // (IsAgentmasterStateLeaf). A path BELOW a profile — the per-user install folder <profile>\bin and what lies in it —
+    // is not covered: what an installer may delete there is limited by its own shipped-names rule.
+    //   path     — an absolute path (a relative or empty one reads as protected: never act on what cannot be placed).
+    //   profiles — KnownProfileFolders() (or a test's list); empty entries are skipped.
+    //   returns  — true when the path must be neither deleted nor moved.
+    //   throws   — std::bad_alloc only.
+    inline bool PathHoldsProfile(std::wstring_view path, const std::vector<std::wstring>& profiles)
+    {
+        std::wstring normal;
+        try
+        {
+            const std::filesystem::path p{ path };
+            if (path.empty() || !p.is_absolute())
+            {
+                return true;
+            }
+            normal = p.lexically_normal().wstring();
+        }
+        catch (const std::bad_alloc&)
+        {
+            throw;
+        }
+        catch (...)
+        {
+            return true; // an unparseable path is never acted on
+        }
+        const std::wstring key = detail::NormPathKey(normal);
+        const size_t cut = key.find_last_of(L'\\');
+        if (IsAgentmasterStateLeaf(cut == std::wstring::npos ? std::wstring_view{ key } : std::wstring_view{ key }.substr(cut + 1)))
+        {
+            return true;
+        }
+        for (const auto& profile : profiles)
+        {
+            if (profile.empty())
+            {
+                continue;
+            }
+            std::wstring other;
+            try
+            {
+                other = detail::NormPathKey(std::filesystem::path{ profile }.lexically_normal().wstring());
+            }
+            catch (const std::bad_alloc&)
+            {
+                throw;
+            }
+            catch (...)
+            {
+                continue; // an unparseable map entry names nothing that could be hit
+            }
+            // `key` is the profile itself, or a folder above it (the profile's path continues with a separator; a drive
+            // root normalizes to "c:", so "c:\users\me\.agentmaster" continues it with one too).
+            if (other == key || (other.size() > key.size() + 1 && other.compare(0, key.size(), key) == 0 && other[key.size()] == L'\\'))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // PathHoldsProfile against the live list (KnownProfileFolders), plus one look INTO the folder: a direct child named
+    // `.agentmaster*` (a profile no map names, kept in that folder) protects the folder too. The one question every
+    // installer step asks before it deletes or moves a folder.
+    //   path    — the absolute folder (or file) about to be deleted or moved.
+    //   returns — true when it must be left alone.
+    //   throws  — std::bad_alloc only (a folder that cannot be listed is judged by the path alone).
+    inline bool PathHoldsProfileNow(const std::wstring& path)
+    {
+        if (PathHoldsProfile(path, KnownProfileFolders()))
+        {
+            return true;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_directory(std::filesystem::path{ path }, ec))
+        {
+            return false;
+        }
+        for (auto it = std::filesystem::directory_iterator{ std::filesystem::path{ path }, ec }; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec))
+        {
+            std::error_code dirEc;
+            if (it->is_directory(dirEc) && IsAgentmasterStateLeaf(it->path().filename().wstring()))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Persist the choice for THIS install (read-modify-write keeps the other installs' slots).
     inline bool SaveChoice(const std::wstring& profileDir)
     {

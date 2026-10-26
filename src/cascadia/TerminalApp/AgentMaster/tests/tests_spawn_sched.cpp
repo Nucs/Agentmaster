@@ -4536,7 +4536,10 @@ void TestPortableInstall()
     CHECK(PI::IsPreservedLeaf(L"settings") && PI::IsPreservedLeaf(L"profile") && PI::IsPreservedLeaf(L"Profile.Path") && PI::IsPreservedLeaf(L"install.path"), "preserve: settings / profile / profile.path / install.path (the scripts' list + install.path)");
     CHECK(!PI::IsPreservedLeaf(L"Agentmaster.exe") && !PI::IsPreservedLeaf(L".am-version") && !PI::IsPreservedLeaf(L".portable"), "preserve: binaries / stamps are replaced");
     CHECK(PI::IsCopyExcludedLeaf(L"profile") && PI::IsCopyExcludedLeaf(L"profile.path") && PI::IsCopyExcludedLeaf(L"install.path") && PI::IsCopyExcludedLeaf(L"x.TMP"), "copy: the source's profile data / pointers / temps never travel");
-    CHECK(!PI::IsCopyExcludedLeaf(L"settings") && !PI::IsCopyExcludedLeaf(L".portable") && !PI::IsCopyExcludedLeaf(L".am-version") && !PI::IsCopyExcludedLeaf(L"Agentmaster.exe"), "copy: settings / marker / stamp / binaries travel");
+    // 2026-10-26: `settings` (a pre-profile portable's Terminal settings) no longer travels either — copied, it would
+    // overwrite the destination's own preserved `settings`; PerformInstall seeds the profile's terminal\ from it instead.
+    CHECK(PI::IsCopyExcludedLeaf(L"settings") && PI::IsCopyExcludedLeaf(L"Settings"), "copy: the source's settings\\ never travels (it would overwrite the destination's own)");
+    CHECK(!PI::IsCopyExcludedLeaf(L".portable") && !PI::IsCopyExcludedLeaf(L".am-version") && !PI::IsCopyExcludedLeaf(L"Agentmaster.exe"), "copy: marker / stamp / binaries travel");
 
     // ---- the user PATH list ----
     CHECK(PI::PathListContains(L"C:\\a;C:\\B\\;c:\\c", L"c:\\b"), "path: contains is case + trailing-separator insensitive");
@@ -4940,6 +4943,127 @@ void TestPortableInstall()
         CHECK(readAll(dst + L"\\Agentmaster.exe") == "new exe" && fs::exists(fs::path{ dst } / L"new-only.dll") && !fs::exists(fs::path{ dst } / L"old-only.dll"),
               "upgrade: the new version, without the file only the old one shipped");
         CHECK(asideCount(dst) == 0 && fs::exists(fs::path{ dst } / L"my-notes.txt"), "upgrade: no set-aside folder left; the user's file stays");
+    }
+    {
+        // 2026-10-26, the owner's rule after "Install just for you" into %USERPROFILE%\.agentmaster\bin left their profile
+        // "as if reset": no install deletes, empties or moves a folder that holds Agentmaster state, and a destination in
+        // the way is renamed aside and kept (ProfileBootstrap.h PathHoldsProfile*, PortableInstall.h RemoveTreeGuarded /
+        // SetAsideFolderInTheWay). A scratch AGENTMASTER_PROFILE stands for a known profile (KnownProfileFolders lists it).
+        namespace fs = std::filesystem;
+        const auto touch = [](const std::wstring& p, const char* text) {
+            fs::create_directories(fs::path{ p }.parent_path());
+            std::ofstream f{ fs::path{ p }, std::ios::binary | std::ios::trunc };
+            f << text;
+        };
+
+        // ---- PURE: which names and paths are Agentmaster state ----
+        CHECK(P::IsAgentmasterStateLeaf(L".agentmaster") && P::IsAgentmasterStateLeaf(L".agentmaster-dev") && P::IsAgentmasterStateLeaf(L".AgentMaster.backup-1"),
+              "state leaf: .agentmaster and every .agentmaster* name, any case");
+        CHECK(!P::IsAgentmasterStateLeaf(L"agentmaster") && !P::IsAgentmasterStateLeaf(L"bin") && !P::IsAgentmasterStateLeaf(L".agentmaste") && !P::IsAgentmasterStateLeaf(L""),
+              "state leaf: other names (no dot, a shorter name, empty) are not");
+        const std::vector<std::wstring> known{ L"C:\\Users\\me\\.agentmaster", L"D:\\Data\\am-profile" };
+        CHECK(P::PathHoldsProfile(L"C:\\Users\\me\\.agentmaster", known) && P::PathHoldsProfile(L"c:/users/ME/.agentmaster/", known), "path guard: a known profile itself (any case / slash / trailing separator)");
+        CHECK(P::PathHoldsProfile(L"C:\\Users\\me", known) && P::PathHoldsProfile(L"C:\\", known) && P::PathHoldsProfile(L"D:\\Data", known), "path guard: a folder above a known profile (a drive root too)");
+        CHECK(P::PathHoldsProfile(L"E:\\Backups\\.agentmaster-2026", known), "path guard: a .agentmaster* folder no map names");
+        CHECK(!P::PathHoldsProfile(L"C:\\Users\\me\\.agentmaster\\bin", known) && !P::PathHoldsProfile(L"C:\\Users\\me\\.agentmaster\\bin\\.am-previous-1", known),
+              "path guard: a folder BELOW a profile (the per-user install folder) is not covered by the guard");
+        CHECK(!P::PathHoldsProfile(L"C:\\Users\\me\\Downloads\\agentmaster-0.8.2", known) && !P::PathHoldsProfile(L"D:\\Data\\am-profile-old", known),
+              "path guard: an unrelated folder (a name that only starts like a profile's) is not protected");
+        CHECK(P::PathHoldsProfile(L"", known) && P::PathHoldsProfile(L"relative\\dir", known), "path guard: an empty or relative path is never acted on");
+
+        // ---- the guarded delete ----
+        const std::wstring savedProfileEnv = P::detail::GetEnvVar(L"AGENTMASTER_PROFILE");
+        const std::wstring guardRoot = exeDir + L"\\guard";
+        const std::wstring profile = guardRoot + L"\\home\\.agentmaster";
+        touch(profile + L"\\sessions.json", "{\"version\":1,\"sessions\":[]}");
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", profile.c_str());
+        const std::wstring install = guardRoot + L"\\install";
+        touch(install + L"\\old.dll", "x");
+        touch(install + L"\\.agentmaster\\sessions.json", "{}");
+        std::error_code rm;
+        CHECK(!PI::detail::RemoveTreeGuarded(fs::path{ install } / L".agentmaster", fs::path{ install }, rm) && fs::exists(fs::path{ install } / L".agentmaster" / L"sessions.json"),
+              "guarded delete: a .agentmaster folder inside the install folder is refused and kept");
+        CHECK(!PI::detail::RemoveTreeGuarded(fs::path{ profile }, fs::path{ guardRoot }, rm) && fs::exists(fs::path{ profile } / L"sessions.json"), "guarded delete: a known profile is refused and kept");
+        CHECK(!PI::detail::RemoveTreeGuarded(fs::path{ guardRoot } / L"home", fs::path{ guardRoot }, rm) && fs::exists(fs::path{ profile } / L"sessions.json"), "guarded delete: a folder above a profile is refused");
+        CHECK(!PI::detail::RemoveTreeGuarded(fs::path{ guardRoot } / L"elsewhere", fs::path{ install }, rm), "guarded delete: anything outside the install folder is refused");
+        CHECK(!PI::detail::RemoveTreeGuarded(fs::path{ install }, fs::path{ install }, rm) && fs::exists(fs::path{ install } / L"old.dll"), "guarded delete: the install folder itself is refused");
+        CHECK(PI::detail::RemoveTreeGuarded(fs::path{ install } / L"old.dll", fs::path{ install }, rm) && !fs::exists(fs::path{ install } / L"old.dll"), "guarded delete: a plain entry inside the install folder goes");
+
+        // ---- a destination in the way ----
+        SYSTEMTIME at{};
+        at.wYear = 2026;
+        at.wMonth = 10;
+        at.wDay = 26;
+        at.wHour = 5;
+        at.wMinute = 7;
+        at.wSecond = 9;
+        CHECK(PI::detail::SetAsideFolderLeaf(L"bin", at, 0) == L"bin.before-install-20261026-050709" && PI::detail::SetAsideFolderLeaf(L"bin", at, 2) == L"bin.before-install-20261026-050709-2",
+              "set-aside folder name: <name>.before-install-<yyyyMMdd-HHmmss>, then -<n>");
+        CHECK(PI::detail::IsAgentmasterLeftoverLeaf(L"profile.path") && PI::detail::IsAgentmasterLeftoverLeaf(L"Install.Path") && PI::detail::IsAgentmasterLeftoverLeaf(L"settings") &&
+                  PI::detail::IsAgentmasterLeftoverLeaf(L"profile") && PI::detail::IsAgentmasterLeftoverLeaf(L".am-previous-12") && PI::detail::IsAgentmasterLeftoverLeaf(L".am-version"),
+              "leftovers: decision / pointer files, preserved folders, set-asides and markers");
+        CHECK(!PI::detail::IsAgentmasterLeftoverLeaf(L"my-notes.txt") && !PI::detail::IsAgentmasterLeftoverLeaf(L"sessions.json") && !PI::detail::IsAgentmasterLeftoverLeaf(L"Agentmaster.exe"),
+              "leftovers: a user's file (or a binary, which only an install of ours holds) is not one");
+        const std::wstring leftDst = guardRoot + L"\\dest-leftovers";
+        touch(leftDst + L"\\profile.path", "C:\\somewhere\n");
+        touch(leftDst + L"\\settings\\settings.json", "{}");
+        CHECK(PI::detail::ForeignEntriesIn(leftDst).empty() && PI::detail::ForeignEntriesIn(guardRoot + L"\\missing").empty(), "foreign entries: none in an uninstall's leftovers or a missing folder");
+        const std::wstring foreignDst = guardRoot + L"\\dest-foreign";
+        touch(foreignDst + L"\\my-notes.txt", "mine");
+        touch(foreignDst + L"\\profile.path", "x\n");
+        const auto foreign = PI::detail::ForeignEntriesIn(foreignDst);
+        CHECK(foreign.size() == 1 && foreign[0] == L"my-notes.txt", "foreign entries: the user's file, not the leftover beside it");
+        std::wstring movedTo;
+        std::wstring moveErr;
+        CHECK(PI::detail::SetAsideFolderInTheWay(foreignDst, movedTo, moveErr), "folder in the way: renamed aside");
+        CHECK(!fs::exists(fs::path{ foreignDst }) && fs::exists(fs::path{ movedTo } / L"my-notes.txt") && fs::path{ movedTo }.filename().wstring().rfind(L"dest-foreign.before-install-", 0) == 0,
+              "folder in the way: KEPT whole under <name>.before-install-<time>, in the same parent");
+        const std::wstring profileDst = guardRoot + L"\\dest-with-profile";
+        touch(profileDst + L"\\notes.txt", "mine");
+        touch(profileDst + L"\\.agentmaster\\sessions.json", "{}");
+        std::wstring refusedTo;
+        std::wstring refusedErr;
+        CHECK(!PI::detail::SetAsideFolderInTheWay(profileDst, refusedTo, refusedErr) && refusedErr.find(L"profile") != std::wstring::npos && fs::exists(fs::path{ profileDst } / L".agentmaster" / L"sessions.json"),
+              "folder in the way: one that holds a profile is refused (renaming it would point its install at an empty profile), nothing changed");
+
+        // ---- the downloaded copy, once it handed over ----
+        const std::vector<std::wstring> manifest{ L"Agentmaster.exe", L"Images", L".am-manifest", L".am-version", L".portable" };
+        CHECK(PI::IsDisposableCopyLeaf(L"agentmaster.exe", manifest) && PI::IsDisposableCopyLeaf(L"IMAGES", manifest) && PI::IsDisposableCopyLeaf(L"install.path", manifest) &&
+                  PI::IsDisposableCopyLeaf(L"profile.path", manifest) && PI::IsDisposableCopyLeaf(L".am-previous-7", manifest),
+              "disposable copy: the manifest's names, the copy's own decision / pointer files, a set-aside folder");
+        CHECK(!PI::IsDisposableCopyLeaf(L"my-download.zip", manifest) && !PI::IsDisposableCopyLeaf(L"TerminalApp.dll", manifest), "disposable copy: a name the manifest does not list is the user's");
+        CHECK(PI::IsDisposableCopyLeaf(L"TerminalApp.dll", {}) && !PI::IsDisposableCopyLeaf(L"my-download.zip", {}), "disposable copy: without a manifest the legacy list decides");
+        const std::wstring copy = guardRoot + L"\\Downloads-like\\Agentmaster_0.8.2.0_x64\\agentmaster-0.8.2.0";
+        const std::wstring installedAt = guardRoot + L"\\home\\.agentmaster\\bin";
+        touch(copy + L"\\Agentmaster.exe", "exe");
+        touch(copy + L"\\Images\\icon.png", "png");
+        touch(copy + L"\\.am-manifest", "Agentmaster.exe\nImages/\n.am-manifest\n.am-version\n.portable\n");
+        touch(copy + L"\\.am-version", "0.8.2.0");
+        touch(copy + L"\\.portable", "");
+        touch(copy + L"\\install.path", "x\n");
+        fs::create_directories(fs::path{ copy } / L"profile");
+        CHECK(PI::JudgeLeftoverCopy(copy, installedAt).offer, "leftover copy: a folder of the download's files (and an empty profile\\) is offered");
+        CHECK(!PI::JudgeLeftoverCopy(copy, copy).offer && !PI::JudgeLeftoverCopy(copy, copy + L"\\inner").offer, "leftover copy: never the install itself, nor a folder around it");
+        touch(copy + L"\\profile\\sessions.json", "{}");
+        const auto withData = PI::JudgeLeftoverCopy(copy, installedAt);
+        CHECK(!withData.offer && withData.reason.find(L"profile") != std::wstring::npos, "leftover copy: a profile\\ with data keeps the folder (the user's state)");
+        fs::remove(fs::path{ copy } / L"profile" / L"sessions.json");
+        touch(copy + L"\\my-download.zip", "mine");
+        const auto withOwn = PI::JudgeLeftoverCopy(copy, installedAt);
+        CHECK(!withOwn.offer && withOwn.reason.find(L"my-download.zip") != std::wstring::npos, "leftover copy: a file the download did not bring keeps the folder");
+        fs::remove(fs::path{ copy } / L"my-download.zip");
+        touch(copy + L"\\.agentmaster\\sessions.json", "{}");
+        CHECK(!PI::JudgeLeftoverCopy(copy, installedAt).offer, "leftover copy: a folder holding Agentmaster state is never offered");
+        fs::remove_all(fs::path{ copy } / L".agentmaster");
+        CHECK(PI::JudgeLeftoverCopy(copy, installedAt).offer, "leftover copy: offered again once only the download's files are left");
+        const std::wstring script = PI::LeftoverCopyRemovalScript(L"C:\\Users\\o'brien\\Downloads\\am", 4242);
+        CHECK(script.find(L"$dir = 'C:\\Users\\o''brien\\Downloads\\am'") != std::wstring::npos && script.find(L"Wait-Process -Id 4242") != std::wstring::npos,
+              "removal script: the folder quoted for PowerShell (a quote doubled), the process waited for");
+        CHECK(script.find(L"SendToRecycleBin") != std::wstring::npos && script.find(L"Remove-Item") == std::wstring::npos, "removal script: to the Recycle Bin, never a plain recursive delete");
+        CHECK(script.find(L"-like 'Agentmaster*'") != std::wstring::npos && script.find(L"[IO.Directory]::Delete($parent)") != std::wstring::npos,
+              "removal script: the extraction folder around it goes only when EMPTY and named Agentmaster* (a non-recursive delete)");
+
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", savedProfileEnv.empty() ? nullptr : savedProfileEnv.c_str());
     }
     {
         // 2026-10-21: the copy Install-Agentmaster.ps1 v0.7.10 and older made (%LOCALAPPDATA%\Programs\Agentmaster,

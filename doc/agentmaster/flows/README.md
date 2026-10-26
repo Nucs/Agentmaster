@@ -44,7 +44,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [16-transcripts-and-summaries.md](16-transcripts-and-summaries.md) | Show Transcript, Copy ▸ Transcript, the summary (TRN) | 7 | 4 / 3 / 0 | 26 | 21 | 2 |
 | [17-sessions-browser.md](17-sessions-browser.md) | The Sessions browser (SES) | 6 | 3 / 3 / 0 | 31 | 20 | — |
 | [18-notifications-taskbar-display.md](18-notifications-taskbar-display.md) | Rings, the taskbar count and frame, toasts, rendering, tab size (DSP) | 5 | 1 / 3 / 1 | 23 | 21 | 1 |
-| [19-install-update-profiles.md](19-install-update-profiles.md) | Install, update, uninstall, profiles (INS); the catalog of every install scenario (IS-01–IS-99), run by the install lane | 10 | 4 / 5 / 1 | 38 | 20 | — |
+| [19-install-update-profiles.md](19-install-update-profiles.md) | Install, update, uninstall, profiles (INS); the catalog of every install scenario (IS-01–IS-107), run by the install lane | 10 | 4 / 5 / 1 | 38 | 20 | — |
 | [20-robustness.md](20-robustness.md) | Freezes, crashes, leaks, hostile environments (ROB) | 11 | 3 / 3 / 5 | 28 | 8 | 1 |
 | [21-small-features.md](21-small-features.md) | Tag chips, the Tags panel, sorts, Specify a model, the launch bar, trust (MSC) | 9 | 2 / 4 / 3 | 35 | 10 | — |
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
