@@ -556,7 +556,10 @@ class App:
                     # The app quits on the press, so the dialog's window goes with it: do not wait for it to close.
                     quit_dialog.press("Close all", wait_close=False)
                 break
-            dialog.press("Close Window")
+            # The window's going is what counts: closing the LAST window quits the app, and while it tears down the
+            # dialog's UI Automation calls fail ("An event was unable to invoke any of the subscribers"), so a wait for
+            # the dialog to close would read a dying window as "still open" (run pqr5, 2026-10-26).
+            dialog.press("Close Window", wait_close=False)
             wait_until(lambda: hwnds[0] not in self.main_hwnds(), 20, what="the window to close")
         if self.alive():
             try:

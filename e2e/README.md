@@ -27,6 +27,7 @@ python e2e/host/e2e_run.py --desktop am-e2e-1 --create --provision --delete-afte
 # an existing, provisioned desktop: one area, or the P0 flows only
 python e2e/host/e2e_run.py --desktop am-e2e-1 -- -v suites/test_tab_menu.py
 python e2e/host/e2e_run.py --desktop am-e2e-1 -- -v -m p0
+python e2e/host/e2e_run.py --desktop am-e2e-1 -- -v -m "not needs_fix" suites/test_prompt_queue_runner.py
 
 # rejoin a run already started (its orchestrator ended, or another session started it); or wait 270 s at most
 python e2e/host/e2e_run.py --desktop am-e2e-1 --attach g1full
@@ -259,6 +260,24 @@ since=mark)`), then the UI.
 - **The Sessions page lies over the Agent Manager page**: its controls follow the page's in the content element. A
   table row is a XAML Border, which has no automation peer — it is its cells' texts, from its star (☆ or ★) on — and a
   click on its title cell selects it. Resume here logs `[nav] sessions resume-done new=<sid8>`.
+- **Claude Code draws a right-to-left line in VISUAL order** (measured 2026-10-26, 2.1.291): with Hebrew in its
+  input box the terminal's cells hold the line as it reads on screen, so `Terminal.input_box().draft` reads it
+  reversed and `Terminal.submit` (which waits for the box to read like the typed text) times out; type such a
+  prompt like `test_prompt_queue_runner.py::_submit_right_to_left` (the same characters, in any order). The app's
+  own verified delivery meets the same and refuses the prompt (PQR-K9).
+- **Claude Code's own dialogs for queued local commands** (2.1.291, measured 2026-10-26): `/model <x>` asks
+  "Switch model? … ❯ 1. Yes, switch to …" for a conversation's FIRST switch only — a second one right after it
+  applied without asking; `/add-dir <folder>` asks "Add directory to workspace" only for a folder outside the
+  session's folder (one inside it is added at once). Both dialogs read as a menu over the input box, and Enter
+  takes the selected first option. Answer a dialog whenever one shows rather than counting on one per command.
+- **A quit that cuts a turn** reads as error at the next start, and the stop-on-error pause is logged during the
+  start itself — before marks a test takes after `am.start()`: read it from marks taken before the quit.
+- **0.8.0 can save a closing window's Claude tabs as shells (TAB-K1)** when an autosave a tab change scheduled is
+  still pending at the close; the reopen then brings shells back. Before a quit, let that save land
+  (`test_prompt_queue_runner.py::_let_the_window_record_save`: the `[window-save]` line after the change).
+- **The window's ✕ dialog during a quit:** pressing "Close Window" on the LAST window quits the app, and the
+  dialog's UI Automation calls fail while it tears down; `App.close` waits for the window to go, not for the dialog
+  (2026-10-26).
 - **The per-tab badge** is a row of the terminal's siblings in the content element, at the terminal's top right: texts,
   and its runner mode as a button named by the mode. The Prompt Queue tab's runner toggle has NO name on 0.8.0 (its
   content is a panel): `PromptQueuePane` finds it by its label text.
@@ -350,7 +369,13 @@ since=mark)`), then the UI.
 | PQR-K1 | PQR-06 | Send now with an empty compose box sends the SELECTED row whatever its status: a history row is typed into the session again (found by reading, 2026-10-21) | `test_prompt_queue_runner.py::test_known_defect_send_now_sends_a_selected_history_row_again` |
 | PQR-K2 | PQR-13 | Move up / Move down swap a row with its neighbor in the RAW queue, history rows included: a queued row "moved up" past a history row stays where it was in UPCOMING (found by reading) | `test_prompt_queue_runner.py::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row` |
 | PQR-K3 | PQR-14 | The board card's `⚙ sent/total` counts the history: a session with one typed prompt and nothing queued says `⚙ 1/1` (found by reading) | `test_prompt_queue_runner.py::test_known_defect_the_boards_send_count_counts_typed_history` |
+| PQR-K4 | PQR-13 | A queue template holds the queue's HISTORY too: saved from a session with a typed prompt and one queued one it says `prompts=2`, and the session it is applied to gets the typed prompt queued again, as Pending (found by reading; the Apply-to-dir half — an archived session of the folder receives it — has no test yet) | `test_prompt_queue_runner.py::test_known_defect_a_template_saves_the_sessions_history_too` |
+| PQR-K5 | PQR-16 | A claude typed into a shell tab and adopted gets the cog's default MODE but the struct's backstops: with the cog's maxAutoSends at 2 its three queued prompts all go (a launched session holds the third) (found by reading) | `test_prompt_queue_runner.py::test_known_defect_an_adopted_session_ignores_the_cogs_send_budget` |
 | PQR-K8 | PQR-15, PQR-07 E9, LIF-04 E1 | A reopened or resumed session loses its own runner mode: a window reopen, Resume here and a restore-fresh re-stamp the cog's default, so a queue left Paused comes back Auto and goes by itself, and an interrupt hold is not saved at all (measured on 0.8.0 by the probe `pqprobe1`, 2026-10-24; a defect by the owner's rule of 2026-10-26: "we need the mode per session persisted"). **Fixed in code 2026-10-26** (NOT BUILT): the restore keeps the mode it was saved with, `sessions.json` keeps an interrupt hold with it, and only a NEW session (a first Resume here of an on-disk session included) starts on the cog's default | `test_prompt_queue_runner.py::test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`, `…::test_an_interrupt_hold_survives_a_restart`, `test_claude_lifecycle.py::test_resume_here_keeps_the_sessions_paused_mode` (`needs_fix`; no build has run them yet) |
+| PQR-K9 | PQR-01 E2 | A queued prompt holding right-to-left text (Hebrew) is never delivered: Claude Code draws such a line in VISUAL order, the verified delivery's read-back of the box does not read like the prompt, the delivery takes it for foreign content, undoes its fill twice and marks the prompt Failed (`[send-verify] … FAILED after 2 unverifiable deliveries`), and the reversed read-back is recorded as the session's unsent draft (found by this suite, run `pqr5`, 2026-10-26) | `test_prompt_queue_runner.py::test_known_defect_a_queued_prompt_with_hebrew_is_never_delivered` (two cases) |
+| PQR-K10 | PQR-13 phase 1 | Up in the Prompt Queue's compose box recalls only the newest sent prompt: a second Up recalls it again (expected: the older one; Down back, Down past the newest or Esc restores the draft). Likely cause: the recall writes the text under a latch that assumes TextChanged is synchronous, so its own write resets the walk (found by this suite, run `pqr5`, 2026-10-26) | `test_prompt_queue_runner.py::test_known_defect_a_second_up_does_not_walk_back_to_older_prompts` |
+| PQR-K11 | PQR-01 E4 | A queued prompt of ONE long line (2,000 characters) is never delivered: Claude Code collapses the paste to a bare `[Pasted text #1]` (a multi-line paste carries `+M lines`), the delivery's paste-marker parser (PendingPaste.h ParseMarkerAt) wants `+M lines`, so the read-back is foreign: `FOREIGN read-back after the fill … head="[Pasted text #1]"`, then `FAILED after 2 unverifiable deliveries` (found by this suite, run `pqr6`, 2026-10-26) | `test_prompt_queue_runner.py::test_known_defect_a_long_single_line_prompt_is_never_delivered` |
+| PQR-K12 | PQR-12 phase 2 | A queued `/add-dir` for a folder outside the session's folder is given up before its dialog shows: the delivery's CR and each Enter-retry press leave the command in Claude Code's box (`verified press (box holds the watched prompt)`), the watchdog gives up (`[enter-retry-giveup] … marked Failed, autorunner paused`), and the echo of the command that then runs is never matched (Claude Code most likely spends the Enters on its path completion; found by this suite, runs `pqr6`, `pqr7`, 2026-10-26; intermittent) | — (intermittent: run `pqr8` delivered it and the dialog held the queue; no test until there is a deterministic way in) |
 
 TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
 filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a

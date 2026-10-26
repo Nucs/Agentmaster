@@ -124,11 +124,15 @@ once, exactly as written, after the session has settled — and moves from UPCOM
   `[delivered] … sanitized=<a>-><b>`; [TR] the cleaned text; [ENG] Sent+echoed (the compare folds the
   character out).
 - **E2 Hebrew + emoji.** Queue `שלום ⚠️ [[mock reply "ok"]]`. *Expect:* arrives intact, recorded once.
-  *Check:* [MOCK] the exact text; [UI] one SENT row, no extra `typed` row.
+  *Check:* [MOCK] the exact text; [UI] one SENT row, no extra `typed` row. Measured (2026-10-26, run `pqr5`, 0.8.0):
+  an emoji arrives intact (`test_an_emoji_prompt_arrives_intact_and_is_recorded_once`); a prompt with Hebrew is
+  never delivered — **PQR-K9**.
 - **E3 Multi-line.** Compose three lines (Enter adds a line in the box). *Expect:* one message with the
   newlines kept. *Check:* [TR] one user line holding `\n`s; [MOCK] one request.
 - **E4 Long prompt.** 2,000 characters. *Expect:* one message (Claude may show it as a paste placeholder);
-  the transcript holds the full text. *Check:* [TR] full text.
+  the transcript holds the full text. *Check:* [TR] full text. Measured (2026-10-26, run `pqr6`, 0.8.0): on 40 lines
+  it goes whole, verified as the collapsed render `[Pasted text #1 +N lines]`
+  (`test_a_long_multi_line_prompt_goes_whole_as_one_message`); on ONE line it is never delivered — **PQR-K11**.
 - **E5 Empty compose box.** *Do:* Add to queue with an empty box. *Expect:* nothing is queued.
 - **E6 Queued while Running.** *Expect:* the send waits for the turn's end, then the settle.
 
@@ -470,11 +474,17 @@ when its echo appears, and never fails the queue.
    delivered; no UserPromptSubmit fires; the transcript's command echo marks it echoed; `after` follows
    after the settle; the runner stays Auto. *Check:* [LOG] `[pull-echo] <sid8> prompt <id8> (the
    transcript's /model echo: the delivered command ran)`; no `[lost-send]`; [MOCK] `after`'s request
-   names the sonnet model.
-2. **/add-dir with its dialog.** *Do:* queue `/add-dir <w1>\extra` (an existing folder). *Expect:* Claude
-   opens "Add directory to workspace"; the box reads MenuOpen; no lost verdict while it is open (even
+   names the sonnet model. Measured (2026-10-26, run `pqr5`, Claude Code 2.1.291): the first switch of a
+   conversation opens "Switch model? … ❯ 1. Yes, switch to …" (it reads MenuOpen: the queue holds, no verdict for
+   20 s; Enter confirms, then the echo comes); a second switch right after it applied without asking; `after`
+   ran on `claude-sonnet-5-5`.
+2. **/add-dir with its dialog.** *Do:* queue `/add-dir <a folder beside w1>` (an existing folder OUTSIDE the
+   session's folder — measured: one inside it is added at once, no dialog, its echo marking the delivery).
+   *Expect:* Claude opens "Add directory to workspace"; the box reads MenuOpen; no lost verdict while it is open (even
    past 15 s). *Do:* wait for the dialog to settle, press Enter. *Expect:* the echo arrives, the prompt is
-   echoed, the queue continues.
+   echoed, the queue continues. Measured (2026-10-26, 0.8.0): in two runs of three (`pqr6`, `pqr7`) the command
+   was given up and marked Failed before its dialog showed — **PQR-K12**; in the third (`pqr8`) the dialog held
+   the queue, as it should. Not automated while the defect is intermittent.
 
 **Edge cases**
 - **E1 Same command twice** → each echo consumed by its own delivery (oldest first).
@@ -489,7 +499,8 @@ when its echo appears, and never fails the queue.
 
 **Phases**
 1. **History recall.** *Do:* in the compose box press Up repeatedly, then Down. *Expect:* earlier prompts
-   of this session cycle in; Down at the bottom restores the in-progress text.
+   of this session cycle in; Down at the bottom restores the in-progress text. Measured (2026-10-26, run `pqr5`,
+   0.8.0): the first Up recalls the newest sent prompt, but a second Up recalls it again — **PQR-K10**.
 2. **Pop the last queued prompt.** *Do:* empty box, Ctrl+Shift+Up. *Expect:* the LAST Pending row leaves
    the queue and its text is in the box, caret at the end. *Check:* [LOG] `[nav] queue-pop <sid8> "…"`.
 3. **Row menu.** *Do:* right-click an UPCOMING row. *Expect:* Copy / Move up / Move down / Delete; on a
@@ -644,6 +655,78 @@ active; an incoherent pair is dropped at load — `Persistence.cpp`, `TestPersis
 registry never knew gets the cog's defaults when it is first resumed (`_ResumeSessionFromDisk`), as a new session.
 NEW sessions — a launch, a fork, a `/clear` or `/handover` successor, an adopted claude — still start on the cog's
 default (DELIVERY.md §14).
+
+### PQR-K9 · A queued prompt with right-to-left text is never delivered
+
+> **P0** · Found by the e2e suite on 2026-10-26 against 0.8.0 + Claude Code 2.1.291 (PQR-01 E2, run `pqr5`) ·
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_a_queued_prompt_with_hebrew_is_never_delivered`
+> (`known_defect`; a Hebrew-first line and a Hebrew word inside a left-to-right line)
+
+Claude Code draws a line that holds right-to-left text (Hebrew, Arabic) in VISUAL order: the characters stand
+in the terminal's cells the way they read on screen, not in the order they were typed. The verified delivery
+fills the box, reads it back from the terminal and compares — and the read-back of
+`שלום ⚠️ [[mock reply "ok"]]` was `" ]]"mock reply "ok[[ ⚠️ םולש"` (hooks.log `[send-verify] <sid8> FOREIGN
+read-back after the fill (box chars=28 head=…) - the merge this would have submitted is refused; undoing our
+insertion`). The delivery undid its own fill, tried once more (`strike 1/2 - prompt rolls back to Pending`, then
+a `[draft-swap]` that stashed the box), and gave up: `[send-verify] <sid8> prompt <id8> FAILED after 2
+unverifiable deliveries (foreign content in the box …) - not resent`. The prompt reads Failed (✕), it never
+reaches the model, and the pending-input monitor recorded the reversed read-back as the session's unsent draft
+(`pendingInput` in sessions.json — what a reopen types back into the box, not measured here).
+
+*Correct:* the read-back is compared in the box's visual order (the Unicode bidirectional algorithm applied to
+the expected text: ICU's `ubidi`, which the engine links for ClaudeInvisibleChars), and a draft read from the box
+is put back in logical order. A typed Hebrew prompt is unaffected: its UserPromptSubmit hook carries the logical
+text (PQR-14 phase 3). The suite's own driver met the same trap: `Terminal.submit` waits for the box to read like
+the typed text, so a right-to-left prompt is typed through `_submit_right_to_left` (the same characters, in any
+order).
+
+### PQR-K10 · Up in the compose box recalls only the newest prompt
+
+> **P2** · Found by the e2e suite on 2026-10-26 against 0.8.0 (PQR-13 phase 1, run `pqr5`) ·
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_a_second_up_does_not_walk_back_to_older_prompts`
+> (`known_defect`)
+
+*Do:* a session with two sent prompts; in the compose box type a draft, then Up, Up. *Correct:* the first Up
+recalls the newest prompt, the second the older one; Down walks back, and Down past the newest (or Esc) restores
+the draft. *Today:* the second Up recalls the newest prompt again. The likely cause, read in the code:
+`AgentManagerContent::_ApplyPromptHistoryText` writes the recalled text under the `_promptHistoryNavigating` latch
+on the assumption that the TextBox raises TextChanged synchronously (its comment says so), but TextChanged is
+asynchronous (CLAUDE.md, Gotchas *Popup placement*), so the handler runs after the latch is down, takes the recall
+for the user's edit and resets the walk (`_ResetPromptHistory`), and the next Up starts over at the newest.
+Shift+Up and Ctrl+Up are not affected (the text box's own) — `test_up_in_the_compose_box_recalls_the_newest_sent_prompt`.
+
+### PQR-K11 · A long one-line prompt is never delivered
+
+> **P1** · Found by the e2e suite on 2026-10-26 against 0.8.0 + Claude Code 2.1.291 (PQR-01 E4, run `pqr6`) ·
+> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_a_long_single_line_prompt_is_never_delivered`
+> (`known_defect`)
+
+Claude Code shows a long paste of ONE line collapsed as a bare `[Pasted text #1]` — without the `+M lines` part
+that a multi-line paste's marker carries. The verified delivery's paste-marker parser (`PendingPaste.h`
+`ParseMarkerAt`) accepts only `[Pasted text #N +M lines]` and `[...Truncated text #N +M lines...]`, so
+`VerifyFillAgainstPrompt` finds no marker, the box does not read like the prompt, and the fill is judged foreign:
+`[send-verify] <sid8> FOREIGN read-back after the fill (box chars=16 head="[Pasted text #1]")`, a second fill,
+then `FAILED after 2 unverifiable deliveries` — a queued 2,000-character prompt on one line never reaches the
+model. *Correct:* the bare marker is the collapsed render of a one-line paste (`DraftCarry.h` already parses it:
+`M == 0 ? "[Pasted text #N]" : "[Pasted text #N +M lines]"`), so the fill verifies as collapsed and the prompt goes
+once, whole. The same 2,000 characters on 40 lines go (PQR-01 E4).
+
+### PQR-K12 · A queued `/add-dir` is given up before its dialog shows
+
+> **P1** · Found by the e2e suite on 2026-10-26 against 0.8.0 + Claude Code 2.1.291 (PQR-12 phase 2) · INTERMITTENT:
+> runs `pqr6` and `pqr7` gave the command up, run `pqr8` delivered it and its dialog held the queue as it should —
+> so no test yet (a known-defect test needs a way in that is deterministic)
+
+*Do:* queue `/add-dir <a folder beside the session's folder>` and a prompt after it. *Correct:* the command is
+delivered once, Claude Code's "Add directory to workspace" dialog holds the queue until it is answered, the command's
+echo counts the delivery (`[pull-echo] … /add-dir echo`), the runner stays on and the queue goes on. *Today:* the
+delivery's CR leaves the command in Claude Code's box (`[pending] <sid8> draft … /add-dir C:\…` right after
+`[delivered]`), and so does each of the Enter-retry watchdog's presses (`[enter-retry] <sid8> prompt <id8> verified
+press (box holds the watched prompt)`, three of them); the watchdog gives up — `[enter-retry-giveup] <id> (turn never
+started after 3 Enter retries; marked Failed, autorunner paused)` — and only then does the dialog show. Answering it runs
+the command (its echo is in the transcript), but the prompt is already Failed and is never matched to the echo; the
+runner stays Paused. Claude Code most likely spends those Enters on its path completion (not pinned). A folder INSIDE
+the session's folder is added at once, no dialog, and its echo counts the delivery (run `pqr5`).
 
 ## Reclassified: accepted behavior (not defects)
 

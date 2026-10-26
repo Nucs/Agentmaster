@@ -80,6 +80,22 @@
 > persisted — PQR-K8 (a reopen, Resume here and a restore-fresh re-stamped the cog's default and dropped an interrupt
 > hold) is fixed in code, NOT BUILT, with three `needs_fix` tests no build has run yet; the suites are 27 and 8 tests.
 >
+> **The Prompt Queue Runner's edge cases (2026-10-26):** the PQR flows' uncovered phases and edge cases became 49
+> more tests in `test_prompt_queue_runner.py` (76 in all): a prompt's text (an invisible character, an emoji, line
+> breaks, 2,000 characters), the queue edited mid-drain, the send budget, the global pause's corners, Send now's
+> targets, the interrupt hold's corners, the question guard's sentence rule, a window-restored background tab,
+> retried and cut streams, queued `/model`s with Claude Code's "Switch model?" dialog, the compose box's keys,
+> row menu and templates, typed rows, a crash and a quit mid-send, two windows, and two known defects found by
+> reading (PQR-K4's history half, PQR-K5). Run on 0.8.0 (`pqr5`, then `pqr6`–`pqr8` for the corrected ones), they
+> found four defects: PQR-K9 (a queued prompt holding Hebrew is never delivered: Claude Code draws right-to-left text
+> in visual order and the delivery's read-back takes it for foreign content), PQR-K10 (the compose box's Up recalls
+> only the newest prompt), PQR-K11 (a long one-line prompt is never delivered: its bare `[Pasted text #1]` marker
+> is not recognized) and PQR-K12 (a queued `/add-dir` is given up and marked Failed before its dialog shows — in two
+> runs of three, so it has no test yet). The driver learned: `e2e_run.py` quotes pytest arguments
+> (`-m "not needs_fix"`), `App.close` waits for the window rather than its dialog, a right-to-left prompt is typed by
+> `_submit_right_to_left`, and a terminal-text poll is kept to one read a second (a 200 ms double read stalled the
+> app's UI thread for 31 s).
+>
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
 > lifecycle/failure scenarios. It distinguishes today's limited crash checks from the proposed coverage. No part

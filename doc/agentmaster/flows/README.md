@@ -28,7 +28,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 |---|---|---|---|---|---|---|
 | [01-agent-manager-page.md](01-agent-manager-page.md) | The Agent Manager page, Home, jump back, zero-tab windows (MGR) | 7 | 4 / 2 / 1 (+1 NOT BUILT) | 29 | 22 | 1 (fixed in code) |
 | [02-side-panel.md](02-side-panel.md) | The side panel, its cards, Sum, the + launcher (SP) | 8 | 3 / 3 / 1 (+1 NOT BUILT) | 37 | 27 | 2 (fixed in code; SP-K2 reclassified as a feature) |
-| [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 69 | 6 (1 fixed in code; PQR-K6 and PQR-K7 reclassified as accepted behavior) |
+| [03-prompt-queue-runner.md](03-prompt-queue-runner.md) | The Prompt Queue Runner (PQR) | 16 | 10 / 6 / 0 | 60 | 69 | 10 (1 fixed in code; PQR-K6 and PQR-K7 reclassified as accepted behavior) |
 | [04-drafts-and-delivery.md](04-drafts-and-delivery.md) | Unsent drafts, the draft swap, the mail button, the fork carry (DRF) | 9 | 5 / 3 / 1 | 33 | 42 | — |
 | [05-session-state.md](05-session-state.md) | Session state on every surface, through Claude Code's own events (STA) | 16 | 8 / 7 / 1 | 42 | 52 | 2 (STA-K2–K4 reclassified as accepted delays) |
 | [06-interrupted-work.md](06-interrupted-work.md) | API-error rewinds, the restore wake, interrupted turns (INT) | 7 | 2 / 2 / 0 (+3 NOT BUILT) | 21 | 37 | — |
@@ -50,7 +50,7 @@ The shared reliability guard and dedicated crash/corruption/leak scenarios are s
 | [22-cli-and-session-database.md](22-cli-and-session-database.md) | The `agentmaster` CLI and the session database (CLI, SDB) | 6 | 0 / 1 / 5 | 18 | 7 | 2 (1 fixed in code) |
 | [23-tab-context-menu.md](23-tab-context-menu.md) | The tab's context menu: what it shows where, and what each item does (TCM) | 9 | 5 / 4 / 0 | 36 | 27 | 2 (1 fixed in code) |
 | [24-claude-lifecycle.md](24-claude-lifecycle.md) | Claude Code's life cycle in a tab: launch, `/exit`, a kill, Close and Resume here, a claude typed by hand, a restart, `/clear` (LIF) | 7 | 4 / 3 / 0 | 22 | 2 | — (its two are filed in 03 and 05: PQR-K8, fixed in code, and STA-K1) |
-| **Total** | | **193** | **82 / 80 / 26** (+6 NOT BUILT) | **≈ 699** | **≈ 571** | **27** (9 fixed in code) |
+| **Total** | | **193** | **82 / 80 / 26** (+6 NOT BUILT) | **≈ 699** | **≈ 571** | **31** (9 fixed in code) |
 
 ---
 
@@ -229,9 +229,13 @@ the Explorer tree, templates. They belong to the suite's later breadth (E2E_TEST
 | PQR-K1 | Send now re-sends a selected history row | read, 2026-10-21 (memory `prompt-queue-runner-study-2026-10-21`); a known-defect test since 2026-10-24 (`e2e/suites/test_prompt_queue_runner.py`) |
 | PQR-K2 | Move up / down swap by raw queue index (history rows included) | read; a known-defect test since 2026-10-24 |
 | PQR-K3 | The board's ⚙ sent/total counts history | read; a known-defect test since 2026-10-24 |
-| PQR-K4 | Templates copy history and reach archived sessions | read |
-| PQR-K5 | Records the registry mints get only the cog's mode | read |
+| PQR-K4 | Templates copy history and reach archived sessions | read; the history half a known-defect test since 2026-10-26 |
+| PQR-K5 | Records the registry mints get only the cog's mode | read; a known-defect test since 2026-10-26 (an adopted session's send budget) |
 | PQR-K8 | A reopened or resumed session loses its own runner mode: a window reopen, Resume here and a restore-fresh re-stamp the cog's default (a queue left Paused comes back Auto and goes by itself), and an interrupt hold is not saved at all — **fixed in code 2026-10-26** (NOT BUILT: the mode and its hold are kept per session; three `needs_fix` tests, not yet run on a build) | e2e suite, 2026-10-24 (probe `pqprobe1`; filed as a defect by the owner's rule of 2026-10-26: "we need the mode per session persisted") |
+| PQR-K9 | A queued prompt holding right-to-left text (Hebrew) is never delivered: Claude Code draws such a line in visual order, the verified delivery's read-back of the box does not read like the prompt, and the delivery refuses it twice and marks it Failed (the reversed read-back also becomes the session's remembered draft) | e2e suite, 2026-10-26 (run `pqr5`; `e2e/suites/test_prompt_queue_runner.py`) |
+| PQR-K10 | Up in the Prompt Queue's compose box recalls only the newest sent prompt: a second Up recalls it again (the recall's own text write likely resets the history walk: TextChanged is asynchronous) | e2e suite, 2026-10-26 (run `pqr5`; `e2e/suites/test_prompt_queue_runner.py`) |
+| PQR-K11 | A queued prompt of ONE long line (2,000 characters) is never delivered: Claude Code collapses its paste to a bare `[Pasted text #1]`, which the delivery's paste-marker parser does not know (it wants `+M lines`), so the fill reads foreign and the prompt fails | e2e suite, 2026-10-26 (run `pqr6`; `e2e/suites/test_prompt_queue_runner.py`) |
+| PQR-K12 | A queued `/add-dir` for a folder outside the session's folder is given up before its dialog shows: the delivery's CR and the Enter-retry watchdog's three presses leave the command in Claude Code's box, the watchdog marks it Failed and pauses the runner, and the echo of the command that then runs is never matched | e2e suite, 2026-10-26 (runs `pqr6`, `pqr7`; intermittent: run `pqr8` delivered it, so no test yet) |
 | TGT-K1 | A session's topic the user deleted is never made again | MESSAGING.md §21.21 |
 | TGT-K2 | A send that gets no answer is lost | MESSAGING.md §21.21 |
 | TGC-K1 | `/newsession` / `/forksession` take any text as the model | MESSAGING.md §21.21; memory `telegram-remote-launch-bugs` |
@@ -262,8 +266,9 @@ which is why it is a sweep). On the test build 0.8.1.1 — a purged Release buil
 zipped and run only in a claude-fleet desktop, never installed on this PC — every one passes (runs `fixall-0811`,
 `fixall-0811b`). The open defects the suite found (TCM-K1, ROB-K1, TAB-K5, A11Y-K2) keep a known-defect test that
 asserts TODAY's wrong behavior; each passes on both builds, so none of the fixes touched them. The defects found by
-reading or measuring (PQR-K4–K5, TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet; PQR-K1–K3 got
-known-defect tests on 2026-10-24. PQR-K8 (fixed in code 2026-10-26) has three `needs_fix` tests, which wait for a
+reading or measuring (TGT-K1–K2, TGC-K1–K2, TRN-K1–K2, DSP-K1, CLI-K1) have no test yet; PQR-K1–K3 got
+known-defect tests on 2026-10-24, PQR-K4 (its history half) and PQR-K5 on 2026-10-26, beside PQR-K9–K12,
+which the runner's edge cases found. PQR-K8 (fixed in code 2026-10-26) has three `needs_fix` tests, which wait for a
 build: on 0.8.0 they should fail on the defect.
 
 **Reclassified.** TAB-K2 — a reopen whose focused tab was a shell starts a Claude tab: the LAST restored one ("the
@@ -346,6 +351,15 @@ became feature tests), and the runner's mode is per session and persisted — PQ
 suites are now 27 and 8 tests; three of them are `needs_fix` tests for PQR-K8 that no build has run yet (on 0.8.0
 they should fail on the defect).
 
+**The Prompt Queue Runner's edge cases** (2026-10-26, `test_prompt_queue_runner.py`, 49 more tests: 76 in all) cover
+the PQR flows' remaining phases and edge cases that a mock and the driver can reach (the coverage rows below; what is
+left is listed under them). On the published 0.8.0 the first run (`pqr5`) passed 38 of 46 in 84.2 min; the eight
+that failed were two defects (PQR-K9, PQR-K10), two more found once their tests were corrected (PQR-K11, PQR-K12),
+a one-off UI Automation timeout, and tests whose assumptions the runs corrected (Claude Code asks "Switch model?" only
+for a conversation's first switch; `/add-dir` asks only for a folder outside the workspace; a quit that cuts a turn
+makes Claude Code continue it on resume; a driver wait read a dying window as open; a 200 ms terminal-text poll
+stalled the app's UI thread) — reruns `pqr6`–`pqr8`.
+
 | Flow | Automated | Tests (`e2e/suites/`) |
 |---|---|---|
 | F-S | the fixture on every surface | `test_smoke.py` |
@@ -394,20 +408,22 @@ they should fail on the defect).
 | STA-16 | phase 1 | `…::test_state_follows_with_every_hook_disabled` |
 | INT-01 | phases 1–3 (a connection lost after a tool result; Restart session rewinds, and the turn goes on) | `test_interrupted_work.py::test_restart_session_continues_a_turn_that_died_on_an_api_error` |
 | INT-04 | phases 1, 3, 4 in one window (a cut-off turn woken after a kill or a quit) | `test_session_state.py::test_a_turn_cut_off_by_the_app_ending_reads_error_then_the_restore_wake_continues_it` |
-| PQR-01 | phases 1–5 (the settle from the queue time, the badge's `⏳1` and `settling`, one verified delivery, the `auto` row) | `test_prompt_queue_runner.py::test_a_queued_prompt_waits_out_the_settle_window_and_is_delivered_once` |
-| PQR-02 | phases 1–3, E2 (a background agent's work) | `…::test_the_queue_drains_one_prompt_per_turn_never_into_a_running_turn`, `…::test_a_background_agents_work_holds_the_queue_until_it_is_done` |
-| PQR-03 | phase 2 (phase 1 and phase 3's cue: PQR-01's test; E1: PQR-05's; E2: PQR-06's), E5 (Restart session after claude ended: the held prompt goes once the box is back — accepted) | `…::test_a_status_change_restarts_the_settle_window`, `…::test_restart_session_sends_a_held_prompt_once_its_box_is_back` |
-| PQR-04 | phases 1–4, E1 | `…::test_paused_holds_the_queue_and_the_badges_auto_releases_it`, `…::test_the_cogs_default_mode_paused_starts_new_sessions_paused` |
-| PQR-05 | phases 1–3, 5 (two windows: both buttons, both badges `Auto (Off globally)`) | `…::test_the_global_pause_holds_every_window_and_resume_releases_them` |
-| PQR-06 | phases 1–3, E4; PQR-K1 | `…::test_send_now_asks_first_then_types_at_once_into_a_paused_session`, `…::test_send_now_into_a_running_turn_runs_as_the_next_turn`, `…::test_known_defect_send_now_sends_a_selected_history_row_again` |
-| PQR-07 | phases 1–4, E3, E9 (the hold survives a restart: PQR-K8's fix, `needs_fix`) | `…::test_esc_parks_the_runner_until_the_users_next_message`, `…::test_a_mode_chosen_during_the_interrupt_hold_cancels_its_resume`, `…::test_an_interrupt_hold_survives_a_restart` |
-| PQR-08 | phases 1–3 | `…::test_a_question_holds_the_queue_until_the_user_answers`, `…::test_re_arming_the_runner_releases_a_question_hold` |
+| PQR-01 | phases 1–5 (the settle from the queue time, the badge's `⏳1` and `settling`, one verified delivery, the `auto` row), E1 (an invisible character cleaned, the send not cancelled), E2 (an emoji intact; Hebrew: PQR-K9), E3 (line breaks kept in one message, recorded once), E4 (2,000 characters on 40 lines whole; one line: PQR-K11), E5 (an empty box queues nothing), E6 (queued while a turn runs: its end, then the settle) | `test_prompt_queue_runner.py::test_a_queued_prompt_waits_out_the_settle_window_and_is_delivered_once`, `…::test_an_invisible_character_is_cleaned_and_the_prompt_still_goes_once`, `…::test_an_emoji_prompt_arrives_intact_and_is_recorded_once`, `…::test_a_multi_line_prompt_goes_as_one_message_and_is_recorded_once`, `…::test_a_long_multi_line_prompt_goes_whole_as_one_message`, `…::test_add_to_queue_with_an_empty_box_queues_nothing`, `…::test_a_prompt_queued_while_a_turn_runs_waits_for_its_end_then_the_settle`, `…::test_known_defect_a_queued_prompt_with_hebrew_is_never_delivered` (PQR-K9), `…::test_known_defect_a_long_single_line_prompt_is_never_delivered` (PQR-K11) |
+| PQR-02 | phases 1–3, E1 (a tool turn is one turn), E2 (a background agent's work), E3 (the send budget; and PQR-04 E3: a re-arm resets it), E4 (moved up mid-drain), E5 (deleted mid-drain) | `…::test_the_queue_drains_one_prompt_per_turn_never_into_a_running_turn`, `…::test_a_background_agents_work_holds_the_queue_until_it_is_done`, `…::test_the_next_prompt_waits_for_the_whole_tool_turn`, `…::test_the_send_budget_holds_the_queue_and_a_re_arm_resets_it`, `…::test_a_prompt_moved_up_while_a_turn_runs_goes_next`, `…::test_a_prompt_deleted_while_a_turn_runs_is_never_sent` |
+| PQR-03 | phase 2 (phase 1 and phase 3's cue: PQR-01's test; E1: PQR-05's; E2: PQR-06's), E4 (decided 40 s after the queue time, the production value), E5 (Restart session after claude ended: the held prompt goes once the box is back — accepted) | `…::test_a_status_change_restarts_the_settle_window`, `…::test_a_prompt_queued_at_rest_is_decided_forty_seconds_after_its_queue_time`, `…::test_restart_session_sends_a_held_prompt_once_its_box_is_back` |
+| PQR-04 | phases 1–4, E1, E2 (a stored SemiAuto default loads as Paused), E3 (the budget: PQR-02 E3's test; the question latch: PQR-08 phase 3's), E4 (switched from another window) | `…::test_paused_holds_the_queue_and_the_badges_auto_releases_it`, `…::test_the_cogs_default_mode_paused_starts_new_sessions_paused`, `…::test_a_stored_semiauto_default_mode_loads_as_paused`, `…::test_a_mode_switched_from_another_window_shows_on_the_hosting_windows_badge` |
+| PQR-05 | phases 1–5 (two windows: both buttons, both badges `Auto (Off globally)`; phase 4: Send now during the pause), E1 (a window opened during the pause), E2 (a restart lifts it: PQR-10 E1's test), E3 (a mode chosen during the pause is kept), E4 (an interrupt hold's badge), E5 (a question hold's cue) | `…::test_the_global_pause_holds_every_window_and_resume_releases_them`, `…::test_send_now_still_works_during_the_global_pause`, `…::test_a_window_opened_during_the_global_pause_shows_it_at_once`, `…::test_a_mode_chosen_during_the_global_pause_is_kept_after_the_resume`, `…::test_an_interrupt_hold_during_the_global_pause_shows_on_the_badge`, `…::test_a_question_hold_stays_visible_through_the_global_pause` |
+| PQR-06 | phases 1–5 (phase 4: a selected queued row; phase 5: nothing to send), E1 (a parked tab: nothing typed, back to Pending), E3 (during the global pause: PQR-05 phase 4's test), E4; PQR-K1 | `…::test_send_now_asks_first_then_types_at_once_into_a_paused_session`, `…::test_send_now_into_a_running_turn_runs_as_the_next_turn`, `…::test_send_now_sends_the_selected_queued_row_at_once`, `…::test_send_now_with_nothing_to_send_asks_nothing`, `…::test_send_now_into_a_parked_tab_types_nothing_and_the_prompt_goes_once_it_is_woken`, `…::test_known_defect_send_now_sends_a_selected_history_row_again` |
+| PQR-07 | phases 1–4, E1 (already Paused: no hold), E2 (a second Esc changes nothing), E3, E4 (Send now resumes), E5 (protocol noise does not), E7 (an error after the resume: sticky), E9 (the hold survives a restart: PQR-K8's fix, `needs_fix`) | `…::test_esc_parks_the_runner_until_the_users_next_message`, `…::test_a_mode_chosen_during_the_interrupt_hold_cancels_its_resume`, `…::test_esc_on_a_paused_session_takes_no_interrupt_hold`, `…::test_a_second_esc_during_the_interrupt_hold_changes_nothing`, `…::test_send_now_during_the_interrupt_hold_resumes_the_runner`, `…::test_a_teammate_message_does_not_resume_the_interrupt_hold`, `…::test_an_api_error_after_the_resume_leaves_the_runner_paused_for_good`, `…::test_an_interrupt_hold_survives_a_restart` |
+| PQR-08 | phases 1–3, E1 (trailing whitespace), E2 and E4 (only the answer's last sentence counts), E5 (a new question re-latches) | `…::test_a_question_holds_the_queue_until_the_user_answers`, `…::test_re_arming_the_runner_releases_a_question_hold`, `…::test_a_question_with_trailing_whitespace_still_holds_the_queue`, `…::test_a_question_mark_that_does_not_end_the_answer_holds_nothing`, `…::test_a_new_question_after_a_release_holds_the_queue_again` |
 | PQR-09 | phases 2, 3, E2 (phase 1: PQR-02's test; phase 5: PQR-11 phase 3's; phase 6: LIF-02's) | `…::test_an_open_question_dialog_holds_the_queue_until_it_is_answered`, `…::test_a_menu_on_screen_holds_the_queue_until_it_closes`, `…::test_a_compaction_holds_the_queue_until_the_status_settles` |
-| PQR-10 | phases 1–2 (phase 3: LIF-04's test) | `…::test_a_parked_tab_never_gets_a_queued_prompt_until_it_is_woken` |
-| PQR-11 | phases 1–3 | `…::test_an_api_error_pauses_the_runner_until_the_user_re_arms_it`, `…::test_with_stop_on_error_off_the_queue_waits_out_the_error` |
-| PQR-13 | PQR-K2; E5 (the queue stays with the old conversation across `/clear`: a feature) | `…::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row`, `…::test_clear_leaves_the_tabs_queue_with_the_old_conversation` |
-| PQR-14 | PQR-K3 | `…::test_known_defect_the_boards_send_count_counts_typed_history` |
-| PQR-15 | phases 1–3 (phases 1–2 with the session's own Paused mode: PQR-K8's fix, `needs_fix`) | `…::test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`, `…::test_a_turn_cut_off_by_a_quit_pauses_the_runner_and_holds_the_queue` |
+| PQR-10 | phases 1–2 (phase 3: LIF-04's test), E1 (a window-restored background tab), E2 (a hold scheduled before the park: phase 1's test), E3 (an adopted session: LIF-05's test) | `…::test_a_parked_tab_never_gets_a_queued_prompt_until_it_is_woken`, `…::test_a_restart_lifts_the_global_pause_and_a_background_tab_gets_its_queue_only_once_entered` |
+| PQR-11 | phases 1–3, E1 (an error Claude Code retries away), E2 (a stream cut mid-response) | `…::test_an_api_error_pauses_the_runner_until_the_user_re_arms_it`, `…::test_with_stop_on_error_off_the_queue_waits_out_the_error`, `…::test_an_api_error_claude_code_retries_away_never_pauses_the_runner`, `…::test_a_stream_cut_mid_response_pauses_the_runner` |
+| PQR-12 | phase 1, E1 (two queued `/model`s: the first asks "Switch model?" — no lost-send verdict while it is open — each delivery its own echo, the prompt after them on the last model) | `…::test_queued_model_commands_count_as_delivered_by_their_echo` |
+| PQR-13 | phases 1–4 (history: the first Up and E3 — a second Up is PQR-K10; the pop; the row menu; templates), E1, E3, E5 (the queue stays with the old conversation across `/clear`: a feature); PQR-K2, PQR-K4 (the history half), PQR-K10 | `…::test_up_in_the_compose_box_recalls_the_newest_sent_prompt`, `…::test_known_defect_a_second_up_does_not_walk_back_to_older_prompts`, `…::test_ctrl_shift_up_pops_the_last_queued_prompt_back_into_an_empty_box`, `…::test_a_rows_menu_offers_copy_everywhere_and_the_queue_ops_on_queued_rows`, `…::test_a_queue_saved_as_a_template_is_appended_to_another_sessions_queue`, `…::test_clear_leaves_the_tabs_queue_with_the_old_conversation`, `…::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row`, `…::test_known_defect_a_template_saves_the_sessions_history_too` |
+| PQR-14 | phases 1–3 (phase 2: PQR-01 E3's test), E2 (and PQR-07 E5's test); PQR-K3 | `…::test_typed_prompts_are_recorded_once_and_protocol_noise_not_at_all`, `…::test_known_defect_the_boards_send_count_counts_typed_history` |
+| PQR-15 | phases 1–3 (phases 1–2 with the session's own Paused mode: PQR-K8's fix, `needs_fix`), E1 (a crash mid-turn), E2 (a prompt sent just before a quit) | `…::test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`, `…::test_a_turn_cut_off_by_a_quit_pauses_the_runner_and_holds_the_queue`, `…::test_a_turn_cut_off_by_a_crash_pauses_the_runner_and_holds_the_queue`, `…::test_a_prompt_sent_just_before_a_quit_is_never_sent_again` |
+| PQR-16 | phases 1–3, E1; PQR-K5 | `…::test_two_sessions_keep_their_own_runner_modes`, `…::test_a_prompt_queued_from_another_window_is_delivered_by_the_hosting_window`, `…::test_closing_a_window_keeps_its_sessions_queue_for_a_resume`, `…::test_known_defect_an_adopted_session_ignores_the_cogs_send_budget` |
 | LIF-01 | phases 1–3, E1 | `test_claude_lifecycle.py::test_a_launch_starts_a_fresh_claude_and_the_first_prompt_makes_its_transcript`, `…::test_a_prompt_queued_into_a_fresh_session_is_its_first_message` |
 | LIF-02 | phases 1–4 (and PQR-09 phase 6) | `…::test_exit_ends_claude_and_restart_session_resumes_the_conversation_and_its_queue` |
 | LIF-03 | phases 1–3 | `…::test_a_killed_claudes_shell_never_gets_the_queue_and_restart_session_recovers` |
@@ -435,10 +451,11 @@ phase 3 (MRU mode), TAB-05–TAB-09, STA-02's 20-prompt sample, STA-03 E1, E2, E
 (2.1.291 runs every Agent call in the background), E2 (the flash ring), STA-06 E1–E3, STA-07 E2, E3, E6, STA-08 phase 3
 (the host tab closed), E1–E3, STA-09 phase 1 (F-CORP), STA-10 phase 2 (the summary's link), STA-11 phases 1–3,
 STA-12 phase 3, E2, STA-13 E2–E4 (scheduled tasks and teammates are not mocked yet), STA-14 E1, E4, STA-15 E1–E2, STA-16 E1–E2, INT-01 E1–E9,
-INT-02, INT-03, INT-04 phases 2–3 (two windows, several busy tabs), E1–E8, INT-05–INT-07 (NOT BUILT), PQR-01 E1–E6, PQR-02 E1, E3–E5, PQR-03
-E3–E4 (the lanes' timings), PQR-04 E2–E4, PQR-05 phase 4, E1–E6, PQR-06 phases 4–5, E1–E3, PQR-07 E1, E2, E4–E8, PQR-08
-phase 4, E1–E5, PQR-09 phase 4, E1, PQR-10 E1–E3, PQR-11 E1–E5, PQR-12, PQR-13 phases 1–4, PQR-14 phases 1–3, PQR-15
-E1–E3, PQR-16, PQR-K4, PQR-K5, the edge cases not listed above.
+INT-02, INT-03, INT-04 phases 2–3 (two windows, several busy tabs), E1–E8, INT-05–INT-07 (NOT BUILT), PQR-03 E3 and
+PQR-05 E6 (a Telegram prompt: the fake Telegram is not built), PQR-06 E2 (a delivery in flight: no way to time it
+yet), PQR-07 E6, E8, PQR-08 phase 4 (the badge's mail button has no name on 0.8.0), PQR-09 phase 4 (Ctrl+G's
+editor), E1, PQR-11 E3–E5 (they need fault injection), PQR-12 phase 2 (PQR-K12 is intermittent), E2, E3,
+PQR-13 E2, PQR-14 E1, PQR-15 E3, PQR-K4's Apply-to-dir half, the edge cases not listed above.
 
 ## Adding a flow
 
