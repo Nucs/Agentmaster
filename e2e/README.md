@@ -109,6 +109,9 @@ python e2e/host/install_lane.py --plan                                          
   `start_like_explorer(exe)` (a double-click), `start_direct(exe, *args, env=…)`, `wait_question(copy_dir)` → a
   `TaskDialog` (`labels()`, `buttons()[i].note` — a command link's note, UI Automation's HelpText —, `text()`,
   `press(r"^Install just for you")`, `choices()` / `choose(r"^Remind me in 3 days")` for radio buttons),
+  `answer_leftover_question(copy_dir, delete=False)` (since 2026-10-26 a copy that installed elsewhere, or handed over to
+  an install that was there, asks "Delete the downloaded copy?" BEFORE the installed copy starts: every such press needs
+  it; it returns the dialog's text and labels),
   `wait_app(folder, newer_than=t)`, `end_agentmaster()`, `install_log_lines()`, `profile_log_lines("[update]")`; typing
   like a user: `start_in_console(*argv)` (a new PowerShell window), `console_type(pid, "text\r")` and
   `console_text(pid)` (keys into, and the screen of, a program's console — a window's, or the shell's of an Agentmaster
@@ -128,8 +131,14 @@ python e2e/host/install_lane.py --plan                                          
   `stop_as_system(pid)` ends it); `net` needs nothing provisioned either: the `fake_github` fixture
   (`amdriver/fakegithub.py`) serves api.github.com, github.com and raw.githubusercontent.com from 127.0.0.1:443 in the
   guest (`publish(tag, {name: zip}, prerelease=…)`, `serve_raw(path, file)`, `refuse_tokens(...)`, `rate_limited()`,
-  `requests()`), its certificates made in memory there and its CA trusted for the test only. A tag the lane cannot
-  prepare yet (`uac`, `deny`, `demote`, `pkg`, `sign-in`) makes the host skip the scenario and say so.
+  `requests()`), its certificates made in memory there and its CA trusted for the test only; `pkg` makes the host stage
+  the v0.7.0 release's `.msixbundle` and certificate in the kit (`C:\e2e\src\kit\pkg-0.7.0`, downloaded once into
+  `Q:\agentmaster-e2e\cache\pkg-0.7.0`), which the test trusts and adds itself. A tag the lane cannot prepare yet
+  (`uac`, `deny`, `demote`, `sign-in`) makes the host skip the scenario and say so.
+- **The hub down?** The orchestrators talk to any endpoint that serves the fleet tools: with Docker Desktop running,
+  `AM_E2E_FLEET_URL=http://127.0.0.1:7790/mcp AM_E2E_FLEET_TOKEN_FILE='Q:\claude-desktops\windows\host\token'` reaches this
+  PC's Windows host directly (E2E_TESTING.md §8.5).
+
 
 ## Writing a scenario
 

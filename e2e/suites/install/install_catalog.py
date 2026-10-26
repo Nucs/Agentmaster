@@ -43,11 +43,11 @@ SCENARIOS = [
     {"test": "test_install_update.py::test_a_failed_update_starts_the_old_version_again",
      "ids": ["IS-87"], "flow": "INS-06", "machine": ["net"], "minutes": 3},
     {"test": "test_install_first_launch.py::test_install_just_for_you",
-     "ids": ["IS-40", "IS-41", "IS-42", "IS-99", "IS-88"], "flow": "INS-02", "machine": [], "minutes": 2},
+     "ids": ["IS-40", "IS-41", "IS-42", "IS-99", "IS-88", "IS-104"], "flow": "INS-02", "machine": [], "minutes": 2},
     {"test": "test_install_first_launch.py::test_ask_me_later_then_keep_it_portable",
      "ids": ["IS-43", "IS-44"], "flow": "INS-02", "machine": [], "minutes": 2},
     {"test": "test_install_first_launch.py::test_a_newer_copy_updates_and_an_older_one_hands_over",
-     "ids": ["IS-45", "IS-46"], "flow": "INS-02", "machine": [], "minutes": 3},
+     "ids": ["IS-45", "IS-46", "IS-105"], "flow": "INS-02", "machine": [], "minutes": 3},
     {"test": "test_install_first_launch.py::test_install_for_all_users",
      "ids": ["IS-47"], "flow": "INS-03", "machine": [], "minutes": 2},
     {"test": "test_install_first_launch.py::test_both_installs_current",
@@ -86,11 +86,23 @@ SCENARIOS = [
      "ids": ["IS-28"], "flow": "INS-04", "machine": ["sys"], "minutes": 3},
     {"test": "test_install_system.py::test_a_copy_started_in_session_0",
      "ids": ["IS-54"], "flow": "INS-02", "machine": ["sys"], "minutes": 2},
+    {"test": "test_install_keeps_data.py::test_just_for_you_beside_the_all_users_copy_keeps_the_profile",
+     "ids": ["IS-100", "IS-101"], "flow": "INS-02", "machine": [], "minutes": 4},
+    {"test": "test_install_keeps_data.py::test_just_for_you_while_the_all_users_copy_runs_keeps_the_profile",
+     "ids": ["IS-102"], "flow": "INS-02", "machine": [], "minutes": 4},
+    {"test": "test_install_keeps_data.py::test_just_for_you_over_the_0_7_0_package_keeps_the_profile",
+     "ids": ["IS-103"], "flow": "INS-08", "machine": ["pkg"], "minutes": 5},
+    {"test": "test_install_keeps_data.py::test_a_bin_folder_in_the_way_is_kept_aside",
+     "ids": ["IS-106"], "flow": "INS-02", "machine": [], "minutes": 2},
+    {"test": "test_install_keeps_data.py::test_the_installer_keeps_a_bin_folder_in_the_way",
+     "ids": ["IS-107"], "flow": "INS-01", "machine": [], "minutes": 2},
 ]
 """Every automated install scenario, in the order the lane runs them."""
 
-PREPARED = frozenset({"std", "adm2", "old", "sys", "net"})
+PREPARED = frozenset({"std", "adm2", "old", "sys", "net", "pkg"})
 """The Machine tags the lane can prepare today (besides "fresh"): "std" and "adm2" (provision.ps1 -Accounts makes the
-standard account qastd and the administrator qaadmin), "old" (provision.ps1 -Old extracts v0.7.10 as published) and
-"sys" (nothing to provision: amdriver.install.run_as_system makes a one-shot scheduled task as SYSTEM). UAC, the policy,
-a demotion, the package, the network and a sign-in are the catalog's "planned" column."""
+standard account qastd and the administrator qaadmin), "old" (provision.ps1 -Old extracts v0.7.10 as published),
+"sys" (nothing to provision: amdriver.install.run_as_system makes a one-shot scheduled task as SYSTEM) and "pkg" (the
+host stages the v0.7.0 release's msixbundle and certificate into the kit: install_lane.py stage_package_kit; the test
+trusts the certificate and adds the bundle itself). UAC, the policy, a demotion, the network and a sign-in are the
+catalog's "planned" column."""

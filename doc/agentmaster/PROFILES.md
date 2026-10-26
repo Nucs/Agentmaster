@@ -217,7 +217,8 @@ Drive}\shell\Agentmaster`, `"<exe>" -d "%1|%V"`; Windows 11 lists it under *Show
 InstallLocation, DisplayIcon, `UninstallString` = `"<exe>" --uninstall-portable`, NoModify/NoRepair,
 EstimatedSize); and the folder on the **user PATH** (`WM_SETTINGCHANGE` broadcast). `install.path` =
 `installed`, `profile.path` = the Default profile (absolute). The work runs under a marquee TaskDialog;
-then the INSTALLED copy is launched and the installing process exits (an in-place install carries on).
+then the copy asks whether its own folder may go (*The downloaded copy*, below), the INSTALLED copy is launched and the
+installing process exits (an in-place install carries on).
 *For all users* — written by the shared PowerShell core (`Install-AmMachineCopy`): `HKLM\Software\Classes`
 verbs, `HKLM\...\Uninstall\AgentmasterAllUsers`, the machine PATH, and — instead of shortcuts in the common
 Start menu and on the Public desktop — an **Active Setup component** that gives every user icons of their
@@ -360,6 +361,52 @@ the core); a destination entry that cannot be moved stops the upgrade before any
 evening of 2026-10-21 the old files were deleted first, and a copy that failed half way left a folder
 holding neither version. A set-aside folder an interrupted run left is deleted by the next upgrade or
 uninstall (either installer: the prefix is shared).
+
+**No install ever loses the user's state (2026-10-26).** The owner's report: an all-users install from the 0.7.0 era (the
+release package, which needs an administrator once for its certificate) had been used, then a newer zip's *Install just
+for you* put the install into `%USERPROFILE%\.agentmaster\bin` — inside the profile that held the sessions and titles —
+and the app came up "as if the `.agentmaster` folder was reset or deleted and recreated". Their rule: never delete any
+`.agentmaster` folder; rename what is in the way, in every case. Four install-lane scenarios on v0.8.0 (IS-100–IS-103:
+the all-users copy closed, the all-users copy RUNNING on the profile, the 0.7.0 package taken over with its box's default,
+and that package's workspace of titled tabs) kept every file of the profile and reopened the workspace, and no code path
+was found that deletes a profile; the old `Install-Agentmaster.ps1` (v0.7.10 and older) did have one — its portable
+install deleted everything in its install folder except five names, and its `-Uninstall -Portable` the whole folder —
+which would wipe a profile only when pointed at one. So the rule is now enforced in every install path, whatever the
+cause was:
+
+- **Nothing that holds Agentmaster state is deleted or moved.** `Profiles::PathHoldsProfileNow` (ProfileBootstrap.h) and
+  the core's `Test-AmProfileHolder` name it: a known profile folder (the per-identity defaults, every folder the home map
+  names, `AGENTMASTER_PROFILE`), a folder ABOVE one, any folder named `.agentmaster*` (known or not), and a folder with a
+  `.agentmaster*` folder directly inside. Every recursive delete of an installer goes through one door that refuses
+  those and anything outside the folder the step works in — `detail::RemoveTreeGuarded` (PortableInstall.h: the
+  set-aside clean-ups, the restore of a failed copy) and `Remove-AmTreeGuarded` (the core: `Remove-AmEntries`, the
+  set-asides, the uninstall, every temp folder); a refusal is logged and leaves the item as it was. An uninstall that
+  empties a `.agentmaster*` folder keeps the empty folder.
+- **A destination folder in the way is renamed aside and kept, never mixed into.** An install into a folder that holds
+  no Agentmaster but files of someone else's — anything beyond an install's leftovers (`profile.path`, `install.path`,
+  `settings\`, `profile\`, the markers, a set-aside folder: what an uninstall leaves) — renames that whole folder to
+  `<name>.before-install-<yyyyMMdd-HHmmss>` in the same parent (one rename: nothing copied, overwritten or deleted) and
+  lays the install into a fresh folder; the install's notes and `[install]` line name where it went
+  (`detail::SetAsideFolderInTheWay`, the core's `Move-AmFolderInTheWay`). A folder that holds a profile is refused
+  instead: renaming it would point its install at an empty profile — which would look exactly like the reported reset.
+- **The copy no longer carries `settings\`** (a pre-profile portable's Terminal settings): copied, it overwrote the
+  destination's own preserved `settings\`, which the core never did. Its files go to `<profile>\terminal\`, copy-if-absent.
+
+**The downloaded copy (2026-10-26).** A zip must be unpacked somewhere to run; once that copy installed Agentmaster
+elsewhere (*Install just for you*, a picked folder, for all users) or handed over to an install that was already there
+(*Use the installed …*), it only forwards launches. The owner's request: the user was never asked whether to delete it.
+So the copy now asks **"Delete the downloaded copy?"** right after the install (before the installed copy starts):
+*Delete the downloaded copy (recommended)* / *Keep it* (it stays a launcher stub; Cancel / Esc keep it too). It is offered
+only for a folder that holds nothing but the download's files (`JudgeLeftoverCopy`: the manifest's names, else the legacy
+list; `install.path` / `profile.path`; `profile\` and `settings\` only when EMPTY — a "later" run's profile with data stays
+the user's), that this account can write, that holds no Agentmaster state, and that is no well-known folder (the user
+folder, Desktop, Documents, Downloads, Program Files, Windows, a drive root). The removal starts only once the installed
+copy started (a failed start goes back to the question, which needs the folder): a hidden Windows PowerShell, outside
+this process's job, waits for the copy's process to end, then for anything else running from the folder (a minute at
+most), proves nothing holds it (a rename there and back), and moves it to the **Recycle Bin** — recoverable, never a plain
+delete — then removes the extraction folder around it (`Agentmaster_<version>_<arch>` from Explorer's *Extract All*) when
+that is left EMPTY and is named `Agentmaster*`. `[install] leftover copy: …` lines record the verdict, the answer and the
+scheduling.
 
 **Existing installs — never overridden, taken over where we can:**
 

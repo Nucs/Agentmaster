@@ -705,6 +705,19 @@ and a Standard provisioning, so the desktop is what the other suites expect (`--
 its reset, provisioning and test times. A desktop the run creates is itself a clean machine: its first scenario skips the
 reset.
 
+**When the homelab's hub is down** (2026-10-26: the k3s nodes unreachable, so the `claude-fleet` MCP server failed): the
+Windows desktops live on this PC, and this PC's Windows host answers the same fleet tools itself, with its own token.
+Start Docker Desktop (the host's container comes back with it), then point the orchestrators at the host:
+`AM_E2E_FLEET_URL=http://127.0.0.1:7790/mcp AM_E2E_FLEET_TOKEN_FILE='Q:\claude-desktops\windows\host\token' python
+e2e/host/install_lane.py …` (`e2e_run.Fleet`; both variables or neither; the token is read into a variable, never printed).
+
+**The `pkg` machine** (2026-10-26): `install_lane.py` downloads the v0.7.0 release's `.msixbundle` and `Agentmaster.cer` once
+into `Q:\agentmaster-e2e\cache\pkg-0.7.0` and stages them in the kit (`C:\e2e\src\kit\pkg-0.7.0`) for a scenario tagged
+`pkg`; the test trusts the certificate (`Cert:\LocalMachine\TrustedPeople`, UAC is off) and adds the bundle itself (the
+golden image has its `Microsoft.UI.Xaml.2.8` dependency). The package's app is `WindowsTerminal.exe` in a WindowsApps
+folder, which `app_processes` cannot see (`_beside_agentmaster` cannot read that folder): the tests find it by its
+`InstallLocation`.
+
 **The isolation modes** (`--isolation`, written into the lane file for the tests):
 
 | Mode | Between scenarios | For |

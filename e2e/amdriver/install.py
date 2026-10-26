@@ -1953,6 +1953,48 @@ def no_question_for(copy_dir: Path, seconds: float) -> bool:
     return True
 
 
+LEFTOVER_QUESTION = "Delete the downloaded copy?"
+"""The question a copy asks once it handed over to an install elsewhere — installed elsewhere, or deferring to an install
+that was already there (PortableInstall.h AskToRemoveLeftoverCopy, the owner's request of 2026-10-26)."""
+
+
+@dataclass
+class LeftoverAnswer:
+    """What the "Delete the downloaded copy?" question showed, and the answer given.
+
+    Attributes:
+        text: The dialog's texts and button labels with their notes (TaskDialog.text), read before the press.
+        labels: Its command links' labels.
+        deleted: True when "Delete the downloaded copy" was pressed, False for "Keep it".
+    """
+
+    text: str
+    labels: list[str]
+    deleted: bool
+
+
+def answer_leftover_question(copy_dir: Path, delete: bool, timeout_s: float = 180.0) -> LeftoverAnswer:
+    """Wait for a copy's "Delete the downloaded copy?" and answer it like a user.
+
+    It comes after the install's progress dialog (or right after a "Use the installed …" press), before the installed copy
+    starts; until it is answered, the installed copy is not started.
+
+    Args:
+        copy_dir: The copy's folder (its process's image lies there).
+        delete: Press "Delete the downloaded copy" (True) or "Keep it" (False).
+        timeout_s: How long the question may take to come (an install's copy runs first).
+    Returns:
+        What the question showed and the answer.
+    Raises:
+        WaitTimeout: When the question did not come.
+        LookupError: When the chosen button is missing.
+    """
+    box = TaskDialog.wait(LEFTOVER_QUESTION, exe_dirs=[copy_dir], timeout_s=timeout_s)
+    text, labels = box.text(), box.labels()
+    box.press(r"^Delete the downloaded copy" if delete else r"^Keep it")
+    return LeftoverAnswer(text, labels, delete)
+
+
 def install_log_lines(profile: Optional[Path] = None) -> list[str]:
     """The `[install]` lines of a profile's hooks.log (the first launch and the uninstall log there).
 

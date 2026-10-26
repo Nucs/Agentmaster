@@ -48,6 +48,12 @@ from pathlib import Path
 
 E2E = Path(__file__).resolve().parents[1]
 FLEET_URL = "http://192.168.50.150:7800/mcp"
+FLEET_URL_ENV = "AM_E2E_FLEET_URL"
+"""Overrides FLEET_URL: e.g. this PC's own Windows host, http://127.0.0.1:7790/mcp, which serves the same fleet tools for
+its Windows desktops when the homelab's hub is down (found 2026-10-26: the cluster unreachable, the desktops fine)."""
+FLEET_TOKEN_FILE_ENV = "AM_E2E_FLEET_TOKEN_FILE"
+"""A file holding the token for the FLEET_URL_ENV endpoint (the Windows host's is Q:\\claude-desktops\\windows\\host\\token);
+when it is set the token is read from it instead of from the cluster (kubectl). Read into a variable, never printed."""
 FLEET_CLIENT = Path(r"K:\source\claude-desktops\fleet")
 PERSIST_ROOT = Path(r"Q:\claude-desktops\windows\desktops")
 RUNS = Path(r"Q:\agentmaster-e2e\runs")
@@ -98,25 +104,41 @@ _INVALID_HANDLE = wintypes.HANDLE(-1).value
 
 
 class Fleet:
-    """The claude-fleet hub, through its MCP endpoint.
+    """The claude-fleet hub, through its MCP endpoint — or, when AM_E2E_FLEET_URL and AM_E2E_FLEET_TOKEN_FILE are set, any
+    endpoint that serves the same fleet tools (this PC's Windows host while the hub is down).
 
     Attributes:
         client: The McpClient (holds the token; never print it).
     """
 
     def __init__(self) -> None:
-        """Read the fleet token from the cluster and prepare the client.
+        """Read the fleet token (from the cluster, or from the override's token file) and prepare the client.
+
+        The override exists because the Windows desktops live on this PC: the hub only forwards to this PC's Windows host,
+        which answers the same tools itself with its own token. With the cluster down, a run that needs only Windows
+        desktops goes on through the host directly.
 
         Returns:
             None.
         Raises:
-            subprocess.CalledProcessError: When kubectl cannot read the secret.
+            subprocess.CalledProcessError: When kubectl cannot read the secret (no override).
+            OSError: When the override's token file cannot be read.
+            ValueError: When only one of the two override variables is set (a half override would send the cluster's
+                token to another endpoint, or the file's token to the hub).
         """
         sys.path.insert(0, str(FLEET_CLIENT))
         from mcp_client import McpClient  # the repo's stdlib client
-        raw = subprocess.check_output(["kubectl", "-n", "claude-desktops", "get", "secret", "fleet-token",
-                                       "-o", "jsonpath={.data.token}"])
-        self.client = McpClient(FLEET_URL, base64.b64decode(raw).decode(), timeout_s=900)
+        url, token_file = os.environ.get(FLEET_URL_ENV, ""), os.environ.get(FLEET_TOKEN_FILE_ENV, "")
+        if bool(url) != bool(token_file):
+            raise ValueError(f"set both {FLEET_URL_ENV} and {FLEET_TOKEN_FILE_ENV}, or neither")
+        if url:
+            token = Path(token_file).read_text(encoding="ascii").strip()
+        else:
+            url = FLEET_URL
+            raw = subprocess.check_output(["kubectl", "-n", "claude-desktops", "get", "secret", "fleet-token",
+                                           "-o", "jsonpath={.data.token}"])
+            token = base64.b64decode(raw).decode()
+        self.client = McpClient(url, token, timeout_s=900)
 
     def tool(self, name: str, arguments: dict) -> str:
         """Call a fleet tool.

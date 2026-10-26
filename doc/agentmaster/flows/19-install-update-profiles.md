@@ -9,7 +9,7 @@
 > secure desktop: answer it through QEMU's monitor (`tools\install-qa\qm.py`). [OS] here = `Get-AmQaState` (every
 > install, Apps & Features entry, PATH entry, verb, shortcut and pin with its AUMID, profile, running process with its
 > account and elevation). These flows automate the manual QA tables of PROFILES.md §2c. **Every scenario of them is
-> listed at the end of this file** ("Every install scenario", IS-01–IS-99, with the machine each needs and its test);
+> listed at the end of this file** ("Every install scenario", IS-01–IS-107, with the machine each needs and its test);
 > the suite runs them in the **install lane** ([`../E2E_TESTING.md`](../E2E_TESTING.md) §8.5), which resets the test
 > desktop before every scenario and once more after the last.
 
@@ -80,7 +80,13 @@ edge cases.
    `profile.path`; never asked again.
 4. **Install just for you.** *Expect:* as INS-01's registrations; the unzip becomes a launcher stub of the install (its
    `install.path` names the install folder, so a later double-click of it starts the installed copy — measured by the
-   install lane on 2026-10-24; this line said "untouched" before); the installed copy started, the unzip's process gone.
+   install lane on 2026-10-24; this line said "untouched" before); then **"Delete the downloaded copy?"** (2026-10-26:
+   *Delete the downloaded copy (recommended)* / *Keep it*, naming the install and the copy's folder); the installed copy
+   started, the unzip's process gone; *Delete* sends the copy's folder to the Recycle Bin once its process ended.
+5. **The profile beside it.** *Do:* the same with `%USERPROFILE%\.agentmaster` already in use (an all-users copy's or the
+   release package's sessions, titles and workspace). *Expect:* every file of the profile kept, the installed copy runs on
+   it and reopens its windows; a `bin` folder of someone else's files is renamed aside (`bin.before-install-<time>`) and
+   kept, never mixed into.
 
 **Edge cases**
 - **E1 A newer zip over a per-user install** → *Update the installed Agentmaster (vX → vY)* recommended; the user's own file in
@@ -250,7 +256,7 @@ spending the 60 GitHub API requests an hour this PC shares with its desktops):
 | `uac` | UAC on at Windows' defaults (a reboot); its prompts sit on the secure desktop, answered through QEMU's monitor (`tools\install-qa\qm.py`) | not yet |
 | `deny` | standard users' elevation refused by policy | not yet |
 | `demote` | the signed-in user removed from Administrators (a reboot) | not yet |
-| `pkg` | an MSIX package the guest trusts (F-PKG, or the real release bundle with `net`) | not yet |
+| `pkg` | an MSIX package the guest trusts (F-PKG, or the real release bundle with `net`) | prepared for the v0.7.0 release package (2026-10-26): `install_lane.py` downloads its `.msixbundle` and `Agentmaster.cer` once (`Q:\agentmaster-e2e\cache\pkg-0.7.0`) and stages them in the kit (`C:\e2e\src\kit\pkg-0.7.0`); the test trusts the certificate and adds the bundle itself. F-PKG (a package of the build under test) is still planned |
 | `sys` | a one-shot scheduled task as SYSTEM | prepared: nothing to provision; `amdriver.install.run_as_system` makes the task (`amqa-sys-…`, removed with its result) and `stop_as_system` ends what it started |
 | `old` | a build from before the manifest / `--register-user` (the released v0.7.10 zip, with or without a manifest added) | prepared: `provision.ps1 -Lane Install -Old` extracts v0.7.10 as published; `Kit.old_zip(manifest=…)` makes the zips |
 | `sign-in` | a Windows sign-in inside the scenario (Active Setup runs then): a reboot the host must wait out | not yet |
@@ -314,7 +320,7 @@ what it waits for.
 | IS-47 | *Install for all users of this PC* (UAC off: no prompt) | IS-18's install; the user's own icons; the copy runs as the user | fresh | probe, real app (UAC Yes) | `…::test_install_for_all_users` |
 | IS-48 | *Install for all users*, UAC *No* | "cancelled at the UAC prompt", back to the question, nothing installed | uac | real app | planned: `uac` |
 | IS-49 | a per-user and an all-users install, both current | the per-user one recommended | fresh | probe | `test_install_first_launch.py::test_both_installs_current` |
-| IS-50 | *Install to a folder you pick…* | a non-empty folder → `<folder>\Agentmaster`; inside the copy → refused; Program Files without rights → refused, pointing at *for all users* | fresh | — | `test_install_first_launch.py::test_install_to_a_folder_you_pick` (the folder dialog through UI Automation; Program Files without rights needs `uac`) |
+| IS-50 | *Install to a folder you pick…* | a non-empty folder → `<folder>\Agentmaster`; inside the copy → refused; Program Files without rights → refused, pointing at *for all users*; the copy, which now holds the refused pick's folder, is NOT offered for deletion (`[install] leftover copy: … is not offered for deletion: it holds sub`) | fresh | — | `test_install_first_launch.py::test_install_to_a_folder_you_pick` (the folder dialog through UI Automation; Program Files without rights needs `uac`) |
 | IS-51 | *Install here* | the registration only, no copy | fresh | — | `test_install_first_launch.py::test_install_here` |
 | IS-52 | another administrator, elevated, in the user's session | *Set it up for <user> (recommended)*; the copy restarts as the user (~13 s), who gets their own question; nothing installed for the administrator | adm2 | probe, real app | `test_install_accounts.py::test_another_administrator_sets_it_up_for_the_signed_in_user` |
 | IS-53 | another account without rights in the user's session | the warning with how to set it up for the signed-in user; its own install offered by name; nothing written | std | probe, real app | `test_install_accounts.py::test_another_account_sees_the_question` |
@@ -381,3 +387,27 @@ what it waits for.
 | IS-97 | `WindowsTerminal.exe -d <dir>` in the install folder while the app runs | the running Agentmaster takes it (a new tab); the forwarder exits; one Agentmaster process | fresh | — | `test_install_coexistence.py::test_the_old_name_forwards` |
 | IS-98 | the same with no app running | `Agentmaster.exe` starts with the arguments | fresh | — | same test |
 | IS-99 | an installed copy's first start | no profile question; the Default profile; Terminal's own settings under `<profile>\terminal\` | fresh | real app | `test_install_first_launch.py::test_install_just_for_you` |
+
+### H · The user's data, and the downloaded copy (2026-10-26)
+
+The owner's report of 2026-10-26: an "admin installation" from the 0.7.0 era (the release package) had been used — sessions
+and titles in `%USERPROFILE%\.agentmaster` — then a newer zip's *Install just for you* (into `.agentmaster\bin`, inside that
+profile) left the app "as if the `.agentmaster` folder was reset or deleted and recreated"; and the zip's own folder, of
+no use once installed elsewhere, was never offered for deletion. IS-100–IS-103 reproduced the install on v0.8.0 four ways
+(green: every file kept, the workspace reopened — the reported reset did NOT reproduce); the rules that now hold in every
+path are PROFILES.md §2b *No install ever loses the user's state* and *The downloaded copy*. On the build that adds them
+(2026-10-26, a purged Release build's portable zip; runs `inst-keepdata-fix-1`/`-2`/`-3` on a desktop reset before every
+scenario, reached through this PC's Windows host) the WHOLE lane passed: all 40 scenarios, IS-100–IS-107 and every
+earlier one (two first-run failures were test bugs, fixed: the picked-folder copy holds the test's own folder, so it is
+correctly not offered for deletion; `-NonInteractive` is no installer parameter).
+
+| Id | Scenario | Expected | Machine | Checked by hand | e2e |
+|---|---|---|---|---|---|
+| IS-100 | an all-users install the user worked in (sessions, titles, tags, files of their own in the Default profile), then a newer copy's *Install just for you* | every file of the profile still there (the user's own byte for byte, the sessions and titles by content) | fresh | — | `test_install_keeps_data.py::test_just_for_you_beside_the_all_users_copy_keeps_the_profile` |
+| IS-101 | the same: the installed copy's profile | `profile.path` = that profile; no question at its first start | fresh | — | same test |
+| IS-102 | the same while the all-users copy RUNS on the profile | the install and the installed copy's start (a second instance on the profile, its warning answered *Yes*) remove nothing | fresh | — | `test_install_keeps_data.py::test_just_for_you_while_the_all_users_copy_runs_keeps_the_profile` |
+| IS-103 | the v0.7.0 release PACKAGE installed and used (titled tabs open), then a newer copy's *Install just for you*, its box left at the default | the question names the package; every file of the profile kept; the package removed; the installed copy runs on the profile and reopens the package app's window with its titled tabs | pkg | — | `test_install_keeps_data.py::test_just_for_you_over_the_0_7_0_package_keeps_the_profile` |
+| IS-104 | *Install just for you* from a copy | **"Delete the downloaded copy?"** with *Delete the downloaded copy (recommended)* and *Keep it*, naming the install, the copy and the Recycle Bin; *Keep it* leaves the copy a launcher stub | fresh | — | `test_install_first_launch.py::test_install_just_for_you` |
+| IS-105 | *Delete the downloaded copy* after a copy updated the per-user install | the copy's folder in the Recycle Bin once its process ended; the folder around it kept (not an extraction folder); `[install] leftover copy: … chose to delete it` | fresh | — | `test_install_first_launch.py::test_a_newer_copy_updates_and_an_older_one_hands_over` |
+| IS-106 | `%USERPROFILE%\.agentmaster\bin` holds files of the user's own, then *Install just for you* | that folder renamed aside whole (`bin.before-install-<time>`), the install in a fresh `bin`, the profile's files kept; the `[install]` note names the kept folder | fresh | — | `test_install_keeps_data.py::test_a_bin_folder_in_the_way_is_kept_aside` |
+| IS-107 | the same with `Install-Agentmaster.ps1 -Scope User` | the same rule from the shared PowerShell core; the run says where the folder went | fresh | — | `test_install_keeps_data.py::test_the_installer_keeps_a_bin_folder_in_the_way` |

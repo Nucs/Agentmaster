@@ -73,6 +73,18 @@
 // folder (kSetAsideLeafPrefix) before the new one is copied in, and put back when the copy fails
 // (detail::SetAsideShippedEntries / RestoreSetAside; the PowerShell core's Install-AmLayout, the same).
 //
+// NO INSTALL EVER LOSES THE USER'S STATE (the owner's rule of 2026-10-26, after "Install just for you" into
+// %USERPROFILE%\.agentmaster\bin left their profile "as if reset"): every recursive delete goes through
+// detail::RemoveTreeGuarded — inside the install folder only, and never a folder that is, contains or is named like
+// Agentmaster state (Profiles::PathHoldsProfileNow); an install destination that holds files of someone else's is
+// renamed aside and KEPT (`<folder>.before-install-<time>`, detail::SetAsideFolderInTheWay), never mixed into, and one
+// that holds a profile is refused. The PowerShell core applies the same two rules.
+//
+// THE DOWNLOADED COPY: once this copy handed over — installed elsewhere, or deferring to an install that was there — it
+// only forwards launches, so it asks "Delete the downloaded copy?" (AskWhetherToRemoveLeftoverCopy): offered only for a
+// folder that holds nothing but the download's files (JudgeLeftoverCopy), removed to the Recycle Bin by a hidden
+// PowerShell after this process ended (ScheduleLeftoverCopyRemoval), and only once the installed copy started.
+//
 // THE DECISION FILE `<exedir>\install.path` (plain UTF-8, `#` comments, first value line wins —
 // the profile.path idiom):
 //   installed          this folder IS the install (registered) — in-place install, or the copy
@@ -653,12 +665,18 @@ namespace Agentmaster::PortableInstall
     }
 
     // Entries a COPY-install never carries from the source: the source's own profile data (it is
-    // MIGRATED into the destination's profile instead), its pointer/decision files (the
-    // destination gets its own), and temp leftovers (an interrupted upgrade's set-aside folder included).
+    // MIGRATED into the destination's profile instead), its `settings` folder (upstream portable mode's Terminal
+    // settings of a pre-profile copy: seeded into the profile's terminal\ instead, copy-if-absent — copied, it would
+    // overwrite the destination's own preserved `settings`, which the PowerShell core never does either), its
+    // pointer/decision files (the destination gets its own), and temp leftovers (an interrupted upgrade's set-aside
+    // folder included). Every name here is one the destination keeps as it is.
+    //   leaf    — a top-level entry name of the source layout.
+    //   returns — true when a copy skips it.
+    //   throws  — std::bad_alloc only.
     inline bool IsCopyExcludedLeaf(std::wstring_view leaf)
     {
         const auto k = Profiles::detail::NormPathKey(leaf);
-        if (k == L"profile" || k == L"profile.path" || k == L"install.path" || IsSetAsideLeaf(k))
+        if (k == L"profile" || k == L"settings" || k == L"profile.path" || k == L"install.path" || IsSetAsideLeaf(k))
         {
             return true;
         }
@@ -2792,6 +2810,139 @@ namespace Agentmaster::PortableInstall
             return true;
         }
 
+        // The one door every recursive delete of this installer goes through. It deletes `target` only when the target lies
+        // strictly INSIDE `within` (the install folder the step works on — an installer never deletes outside the folder it
+        // installs) and holds no Agentmaster state (Profiles::PathHoldsProfileNow: a profile folder, a folder above one, a
+        // `.agentmaster*` folder, or a folder with one directly inside). A refusal is logged and leaves everything as it
+        // was: the owner's rule of 2026-10-26 — "never delete any .agentmaster folder, they contain states the user MUST NOT
+        // lose" — outranks a tidy install folder (a leftover set-aside folder is the worst a refusal costs).
+        //   target  — the file or folder to delete.
+        //   within  — the install folder it must lie inside.
+        //   ec      — receives the filesystem error of the delete (cleared on a refusal: nothing was tried).
+        //   returns — true when the target was deleted or did not exist; false when refused or the delete failed.
+        //   throws  — std::bad_alloc only.
+        inline bool RemoveTreeGuarded(const std::filesystem::path& target, const std::filesystem::path& within, std::error_code& ec)
+        {
+            ec.clear();
+            const std::wstring t = target.wstring();
+            const std::wstring w = within.wstring();
+            // Strictly below the install folder: IsSameOrBelow alone would let the install folder itself through.
+            if (!IsSameOrBelow(t, w) || Profiles::detail::SamePath(t, w))
+            {
+                LogInstall(L"REFUSED to delete " + t + L": it is not inside the install folder " + w);
+                return false;
+            }
+            if (Profiles::PathHoldsProfileNow(t))
+            {
+                LogInstall(L"REFUSED to delete " + t + L": it holds Agentmaster profile data (a profile folder, or a .agentmaster folder)");
+                return false;
+            }
+            std::filesystem::remove_all(target, ec);
+            return !ec;
+        }
+
+        // PURE: the name a folder in the way of an install gets when it is set aside: `<leaf>.before-install-<yyyyMMdd-
+        // HHmmss>`, plus `-<attempt>` from the second attempt on (a name already taken by an earlier set-aside that second).
+        //   leaf    — the folder's own name ("bin").
+        //   now     — the local time to stamp.
+        //   attempt — 0 for the first try, then 1, 2, ….
+        //   returns — the new leaf.
+        //   throws  — std::bad_alloc only.
+        inline std::wstring SetAsideFolderLeaf(std::wstring_view leaf, const SYSTEMTIME& now, unsigned attempt)
+        {
+            wchar_t stamp[32];
+            ::swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", static_cast<unsigned>(now.wYear), static_cast<unsigned>(now.wMonth),
+                       static_cast<unsigned>(now.wDay), static_cast<unsigned>(now.wHour), static_cast<unsigned>(now.wMinute), static_cast<unsigned>(now.wSecond));
+            std::wstring out{ leaf };
+            out += L".before-install-";
+            out += stamp;
+            if (attempt > 0)
+            {
+                out += L"-" + std::to_wstring(attempt);
+            }
+            return out;
+        }
+
+        // PURE: whether a top-level entry of an install destination that holds NO app exe is an Agentmaster leftover an
+        // install may lay its files in beside: the decision and pointer files, the version / manifest / portable markers,
+        // an interrupted upgrade's set-aside folder, and the preserved `settings` / `profile` folders (never touched by a
+        // copy: IsCopyExcludedLeaf). What an uninstall leaves (profile.path, a profile) is the common case.
+        //   leaf    — a top-level entry name.
+        //   returns — true for such a leftover; false for anything else (a file or folder of the user's own).
+        //   throws  — std::bad_alloc only.
+        inline bool IsAgentmasterLeftoverLeaf(std::wstring_view leaf)
+        {
+            const auto k = Profiles::detail::NormPathKey(leaf);
+            return IsPreservedLeaf(k) || IsSetAsideLeaf(k) || k == L".am-version" || k == L".am-manifest" || k == L".portable";
+        }
+
+        // The top-level entries of `dir` that are NOT Agentmaster leftovers (IsAgentmasterLeftoverLeaf): what an install
+        // would otherwise mix its files into. Empty for a missing or empty folder.
+        //   dir     — the install destination.
+        //   returns — the foreign entries' names, in directory order.
+        //   throws  — std::bad_alloc only (a folder that cannot be listed reads as empty).
+        inline std::vector<std::wstring> ForeignEntriesIn(const std::wstring& dir)
+        {
+            std::vector<std::wstring> out;
+            std::error_code ec;
+            for (auto it = std::filesystem::directory_iterator{ std::filesystem::path{ dir }, ec }; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec))
+            {
+                std::wstring leaf = it->path().filename().wstring();
+                if (!IsAgentmasterLeftoverLeaf(leaf))
+                {
+                    out.push_back(std::move(leaf));
+                }
+            }
+            return out;
+        }
+
+        // Rename a destination folder that is in the way of an install (it holds files that are not an Agentmaster
+        // install's) to SetAsideFolderLeaf in the same parent: one rename on the same volume, nothing copied, overwritten
+        // or deleted — the folder is KEPT, under a name that says why. Refused, with nothing changed, for a folder that
+        // holds Agentmaster state (Profiles::PathHoldsProfileNow): renaming a profile would point every install that uses it
+        // at an empty folder, which would look exactly like the reset the owner reported.
+        //   dir     — the destination folder (it exists).
+        //   movedTo — receives the folder's new full path.
+        //   err     — receives the user-facing reason on a failure.
+        //   returns — true when the folder was renamed.
+        //   throws  — std::bad_alloc only.
+        inline bool SetAsideFolderInTheWay(const std::wstring& dir, std::wstring& movedTo, std::wstring& err)
+        {
+            if (Profiles::PathHoldsProfileNow(dir))
+            {
+                err = dir + L" holds Agentmaster data (a profile). It is left as it is: pick another folder to install to.";
+                return false;
+            }
+            const std::filesystem::path p{ dir };
+            const std::filesystem::path parent = p.parent_path();
+            const std::wstring leaf = p.filename().wstring();
+            SYSTEMTIME now{};
+            ::GetLocalTime(&now);
+            for (unsigned attempt = 0; attempt < 50; ++attempt)
+            {
+                const std::filesystem::path candidate = parent / SetAsideFolderLeaf(leaf, now, attempt);
+                std::error_code ec;
+                if (std::filesystem::exists(candidate, ec))
+                {
+                    continue;
+                }
+                if (::MoveFileExW(p.c_str(), candidate.c_str(), 0))
+                {
+                    movedTo = candidate.wstring();
+                    return true;
+                }
+                const DWORD code = ::GetLastError();
+                if (code != ERROR_ALREADY_EXISTS && code != ERROR_FILE_EXISTS)
+                {
+                    err = dir + L" holds files that are not Agentmaster's, and it could not be renamed to keep them (Windows error " + std::to_wstring(code) +
+                          L"; something may be using it). Nothing was changed: close what uses it, or pick another folder.";
+                    return false;
+                }
+            }
+            err = dir + L" could not be renamed: every name for it is taken. Nothing was changed: pick another folder.";
+            return false;
+        }
+
         // The entries of an existing install at dst that an UPGRADE replaces — only what WE SHIP: a
         // top-level entry the NEW source layout also has, or one the OLD install's manifest lists (a file a
         // newer version no longer ships must not linger), and the old version stamp — never the preserved
@@ -2851,7 +3002,7 @@ namespace Agentmaster::PortableInstall
             for (const auto& p : stale)
             {
                 std::error_code rm;
-                std::filesystem::remove_all(p, rm);
+                RemoveTreeGuarded(p, dst, rm); // a refusal or a file still in use keeps it for the next run
             }
         }
 
@@ -2868,7 +3019,7 @@ namespace Agentmaster::PortableInstall
             for (const auto& p : ShippedEntriesToReplace(src, dst))
             {
                 std::error_code ec;
-                std::filesystem::remove_all(p, ec);
+                RemoveTreeGuarded(p, dst, ec);
             }
         }
 
@@ -2898,7 +3049,7 @@ namespace Agentmaster::PortableInstall
             if (all && !aside.dir.empty())
             {
                 std::error_code rm;
-                std::filesystem::remove_all(aside.dir, rm);
+                RemoveTreeGuarded(aside.dir, dst, rm); // empty by now; a refusal only leaves the empty folder
                 aside.dir.clear();
                 aside.moved.clear();
             }
@@ -2979,21 +3130,38 @@ namespace Agentmaster::PortableInstall
                     continue; // never laid down by the copy, and never touched in dst
                 }
                 std::error_code rm;
-                std::filesystem::remove_all(dst / leaf, rm);
+                RemoveTreeGuarded(dst / leaf, dst, rm);
             }
             return PutBackSetAside(dst, aside);
         }
 
         // After a successful upgrade: delete the previous version's set-aside folder (best effort — one that
-        // cannot be deleted yet goes at the next upgrade or uninstall).
+        // cannot be deleted yet goes at the next upgrade or uninstall). It holds only the previous version's SHIPPED
+        // entries (SetAsideShippedEntries), and the delete still goes through RemoveTreeGuarded, inside the install folder.
         //   aside  — what SetAsideShippedEntries moved; cleared.
         //   throws — nothing.
         inline void DropSetAside(SetAside& aside) noexcept
         {
             if (!aside.dir.empty())
             {
-                std::error_code rm;
-                std::filesystem::remove_all(aside.dir, rm);
+                try
+                {
+                    std::error_code rm;
+                    RemoveTreeGuarded(aside.dir, aside.dir.parent_path(), rm);
+                }
+                catch (...)
+                {
+                    // Only bad_alloc reaches here (RemoveTreeGuarded's paths and its log line): the set-aside folder then
+                    // stays, and the next upgrade or uninstall deletes it (RemoveStaleSetAsides) — nothing is lost.
+                    try
+                    {
+                        LogInstall(L"the previous version's set-aside folder was not deleted (out of memory): " + aside.dir.wstring());
+                    }
+                    catch (...)
+                    {
+                        // logger-failed: nothing left to report through (this function is noexcept)
+                    }
+                }
             }
             aside.dir.clear();
             aside.moved.clear();
@@ -3093,8 +3261,17 @@ namespace Agentmaster::PortableInstall
         }
     }
 
-    // The install proper. Runs on a worker thread under the progress dialog; `status` receives
-    // the phase text. No-throw.
+    // The install proper: lay the running copy into the destination (or register it in place), point it at the profile,
+    // register it, and make the copy a launcher stub. Runs on a worker thread under the progress dialog.
+    // What it never does: write into a destination folder that holds someone else's files — that folder is renamed aside
+    // and kept, or the install is refused when it holds a profile (detail::SetAsideFolderInTheWay) — nor delete anything
+    // outside the install folder or holding Agentmaster state (detail::RemoveTreeGuarded). An upgrade of an install of
+    // ours replaces only what releases ship and puts the previous version back when the copy fails.
+    //   o       — what to install where (InstallOptions).
+    //   status  — receives the phase text for the progress dialog (called on this worker thread).
+    //   returns — the outcome: ok with the installed exe and non-fatal notes (a folder renamed aside is one), or the
+    //             user-facing error.
+    //   throws  — nothing (an exception reads as a failed install).
     inline InstallOutcome PerformInstall(const InstallOptions& o, const std::function<void(const std::wstring&)>& status)
     {
         InstallOutcome out;
@@ -3115,10 +3292,6 @@ namespace Agentmaster::PortableInstall
             const std::filesystem::path dst{ o.destDir };
             const Updater::Version ours = VersionStampIn(o.sourceDir);
             uint64_t bytes = 0;
-            // A destination the user kept portable on purpose (the old install script's copy, for one) is
-            // updated, never turned into an install: its files only — no install.path change, no profile
-            // pointer, no registration (the PowerShell core's Install-AmUserCopy, the same rule).
-            const bool keptPortable = !inPlace && ReadInstallDecisionIn(o.destDir).kind == Decision::Portable;
 
             if (!inPlace)
             {
@@ -3130,6 +3303,42 @@ namespace Agentmaster::PortableInstall
                     out.error = L"Agentmaster cannot write to " + o.destDir + L" without administrator rights. Pick a folder of your own (your user folder is the default), or choose \x201CInstall for all users\x201D.";
                     return out;
                 }
+                // A destination that holds files of someone else's — anything but an install of ours or the leftovers
+                // of one (detail::ForeignEntriesIn) — is never mixed into, overwritten or emptied: the whole folder is
+                // renamed aside and KEPT (`<folder>.before-install-<time>`), and the install lands in a fresh folder.
+                // The owner's rule of 2026-10-26: an install never loses what was there. A folder that holds a profile
+                // is refused instead (renaming it would point its install at an empty profile: it would look like the reported reset).
+                if (!DirHoldsAppExe(o.destDir))
+                {
+                    const std::vector<std::wstring> foreign = detail::ForeignEntriesIn(o.destDir);
+                    if (!foreign.empty())
+                    {
+                        status(L"Keeping what is already in " + o.destDir + L"\x2026");
+                        std::wstring movedTo;
+                        std::wstring moveErr;
+                        if (!detail::SetAsideFolderInTheWay(o.destDir, movedTo, moveErr))
+                        {
+                            out.error = moveErr;
+                            return out;
+                        }
+                        std::wstring names;
+                        for (size_t i = 0; i < foreign.size() && i < 5; ++i)
+                        {
+                            names += (i ? L", " : L"") + foreign[i];
+                        }
+                        out.notes.push_back(o.destDir + L" already held " + std::to_wstring(foreign.size()) + L" item(s) that are not Agentmaster's (" + names +
+                                            (foreign.size() > 5 ? L", \x2026" : L"") + L"): kept, the folder was renamed to " + movedTo);
+                    }
+                }
+            }
+            // A destination the user kept portable on purpose (the old install script's copy, for one) is
+            // updated, never turned into an install: its files only — no install.path change, no profile
+            // pointer, no registration (the PowerShell core's Install-AmUserCopy, the same rule). Read AFTER a folder in
+            // the way was renamed aside: the fresh folder then decides nothing.
+            const bool keptPortable = !inPlace && ReadInstallDecisionIn(o.destDir).kind == Decision::Portable;
+
+            if (!inPlace)
+            {
                 const bool existing = DirHoldsAppExe(o.destDir);
                 detail::SetAside aside;
                 if (existing)
@@ -3218,6 +3427,13 @@ namespace Agentmaster::PortableInstall
                     {
                         Profiles::MigrateProfileData(sourceProfile, o.profileDir);
                     }
+                    // A pre-profile portable kept Terminal's own settings in <source>\settings (upstream portable mode):
+                    // the copy no longer carries that folder (IsCopyExcludedLeaf), so its files go where the installed copy
+                    // reads them — <profile>\terminal\, only where the profile has none (it never overwrites).
+                    if (!inPlace)
+                    {
+                        Profiles::SeedTerminalSettingsFromDir(o.sourceDir + L"\\settings", o.profileDir);
+                    }
                     if (Profiles::ReadLocalProfilePointerIn(o.destDir).empty())
                     {
                         // A destination that never chose a profile (the old install script's folder, run with "Ask
@@ -3275,6 +3491,289 @@ namespace Agentmaster::PortableInstall
             }
         }
         return out;
+    }
+
+    // ============================ the downloaded copy, once it handed over ============================
+    //
+    // A portable zip must be unpacked somewhere to run; once that copy installed Agentmaster elsewhere (or handed over to
+    // an install that was already there) it only forwards launches (a launcher stub). The owner's request of 2026-10-26:
+    // the user was never asked whether to delete it — "there is no use for that folder, so we can suggest the user to
+    // delete it". So the copy asks, and only for a folder whose every file the download brought.
+
+    // PURE: whether a top-level entry of a copy's folder is something only Agentmaster put there: a name its release
+    // ships (the copy's own .am-manifest list, else the legacy list of names releases shipped before the manifest), a
+    // file the copy itself wrote (install.path, profile.path), an interrupted upgrade's set-aside folder, or the markers.
+    //   leaf          — the entry's name.
+    //   manifestNames — ReadManifestNamesIn(copyDir); empty for a copy without a manifest.
+    //   returns       — true when deleting the entry loses nothing of the user's (an EMPTY profile / settings folder is
+    //                   judged by the caller: its emptiness is not in the name).
+    //   throws        — std::bad_alloc only.
+    inline bool IsDisposableCopyLeaf(std::wstring_view leaf, const std::vector<std::wstring>& manifestNames)
+    {
+        const auto k = Profiles::detail::NormPathKey(leaf);
+        if (k == L"install.path" || k == L"profile.path" || k == L".am-version" || k == L".am-manifest" || k == L".portable" || IsSetAsideLeaf(k))
+        {
+            return true;
+        }
+        if (manifestNames.empty())
+        {
+            return IsLegacyShippedLeaf(k);
+        }
+        return std::any_of(manifestNames.begin(), manifestNames.end(), [&](const std::wstring& n) { return Profiles::detail::NormPathKey(n) == k; });
+    }
+
+    // What JudgeLeftoverCopy found.
+    struct LeftoverCopyVerdict
+    {
+        bool offer{ false }; // the folder may be offered for deletion
+        std::wstring reason; // why not (for the [install] log), "" when offered
+    };
+
+    // Whether the folder a copy runs from may be offered for deletion once it handed over to `installDir`. Offered only
+    // when deleting it can lose nothing: it is not the install (nor inside or around it), not a well-known folder (the
+    // user folder, Desktop, Documents, Downloads, Program Files, Windows, a drive root — a flat unzip into one of them
+    // must never put that folder up for deletion), holds no Agentmaster state (Profiles::PathHoldsProfileNow), this
+    // account can write it, and every top-level entry is disposable (IsDisposableCopyLeaf) — `profile` and `settings`
+    // only when EMPTY (a "later" run's profile with data stays the user's, even after the install migrated a copy of it).
+    //   copyDir    — the folder this process runs from.
+    //   installDir — where Agentmaster runs from now.
+    //   returns    — the verdict.
+    //   throws     — std::bad_alloc only (a folder that cannot be read is never offered).
+    inline LeftoverCopyVerdict JudgeLeftoverCopy(const std::wstring& copyDir, const std::wstring& installDir)
+    {
+        if (copyDir.empty() || installDir.empty() || IsSameOrBelow(copyDir, installDir) || IsSameOrBelow(installDir, copyDir))
+        {
+            return { false, L"the copy is the install, or lies inside or around it" };
+        }
+        std::filesystem::path p;
+        try
+        {
+            p = std::filesystem::path{ copyDir }.lexically_normal();
+        }
+        catch (const std::bad_alloc&)
+        {
+            throw;
+        }
+        catch (...)
+        {
+            return { false, L"the copy's path cannot be read" };
+        }
+        if (!p.has_parent_path() || p.parent_path() == p || p == p.root_path())
+        {
+            return { false, L"the copy is a drive root" };
+        }
+        // Downloads has no CSIDL; its default place is what a flat unzip into it would be.
+        const std::wstring home = Profiles::detail::GetEnvVar(L"USERPROFILE");
+        const std::wstring downloads = home.empty() ? std::wstring{} : home + L"\\Downloads";
+        for (const std::wstring& known : { detail::ShellFolder(CSIDL_PROFILE), detail::ShellFolder(CSIDL_DESKTOPDIRECTORY), detail::ShellFolder(CSIDL_PERSONAL),
+                                           downloads, detail::ShellFolder(CSIDL_PROGRAM_FILES), detail::ShellFolder(CSIDL_PROGRAM_FILESX86), detail::ShellFolder(CSIDL_WINDOWS) })
+        {
+            if (!known.empty() && Profiles::detail::SamePath(known, copyDir))
+            {
+                return { false, L"the copy is a well-known folder (" + known + L")" };
+            }
+        }
+        if (Profiles::PathHoldsProfileNow(copyDir))
+        {
+            return { false, L"the copy's folder holds Agentmaster profile data" };
+        }
+        if (!Profiles::detail::IsDirWritableByUs(copyDir))
+        {
+            return { false, L"this account cannot write the copy's folder" };
+        }
+        const std::vector<std::wstring> manifest = ReadManifestNamesIn(copyDir);
+        std::error_code ec;
+        bool holdsExe = false;
+        for (auto it = std::filesystem::directory_iterator{ p, ec }; !ec && it != std::filesystem::directory_iterator{}; it.increment(ec))
+        {
+            const std::wstring leaf = it->path().filename().wstring();
+            const auto key = Profiles::detail::NormPathKey(leaf);
+            if (key == L"profile" || key == L"settings")
+            {
+                std::error_code inner;
+                if (std::filesystem::directory_iterator{ it->path(), inner } != std::filesystem::directory_iterator{} || inner)
+                {
+                    return { false, L"its " + leaf + L" folder holds data" };
+                }
+                continue;
+            }
+            if (!IsDisposableCopyLeaf(leaf, manifest))
+            {
+                return { false, L"it holds " + leaf + L", which the download did not bring" };
+            }
+            holdsExe = holdsExe || key == L"agentmaster.exe" || key == L"windowsterminal.exe";
+        }
+        if (ec)
+        {
+            return { false, L"the copy's folder cannot be listed" };
+        }
+        if (!holdsExe)
+        {
+            return { false, L"the folder holds no Agentmaster" };
+        }
+        return { true, {} };
+    }
+
+    // Ask whether the copy's folder should go (JudgeLeftoverCopy said it may be offered). A Win32 TaskDialog with two
+    // command links, the deletion pre-selected; Cancel / X / Esc keep it. Echoed to the command's console (DialogEcho.h).
+    //   copyDir    — the folder this process runs from.
+    //   installDir — where Agentmaster runs from now.
+    //   returns    — true when the user chose to delete it.
+    //   throws     — std::bad_alloc only (the texts are built in std::wstring).
+    inline bool AskToRemoveLeftoverCopy(const std::wstring& copyDir, const std::wstring& installDir)
+    {
+        const std::wstring content = L"Agentmaster now runs from:\n    " + installDir + L"\n\nThe folder you started this copy from is not needed any more:\n    " + copyDir +
+                                     L"\n\nIt holds only the files of the download. If you keep it, starting Agentmaster.exe from it opens the installed Agentmaster.";
+        constexpr int idDelete = 1201, idKeep = 1202;
+        const TASKDIALOG_BUTTON buttons[] = {
+            { idDelete, L"Delete the downloaded copy (recommended)\nMoves the folder to the Recycle Bin once this window closes; the installed Agentmaster is not touched" },
+            { idKeep, L"Keep it\nIt stays as a shortcut to the installed Agentmaster" },
+        };
+        TASKDIALOGCONFIG cfg{};
+        cfg.cbSize = sizeof(cfg);
+        cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW | TDF_SIZE_TO_CONTENT;
+        cfg.pszWindowTitle = L"Agentmaster";
+        cfg.pszMainIcon = TD_INFORMATION_ICON;
+        cfg.pszMainInstruction = L"Delete the downloaded copy?";
+        cfg.pszContent = content.c_str();
+        cfg.cButtons = static_cast<UINT>(ARRAYSIZE(buttons));
+        cfg.pButtons = buttons;
+        cfg.nDefaultButton = idDelete;
+        cfg.pfCallback = detail::ForegroundOnCreate;
+        int pressed = 0;
+        if (FAILED(DialogEcho::ShowTaskDialogIndirect(&cfg, &pressed, nullptr, nullptr)))
+        {
+            return false; // no dialog (comctl v6 unavailable): nothing is deleted without a yes
+        }
+        return pressed == idDelete;
+    }
+
+    // PURE: the hidden PowerShell that removes a copy's folder after this process ended. In order: wait for the process
+    // (its exe and DLLs are in that folder) — two minutes at most; then for anything else that runs from the folder —
+    // one minute at most; then prove nothing holds it (a rename there and back, which Windows refuses while a file in
+    // it is open) and move it to the Recycle Bin (Microsoft.VisualBasic FileSystem.DeleteDirectory, SendToRecycleBin:
+    // recoverable, never a plain delete); then remove the extraction folder around it ("Extract All" makes
+    // Agentmaster_<version>_<arch>\agentmaster-<version>) when that is left EMPTY and is named Agentmaster* — a
+    // non-recursive delete, which Windows refuses for a folder with anything in it. A folder still held is left as it is.
+    //   copyDir — the folder to remove (JudgeLeftoverCopy offered it).
+    //   waitPid — the process to wait for (this one).
+    //   returns — the script text (for -EncodedCommand).
+    //   throws  — std::bad_alloc only.
+    inline std::wstring LeftoverCopyRemovalScript(const std::wstring& copyDir, DWORD waitPid)
+    {
+        return L"$ErrorActionPreference = 'Stop'\n"
+               L"$dir = " +
+               detail::PsQuote(copyDir) + L"\n"
+                                          L"try { Wait-Process -Id " +
+               std::to_wstring(waitPid) + L" -Timeout 120 -ErrorAction SilentlyContinue } catch { }\n"
+                                          L"$deadline = (Get-Date).AddSeconds(60)\n"
+                                          L"while ((Get-Date) -lt $deadline) {\n"
+                                          L"  $busy = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($dir + '\\', [StringComparison]::OrdinalIgnoreCase) })\n"
+                                          L"  if ($busy.Count -eq 0) { break }\n"
+                                          L"  Start-Sleep -Milliseconds 500\n"
+                                          L"}\n"
+                                          L"$probe = $dir + '.am-removing'\n"
+                                          L"try { [IO.Directory]::Move($dir, $probe) } catch { exit 3 }\n"
+                                          L"try { [IO.Directory]::Move($probe, $dir) } catch { $dir = $probe }\n"
+                                          L"Add-Type -AssemblyName Microsoft.VisualBasic\n"
+                                          L"[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($dir, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin)\n"
+                                          L"$parent = Split-Path -Parent $dir\n"
+                                          L"if ($parent -and (Split-Path -Leaf $parent) -like 'Agentmaster*' -and -not (Get-ChildItem -LiteralPath $parent -Force | Select-Object -First 1)) {\n"
+                                          L"  try { [IO.Directory]::Delete($parent) } catch { }\n"
+                                          L"}\n"
+                                          L"exit 0\n";
+    }
+
+    // Start the removal of a copy's folder (LeftoverCopyRemovalScript) in a hidden Windows PowerShell that outlives this
+    // process: no wait, no window, out of this process's job when Windows allows it (a job that ends its processes with
+    // it would end the removal too). The caller exits right after; the script waits for that.
+    //   copyDir — the folder to remove.
+    //   returns — true when the PowerShell process started.
+    //   throws  — nothing.
+    inline bool ScheduleLeftoverCopyRemoval(const std::wstring& copyDir) noexcept
+    {
+        try
+        {
+            std::wstring sysDir(MAX_PATH, L'\0');
+            const UINT n = ::GetSystemDirectoryW(sysDir.data(), MAX_PATH);
+            if (n == 0 || n >= MAX_PATH)
+            {
+                return false;
+            }
+            sysDir.resize(n);
+            std::wstring cmd = Quoted(sysDir + L"\\WindowsPowerShell\\v1.0\\powershell.exe") +
+                               L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand " +
+                               detail::Base64Utf16(LeftoverCopyRemovalScript(copyDir, ::GetCurrentProcessId()));
+            // Its working folder must not be the copy's folder (a process's current directory keeps that folder busy).
+            const std::wstring workDir = sysDir;
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION pi{};
+            BOOL started = ::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB, nullptr, workDir.c_str(), &si, &pi);
+            if (!started)
+            {
+                // A job that forbids breaking away refuses the flag (ERROR_ACCESS_DENIED): start it inside the job then.
+                started = ::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, workDir.c_str(), &si, &pi);
+            }
+            if (!started)
+            {
+                LogInstall(L"leftover copy: the removal of " + copyDir + L" could not be started (error " + std::to_wstring(::GetLastError()) + L")");
+                return false;
+            }
+            ::CloseHandle(pi.hThread);
+            ::CloseHandle(pi.hProcess);
+            LogInstall(L"leftover copy: " + copyDir + L" goes to the Recycle Bin once this process ends");
+            return true;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"leftover copy: scheduling the removal CRASHED (exception) \x2014 the folder stays");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through (this function is noexcept)
+            }
+            return false;
+        }
+    }
+
+    // The whole question for a copy that handed over: judge the folder (JudgeLeftoverCopy), and ask only when it may be
+    // offered. The removal itself is started by the caller AFTER the installed copy started (ScheduleLeftoverCopyRemoval):
+    // a copy whose hand-over failed goes back to the install question and must keep its folder.
+    //   copyDir    — the folder this process runs from.
+    //   installDir — where Agentmaster runs from now.
+    //   returns    — true when the folder should be removed once the hand-over succeeded.
+    //   throws     — nothing (a failure keeps the folder, logged).
+    inline bool AskWhetherToRemoveLeftoverCopy(const std::wstring& copyDir, const std::wstring& installDir) noexcept
+    {
+        try
+        {
+            const LeftoverCopyVerdict verdict = JudgeLeftoverCopy(copyDir, installDir);
+            if (!verdict.offer)
+            {
+                LogInstall(L"leftover copy: " + copyDir + L" is not offered for deletion: " + verdict.reason);
+                return false;
+            }
+            const bool remove = AskToRemoveLeftoverCopy(copyDir, installDir);
+            LogInstall(L"leftover copy: " + copyDir + (remove ? L" \x2014 the user chose to delete it" : L" \x2014 the user kept it"));
+            return remove;
+        }
+        catch (...)
+        {
+            try
+            {
+                LogInstall(L"leftover copy: the question CRASHED (exception) \x2014 the folder stays");
+            }
+            catch (...)
+            {
+                // logger-failed: nothing left to report through (this function is noexcept)
+            }
+            return false;
+        }
     }
 
     // ============================ the progress dialog ============================
@@ -3820,8 +4319,15 @@ namespace Agentmaster::PortableInstall
                     SaveInstallDecisionIn(exeDir, { Decision::InstalledTo, pick.dir });
                     LogInstall(L"unzip " + exeDir + L" (v" + FormatVersion(ours) + L") defers to the installed copy " + target +
                                (pick.choice == Choice::UseMachine ? L" (all users)" : L""));
+                    // This copy is a launcher stub from here on: offer to delete it (the removal starts only once the
+                    // installed copy runs — a failed start comes back to the question, which needs this folder).
+                    const bool removeCopy = AskWhetherToRemoveLeftoverCopy(exeDir, pick.dir);
                     if (startInstalled(target, tail))
                     {
+                        if (removeCopy)
+                        {
+                            ScheduleLeftoverCopyRemoval(exeDir);
+                        }
                         return StartupAction::Exit;
                     }
                     ShowError(nullptr, L"The installed Agentmaster could not be started:\n" + target);
@@ -3872,9 +4378,15 @@ namespace Agentmaster::PortableInstall
                         }
                     }
                     SaveInstallDecisionIn(exeDir, { Decision::InstalledTo, pick.dir }); // this unzip -> a launcher stub
+                    // The downloaded copy is of no use now: offer to delete it; the removal starts once the installed copy runs.
+                    const bool removeCopy = AskWhetherToRemoveLeftoverCopy(exeDir, pick.dir);
                     if (!startInstalled(AppExeIn(pick.dir), {}))
                     {
                         ShowError(nullptr, L"Installed, but the new copy could not be started:\n" + AppExeIn(pick.dir) + L"\n\nStart it from the Start menu.");
+                    }
+                    else if (removeCopy)
+                    {
+                        ScheduleLeftoverCopyRemoval(exeDir);
                     }
                     return StartupAction::Exit;
                 }
@@ -3915,9 +4427,16 @@ namespace Agentmaster::PortableInstall
                         }
                         return StartupAction::Continue;
                     }
+                    // Installed elsewhere: this unzip only forwards launches now — offer to delete it (the removal starts
+                    // once the installed copy runs; the copy's own process must end first, its files are in use).
+                    const bool removeCopy = AskWhetherToRemoveLeftoverCopy(exeDir, pick.dir);
                     if (!startInstalled(done.exe, {}))
                     {
                         ShowError(nullptr, L"Installed, but the new copy could not be started:\n" + done.exe + L"\n\nStart it from the Start menu.");
+                    }
+                    else if (removeCopy)
+                    {
+                        ScheduleLeftoverCopyRemoval(exeDir);
                     }
                     return StartupAction::Exit;
                 }

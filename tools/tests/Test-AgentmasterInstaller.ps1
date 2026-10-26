@@ -357,7 +357,65 @@ try {
     Install-AmLayout -SourceDir $marked -DestDir $markDst
     $stillMarked = @('Agentmaster.exe', 'TerminalApp.dll', 'Images\icon.png' | Where-Object { Get-Item -LiteralPath (Join-Path $markDst $_) -Stream Zone.Identifier -ErrorAction SilentlyContinue })
     Assert ($stillMarked.Count -eq 0) "download mark: every installed file loses it (still marked: $($stillMarked -join ', '))"
-    Assert ($null -ne (Get-Item -LiteralPath (Join-Path $markDst 'my-download.zip') -Stream Zone.Identifier -ErrorAction SilentlyContinue)) "download mark: a user's own file in the install folder keeps it"
+    # The folder held no Agentmaster, only a file of the user's: since 2026-10-26 the whole folder is renamed aside and
+    # kept (Move-AmFolderInTheWay), never mixed into - the user's file stays in it, mark and all.
+    $markKept = @(Get-ChildItem -LiteralPath $root -Directory | Where-Object { $_.Name -like 'install-marks.before-install-*' })
+    Assert ($markKept.Count -eq 1) "folder in the way: the destination that held a user's file was renamed aside (found: $($markKept.Name -join ', '))"
+    Assert ($markKept.Count -eq 1 -and $null -ne (Get-Item -LiteralPath (Join-Path $markKept[0].FullName 'my-download.zip') -Stream Zone.Identifier -ErrorAction SilentlyContinue)) "download mark: a user's own file keeps it (in the folder kept aside)"
+    Assert (-not (Test-Path (Join-Path $markDst 'my-download.zip'))) 'folder in the way: the install folder itself holds only the layout'
+
+    # ---- the user's state is never touched (the owner's rule of 2026-10-26) ----------------------------------
+    # Test-AmProfileHolder / Remove-AmTreeGuarded / Move-AmFolderInTheWay: no install, update or uninstall deletes,
+    # empties or moves a folder that holds Agentmaster state. A scratch AGENTMASTER_PROFILE stands for a known profile.
+    $savedEnvProfile = $env:AGENTMASTER_PROFILE
+    try {
+        $guardRoot = Join-Path $root 'guard'
+        $knownProfile = Join-Path $guardRoot 'home\.agentmaster'
+        Write-TestFile (Join-Path $knownProfile 'sessions.json') '{"version":1,"sessions":[]}'
+        $env:AGENTMASTER_PROFILE = $knownProfile
+        Assert (Test-AmProfileHolder $knownProfile) 'profile guard: a known profile folder is protected'
+        Assert (Test-AmProfileHolder (Join-Path $guardRoot 'home')) 'profile guard: a folder above a known profile is protected'
+        Assert (Test-AmProfileHolder (Join-Path $guardRoot 'elsewhere\.agentmaster-old')) 'profile guard: any .agentmaster* folder is protected, known or not'
+        Assert (Test-AmProfileHolder 'relative\folder') 'profile guard: a relative path is never acted on'
+        Assert (-not (Test-AmProfileHolder (Join-Path $knownProfile 'bin\.am-previous-1'))) 'profile guard: a folder BELOW a profile (the per-user install folder) is not covered'
+        $holder = Join-Path $guardRoot 'holder'
+        Write-TestFile (Join-Path $holder '.agentmaster-kept\sessions.json') '{}'
+        Assert (Test-AmProfileHolder $holder) 'profile guard: a folder with a .agentmaster* folder directly inside is protected'
+
+        $within = Join-Path $guardRoot 'install'
+        Write-TestFile (Join-Path $within 'old.dll') 'x'
+        Write-TestFile (Join-Path $within '.agentmaster\sessions.json') '{}'
+        Assert (-not (Remove-AmTreeGuarded -Path (Join-Path $within '.agentmaster') -Within $within)) 'guarded delete: a .agentmaster folder inside the install folder is refused'
+        Assert (Test-Path (Join-Path $within '.agentmaster\sessions.json')) 'guarded delete: ... and left as it was'
+        Assert (-not (Remove-AmTreeGuarded -Path $knownProfile -Within $guardRoot)) 'guarded delete: a known profile is refused'
+        Assert (Test-Path (Join-Path $knownProfile 'sessions.json')) 'guarded delete: ... and left as it was'
+        Assert (-not (Remove-AmTreeGuarded -Path $holder -Within $within)) 'guarded delete: anything outside the folder the step works in is refused'
+        Assert (-not (Remove-AmTreeGuarded -Path $within -Within $within)) 'guarded delete: the folder the step works in itself is refused'
+        Assert (Remove-AmTreeGuarded -Path (Join-Path $within 'old.dll') -Within $within) 'guarded delete: a plain entry inside the install folder goes'
+        Assert (-not (Test-Path (Join-Path $within 'old.dll'))) 'guarded delete: ... and is gone'
+
+        # A destination folder in the way that holds a profile: the install refuses, nothing changes.
+        $profDst = Join-Path $guardRoot 'dest-with-profile'
+        Write-TestFile (Join-Path $profDst 'notes.txt') 'mine'
+        Write-TestFile (Join-Path $profDst '.agentmaster\sessions.json') '{}'
+        $threwProfile = $false
+        try { Install-AmLayout -SourceDir $src -DestDir $profDst } catch { $threwProfile = $true }
+        Assert $threwProfile 'folder in the way: a destination that holds a profile makes the install refuse'
+        Assert ((Test-Path (Join-Path $profDst 'notes.txt')) -and (Test-Path (Join-Path $profDst '.agentmaster\sessions.json')) -and -not (Test-Path (Join-Path $profDst 'Agentmaster.exe'))) 'folder in the way: ... with nothing changed'
+        Assert (@(Get-ChildItem -LiteralPath $guardRoot -Directory | Where-Object { $_.Name -like 'dest-with-profile.before-install-*' }).Count -eq 0) 'folder in the way: ... and nothing renamed'
+
+        # Only an install's leftovers (an uninstall leaves profile.path and settings\): installed in place, no rename.
+        $leftDst = Join-Path $guardRoot 'dest-leftovers'
+        Write-TestFile (Join-Path $leftDst 'profile.path') "C:\somewhere`n"
+        Write-TestFile (Join-Path $leftDst 'settings\settings.json') '{}'
+        Write-TestFile (Join-Path $leftDst '.am-previous-1234\stale.dll') 'x'
+        Install-AmLayout -SourceDir $src -DestDir $leftDst
+        Assert ((Test-Path (Join-Path $leftDst 'Agentmaster.exe')) -and (Test-Path (Join-Path $leftDst 'profile.path')) -and (Test-Path (Join-Path $leftDst 'settings\settings.json'))) 'leftovers: an install lays in beside them and keeps them'
+        Assert (@(Get-ChildItem -LiteralPath $guardRoot -Directory | Where-Object { $_.Name -like 'dest-leftovers.before-install-*' }).Count -eq 0) 'leftovers: no folder renamed aside for them'
+        Assert (-not (Test-Path (Join-Path $leftDst '.am-previous-1234'))) "leftovers: an interrupted upgrade's set-aside folder goes"
+    } finally {
+        $env:AGENTMASTER_PROFILE = $savedEnvProfile
+    }
 
     # ---- a failed upgrade puts the previous version back (2026-10-21) ----------------------------------------
     # Before, the old files were deleted before the copy, and a copy that failed half way left a folder with
