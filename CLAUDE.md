@@ -16,7 +16,7 @@
 | Install | Identity | Version | Runs from | Commit |
 |---|---|---|---|---|
 | production | `Agentmaster` | 0.8.0.0 | the installed MSIX of release `v0.8.0` | `7ee5fadcc` |
-| dev | `AgentmasterDev` | 0.0.1.36 | the loose layout `Q:\agentmaster-layouts\Debug` (build server build `b20261026-5`) | `a8d8b97a2` |
+| dev | `AgentmasterDev` | 0.0.1.37 | the loose layout `Q:\agentmaster-layouts\Debug-B` (build server build `b20261026-6`) | `dae998824` |
 
 - Whether a commit is in a build: `git merge-base --is-ancestor <commit> <build commit>`.
 - Update this table at every deploy (`Get-AppxPackage Agentmaster*` shows each install's version and folder; a loose layout runs the commit it was built from).
