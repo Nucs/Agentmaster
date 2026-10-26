@@ -14,6 +14,10 @@ What the tab holds (AgentManagerContent.AutoTesting.cpp `_RebuildPlan`; the layo
                  label, the gate "[turn-done]"); "No messages yet. …" when both are empty
     compose      the edit named by its placeholder and its icons (ManagerPage.compose_box / compose_buttons):
                  Jump to tab, Send now ("!": asks "Send now?" with the prompt quoted, Send · Cancel), Add to queue
+    templates    the paper icon at the box's top right shows a row (collapsed at first): the name box (named by its
+                 placeholder "queue template name"), "Save as queue template", the saved templates' combo box (the
+                 last saved one selected), "Apply" and "Apply to dir" (AgentManagerContent.AutoTesting.cpp
+                 _OnSaveTemplate / _OnApplyTemplate)
 The toolbar's last button reads "Pause Prompt Queue Runner", and "Resume Prompt Queue Runner" while the ONE process-wide
 pause is on (every window shows the same word: Scheduler::SetGlobalPause calls each window's listener).
 
@@ -46,6 +50,14 @@ UPCOMING_CAPTION = re.compile(r"^UPCOMING — (\d+)$")
 """The queue's caption."""
 GLYPH_STATUS = {"✓": "sent", "⏳": "pending", "✕": "failed", "⛔": "held", "—": "skipped"}
 """A row's first text -> the prompt's status (AgentManagerContent.Internal.h PromptGlyph)."""
+TEMPLATES_ID = "am.mgr.queue.templates"
+"""The paper icon's AutomationId on a build with the accessibility metadata (not 0.8.0)."""
+TEMPLATE_NAME_ID = "am.mgr.queue.templateName"
+"""The template name box's AutomationId on such a build."""
+TEMPLATE_NAME_PLACEHOLDER = "queue template name"
+"""The template name box's placeholder — its accessible name on 0.8.0."""
+SAVE_TEMPLATE = "Save as queue template"
+"""The templates row's save button (its content is its label, so its name)."""
 
 
 @dataclass
@@ -410,7 +422,9 @@ class PromptQueuePane:
         t0 = time.time()
         for prompt in prompts:
             self.page.queue_prompt(prompt)
-            self.wait_row(prompt[:30], "upcoming", timeout_s=10.0)
+            # A row's label is the prompt's first characters with its line breaks shown as spaces (the engine's
+            # label, _OnAddPrompt), so a multi-line prompt is found by that form of its start.
+            self.wait_row(prompt[:30].replace("\r", " ").replace("\n", " "), "upcoming", timeout_s=10.0)
         return t0
 
     def send_now(self, text: Optional[str] = None):
@@ -441,6 +455,101 @@ class PromptQueuePane:
             The text.
         """
         return self.page.compose_box().value
+
+    # ---- queue templates --------------------------------------------------------------------------
+
+    def _templates_button(self) -> uia.Element:
+        """The compose row's paper icon, which shows / hides the templates row: by its AutomationId on a build with
+        the accessibility metadata (TEMPLATES_ID), else — 0.8.0, a nameless glyph button — the visible button at the
+        compose box's top right (its only neighbor there while the session has no unsent draft to pull in).
+
+        Returns:
+            The button.
+        Raises:
+            LookupError: When the compose row does not show or no such button is there.
+        """
+        controls = self.page.controls()
+        by_id = next((el for el in controls if el.automation_id == TEMPLATES_ID), None)
+        if by_id is not None:
+            return by_id
+        bx, by, bw, _bh = self.page.compose_box().rect
+        right = [el for el in controls if el.role == "button" and el.visible and el.rect[0] >= bx + bw - 4
+                 and abs(el.rect[1] - by) <= 14 and el.rect[0] - (bx + bw) < 120]
+        if not right:
+            raise LookupError("no templates (paper) icon right of the compose box")
+        return max(right, key=lambda el: el.rect[0])  # the paper icon is the right-most (the pull-draft one is left)
+
+    def templates_showing(self) -> bool:
+        """Whether the templates row shows (its "Save as queue template" button is on the page).
+
+        Returns:
+            True when it shows.
+        """
+        return any(el.role == "button" and el.name == SAVE_TEMPLATE for el in self.page.controls())
+
+    def show_templates(self, timeout_s: float = 10.0) -> None:
+        """Open the templates row (the paper icon) unless it already shows.
+
+        Args:
+            timeout_s: How long the row may take to show.
+        Returns:
+            None.
+        Raises:
+            LookupError: When the paper icon is not found.
+            WaitTimeout: When the row did not show.
+        """
+        if self.templates_showing():
+            return
+        self._templates_button().click()
+        wait_until(self.templates_showing, timeout_s, what="the templates row")
+
+    def _template_button(self, name: str) -> uia.Element:
+        """One of the templates row's text buttons ("Save as queue template", "Apply", "Apply to dir").
+
+        Args:
+            name: Its label (its name).
+        Returns:
+            The button.
+        Raises:
+            LookupError: When the row does not show it.
+        """
+        for el in self.page.controls():
+            if el.role == "button" and el.name == name:
+                return el
+        raise LookupError(f"no {name!r} button: is the templates row open?")
+
+    def save_template(self, name: str) -> None:
+        """Save the selected session's queue as a template: the name typed into the row's name box (set through UI
+        Automation), then "Save as queue template". The saved template becomes the row's selected one.
+
+        Args:
+            name: The template's name ("" = the app's default, "<session>-plan").
+        Returns:
+            None.
+        Raises:
+            LookupError: When the row or its name box does not show.
+        """
+        self.show_templates()
+        box = next((el for el in self.page.controls() if el.role == "edit" and
+                    (el.automation_id == TEMPLATE_NAME_ID or el.name == TEMPLATE_NAME_PLACEHOLDER)), None)
+        if box is None:
+            raise LookupError("no template name box in the templates row")
+        box.set_value(name)
+        self._template_button(SAVE_TEMPLATE).click()
+
+    def apply_template(self, to_folder: bool = False) -> None:
+        """Apply the row's selected template: "Apply" (append its prompts to the selected session's queue) or
+        "Apply to dir" (to every session of that session's working folder).
+
+        Args:
+            to_folder: True for "Apply to dir".
+        Returns:
+            None.
+        Raises:
+            LookupError: When the row does not show.
+        """
+        self.show_templates()
+        self._template_button("Apply to dir" if to_folder else "Apply").click()
 
 
 # ---- the toolbar's global pause ---------------------------------------------------------------------

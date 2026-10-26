@@ -627,7 +627,11 @@ def launch(fleet: Fleet, desktop: str, persist: Path, name: str, pytest_args: li
     # (the guest's runner deletes its progress file too, but only once it runs).
     (out / f"{name}.status.json").unlink(missing_ok=True)
     (out / f"{name}.progress.jsonl").unlink(missing_ok=True)
-    command = "C:\\e2e\\venv\\Scripts\\python.exe Z:\\e2e\\src\\guest\\run_suite.py " + name + " " + " ".join(pytest_args)
+    # Quoted the way the guest's Python splits its command line again: an argument with a space — the marker
+    # expression `-m "not needs_fix"` — stays ONE argument (joined with plain spaces, pytest got `-m not` and took
+    # `needs_fix` for a file: run pqr4 of 2026-10-26 collected nothing and exited 4).
+    command = subprocess.list2cmdline(["C:\\e2e\\venv\\Scripts\\python.exe", "Z:\\e2e\\src\\guest\\run_suite.py", name,
+                                       *pytest_args])
     fleet.desk(desktop, "launch", {"command": command, "cwd": "C:\\e2e"})
 
 
