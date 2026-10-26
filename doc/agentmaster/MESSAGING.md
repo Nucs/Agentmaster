@@ -11,9 +11,9 @@
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
 > **Where each part runs** (checked 2026-10-26 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
-> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.36 (a Debug build
-> of a8d8b97a2 by the build server, since 2026-10-26) holds everything through §21.39 but its level picker and File diffs
-> (in no build yet); §21.32–§21.32.3 and §21.36 are
+> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.37 (a Debug build
+> of dae998824 by the build server, since 2026-10-26) holds everything through §21.39, its level picker and File diffs
+> included (§21.40 is in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5404,7 +5404,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production; its level picker and File diffs of 2026-10-26 in no build yet)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, its level picker and File diffs of 2026-10-26 since 0.0.1.37; not in production)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5619,7 +5619,7 @@ this Debug run took 1,125 ms for 631.
   `ConversationImage.cpp`, and the PCH units `AgentManagerContent.Settings.cpp`, `AgentManagerContent.cpp` and
   `TerminalPage.AgentEngine.cpp`; a probe asserting the opposite of the new table's Full row fails with exactly C2338.
 - ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h` and the messaging service (`_allScreenLevel`) gained members:
-  the next build must purge.
+  a build over older intermediates must purge (dev 0.0.1.37's was a clean build).
 
 **Checked, File diffs** (2026-10-26; in no build yet):
 - The m5 suite, isolated: 10,198 checks, every new one passing in each of three runs, all 55 goldens byte-identical. The only
@@ -5637,7 +5637,8 @@ this Debug run took 1,125 ms for 631.
 - Looked at (the scratch driver, `/O2`): a synthetic session at Default with File diffs, and a real hunk of this machine (its
   numbers 23–45, context, added lines, long lines broken at the edge) — Claude Code's own diff look.
 - ⚠ `TurnsOptions` gained a member (`TranscriptTurns.h`, included through `MessagingModels.h` by most of the messaging units)
-  and the messaging service's members changed above: the next build must purge.
+  and the messaging service's members changed above: a build over older intermediates must purge (dev
+  0.0.1.37's was a clean build).
 
 **Check after the build** (dev, with the bot):
 1. A session's card → ⚙️ Session: [📜 All Screen ▸] alone under the two screen buttons. Tap it: the keyboard flips to the
