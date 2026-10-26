@@ -73,10 +73,14 @@ the 20 s spacing: the E2E lane's short values are not built). What a test can re
   session reads Done and the runner is not asked at all (run `pqr1`).
 - **A wake settles; a restart does not.** A parked tab woken by Activate Tab got its prompt 40.7 s after the wake
   (`started` changed, the window restarted); a session whose ended claude was started again by Restart session got its
-  prompt 8 s after the restart, a second before the new claude's SessionStart hook ran (PQR-K6).
-- **`/clear` leaves the queue behind** with the old conversation (PQR-K7).
-- **A reopened session runs on the cog's default mode.** A queue left Paused came back Auto after a quit and a reopen
-  (PQR-15 phase 2) and after Close + Resume here (LIF-04), and went once the tab had started and settled.
+  prompt 8 s after the restart, a second before the new claude's SessionStart hook ran (PQR-03 E5 — filed as PQR-K6,
+  ACCEPTED by the owner on 2026-10-26: "what we have now is okay").
+- **`/clear` leaves the queue behind** with the old conversation (LIF-07 — filed as PQR-K7, a FEATURE by the owner's
+  ruling of 2026-10-26: the queue does not follow the tab across `/clear`).
+- **0.8.0: a reopened session runs on the cog's default mode.** A queue left Paused came back Auto after a quit and a
+  reopen (PQR-15 phase 2) and after Close + Resume here (LIF-04), and went once the tab had started and settled. The
+  owner's rule of 2026-10-26 is the opposite — "we need the mode per session persisted" — and the code now keeps it
+  (PQR-K8, fixed in code, NOT BUILT).
 - **`/model`'s picker reads MenuOpen:** `[advance-skip] <id> (input box not visible (a menu/dialog is open))` for as
   long as it is on the screen (55 s watched, nothing sent); Esc closed it and the prompt — queued 69 s earlier — was in
   Claude's box 3 s later and at the model 10.7 s later: a picker changes no status, so no new window starts (PQR-09
@@ -190,6 +194,12 @@ restarts the window.
 - **E3 Telegram prompt** (F-TG). *Expect:* a remote prompt settles 5 s, not 40 s
   (`kRemotePromptSettleMs`) — see TG flows.
 - **E4 Realtime lane.** *Expect:* exactly 40 s (± a scheduler tick) after the later anchor.
+- **E5 Restart session after claude ended** (killed, or `/exit` whose SessionEnd hook was cancelled — the session
+  still reads waiting-for-you). *Expect:* no new window: the prompt held while claude was gone goes as soon as the
+  restarted claude's input box draws (measured 8 s after the restart). A restart changes none of the window's facts
+  (the state stays waiting-for-you, `started` stays true), unlike a parked tab's wake, which changes `started` and
+  waits the whole window. ACCEPTED (the owner, 2026-10-26: "what we have now is okay"; filed as PQR-K6).
+  *Check:* [LOG] the `[send]` < 30 s after the restart. Test: `test_restart_session_sends_a_held_prompt_once_its_box_is_back`.
 
 ---
 
@@ -319,7 +329,12 @@ until the user's own next message, which then resumes the previous mode.
 - **E7 A backstop pause wins.** While held, the next turn ends in an API error → stop-on-error turns the
   hold into a sticky Paused; the following message does NOT resume Auto.
 - **E8 An old marker.** A resumed session whose transcript ends on an interrupt older than 60 s → no hold.
-- **E9 Restart while held** → the hold is not persisted; the restored session gets the cog default mode.
+- **E9 Restart while held** → the hold is part of the session's persisted mode (since 2026-10-26, PQR-K8's fix,
+  NOT BUILT): the reopened session still reads `Paused → Auto on your next message`, nothing goes by itself, and the
+  user's first message after the reopen resumes Auto. *Check:* [UI] the toggle after the reopen; [MOCK] silence past a
+  window, then the queued prompt after the message's turn; [LOG] `[interrupt-resume]`. Test (`needs_fix`):
+  `test_an_interrupt_hold_survives_a_restart`. (0.8.0: the hold was transient and the reopen re-stamped the cog's
+  default, so the queued prompt went by itself.)
 
 ---
 
@@ -397,8 +412,9 @@ by itself once the tab starts.
    (no open tab)`. *Do:* Sessions page → Resume here. *Expect:* the queue comes back with the session and
    q goes out after start + settle (Auto). Measured (2026-10-24, LIF-04): with the runner Paused at the
    Close nothing asks the runner to decide, so the `session closed` line does not appear (the test checks
-   `[archive] <id>` and the card leaving the board); Resume here re-arms the session on the cog's default
-   (Auto), so a queue closed Paused goes after the resume too.
+   `[archive] <id>` and the card leaving the board). Resume here keeps the session's own mode (PQR-K8's fix,
+   NOT BUILT; LIF-04 E1): a queue closed Paused stays Paused. (0.8.0 re-armed it on the cog's default, Auto, so a
+   queue closed Paused went after the resume too.)
 
 **Edge cases**
 - **E1 Window-restored background tab** with a queue (F-RS) → same as phase 1–2.
@@ -487,6 +503,10 @@ when its echo appears, and never fails the queue.
 - **E2 Pop racing a send** → a prompt that just went Sent is not popped (history never pops).
 - **E3 Up/Down with Shift or Ctrl** → caret/selection moves, no history.
 - **E4 Known defects K2 and K4** below.
+- **E5 `/clear` in the tab** → the tab's new conversation is a new session: an empty queue, the cog's default
+  mode; the queued prompts stay with the old conversation (archived, its own mode kept) and are never sent into the
+  new one. A FEATURE (the owner's ruling of 2026-10-26: the queue does not follow the tab across `/clear`; filed as
+  PQR-K7). Test: `test_clear_leaves_the_tabs_queue_with_the_old_conversation` (also LIF-07).
 
 ---
 
@@ -520,10 +540,14 @@ cut off is never followed blindly.
 **Phases**
 1. **At rest.** *Do:* Paused session with 2 Pending + 3 Sent rows; quit; reopen (Yes to reopen).
    *Expect:* the same rows and statuses; the tab dormant until entered; nothing sent while dormant.
-2. **Mode on reopen.** *Expect:* the restored session's mode is the cog default (re-stamped at the
-   restored launch), not the saved one — note it (by design today). Measured (2026-10-24): a session left
-   Paused with two queued prompts came back Auto and, once its tab started and settled, sent both, one per
-   turn; the SENT row was never typed again.
+2. **Mode on reopen.** *Expect:* the restored session KEEPS its own mode (the owner's rule of 2026-10-26: "we
+   need the mode per session persisted"; PQR-K8's fix, NOT BUILT): a session left Paused comes back Paused and
+   sends nothing by itself; switched to Auto, its queue goes one per turn; the SENT row is never typed again.
+   *Check:* [UI] the toggle after the reopen; [MOCK] silence past a window, then each prompt once. Test
+   (`needs_fix`): `test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`; Close +
+   Resume here: `test_claude_lifecycle.py::test_resume_here_keeps_the_sessions_paused_mode`. (0.8.0, measured
+   2026-10-24: the restored launch re-stamped the cog's default, so a queue left Paused came back Auto and both
+   prompts went once the tab had started and settled — PQR-K8.)
 3. **Mid-turn quit.** *Do:* Auto session with `p1 [[mock hold g1; …]]` running and `p2` queued; quit.
    *Expect after reopen:* the session reads **Error** (a cut-off turn), the runner is Paused
    (stop-on-error); p2 not sent. If the session was the focused tab or woken by the restore wake, its
@@ -599,42 +623,55 @@ too, and the archived session receives the prompts.
 session's runner takes the cog's maxAutoSends / stopOnError too. *Today:* it takes the struct defaults
 (100 / on).
 
-### PQR-K6 · Restart session starts no settle window
+### PQR-K8 · A reopened or resumed session loses its own runner mode — **fixed in code 2026-10-26** (NOT BUILT)
 
-> **P1** · Found by the e2e suite on 2026-10-24 against 0.8.0 (probe `pqprobe1` pq04) ·
-> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_restart_session_does_not_restart_the_settle_window`
-> (`known_defect`)
+> **P0** · Found by the e2e suite on 2026-10-24 against 0.8.0 (PQR-15 phase 2, LIF-04; then filed as "by design");
+> the owner's rule of 2026-10-26: "no, we need the mode per session persisted" · tests (`needs_fix`):
+> `test_prompt_queue_runner.py::test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`,
+> `…::test_an_interrupt_hold_survives_a_restart`, `test_claude_lifecycle.py::test_resume_here_keeps_the_sessions_paused_mode`
 
-**What it is.** A prompt the runner held because the session's claude had ended — no Claude input box on the screen,
-the tab at its PowerShell prompt — is typed into the claude that **Restart session** starts as soon as that claude's
-input box draws. Measured: the `[send]` 8 s after the restart, a second BEFORE the new claude's SessionStart hook
-ran. It went through (the Enter-retry's press 3 s later found the box already empty: only the UserPromptSubmit hook
-was slow), but the settle window exists to keep a prompt out of exactly such a claude's first seconds (DELIVERY.md
-§16: "a resumed tab starts up"). A parked tab's WAKE gets the window (the send 40.7 s after Activate Tab), a restart
-does not.
+**What it was.** `sessions.json` kept each session's mode (`autorunner.mode`), but `_LaunchClaudeSession`'s restored
+branch re-stamped the cog's "default mode for new sessions" on every OPENED session too ("all new OR opened sessions
+run on the default"): a window's reopen and the Sessions page's Resume here brought a session left Paused back Auto,
+and its queue went by itself once the tab had started and settled. An interrupt hold (Esc's "Paused → Auto on your
+next message") was transient and voided the same way. With the cog's default on Auto, a restart also undid every
+automatic pause — stop-on-error, the Enter-retry give-up, the lost-send verdict; such a pause now survives a
+restart too, until the user re-arms the session.
 
-**The cause.** The window counts from `SessionInfo::stateChangedAtUnixMs`, which moves when the state, `live` or
-`started` changes. Around a restart none of them did: a claude that ended without its SessionEnd hook keeps reading
-waiting-for-you (STA-K1 — `/exit` on a busy PC, or a kill), so the restart's SessionStart changed no state, and
-`_RestartManagedSession` swaps the connection in place without touching `started`. The window had long ended when
-the box came back.
+**The fix.** The restored branch keeps the record's mode (`TerminalPage.AgentSessions.cpp`); the interrupt hold is
+persisted with it (`interruptHeldMode` + `interruptHeldUnixMs` beside `mode: Off`, written only while a hold is
+active; an incoherent pair is dropped at load — `Persistence.cpp`, `TestPersistence`); an on-disk session the
+registry never knew gets the cog's defaults when it is first resumed (`_ResumeSessionFromDisk`), as a new session.
+NEW sessions — a launch, a fork, a `/clear` or `/handover` successor, an adopted claude — still start on the cog's
+default (DELIVERY.md §14).
 
-**Expected.** The window counts from the restarted claude's start (a restart is a status change of its own), so the
-prompt goes ≥ 40 s after Restart session, like after a wake. The test kills the claude (≥ 10 s after its turn, so the
-session keeps reading waiting-for-you): the deterministic way to an ended claude whose session still reads ready.
+## Reclassified: accepted behavior (not defects)
 
-### PQR-K7 · `/clear` leaves the tab's queue with the old conversation
+Filed by the e2e suite on 2026-10-24, ruled by the owner on 2026-10-26. Each test now proves the behavior.
 
-> **P1** · Found by the e2e suite on 2026-10-24 against 0.8.0 (probe `pqprobe1` pq06) ·
-> `e2e/suites/test_prompt_queue_runner.py::test_known_defect_clear_leaves_the_tabs_queue_behind` (`known_defect`) ·
-> flows: PQR-13, LIF-07 · **decision owed by the owner** (like TAB-K2: it may be meant)
+### PQR-K6 · Restart session starts no settle window — ACCEPTED
 
-**What it is.** `/clear` in a tab starts a new conversation there, and the tab, its card and its Telegram topic follow
-it (hooks.log `[rehome] <old> -> <new> (same tab, new conversation id)`, `[nav] tab-swap <old8> -> <new8> …`, `[lineage]
-<new8> continues <old8> (/clear …)`). The QUEUE does not: the prompts queued for the tab stay in the old conversation's
-record, which is archived. Measured: the tab's new conversation shows an empty queue, its runner on the cog's default
-(Auto) although the user had paused the tab, the Prompt Queue tab says "Select a session …" until the new card is
-picked, and the queued prompt is never sent (it would go into the OLD conversation if that one were ever resumed).
+> The owner (2026-10-26): "what we have now is okay" · PQR-03 E5 ·
+> `e2e/suites/test_prompt_queue_runner.py::test_restart_session_sends_a_held_prompt_once_its_box_is_back`
 
-**Expected (if the owner decides it is a defect).** The queue and the runner's mode follow the tab to its new
-conversation, as its topic does (`Rekey` in MESSAGING.md §21.6).
+A prompt the runner held because the session's claude had ended — no Claude input box on the screen, the tab at its
+PowerShell prompt — is typed into the claude that **Restart session** starts as soon as that claude's input box draws:
+measured 8 s after the restart, a second before the new claude's SessionStart hook ran; it went through (the
+Enter-retry's press 3 s later found the box already empty: only the UserPromptSubmit hook was slow). The window counts
+from `SessionInfo::stateChangedAtUnixMs`, which moves when the state, `live` or `started` changes; around such a restart
+none of them does (a claude that ended without its SessionEnd hook keeps the session waiting-for-you — STA-K1 — and
+`_RestartManagedSession` swaps the connection in place without touching `started`), so the window, long over, is not
+started again. A parked tab's WAKE does start one (`started` changes: the send 40.7 s after Activate Tab), and so does
+a restart after a `/exit` whose SessionEnd hook arrived (Done → the restored state is a change).
+
+### PQR-K7 · `/clear` leaves the tab's queue with the old conversation — a FEATURE
+
+> The owner (2026-10-26): "no don't follow tab across /clear" · LIF-07 phase 2, PQR-13 E5 ·
+> `e2e/suites/test_prompt_queue_runner.py::test_clear_leaves_the_tabs_queue_with_the_old_conversation`
+
+`/clear` in a tab starts a new conversation there, and the tab, its card and its Telegram topic follow it (hooks.log
+`[rehome] <old> -> <new> (same tab, new conversation id)`, `[nav] tab-swap <old8> -> <new8> …`, `[lineage] <new8>
+continues <old8> (/clear …)`). The queue stays with the old conversation's record, which is archived with its own mode;
+the tab's new conversation is a new session — an empty queue on the cog's default mode — and the old queue's prompts
+are never sent into it (they would go into the old conversation if that one were resumed and its mode allowed it). The
+Prompt Queue tab says "Select a session …" until the new card is picked.

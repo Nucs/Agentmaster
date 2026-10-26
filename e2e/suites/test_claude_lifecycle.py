@@ -299,11 +299,58 @@ def test_a_killed_claudes_shell_never_gets_the_queue_and_restart_session_recover
 @pytest.mark.flow("PQR-10")
 @pytest.mark.slow
 def test_close_keeps_the_session_and_resume_here_brings_it_back_with_its_queue(am, s2):
-    """LIF-04 phases 1–4 and PQR-10 phase 3: a session with a queued prompt (its runner Paused, so nothing goes before
-    the close) is closed: its claude exits, its card leaves the board, nothing is sent. The Sessions page lists it;
-    Resume here opens it in a tab again with `--resume <id>` — the same conversation — with its queue back; the
-    resumed session takes the cog's default mode (Auto: every OPENED session is re-armed on it, AppSettings), so the
-    queued prompt goes once, into the resumed conversation.
+    """LIF-04 phases 1–4 and PQR-10 phase 3: a session with a queued prompt is closed inside the prompt's settle window
+    (the runner on Auto, but the window keeps the prompt for 40 s, and a closed session asks the runner nothing): its
+    claude exits, its card leaves the board, nothing is sent. The Sessions page lists it; Resume here opens it in a tab
+    again with `--resume <id>` — the same conversation — with its queue and its mode (Auto) back, so the queued prompt
+    goes once, into the resumed conversation. Auto is both the session's own mode and the cog's default, so this holds
+    on every build; the Paused case — a mode the default does not restore — is the next test (PQR-K8).
+
+    Args:
+        am: The app.
+        s2: F-S2 (t2 keeps the window from emptying).
+    """
+    a, _b = s2
+    marks = _marks(am)
+    pane = am.window.queue.open(a.title)
+    assert pane.mode() == "Auto", pane.mode()
+    t_queue = pane.queue('later [[mock reply "resumed and sent"]]')
+    a.select()
+    am.window.tabs.close(a.title, "Close")
+    wait_until(lambda: not a.claude_pids(), 30, what="the closed session's claude to exit")
+    am.profile.hooks.wait(rf"\[archive\] {a.id}", since=marks[0], timeout_s=30)
+    assert time.time() - t_queue < SETTLE_S - EARLY_S, "the close took longer than the settle window: the test is void"
+    page = am.window.manager.open()
+    wait_until(lambda: all(c.title != a.title for c in page.cards()), 15, what="the closed session's card to leave")
+    _assert_no_turn(am, "later [[", marks[3], max(0.0, SETTLE_S + 5 - (time.time() - t_queue)), "the session is closed")
+    sessions = am.window.sessions.open()
+    assert sessions.resume(a.title) == a.short  # the same conversation, not a fresh one
+    am.window.tabs.wait_tab(a.title, timeout_s=30)
+    a.select()  # a tab opened in the background starts its claude when it is first shown
+    a.wait_running(timeout_s=60)
+    assert any(f"--resume {a.id}" in c for c in a.claude_cmdlines()), a.claude_cmdlines()
+    pane = am.window.queue.open(a.title)
+    assert [r.label[:5] for r in pane.upcoming()] == ["later"], pane.list_texts()
+    assert pane.mode() == "Auto", pane.mode()
+    e = am.mock.wait_prompt("later [[", since=marks[3], timeout_s=RUNNER_WAIT_S)
+    assert e.get("n_msgs", 0) > 1, e  # into the resumed conversation
+    time.sleep(3)  # a second delivery would have reached the mock by now
+    assert len(_turns(am, "later [[", marks[3])) == 1
+
+
+@pytest.mark.p0
+@pytest.mark.flow("LIF-04")
+@pytest.mark.flow("PQR-15")
+@pytest.mark.needs_fix("PQR-K8")
+@pytest.mark.slow
+def test_resume_here_keeps_the_sessions_paused_mode(am, s2):
+    """LIF-04 E1 (PQR-K8's fix, `needs_fix`): the runner's mode is per session and persisted (the owner's rule of
+    2026-10-26: "we need the mode per session persisted"), so a session closed Paused with a queued prompt comes back
+    Paused from the Sessions page's Resume here: nothing is sent by itself past a whole settle window once its claude
+    runs; when the user switches it to Auto, the prompt goes once, into the resumed conversation.
+
+    On 0.8.0 the restore re-stamps the cog's default (Auto) and the prompt goes by itself (PQR-K8): this test fails
+    there by design (`-m "not needs_fix"` deselects it).
 
     Args:
         am: The app.
@@ -313,26 +360,28 @@ def test_close_keeps_the_session_and_resume_here_brings_it_back_with_its_queue(a
     marks = _marks(am)
     pane = am.window.queue.open(a.title)
     assert pane.click_toggle() == "Paused"
-    pane.queue('later [[mock reply "resumed and sent"]]')
+    pane.queue('kept [[mock reply "sent when the user says so"]]')
     a.select()
     am.window.tabs.close(a.title, "Close")
     wait_until(lambda: not a.claude_pids(), 30, what="the closed session's claude to exit")
     am.profile.hooks.wait(rf"\[archive\] {a.id}", since=marks[0], timeout_s=30)
-    page = am.window.manager.open()
-    wait_until(lambda: all(c.title != a.title for c in page.cards()), 15, what="the closed session's card to leave")
     sessions = am.window.sessions.open()
-    assert sessions.resume(a.title) == a.short  # the same conversation, not a fresh one
+    assert sessions.resume(a.title) == a.short
     am.window.tabs.wait_tab(a.title, timeout_s=30)
-    a.select()  # a tab opened in the background starts its claude when it is first shown
+    a.select()
     a.wait_running(timeout_s=60)
-    assert any(f"--resume {a.id}" in c for c in a.claude_cmdlines()), a.claude_cmdlines()
     pane = am.window.queue.open(a.title)
-    assert [r.label[:5] for r in pane.upcoming()] == ["later"], pane.list_texts()
-    assert pane.mode() == "Auto", pane.mode()  # re-armed on the cog's default, not the Paused it was closed with
-    e = am.mock.wait_prompt("later [[", since=marks[3], timeout_s=RUNNER_WAIT_S)
+    assert [r.label[:4] for r in pane.upcoming()] == ["kept"], pane.list_texts()
+    assert pane.mode() == "Paused", f"{pane.mode()}: Resume here did not keep the session's own mode (PQR-K8)"
+    a.select()
+    _assert_no_turn(am, "kept [[", marks[3], HOLD_CHECK_S, "the resumed session's runner is Paused")
+    assert not _sends(am, a, marks[2]), _why(am, a, marks)
+    pane = am.window.queue.open(a.title)
+    assert pane.click_toggle() == "Auto"
+    e = am.mock.wait_prompt("kept [[", since=marks[3], timeout_s=RUNNER_WAIT_S)
     assert e.get("n_msgs", 0) > 1, e  # into the resumed conversation
     time.sleep(3)  # a second delivery would have reached the mock by now
-    assert len(_turns(am, "later [[", marks[3])) == 1
+    assert len(_turns(am, "kept [[", marks[3])) == 1
 
 
 # ---- LIF-05 · a hand-typed claude ----------------------------------------------------------------------------------------

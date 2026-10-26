@@ -592,6 +592,16 @@ namespace Agentmaster
         }
         approval.Set(L"autoApproveTools", std::move(tools));
         o.Set(L"approval", std::move(approval));
+        // Agentmaster (the INTERRUPT HOLD is part of the persisted mode, 2026-10-26 — DELIVERY.md §14): a session parked
+        // by an Esc ("Paused → Auto on your next message") saves the mode it will resume and the interrupt marker's
+        // stamp, the resume anchor, so a restart neither forgets the resume (the session would stay Paused for good) nor
+        // turns it into a plain Auto (the runner would send into the session the user had just stopped). Written only
+        // while a hold is active, so every record without one — almost all — is byte-unchanged.
+        if (InterruptHoldActive(a))
+        {
+            o.Set(L"interruptHeldMode", json::Value::MkStr(ToString(a.interruptHeldMode)));
+            o.Set(L"interruptHeldUnixMs", json::Value::MkNum(static_cast<double>(a.interruptHeldUnixMs)));
+        }
         return o;
     }
 
@@ -603,6 +613,16 @@ namespace Agentmaster
         a.stopOnError = v.BoolAt(L"stopOnError", true);
         a.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
         a.maxAutoSends = v.U32At(L"maxAutoSends", 100);
+        // The interrupt hold (written by ToJson above only while active; absent in every other record). Kept only when
+        // it is coherent — a hold means the mode is Off, a held mode other than Off, and a stamped marker (an unstamped
+        // one could never be told from a replayed old line, which TakeInterruptHold refuses for the same reason) — so a
+        // hand-edited or half-written record can never resume a mode the user did not choose.
+        a.interruptHeldMode = AutorunnerModeFromString(v.StrAt(L"interruptHeldMode", L"Off"));
+        a.interruptHeldUnixMs = v.I64At(L"interruptHeldUnixMs");
+        if (!InterruptHoldActive(a) || a.interruptHeldUnixMs <= 0)
+        {
+            ClearInterruptHold(a);
+        }
         if (const auto* ap = v.Find(L"approval"); ap && ap->type == json::Value::Type::Obj)
         {
             a.approval.pauseForHuman = ap->BoolAt(L"pauseForHuman", true);
@@ -1007,7 +1027,8 @@ namespace Agentmaster
         s.env = v.StrAt(L"env");
         s.claudeExePath = v.StrAt(L"claudeExePath");
         // Default Full (Agentmaster): a missing field => Full, matching the struct default so an
-        // older / absent settings.json also opts every new/opened session into Autorunner.
+        // older / absent settings.json also opts every new session into Autorunner (a reopened
+        // session keeps its own persisted mode).
         // MIGRATION: renamed from "defaultAutopilotMode" (Autopilot -> Tests Autorunner). Fall back
         // to the old key when the new one is absent so a pre-rename stored default survives.
         s.defaultAutorunnerMode = AutorunnerModeFromString(

@@ -12,7 +12,10 @@ the app does not control first:
 - WHEN the runner decided to send: autorunner.log's `[send] <id> #<index>`, stamped by the app's own clock — the
   moment the settle window is measured to (the request reaches the mock 10–20 s later on a loaded desktop: Claude
   Code runs its UserPromptSubmit hook first);
-- WHY it waited: `[advance-skip] <id> (<reason>)` (DecideAdvance's fixed reasons, logged once per stall);
+- WHY it waited: `[advance-skip] <id> (<reason>)` (DecideAdvance's fixed reasons, logged once per stall) — only when
+  the runner is ASKED: nothing asks it while a session runs, needs approval, reads Error or Done, or is Paused
+  (Scheduler::_wantsIdleStart; run pqr1), so a hold is judged by the mock's silence, never by a reason that may not
+  come;
 - WHAT the user sees: the Prompt Queue tab (its runner toggle, the SENT / UPCOMING rows), the tab badge (its mode
   button, "⏳N", the row-3 cue), the toolbar's Pause / Resume — and the side panel's state word (`StateTimeline`),
   whose LAST change before a send is the settle window's anchor.
@@ -25,6 +28,11 @@ Measured with the probes of 2026-10-24 (run `pqprobe1`, 0.8.0 + Claude Code 2.1.
 - the question guard held the next prompt 50+ s; the answer's turn released it 46 s after that turn ended;
 - Esc parked the runner (`[interrupt-hold] <sid8> autorunner Full -> Off …`); the user's next message resumed it.
 The production timings apply (0.8.0 has no E2E lane), so a test that sends costs about a minute per prompt.
+
+The owner's rulings of 2026-10-26: the runner's mode is per session and persisted — a reopened or resumed session
+keeps it, an interrupt hold included (PQR-K8, fixed in code, NOT BUILT: its tests are `needs_fix` and fail on 0.8.0,
+which re-stamps the cog's default); Restart session starting no settle window (PQR-K6) and `/clear` leaving the queue
+with the old conversation (PQR-K7) are accepted behavior, so their tests prove the behavior.
 """
 from __future__ import annotations
 
@@ -741,6 +749,53 @@ def test_a_mode_chosen_during_the_interrupt_hold_cancels_its_resume(am, s1):
     assert am.window.queue.open(s1.title).mode() == "Paused"
 
 
+@pytest.mark.p1
+@pytest.mark.flow("PQR-07")
+@pytest.mark.needs_fix("PQR-K8")
+@pytest.mark.slow
+def test_an_interrupt_hold_survives_a_restart(am, s1):
+    """PQR-07 E9 (PQR-K8's fix, `needs_fix`): Esc parks the runner ("Paused → Auto on your next message"), the app quits
+    and reopens, and the session comes back STILL held — the hold is part of the session's persisted mode (the owner's
+    rule of 2026-10-26: "we need the mode per session persisted"; `sessions.json` keeps the held mode and the marker's
+    stamp) — so nothing is sent by itself past a whole settle window, and the user's first message after the reopen
+    resumes Auto: the queued prompt follows that message's turn.
+
+    The quit itself saves the record (the window's close archives its sessions), so the hold is on disk before the
+    restart. Claude Code counts an Esc-ed turn as finished on resume, so nothing continues the turn by itself. On 0.8.0
+    the hold is transient and the reopen re-stamps the cog's default (Auto): the queued prompt goes by itself, and this
+    test fails there by design.
+
+    Args:
+        am: The app.
+        s1: F-S.
+    """
+    marks = _marks(am)
+    am.window.queue.open(s1.title).queue('p1 [[mock say "working"; hold g1; reply "one"]]', 'p2 [[mock reply "two"]]')
+    s1.select()
+    _turn_at(am, "p1", marks.seq)
+    am.mock.wait_holding("g1", timeout_s=60)
+    am.window.side_panel.wait_card(s1.title, state="running", timeout_s=STATE_WAIT_S)
+    _press(am, "escape")
+    am.profile.autorunner.wait(rf"\[interrupt-hold\] {s1.short} autorunner Full -> Off", since=marks.autorunner,
+                               timeout_s=30)
+    am.mock.release("g1")
+    assert am.window.queue.open(s1.title).mode() == "Paused → Auto on your next message"
+    am.restart()
+    pane = am.window.queue.open(s1.title)
+    assert pane.mode() == "Paused → Auto on your next message", \
+        f"{pane.mode()}: the interrupt hold did not survive the restart (PQR-K8)"
+    s1.select()
+    s1.wait_running(timeout_s=60)
+    _assert_no_turn(am, "p2 [[", marks.seq, HOLD_CHECK_S, "the reopened session is still held by the interrupt")
+    mark = am.profile.hooks.mark()
+    s1.ask('go [[mock reply "ok"]]', wait="sent")
+    am.profile.hooks.wait(rf"\[interrupt-resume\] {s1.short} autorunner Off -> Full \(your message arrived\)",
+                          since=mark, timeout_s=60)
+    _turn_at(am, "p2 [[", marks.seq)
+    assert len(_turns(am, "p2 [[", marks.seq)) == 1
+    assert am.window.queue.open(s1.title).mode() == "Auto"
+
+
 # ---- PQR-08 · a question holds the queue ------------------------------------------------------------------------------------
 
 
@@ -1019,12 +1074,16 @@ def test_with_stop_on_error_off_the_queue_waits_out_the_error(am, s1):
 
 @pytest.mark.p0
 @pytest.mark.flow("PQR-15")
+@pytest.mark.needs_fix("PQR-K8")
 @pytest.mark.slow
-def test_a_queue_survives_a_restart_and_nothing_sent_is_sent_again(am, s1):
-    """PQR-15 phases 1–2: a Paused session holding two queued prompts survives a quit and a reopen — same rows, same
-    statuses, the sent one never typed again. The restored session's mode is the cog's default (Auto), not the saved
-    Paused one (by design today: a reopened session is re-armed on the default), so once its tab has started and
-    settled the two prompts go, one per turn.
+def test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again(am, s1):
+    """PQR-15 phases 1–2 (PQR-K8's fix, `needs_fix`): a Paused session holding two queued prompts survives a quit and a
+    reopen — same rows, same statuses, the sent one never typed again — and KEEPS its mode: the runner's mode is per
+    session and persisted (the owner's rule of 2026-10-26), so nothing is sent by itself after the reopen, past a whole
+    settle window once its claude runs. When the user switches the runner to Auto, the two go, one per turn.
+
+    On 0.8.0 the reopen re-stamps the cog's default (Auto) and the two prompts go by themselves (PQR-K8): this test
+    fails there by design (`-m "not needs_fix"` deselects it).
 
     Args:
         am: The app.
@@ -1038,10 +1097,16 @@ def test_a_queue_survives_a_restart_and_nothing_sent_is_sent_again(am, s1):
     pane = am.window.queue.open(s1.title)
     assert [r.label[:2] for r in pane.upcoming()] == ["r1", "r2"], pane.list_texts()
     assert [r.label[:5] for r in pane.sent()] == ["ready"], pane.list_texts()
-    assert pane.mode() == "Auto", pane.mode()  # the cog's default, re-stamped at the restored launch
+    assert pane.mode() == "Paused", f"{pane.mode()}: the reopen did not keep the session's own mode (PQR-K8)"
     s1.select()
-    _turn_at(am, "r1", marks.seq)
-    _turn_at(am, "r2", marks.seq, timeout_s=RUNNER_WAIT_S + 30)
+    s1.wait_running(timeout_s=60)  # the reopened window's focused tab: its claude starts when the tab is shown
+    _assert_no_turn(am, "r1 [[", marks.seq, HOLD_CHECK_S, "the session's runner was left Paused before the restart")
+    assert not _sends(am, s1, marks.autorunner), _why(am, s1, marks)
+    pane = am.window.queue.open(s1.title)
+    assert pane.click_toggle() == "Auto"
+    _turn_at(am, "r1 [[", marks.seq, timeout_s=RELEASE_S + ARRIVE_S)
+    _turn_at(am, "r2 [[", marks.seq, timeout_s=RUNNER_WAIT_S + 30)
+    assert len(_turns(am, "r1 [[", marks.seq)) == 1 and len(_turns(am, "r2 [[", marks.seq)) == 1
     assert not _turns(am, "ready [[", marks.seq), "the history's prompt was sent again after the restart"
 
 
@@ -1136,25 +1201,26 @@ def test_known_defect_the_boards_send_count_counts_typed_history(am, s1):
     assert "⚙ 1/1" in card.texts, card.texts  # TODAY
 
 
+# ---- reclassified: accepted behavior (flows/03 "Reclassified: accepted behavior") ---------------------------------------
+# Filed as known defects on 2026-10-24 and ruled ACCEPTED by the owner on 2026-10-26: each test now proves the behavior.
+
+
 @pytest.mark.p2
 @pytest.mark.flow("PQR-03")
-@pytest.mark.known_defect("PQR-K6")
 @pytest.mark.slow
-def test_known_defect_restart_session_does_not_restart_the_settle_window(am, s1):
-    """PQR-K6 (found by the probe pqprobe1 pq04, 2026-10-24): a prompt the runner held because the session's claude
-    had ended (no Claude input box on the screen) is typed into the claude that Restart session starts as soon as its
-    input box draws — measured 8 s after the restart, a second BEFORE that claude's SessionStart hook ran. It went
-    through (the Enter-retry's press 3 s later found the box already empty: only the UserPromptSubmit hook was slow),
-    but the settle window exists to keep a prompt out of exactly such a claude's first seconds ("a resumed tab's
-    start-up", DELIVERY.md §16), and a parked tab's wake gets it (pq05: the send 40.7 s after Activate Tab — `started`
-    changed) while a restart does not: the session read waiting-for-you before and after it (a claude that ended
-    without its SessionEnd never reads done, STA-K1) and its `started` never changed, so the window had long ended.
-    Expected once fixed: the window counts from the restarted claude's start, so the prompt goes ≥ 40 s after it.
+def test_restart_session_sends_a_held_prompt_once_its_box_is_back(am, s1):
+    """PQR-03 E5 (PQR-K6 as filed on 2026-10-24, accepted by the owner on 2026-10-26: "what we have now is okay"): a
+    prompt the runner held because the session's claude had ended (no Claude input box on the screen) is typed into the
+    claude that Restart session starts as soon as its input box draws — measured 8 s after the restart, a second
+    before that claude's SessionStart hook ran — with no new settle window. A restart changes none of the facts the
+    window counts from: the session read waiting-for-you before and after it (a claude that ended without its
+    SessionEnd never reads done, STA-K1) and its `started` never changed, so the window, long over, is not started
+    again. (A parked tab's WAKE does start one: `started` changes — PQR-10.)
 
     The claude is KILLED here (≥ 10 s after its turn, so the session keeps reading waiting-for-you): the deterministic
     way to an ended claude whose session still reads ready. The probe met the same with `/exit`, whose SessionEnd hook
-    the loaded desktop cancelled; on a fast PC `/exit` reads done, and the SessionStart after a restart is then a status
-    change.
+    the loaded desktop cancelled; when that hook arrives the session reads done, and the SessionStart after a restart
+    is then a status change, which does start a window.
 
     Args:
         am: The app.
@@ -1180,22 +1246,21 @@ def test_known_defect_restart_session_does_not_restart_the_settle_window(am, s1)
     _turn_at(am, "back [[", marks.seq)
     sent_at = _nth_send(am, s1, marks.autorunner, 1)
     assert sent_at - t_restart < SETTLE_S - 10, \
-        f"sent {sent_at - t_restart:.1f} s after the restart: the defect is gone? ({_why(am, s1, marks)})"
+        f"sent {sent_at - t_restart:.1f} s after the restart: a restart now starts a settle window ({_why(am, s1, marks)})"
 
 
 @pytest.mark.p1
 @pytest.mark.flow("PQR-13")
 @pytest.mark.flow("LIF-07")
-@pytest.mark.known_defect("PQR-K7")
 @pytest.mark.slow
-def test_known_defect_clear_leaves_the_tabs_queue_behind(am, s1):
-    """PQR-K7 (found by the probe pqprobe1 pq06, 2026-10-24): `/clear` in a tab starts a new conversation there —
-    the tab, its card and its Telegram topic follow it (`[nav] tab-swap <old> -> <new>`, `[lineage] <new> continues
-    <old> (/clear …)`) — but the QUEUE does not: the prompts queued for the tab stay in the old conversation's record,
-    which is archived. TODAY: the tab's new conversation shows an empty queue, its runner on the cog's default (Auto)
-    although the user had paused it, the Prompt Queue tab says "Select a session …" until its new card is picked, and
-    the queued prompt is never sent (it would go into the OLD conversation if that one were ever resumed). Expected
-    (to be decided by the owner, like TAB-K2): the queue and the runner's mode follow the tab, as its topic does.
+def test_clear_leaves_the_tabs_queue_with_the_old_conversation(am, s1):
+    """LIF-07 phase 2 and PQR-13 E5 (PQR-K7 as filed on 2026-10-24, a FEATURE by the owner's ruling of 2026-10-26: the
+    queue does not follow the tab across `/clear`): `/clear` in a tab starts a new conversation there — the tab, its
+    card and its Telegram topic follow it (`[nav] tab-swap <old> -> <new>`, `[lineage] <new> continues <old> (/clear
+    …)`) — while the prompts queued for the tab stay with the old conversation's record, which is archived (with its
+    own Paused mode). The tab's new conversation is a new session: an empty queue and the cog's default mode (Auto),
+    and the old queue's prompt is never sent into it. The Prompt Queue tab says "Select a session …" until the new card
+    is picked.
 
     Args:
         am: The app.
@@ -1211,9 +1276,16 @@ def test_known_defect_clear_leaves_the_tabs_queue_behind(am, s1):
     new_key = m.group(1)
     am.window.side_panel.wait_card(s1.title, timeout_s=30)
     pane = am.window.queue.open(s1.title)  # the tab's card is the NEW conversation's now
-    assert not pane.upcoming(), pane.list_texts()  # TODAY: the queued prompt stayed behind
-    assert pane.mode() == "Auto", pane.mode()  # TODAY: the new conversation took the cog's default, not Paused
-    _assert_no_turn(am, "kept [[", marks.seq, HOLD_CHECK_S, "its conversation was cleared")  # TODAY: never sent
+    assert not pane.upcoming(), pane.list_texts()  # the queued prompt stays with the old conversation
+    assert pane.mode() == "Auto", pane.mode()  # a new session: the cog's default mode
+    _assert_no_turn(am, "kept [[", marks.seq, HOLD_CHECK_S, "its conversation was cleared")  # never sent into the new one
     am.window.tabs.wait_tab(s1.title)
     assert am.profile.session(new_key) is not None
+    # The prompt is still in the OLD conversation's record, which keeps its own Paused mode: one read of sessions.json,
+    # after the hold check (the app is at rest; a read is never polled — ROB-K1).
+    old = am.profile.session(s1.id)
+    assert old is not None, "the old conversation's record is gone"
+    old_queue = old.raw.get("queue", [])
+    assert any(p.get("text", "").startswith("kept [[") and p.get("status") == "Pending" for p in old_queue), old_queue
+    assert old.raw.get("autorunner", {}).get("mode") == "Off", old.raw.get("autorunner")
 

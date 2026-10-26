@@ -281,8 +281,8 @@ tryAdvance(s):
 
 ### Policy & guards
 - **Default mode:** the cog's `defaultAutorunnerMode` — shipped as **`Full`** — is stamped onto every
-  new, adopted and reopened session (the bare `AutorunnerState` default is `Off`; a managed Codex stays
-  `Off`). `Full` (shown "Auto") is hands-off; `Off` (shown "Paused") sends nothing by itself. A third
+  new and adopted session; a reopened one keeps its own, persisted mode, an interrupt hold included (the
+  bare `AutorunnerState` default is `Off`; a managed Codex stays `Off`). `Full` (shown "Auto") is hands-off; `Off` (shown "Paused") sends nothing by itself. A third
   mode, `SemiAuto` with a one-click confirm per send, was removed on 2026-10-09. The scheduler runs in
   every build since the same day (before: only in a dev build or with debug mode on).
 - **Question-guard ON** by default; per-item override `answers-a-question:ok` (set as the prompt's `guardPattern`).

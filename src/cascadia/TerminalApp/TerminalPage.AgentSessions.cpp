@@ -1238,21 +1238,24 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
-            // Agentmaster: an OPENED (restored / window-restored) session ALSO adopts the cog's
-            // default Autorunner MODE — the product rule is "all new OR opened sessions run on the
-            // default (Full)" — even though it keeps its persisted queue + backstops. This
-            // intentionally OVERRIDES the session's saved per-session mode (a deliberate carve-out
-            // from the old "a restored session keeps its mode"); it stays changeable afterward via
-            // the Auto Testing toggle. Re-arming zeroes the per-run send counter so a reopened plan
-            // isn't instantly capped by a lingering in-memory autoSendsThisRun. Codex restores keep
-            // their own Off (see _LaunchCodexSession).
-            info.autorunner.mode = _appSettings.defaultAutorunnerMode;
+            // Agentmaster (the runner's mode is PER SESSION and persisted — the owner's rule of 2026-10-26: "we need the
+            // mode per session persisted"): an OPENED session — a window reopen's re-home, the Sessions page's Resume
+            // here, a restore-fresh or re-fork of a restored record — KEEPS the Prompt Queue Runner mode it was saved with
+            // (`autorunner.mode` in sessions.json), its queue and its backstops, so a queue the user left Paused never
+            // starts sending by itself after a restart. (Until 2026-10-26 this branch re-stamped the cog's default on
+            // every opened session too: "all new OR opened sessions run on the default".) The DEFAULT stays for
+            // sessions that are new to Agentmaster: a fresh launch or fork (the branch above), a registry-minted adopt /
+            // `/clear` successor (SessionRegistry's _defaultAutorunnerMode), and an on-disk session resumed for the first
+            // time, which _ResumeSessionFromDisk seeds with the cog's defaults before it reaches this seam. Codex
+            // restores keep their own Off (see _LaunchCodexSession).
+            // The per-run send counter is zeroed, so a reopened plan isn't instantly capped by a lingering in-memory
+            // autoSendsThisRun (it is transient: a record loaded from disk starts at 0 anyway).
             info.autorunner.autoSendsThisRun = 0;
-            // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): the re-stamp above voids any hold a
-            // this-run-archived record still carries in memory (the field is transient, so a record
-            // loaded from disk never has one); clear it explicitly so a later user Off on this reopened
-            // session can never be "resumed" off a stale remembered mode.
-            ::Agentmaster::ClearInterruptHold(info.autorunner);
+            // Agentmaster (the INTERRUPT HOLD — DELIVERY.md §14): a hold is part of the session's persisted mode
+            // ("Paused → Auto on your next message": mode Off, interruptHeldMode + the marker's stamp as the resume
+            // anchor, saved since 2026-10-26), so it is kept here too — the user's next message after the reopen resumes
+            // the mode they had chosen, exactly as it would have without the restart. Claude Code counts an Esc-ed turn
+            // as finished on resume (memory interrupted-turn-questions), so nothing but the user's own message resumes it.
         }
         _sessionRegistry->Upsert(info);
 
@@ -3392,8 +3395,8 @@ namespace winrt::TerminalApp::implementation
     //      the half-hollow tab dot and the "Activate" surfaces already honor for restored tabs; the scanner
     //      also holds every Running promotion for it (ScanSessionIsDormant), so the closed claude's last
     //      transcript lines and subagent files cannot re-light it.
-    // Deliberate difference from a window restore: the session KEEPS its Tests Autorunner mode (a restore
-    // re-stamps the cog default) — parking a tab must never switch on auto-sends the user had turned off.
+    // The session KEEPS its Tests Autorunner mode, as a window restore keeps it (the mode is per session and
+    // persisted) — parking a tab must never switch on auto-sends the user had turned off.
     // The unsent-draft memory is kept and re-armed (§10), as on every resume path. Waking needs nothing new:
     // entering the tab lays the control out and its own init starts the resume; "Activate Tab" and "Activate
     // All Tabs (N)" initialize it in place (InitializeWithSize). Returns true when the tab went dormant;

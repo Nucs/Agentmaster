@@ -75,7 +75,10 @@
 > with the old conversation; the owner decides) — and reproduced PQR-K1–K3, which reading had found. Measured on the
 > way: the runner writes a reason only when it is asked (never while a session runs, needs approval, reads Error or
 > Done, or is Paused), and a settle window's anchor is the last status change — usually the ~20 s running blip after a
-> turn, not the turn's end (flows/03 "Measured").
+> turn, not the turn's end (flows/03 "Measured"). **The owner's rulings (2026-10-26):** PQR-K6 is accepted and
+> PQR-K7 a feature (their known-defect tests became feature tests), and the runner's mode is per session and
+> persisted — PQR-K8 (a reopen, Resume here and a restore-fresh re-stamped the cog's default and dropped an interrupt
+> hold) is fixed in code, NOT BUILT, with three `needs_fix` tests no build has run yet; the suites are 27 and 8 tests.
 >
 > **Reliability extension (2026-10-23, PLAN ONLY):** [E2E_RELIABILITY.md](E2E_RELIABILITY.md) specifies a mandatory
 > guard around every desktop test, an external supervisor, crash/corruption evidence, leak measurements and special
@@ -862,8 +865,10 @@ through the mock log + transcript + bridge + UIA.
 rather than by the ladder below, at the PRODUCTION timings (the fast lane's short settle and spacing are not built):
 L0 (the smoke test), L1 (flows' PQR-01, -02, -04, -05, -06), L2 PQR-21–23 (PQR-20 and PQR-24 not), L3 PQR-31 (PQR-30,
 -32, -33 not), L4 PQR-40 (PQR-41 and PQR-42 are flows/05's and flows/06's tests; PQR-43 is STA-K1, and LIF-03 checks
-that the killed claude's shell never gets the queue), L5 PQR-50–51, K1–K3 — plus the two defects the suite found
-(PQR-K6, PQR-K7) and Claude's own life cycle around the queue ([`flows/24`](flows/24-claude-lifecycle.md),
+that the killed claude's shell never gets the queue), L5 PQR-50–51, K1–K3 — plus the two behaviors the suite found
+(PQR-K6, accepted, and PQR-K7, a feature: the owner's rulings of 2026-10-26), PQR-K8's fix (`needs_fix`: a reopen
+and Resume here keep the session's own mode and its interrupt hold) and Claude's own life cycle around the queue
+([`flows/24`](flows/24-claude-lifecycle.md),
 `e2e/suites/test_claude_lifecycle.py`). The bridge is not built, so the oracles are the mock, the transcript, the
 logs and UI Automation; what the runner logs, and when, is in flows/03 "Measured".
 

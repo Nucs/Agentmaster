@@ -356,11 +356,12 @@ namespace Agentmaster
                 // Adopt/re-home autorunner default (SetDefaultAutorunnerMode): the MODE the registry
                 // stamps onto records it mints ITSELF — the hook SessionStart adopt create + the Fleet
                 // Observer's first-sight create (a hand-typed adopted claude; the NEW conversation id
-                // an in-session /clear or /resume mints on a re-homed tab). The launch/restore seams
-                // stamp the cog default in TerminalPage, but these two creations happen inside the
-                // engine and used to default Off — silently exempting exactly those sessions from the
-                // autorunner ("queued prompts stuck Pending"). Seeded here from the persisted settings;
-                // the cog Save re-pushes it live (TerminalPage's settings handler), in every build.
+                // an in-session /clear or /resume mints on a re-homed tab). The launch seam stamps the
+                // cog default on every other new session in TerminalPage (a restored session keeps its
+                // own persisted mode), but these two creations happen inside the engine and used to
+                // default Off — silently exempting exactly those sessions from the autorunner ("queued
+                // prompts stuck Pending"). Seeded here from the persisted settings; the cog Save
+                // re-pushes it live (TerminalPage's settings handler), in every build.
                 e->registry->SetDefaultAutorunnerMode(defaultRunnerMode);
             }
             // One line per process start: proof in hooks.log that this build runs the runner, and with

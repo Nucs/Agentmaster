@@ -1416,7 +1416,7 @@ namespace winrt::TerminalApp::implementation
         _setDefaultMode.Header(winrt::box_value(L"New-session mode"));
         _setDefaultMode.Items().Append(winrt::box_value(winrt::hstring{ ::Agentmaster::AutorunnerModeDisplayName(AutorunnerMode::Off) })); // 0: "Paused"
         _setDefaultMode.Items().Append(winrt::box_value(winrt::hstring{ ::Agentmaster::AutorunnerModeDisplayName(AutorunnerMode::Full) })); // 1: "Auto"
-        AgentSetTip(_setDefaultMode, L"Prompt Queue Runner mode each new or reopened session starts in \x2014 Paused (nothing is sent on its own; you use Send now) \xB7 Auto (the next queued prompt goes out by itself once the session has been ready for a short while). Per-session, changeable from the Prompt Queue pane or the tab's badge.");
+        AgentSetTip(_setDefaultMode, L"Prompt Queue Runner mode each new session starts in \x2014 Paused (nothing is sent on its own; you use Send now) \xB7 Auto (the next queued prompt goes out by itself once the session has been ready for a short while). A reopened session keeps the mode it had. Per-session, changeable from the Prompt Queue pane or the tab's badge.");
         panel.Children().Append(_setDefaultMode);
         _setMaxAutoSends = TextBox{};
         _setMaxAutoSends.Header(winrt::box_value(L"Max auto-sends per run"));

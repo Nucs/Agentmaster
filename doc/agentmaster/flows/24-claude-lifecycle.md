@@ -37,7 +37,7 @@ edge and check the three things a user relies on across it:
  is cancelled,  the console     state normalized   kept, the          follow it; the old  others dormant; a never-
  still waiting  guard's note    (TAB-01)           transcript kept)   one is archived     prompted one comes back
    │              │               │                  │                with its QUEUE      FRESH (Rule #6)
-   ▼              ▼               ▼                  ▼                (PQR-K7)
+   ▼              ▼               ▼                  ▼                (a feature)
  the tab's PowerShell host stays  enter / Activate   Sessions page →
    │                              Tab → claude       Resume here →
    ▼                              --resume <id>      claude --resume <id>
@@ -49,7 +49,7 @@ edge and check the three things a user relies on across it:
  the runner at every edge: never into a claude that does not run — no Claude input box on the screen ("input box not
  visible"), a parked tab ("tab dormant"), a Done or closed session (nothing asks the runner at all: no line) — and
  after a claude starts again the settle window counts from the start for a WAKE (`started` changed) but not for a
- RESTART (PQR-K6)
+ RESTART (accepted, PQR-03 E5); every reopen and Resume here keeps the session's own runner mode (PQR-K8's fix)
 ```
 
 ---
@@ -104,7 +104,7 @@ into the shell left behind, and Restart session continues the same conversation,
    ConPTY <old wt> …`; [OS] the command line.
 4. **The queue goes.** *Expect:* the held prompt is delivered once, into the resumed conversation. *Check:* [MOCK] one
    turn, `n_msgs > 1`. **Measured:** 8 s after the restart, a second before the new claude's SessionStart hook ran
-   — the restart started no settle window (PQR-K6).
+   — the restart started no settle window (accepted by the owner on 2026-10-26: flows/03 PQR-03 E5).
 
 ---
 
@@ -134,17 +134,23 @@ behind, and Restart session brings the conversation back.
 continues it, queue included.
 
 **Phases**
-1. **A queue, then Close.** *Do:* in F-S2's t1: the runner Paused, queue `later [[mock reply "resumed and sent"]]`;
-   the tab's ✕ → Close. *Expect:* the claude exits, the card leaves the board, nothing is sent. *Check:* [LOG]
+1. **A queue, then Close.** *Do:* in F-S2's t1 (runner on Auto): queue `later [[mock reply "resumed and sent"]]`,
+   then — inside the prompt's 40 s settle window — the tab's ✕ → Close. *Expect:* the claude exits, the card leaves
+   the board, nothing is sent (the window held it; a closed session asks the runner nothing). *Check:* [LOG]
    `[nav] close-begin <sid8> (archived, resumable)`, `[archive] <id>`, `[nav] close-done <sid8>`.
 2. **The Sessions page.** *Do:* the toolbar's Sessions. *Expect:* the table lists t1 (and t2), the closed one with
    "Resume here" in its detail pane. *Check:* [UI] (a row is no element: its cells are texts — e2e/README.md).
 3. **Resume here.** *Expect:* a tab titled t1 again, its claude with `--resume <id>` (the same id — not a fresh
    conversation); the Prompt Queue tab shows `later` in UPCOMING. *Check:* [LOG] `[nav] sessions resume-click row=<sid8>
    …`, `[nav] sessions resume-done new=<sid8>`; [OS].
-4. **The mode and the send.** *Expect:* the resumed session is re-armed on the cog's default mode (Auto — every OPENED
-   session is, AppSettings `defaultAutorunnerMode`), not the Paused it was closed with, so `later` goes once into the
-   resumed conversation. *Check:* [UI] the toggle; [MOCK] one turn, `n_msgs > 1`.
+4. **The mode and the send.** *Expect:* the resumed session keeps its own mode (Auto here), so `later` goes once into
+   the resumed conversation. *Check:* [UI] the toggle; [MOCK] one turn, `n_msgs > 1`.
+
+**Edge cases**
+- **E1 Closed Paused.** *Expect:* Resume here brings it back Paused — the runner's mode is per session and persisted
+  (the owner's rule of 2026-10-26; PQR-K8's fix, NOT BUILT) — so nothing goes by itself; switched to Auto, the prompt
+  goes once. Test (`needs_fix`): `test_resume_here_keeps_the_sessions_paused_mode`. (0.8.0, measured 2026-10-24: the
+  restore re-stamped the cog's default, so a session closed Paused came back Auto and its queue went by itself.)
 
 ---
 
@@ -203,9 +209,11 @@ same folder, same title — instead of a `--resume` that would die on "No conver
    tab-swap <old8> -> <new8> (same tab; claude switched conversation — /clear or /resume)`, `[rehome] <new> inherits
    MANAGED provenance from <old> …`, `[lineage] <new8> continues <old8> (/clear on ConPTY …)`, `[SessionStart] <new>
    state=0`; [ENG] the new record's `continuedFromId` / `continuedVia` = clear.
-2. **The queue.** *Expect (TODAY, PQR-K7):* the prompts queued for the tab stay in the OLD conversation's (archived)
-   record: the tab's new conversation shows an empty queue, its runner on the cog's default (Auto), and the queued
-   prompt is never sent. Whether the queue should follow the tab is the owner's decision (flows/03 PQR-K7).
+2. **The queue.** *Expect (a FEATURE — the owner's ruling of 2026-10-26: "no don't follow tab across /clear"):* the
+   prompts queued for the tab stay in the OLD conversation's (archived) record, with its runner mode: the tab's new
+   conversation shows an empty queue, its runner on the cog's default (a new conversation), and the queued prompt is
+   never sent into it. It stays resumable with the old conversation (Sessions page → Resume here). Test:
+   `test_clear_leaves_the_tabs_queue_with_the_old_conversation` (flows/03 PQR-13 E5).
 
 ---
 
@@ -214,6 +222,9 @@ same folder, same title — instead of a `--resume` that would die on "No conver
 The life cycle's defects are filed where the behavior lives:
 - **STA-K1** (flows/05): a claude that ends without its SessionEnd — killed, or its `/exit` hook cancelled on a busy PC
   — never reads done (LIF-02 phase 1, LIF-03 phase 1).
-- **PQR-K6** (flows/03): Restart session starts no settle window: a held prompt goes into the restarted claude's first
-  seconds (LIF-02 phase 4).
-- **PQR-K7** (flows/03): `/clear` leaves the tab's queue with the old conversation (LIF-07 phase 2).
+- **PQR-K8** (flows/03; **fixed in code 2026-10-26**, NOT BUILT): a session closed Paused came back from Resume here on
+  the cog's default mode (LIF-04 E1).
+
+Two behaviors filed as defects on 2026-10-24 are the owner's accepted behavior (2026-10-26; flows/03 *Reclassified*):
+Restart session starts no settle window (PQR-K6 → LIF-02 phase 4), and `/clear` leaves the tab's queue with the old
+conversation (PQR-K7 → LIF-07 phase 2).
