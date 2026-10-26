@@ -4755,14 +4755,14 @@ namespace Agentmaster::Msg
     {
         Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
         Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ◀ Back
-        AllScreen, // §21.39: ☐ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ★) · ◀ Back (to Session)
-        AllScreenDiffs, // §21.39: the same picker with ☑ File diffs checked - its levels draw every file change as a diff, whatever the level
+        AllScreen, // §21.39: ⬜ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
+        AllScreenDiffs, // §21.39: the same picker with ☑️ File diffs checked - its levels draw every file change as a diff, whatever the level
     };
 
     // ===== 📜 All Screen's levels (§21.39) ======================================================
 
     /// <summary>
-    /// The level 📜 All Screen draws when none is named - a bare /allscreen - and the one its level picker marks with ★: FULL,
+    /// The level 📜 All Screen draws when none is named - a bare /allscreen - and the one its level picker marks with ⭐: FULL,
     /// the user's rule of 2026-10-26 ("default is full or can be set in settings"). The cog's "All Screen's default level"
     /// (AppSettings::messagingAllScreenLevel) overrides it; an empty or unknown stored word reads as this (AllScreenLevelSetting).
     /// </summary>
@@ -4909,7 +4909,7 @@ namespace Agentmaster::Msg
         bool reactivatable{ false }; // SessionIsReactivatable: a parked tab, a session in Error, or a claude that exited - ▶ Reactivate is offered for a parked tab only (the other two show 🔄 Restart Session, which does the same for them)
         bool error{ false }; // the session is in Error: 🔄 Restart Session on Main, 🔧 Resume Session beside it on the Session page (§21.24)
         bool done{ false }; // claude exited (Done): 🔄 Restart Session on Main too (the user's rule of 2026-10-19)
-        // §21.39: the default level (the cog's setting, not the session's): its button on the ALL SCREEN page wears ★. Not read
+        // §21.39: the default level (the cog's setting, not the session's): its button on the ALL SCREEN page wears ⭐. Not read
         // from the session - CardButtonFactsFor leaves the built-in default, and the service sets the setting's (_cardMarkupFor).
         TurnsLevel allScreenLevel{ kAllScreenDefaultLevel };
     };
@@ -4958,7 +4958,7 @@ namespace Agentmaster::Msg
     /// </remarks>
     inline constexpr std::wstring_view kCardVerbAllScreen = L"allscreen";
     /// <summary>
-    /// The picker with ☑ File diffs checked (CardPage::AllScreenDiffs): what the unchecked box's button opens. Its checked box's
+    /// The picker with ☑️ File diffs checked (CardPage::AllScreenDiffs): what the unchecked box's button opens. Its checked box's
     /// button is kCardVerbAllScreen again (unchecked). Each tap NAMES the page it shows, so a double tap never flips twice, and a
     /// copy of the card (whose page nobody remembers) gets the right one. "c:allscreen+d:" with a 36-character id is 50 bytes.
     /// </summary>
@@ -4967,7 +4967,8 @@ namespace Agentmaster::Msg
     /// A level's button on the ALL SCREEN page: "allscreen-&lt;word&gt;" ("allscreen-full") is /allscreen &lt;word&gt;; on the checked
     /// page it ends with kAllScreenDiffsSuffix ("allscreen-full+d" = /allscreen full diffs) - the button carries the box as it
     /// was SHOWN, so what the user saw is what is drawn. The longest, "c:allscreen-compact+d:" (or -minimal / -default) with a
-    /// 36-character id, is 58 bytes of Telegram's 64.
+    /// 36-character id, is 58 bytes of Telegram's 64. A tap on one also takes the card back to its MAIN page (the service's
+    /// handler; the user's rule of 2026-10-26, "after picking which, reset menu to main view").
     /// </summary>
     inline constexpr std::wstring_view kCardVerbAllScreenLevelPrefix = L"allscreen-";
     /// <summary>The ending of a level verb (and of kCardVerbAllScreenDiffs) that means "File diffs" is checked.</summary>
@@ -5036,9 +5037,10 @@ namespace Agentmaster::Msg
     /// "in case of error"); the runner · 📋 Queue; 📌 Pin · 📄 Transcript; 🖥 Screen Text · 🖼 Screen Image; 📜 All Screen ▸ alone
     /// (§21.39: the whole conversation as tall pictures - the user's request of 2026-10-25, a row of its own so the existing
     /// buttons keep their places); and ◀ Back. ALL SCREEN (§21.39, the requests of 2026-10-26) is the level picker 📜 All
-    /// Screen ▸ opens: first the "File diffs" checkbox (☐ on ALL SCREEN, ☑ on ALL SCREEN DIFFS: a tap shows the other page),
+    /// Screen ▸ opens: first the "File diffs" checkbox (⬜ on ALL SCREEN, ☑️ on ALL SCREEN DIFFS: a tap shows the other page),
     /// then one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default level
-    /// (facts.allScreenLevel) wearing ★ in place of 📜, then ◀ Back to the Session page.
+    /// (facts.allScreenLevel) wearing ⭐ in place of 📜, then ◀ Back to the Session page. A picked level takes the card back to
+    /// MAIN (the service's handler, not this page's buttons).
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
@@ -5079,15 +5081,20 @@ namespace Agentmaster::Msg
             // §21.39 (the request of 2026-10-26): "File diffs" first, a checkbox Telegram has no widget for - a button whose box
             // shows the state and whose tap shows the picker in the other state. It sits above the levels because it changes
             // what each of them draws. Unchecked = each level's own default (none draws diffs); checked = diffs at every level.
+            // Both boxes are EMOJI, so they look alike (the user's word of 2026-10-26: the empty box "to match the checked
+            // checkbox"): ☑️ is U+2611 + U+FE0F (alone, U+2611 may be drawn as a text glyph, like the cog's U+2699 above), and the
+            // empty one is ⬜ U+2B1C, an emoji by default - the text glyph ☐ U+2610 has no emoji form at all.
             const bool diffs = page == CardPage::AllScreenDiffs;
-            rows.push_back({ { diffs ? L"\x2611 File diffs \x00B7 at every level" : L"\x2610 File diffs \x00B7 the level's default",
+            rows.push_back({ { diffs ? L"\x2611\xFE0F File diffs \x00B7 at every level" : L"\x2B1C File diffs \x00B7 the level's default",
                                CardCallbackData(diffs ? kCardVerbAllScreen : kCardVerbAllScreenDiffs, sessionId) } });
             // One level a row - "📜 Full · + commands & output" is too long for two a row on a phone, and the hint is what tells
-            // the five apart. The default level wears ★ instead of 📜: the one a bare /allscreen draws. Each level's data carries
-            // the box as shown (CardAllScreenLevelVerb's "+d"), so a tap draws exactly what the card said.
+            // the five apart. The default level wears ⭐ (U+2B50, an emoji by default; the user's word of 2026-10-26: "the star
+            // of full should be emoji" - the text star ★ U+2605 was drawn beside the 📜 emoji of the others) instead of 📜: the
+            // one a bare /allscreen draws. Each level's data carries the box as shown (CardAllScreenLevelVerb's "+d"), so a tap
+            // draws exactly what the card said.
             for (const auto& choice : kAllScreenLevels)
             {
-                std::wstring label = choice.level == facts.allScreenLevel ? L"\x2605 " : L"\U0001F4DC ";
+                std::wstring label = choice.level == facts.allScreenLevel ? L"\x2B50 " : L"\U0001F4DC ";
                 label += choice.label;
                 label += L" \x00B7 ";
                 label += choice.hint;
