@@ -35,7 +35,8 @@
     The package layout's folder (-LayoutDir), kept per worktree so the package step copies only what changed.
 
 .PARAMETER Log
-    The build's output file (the step's progress file).
+    The build's output file (the step's progress file), one per request (D:\out\<worktree>\build-<request id>.log):
+    the agent tails it from the step's start, so it must not be an earlier build's file.
 
 .OUTPUTS
     The build's exit code and time, then "BUILD {json}".
@@ -66,7 +67,9 @@ if ($Purge -eq 'force') {
     Write-Output "purged $($doomed.Count) folders"
 }
 New-Item -ItemType Directory -Force -Path (Split-Path $Log), $Layout | Out-Null
-Remove-Item -LiteralPath $Log, "$Log.err" -ErrorAction SilentlyContinue
+# Each request has its own log (the coordinator names it); earlier builds' logs of this worktree go.
+Get-ChildItem -Path (Split-Path $Log) -Filter 'build-*.log*' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notlike "$Log*" } | Remove-Item -Force -ErrorAction SilentlyContinue
 
 $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$Worktree\tools\Build-Agentmaster.ps1",
     '-Configuration', $Configuration, '-MaxCpu', $MaxCpu, '-ClMpCount', $ClMpCount, '-LayoutDir', $Layout)

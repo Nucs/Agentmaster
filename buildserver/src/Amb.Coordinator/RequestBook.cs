@@ -295,13 +295,16 @@ public sealed class RequestBook
     /// <summary>Appends one event to a request's log and wakes whoever waits on the request.</summary>
     /// <param name="id">The request's id.</param>
     /// <param name="kind">"state", "progress", "log", "placement", "error".</param>
-    /// <param name="message">The line.</param>
+    /// <param name="message">The line; NUL characters are dropped and line breaks folded.</param>
     /// <param name="state">The state after the event, for state events.</param>
     /// <exception cref="IOException">The event could not be appended.</exception>
     public void Event(string id, string kind, string message, RequestState? state = null)
     {
-        // An event line is one line: a multi-line message (an exception's text) is folded.
-        string folded = message.Replace("\r", "", StringComparison.Ordinal).Replace("\n", " | ", StringComparison.Ordinal);
+        // An event line is one line: a multi-line message (an exception's text) is folded. NULs go: a native tool that
+        // writes UTF-16 into a redirected stream (MakePri's warnings in a build's package step) reaches the guest's
+        // UTF-8 reader with a NUL beside every character, which `amb logs` and the JSON show as noise.
+        string folded = message.Replace("\0", "", StringComparison.Ordinal).Replace("\r", "", StringComparison.Ordinal)
+            .Replace("\n", " | ", StringComparison.Ordinal);
         string line = JsonSerializer.Serialize(new RequestEvent(_clock.GetUtcNow(), kind, folded, state),
             AmbJsonLine.Default.RequestEvent);
         _store.AppendEventLine(id, line);

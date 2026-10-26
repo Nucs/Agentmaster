@@ -46,6 +46,8 @@ public sealed class BuildJob : VmJob
         BuildRecord? existing = FindExisting(context.Store, commit, configuration, identity, purge);
         if (existing is not null)
         {
+            // A request only ends from Running (DESIGN.md §12's life): it runs for the instant it takes to answer.
+            context.MarkRunning($"build {existing.Id} exists");
             return new JobOutcome(true, $"build {existing.Id} exists: {commit[..9]}, {configuration}, {identity}, purge {purge}",
                 BuildId: existing.Id);
         }
@@ -69,7 +71,9 @@ public sealed class BuildJob : VmJob
 
             string worktree = $@"D:\src\{key}";
             string layout = $@"D:\out\{key}\layout";
-            string log = $@"D:\out\{key}\build.log";
+            // One log per request: the guest agent starts tailing the progress file as the step starts, so a reused name
+            // streamed the previous build's last lines (its old "Build OK") and then lost the new file (seen 2026-10-26).
+            string log = $@"D:\out\{key}\build-{request.Id}.log";
             await CheckoutAsync(context, lease, mirror, vm, key, commit, sdkCommit, worktree, cancel).ConfigureAwait(false);
             // From here the worktree holds the commit, built or not: the next bundle starts from it.
             vm = SaveVm(context, vm, key, commit, sdkCommit);
@@ -130,6 +134,45 @@ public sealed class BuildJob : VmJob
     /// <returns>E.g. "release-dev".</returns>
     internal static string WorktreeKey(string configuration, string identity) =>
         configuration.ToLowerInvariant() + "-" + identity;
+
+    /// <summary>The VM-wide submodule entry that records written before <see cref="SdkKey"/> carry.</summary>
+    internal const string LegacySdkKey = "sdk";
+
+    /// <summary>The key under which the VM's record keeps the commit of ONE worktree's submodule clone.</summary>
+    /// <param name="worktreeKey">The worktree's key (<see cref="WorktreeKey"/>).</param>
+    /// <returns>E.g. "release-dev/sdk".</returns>
+    /// <remarks>Per worktree, because each worktree holds its own clone of the submodule (refs\claude-agent-sdk-cpp in
+    /// its tree). One VM-wide entry told a new worktree that its clone held the commit already, so no submodule bundle
+    /// was sent and its checkout failed in an empty clone (the first Debug build, 2026-10-26).</remarks>
+    internal static string SdkKey(string worktreeKey) => worktreeKey + "/sdk";
+
+    /// <summary>The VM record's commits after a checkout of one worktree.</summary>
+    /// <param name="commits">The record's commits before it.</param>
+    /// <param name="key">The worktree's key.</param>
+    /// <param name="commit">The commit the worktree holds now.</param>
+    /// <param name="sdkCommit">The commit its submodule clone holds now, or null when the commit has no submodule.</param>
+    /// <returns>A new map with the worktree's two entries replaced and the <see cref="LegacySdkKey"/> entry gone.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="commits"/> is null.</exception>
+    /// <remarks>The legacy entry described one worktree without saying which, so it is dropped rather than moved: that
+    /// worktree's next build gets the submodule's whole history once (~0.6 MB). A commit without the submodule drops the
+    /// worktree's entry for the same reason: a later commit with it gets the whole submodule history, never a guess.
+    /// </remarks>
+    internal static Dictionary<string, string> RecordCommits(IReadOnlyDictionary<string, string> commits, string key,
+        string commit, string? sdkCommit)
+    {
+        ArgumentNullException.ThrowIfNull(commits);
+        var next = new Dictionary<string, string>(commits, StringComparer.Ordinal) { [key] = commit };
+        next.Remove(LegacySdkKey);
+        if (sdkCommit is not null)
+        {
+            next[SdkKey(key)] = sdkCommit;
+        }
+        else
+        {
+            next.Remove(SdkKey(key));
+        }
+        return next;
+    }
 
     /// <summary>The build that a request names, when it exists already.</summary>
     /// <param name="store">The record store.</param>
@@ -209,7 +252,7 @@ public sealed class BuildJob : VmJob
                 Directory.Delete(srcFolder, recursive: true);
             }
             SourceBundle bundle = await mirror.BundleAsync(context.Request.Id, commit, vm.Commits.GetValueOrDefault(key),
-                sdkCommit, vm.Commits.GetValueOrDefault("sdk"), srcFolder, full, cancel).ConfigureAwait(false);
+                sdkCommit, vm.Commits.GetValueOrDefault(SdkKey(key)), srcFolder, full, cancel).ConfigureAwait(false);
             context.Event("source", FormattableString.Invariant(
                 $"bundle: {bundle.Mode}, {bundle.Bytes / 1048576.0:0.0} MB{(bundle.SdkBundleFile is null ? "" : " with the submodule")}"));
             GuestStep step = Script("checkout", "checkout.ps1", 1800,
@@ -282,12 +325,7 @@ public sealed class BuildJob : VmJob
     /// <exception cref="IOException">The record could not be written.</exception>
     private static VmRecord SaveVm(JobContext context, VmRecord vm, string key, string commit, string? sdkCommit)
     {
-        var commits = new Dictionary<string, string>(vm.Commits, StringComparer.Ordinal) { [key] = commit };
-        if (sdkCommit is not null)
-        {
-            commits["sdk"] = sdkCommit;
-        }
-        VmRecord next = vm with { Commits = commits, LastUsedAt = context.Clock.GetUtcNow() };
+        VmRecord next = vm with { Commits = RecordCommits(vm.Commits, key, commit, sdkCommit), LastUsedAt = context.Clock.GetUtcNow() };
         context.Store.Update<VmRecord>("vms", vm.Name, _ => next, AmbJson.Default.EnvelopeVmRecord);
         return next;
     }

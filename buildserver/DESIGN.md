@@ -1,7 +1,10 @@
 # Agentmaster build server — design and plan (fourth revision)
 
-> **Status: DESIGN ONLY. Nothing here is built.** The measurements of 2026-10-25 ran in throwaway test machines and
-> folders, which were removed afterwards (§16.8); their scripts are in [`measure/`](measure/README.md).
+> **Status (2026-10-26): Phase 1 (e2e on demand) and Phase 3's MVP (builds) run on this PC; the rest is design.**
+> What runs, and how it differs from this design, is in §13 ("Phase 1 as built", "Phase 3's MVP as built") and
+> [`README.md`](README.md). The measurements of 2026-10-25 ran in throwaway test machines and folders, which were
+> removed afterwards (§16.8); the proofs and builds since (§16.9–§16.12) ran on the real site. The scripts are in
+> [`measure/`](measure/README.md).
 >
 > **The request, 2026-10-24:** "Building and installing and using VM to run e2e is very complicated, and very very
 > resource heavy. We need a centralized server under buildserver/ that will use fastrun (K:/source/fastrun) to host two
@@ -62,8 +65,9 @@ it to what is free between the two; otherwise the request waits, up to its timeo
 **What the measurements decided (E5):**
 - **A VM's disk does ~2,000 random I/Os per second, whatever the attachment** (nested virtualization: KVM inside
   WSL 2 inside Hyper-V, no APICv), **and compiling costs ~1.55× the host's time** at the same parallelism (the engine
-  harness: 107.5 s in the VM, 69.2–69.9 s on the host). Builds stay in VMs, as the owner chose (W4): the factor is the
-  price of a clean, isolated build machine; P0.4 measures a full build.
+  harness: 107.5 s in the VM, 69.2–69.9 s on the host). Builds stay in VMs, as the owner chose (W4), and P0.4
+  confirmed it on a full build: a Release build of Agentmaster took 1.17× the native time cold (38.0 against
+  32.6 min) and 1.31× incremental (6.0 against 4.6 min) at the same parallelism (§16.12).
 - **A VM holds all of its RAM** (the guest zeroes its free memory within 1–2 minutes of boot) until the balloon takes
   it back, so every VM slot has a balloon and the allocator counts balloon targets, not ceilings.
 - **homepc's real limits are Windows' free memory and WSL's 31.2 GB VM, not commit.** During the tests Windows had
@@ -76,8 +80,9 @@ it to what is free between the two; otherwise the request waits, up to its timeo
 - **Tiny11 Core carries both jobs:** Agentmaster's portable zip runs on it, and VS 2022 Build Tools installs (exit 0,
   28 minutes, 18.5 GB). ⚠ Its servicing worker then ran for over 30 minutes and slowed the compiles by up to 47 %, so
   an image is sealed only with servicing idle.
-- **Disk stays the PC's tightest resource:** the images and the e2e slots fit in `Q:\buildserver`; a build VM (the
-  18.5 GB build layer plus 40–60 GB of its own) does not, until space is freed (W3).
+- **Disk was the PC's tightest resource:** the images and the e2e slots fit in `Q:\buildserver`; a build VM did not
+  until the owner freed 170 GB+ of Q: (W3, 2026-10-26). The build VM now lives there: the `am-build` layer (22.3 GB
+  of files) and its own data disk, ~29 GB used after a cold Release build (§16.12).
 
 ## 1. The owner's answers, and what each changes
 
@@ -92,7 +97,7 @@ it to what is free between the two; otherwise the request waits, up to its timeo
 | D7 | approvals | none; allocation by estimate; pending with a timeout; build → build id → test / e2e | §2, §3 |
 | D8 | a Telegram bot | don't touch | none |
 | D9 | Docker Desktop on demand | defer | no longer needed: the site does not use Docker Desktop (§5.2) |
-| D10 | the host native lane | defer | still deferred; W4 (§14) asks whether builds belong there |
+| D10 | the host native lane | defer | still deferred: P0.4 kept builds in VMs (W4, §14) |
 | D11 | the GitHub lane | defer | deferred, with `publish` |
 | D12 | the stack | .NET 10; Python for setup and the e2e engine | unchanged (§10) |
 | E1 | the allocation | fluid, availability × priority, dock first | §3 |
@@ -431,15 +436,15 @@ Q:\buildserver\
 |---|---|---|
 | the Tiny11 Core base, shared by `am-e2e` and `am-build` | 9.2 GB | measured |
 | the `am-e2e` layer | ~2 GB | expected (Python, PowerShell 7, PortableGit, the wheel cache) |
-| the `am-build` layer | 18.5 GB | measured: Build Tools with the workloads' recommended components (C: +14.6 GB, D: +3.9 GB) |
+| the `am-build` layer | 20.3 GB | measured as built (§16.12; 22.3 GB of files): Build Tools, PowerShell 7, Git, the seal. The test install of Build Tools alone (§16.2) was 18.5 GB |
 | `am-install` | ~13 GB | expected (Tiny11's ISO is 5.3 GB) |
-| a build VM: overlay + data disk (two worktrees, the caches, the guest's page file) | ~40–60 GB | from the native trees: Debug ~25 GB, Release ~30 GB the first time |
+| a build VM: overlay + data disk (two worktrees, the caches) | 58 GB | measured as built (§16.12): the data disk 55.3 GB with the `release-dev` (~29 GB) and `debug-dev` (~26 GB) worktrees and vcpkg's binary cache, the overlay 2.6 GB |
 | e2e overlays | 1–3 GB each | deleted with the slot |
-| the store | 40 GB | a budget, oldest out first |
+| the store | 40 GB | a budget, oldest out first; as built: no budget yet, ~0.6 GB per Release build id (2.2 GB for five) |
 
-- **Today it does not all fit:** Q: had 31–70 GB free during the tests (another session's Tiny11 build was writing
-  ~40 GB there too), with 15 GB kept for other work. The e2e images, overlays and the store fit; a build VM does not
-  (W3).
+- **It fits since W3:** Q: had 31–70 GB free during the tests (another session's Tiny11 build was writing ~40 GB there
+  too), with 15 GB kept for other work, so a build VM did not fit; the owner freed 170 GB+ (2026-10-26), and with the
+  images, both worktrees and five build ids the site's disk is 102.6 GB on Q:, with 161 GB still free.
 - **Space goes back in two steps:** what a guest deletes is unmapped in its disk file (`discard=unmap`; measured: a
   64 GB data disk held 92 MB after its test files were deleted), and the distro's ext4 (mounted with `discard`) frees
   it. Q: gets it back only once the VHDX is sparse (§5.2); before that, the distro keeps it for its next files.
@@ -539,7 +544,7 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 | P0.1 | the `buildserver` distro on Q: (sparse after W1's restart); fastrund 1.2.x in it: ad-hoc runs, its ports from Windows, its idle cost | **passed 2026-10-25** (§16.9): the distro made by `site/sitectl.py create` in 11.5 s; production's fastrund image in it answers `/healthz` from Windows 0.36 s after `podman run`, runs ad-hoc scripts (the first 2.6 s after its start, then ~15 ms from Windows), 30 MB resident; found: Windows reaches it only at the distro's address, its HTTPS registry pulls fail (plain HTTP through Traefik works), slots run without cgroups |
 | P0.2 | the slot chain through the coordinator: a base image installed by a request, then booted through an overlay, one command through its guest agent, a graceful stop | **passed 2026-10-25** (§16.10): `am-base` made from Tiny11 Core in 13.1 min (the agent's hello after 751 s), booted and ready 43 s after the request, `ver` run, gone 9 s after the shutdown step; found: a boot must pass the image's own dockur `VERSION`, or dockur reinstalls Windows over the slot |
 | P0.5 | e2e on Tiny11 Core: a few suites on Core and on a full Windows 11 desktop, side by side (decides whether `am-e2e` is Core or regular Tiny11) | **passed 2026-10-25** (§16.11): the same build and 48 tests of six suites on `am-e2e` and on a claude-fleet desktop: the same outcome on 45; the 3 that differ are the TAB-K1 race's timing (two parametrized probes, a `needs_fix` defect of that build, on opposite sides in the two runs) and one UI Automation COM error on the full desktop. Test times equal (24.9 / 25.3 min). **`am-e2e` stays on Tiny11 Core** |
-| P0.4 | a full build in a VM: Debug, cold and incremental, against native (W4: over 2× native → the host lane) | the engine harness: 1.55× the host (107.5 s against 69.2–69.9 s); a full build needs ~55 GB of Q: while it runs (W3) |
+| P0.4 | a full build in a VM, cold and incremental, against native (W4: over 2× native → the host lane) | **passed 2026-10-26** (§16.12): the same Release build of 5f5d53fa9 at the same parallelism (`/m:2`, `CL_MPCount` 2): cold 2,278.6 s in the build VM against 1,955.3 s natively (**1.17×**); incremental to ea28331ae 360.0 s against 275.6 s (**1.31×**). Release, not Debug: the first build served the MVP too, and Release compiles the most. **Builds stay in VMs** (W4) |
 
 **Then two tracks in parallel:**
 - **Track A, fastrun** (its repository, in a worktree of its own; tested on this PC's node and fastrun-next, never on
@@ -552,10 +557,10 @@ claude-fleet desktops whose creation alone took 549 s (`vm-setup-validation-2026
 |---|---|---|
 | **P1, e2e on demand on this PC** | the image script, the Tiny11 Core base with the guest agent, the `am-e2e` layer; the guest agent (HTTP), the host agent (front door, wakes the distro, the store), a minimal coordinator (records, one site, §3.2's reserves; a VM boots at its grant), the CLI, the e2e engine's second transport; `amb import <zip>`: a hand-built zip or a GitHub release as a build id, so e2e works before builds exist | `amb e2e <build id>` runs a suite in a fresh VM and leaves nothing behind, in every outcome |
 | **P2, fluid memory, on fastrun** | balloons, pressure handling (§3.5), pending with timeouts, several VMs at once; KSM measured (W2); the slot driver switched to fastrun; the coordinator a fastrun app | two e2e VMs side by side while Windows keeps its 6 GB; a request under pressure waits and starts by itself, or ends `no-capacity` |
-| **P3, builds** (after P0.4, W3, W1) | the `am-build` layer sealed with servicing idle; build VMs kept 10 minutes; the mirror and bundles; artifacts into the store; `amb build`, `amb test m5\|syntax` | a Debug build of HEAD gets a build id and its artifacts; two identical requests → one build; nothing written to K:; `amb e2e <that id>` closes the loop |
+| **P3, builds** (after P0.4, W3) | the `am-build` layer sealed with servicing idle; build VMs kept 10 minutes; the mirror and bundles; artifacts into the store; `amb build`, `amb test m5\|syntax` | a Debug build of HEAD gets a build id and its artifacts; two identical requests → one build; nothing written to K:; `amb e2e <that id>` closes the loop |
 | **P4, the install lane, then `install`** | `am-install` from regular Tiny11; the install suites and a weekly full run on it; `install` of a build id through the swap script | a dev install of a build id; an injected failure after the swap's stop rolls back |
 | **P5, dock** (E3) | dock's e2e slots | an e2e run lands on dock by its score while homepc builds |
-| deferred | `publish` (D11), freeze (F6), the host lane unless P0.4 calls for it (D10) | — |
+| deferred | `publish` (D11), freeze (F6), the host lane (D10: P0.4 did not call for it) | — |
 
 **Phase 1 as built (2026-10-25; [`README.md`](README.md)):** its done-when holds on this PC: `amb e2e <build id>` ran
 the smoke suite on an imported 0.8.1.0 build in a fresh `am-e2e` VM and passed in 2 min 11 s, and each outcome (passed,
@@ -566,9 +571,40 @@ provision.ps1 run unchanged, with the slot's share mapped to Z:); and each slot 
 itself is given up within ~30 s), which the table did not list. P0.5 passed (§16.11), so the e2e image stays on Tiny11
 Core. Still owed for Phase 1's own scope: a full-suite run on `am-e2e` (`--run-timeout`: it takes hours).
 
+**Phase 3's MVP as built (2026-10-26; [`README.md`](README.md) "Builds"):** `amb build [<rev>]` builds a commit in the
+kept build VM `build-1`, into a build id whose portable zip, layout zip, symbols zip, `build.log` and `build.json` sit in
+the store with their SHA-256; `amb artifacts` lists them and `amb fetch` copies them to `Q:\buildserver\out\<build id>`.
+Its done-when holds on this PC, checked on the real site by [`tests/site_build.py`](tests/site_build.py): a Release
+build of HEAD (e54f37fae) got build id `b20261026-3` 11.7 min after its request; an identical request answered with that
+id in 0 s; `amb e2e` passed the smoke suite on it; `amb fetch` copied its zip and checked the hash; no slot was left;
+and K: was only read (§16.12). It differs from the table and from §2, §5.1, §8 and §11 in these ways:
+- **Release is the default and what the check built**, not Debug: Release is what e2e runs and what P0.4 measured. A
+  Debug build's binaries link the debug UCRT (`ucrtbased.dll`, which only the Windows SDK installs), so its portable zip
+  runs on no PC without the SDK, `am-e2e` included. A Debug build of HEAD works the same way in its own worktree:
+  `b20261026-4` (e54f37fae), cold, 23.9 min from its request (§16.12).
+- **Not built yet:** `amb test m5|syntax`; purge `auto` (`none` is the default, `force` deletes the worktree's build
+  outputs first); snapshot commits of uncommitted work (`amb build` takes a commit); the binlog; the store's budget
+  (each Release build keeps ~0.6 GB, and nothing deletes builds yet).
+- **The VM shuts down after each build** instead of staying up 10 minutes: the next build boots it again in 27–38 s.
+  One build VM, one build at a time: a second identical request waits for the VM, then answers with the first's id.
+- **The mirror and the store are the coordinator's, inside the distro** (`/srv/buildserver/git`,
+  `/srv/buildserver/store`), not a host agent's on Q: (there is no host agent yet); `amb fetch` streams files out
+  through the API, checking each SHA-256.
+- **The build VM's data disk** is a sparse 128 GiB raw file (`vms/build-1/data-disk.raw`, D:) on its own virtio-scsi
+  controller with `discard=unmap`, holding one worktree per configuration × identity (`D:\src\release-dev`, …), each
+  with its own submodule clone, and vcpkg's binary cache; the guest's page file stays on C:. A VM made over an older
+  `am-build` (another image stamp) is discarded and made anew.
+- **No balloon controller yet** (P2): the build VM keeps its whole grant (8.8–16 GB) while it runs, and `/m` and
+  `CL_MPCount` follow that grant (2 × 2 below 10 GB, 2 × 3 below 14 GB, else 3 × 3).
+- **W1 was not needed:** the site's disk is not sparse, so it keeps what a build frees for the next one; Q: had room
+  once the owner freed it (W3).
+
 ## 14. Decisions
 
-**Made by the owner and the measurements:** E1 → §3; E2 → §5.2, §8; E4 → §4; E5 → §3.2 and §16.
+**Made by the owner and the measurements:** E1 → §3; E2 → §5.2, §8; E4 → §4; E5 → §3.2 and §16. W3 → the owner freed
+170 GB+ of Q: for builds (2026-10-26; Q: had 160 GB free after the first builds). W4 → builds stay in VMs: P0.4
+measured a full Release build at 1.17× native cold and 1.31× incremental, under the 2× limit (§16.12); the host lane
+(D10) stays deferred.
 
 **Open:**
 
@@ -577,14 +613,12 @@ Core. Still owed for Phase 1's own scope: a full-suite run on `am-e2e` (`--run-t
 | E3 | the homelab changes for dock's Windows slots (§5.3) | after P3; with its priority, dock then takes e2e first |
 | W1 | one restart of WSL's VM, which ends every container and other sessions' desktops: it brings cgroup v2 (for per-run limits and freeze on homepc: WSL 2.3.24 → 3.0.3, WSL dropped cgroup v1 in 2.5.1, together with a Docker Desktop that supports it; 4.35.1 here, from October 2024) and makes the site's disk sparse (§5.2) | not needed to start (VMs are bounded by QEMU and the balloon; the distro reuses its own free space). When wanted: at a quiet time, after reading both release notes |
 | W2 | KSM in the WSL VM | measure it when no other session measures memory there; then decide |
-| W3 | disk for builds: the `am-build` layer (18.5 GB) and a build VM (~40–60 GB) on Q:, which had 31–70 GB free during the tests, with 15 GB kept for other work | the third revision's reclaim list (the stock build trees in `Q:\tmp`, session leftovers on Q:); until then build requests wait or end `no-capacity: disk` |
-| W4 | builds in VMs or on the host (D10) | builds stay in VMs, as the owner chose: ~1.55× on compile work is the price of a clean, isolated build machine (a process starts in 23–31 ms there, in 109 ms on the host under Defender). The host lane (D10, deferred) is the fallback if P0.4's full build takes more than 2× the native time |
 
 ## 15. Risks
 
 | Risk | How it is contained |
 |---|---|
-| builds are slow in a VM: the guest's disk does ~2,000 random I/Os per second | measured 1.55× on compile work at equal parallelism; a build VM gets more vCPUs than the host's hand builds use (8 against 3–6 compilers); P0.4 measures a full build; above 2× builds take the host lane (D10) |
+| builds are slow in a VM: the guest's disk does ~2,000 random I/Os per second | measured 1.55× on the engine harness and, by P0.4, 1.17× on a full cold Release build and 1.31× on an incremental one, at equal parallelism (§16.12); above 2× builds would take the host lane (D10) |
 | Tiny11 Core lacks something a build or the app needs, and cannot be serviced | measured: the app runs, and Build Tools installs (exit 0); ⚠ its servicing worker then ran for 30+ minutes, so the build image is sealed only with servicing idle (TrustedInstaller stopped, checked at the next boot) |
 | a test passes on Tiny11 Core where a user's Windows 11 fails, or the reverse | P0.5's side-by-side run; the install lane and a weekly run on `am-install`; no build tools in e2e images |
 | dockur's Core ISO is old (November 2025) and gets no updates | VMs are LAN-only, take no inbound connection, live for one request or a few minutes after it, and run only this repository's code; a fresh base from Tiny11 Builder's engine when needed (§4.1) |
@@ -764,6 +798,40 @@ once on a claude-fleet desktop (`am-e2e-1`, the fleet's Tiny11 25H2 golden image
   `images.py check`.
 - **Decision:** `am-e2e` stays a layer over Tiny11 Core (E4): nothing the suite does needed what Core leaves out, and
   a Core slot is ready for its suite in 1.5 min against 4.2 for a fleet desktop.
+
+### 16.12 Phase 3's MVP and P0.4: builds in the build VM, against native (2026-10-26)
+
+The VM rows are requests to `amb-coordinator` (the build job, the kept VM `build-1` with 8 vCPUs; its memory per row);
+their times are the requests' own events and the wrapper's "Build OK in N s". The native rows are the same commits with
+the same wrapper and parallelism on this PC, from a private clone on Q: under the build lock
+([`measure/p04_native.sh`](measure/p04_native.sh); result: `measure/results-2026-10-26/p04-full-build.json`).
+
+| What | Measured |
+|---|---|
+| the build image: `images.py build-image` (8 GB / 8 vCPU) | 24.6 min: Build Tools 17.14.37824.6 in 22.4 min (MSVC 14.44.35207, SDKs 22621 + 26100, MakeAppx, vcpkg, the .NET SDK), PowerShell 7.6.8 and PortableGit 2.56.0.3 from the staged downloads, VSSetup 2.2.16, the trims, the seal (TiWorker idle); `am-build` = 22.3 GB of files over `am-base`; `images.py check --image am-build` found every tool |
+| the site's mirror: the first fetch / later ones | 92 s for 145 MB / 0–14 s |
+| **the first build** (5f5d53fa9, Release, dev; r20261026-061859-3d231a; 8.8 GB, `/m:2`, `CL_MPCount` 2) | placed once the site's page cache was dropped (Windows' available memory 12.6 → 15.1 GB); the VM's first boot ~2 min, D: made; the whole history as a bundle (140.3 MB) checked out in 46.5 s; "Build OK in 2,278.6 s" (38.0 min, cold: NuGet, DuckDB, vcpkg from source, every project); packaging 2.7 min; `b20261026-1`: the portable zip 201.9 MB, the layout zip 198.0 MB, the symbols zip 171.0 MB (16 PDBs matched; `TerminalThemeHelpers.pdb` missing, not required), `build.log` 0.9 MB; D: then held ~29 GB. 54 min from the request to the build id, ~10 of them the step waiting for msbuild's lingering processes (fixed since, below) |
+| the same build natively (`p04_native.sh cold`) | "Build OK in 1,955.3 s" (32.6 min): **the VM took 1.17×** |
+| **incremental:** 5f5d53fa9 → ea28331ae in the same worktree (r20261026-074830-985d31; 9.6 GB; 5b292ab4a's installer headers undone) | no bundle (ea28331ae is reachable from the worktree's commit); the VM's boot 38 s; checkout 6.6 s; "Build OK in 360.0 s" (6.0 min); packaging 2.7 min; `b20261026-2` 10.2 min after the request |
+| the same natively (`p04_native.sh incr`) | "Build OK in 275.6 s" (4.6 min): **1.31×** |
+| **the acceptance check** (`tests/site_build.py`): ea28331ae → e54f37fae (r20261026-080522-444ac4; 10.9 GB, `/m:2`, `CL_MPCount` 3; 5b292ab4a redone and c50fb6468's persistence files) | an incremental bundle of 0.1 MB, the VM's boot 27 s, checkout 4.1 s; "Build OK in 447.3 s" (7.5 min); packaging 164.1 s; `b20261026-3` 11.7 min after the request. The identical request: the same id in 0 s, no slot. `amb e2e` on it: placed 18 s after its request (once Windows had the build VM's memory back), the smoke suite passed, 2 min 40 s in all. `amb fetch`: 206.9 MB, hash checked. No slot left; K: only read. 7 of 7 checks |
+| `amb fetch` of `b20261026-1`'s portable zip | 201.9 MB in 1 s, SHA-256 checked; a target on K: refused (exit 2) |
+| **a Debug build** of e54f37fae in a new worktree (r20261026-082909-883b8d; 16 GB, `/m:3`, `CL_MPCount` 3) | the first attempt (r20261026-082419-968ab6) failed at its checkout: the submodule's commit was recorded once for the VM, so the new worktree got no submodule bundle (fixed, below). Then: the VM's boot 37 s; the whole history with the submodule (140.4 MB), checkout 6.8 s (the failed attempt had fetched the repository); "Build OK in 1,237.0 s" (20.6 min, cold); packaging 93.4 s; `b20261026-4` 23.9 min after the request: the portable zip 123.9 MB, the layout zip 120.1 MB, the symbols zip 72.3 MB (16 PDBs matched), `build.log` 0.9 MB. The package step's output had no NUL left |
+| an identical Debug request sent while it built (r20261026-083038-76d2f6) | `waiting: the build VM is busy with r20261026-082909-883b8d` for 22.4 min, then answered "build b20261026-4 exists" the instant the first ended, without a slot |
+| the site afterwards | its disk `ext4.vhdx` 102.6 GB on Q:, holding 92.7 GB: the build VM's data disk 55.3 GB (two worktrees, Release ~29 GB and Debug ~26 GB, with vcpkg's binary cache) and its overlay 2.6 GB; the images `am-base` 9.1, `am-build` 20.3 and `am-e2e` 1.9 GB; the store 2.2 GB (five build ids); the mirror 0.2 GB. Q: 161 GB free |
+
+- **Found and fixed on the way:** `Start-Process -Wait` in the build step waited for msbuild's reused nodes, the
+  compiler server and `mspdbsrv.exe` (~10 min after "Build OK"); an older commit built after a newer one would have
+  made git refuse an empty bundle (the plan is now "none" when the commit is reachable from the worktree's); a
+  repeated request stuck in Starting (a request ends only from Running) and waited for memory and the busy VM (an
+  existing build is now answered without a slot); a reused log name streamed the previous build's last lines (one log
+  per request); UTF-16 output read as UTF-8 put a NUL beside every character of the package step's MakePri warnings
+  (NULs are dropped from every event); the submodule's commit was recorded once for the VM, so a second worktree got no
+  submodule bundle and its checkout failed in an empty clone (recorded per worktree, and a clone that lacks the commit
+  asks for the whole history).
+- **Made and removed:** the native reference clone and its build tree `Q:\tmp\p04-native` (29 GB), and a fetched test
+  copy. Kept: the build VM's disks (they are the next build's), the four builds in the store (`b20261026-1` to `-4`),
+  and the acceptance check's fetched zip in `Q:\buildserver\out\b20261026-3`.
 
 ## 17. Evidence
 

@@ -1,7 +1,8 @@
 # Build server measurements: the kit
 
-The scripts behind every number in [`../DESIGN.md`](../DESIGN.md) §16, as they ran on 2026-10-24 and 2026-10-25. Nothing
-here is part of the build server: they are the measurements' proof, kept so that each number can be measured again.
+The scripts behind every number in [`../DESIGN.md`](../DESIGN.md) §16, as they ran on 2026-10-24, 2026-10-25 and
+2026-10-26. Nothing here is part of the build server: they are the measurements' proof, kept so that each number can be
+measured again.
 
 ## Where they ran
 
@@ -31,7 +32,9 @@ here is part of the build server: they are the measurements' proof, kept so that
 | [`guest/`](guest) | the jobs: `facts.ps1` (what Tiny11 Core contains), `bench-c.ps1`, `bench-disks.ps1`, `alloc.ps1` (new space vs overwrites), `attach.ps1` (four QEMU disk attachments), `app-portable.ps1` (Agentmaster v0.8.0 portable), `vs-install.ps1` (VS 2022 Build Tools), `compile.ps1` / `compile-sampled.ps1` / `compile-quiet.ps1` (the compile benchmark in the guest: twice, with memory and CPU samples, and with Windows' servicing stopped), `update-agent.ps1` | a guest, through the agent |
 | [`p01_fastrund.py`](p01_fastrund.py) | proof P0.1 (DESIGN.md §16.9): production's fastrund image in the REAL site distro (`buildserver`, made by `../site/sitectl.py`), releases off: `/healthz` from Windows, ad-hoc script runs, idle CPU and memory; the registry credentials come from Docker Desktop's credential store and are never printed | Windows (it drives the distro through wsl.exe) |
 | [`p05_compare.py`](p05_compare.py) | proof P0.5's comparison (DESIGN.md §16.11): two JUnit reports side by side, one from `amb e2e` on `am-e2e` (Tiny11 Core), one from `e2e/host/e2e_run.py` on a claude-fleet desktop (Tiny11 25H2); every test's outcome and time on both, and the tests that differ | Windows |
-| [`results-2026-10-25/`](results-2026-10-25) | every result file the numbers in DESIGN.md §16 come from: `docker-vm-*` (the VM in Docker Desktop), `distro-slot-*` (the slot in the test distro), `host-*` (this PC), `p01-fastrund.json` (P0.1), and the screenshot of Agentmaster on Tiny11 Core | — |
+| [`p04_native.sh`](p04_native.sh) | proof P0.4's native half (DESIGN.md §16.12): the build VM's Release build of a commit repeated on this PC from a private clone on Q:, with the same wrapper and parallelism (`/m:2`, `CL_MPCount` 2), under the build lock; its header says how the clone was made. The VM half is the builds' own requests (`amb build`) | Git Bash on Windows |
+| [`results-2026-10-25/`](results-2026-10-25) | every result file the numbers in DESIGN.md §16.1–§16.11 come from: `docker-vm-*` (the VM in Docker Desktop), `distro-slot-*` (the slot in the test distro), `host-*` (this PC), `p01-fastrund.json` (P0.1), and the screenshot of Agentmaster on Tiny11 Core | — |
+| [`results-2026-10-26/`](results-2026-10-26) | `p04-full-build.json` (P0.4: the cold and incremental builds, VM against native, with their requests, build ids and ratios) | — |
 
 ## Traps met on the way (each one is in DESIGN.md too)
 
@@ -63,3 +66,8 @@ here is part of the build server: they are the measurements' proof, kept so that
   given as `FASTRUN_REGISTRY_ENDPOINTS`) works.
 - **A process started by `wsl.exe -e sh -c '… &'` ends when that call returns:** start anything that must keep running
   as a podman container (conmon keeps it), never as a background job of a wsl.exe call.
+- **`Start-Process -Wait` waits for every descendant, not just the process it started:** a build step that waited that
+  way ran ~10 minutes past "Build OK", until msbuild's reused nodes, the compiler server and `mspdbsrv.exe` ended. The
+  build step and `p04_native.sh` set `MSBUILDDISABLENODEREUSE=1`, and the step waits on its own process only.
+- **The page cache of the site's distro is memory Windows counts as used:** before the first build, `sync; echo 3 >
+  /proc/sys/vm/drop_caches` in the distro raised Windows' available memory from 12.6 to 15.1 GB.
