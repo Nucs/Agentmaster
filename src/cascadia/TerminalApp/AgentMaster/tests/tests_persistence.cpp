@@ -23,6 +23,10 @@
 
 #include "../Engine.h" // the window-lifecycle `...In` seams (TestEngineWindowLifecycle)
 
+#include <algorithm> // TestUnreadableStateFiles: the kept copies in name (= creation) order
+#include <fstream> // TestUnreadableStateFiles: raw bytes planted / read back (a BOM, NULs, a torn write)
+#include <vector>
+
 void TestPersistence()
 {
     std::wprintf(L"Persistence (JSON + sessions + templates):\n");
@@ -2120,5 +2124,379 @@ void TestUiStallEscalation()
         rewound.rescuedRecoveries = 2;
         CHECK(NoteUiStallRescuedRecovery(rewound, t0) == false && rewound.rescuedRecoveries == 1 && rewound.firstMs == t0,
               "ui-stall limp: a rewound clock resets the window instead of underflowing");
+    }
+}
+
+// Agentmaster (PERSISTENCE.md "Unreadable state files", 2026-10-26): every loader fails OPEN — a state file that cannot
+// be read or parsed loads as "nothing saved" — and the 2026-10-26 report of a profile that looked "reset" after an install
+// is where that leads at startup: an empty fleet re-homes no tab, Manager-only windows delete their records, and the next
+// save writes the empty fleet over sessions.json. This proves the layers that stop the loss: the JSON reader (a BOM is
+// skipped; a NUL-filled or garbage root and a non-finite token no longer read as "the number 0" or sink the whole
+// document), the state-file reader (missing vs unreadable, the retries, the quiet window), the guard before every replace
+// (an unreadable file is not replaced, an unparseable one is kept aside first, a file the startup read could not use is
+// kept whatever it holds), the startup fleet read with its recovery snapshot, and the session store's read-modify-write.
+// Every disk case runs in a scratch profile (AGENTMASTER_PROFILE), never the live one.
+void TestUnreadableStateFiles()
+{
+    std::wprintf(L"Unreadable state files (JSON reader, state-file reader, replace guard, startup snapshot, store RMW):\n");
+
+    // Raw bytes in and out: the cases ARE byte patterns (a BOM, NULs, a torn write), so no text API may touch them.
+    const auto writeBytes = [](const std::wstring& path, const std::string& bytes) {
+        std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto readBytes = [](const std::wstring& path) {
+        std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    // The copies the guard kept of `leaf` in `dir` ("<leaf>.could-not-read-<stamp>[-n]"), in name order.
+    const auto keptCopies = [](const std::wstring& dir, const std::wstring& leaf) {
+        std::vector<std::wstring> out;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator{ std::filesystem::path{ dir }, ec })
+        {
+            const std::wstring name = e.path().filename().wstring();
+            if (name.rfind(leaf + L".could-not-read-", 0) == 0)
+            {
+                out.push_back(e.path().wstring());
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    // UTF-16 -> UTF-8, for planting a serialized document as its real bytes.
+    const auto utf8 = [](const std::wstring& w) {
+        const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+        std::string out(static_cast<size_t>(n > 0 ? n : 0), '\0');
+        if (n > 0)
+        {
+            ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr, nullptr);
+        }
+        return out;
+    };
+    // A scratch folder for one block, removed when the block ends. AgentmasterStateDir() is resolved ONCE per process (the
+    // harness's own scratch profile), so these blocks never redirect it: they pass folders to the `...In` seams and drive
+    // the guard on paths of their own. The guard's memory is reset on entry and exit, since the other tests write files
+    // through it too.
+    struct ScratchDir
+    {
+        std::wstring dir;
+        explicit ScratchDir(const wchar_t* tag)
+        {
+            wchar_t tmp[MAX_PATH]{};
+            ::GetTempPathW(MAX_PATH, tmp);
+            dir = std::wstring{ tmp } + tag + NewSessionId();
+            std::filesystem::create_directories(std::filesystem::path{ dir });
+            ResetStateFileGuardForTests();
+        }
+        ~ScratchDir()
+        {
+            ResetStateFileGuardForTests();
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+        }
+    };
+
+    // ---- the JSON reader ----
+    {
+        const auto bom = json::Parse(std::wstring(1, static_cast<wchar_t>(0xFEFF)) + L"{\"sessions\":[{\"id\":\"a\"}]}");
+        CHECK(bom && bom->type == json::Value::Type::Obj && bom->Find(L"sessions") && bom->Find(L"sessions")->arr.size() == 1,
+              "json: a leading BOM is skipped (a BOM'd sessions.json used to parse as the number 0 = an empty fleet)");
+        CHECK(!json::Parse(std::wstring(64, L'\0')), "json: a NUL-filled file (what a power loss can leave) is a failed parse, not the number 0");
+        CHECK(!json::Parse(L"hello") && !json::Parse(L"}") && !json::Parse(L"#x"), "json: a root that starts with no value is a failed parse");
+        CHECK(!json::Parse(L"") && !json::Parse(L"   "), "json: empty and blank text still fail");
+        CHECK(!json::Parse(L"{\"a\":x}") && !json::Parse(L"[1,?]"), "json: an unknown value inside an object or array still fails (unchanged)");
+        const auto nums = json::Parse(L"[-5, 0, 3.25, 1e3, -0.5, 12345678901234]");
+        CHECK(nums && nums->arr.size() == 6 && nums->arr[0].num == -5 && nums->arr[2].num == 3.25 && nums->arr[3].num == 1000 && nums->arr[4].num == -0.5 &&
+                  nums->arr[5].AsI64() == 12345678901234LL,
+              "json: ordinary numbers parse as before");
+        const auto lits = json::Parse(L"{\"t\":true,\"f\":false,\"n\":null}");
+        CHECK(lits && lits->BoolAt(L"t") && !lits->BoolAt(L"f", true) && lits->Find(L"n")->type == json::Value::Type::Null, "json: true / false / null unchanged");
+        // Non-finite tokens — what Dump wrote for a NaN or an infinity until 2026-10-26 (MSVC's "%g"), and Python's
+        // spellings — read as null: the field takes its default, and the rest of the document survives.
+        const auto nf = json::Parse(L"{\"a\":nan,\"b\":-nan(ind),\"c\":inf,\"d\":-inf,\"e\":NaN,\"f\":Infinity,\"g\":-Infinity,\"h\":nan(snan),\"k\":7}");
+        CHECK(nf && nf->members.size() == 9, "json: a document holding non-finite tokens parses whole (one used to sink the whole file)");
+        bool allNull = static_cast<bool>(nf);
+        for (const wchar_t* key : { L"a", L"b", L"c", L"d", L"e", L"f", L"g", L"h" })
+        {
+            const auto* m = nf ? nf->Find(key) : nullptr;
+            allNull = allNull && m && m->type == json::Value::Type::Null;
+        }
+        CHECK(allNull, "json: nan, -nan(ind), inf, -inf, NaN, Infinity, -Infinity and nan(snan) each read as null");
+        CHECK(nf && nf->NumAt(L"a", 0.25) == 0.25 && nf->NumAt(L"k", 0) == 7, "json: a null field takes the reader's default; the next field is intact");
+        CHECK(!json::Parse(L"{\"a\":nanx}") && !json::Parse(L"{\"a\":infinite}"), "json: a word that only starts like one is still garbage");
+        // Dump never writes them again.
+        json::Value o = json::Value::MkObj();
+        o.Set(L"n", json::Value::MkNum(std::nan("")));
+        o.Set(L"i", json::Value::MkNum(-HUGE_VAL));
+        o.Set(L"k", json::Value::MkNum(2));
+        const std::wstring dumped = json::Dump(o);
+        CHECK(dumped == L"{\"n\":null,\"i\":null,\"k\":2}", "json: Dump writes null for NaN and infinity (JSON has neither)");
+        CHECK(json::Parse(dumped).has_value(), "json: what Dump writes always parses back");
+    }
+
+    // ---- the state-file reader ----
+    {
+        ScratchDir sp(L"am-unreadable-read-");
+        const std::wstring p = sp.dir + L"\\x.json";
+        CHECK(ReadStateFileUtf8(p).status == StateFileStatus::Missing, "read: a missing file is Missing (not Unreadable)");
+        CHECK(ReadStateFileUtf8(sp.dir + L"\\no-such-folder\\x.json").status == StateFileStatus::Missing, "read: a missing folder is Missing too");
+        writeBytes(p, "\xEF\xBB\xBF{\"a\":1}");
+        const auto r = ReadStateFileUtf8(p);
+        CHECK(r.status == StateFileStatus::Read && r.text == L"{\"a\":1}", "read: the text, the UTF-8 BOM dropped");
+        writeBytes(p, "");
+        CHECK(ReadStateFileUtf8(p).status == StateFileStatus::Read && ReadStateFileUtf8(p).text.empty(), "read: an empty file is Read (empty), not Missing");
+        writeBytes(p, "{\"a\":1}");
+        // Another program holding the file with no sharing.
+        const HANDLE lock = ::CreateFileW(p.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(lock != INVALID_HANDLE_VALUE, "read: (setup) the file is held with no sharing");
+        const uint64_t t0 = ::GetTickCount64();
+        const auto locked = ReadStateFileUtf8(p, 200);
+        const uint64_t took = ::GetTickCount64() - t0;
+        CHECK(locked.status == StateFileStatus::Unreadable && locked.error == ERROR_SHARING_VIOLATION && locked.text.empty(),
+              "read: a file held with no sharing is Unreadable (sharing violation) - never Missing, never an empty Read");
+        CHECK(took >= 150, "read: a sharing violation is retried for the budget");
+        const uint64_t t1 = ::GetTickCount64();
+        const auto again = ReadStateFileUtf8(p, 3000);
+        CHECK(again.status == StateFileStatus::Unreadable && ::GetTickCount64() - t1 < 1500,
+              "read: inside the quiet window a still-unreadable file costs one attempt, not the whole budget again");
+        // A lock that ends while the reader waits: the retry gets the text.
+        ResetStateFileGuardForTests(); // out of the quiet window
+        std::thread releaser([lock]() {
+            ::Sleep(150);
+            ::CloseHandle(lock);
+        });
+        const auto waited = ReadStateFileUtf8(p, 3000);
+        releaser.join();
+        CHECK(waited.status == StateFileStatus::Read && waited.text == L"{\"a\":1}", "read: a lock that ends inside the budget is ridden out");
+    }
+
+    // ---- the guard before every replace: its rules, on a scratch file, through the sequence every writer runs around its
+    //      atomic replace (PrepareStateFileReplace -> write -> MarkStateFileSafeToReplace) ----
+    {
+        ScratchDir sd(L"am-unreadable-guard-");
+        const std::wstring f = sd.dir + L"\\state.json";
+        // What WriteAllUtf8 and SessionStore's AtomicWriteUtf8 do; "ours" writes are long, so an outside write of another
+        // length can never share their stamp.
+        const auto guardedWrite = [&](const std::string& bytes) {
+            if (!PrepareStateFileReplace(f))
+            {
+                return false;
+            }
+            writeBytes(f, bytes);
+            MarkStateFileSafeToReplace(f);
+            return true;
+        };
+        const std::string ours1 = "{\"version\":1,\"settings\":{\"maxTags\":9,\"note\":\"written by this process (1)\"}}";
+        const std::string ours2 = "{\"version\":1,\"settings\":{\"maxTags\":9,\"note\":\"written by this process (two)\"}}";
+        CHECK(guardedWrite(ours1) && keptCopies(sd.dir, L"state.json").empty(), "guard: a first write (no file yet) has nothing to check or keep");
+        CHECK(guardedWrite(ours2) && keptCopies(sd.dir, L"state.json").empty(), "guard: a file this process wrote is replaced without a copy (the stamp's fast path)");
+        const std::string torn = "{\"version\":1,\"settings\":{\"maxTags\":7";
+        writeBytes(f, torn); // someone else: a torn write
+        CHECK(guardedWrite(ours1), "guard: a write over a file that does not parse goes through...");
+        auto copies = keptCopies(sd.dir, L"state.json");
+        CHECK(copies.size() == 1 && readBytes(copies[0]) == torn && readBytes(f) == ours1, "guard: ...after its bytes were kept aside, byte for byte");
+        writeBytes(f, "garbage!");
+        CHECK(guardedWrite(ours2) && keptCopies(sd.dir, L"state.json").size() == 2, "guard: a file someone else broke after our write is judged again (and kept)");
+        writeBytes(f, "{\"version\":1,\"settings\":{}}");
+        CHECK(guardedWrite(ours1) && keptCopies(sd.dir, L"state.json").size() == 2, "guard: a file someone else changed but that parses is replaced without a copy");
+        writeBytes(f, "  \r\n");
+        CHECK(guardedWrite(ours2) && keptCopies(sd.dir, L"state.json").size() == 2, "guard: a blank file has nothing to keep");
+        // Unreadable: refused, and the file keeps its bytes.
+        const std::string held = "{\"version\":1,\"settings\":{\"maxTags\":3}}";
+        writeBytes(f, held);
+        const HANDLE lock = ::CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(!PrepareStateFileReplace(f), "guard: a file that cannot be read is NOT to be replaced (its bytes could be neither checked nor kept)");
+        ::CloseHandle(lock);
+        CHECK(readBytes(f) == held && keptCopies(sd.dir, L"state.json").size() == 2, "guard: ...it keeps its bytes, and no copy pretends to hold it");
+        ResetStateFileGuardForTests(); // out of the lock's quiet window
+        CHECK(guardedWrite(ours1) && readBytes(f) == ours1, "guard: once it can be read again, the write goes through");
+        // Keep-before-replace: a file a loader could not use is kept even when it parses by the time of the write.
+        MarkStateFileKeepBeforeReplace(f);
+        CHECK(guardedWrite(ours2), "guard: (a write after a keep mark)");
+        copies = keptCopies(sd.dir, L"state.json");
+        CHECK(copies.size() == 3 && readBytes(copies.back()) == ours1, "guard: a keep-before-replace file is kept although it parses (what replaces it did not come from it)");
+        CHECK(guardedWrite(ours1) && keptCopies(sd.dir, L"state.json").size() == 3, "guard: ...once");
+        // A file that vanished is simply a first write again.
+        std::filesystem::remove(std::filesystem::path{ f });
+        CHECK(PrepareStateFileReplace(f), "guard: a missing file may be written");
+        // The copies end in no ".json", so a "*.json" scan never reads one as live state.
+        bool noJsonCopy = true;
+        for (const auto& c : keptCopies(sd.dir, L"state.json"))
+        {
+            noJsonCopy = noJsonCopy && std::filesystem::path{ c }.extension() != L".json";
+        }
+        CHECK(noJsonCopy, "guard: a kept copy's name does not end in .json");
+    }
+
+    // ---- the guard inside the real saver: SaveAppSettings -> WriteAllUtf8, in the harness's own profile (its
+    //      settings.json is put back afterwards, byte for byte, for the tests that follow) ----
+    {
+        ResetStateFileGuardForTests();
+        const std::wstring profile = AgentmasterStateDir();
+        const std::wstring settingsPath = profile + L"\\settings.json";
+        const bool had = std::filesystem::exists(std::filesystem::path{ settingsPath });
+        const std::string before = had ? readBytes(settingsPath) : std::string{};
+        const auto copiesBefore = keptCopies(profile, L"settings.json");
+        const std::string torn = "{\"version\":1,\"settings\":{\"maxTags\":7";
+        writeBytes(settingsPath, torn);
+        CHECK(LoadAppSettings().maxTags == AppSettings{}.maxTags, "save: (setup) a torn settings.json reads as all defaults");
+        AppSettings s;
+        s.maxTags = 9;
+        SaveAppSettings(s);
+        const auto copiesAfter = keptCopies(profile, L"settings.json");
+        std::vector<std::wstring> made;
+        for (const auto& c : copiesAfter)
+        {
+            if (std::find(copiesBefore.begin(), copiesBefore.end(), c) == copiesBefore.end())
+            {
+                made.push_back(c);
+            }
+        }
+        CHECK(made.size() == 1 && readBytes(made[0]) == torn, "save: SaveAppSettings keeps a torn settings.json aside before it writes the defaults over it");
+        CHECK(LoadAppSettings().maxTags == 9, "save: ...and then writes");
+        for (const auto& c : made)
+        {
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path{ c }, ec);
+        }
+        if (had)
+        {
+            writeBytes(settingsPath, before);
+        }
+        else
+        {
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path{ settingsPath }, ec);
+        }
+        ResetStateFileGuardForTests();
+    }
+
+    // ---- the startup fleet read and the recovery snapshot (on a scratch profile folder, through the `...In` seams; the
+    //      registry save that follows at startup is played by the guard sequence WriteAllUtf8 runs) ----
+    {
+        ScratchDir sp(L"am-unreadable-fleet-");
+        const std::wstring sessionsPath = sp.dir + L"\\sessions.json";
+        const auto save = [&](const std::vector<SessionInfo>& fleet) {
+            if (!PrepareStateFileReplace(sessionsPath))
+            {
+                return false;
+            }
+            writeBytes(sessionsPath, utf8(SerializeSessions(fleet)));
+            MarkStateFileSafeToReplace(sessionsPath);
+            return true;
+        };
+        const auto fresh = LoadSessionsForStartupIn(sp.dir);
+        CHECK(fresh.usable && fresh.fileStatus == StateFileStatus::Missing && fresh.sessions.empty(), "fleet: a fresh profile is usable (nothing to lose)");
+        CHECK(save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000001"), MakeSession(L"5e55a0a0-0000-4000-8000-000000000002") }), "fleet: (setup) a fleet of two");
+        ResetStateFileGuardForTests();
+        const auto good = LoadSessionsForStartupIn(sp.dir);
+        CHECK(good.usable && good.fileStatus == StateFileStatus::Read && good.sessions.size() == 2 && good.sessions[1].id == L"5e55a0a0-0000-4000-8000-000000000002",
+              "fleet: a good sessions.json loads whole");
+        writeBytes(sessionsPath, "\xEF\xBB\xBF" + readBytes(sessionsPath));
+        CHECK(LoadSessionsForStartupIn(sp.dir).sessions.size() == 2, "fleet: a BOM'd sessions.json loads (it used to read as an empty fleet)");
+        writeBytes(sessionsPath, "{\"version\":1,\"sessions\":[]}");
+        const auto empty = LoadSessionsForStartupIn(sp.dir);
+        CHECK(empty.usable && empty.sessions.empty(), "fleet: a fleet saved empty is usable (an empty list is a real answer)");
+        writeBytes(sessionsPath, "{\"version\":1}");
+        CHECK(!LoadSessionsForStartupIn(sp.dir).usable, "fleet: a document with no \"sessions\" list is not usable");
+
+        // A damaged fleet beside a window record and the open-at-exit manifest.
+        std::filesystem::create_directories(std::filesystem::path{ sp.dir + L"\\windows" });
+        const std::string windowRecord = "{\"version\":1,\"window\":{\"windowId\":\"w1\"}}";
+        const std::string manifest = "{\"version\":1,\"open\":[\"w1\"]}";
+        writeBytes(sp.dir + L"\\windows\\w1.json", windowRecord);
+        writeBytes(sp.dir + L"\\open-windows.json", manifest);
+        const std::string damaged(4096, '\0');
+        writeBytes(sessionsPath, damaged);
+        ResetStateFileGuardForTests();
+        const auto bad = LoadSessionsForStartupIn(sp.dir);
+        CHECK(!bad.usable && bad.sessions.empty() && bad.fileStatus == StateFileStatus::Read && bad.problem.find(L"not valid JSON") != std::wstring::npos,
+              "fleet: a NUL-filled sessions.json is reported as unusable (not valid JSON), not read as an empty fleet");
+        const std::wstring kept = PreserveWorkspaceForRecoveryIn(sp.dir, bad.problem);
+        CHECK(!kept.empty() && std::filesystem::path{ kept }.parent_path().filename() == L"recovery", "fleet: the snapshot is <profile>\\recovery\\<stamp>");
+        CHECK(readBytes(kept + L"\\sessions.json") == damaged && readBytes(kept + L"\\windows\\w1.json") == windowRecord && readBytes(kept + L"\\open-windows.json") == manifest,
+              "fleet: sessions.json, every window record and the manifest are copied byte for byte");
+        CHECK(readBytes(kept + L"\\README.txt").find("copy these files back") != std::string::npos, "fleet: a README says how to put them back");
+        // What the restore does next — save the empty fleet over sessions.json — now loses nothing, and keeps no second copy.
+        CHECK(save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000003") }), "fleet: the save after the snapshot goes through");
+        CHECK(keptCopies(sp.dir, L"sessions.json").empty(), "fleet: the snapshot holds sessions.json, so the save keeps no second copy");
+        CHECK(readBytes(kept + L"\\sessions.json") == damaged, "fleet: the snapshot is untouched by the save");
+        // Without the snapshot (the load's keep mark alone), the save keeps the damaged bytes itself.
+        writeBytes(sessionsPath, damaged);
+        ResetStateFileGuardForTests();
+        CHECK(!LoadSessionsForStartupIn(sp.dir).usable && save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000007") }), "fleet: (an unusable load, then a save)");
+        const auto markCopies = keptCopies(sp.dir, L"sessions.json");
+        CHECK(markCopies.size() == 1 && readBytes(markCopies[0]) == damaged, "fleet: an unusable sessions.json is kept aside by the first save even with no snapshot");
+        for (const auto& c : markCopies)
+        {
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::path{ c }, ec);
+        }
+
+        // A lock through the whole startup read (longer than its budget): the snapshot cannot copy sessions.json, so its
+        // keep-before-replace mark stays — and the first save after the lock ended keeps what the file then holds.
+        CHECK(save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000004"), MakeSession(L"5e55a0a0-0000-4000-8000-000000000005") }), "fleet: (setup) a good fleet");
+        const std::string goodFleet = readBytes(sessionsPath);
+        ResetStateFileGuardForTests();
+        const HANDLE lock = ::CreateFileW(sessionsPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const uint64_t lockT0 = ::GetTickCount64();
+        const auto lockedLoad = LoadSessionsForStartupIn(sp.dir); // waits kStartupStateReadRetryBudgetMs
+        CHECK(!lockedLoad.usable && lockedLoad.fileStatus == StateFileStatus::Unreadable && lockedLoad.problem.find(L"32") != std::wstring::npos,
+              "fleet: a sessions.json locked through the startup read is Unreadable (error 32), not an empty fleet");
+        CHECK(::GetTickCount64() - lockT0 >= kStartupStateReadRetryBudgetMs - 200, "fleet: the startup read waits its longer budget for a lock to clear");
+        const std::wstring keptWhileLocked = PreserveWorkspaceForRecoveryIn(sp.dir, lockedLoad.problem);
+        CHECK(!keptWhileLocked.empty() && !std::filesystem::exists(std::filesystem::path{ keptWhileLocked + L"\\sessions.json" }) &&
+                  readBytes(keptWhileLocked + L"\\windows\\w1.json") == windowRecord,
+              "fleet: the snapshot still keeps the window records when sessions.json itself is locked");
+        CHECK(readBytes(keptWhileLocked + L"\\README.txt").find("Could not be copied: sessions.json") != std::string::npos, "fleet: ...and its README says what it could not copy");
+        CHECK(!save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000008") }), "fleet: a save while the lock lasts is refused");
+        // The app's order of events: the lock ends, then the next registry save (still inside the read's quiet window, so
+        // the guard's read is one attempt — and succeeds now). The file is read back only here: while the test holds it
+        // with no sharing, no reader (readBytes included) can open it.
+        ::CloseHandle(lock);
+        CHECK(readBytes(sessionsPath) == goodFleet, "fleet: ...and the refused save left the good fleet as it was");
+        CHECK(save({ MakeSession(L"5e55a0a0-0000-4000-8000-000000000006") }), "fleet: the save after the lock ended goes through");
+        const auto fleetCopies = keptCopies(sp.dir, L"sessions.json");
+        CHECK(fleetCopies.size() == 1 && readBytes(fleetCopies[0]) == goodFleet,
+              "fleet: ...after the good fleet was kept aside (the in-memory fleet that replaces it did not come from it)");
+    }
+
+    // ---- the session store's read-modify-write ----
+    {
+        ScratchDir sp(L"am-unreadable-store-");
+        const std::wstring store = sp.dir + L"\\session-store";
+        // A draft over the display read's 1 MiB cap: the next write must keep the title and the tags.
+        const std::wstring sid = L"5e55a0a0-0000-4000-8000-0000000000a1";
+        const std::wstring rec = store + L"\\" + sid + L".json";
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreTitleKey, L"My title") && SetSessionStoreFieldIn(store, sid, kSessionStoreTagsKey, L"red"),
+              "store: (setup) a title and a tag");
+        const std::wstring bigDraft(600 * 1024, static_cast<wchar_t>(0x05D0)); // Hebrew alef: 2 UTF-8 bytes each, ~1.2 MB on disk
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreDraftKey, bigDraft) && std::filesystem::file_size(std::filesystem::path{ rec }) > (1u << 20),
+              "store: (setup) a stored draft makes the record larger than 1 MiB");
+        CHECK(SetSessionStoreFieldIn(store, sid, kSessionStoreFavoriteKey, L"1"), "store: a write into the big record succeeds");
+        const auto big = json::Parse(ReadStateFileUtf8(rec).text);
+        CHECK(big && big->StrAt(kSessionStoreTitleKey) == L"My title" && big->StrAt(kSessionStoreTagsKey) == L"red" && big->StrAt(kSessionStoreFavoriteKey) == L"1" &&
+                  big->StrAt(kSessionStoreDraftKey).size() == bigDraft.size(),
+              "store: a record over 1 MiB keeps every key through a read-modify-write (it used to keep only the written one)");
+        // A record that does not parse: the write keeps its bytes aside first.
+        const std::wstring sid2 = L"5e55a0a0-0000-4000-8000-0000000000a2";
+        const std::string tornRecord = "{\"title\":\"Old ti";
+        writeBytes(store + L"\\" + sid2 + L".json", tornRecord);
+        CHECK(SetSessionStoreFieldIn(store, sid2, kSessionStoreTitleKey, L"New"), "store: a write over a torn record goes through");
+        const auto storeCopies = keptCopies(store, sid2 + L".json");
+        CHECK(storeCopies.size() == 1 && readBytes(storeCopies[0]) == tornRecord, "store: ...after the torn record's bytes were kept aside");
+        // A record that cannot be read: not rewritten.
+        const std::wstring sid3 = L"5e55a0a0-0000-4000-8000-0000000000a3";
+        const std::wstring rec3 = store + L"\\" + sid3 + L".json";
+        CHECK(SetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey, L"Keep me"), "store: (setup) a titled record");
+        const HANDLE lock = ::CreateFileW(rec3.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(!SetSessionStoreFieldIn(store, sid3, kSessionStoreTagsKey, L"blue"), "store: a record that cannot be read is not rewritten (the write would drop keys it never saw)");
+        ::CloseHandle(lock);
+        ResetStateFileGuardForTests();
+        const auto rec3Now = json::Parse(ReadStateFileUtf8(rec3).text);
+        CHECK(rec3Now && rec3Now->StrAt(kSessionStoreTitleKey) == L"Keep me" && rec3Now->Find(kSessionStoreTagsKey) == nullptr, "store: ...and keeps its title");
+        CHECK(SetSessionStoreFieldIn(store, sid3, kSessionStoreTagsKey, L"blue") && GetSessionStoreFieldIn(store, sid3, kSessionStoreTitleKey) == L"Keep me",
+              "store: once readable, the write goes through and the title stays");
     }
 }

@@ -7,6 +7,7 @@
 
 #include "ClaudeSpawn.h" // AgentmasterStateDir
 #include "Json.h"
+#include "StateFileGuard.h" // PrepareStateFileReplace / MarkStateFileSafeToReplace / ReadStateFileUtf8 (PERSISTENCE.md "Unreadable state files")
 
 #include <windows.h>
 
@@ -76,8 +77,25 @@ namespace Agentmaster
         // made unique per writer (thread id) so two threads writing DIFFERENT sessions never collide
         // on the temp path; the final MoveFileEx replace is atomic (last writer wins for the SAME
         // session — rare, since a session's title is set from one place at a time).
+        //
+        // Agentmaster (PERSISTENCE.md "Unreadable state files"): every store file (a session's record, tags.json,
+        // tag-colors.json) is written through here, and each write is a read-modify-write whose read FAILS OPEN — a
+        // record that could not be read or parsed reads as empty, and writing one key into that "empty" record replaced
+        // the session's title, tags and favorite with that one key. So the state-file guard decides first, as it does
+        // for Persistence's WriteAllUtf8: a file it cannot read is not replaced (the write fails, the caller's next
+        // write retries), and one whose text does not parse is copied aside ("<sid>.json.could-not-read-<stamp>", a
+        // name no "*.json" scan picks up) before it is replaced.
+        //   path    - the store file.
+        //   text    - its new content (JSON).
+        //   returns - true when the file now holds `text`; false when the guard refused, or the temp write or the
+        //             atomic replace failed (the old file is then untouched).
+        // Throws std::bad_alloc only.
         bool AtomicWriteUtf8(const std::wstring& path, const std::wstring& text)
         {
+            if (!PrepareStateFileReplace(path))
+            {
+                return false; // logged by the guard; the file keeps its bytes
+            }
             const int n = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
             std::string bytes(static_cast<size_t>(n > 0 ? n : 0), '\0');
             if (n > 0)
@@ -98,7 +116,13 @@ namespace Agentmaster
                 ::DeleteFileW(tmp.c_str());
                 return false;
             }
-            return ::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+            const bool replaced = ::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+            if (replaced)
+            {
+                // The file holds this process's write: the guard's next check of it is one stat.
+                MarkStateFileSafeToReplace(path);
+            }
+            return replaced;
         }
 
         // A sessionId is the file STEM, so it must be a safe single path component. GUIDs (and the
@@ -173,6 +197,50 @@ namespace Agentmaster
                 }
             }
             return rec;
+        }
+
+        // Agentmaster (PERSISTENCE.md "Unreadable state files"): read a record for a READ-MODIFY-WRITE — the read whose
+        // result is written back whole. ParseRecord is the DISPLAY read (hot, UI thread): it reads an absent, locked,
+        // over-1-MiB or unparseable record alike as empty, which is right for showing it and wrong for rewriting it — the
+        // setter then wrote one key over every other: a pasted draft of more than 1 MiB (the draft mirror has no cap) made
+        // the next title, tag or draft write drop the session's title, tags and favorite, and a record an antivirus scan
+        // held for an instant did the same. This read tells "missing" from "could not be read" (with the state-file
+        // reader's short retries) and has no 1 MiB cap. A record that reads but does not parse yields an empty record:
+        // the write's guard (AtomicWriteUtf8 -> PrepareStateFileReplace) then keeps its bytes aside before replacing it.
+        //   storeDir - the session-store folder.
+        //   sid      - the session id (the file stem; the caller validated it).
+        //   rec      - receives the record's string members (cleared first; empty for a missing or unparseable record).
+        //   returns  - false when the record exists but could not be read: the caller must NOT write (it would replace
+        //              keys it never saw); the reader logged it ([persist-read-fail]). True otherwise.
+        // Throws std::bad_alloc only.
+        bool ReadRecordForUpdate(const std::wstring& storeDir, const std::wstring& sid, SessionStoreRecord& rec)
+        {
+            // Counted like ParseRecord's open: SessionStoreRecordFileReads() is the store's cost meter, and the harness
+            // proves "a read-modify-write reads the FILE" with it.
+            g_recordFileReads.fetch_add(1, std::memory_order_relaxed);
+            rec.clear();
+            const StateFileRead read = ReadStateFileUtf8(FilePath(storeDir, sid));
+            if (read.status == StateFileStatus::Unreadable)
+            {
+                return false;
+            }
+            if (read.status == StateFileStatus::Missing)
+            {
+                return true; // a sparse store: no record yet
+            }
+            const auto parsed = json::Parse(read.text);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                return true; // unparseable: kept aside by the write's guard before it is replaced
+            }
+            for (const auto& [k, v] : parsed->members)
+            {
+                if (v.type == json::Value::Type::Str)
+                {
+                    rec[k] = v.str;
+                }
+            }
+            return true;
         }
 
         // Agentmaster (perf — the CPU-hotspot fix): an in-process, (size,mtime)-VALIDATED record cache.
@@ -566,7 +634,12 @@ namespace Agentmaster
         {
             return false;
         }
-        SessionStoreRecord rec = ParseRecord(storeDir, sessionId);
+        // The freshest file, every key, and "could not be read" told apart from "no record" (ReadRecordForUpdate).
+        SessionStoreRecord rec;
+        if (!ReadRecordForUpdate(storeDir, sessionId, rec))
+        {
+            return false; // the record exists but could not be read: writing would replace keys never seen
+        }
         const auto it = rec.find(key);
         const bool present = it != rec.end();
         if (value.empty())
@@ -606,7 +679,12 @@ namespace Agentmaster
         {
             return false;
         }
-        SessionStoreRecord rec = ParseRecord(storeDir, sessionId); // freshest-disk RMW (as the single-field setter)
+        // Freshest-disk RMW, as the single-field setter: every key, and no write over a record that could not be read.
+        SessionStoreRecord rec;
+        if (!ReadRecordForUpdate(storeDir, sessionId, rec))
+        {
+            return false; // the record exists but could not be read: writing would replace keys never seen
+        }
         bool changed = false;
         bool tagsChanged = false; // the batch changed the `tags` key — moves the tag-change epoch once written
         bool factsChanged = false; // the batch changed a title, favorite or tags — moves the facts epoch once written

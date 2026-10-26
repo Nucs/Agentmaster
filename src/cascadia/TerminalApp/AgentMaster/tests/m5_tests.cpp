@@ -116,6 +116,7 @@ int wmain()
     TestTabColorModes();
     TestEngineWindowLifecycle();
     TestUiStallEscalation();
+    TestUnreadableStateFiles(); // PERSISTENCE.md "Unreadable state files": a state file that cannot be read is never replaced without its bytes kept (tests_persistence.cpp)
     TestProcessInspectTree();
     TestOrphanConsoleReaper();
     TestProcessInspectParse();

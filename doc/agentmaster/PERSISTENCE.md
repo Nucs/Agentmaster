@@ -774,3 +774,100 @@ restart → in hooks.log, the `[restore-wake]` steps per window, the wakes only 
 does with the open question; (3) a restart with nothing busy → each window's "no busy tab to wake
 here" line and no wake; (4) busy tabs in several windows → the `[nav] activate-dormant` lines of
 ALL windows together keep the pace (≥ 500 ms apart, at most 4 in any 10 s).
+
+## 15. Unreadable state files: a file Agentmaster could not read is never replaced without its bytes kept (2026-10-26)
+
+**The report.** After a portable copy's first-launch "Install just for you" (into `%USERPROFILE%\.agentmaster\bin`,
+beside a v0.7.0 release package whose data lived in `%USERPROFILE%\.agentmaster`), the profile looked "reset or deleted
+and recreated": the sessions and their titles were gone. The install step was reproduced on e2e (PROFILES.md §2b, flows/19
+IS-100–IS-107) and kept every file. The owner then asked: does the install or the launch wipe or override the state, and
+what could? The answer, from the code and the experiments below:
+
+| Candidate | Verdict | Evidence |
+|---|---|---|
+| The install deletes the profile | **No** (v0.7.7–v0.8.0, the releases with the question) | Their only recursive delete (`RemoveShippedEntries`) runs inside the install folder on names the zip itself ships; v0.8.0's 4 e2e scenarios kept every file. Since 5b292ab4a every installer delete is profile-guarded. |
+| The installed copy opens another, empty profile | **No** (v0.8.0) | The question runs before the zip copy resolves or exports a profile (`EnsureInstallDecidedAtStartup` precedes `EnsureProfileResolvedAtStartup`), and the installed copy's `profile.path` names the package's own folder (`UserInstallProfileDir`). v0.7.7–v0.7.10 always took the Default profile: wrong only for a package moved to another folder. |
+| The package removal deletes state | **No** | Both 0.7.0 and 0.8.0 keep Terminal's own settings in `<profile>\terminal\` (the `AGENTMASTER_PROFILE` redirect), and the removal script stops the old GUI and drains its hosts before the installed copy starts — no two apps write the profile at once. |
+| The first launch rewrites the state | **Yes, whenever a state file cannot be read** | Below. |
+
+**The chain.** Every loader fails OPEN: a file that cannot be opened, or whose text does not parse, loads as "nothing
+saved" (`ReadAllUtf8` returned `""` without a word for a failed open; `DeserializeSessions` returns an empty fleet for a
+failed parse). At startup that is the whole workspace:
+
+1. `sessions.json` reads as an empty fleet (`[restore] 0 session(s) loaded as archived`).
+2. Each reopened window's Claude tab refs are unknown, so none is re-homed (`[rehome] … skip … (unknown — fleet not loaded
+   / pruned)`).
+3. A window left with only its Manager page closes itself and DELETES its record, and the last one discards its record
+   (`[manager-only] self-close window …` / `keep last window … (record discarded)`).
+4. The next registry save writes the empty fleet over `sessions.json`.
+
+`settings.json` has the same shape: two engine-init seeders (`SeedSessionEnvDefaults`, `SeedClaudeCleanupPeriodDaysIfNeeded`)
+and the command reconcile do load → change one field → save, so an unreadable file is rewritten with the defaults at
+every start. A session-store record too: the read-modify-write setters read an unreadable record as empty and wrote one
+key over the title, tags and favorite.
+
+**What made a file "unreadable" (measured on the parser with a scratch probe):** a UTF-8 BOM (decoded as U+FEFF, which the
+parser read as the number 0 with the parse still "ok" — so a BOM'd `sessions.json` was an EMPTY fleet, silently); a file
+of NUL bytes (what a power loss can leave — also "the number 0"); a torn or empty file; a NaN or infinity that `json::Dump`
+had written as `nan` / `inf` (one such field failed the whole document); a lock by another program at the moment of the
+read (an antivirus scan, a backup); a session-store record over 1 MiB (a stored draft has no cap; the read had one).
+
+**The fix — four layers:**
+
+1. **The reader** (`Json.h`): a leading BOM is skipped; a value that starts with no value character is a failed parse (it
+   used to be the number 0); `nan`, `-nan(ind)`, `inf`, `-inf`, `NaN`, `Infinity` read as null (the field takes its
+   default, the rest of the document survives); `Dump` writes `null` for a non-finite number.
+2. **The state-file reader** (`ReadStateFileUtf8`, `StateFileGuard.h`): tells MISSING from UNREADABLE; retries a sharing
+   violation, a lock violation or access denied for 400 ms (3 s for the startup fleet read); drops a BOM; logs a file that
+   stays unreadable once per 30 s episode (`[persist-read-fail]`), and makes one attempt inside that window. Every loader's
+   `ReadAllUtf8` goes through it.
+3. **The guard before every replace** (`PrepareStateFileReplace`, called by Persistence's `WriteAllUtf8` and the session
+   store's `AtomicWriteUtf8`). It costs one stat while the file is still what this process last wrote or loaded. Otherwise
+   (the first replace in a run, or someone else changed the file) it reads the file:
+
+   | The file | The replace |
+   |---|---|
+   | missing, blank, or valid JSON | goes ahead |
+   | not valid JSON | goes ahead after a copy `<name>.could-not-read-<yyyyMMdd-HHmmss>` is kept beside it |
+   | marked keep-before-replace (a loader could not use it) | goes ahead after a copy, whatever it holds now |
+   | cannot be read (or the copy cannot be made) | REFUSED — the file keeps its bytes; the caller's next save retries (`[persist-guard] … NOT replaced`, once per 30 s) |
+
+   A copy's name ends in no `.json`, so no `*.json` scan (`windows\`, the session store) reads it as live state.
+4. **The startup fleet read** (`LoadSessionsForStartup`, `_RestoreClaudeSessions`): when `sessions.json` exists but cannot
+   be used, `PreserveWorkspaceForRecovery` copies the workspace BEFORE the restore changes anything — `sessions.json`,
+   `open-windows.json`, `settings.json`, `layout.json` and every `windows\*.json` — into `<profile>\recovery\<yyyyMMdd-HHmmss>\`
+   with a `README.txt` (what happened, how to put the files back). The load marks `sessions.json` keep-before-replace, so
+   a file the snapshot could not copy (a lock) is kept by the first save after the lock ends; one the snapshot did copy is
+   marked safe, so the save keeps no second copy. The `[restore]` line names the problem; `[persist-guard]` names the folder.
+   The session store's setters read through `ReadRecordForUpdate` (no 1 MiB cap; "could not be read" refuses the write).
+
+**Recovering a workspace** from `<profile>\recovery\<stamp>\`: close Agentmaster, copy the files back into the profile
+(replacing), start it. A `*.could-not-read-*` copy is the file's bytes as they were before the replace; rename it back to
+look at it, or to restore it.
+
+**On the machine of the 2026-10-26 report** (not inspected — it is not this PC): `hooks.log` in the profile answers which
+step happened. Lines from before the install (and the `[install] install begin` line) mean the folder was NOT deleted;
+`[restore] N session(s) loaded as archived` gives the fleet the installed copy read — `0` while the older lines show
+sessions is the empty-fleet chain above; `[rehome] … skip …` and `[manager-only] …` lines show the window records being
+dropped. v0.8.0 logged nothing for a failed open (only an exception reached `[exc] ReadAllUtf8`), so a lock leaves no
+line of its own there.
+
+**Limits (open):**
+
+- No on-screen notice: a run that started without its sessions says so in `hooks.log` and in the recovery folder's README,
+  but the window only looks empty.
+- The tag registries' read-modify-write (`tags.json`, `tag-colors.json`) still reads a locked file as "no registry"; the
+  guard refuses the write while the lock lasts, but a lock that ends between that read and the write lets the registry be
+  rewritten from the partial read (a window of milliseconds).
+- Other loaders (window records, `open-windows.json`, `dir-colors.json`, `templates.json`, …) still read an unreadable file
+  as empty; the guard covers their writes. An unparseable window record is skipped by the reopen and never rewritten.
+- Writers outside the two chokepoints are not guarded: the Telegram bot's `messaging\telegram\state.json`, the sessions
+  index sidecars, the AI search's `harness\` files, the hook files (regenerated at every start).
+- The display read of a session-store record still caps at 1 MiB: a record above it shows no title or tags until it
+  shrinks (nothing is lost — the setters read it whole).
+
+Tests: `TestUnreadableStateFiles` (m5 harness): the reader's cases, the state-file reader (missing / BOM / empty / a lock
+retried, refused and ridden out / the quiet window), the guard's table on a scratch file, the real `SaveAppSettings` over a
+torn `settings.json`, the startup fleet read (fresh / good / BOM / empty list / no list / NUL-filled / locked through its
+3 s budget) with the snapshot and the first save after it, and the store's setters (a record over 1 MiB keeps every key; a
+torn record is kept aside; a locked record is not rewritten).

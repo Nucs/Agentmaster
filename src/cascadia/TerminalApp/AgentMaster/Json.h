@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cmath> // std::isfinite (Dump: JSON has no NaN / infinity)
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -200,12 +201,77 @@ namespace Agentmaster::json
                 return out;
             }
 
+            // Agentmaster (PERSISTENCE.md "Unreadable state files"): consume a NON-FINITE number token at `i` — the
+            // spellings MSVC's printf gives a non-finite double ("nan", "-nan(ind)", "inf", "-inf") and the ones
+            // Python's json module writes ("NaN", "Infinity", "-Infinity"). JSON has no such token, yet Dump wrote
+            // "nan" / "inf" for a non-finite double until 2026-10-26, and ONE such field made the whole document
+            // unparseable: every loader fails open, so a settings.json or window record holding one read as "nothing
+            // saved" and the next save wrote that over the file. The caller reads the token as null, so that field
+            // takes its default and every other field survives.
+            //   returns - true and `i` past the token (a sign and MSVC's "(ind)" / "(snan)" payload tag included);
+            //             false and `i` unchanged when the text at `i` is not one of those spellings.
+            // Never throws (wstring_view::compare cannot go out of range here: the offset never passes size()).
+            bool NonFinite()
+            {
+                size_t k = i;
+                if (k < s.size() && (s[k] == L'-' || s[k] == L'+'))
+                {
+                    ++k;
+                }
+                size_t len = 0;
+                if (s.compare(k, 8, L"Infinity") == 0)
+                {
+                    len = 8;
+                }
+                else if (s.compare(k, 3, L"inf") == 0 || s.compare(k, 3, L"NaN") == 0 || s.compare(k, 3, L"nan") == 0)
+                {
+                    len = 3;
+                }
+                else
+                {
+                    return false;
+                }
+                k += len;
+                // MSVC tags a NaN with its kind: "-nan(ind)", "nan(snan)". A short run of letters in parentheses is
+                // taken with it; anything else after the word is left for the caller to judge.
+                if (k < s.size() && s[k] == L'(')
+                {
+                    size_t close = k + 1;
+                    while (close < s.size() && close - k <= 8 && ::iswalpha(s[close]))
+                    {
+                        ++close;
+                    }
+                    if (close < s.size() && s[close] == L')')
+                    {
+                        k = close + 1;
+                    }
+                }
+                i = k;
+                return true;
+            }
+
             Value Number()
             {
+                // A non-finite spelling ("-inf", "-nan(ind)", "Infinity") reads as null, never as half a number.
+                if (NonFinite())
+                {
+                    return Value{};
+                }
                 const size_t start = i;
                 while (i < s.size() && (::iswdigit(s[i]) || s[i] == L'-' || s[i] == L'+' || s[i] == L'.' || s[i] == L'e' || s[i] == L'E'))
                 {
                     ++i;
+                }
+                // Agentmaster (PERSISTENCE.md "Unreadable state files"): Val() sends every character it does not
+                // recognize here, so a value that starts with none of a number's characters is NOT a number. It used
+                // to read as 0 with the parse still "ok": at the root, a file of NUL bytes (what a power loss can leave)
+                // or one that starts with garbage parsed as the number 0, and a loader looking for an object then
+                // silently read "nothing saved". Inside an object or array the next separator check failed anyway, so
+                // only the root changes: such text is now a failed parse, which every caller already handles.
+                if (i == start)
+                {
+                    ok = false;
+                    return Value{};
                 }
                 const std::wstring tok{ s.substr(start, i - start) };
                 return Value::MkNum(::wcstod(tok.c_str(), nullptr));
@@ -226,6 +292,11 @@ namespace Agentmaster::json
                 if (s.compare(i, 4, L"null") == 0)
                 {
                     i += 4;
+                    return Value{};
+                }
+                // "nan", "NaN", "inf", "Infinity": a non-finite number an older Dump (or Python) wrote — null.
+                if (NonFinite())
+                {
                     return Value{};
                 }
                 ok = false;
@@ -330,7 +401,9 @@ namespace Agentmaster::json
                 {
                     return Value::MkStr(Str());
                 }
-                if (c == L't' || c == L'f' || c == L'n')
+                // 'i' / 'I' / 'N' start no JSON value, but they start "inf" / "Infinity" / "NaN" (Literal reads those
+                // as null; NonFinite says why).
+                if (c == L't' || c == L'f' || c == L'n' || c == L'i' || c == L'I' || c == L'N')
                 {
                     return Literal();
                 }
@@ -395,6 +468,14 @@ namespace Agentmaster::json
                 break;
             case Value::Type::Num:
             {
+                // Agentmaster (PERSISTENCE.md "Unreadable state files"): JSON has no NaN or infinity, and "%g" spells
+                // them "nan" / "-nan(ind)" / "inf" — tokens that made the WHOLE document unreadable on the next start
+                // (Parser::NonFinite). Write null instead: the reader then takes that field's default and nothing else.
+                if (!std::isfinite(v.num))
+                {
+                    out += L"null";
+                    break;
+                }
                 wchar_t buf[32];
                 if (v.num == static_cast<double>(static_cast<int64_t>(v.num)))
                 {
@@ -440,8 +521,19 @@ namespace Agentmaster::json
         }
     }
 
+    // Parse one JSON document. Lenient by design where it costs nothing (an unknown escape keeps its character, text
+    // after the document is ignored), strict where leniency lost data (PERSISTENCE.md "Unreadable state files").
+    //   text    - the document. A leading U+FEFF (a UTF-8 BOM an editor or Windows PowerShell 5.1's
+    //             "Set-Content -Encoding UTF8" put there, decoded by MultiByteToWideChar) is skipped: it used to make
+    //             the whole file parse as the number 0, so a sessions.json saved with one loaded as an empty fleet.
+    //   returns - the root value; nullopt for text that is not a JSON value (empty, torn, garbage, NUL-filled).
+    // Throws std::bad_alloc only.
     inline std::optional<Value> Parse(std::wstring_view text)
     {
+        if (!text.empty() && text.front() == static_cast<wchar_t>(0xFEFF))
+        {
+            text.remove_prefix(1);
+        }
         detail::Parser p{ text };
         Value v = p.Val();
         if (!p.ok)
