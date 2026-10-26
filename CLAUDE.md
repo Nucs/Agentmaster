@@ -202,6 +202,7 @@ Detail: [`DELIVERY.md`](doc/agentmaster/DELIVERY.md).
 - **Every paste is sanitized** with Claude Code's invisible-character rule, and every prompt compare goes through `NormalizePromptTextForCompare` (Gotcha *Claude Code cancels an Enter …*).
 - **After a send:** the echo (the push hook, or the scanner's pull of the transcript line) marks it picked up. The Enter-retry watch re-presses a lone Enter up to 3 times when the turn did not start — never into a foreign draft, a menu, a dormant tab or an open gate, and verified live (`PressEnterVerified`) — then marks the prompt Failed and pauses the runner. A Sent prompt with injection evidence and no echo after 15 s at rest is judged lost (`DecideLostSend` → Failed + paused, never resent); a Sent prompt that was never injected is reclaimed to Pending.
 - Mark-Sent is atomic and persisted; a restored `Sent` prompt is never replayed (Rule #4).
+- **The mode is per session and persisted:** `autorunner.mode` in `sessions.json`, an interrupt hold with it. A reopened window's sessions and a Resume here keep their own mode (a queue left Paused stays Paused); a new session — a launch, a fork, a `/clear` or `/handover` successor, an adopted claude, an on-disk session resumed for the first time (`_ResumeSessionFromDisk` seeds it) — starts on the cog's default.
 - ⚠ `pauseOnHumanInput` has no feeder (`SessionRegistry::NoteHumanInput` has no caller).
 
 ### Pending-input monitor (unsent drafts)

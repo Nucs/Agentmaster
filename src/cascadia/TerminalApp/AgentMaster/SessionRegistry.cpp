@@ -766,11 +766,11 @@ namespace Agentmaster
                 // the lock) tries to bind it to its ConPTY for full control.
                 created.external = true;
                 // Agentmaster (adopt/re-home autorunner default — SetDefaultAutorunnerMode): a record
-                // minted HERE is a newly-OPENED session (a hand-typed adopted claude, or the NEW
-                // conversation id an in-session /clear or /resume mints on a re-homed tab), so it gets
-                // the same cog default MODE the launch/restore seams stamp — it used to default Off,
-                // silently exempting exactly these sessions from the Tests Autorunner. Config only,
-                // creation only; never SessionState.
+                // minted HERE is a NEW session (a hand-typed adopted claude, or the NEW conversation id
+                // an in-session /clear or /resume mints on a re-homed tab), so it gets the same cog
+                // default MODE the launch seam stamps on a new session (a restored one keeps its own
+                // persisted mode) — it used to default Off, silently exempting exactly these sessions
+                // from the Tests Autorunner. Config only, creation only; never SessionState.
                 created.autorunner.mode = _defaultAutorunnerMode;
                 // The STATE SETTLE clock (DELIVERY.md §16): a record created here is a session whose
                 // current status begins now — an adopted claude's queue waits out a full window first.

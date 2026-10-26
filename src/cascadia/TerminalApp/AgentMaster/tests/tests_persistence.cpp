@@ -368,6 +368,52 @@ void TestPersistence()
                 CHECK(old.size() == 1 && old[0].queue.size() == 2 && old[0].autorunner.maxAutoSends == 7, "legacy SemiAuto: the queue and the other autorunner fields are kept");
             }
         }
+        // No interrupt hold in that record: the pair is not written at all (a record without a hold stays byte-unchanged).
+        CHECK(text.find(L"interruptHeld") == std::wstring::npos, "interrupt hold: absent from a record without one");
+    }
+
+    // The INTERRUPT HOLD is part of the persisted mode (2026-10-26, DELIVERY.md §14 — "we need the mode per session
+    // persisted"): a session parked by an Esc ("Paused → Auto on your next message") comes back held after a restart, so
+    // the user's next message resumes the mode they chose; an incoherent pair on disk never resumes anything.
+    {
+        SessionInfo held;
+        held.id = L"held-1";
+        held.title = L"held";
+        held.workingDir = L"C:/w";
+        held.autorunner.mode = AutorunnerMode::Full;
+        CHECK(TakeInterruptHold(held.autorunner, 1792900000123), "interrupt hold: taken on an Auto session");
+        const auto text = SerializeSessions({ held });
+        CHECK(text.find(L"\"interruptHeldMode\"") != std::wstring::npos && text.find(L"\"interruptHeldUnixMs\"") != std::wstring::npos,
+              "interrupt hold: the held mode and the marker's stamp are written");
+        const auto back = DeserializeSessions(text);
+        CHECK(back.size() == 1 && back[0].autorunner.mode == AutorunnerMode::Off && InterruptHoldActive(back[0].autorunner),
+              "interrupt hold: loads held (Paused now, a resume pending)");
+        CHECK(back.size() == 1 && back[0].autorunner.interruptHeldMode == AutorunnerMode::Full && back[0].autorunner.interruptHeldUnixMs == 1792900000123,
+              "interrupt hold: the held mode and the resume anchor round-trip");
+        if (back.size() == 1)
+        {
+            // The loaded hold behaves as the live one did: a message stamped before the marker resumes nothing, one
+            // after it resumes the held mode.
+            auto a = back[0].autorunner;
+            CHECK(ResumeInterruptHold(a, 1792900000000) == AutorunnerMode::Off && InterruptHoldActive(a),
+                  "interrupt hold: a reloaded hold ignores a message older than the marker");
+            CHECK(ResumeInterruptHold(a, 1792900001000) == AutorunnerMode::Full && a.mode == AutorunnerMode::Full && !InterruptHoldActive(a),
+                  "interrupt hold: a reloaded hold resumes on the user's next message");
+        }
+        // Incoherent pairs on disk (a hand edit, a half-written record) are dropped, never resumed.
+        const auto incoherent = [](const std::wstring& autorunnerJson) {
+            const auto r = DeserializeSessions(L"{\"version\":1,\"sessions\":[{\"id\":\"x\",\"title\":\"x\",\"workingDir\":\"C:/w\",\"autorunner\":" +
+                                               autorunnerJson + L"}]}");
+            return r.size() == 1 && !InterruptHoldActive(r[0].autorunner) && r[0].autorunner.interruptHeldMode == AutorunnerMode::Off &&
+                   r[0].autorunner.interruptHeldUnixMs == 0;
+        };
+        CHECK(incoherent(L"{\"mode\":\"Full\",\"interruptHeldMode\":\"Full\",\"interruptHeldUnixMs\":1792900000123}"),
+              "interrupt hold: dropped when the mode is not Off (no hold is running)");
+        CHECK(incoherent(L"{\"mode\":\"Off\",\"interruptHeldMode\":\"Full\"}"), "interrupt hold: dropped without the marker's stamp");
+        CHECK(incoherent(L"{\"mode\":\"Off\",\"interruptHeldMode\":\"Off\",\"interruptHeldUnixMs\":1792900000123}"),
+              "interrupt hold: dropped when nothing is held");
+        CHECK(incoherent(L"{\"mode\":\"Off\",\"interruptHeldMode\":\"SemiAuto\",\"interruptHeldUnixMs\":1792900000123}"),
+              "interrupt hold: a held SemiAuto (a removed mode, read as Off) holds nothing");
     }
 
     // Codex managed session: the agent kind + the rollout resume target (codexSessionId) round-trip,

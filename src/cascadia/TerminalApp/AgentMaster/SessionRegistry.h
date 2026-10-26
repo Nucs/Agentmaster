@@ -460,18 +460,18 @@ namespace Agentmaster
         void SetAdvanceHandler(AdvanceHandler handler);
         // Agentmaster (adopt/re-home autorunner default): the Tests Autorunner MODE stamped onto a
         // session record the registry CREATES itself — the hook SessionStart adopt path and the Fleet
-        // Observer's first-sight create. Every other opened session gets the cog default at its
-        // launch/restore seam (TerminalPage.AgentSessions.cpp), but these two records are minted
-        // INSIDE the engine where AppSettings isn't in scope, so they silently defaulted to Off — an
-        // adopted hand-typed claude (or the NEW conversation id an in-session /clear or /resume mints
-        // on a re-homed tab) then never auto-sent its queued prompts, contradicting the documented
-        // "the MODE seeds every OPENED session — new, adopted, AND restored" (AppSettings,
-        // SessionModels.h) and reading as "queued prompts stuck Pending, never sent". Wired at engine
-        // init in EVERY build since 2026-10-09 (until then it was gated on IsDevOrDebugPackage like the
-        // scheduler's auto-advance, so a plain release kept minting Off records) and re-pushed live by
-        // the cog Save. Un-wired (the test harness, the CLI) the registry still mints Off. CREATION-only:
-        // an existing record's mode is the user's per-session choice (or the launch/restore stamp) and
-        // is never touched here.
+        // Observer's first-sight create. Every other NEW session gets the cog default at its launch
+        // seam (TerminalPage.AgentSessions.cpp; a restored session keeps its own persisted mode), but
+        // these two records are minted INSIDE the engine where AppSettings isn't in scope, so they
+        // silently defaulted to Off — an adopted hand-typed claude (or the NEW conversation id an
+        // in-session /clear or /resume mints on a re-homed tab) then never auto-sent its queued
+        // prompts, contradicting the documented "the MODE seeds every NEW session — launched, adopted,
+        // a successor" (AppSettings, SessionModels.h) and reading as "queued prompts stuck Pending,
+        // never sent". Wired at engine init in EVERY build since 2026-10-09 (until then it was gated on
+        // IsDevOrDebugPackage like the scheduler's auto-advance, so a plain release kept minting Off
+        // records) and re-pushed live by the cog Save. Un-wired (the test harness, the CLI) the registry
+        // still mints Off. CREATION-only: an existing record's mode is the user's per-session choice (or
+        // the launch stamp), persisted with the record, and is never touched here.
         //   mode   — the mode to stamp on records created from now on (Off == Paused, Full == Auto).
         //   throws — nothing beyond std::mutex::lock's std::system_error.
         void SetDefaultAutorunnerMode(AutorunnerMode mode);

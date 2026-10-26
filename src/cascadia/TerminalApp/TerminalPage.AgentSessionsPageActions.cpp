@@ -132,6 +132,15 @@ namespace winrt::TerminalApp::implementation
             s.title = title;
             s.state = ::Agentmaster::SessionState::Idle;
             s.live = false; // archived-shaped: exactly what _RestoreArchivedSession expects
+            // Agentmaster (the runner's mode is per session and persisted, 2026-10-26): a session the registry never knew
+            // has no saved plan, so it starts on the cog's Prompt Queue Runner defaults, as a fresh launch or an adopted
+            // session does. The restore seam (_LaunchClaudeSession's restored branch) keeps whatever mode the record
+            // carries — without these lines this first resume would come up Paused (the struct's Off), where it used
+            // to get the cog's default from the restore seam's old re-stamp.
+            s.autorunner.mode = _appSettings.defaultAutorunnerMode;
+            s.autorunner.maxAutoSends = _appSettings.maxAutoSends;
+            s.autorunner.stopOnError = _appSettings.stopOnError;
+            s.autorunner.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
             _sessionRegistry->Upsert(std::move(s));
         }
         const auto resumedTab = _RestoreArchivedSession(winrt::hstring{ target }, insertPosition);

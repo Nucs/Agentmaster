@@ -199,7 +199,7 @@ since=mark)`), then the UI.
 - The test that replaces it proves the FIX. Until a published release holds the fix, mark it `needs_fix("<ID>")`:
   it passes against a build of the branch and fails on the older release, where a run deselects it with
   `-m "not needs_fix"` (MGR-K1, SP-K1, TCM-K2, TAB-K4, TAB-K3, A11Y-K1 and CLI-K2 since 2026-10-23; SP-K3 since
-  2026-10-24).
+  2026-10-24; PQR-K8 since 2026-10-26).
 - A NEW FEATURE that no published release holds takes the same marker with an `-F<n>` id, so the same deselection
   covers it: TAB-F1 = Deactivate ▸ "Deactivate All Idle Tabs" and its "This window / All windows" question (2026-10-24,
   `test_tab_lifecycle.py::test_deactivate_all_idle_tabs` + `::test_deactivate_idle_tabs_asks_which_windows`; flows/07
@@ -342,8 +342,7 @@ since=mark)`), then the UI.
 | PQR-K1 | PQR-06 | Send now with an empty compose box sends the SELECTED row whatever its status: a history row is typed into the session again (found by reading, 2026-10-21) | `test_prompt_queue_runner.py::test_known_defect_send_now_sends_a_selected_history_row_again` |
 | PQR-K2 | PQR-13 | Move up / Move down swap a row with its neighbor in the RAW queue, history rows included: a queued row "moved up" past a history row stays where it was in UPCOMING (found by reading) | `test_prompt_queue_runner.py::test_known_defect_move_up_swaps_a_queued_row_with_a_history_row` |
 | PQR-K3 | PQR-14 | The board card's `⚙ sent/total` counts the history: a session with one typed prompt and nothing queued says `⚙ 1/1` (found by reading) | `test_prompt_queue_runner.py::test_known_defect_the_boards_send_count_counts_typed_history` |
-| PQR-K6 | PQR-03, LIF-02 | Restart session starts no settle window: a prompt held while claude was gone is typed into the restarted claude 8 s after the restart, before its SessionStart hook; a parked tab's wake waits the whole window | `test_prompt_queue_runner.py::test_known_defect_restart_session_does_not_restart_the_settle_window` |
-| PQR-K7 | PQR-13, LIF-07 | `/clear` leaves the tab's queue with the old, archived conversation: the new conversation's queue is empty, its runner on the cog's default, the queued prompt never sent (the owner decides whether it is a defect) | `test_prompt_queue_runner.py::test_known_defect_clear_leaves_the_tabs_queue_behind` |
+| PQR-K8 | PQR-15, PQR-07 E9, LIF-04 E1 | A reopened or resumed session loses its own runner mode: a window reopen, Resume here and a restore-fresh re-stamp the cog's default, so a queue left Paused comes back Auto and goes by itself, and an interrupt hold is not saved at all (measured on 0.8.0 by the probe `pqprobe1`, 2026-10-24; a defect by the owner's rule of 2026-10-26: "we need the mode per session persisted"). **Fixed in code 2026-10-26** (NOT BUILT): the restore keeps the mode it was saved with, `sessions.json` keeps an interrupt hold with it, and only a NEW session (a first Resume here of an on-disk session included) starts on the cog's default | `test_prompt_queue_runner.py::test_a_paused_queue_stays_paused_across_a_restart_and_nothing_sent_is_sent_again`, `…::test_an_interrupt_hold_survives_a_restart`, `test_claude_lifecycle.py::test_resume_here_keeps_the_sessions_paused_mode` (`needs_fix`; no build has run them yet) |
 
 TAB-K2 (TAB-10 E1: a reopen whose focused tab was a shell starts a restored Claude tab — the LAST one; "the first" as
 filed was measured with one) was filed as a defect on 2026-10-23 and reclassified the same day by the user as a
@@ -358,7 +357,13 @@ bounded tests replace their known-defect tests (the state settles within `ACCEPT
 `test_session_state.py::test_esc_before_any_output_settles_waiting_within_the_accepted_lag`,
 `…::test_compact_settles_waiting_within_the_accepted_lag` and
 `…::test_a_blocking_stop_hooks_continuation_reads_running_within_the_accepted_lag`;
-`…::test_the_runner_sends_nothing_into_a_blocked_stops_continuation` proves the runner's side.
+`…::test_the_runner_sends_nothing_into_a_blocked_stops_continuation` proves the runner's side. PQR-K6 and PQR-K7, filed
+by the runner's suite on 2026-10-24, are the owner's accepted behavior (2026-10-26): Restart session starting no
+settle window is ACCEPTED ("what we have now is okay": the held prompt goes once the restarted claude's box is back,
+`test_prompt_queue_runner.py::test_restart_session_sends_a_held_prompt_once_its_box_is_back`), and `/clear` leaving
+the tab's queue with the old, archived conversation is a FEATURE ("no don't follow tab across /clear":
+`…::test_clear_leaves_the_tabs_queue_with_the_old_conversation`, which also checks that the old record keeps the
+queued prompt Pending and its mode).
 
 **Checked both ways (2026-10-23).** Each `needs_fix` test fails on 0.8.0 on its defect (runs `nf-080`, `nf-080b`;
 TAB-K1's sweep on 6 of its 9 moments) and passes on the test build 0.8.1.1, a purged Release build whose `src/` equals

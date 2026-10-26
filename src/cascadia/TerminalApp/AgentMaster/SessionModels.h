@@ -1209,8 +1209,10 @@ namespace Agentmaster
         // never silently undone by the next message. interruptHeldUnixMs = the marker line's own
         // transcript timestamp: the resume ANCHOR — only a message stamped AFTER it resumes (a late-
         // forwarded UPS of the killed turn, or a replayed older transcript line, never does).
-        // TRANSIENT (NOT persisted — Persistence.cpp must not write them): a reopened session re-stamps
-        // the cog's default mode, which voids any hold, and the restore seam clears it explicitly.
+        // PERSISTED with the mode since 2026-10-26 (Persistence.cpp writes both only while a hold is
+        // active and drops an incoherent pair on load): the runner's mode is per session and survives a
+        // reopen, the hold included, so the user's first message after a restart resumes it. (Until then
+        // both were transient, and a reopened session re-stamped the cog's default mode.)
         AutorunnerMode interruptHeldMode{ AutorunnerMode::Off };
         int64_t interruptHeldUnixMs{ 0 };
     };
@@ -2272,12 +2274,14 @@ namespace Agentmaster
 
     // Global app settings — the Manager toolbar's Settings cog (next to "Pause Prompt Queue Runner").
     // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutorunnerMode (now
-    // Full, the product default — "all new or opened sessions run on Autorunner"), so a missing
+    // Full, the product default — "all new sessions run on Autorunner"), so a missing
     // settings.json mostly changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
-    // startup, and applied at two seams: the spawn recipe (Claude fields) and session OPEN — the
-    // autorunner MODE is stamped onto EVERY opened session (new / adopted / restored); the other
-    // autorunner backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
-    // per-session autorunner mode still lives in the Prompt Queue pane (changeable after open).
+    // startup, and applied at two seams: the spawn recipe (Claude fields) and session CREATION — the
+    // autorunner MODE and backstops are stamped onto NEW sessions only (a launch, a fork, a successor,
+    // an adopted claude, an on-disk session resumed for the first time); a REOPENED session keeps its
+    // own persisted mode and backstops (the runner's mode is per session — 2026-10-26). These are
+    // GLOBAL defaults/backstops; the per-session mode lives in the session's record (changeable from
+    // the Prompt Queue pane or the tab's badge).
     // All of it applies in EVERY build since 2026-10-09 (the runner left the dev-or-debug gate).
     // Agentmaster (COMMANDS.md §6a — customizable slash commands): the shipped defaults of the
     // /handover family's command names. ONE definition each — AppSettings' struct defaults, the
@@ -2407,11 +2411,13 @@ namespace Agentmaster
         std::wstring claudeExePath{};
 
         // --- Autorunner defaults ---
-        // The MODE seeds every OPENED session — new, adopted, AND restored/window-restored (a
-        // reopened session is re-armed on this default, OVERRIDING its saved per-session mode),
-        // and stays changeable afterward (the Prompt Queue pane's runner toggle / the tab badge). Default Full ==
-        // "all new or opened sessions run on Autorunner". The backstops below are stamped onto
-        // NEW sessions only; a restored one keeps its persisted maxAutoSends/stopOnError/pauseOnHumanInput.
+        // The MODE seeds every NEW session — launched, forked, a /clear or /handover successor, adopted,
+        // or an on-disk session resumed for the first time — and stays changeable afterward (the Prompt
+        // Queue pane's runner toggle / the tab badge). A RESTORED / window-restored session keeps its own
+        // persisted mode, an interrupt hold included (the runner's mode is per session — 2026-10-26), so
+        // a queue the user left Paused never starts sending by itself after a restart. Default Full ==
+        // "all new sessions run on Autorunner". The backstops below are stamped onto NEW sessions only;
+        // a restored one keeps its persisted maxAutoSends/stopOnError/pauseOnHumanInput.
         // Two values only — Off (shown "Paused") or Full (shown "Auto"); a stored "SemiAuto" from an
         // older build loads as Off (see AutorunnerMode).
         AutorunnerMode defaultAutorunnerMode{ AutorunnerMode::Full };

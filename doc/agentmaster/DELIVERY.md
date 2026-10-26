@@ -671,9 +671,14 @@ genuinely IS ready for input. The missing fact is *who* should supply that input
 `mode = Off`, so a backstop pause is never silently undone by the next message; the merged-submit
 verdict in particular runs BEFORE the resume check on the very message that drew it. stop-on-error
 fires on a HELD session too (`mode != Off || InterruptHoldActive`), converting the hold into a
-real, sticky pause. The restore seam (`_LaunchClaudeSession`'s reopened-session mode re-stamp)
-clears it as well — the field is transient (never persisted), so a record loaded from disk never
-carries one, and a this-run-archived record's in-memory remainder is voided explicitly.
+real, sticky pause. **A hold survives a reopen** (2026-10-26, NOT BUILT — the owner's rule "we need
+the mode per session persisted"): it is part of the session's persisted mode. While a hold is active
+`sessions.json` keeps the held mode and the marker's stamp beside `mode: Off`
+(`interruptHeldMode`, `interruptHeldUnixMs`; written only then, so every other record is
+byte-unchanged; an incoherent pair is dropped at load), and the restore seam keeps both, as it keeps
+every session's mode, so the user's first message after a restart resumes the mode they had chosen.
+(Until then both fields were transient and `_LaunchClaudeSession` re-stamped a reopened session with
+the cog's default mode, voiding any hold.)
 
 **Belts.** The marker is sighted on every read that ends on it — a restored/adopted session's
 history replay included — so `NoteInterrupt` refuses a marker older than `kInterruptHoldFreshMs`
