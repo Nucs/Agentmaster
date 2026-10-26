@@ -1463,7 +1463,7 @@ of them; the session database of SESSIONS_DB.md is the way past it); the Debug b
 over large sessions; the database mode's procedure was never evaluated; nothing here has met the app's XAML or a
 Telegram chat.
 
-### 9.16 Overview and status: what the open sessions are doing now (2026-10-24, NOT BUILT yet)
+### 9.16 Overview and status: what the open sessions are doing now (2026-10-24; in dev since 0.0.1.36, not in production)
 
 > **The user's request of 2026-10-24**, after a study of what the agent can reach (8 tools, no shell, no CLI) and of
 > the `agentmaster` CLI: "Add the following tools but have them accept either scalar or vector of values and respond
