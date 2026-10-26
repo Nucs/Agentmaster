@@ -391,6 +391,11 @@ cause was:
   instead: renaming it would point its install at an empty profile — which would look exactly like the reported reset.
 - **The copy no longer carries `settings\`** (a pre-profile portable's Terminal settings): copied, it overwrote the
   destination's own preserved `settings\`, which the core never did. Its files go to `<profile>\terminal\`, copy-if-absent.
+- **The first launch after the install** is where the state CAN be overridden: every loader fails open, so a
+  `sessions.json` the installed copy could not read (a lock, a BOM, a torn or NUL-filled file) loaded as an empty fleet,
+  the reopened windows then dropped their records and the next save wrote the emptiness over the file. That launch path
+  is closed in PERSISTENCE.md §15 (the state-file guard and the startup recovery snapshot), which also has the verdicts on
+  the install, the profile choice and the package removal, and what to read in the reporting machine's `hooks.log`.
 
 **The downloaded copy (2026-10-26).** A zip must be unpacked somewhere to run; once that copy installed Agentmaster
 elsewhere (*Install just for you*, a picked folder, for all users) or handed over to an install that was already there

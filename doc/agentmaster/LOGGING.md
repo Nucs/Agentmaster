@@ -29,7 +29,8 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
 2. **Mechanism tags**, each carrying the ids involved: `[fork]`, `[resume]`, `[restore-fresh]`,
    `[restore->refork]`, `[rehome]`, `[spawn]`, `[launch-fail]`, `[launch-blocked]`, `[archive]`,
    `[teardown-archive]`, `[codex-*]`, `[adopt-*]`, `[pending]`, `[notify]`, `[update]`, `[trust]`,
-   `[transcript]`, `[cmd]`, `[cmd-fire]`, `[cmd-expire]`, `[persist-fail]`, `[observer]`, `[activity]`,
+   `[transcript]`, `[cmd]`, `[cmd-fire]`, `[cmd-expire]`, `[persist-fail]`, `[persist-read-fail]`, `[persist-guard]`,
+   `[observer]`, `[activity]`,
    `[orphan]`, `[orphan-reap]`, `[close-successor]`, `[unread]`, `[taskbar-badge]`, `[tags]`, `[harness]`,
    `[ai-search]`, `[sessdb]`, `[msg]`, `[render]`, `[tab-size]`, `[strip]`, `[deactivate]`,
    `[retired-host]`, `[restore-wake]`, `[api-error-rewind]`, `[interrupt-rewind]`, `[fork-stop]`;
@@ -103,6 +104,12 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
 - A launch that built no tab logs `[launch-fail]` (the Claude and Codex null-pane returns); a failed state
   write logs `[persist-fail]` (the `WriteAllUtf8` chokepoint behind `sessions.json`, the window records,
   templates, `dir-colors.json`, …).
+- A state file that exists but cannot be read logs `[persist-read-fail] <path> could not be read (error …)`, once
+  per 30 s episode (`ReadStateFileUtf8`); before 2026-10-26 a failed open read as an empty file without a word.
+  The guard before every state-file replace logs `[persist-guard]`: a copy kept (`kept a copy of <path> as
+  <name>.could-not-read-<stamp> (<reason>)`), a replace refused (`<path> NOT replaced: …`, once per 30 s), and the
+  startup snapshot when `sessions.json` could not be used (`… the workspace as it was is kept in <profile>\recovery\
+  <stamp> …`). PERSISTENCE.md §15.
 
 ## Exception forensics (Rule #18)
 

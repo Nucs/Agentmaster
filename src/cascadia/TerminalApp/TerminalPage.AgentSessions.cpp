@@ -1426,8 +1426,21 @@ namespace winrt::TerminalApp::implementation
             std::lock_guard<std::mutex> restoreGuard{ eng.restoreMutex };
             if (!eng.restored)
             {
-                auto saved = ::Agentmaster::LoadSessions();
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived\n");
+                // Agentmaster (PERSISTENCE.md "Unreadable state files"): the startup read that tells "no sessions" from
+                // "sessions.json could not be used". The second used to look exactly like the first — the 2026-10-26
+                // report of a profile that looked "reset or deleted and recreated" after an install is that chain: an
+                // empty fleet re-homes none of a reopened window's Claude tabs, the window is then Manager-only and
+                // deletes its record, and the next registry save writes the empty fleet over sessions.json. So BEFORE
+                // anything here changes the workspace, its files are copied into <profile>\recovery\<stamp> (with a
+                // README saying how to put them back), and the load marked sessions.json for the state-file guard.
+                auto load = ::Agentmaster::LoadSessionsForStartup();
+                if (!load.usable)
+                {
+                    ::Agentmaster::PreserveWorkspaceForRecovery(load.problem); // logs [persist-guard] with the folder
+                }
+                auto saved = std::move(load.sessions);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived" +
+                                                                (load.usable ? std::wstring{} : (L" (sessions.json could not be used: " + load.problem + L")")) + L"\n");
 
                 for (auto& s : saved)
                 {

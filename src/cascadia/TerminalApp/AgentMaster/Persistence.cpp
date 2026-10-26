@@ -74,6 +74,17 @@ namespace
         //
         // A failure here = state silently NOT saved, so surface it ([persist-fail]); rare (disk full /
         // permissions / a sharing violation on the destination), so it never floods steady state.
+        //
+        // Agentmaster (PERSISTENCE.md "Unreadable state files"): the atomic swap keeps OUR writes whole, but it cannot
+        // protect a file the loaders could not read — they fail open, so whatever this write carries may be "nothing
+        // saved" standing in for a file that was locked, torn or hand-broken. The state-file guard decides first: it
+        // refuses to replace a file it cannot read, and keeps a copy of one that does not parse (or that the startup
+        // read could not use) before it is replaced. A refusal is a failed write like any other (it returns false),
+        // so SaveSessions retries at its next notify.
+        if (!Agentmaster::PrepareStateFileReplace(path))
+        {
+            return false; // logged by the guard ([persist-guard] ... NOT replaced); the file keeps its bytes
+        }
         try
         {
             const auto bytes = Utf16ToUtf8(content);
@@ -112,6 +123,9 @@ namespace
                 ::DeleteFileW(tmp.c_str()); // don't leave the temp behind; the old file stays intact
                 return false;
             }
+            // The file now holds what this process wrote: stamp it, so the guard's next check is one stat until
+            // someone else changes the file.
+            Agentmaster::MarkStateFileSafeToReplace(path);
             return true;
         }
         catch (...)
@@ -125,26 +139,22 @@ namespace
         }
     }
 
+    // Read a whole state file as UTF-16 for a loader; "" for a missing OR unreadable file — the loaders treat both as
+    // "nothing saved", as they always have.
+    //
+    // Agentmaster (PERSISTENCE.md "Unreadable state files"): an empty return is indistinguishable from "the file
+    // legitimately has no content", so an unreadable file reads downstream as "no sessions / no window record / default
+    // settings" — and the next save then writes that emptiness back over good state (Rule #16). This used to be an
+    // ifstream that returned "" without a word when the open failed (a lock) and kept a UTF-8 BOM (which then parsed as
+    // the number 0). It now goes through ReadStateFileUtf8: a brief lock is retried, a BOM is dropped, a file that stays
+    // unreadable is logged ([persist-read-fail]) and an exception is logged (Rule #18) — and whatever a loader then
+    // saves over such a file meets the state-file guard in WriteAllUtf8, which refuses or keeps a copy first.
+    //   path    - the state file.
+    //   returns - its text, or "" (missing, unreadable, or empty).
+    // Never throws.
     std::wstring ReadAllUtf8(const std::wstring& path)
     {
-        try
-        {
-            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
-            if (!f)
-            {
-                return {};
-            }
-            std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            return Utf8ToUtf16(bytes);
-        }
-        catch (...)
-        {
-            // Forensics: an empty return is indistinguishable from "the file legitimately has no
-            // content", so a throw here reads downstream as "no sessions / no window record" — and
-            // the next save then writes that emptiness back over good state (Rule #16). Must be loud.
-            Agentmaster::LogSwallowedException(L"ReadAllUtf8"); // qualified: file-scope anonymous namespace
-            return {};
-        }
+        return Agentmaster::ReadStateFileUtf8(path).text;
     }
 }
 
@@ -1893,6 +1903,453 @@ namespace Agentmaster
         return w;
     }
 
+    // ---- the state-file guard (StateFileGuard.h; PERSISTENCE.md "Unreadable state files") ----
+
+    namespace
+    {
+        // A larger "state file" is not one of ours (the biggest real one, a long-lived sessions.json, is ~10 MB), and
+        // Utf8ToUtf16 takes an int length: refusing it keeps the read bounded and reports it as unreadable.
+        constexpr uint64_t kMaxStateFileBytes = 512ull * 1024 * 1024;
+        // The pause between two attempts of a read that hit a transient error (ReadStateFileUtf8).
+        constexpr DWORD kStateReadRetryStepMs = 50;
+
+        // What the guard knows about one path. Keyed by StateGuardKey(path).
+        struct StateGuardEntry
+        {
+            bool stamped{ false }; // size + mtime hold a stamp of known-safe bytes (our write, a clean load, a kept copy)
+            bool keepBeforeReplace{ false }; // a loader could not use the file: copy it before the first replace
+            uint64_t size{ 0 };
+            int64_t mtime{ 0 }; // FILETIME ticks of the last write
+            uint64_t refusalLoggedTick{ 0 }; // GetTickCount64 of the last "NOT replaced" line (one per quiet window)
+        };
+        // Guards the two maps below. Held only for map access — never across file I/O or AppendStateLog, so a slow disk
+        // or a 10 MB read on one thread never stalls another thread's save of a different file.
+        std::mutex g_stateGuardMtx;
+        std::unordered_map<std::wstring, StateGuardEntry> g_stateGuard;
+        // Path key -> GetTickCount64 of the start of its current "unreadable" episode (ReadStateFileUtf8's quiet window).
+        std::unordered_map<std::wstring, uint64_t> g_stateUnreadableSince;
+
+        // The map key for a path: lower-cased (Windows compares paths case-insensitively), separators as written —
+        // every caller builds its paths the same way (AgentmasterStateDir() + "\\<leaf>").
+        //   path    - the file path.
+        //   returns - the key.
+        // Throws std::bad_alloc only.
+        std::wstring StateGuardKey(const std::wstring& path)
+        {
+            std::wstring key = path;
+            if (!key.empty())
+            {
+                ::CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+            }
+            return key;
+        }
+
+        // Stat a state file: does it exist, and its size + last-write time.
+        //   path   - the file.
+        //   size   - receives the size in bytes (0 when missing).
+        //   mtime  - receives the last-write FILETIME as ticks (0 when missing).
+        //   exists - receives whether the file exists.
+        //   error  - receives the Win32 error of a failed stat (0 when the stat answered, missing included).
+        //   returns - false only when the stat itself failed for another reason than "not found" (access denied on the
+        //             folder, a device error); the outputs then mean nothing but `error`.
+        // Never throws.
+        bool StatStateFile(const std::wstring& path, uint64_t& size, int64_t& mtime, bool& exists, DWORD& error) noexcept
+        {
+            size = 0;
+            mtime = 0;
+            exists = false;
+            error = 0;
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                const DWORD e = ::GetLastError();
+                if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)
+                {
+                    return true; // answered: no such file
+                }
+                error = e;
+                return false;
+            }
+            exists = true;
+            size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            mtime = static_cast<int64_t>((static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) | fad.ftLastWriteTime.dwLowDateTime);
+            return true;
+        }
+
+        // True when `text` holds nothing but JSON whitespace (an empty file has nothing to lose).
+        //   text    - the file's text.
+        //   returns - whether every character is ' ', '\t', '\r' or '\n'.
+        // Never throws.
+        bool IsBlankStateText(std::wstring_view text) noexcept
+        {
+            for (const wchar_t c : text)
+            {
+                if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // "yyyyMMdd-HHmmss" in local time — the stamp of a kept copy and of a recovery folder (the installer's
+        // set-aside names use the same shape).
+        //   returns - the stamp.
+        // Throws std::bad_alloc only.
+        std::wstring LocalStampForStateCopy()
+        {
+            SYSTEMTIME st{};
+            ::GetLocalTime(&st);
+            wchar_t buf[32]{};
+            ::swprintf_s(buf, L"%04u%02u%02u-%02u%02u%02u", static_cast<unsigned>(st.wYear), static_cast<unsigned>(st.wMonth), static_cast<unsigned>(st.wDay),
+                         static_cast<unsigned>(st.wHour), static_cast<unsigned>(st.wMinute), static_cast<unsigned>(st.wSecond));
+            return buf;
+        }
+
+        // A short, readable meaning for the Win32 errors a state-file read meets, for the log lines.
+        //   error   - the GetLastError value.
+        //   returns - "<number>" plus a word for the common ones.
+        // Throws std::bad_alloc only.
+        std::wstring DescribeStateFileError(DWORD error)
+        {
+            std::wstring out = std::to_wstring(error);
+            switch (error)
+            {
+            case ERROR_SHARING_VIOLATION:
+                out += L", another program has it open";
+                break;
+            case ERROR_LOCK_VIOLATION:
+                out += L", another program has it locked";
+                break;
+            case ERROR_ACCESS_DENIED:
+                out += L", access denied";
+                break;
+            case ERROR_FILE_TOO_LARGE:
+                out += L", too large for a state file";
+                break;
+            default:
+                break;
+            }
+            return out;
+        }
+    }
+
+    StateFileRead ReadStateFileUtf8(const std::wstring& path, unsigned retryBudgetMs) noexcept
+    {
+        StateFileRead result;
+        try
+        {
+            const std::wstring key = StateGuardKey(path);
+            // Inside a recent failure episode: one attempt, and no new log line (the episode's first failure logged).
+            bool quiet = false;
+            {
+                std::lock_guard lk{ g_stateGuardMtx };
+                if (const auto it = g_stateUnreadableSince.find(key); it != g_stateUnreadableSince.end())
+                {
+                    quiet = ::GetTickCount64() - it->second < kStateUnreadableQuietMs;
+                }
+            }
+            const uint64_t deadline = ::GetTickCount64() + (quiet ? 0 : retryBudgetMs);
+            DWORD error = 0;
+            for (;;)
+            {
+                // FILE_SHARE_DELETE as well: a reader must never be the reason a writer's atomic rename fails.
+                const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                if (h == INVALID_HANDLE_VALUE)
+                {
+                    error = ::GetLastError();
+                    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                    {
+                        // Missing is the truth for a fresh profile — and it ends any unreadable episode.
+                        std::lock_guard lk{ g_stateGuardMtx };
+                        g_stateUnreadableSince.erase(key);
+                        result.status = StateFileStatus::Missing;
+                        return result;
+                    }
+                }
+                else
+                {
+                    std::string bytes;
+                    bool readOk = true;
+                    LARGE_INTEGER size{};
+                    if (!::GetFileSizeEx(h, &size))
+                    {
+                        readOk = false;
+                        error = ::GetLastError();
+                    }
+                    else if (size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) > kMaxStateFileBytes)
+                    {
+                        readOk = false;
+                        error = ERROR_FILE_TOO_LARGE;
+                    }
+                    else
+                    {
+                        bytes.resize(static_cast<size_t>(size.QuadPart));
+                        size_t off = 0;
+                        while (off < bytes.size())
+                        {
+                            DWORD got = 0;
+                            if (!::ReadFile(h, bytes.data() + off, static_cast<DWORD>(bytes.size() - off), &got, nullptr))
+                            {
+                                readOk = false;
+                                error = ::GetLastError();
+                                break;
+                            }
+                            if (got == 0)
+                            {
+                                break; // the file shrank while it was read: what was read is what it holds now
+                            }
+                            off += got;
+                        }
+                        bytes.resize(off);
+                    }
+                    ::CloseHandle(h);
+                    if (readOk)
+                    {
+                        // A UTF-8 BOM (an editor's, or Windows PowerShell 5.1's "-Encoding UTF8") is not part of the
+                        // JSON; MultiByteToWideChar would hand it on as U+FEFF.
+                        if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB &&
+                            static_cast<unsigned char>(bytes[2]) == 0xBF)
+                        {
+                            bytes.erase(0, 3);
+                        }
+                        {
+                            std::lock_guard lk{ g_stateGuardMtx };
+                            g_stateUnreadableSince.erase(key);
+                        }
+                        result.status = StateFileStatus::Read;
+                        result.text = Utf8ToUtf16(bytes);
+                        return result;
+                    }
+                }
+                // Only errors that clear by themselves are worth waiting for: a sharing or lock violation (an antivirus
+                // scan, a backup), and access denied (a file being replaced reads as "delete pending" for an instant;
+                // a real ACL denial just spends the budget once per quiet window).
+                const bool transient = error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION || error == ERROR_ACCESS_DENIED;
+                if (!transient || ::GetTickCount64() + kStateReadRetryStepMs > deadline)
+                {
+                    break;
+                }
+                ::Sleep(kStateReadRetryStepMs);
+            }
+            result.status = StateFileStatus::Unreadable;
+            result.error = error;
+            bool firstOfEpisode = false;
+            {
+                std::lock_guard lk{ g_stateGuardMtx };
+                const uint64_t now = ::GetTickCount64();
+                const auto it = g_stateUnreadableSince.find(key);
+                if (it == g_stateUnreadableSince.end() || now - it->second >= kStateUnreadableQuietMs)
+                {
+                    g_stateUnreadableSince[key] = now;
+                    firstOfEpisode = true;
+                }
+            }
+            if (firstOfEpisode)
+            {
+                AppendStateLog(L"hooks.log", L"[persist-read-fail] " + path + L" could not be read (error " + DescribeStateFileError(error) +
+                                                 L"): it reads as nothing saved, and no save replaces it until it can be read\n");
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: "unreadable" — the caller reads nothing, and the guard refuses to replace the file.
+            Agentmaster::LogSwallowedException(L"ReadStateFileUtf8");
+            result.status = StateFileStatus::Unreadable;
+            result.text.clear();
+        }
+        return result;
+    }
+
+    std::wstring KeepStateFileCopy(const std::wstring& path, std::wstring_view reason) noexcept
+    {
+        try
+        {
+            const std::wstring stamp = LocalStampForStateCopy();
+            // One copy per second normally; "-2", "-3", ... only when two land in the same second.
+            for (int n = 1; n <= 99; ++n)
+            {
+                const std::wstring copy = path + L".could-not-read-" + stamp + (n > 1 ? (L"-" + std::to_wstring(n)) : std::wstring{});
+                if (::CopyFileW(path.c_str(), copy.c_str(), TRUE /* never overwrite an earlier copy */))
+                {
+                    const size_t slash = copy.find_last_of(L"\\/");
+                    AppendStateLog(L"hooks.log", L"[persist-guard] kept a copy of " + path + L" as " + (slash == std::wstring::npos ? copy : copy.substr(slash + 1)) +
+                                                     L" (" + std::wstring{ reason } + L")\n");
+                    return copy;
+                }
+                const DWORD e = ::GetLastError();
+                if (e != ERROR_FILE_EXISTS && e != ERROR_ALREADY_EXISTS)
+                {
+                    AppendStateLog(L"hooks.log", L"[persist-guard] could not keep a copy of " + path + L" (error " + DescribeStateFileError(e) + L")\n");
+                    return {};
+                }
+            }
+            AppendStateLog(L"hooks.log", L"[persist-guard] could not keep a copy of " + path + L" (99 copies already carry this second's stamp)\n");
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"KeepStateFileCopy"); // Rule #18. Recovery: "no copy" — the caller refuses the replace
+        }
+        return {};
+    }
+
+    bool PrepareStateFileReplace(const std::wstring& path) noexcept
+    {
+        try
+        {
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            bool exists = false;
+            DWORD statError = 0;
+            const std::wstring key = StateGuardKey(path);
+            // One "NOT replaced" line per quiet window per path: a file that stays unreadable is met by every save
+            // (SaveSessions runs on every registry notify), and hooks.log needs the fact once, not a flood.
+            const auto refuse = [&](const std::wstring& why) {
+                bool log = false;
+                {
+                    std::lock_guard lk{ g_stateGuardMtx };
+                    auto& e = g_stateGuard[key];
+                    const uint64_t now = ::GetTickCount64();
+                    if (e.refusalLoggedTick == 0 || now - e.refusalLoggedTick >= kStateUnreadableQuietMs)
+                    {
+                        e.refusalLoggedTick = now;
+                        log = true;
+                    }
+                }
+                if (log)
+                {
+                    AppendStateLog(L"hooks.log", L"[persist-guard] " + path + L" NOT replaced: " + why + L"; it keeps its bytes, and the write is retried at the next save\n");
+                }
+                return false;
+            };
+            if (!StatStateFile(path, size, mtime, exists, statError))
+            {
+                // Nothing proves the file can be read, so its bytes can neither be checked nor kept: never replace blind.
+                return refuse(L"it could not be looked at (error " + DescribeStateFileError(statError) + L")");
+            }
+            if (!exists)
+            {
+                // A first write: there is nothing to keep, and any earlier mark is moot.
+                std::lock_guard lk{ g_stateGuardMtx };
+                g_stateGuard.erase(key);
+                return true;
+            }
+            bool keep = false;
+            {
+                std::lock_guard lk{ g_stateGuardMtx };
+                if (const auto it = g_stateGuard.find(key); it != g_stateGuard.end())
+                {
+                    if (it->second.keepBeforeReplace)
+                    {
+                        keep = true;
+                    }
+                    else if (it->second.stamped && it->second.size == size && it->second.mtime == mtime)
+                    {
+                        return true; // the steady state: the file is still what this process last wrote or loaded
+                    }
+                }
+            }
+            // First replace in this process, or someone else changed the file since: look at what it holds now.
+            const StateFileRead now = ReadStateFileUtf8(path);
+            if (now.status == StateFileStatus::Missing)
+            {
+                return true; // deleted between the stat and the read: nothing to keep
+            }
+            if (now.status == StateFileStatus::Unreadable)
+            {
+                return refuse(L"it exists but could not be read (error " + DescribeStateFileError(now.error) + L"), so its content could not be checked or kept");
+            }
+            std::wstring reason;
+            if (keep)
+            {
+                reason = L"Agentmaster could not use it when it started, so what replaces it did not come from it";
+            }
+            else if (!IsBlankStateText(now.text) && !json::Parse(now.text))
+            {
+                reason = L"its content is not valid JSON, so it read as nothing saved";
+            }
+            if (!reason.empty() && KeepStateFileCopy(path, reason).empty())
+            {
+                return refuse(L"a copy of it could not be kept first");
+            }
+            // Judged: fine as it is, or kept. Stamp it so the next check is one stat, and drop the keep mark so the
+            // copy is made once.
+            std::lock_guard lk{ g_stateGuardMtx };
+            auto& e = g_stateGuard[key];
+            e.keepBeforeReplace = false;
+            e.stamped = true;
+            e.size = size;
+            e.mtime = mtime;
+            return true;
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"PrepareStateFileReplace"); // Rule #18. Recovery: refuse — the file keeps its bytes
+            return false;
+        }
+    }
+
+    void MarkStateFileSafeToReplace(const std::wstring& path) noexcept
+    {
+        try
+        {
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            bool exists = false;
+            DWORD statError = 0;
+            const bool statOk = StatStateFile(path, size, mtime, exists, statError);
+            const std::wstring key = StateGuardKey(path);
+            std::lock_guard lk{ g_stateGuardMtx };
+            if (!statOk || !exists)
+            {
+                // No stamp to keep: the next replace judges the file again (a missing one needs no judging).
+                g_stateGuard.erase(key);
+                return;
+            }
+            auto& e = g_stateGuard[key];
+            e.stamped = true;
+            e.keepBeforeReplace = false;
+            e.size = size;
+            e.mtime = mtime;
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"MarkStateFileSafeToReplace"); // Rule #18. Recovery: no stamp — the next replace re-reads the file
+        }
+    }
+
+    void MarkStateFileKeepBeforeReplace(const std::wstring& path) noexcept
+    {
+        try
+        {
+            const std::wstring key = StateGuardKey(path);
+            std::lock_guard lk{ g_stateGuardMtx };
+            auto& e = g_stateGuard[key];
+            e.keepBeforeReplace = true;
+            e.stamped = false;
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: no mark — the guard still refuses an unreadable file and keeps an unparseable one.
+            Agentmaster::LogSwallowedException(L"MarkStateFileKeepBeforeReplace");
+        }
+    }
+
+    void ResetStateFileGuardForTests() noexcept
+    {
+        try
+        {
+            std::lock_guard lk{ g_stateGuardMtx };
+            g_stateGuard.clear();
+            g_stateUnreadableSince.clear();
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"ResetStateFileGuardForTests"); // Rule #18 (a test seam; the lock cannot really fail)
+        }
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
@@ -1926,6 +2383,176 @@ namespace Agentmaster
     std::vector<SessionInfo> LoadSessions()
     {
         return DeserializeSessions(ReadAllUtf8(AgentmasterStateDir() + L"\\sessions.json"));
+    }
+
+    FleetLoad LoadSessionsForStartup()
+    {
+        return LoadSessionsForStartupIn(AgentmasterStateDir());
+    }
+
+    FleetLoad LoadSessionsForStartupIn(const std::wstring& profileDir)
+    {
+        FleetLoad out;
+        const std::wstring path = profileDir + L"\\sessions.json";
+        // The longer budget: the whole workspace depends on this one read, so a lock gets seconds, not milliseconds.
+        const StateFileRead read = ReadStateFileUtf8(path, kStartupStateReadRetryBudgetMs);
+        out.fileStatus = read.status;
+        if (read.status == StateFileStatus::Missing)
+        {
+            out.usable = true; // a fresh profile, or one that never saved a session: nothing to lose
+            return out;
+        }
+        if (read.status == StateFileStatus::Unreadable)
+        {
+            out.problem = L"the file could not be opened or read (Windows error " + DescribeStateFileError(read.error) + L")";
+            MarkStateFileKeepBeforeReplace(path);
+            return out;
+        }
+        // Parsed ONCE (a long-lived fleet is ~10 MB) and walked like DeserializeSessions does.
+        const auto parsed = json::Parse(read.text);
+        const json::Value* arr = (parsed && parsed->type == json::Value::Type::Obj) ? parsed->Find(L"sessions") : nullptr;
+        if (!arr || arr->type != json::Value::Type::Arr)
+        {
+            out.problem = IsBlankStateText(read.text) ? L"the file is empty" :
+                          !parsed                     ? L"its content is not valid JSON (a torn or damaged write)" :
+                                                        L"it holds no \"sessions\" list";
+            MarkStateFileKeepBeforeReplace(path);
+            return out;
+        }
+        out.sessions.reserve(arr->arr.size());
+        for (const auto& sv : arr->arr)
+        {
+            out.sessions.push_back(SessionFromJson(sv));
+        }
+        out.usable = true;
+        MarkStateFileSafeToReplace(path); // loaded: the first save needs no second read of the file
+        return out;
+    }
+
+    std::wstring PreserveWorkspaceForRecovery(std::wstring_view reason) noexcept
+    {
+        try
+        {
+            return PreserveWorkspaceForRecoveryIn(AgentmasterStateDir(), reason);
+        }
+        catch (...)
+        {
+            // Rule #18: the profile path itself could not be built (std::bad_alloc). Recovery: no snapshot.
+            Agentmaster::LogSwallowedException(L"PreserveWorkspaceForRecovery");
+            return {};
+        }
+    }
+
+    std::wstring PreserveWorkspaceForRecoveryIn(const std::wstring& profileDir, std::wstring_view reason) noexcept
+    {
+        std::wstring dir;
+        try
+        {
+            const std::wstring& profile = profileDir;
+            const std::wstring root = profile + L"\\recovery";
+            ::CreateDirectoryW(root.c_str(), nullptr); // may exist from an earlier episode
+            const std::wstring stamp = LocalStampForStateCopy();
+            DWORD mkdirError = 0;
+            for (int n = 1; n <= 99 && dir.empty(); ++n)
+            {
+                const std::wstring candidate = root + L"\\" + stamp + (n > 1 ? (L"-" + std::to_wstring(n)) : std::wstring{});
+                if (::CreateDirectoryW(candidate.c_str(), nullptr))
+                {
+                    dir = candidate;
+                }
+                else if ((mkdirError = ::GetLastError()) != ERROR_ALREADY_EXISTS)
+                {
+                    break; // no permission / disk full: no folder to keep anything in
+                }
+            }
+            if (dir.empty())
+            {
+                AppendStateLog(L"hooks.log", L"[persist-guard] sessions.json could not be used at startup (" + std::wstring{ reason } +
+                                                 L"), and no recovery folder could be created under " + root + L" (error " + DescribeStateFileError(mkdirError) +
+                                                 L"): the workspace files were NOT copied\n");
+                return {};
+            }
+
+            // Copy one file; a missing source is simply not part of this workspace.
+            std::wstring copied, failed;
+            size_t copiedCount = 0;
+            const auto copyOne = [&](const std::wstring& from, const std::wstring& to, const std::wstring& label) {
+                if (::CopyFileW(from.c_str(), to.c_str(), TRUE))
+                {
+                    ++copiedCount;
+                    copied += (copied.empty() ? L"" : L", ") + label;
+                    return true;
+                }
+                const DWORD e = ::GetLastError();
+                if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
+                {
+                    failed += (failed.empty() ? L"" : L", ") + label + L" (error " + DescribeStateFileError(e) + L")";
+                }
+                return false;
+            };
+            const std::wstring sessionsPath = profile + L"\\sessions.json";
+            const bool sessionsKept = copyOne(sessionsPath, dir + L"\\sessions.json", L"sessions.json");
+            for (const wchar_t* leaf : { L"open-windows.json", L"settings.json", L"layout.json" })
+            {
+                copyOne(profile + L"\\" + leaf, dir + L"\\" + leaf, leaf);
+            }
+            // Every window record: the restore that follows re-homes none of their Claude tabs, and a window left with
+            // only its Manager page deletes its record — these copies are the window-to-tabs map.
+            const std::wstring windowsDir = profile + L"\\windows";
+            WIN32_FIND_DATAW fd{};
+            const HANDLE find = ::FindFirstFileW((windowsDir + L"\\*.json").c_str(), &fd);
+            if (find != INVALID_HANDLE_VALUE)
+            {
+                ::CreateDirectoryW((dir + L"\\windows").c_str(), nullptr);
+                do
+                {
+                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                    {
+                        copyOne(windowsDir + L"\\" + fd.cFileName, dir + L"\\windows\\" + fd.cFileName, std::wstring{ L"windows\\" } + fd.cFileName);
+                    }
+                } while (::FindNextFileW(find, &fd));
+                ::FindClose(find);
+            }
+
+            // The note a user (or support) finds in the folder. Written directly, not through WriteAllUtf8: it is not a
+            // JSON state file, and it is created once.
+            const std::wstring readme =
+                L"Agentmaster could not use its list of saved sessions (sessions.json) when it started, at " + stamp + L":\r\n" +
+                std::wstring{ reason } + L".\r\n\r\n" +
+                L"It started without them, so its windows came back without their Claude tabs, and its next saves replace\r\n"
+                L"these files. The files in this folder are copies of the workspace as it was BEFORE that start changed\r\n"
+                L"anything: sessions.json (the saved sessions), windows\\ (each window's tabs), open-windows.json (the windows\r\n"
+                L"that were open), settings.json and layout.json (Agentmaster's settings).\r\n\r\n"
+                L"To bring the workspace back: close Agentmaster, copy these files back into\r\n" +
+                profile + L"\r\n(replace the files there when asked), and start Agentmaster again.\r\n\r\n" +
+                L"Copied: " + (copied.empty() ? std::wstring{ L"nothing" } : copied) + L"\r\n" +
+                (failed.empty() ? std::wstring{} : (L"Could not be copied: " + failed + L"\r\n"));
+            const std::string readmeBytes = Utf16ToUtf8(readme);
+            const HANDLE h = ::CreateFileW((dir + L"\\README.txt").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                DWORD wrote = 0;
+                ::WriteFile(h, readmeBytes.data(), static_cast<DWORD>(readmeBytes.size()), &wrote, nullptr);
+                ::CloseHandle(h);
+            }
+
+            // The copy holds sessions.json's bytes now, so the guard need not keep a second one; when it could not be
+            // copied (a lock), its keep-before-replace mark stays and the first save keeps whatever it then holds.
+            if (sessionsKept)
+            {
+                MarkStateFileSafeToReplace(sessionsPath);
+            }
+            AppendStateLog(L"hooks.log", L"[persist-guard] sessions.json could not be used at startup (" + std::wstring{ reason } +
+                                             L"): Agentmaster starts without its saved sessions; the workspace as it was is kept in " + dir + L" (" +
+                                             std::to_wstring(copiedCount) + L" file(s): " + (copied.empty() ? std::wstring{ L"none" } : copied) + L")" +
+                                             (failed.empty() ? std::wstring{} : (L"; NOT copied: " + failed)) + L"\n");
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: whatever was copied stays; the caller starts as it would have without the snapshot.
+            Agentmaster::LogSwallowedException(L"PreserveWorkspaceForRecoveryIn");
+        }
+        return dir;
     }
     void SaveTemplates(const std::vector<PlanTemplate>& templates)
     {

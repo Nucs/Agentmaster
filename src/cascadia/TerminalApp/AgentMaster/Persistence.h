@@ -20,6 +20,7 @@
 
 #include "Json.h"
 #include "SessionModels.h"
+#include "StateFileGuard.h" // StateFileStatus (FleetLoad) + the guard every state write goes through
 
 namespace Agentmaster
 {
@@ -177,6 +178,49 @@ namespace Agentmaster
     // ---- disk (state dir; best-effort) ----
     void SaveSessions(const std::vector<SessionInfo>& sessions);
     std::vector<SessionInfo> LoadSessions();
+
+    // Agentmaster (PERSISTENCE.md "Unreadable state files"): the STARTUP read of the fleet, which — unlike LoadSessions,
+    // whose "no sessions" also stands for "could not read" — says whether sessions.json was there and usable. The app's
+    // one caller (TerminalPage::_RestoreClaudeSessions) needs the difference: an empty fleet re-homes no tab, every
+    // reopened window then deletes its record as "Manager-only", and the next save writes the emptiness over the file.
+    struct FleetLoad
+    {
+        std::vector<SessionInfo> sessions; // the loaded fleet; empty unless `usable`
+        StateFileStatus fileStatus{ StateFileStatus::Missing }; // what the read found (Missing = a fresh profile)
+        bool usable{ false }; // the file was missing (nothing to lose), or it read and parsed as {"sessions":[...]}
+        std::wstring problem; // when the file exists but is not usable: what was wrong, for the log and the recovery note
+    };
+    // Read sessions.json for the startup restore, waiting up to kStartupStateReadRetryBudgetMs for a lock to clear.
+    // Marks the file for the state-file guard either way: SAFE to replace when it loaded (so the first save does not
+    // re-read a large fleet), KEEP-BEFORE-REPLACE when it exists but could not be used (so the first save keeps whatever
+    // the file then holds before writing the in-memory fleet, which did not come from it).
+    //   returns - the fleet and how the read went (FleetLoad); never a partial fleet.
+    // Throws std::bad_alloc only (a read failure is a FleetLoad, not an exception).
+    FleetLoad LoadSessionsForStartup();
+    // LoadSessionsForStartup on an explicit profile folder — the harness's seam (AgentmasterStateDir() is resolved once
+    // per process, so a test cannot point it at a scratch folder).
+    //   profileDir - the profile folder whose sessions.json to read.
+    //   returns    - as LoadSessionsForStartup.
+    // Throws std::bad_alloc only.
+    FleetLoad LoadSessionsForStartupIn(const std::wstring& profileDir);
+    // Copy the workspace as it is on disk — sessions.json, open-windows.json, settings.json, layout.json and every
+    // windows\*.json — into a new folder <profile>\recovery\<yyyyMMdd-HHmmss>, with a README.txt that says what happened
+    // and how to put the files back. Called when the startup fleet read failed (FleetLoad::usable false), BEFORE the
+    // restore can change anything: what follows (no tab re-homed, Manager-only windows deleting their records, an empty
+    // fleet saved) is then recoverable by copying the files back. Marks sessions.json safe to replace when its copy was
+    // made (the guard then keeps no second copy); a sessions.json that could not be copied keeps its keep-before-replace
+    // mark. Logs "[persist-guard] ..." with the folder.
+    //   reason  - what was wrong with sessions.json (FleetLoad::problem), for the README and the log.
+    //   returns - the recovery folder, or "" when it could not be created (the log says so; nothing else changes).
+    // Never throws: a failure is logged (Rule #18) and returns what was done so far.
+    std::wstring PreserveWorkspaceForRecovery(std::wstring_view reason) noexcept;
+    // PreserveWorkspaceForRecovery on an explicit profile folder — the harness's seam (see LoadSessionsForStartupIn).
+    //   profileDir - the profile folder to copy from (the recovery folder is made under it).
+    //   reason     - as PreserveWorkspaceForRecovery.
+    //   returns    - as PreserveWorkspaceForRecovery.
+    // Never throws.
+    std::wstring PreserveWorkspaceForRecoveryIn(const std::wstring& profileDir, std::wstring_view reason) noexcept;
+
     void SaveTemplates(const std::vector<PlanTemplate>& templates);
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
