@@ -878,6 +878,13 @@ namespace Agentmaster::Msg
                 _sendHelp(0, true);
                 return;
             }
+            if (cmd.kind == RemoteKind::AgentmasterCommand && cmd.name == L"status")
+            {
+                // §21.40: the fleet's /status works here as in the 🔎 Search topic: the bot's line, then Claude Code's account and
+                // plan usage (before §21.40 the main view answered every command but /help with the line below).
+                _runSearchCommand(cmd, msg, 0);
+                return;
+            }
             _reply(0, L"This is Agentmaster's bot. Each working session has its own topic; the \U0001F50E Search topic finds old ones (/search &lt;words&gt; asks it from anywhere, /search_tab puts it first in the list); a new thread starts a new session (you pick its folder). Send /help for the commands.", false); // §21.17: the new thread; §21.19: /search, /search_tab
             return;
         }
@@ -1283,7 +1290,9 @@ namespace Agentmaster::Msg
             extras.colorSquare = _titleSquare(&*s); // §21.13: the title with the tab's color, as the tab shows it now
             extras.threadId = _threadOf(sessionId); // §21.17: the title links to the session's topic
             _reply(threadId, BuildCardText(*s, WallMs(), idleLeaves, _scheduler ? _scheduler->GlobalPaused() : false, &extras), false, markup);
-            done(L"ok");
+            // §21.40: /status then sends what Claude Code's own /status shows (its Status tab, the account, the plan usage), read on
+            // a worker thread and sent as a reply to the command; /card stays the card copy alone.
+            done(name == L"status" ? L"ok, " + std::wstring{ _startClaudeStatusReport(sessionId, threadId, msgId) } : std::wstring{ L"ok" });
             return;
         }
         if (name == L"queue")
@@ -2022,6 +2031,9 @@ namespace Agentmaster::Msg
             }
             html += L"\n" + std::to_wstring(topics) + L" topic(s)";
             _reply(threadId, html, false);
+            // §21.40: then Claude Code's account and plan usage (they are the account's, not a session's), as Claude Code prints
+            // them, read on a worker thread and sent as a reply to the command.
+            LogNav(L"remote telegram /status (fleet) -> " + std::wstring{ _startClaudeStatusReport(L"", threadId, msg.I64At(L"message_id", 0)) });
             return;
         }
         if (name == L"recreate")
@@ -5371,7 +5383,7 @@ namespace Agentmaster::Msg
             // §21.38: a pick's menu fits where the session stands, so the help names each first button.
             html = L"<b>\U0001F50E Search</b>\nWrite what you look for in plain words; the agent reads the sessions it finds and answers with one numbered card each, quoting the evidence it saw. Tap a number to pick one: its menu fits where the session stands \x2014 \x25B6 Resume a closed one, \x25B6 Activate a deactivated tab, \x23F0 Wake an idle one, \U0001F4AC Go to topic \x2014 or \x2442 Fork it. A follow-up refines the last answer.\n"
                    L"It is one conversation for the whole app: it carries on after a restart, and /clear (or \x2298 Clear under an answer) starts it over.\n"
-                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
+                   L"/idle \x2014 the idle tabs\n/board \x2014 counts per state\n/newsession &lt;folder&gt; [model] \x2014 or open a new thread and pick its folder\n/pauseall \x00B7 /resumeall\n/status \x2014 the bot, then Claude Code's account and plan usage\n/clear \x2014 forget the search conversation\n/verbose on|off \x2014 the default for all topics: the work too, or the conversation only\n/recreate \x2014 make the session topics again in MOST RECENT order, with their history, verbose or not (asks first)\n"
                    // §21.19: the hyphenated spelling only inside <code>: a client makes a command LINK of "/search-tab" only up
                    // to the hyphen, so the word would show half linked, and its tap would send a bare "/search" (the jump too,
                    // but not what the line says). The menu's "/search_tab" is a link as a whole.
@@ -5386,7 +5398,9 @@ namespace Agentmaster::Msg
                    // §21.32.4: the file links (on in the settings' FILE LINKS section).
                    L"/download &lt;path&gt; \x2014 a file's download link (absolute, or relative to the session's folder), with \U0001F4E4 Send as file\n"
                    L"/queue \x00B7 /sendnow \x00B7 /steer &lt;text&gt; \x00B7 /unqueue n\n/runner auto|paused\n/pin \x00B7 /unpin \x2014 never idle\n/wake \x00B7 /moveidle \x00B7 /markunread\n/rename &lt;title&gt;\n/favorite \x00B7 /tags \x00B7 /tag x \x00B7 /untag x\n"
-                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage \x00B7 /status\n"
+                   L"/sessionid \x00B7 /path \x00B7 /gitbranch \x00B7 /draft\n/summary \x00B7 /transcript [level] \x00B7 /screen \x00B7 /screenimage\n"
+                   // §21.40: /status sends the card copy, then what Claude Code's own /status dialog shows.
+                   L"/status \x2014 the card, then what Claude Code's /status shows: version, model, MCP servers, memory, account, plan usage\n"
                    // §21.39: the card's 📜 All Screen ▸ (a level picker with a File diffs box), typed with a level or bare (the cog's
                    // default level, Full), and "diffs" for every file change as a diff.
                    L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"

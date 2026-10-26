@@ -563,6 +563,10 @@ namespace Agentmaster
                 // §21.25: the new-thread wizard's window step lists every window's strip (the AI search's census, answered by
                 // each window's UI thread). The service calls it on a worker thread of its own, never on a UI thread.
                 hooks.windowCensus = [](uint32_t timeoutMs) { return CollectWindowCensus(timeoutMs); };
+                // §21.40: /status's account and plan usage are printed by the claude.exe every session runs, read when a report
+                // runs (a path changed in the cog applies to the next report). The path's writer is the UI thread
+                // (RefreshClaudeExe); a report's worker copies it, as the Telegram search bridge's claudeExe does.
+                hooks.claudeExe = []() { return SharedEngine().claudeExePath; };
                 e->messaging = std::make_shared<Msg::MessagingService>(e->registry, e->scheduler, AgentmasterStateDir(), std::move(hooks));
                 // INTERACTIVE_TOOLS.md §6: the question registry, BEFORE Apply — the service becomes its acceptor when its bot runs,
                 // so a question hook that connects the moment the pipe opens (below) is already judged by it.

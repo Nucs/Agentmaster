@@ -776,6 +776,9 @@ menu (`setMyCommands`, one list for the whole chat) lists these. As built (§21.
 As built (§21.24): `/screenimage` (the screen as a picture — the card's 🖼 Screen Image).
 As built (§21.39): `/allscreen [minimal|compact|default|full|max]` (the whole conversation as tall pictures — the card's
 📜 All Screen ▸; bare, the default level: full unless the cog sets another).
+As built (§21.40): `/status` sends the card copy, then what Claude Code's own `/status` dialog shows — the Status tab's facts,
+the account and the plan usage; in 🔎 Search and the main view, the bot's line, then the account and the plan usage. Claude
+Code's `/status` itself stays in the refusal table: nothing is typed into the session.
 
 ### 7.4 Questions, plans and permission prompts as buttons (D9)
 
@@ -5661,6 +5664,188 @@ this Debug run took 1,125 ms for 631.
    not one." (`-> refused:not-claude`).
 6. On a phone: open a tall part from Telegram, and from the gallery after Save; note whether the viewer keeps the text
    readable.
+
+### 21.40 `/status`: what Claude Code's own /status shows — its Status tab, the account, the plan usage (2026-10-26; NOT BUILT)
+
+> The user's request (2026-10-26): "When user send in telegram /status, we need to get all the info we can see in claude code
+> status and other tabs like usage to be sent to the user."
+
+**What Claude Code's `/status` shows** (2.1.310, measured on this PC: a throwaway session's dialog driven tab by tab on a ConPTY
+with the claude-wrap-ConPTY driver, and its bundle read). A dialog with four tabs:
+
+| Tab | What it shows |
+|---|---|
+| Status | Version · Session name (the `/rename` title, else the generated one; "/rename to add a name") · Session ID · Session kind · Peer address · cwd · Login method · Organization · Email · Cloud sessions · Anthropic base URL; then Model · MCP servers ("N connected, N failed · /mcp", when there are any) · Setting sources · Managed settings (remote) · Organization policy · Auto mode server; then diagnostics (instruction files too large for performance, …) |
+| Config | ~50 settings (Auto-compact, Thinking mode, Verbose output, Theme, Model, …) behind a search box |
+| Usage | the PROCESS's own Session block (Total cost, Total duration (API / wall), Total code changes, "Usage: N input, N output, N cache read, N cache write"), the plan's limits with bars (Current session · Current week (all models) · Current week (&lt;model&gt;), each "N% used · resets …"), "What's contributing to your limits usage?" (the last 24 h and 7 days of this PC's sessions), Usage credits |
+| Stats | an activity heatmap and all-time totals: favorite model, total tokens, sessions, longest session, active days, streaks |
+
+**Nothing is typed into the session.** Opening `/status` in a session's terminal would show the dialog on the PC, write two
+lines into its transcript (`/status`, then "Settings dialog dismissed" — seen in the user's own transcripts), need an empty
+input box (an unsent draft stashed and restored), and need a running claude (a parked tab has none); the tabs are switched by
+keys pressed blind. So the bot reads the same facts OUT OF BAND (`AgentMaster/ClaudeStatus.{h,cpp}`):
+
+| Row | Where it comes from |
+|---|---|
+| Version | claude's presence heartbeat (`~/.claude/sessions/<pid>.json` `version`) while it runs, trusted only when the row names this conversation; else the transcript's newest response line, marked "(its last run)" |
+| Session name | the transcript's newest `custom-title` (a `/rename`), else its newest `ai-title` — the dialog's own rule (`currentSessionTitle ?? currentSessionAiTitle` in the bundle); no row when neither exists |
+| Session ID · cwd | the registry (the conversation id; the live cwd, else the working folder) |
+| Model | the transcript's `model` attachment — Claude Code's own name and id ("Opus 5.5 (1M context) (`claude-opus-5-5[1m]`)") — when the newest response asked for that id; else the id the newest response asked for (`requestedModel`: a `/model` switch shows there first); else the observer's model |
+| Effort · Permission mode | the newest response line's `effort`, the newest `permission-mode` line; else what the observer read from the process |
+| Context | the registry's context size (the scanner's), else the newest response's input + cache read + cache write + output |
+| MCP servers | the `deferred_tools_delta` attachments folded as Claude Code folds them: added tool names in, removed ones out, the fold reset at each compact boundary (Claude Code then announces every tool again); a server is a tool's `mcp__<server>__` prefix; pending, needs-auth and failed are the newest delta that carries each list — a failure with Claude Code's own reason ("claude-fleet: Version negotiation probe timed out after 5000ms") |
+| Memory | the `instructions` attachments: one without a `changed` key lists every instruction file (path and kind: User, Project, AutoMem, …), one with it updates the files it names |
+| Additional directories | the newest `environment` attachment's `additionalWorkingDirectories` (the folders `/add-dir` added) |
+| Claude | the heartbeat's word (busy · idle · waiting (what for) · shell), the pid and how long it runs; else "not running — the tab is parked; a message here or /activate starts it", "exited — /reactivate starts it again" |
+| Account | `claude auth status --text`: the Status tab's account rows in Claude Code's own words (Login method, Organization, Email, Anthropic base URL); ~0.5 s |
+| Plan usage | `claude -p /usage --output-format json`: the Usage tab's limits and contributions as Claude Code prints them headless. A LOCAL command — no model call (`num_turns` 0, `total_cost_usd` 0, `local_command` "usage", measured) — ~6 s, most of it the scan of this PC's recent sessions behind "What's contributing" |
+| This conversation | the transcript's responses, each counted ONCE by its message id (Claude Code writes one line per content block, repeating the usage): input, output, cache read and cache write tokens, worded like the Usage tab's row; the number of responses and compactions. A synthetic line (an API error's placeholder) is no response |
+
+Not shown, because nothing out of band records them: Session kind (a tab is always "interactive"), Peer address, Cloud
+sessions, Setting sources, Managed settings, Organization policy, Auto mode server; the Config tab (local settings, ~50 rows);
+the Usage tab's process cost and durations (the live process's own counters — a headless run's are zero); the Stats tab
+(computed when it is opened; `~/.claude/stats-cache.json` holds a copy as old as the last time the tab was opened).
+
+**The headless runs** (`ClaudeStatus.cpp`: `RunClaudeCapture`, `ClaudeStatusProbe`, one per process: `SharedClaudeStatusProbe`):
+- The child is the claude.exe every session runs (`Engine::claudeExePath`, through the new `ServiceHooks::claudeExe`), by full
+  path (never the PATH shim), hidden (`CREATE_NO_WINDOW`), created SUSPENDED into a kill-on-close job object (a timeout or
+  Agentmaster's end ends it with everything it started), with only its three standard handles inherited
+  (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), standard input NUL (an open, silent stdin costs a headless claude 3 s), standard
+  output and error read by two threads, its working folder the active profile.
+- Its environment is Agentmaster's own minus every variable of a parent Claude Code session or terminal tab
+  (`BuildHarnessEnvironment`'s list), with `AM_HARNESS=claude-status` (the Fleet Observer and the CLI skip it),
+  `DISABLE_AUTOUPDATER=1` (a child must never update the user's claude.exe) and `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` — without
+  it a headless run leaves an empty `projects\<folder>\memory\` behind (measured). With it, a run leaves nothing under
+  `~/.claude` and no project entry in `~/.claude.json` (measured).
+- `/usage` runs with `--no-session-persistence --strict-mcp-config --tools "" --setting-sources "" --settings {"verbose":false}`:
+  no transcript, no MCP server, no hook, no plugin, one JSON object (the user's `verbose` turns the answer into an array of
+  every message; the reader takes an array's last result too). `auth status` keeps the default setting sources, so a base URL
+  the user's settings set shows as the dialog shows it; it starts no session.
+- Safety of the model: `/usage` is asked only of a claude.exe whose file version is 2.1.310 or newer (the measured version;
+  `ClaudeVersionRunsHeadlessUsage`), because an older one could send the text "/usage" to the model — a paid call for nothing.
+  An answer that came from a MODEL turn anyway (no `local_command` "usage", or turns taken) LATCHES: that claude.exe (its path,
+  size and write time) is never asked again in this run, and the report says why.
+- One run at a time per command; a second caller waits for the run in flight (single flight). A good answer is reused: the
+  account 10 minutes, the usage 60 s (the report says "(read 40s ago)"); a failed answer is never reused. Time limits: 20 s for
+  `auth status`, 60 s for `/usage`.
+
+**What the bot sends.** In a session's topic `/status` keeps its card copy (§21.24; `/card` stays the copy alone) and then the
+REPORT, as a reply to the command, from a worker thread of its own (`Messaging.Status.cpp`: `_startClaudeStatusReport`;
+`MessagingStatus.h` lays it out). The live run on this PC (a scratch driver over the real claude.exe and a 10.8 MB transcript,
+2026-10-26):
+
+```
+📊 Claude Code status · Agentmaster
+
+Status
+Version: 2.1.310 (its last run)
+Session ID: 11ad3802-b477-4365-90b8-705dcb7db31d
+cwd: K:\source\Agentmaster
+Model: Opus 5.5 (1M context) (claude-opus-5-5[1m])
+Effort: max
+Permission mode: bypassPermissions
+Context: 413.8k tokens
+MCP servers: 7 connected, 1 failed
+  catalog, chrome-devtools, claude_ai_Claude_Docs, claude_ai_Gmail, claude_ai_Google_Calendar, claude_ai_Google_Drive, tampermonkey
+  ✖️ claude-fleet: Version negotiation probe timed out after 5000ms
+Memory: 3 files
+  C:\Users\ELI\.claude\CLAUDE.md (User)
+  K:\source\Agentmaster\CLAUDE.md (Project)
+  C:\Users\ELI\.claude\projects\K--source-Agentmaster\memory\MEMORY.md (AutoMem)
+
+Account
+Login method: Claude Max account
+Organization: …
+Email: …
+Anthropic base URL: http://127.0.0.1:18764
+
+Plan usage
+You are currently using your subscription to power your Claude Code usage
+
+Current session: ▰▱▱▱▱▱▱▱▱▱ 14% used · resets Oct 26, 10:19pm (Asia/Jerusalem)
+Current week (all models): ▰▰▰▰▰▰▰▰▰▰ 100% used · resets Oct 27, 7:59pm (Asia/Jerusalem)
+Current week (Fable): ▱▱▱▱▱▱▱▱▱▱ 0% used · resets Oct 27, 8pm (Asia/Jerusalem)
+
+▸ What's contributing to your limits usage?   (an expandable quote: Last 24h · 4884 requests · 12 sessions, …)
+
+This conversation (its transcript)
+Usage: 832 input, 583.7k output, 202.1m cache read, 2.0m cache write
+Responses: 416 · 1 compaction
+
+Read 19:11 · the session from its transcript and claude's heartbeat; the account and the plan usage as Claude Code prints them
+```
+
+- Every line of `/usage` is kept in its order; a LIMIT line ("&lt;title&gt;: N% used · resets …") gets a ten-cell bar (▰ per 10 %
+  rounded half up, at least one cell above 0 %); a line this build cannot read as a limit still shows, without a bar. The
+  "What's contributing" section goes into an expandable quote, cut at 2,400 characters.
+- A message holds at most 3,800 characters (under Telegram's 4,096: the HTML is never shorter than the text Telegram counts).
+  A longer report goes as two messages, split between whole sections before the contributions quote — never inside a quote.
+  MCP server names stop at 24 and instruction files at 8, each with "+N more".
+- A failed read says why ("⚠️ Claude Code was not found on this PC", "⚠️ claude /usage did not answer within 60 s"), and an
+  error Claude Code printed itself is quoted (an account with no plan usage, for one).
+- In 🔎 Search and in the chat's main view, `/status` keeps the bot's line ("Agentmaster — connected … · N topic(s)"; before
+  §21.40 the main view answered every command but `/help` with the bot's introduction) and then sends "📊 Claude Code ·
+  account and plan usage": the account and the plan usage alone, which are the account's, not a session's.
+- A Codex session's topic gets one line: Claude Code's status, account and plan usage are read for Claude Code sessions.
+- At most two reports are read at once (`kClaudeStatusMaxReports`); a third is told to ask again in a moment.
+
+**Logs.** hooks.log: `[claude-status] account: 4 line(s) in 532 ms (exit 0)`, `[claude-status] usage: 1389 chars in 6468 ms
+(exit 0)` (or why it failed), `[msg] status report of <sid8>: 1 message(s) in … ms; account ok|cached Ns|failed (…), usage
+…, transcript N lines (M parsed)`, `[nav] remote telegram /status <sid8> -> ok, report|busy|not-claude|failed`, `[nav] remote
+telegram /status (fleet) -> report`; a latch: `[claude-status] usage: ⚠ this claude.exe answered /usage with a MODEL turn …`.
+
+**The code.** `AgentMaster/ClaudeStatus.h` (pure: the version gate, `ParseClaudeStatusLines`, `ParseClaudeUsageAnswer`,
+`ParseClaudeUsageLimitLine`, `IsClaudeUsageContributionsHeading`, `FormatClaudeTokenCount`, `GroupClaudeCount`,
+`McpServerOfToolName`, `ClaudeTranscriptStatusLineWanted` — a filter on the raw UTF-8 bytes, so a 100 MB transcript of tool
+output costs a read, not a parse — and `ClaudeTranscriptStatusReader`; plus the OS half's declarations); `ClaudeStatus.cpp`
+(`RunClaudeCapture`, `ReadClaudeTranscriptStatusFile`, `ClaudeStatusProbe`); `MessagingStatus.h` (pure: the report's
+sections, `BuildClaudeStatusReport`); `Messaging.Status.cpp` (the service's sixth TU: `_startClaudeStatusReport`); Messaging.h
+(`ServiceHooks::claudeExe`, the declaration); Messaging.Inbound.cpp (the session topic's `/status`, Search's and the main
+view's, the help lines); Messaging.cpp (the "/" menu's line); Engine.cpp (the hook); TerminalAppLib.vcxproj.
+
+**Tests.** `tests_claude_status.cpp` → `TestClaudeStatus` (the m5 suite, 72 checks): the readers on the texts Claude Code
+2.1.310 printed here (the auth lines, the JSON answer — a result, a verbose array, a line before it, an error, a MODEL turn, not
+JSON, blank — the limit lines and the contributions heading, the token and count wording, the MCP tool names); the transcript
+fold on 2.1.310's own line shapes (a response's two lines counted once, a synthetic line not at all, the MCP fold restarted at a
+compact boundary with the failure kept, pending and needs-auth, the instruction files' full list and update, a `/model` switch,
+the titles, the folders, a quoted pair and a nested one, Hebrew next to a needle); the layout (every section in order, the
+model's name or its bare id, the bars at 0 / 7 / 98 %, the escaping, a reused usage's age, a parked tab, an exited claude, no
+transcript, the failures, the fleet report, the split of a long report); the transcript FILE read (a BOM, CRLF, a line across
+the 1 MiB chunk, a torn last line) against the in-memory fold; the child runner with cmd.exe (output, standard error, exit code,
+working folder, the scrubbed environment, a timeout that also ends the child's child, a missing executable); the probe's cache
+and report slots with cmd.exe standing in. claude is never started by the suite.
+
+**Checked** (2026-10-26, on this PC, nothing built): the m5 suite isolated on `git archive HEAD` + this change (`Q:\tmp\
+m5iso-f15a`, a scratch profile): 10,270 checks, the three known `TestTaskbarBadge` failures only. `cl /Zs` with the app's own
+Release command lines (`/W3 /WX` + its `/we` list) on `Messaging.Status.cpp` and `ClaudeStatus.cpp` (borrowing
+`Messaging.Menus.cpp`'s line) and on `Messaging.Inbound.cpp`, `Messaging.cpp`, `Engine.cpp`, `Messaging.Menus.cpp`,
+`Messaging.Questions.cpp`, `Messaging.Files.cpp`: no diagnostic; a negative control (an unused local appended to a copy of
+`Messaging.Status.cpp`) failed with exactly C4189 at its line. A scratch driver linked with the suite's objects ran the real
+reads: the 10.8 MB transcript folded in 609 ms (an unoptimized build: 3,963 lines, 1,237 parsed), `auth status` in 532 ms,
+`/usage` in 6,468 ms, the second `/usage` from the cache in 0 ms; the report above is its output.
+⚠ `Messaging.h`'s `ServiceHooks` grew a member (`claudeExe`, held by value in MessagingService) and two TUs join
+TerminalAppLib: the next build must PURGE (the build-install skill's §5.8).
+
+**Check after the build** (the dev bot):
+1. `/status` in a live session's topic: the card copy at once, then within ~7 s "📊 Claude Code status · <title>" as a reply to
+   the command; hooks.log `[claude-status] account …`, `[claude-status] usage …`, `[msg] status report of <sid8> …`, `[nav]
+   remote telegram /status <sid8> -> ok, report`. The Version row has no "(its last run)" (the heartbeat was read), and the
+   Claude row says busy / idle with the pid.
+2. `/status` again within a minute: the report at once, "Plan usage (read Ns ago)".
+3. `/status` in 🔎 Search: the bot's line, then "📊 Claude Code · account and plan usage". The same in the chat's main view.
+4. A parked tab: "Claude: not running — the tab is parked …", the other rows from its transcript. A Codex topic: the one line.
+   `/card`: the copy alone, no report.
+5. A session with a failed MCP server (start one with a server that cannot connect): its ✖️ line with Claude Code's reason.
+6. Task Manager during a report: one hidden `claude.exe` for ~6 s, gone afterwards; the External column shows nothing new.
+
+**Not changed, still open.**
+- Like everything the bot sends, the report is NOT redacted (§9.6 is not built): it carries the account's e-mail address and
+  this PC's paths.
+- The rows Claude Code keeps only in its process (Session kind, Peer address, Cloud sessions, Setting sources, Managed
+  settings, Organization policy, Auto mode server), the Config tab and the Stats tab are not in the report.
+- The headless `/usage` is asked of the engine's claude.exe; a session started from another claude (an older install it
+  resumed with) still reports the engine's account and usage — the same account in every case seen.
+- A Codex session's own status (its rollout records rate limits) is not read.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
