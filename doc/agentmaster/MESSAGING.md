@@ -9,12 +9,12 @@
 > "👤 You" line, the reply that quotes its prompt, the status on the last prompt — dev 0.0.1.22, and LIVE in PRODUCTION
 > 0.6.8.21 since 2026-10-17 12:01 with 413 topics (§21.12.5); §21.17 = every title opens its topic, the "👤 You" line's title row, turns that quote turns, and a NEW THREAD that starts a session in a folder the user picks — LIVE on dev 0.0.1.29 since 2026-10-18 02:27; §22 = folder groups — the topics grouped by working
 > folder, a discovery, DESIGN ONLY); designed 2026-10-15, revised twice on 2026-10-16.**
-> **Where each part runs** (checked 2026-10-21 against git and the commit each installed `TerminalApp.dll` bakes):
-> PRODUCTION 0.6.8.23 (the Release build of af3d40b5e, since 2026-10-20 08:37) holds everything through §21.35 except
-> §21.32.4 (the file links); DEV 0.0.1.33 (the Debug build of d6c85e54f, since 2026-10-21) holds everything through
-> §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); §21.32–§21.32.3 are research and
-> design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A heading or
-> note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
+> **Where each part runs** (checked 2026-10-26 against git and the commit each installed `TerminalApp.dll` bakes):
+> PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
+> through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.36 (a Debug build
+> of a8d8b97a2 by the build server, since 2026-10-26) holds everything through §21.39; §21.32–§21.32.3 and §21.36 are
+> research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
+> heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
 > 18:50 until then); each token in `K:\source\telegram\<bot>.env`, stored in Windows Credential Manager per profile by the
 > cog — never in a profile file; the first bot, `@SidKatrineBot`, never got Threaded Mode on. Teams, webhooks and external connectors
@@ -4817,7 +4817,7 @@ fallback if it fails; the Worker for exact hashes (optional); a link's lifetime 
 linked set of a session closed for N days?); one link (hosted when on, else LAN) or two; the station names of dev and
 production. (As built: §21.32.4.)
 
-### 21.32.4 File links as built: downloads through `cc.sysd.cc` or the home network (2026-10-20; the Agentmaster half in dev since 0.0.1.33, not in production; the route home LIVE)
+### 21.32.4 File links as built: downloads through `cc.sysd.cc` or the home network (2026-10-20; the Agentmaster half in production since 0.8.0.0 and dev since 0.0.1.33; the route home LIVE)
 
 > The user (2026-10-20): "Implement and host using fastrun and the tunnel on this machine".
 
@@ -5285,7 +5285,7 @@ last ~5 minutes is refreshed about every 2 s; the turn's final message removes t
 If the line must sit ABOVE the card, it can only be an edited message: one topic at a time (the one the user last acted in),
 every 5–10 s.
 
-### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; NOT BUILT yet)
+### 21.37 The interrupted-turn questions, asked in the topic (2026-10-22; in dev since 0.0.1.35, not in production)
 
 The PC asks two questions since 2026-10-22 (HOOKS.md "Interrupted turns"): a restart of a turn the user interrupted asks
 whether to continue it (one rewind line in the transcript before the new claude starts), and a fork of a session in the
@@ -5313,7 +5313,7 @@ the answer on:
   continue the interrupted turn | keep it interrupted`, `remote telegram fork <sid8> -> asked (…) | not asked: <why> |
   interrupted | uninterrupted`.
 
-### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; NOT BUILT yet)
+### 21.38 A pick's menu fits where the session stands: ▶ Activate for a deactivated tab (2026-10-23; in dev since 0.0.1.35, not in production)
 
 > The user's report (2026-10-23, after the 🔎 Search topic's "la cook" request): "the last one about 'la cook' was supposed
 > to find a tab. The la cook session was actually open in a tab that was idle. The tab was both idle and deactivated. A.
@@ -5399,7 +5399,7 @@ PCH unit, that failed at their planted line. The pin removal was checked the sam
 6. A menu drawn for a deactivated tab, then the tab entered at the PC, then ▶ Activate: the menu reads "woken" (no second
    start).
 
-### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; NOT BUILT yet)
+### 21.39 📜 All Screen: the whole conversation as tall pictures (2026-10-25; in dev since 0.0.1.36, not in production)
 
 > The user's request (2026-10-25): "check if we can add conversation render into an image so that its like a screenshot but
 > we get to see the entire claude code conversation in a tall tall image — look into that and have All Screen button"
@@ -5500,7 +5500,7 @@ Peak commit: ~315 MB for the 95 MB transcript at either level (mostly the transc
   `ConversationImage.cpp` and those cases report a skip.
 - `tests_messaging_card.cpp` checks the Session page's seven rows, All Screen alone on its row, and no All Screen on Main.
 
-**Checked** (2026-10-25; NOT BUILT, nothing tried in Telegram):
+**Checked** (2026-10-25, before any build; in dev since 0.0.1.36, nothing tried in Telegram yet):
 - The m5 suite, isolated (scratch outputs, a wiped scratch profile): 9,977 checks; the final run's only failures are the
   three known `TestTaskbarBadge` ones. Three earlier runs each also failed one real-time scheduler check, a different one each
   time (the load flake). Every new check passed in every run.

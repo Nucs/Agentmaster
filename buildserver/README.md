@@ -75,6 +75,14 @@ amb list | show <id> | cancel <id>
   `b20261026-4`: a 124 MB portable zip). ⚠ Their binaries need `ucrtbased.dll`, the debug UCRT that only the Windows
   SDK installs, so a Debug portable zip does not run on a PC without the SDK, `am-e2e` included: `amb e2e` takes
   Release builds.
+- **Installing a build on this PC** (no `amb install` yet): `amb fetch <id> --kind layout-zip`, extract the zip into
+  the EMPTY layout folder of the instance's pair that it does not run from (`Q:\agentmaster-layouts\Debug` / `Debug-B`
+  for dev), check that `AppxManifest.xml` names the package at 0.0.1.0 and that `TerminalApp.dll` bakes the build's
+  commit, then `tools\Swap-AgentmasterLayout.ps1 -LayoutDir <folder> [-PackageName AgentmasterDev]` after a
+  `-WhatIf`. First done 2026-10-26: `b20261026-5` (a Debug dev build of a8d8b97a2, 6 min 48 s from request to build
+  id, 3.1 min of it the build) became dev 0.0.1.36: the fetch took 0.8 s, the extraction 1.6 s, its 316 files were
+  exactly those of the local msbuild layout it replaced, and the swap was down 6.9 s. Its PDBs stay in the build's
+  symbols zip.
 - **Memory:** a build needs 8 GB beyond Windows' 6 GB reserve. While the PC has less, the request waits; the site's
   page cache counts as used memory for Windows, so after big copies it can help to drop it
   (`python buildserver/site/sitectl.py run -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'`).
