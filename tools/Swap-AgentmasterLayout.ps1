@@ -312,6 +312,50 @@ function Read-PackageFileIdentity([string]$Path) {
 
 <#
 .SYNOPSIS
+  Keep the files an installed package holds in its own storage before step 4b removes it: Remove-AppxPackage deletes
+  %LOCALAPPDATA%\Packages\<family>\ with the package (doc/agentmaster/PROFILES.md 2d; the install core's
+  Save-AmPackageData is the same rule for the user-facing installers).
+.DESCRIPTION
+  Agentmaster's state lives in the profile, outside the package, so this storage is normally empty (measured 2026-10-26
+  on this PC's production package: no file in LocalState, RoamingState or LocalCache). Should it hold any file (Windows
+  Terminal's settings of a v0.1.x package, a file a process inside the package created under AppData), it is copied into
+  <profile>\package-data\<family>-<yyyyMMdd-HHmmss>\<part>\ of the package's profile: its "<family>=" line in
+  ~\.agentmaster.profiles, else %USERPROFILE%\.agentmaster (-dev for the AgentmasterDev family).
+.PARAMETER Package
+  The Get-AppxPackage object about to be removed.
+.OUTPUTS
+  [string] the folder the files were kept in, or '' when there was nothing to keep.
+.NOTES
+  Throws when the profile map cannot be read or a file cannot be copied - before the removal, so the swap's catch rolls
+  back to the still-installed package.
+#>
+function Save-PackageOwnFiles($Package) {
+    $family = [string]$Package.PackageFamilyName
+    $root = Join-Path (Join-Path $env:LOCALAPPDATA 'Packages') $family
+    $parts = @(@('LocalState', 'RoamingState', 'LocalCache') | Where-Object {
+            $dir = Join-Path $root $_
+            (Test-Path -LiteralPath $dir) -and @(Get-ChildItem -LiteralPath $dir -Recurse -Force -File -ErrorAction SilentlyContinue).Count -gt 0
+        })
+    if ($parts.Count -eq 0) { return '' }
+    $profileDir = ''
+    $map = Join-Path $env:USERPROFILE '.agentmaster.profiles'
+    if (Test-Path -LiteralPath $map) {
+        # ReadAllLines throws on a map it cannot read: never guess the profile the files go to.
+        foreach ($line in [IO.File]::ReadAllLines($map)) {
+            if ($line.StartsWith("$family=", [StringComparison]::OrdinalIgnoreCase)) { $profileDir = $line.Substring($family.Length + 1).Trim(); break }
+        }
+    }
+    if (-not $profileDir) { $profileDir = Join-Path $env:USERPROFILE $(if ($family -like 'AgentmasterDev_*') { '.agentmaster-dev' } else { '.agentmaster' }) }
+    $dest = Join-Path (Join-Path $profileDir 'package-data') ("$family-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Force -Path $dest -ErrorAction Stop | Out-Null
+    foreach ($part in $parts) {
+        Copy-Item -LiteralPath (Join-Path $root $part) -Destination (Join-Path $dest $part) -Recurse -Force -ErrorAction Stop
+    }
+    return $dest
+}
+
+<#
+.SYNOPSIS
   Brings the OLD version back up after a failure between the GUI stop and the end of the register,
   at most once per run.
 .DESCRIPTION
@@ -586,6 +630,11 @@ if ($installedPackage) {
         $result.HostsLeft = $hosts.Count
         Write-Step ("drained  {0:n1}s more before the removal ({1} host(s) still alive)" -f $extra.Elapsed.TotalSeconds, $hosts.Count)
     }
+    # The removal deletes the package's own storage with it: any file there is kept in the package's
+    # profile first (Save-PackageOwnFiles). It throws BEFORE the removal, so a failure rolls back to the
+    # still-installed package.
+    $keptOwnFiles = Save-PackageOwnFiles $pkg
+    if ($keptOwnFiles) { Write-Step "kept     the package's own files in $keptOwnFiles" }
     # From the first Remove-AppxPackage call on, the installed package may be gone, and the rollback
     # must then reinstall the bundle instead of relaunching (Invoke-SwapRollback reads this flag).
     $script:removeAttempted = $true

@@ -428,6 +428,42 @@ namespace Agentmaster::PortableInstall
         return saved.empty() ? Profiles::DefaultReleaseProfileDir() : saved;
     }
 
+    // The profile folder an MSIX package's install uses — its "<family>=<folder>" line in the home map, else its per-identity
+    // default (the AgentmasterDev family: the Development profile; any other: the Default profile) — told apart from "the
+    // map could not be read" (PROFILES.md §2d). The C++ twin of the install core's Get-AmPackageProfileDir.
+    //   family  — the package family name (Agentmaster_56k4f06dsfp9r).
+    //   dir     — receives the folder; untouched on false.
+    //   returns — false when the home map exists but cannot be read: the folder is then unknown, and a step that would write
+    //             a pointer to it, or into it, must not guess.
+    //   throws  — std::bad_alloc only.
+    inline bool PackageProfileDirFor(const std::wstring& family, std::wstring& dir)
+    {
+        std::map<std::wstring, std::wstring> entries;
+        if (Profiles::ReadChoiceFileChecked(Profiles::ChoiceFilePath(), entries) == Profiles::ChoiceFileState::Unreadable)
+        {
+            return false;
+        }
+        if (const auto it = entries.find(family); it != entries.end())
+        {
+            dir = it->second;
+            return true;
+        }
+        dir = Profiles::detail::StartsWith(family, L"AgentmasterDev_") ? Profiles::DefaultDevProfileDir() : Profiles::DefaultReleaseProfileDir();
+        return true;
+    }
+
+    // UserInstallProfileDir for a step that PERSISTS it — the install's profile.path. UserInstallProfileDir reads an
+    // unreadable map as "no choice" and answers the Default profile, which is right for a line of text and wrong for a
+    // pointer: a copy installed while the map was locked for an instant pointed at an empty Default profile, and the user's
+    // data sat unused in the folder the package had chosen.
+    //   dir     — receives the folder; untouched on false.
+    //   returns — false when the home map exists but cannot be read (the caller then does not install).
+    //   throws  — std::bad_alloc only.
+    inline bool TryUserInstallProfileDir(std::wstring& dir)
+    {
+        return PackageProfileDirFor(Updater::kReleaseFamily, dir);
+    }
+
     // The folder Install-Agentmaster.ps1 v0.7.10 and older put its portable copy into:
     // %LOCALAPPDATA%\Programs\Agentmaster, with a Start-menu entry "Agentmaster (Portable)" but no Apps & Features
     // entry and no install.path — so the registry never tells DetectExistingInstalls about it (the PowerShell
@@ -3234,8 +3270,181 @@ namespace Agentmaster::PortableInstall
             return {};
         }
 
+        // PURE: the package family name of a package full name — "<Name>_<Version>_<Arch>_<ResourceId>_<PublisherId>" ->
+        // "<Name>_<PublisherId>" (a package name holds no '_'; the publisher id is the last field).
+        //   fullName — the package full name ("Agentmaster_0.8.0.0_x64__56k4f06dsfp9r").
+        //   returns  — the family name, or "" when the text is not a full name.
+        //   throws   — std::bad_alloc only.
+        inline std::wstring PackageFamilyFromFullName(std::wstring_view fullName)
+        {
+            const size_t first = fullName.find(L'_');
+            const size_t last = fullName.rfind(L'_');
+            if (first == std::wstring_view::npos || first == 0 || first == last || last + 1 >= fullName.size())
+            {
+                return {};
+            }
+            return std::wstring{ fullName.substr(0, first) } + L"_" + std::wstring{ fullName.substr(last + 1) };
+        }
+
+        // PURE: the name of the folder a package's own files are kept in before the package is removed:
+        // `<family>-<yyyyMMdd-HHmmss>`, plus `-<attempt>` from the second attempt on (a name an earlier copy that second took).
+        //   family  — the package family name.
+        //   now     — the local time to stamp.
+        //   attempt — 0 for the first try, then 1, 2, ….
+        //   returns — the leaf.
+        //   throws  — std::bad_alloc only.
+        inline std::wstring PackageDataFolderLeaf(std::wstring_view family, const SYSTEMTIME& now, unsigned attempt)
+        {
+            wchar_t stamp[32];
+            ::swprintf(stamp, 32, L"%04u%02u%02u-%02u%02u%02u", static_cast<unsigned>(now.wYear), static_cast<unsigned>(now.wMonth),
+                       static_cast<unsigned>(now.wDay), static_cast<unsigned>(now.wHour), static_cast<unsigned>(now.wMinute), static_cast<unsigned>(now.wSecond));
+            std::wstring out{ family };
+            out += L"-";
+            out += stamp;
+            if (attempt > 0)
+            {
+                out += L"-" + std::to_wstring(attempt);
+            }
+            return out;
+        }
+
+        // Keep the files an MSIX package holds in its own storage before the package is removed: Remove-AppxPackage deletes
+        // <packagesRoot>\<family>\ with it (PROFILES.md §2d; the install core's Save-AmPackageData is the PowerShell twin).
+        // Agentmaster keeps its state in the profile, outside the package, so that storage is normally empty (measured
+        // 2026-10-26 on a production package used for months). Nothing guarantees it: v0.1.0 and v0.1.1 kept Windows
+        // Terminal's settings.json / state.json in LocalState (the <profile>\terminal\ redirect came with v0.2.0), and a
+        // process running inside the package that creates a file under AppData has it redirected into LocalCache. Every file
+        // of LocalState, RoamingState and LocalCache is copied into <profileDir>\package-data\<family>-<stamp>\<part>\, and
+        // Windows Terminal's settings found in LocalState also seed <profileDir>\terminal\ when it holds none
+        // (Profiles::SeedTerminalSettingsFromDir: copy-if-absent). Nothing is created when the storage holds no file.
+        //   packagesRoot — the folder holding the packages' storage (%LOCALAPPDATA%\Packages; a scratch folder in tests).
+        //   family       — the package family name.
+        //   profileDir   — the package's profile folder (PackageProfileDirFor).
+        //   keptTo       — receives the folder the files went to; "" when there was nothing to keep.
+        //   error        — receives what failed, for the install's note and log.
+        //   returns      — true when there was nothing to keep or every file was copied; false when the storage could not be
+        //                  listed or a file could not be copied: the caller then leaves the package installed.
+        //   throws       — nothing (a failure is a false with `error` set).
+        inline bool KeepPackageDataIn(const std::wstring& packagesRoot, const std::wstring& family, const std::wstring& profileDir, std::wstring& keptTo, std::wstring& error) noexcept
+        {
+            try
+            {
+                keptTo.clear();
+                error.clear();
+                const std::filesystem::path root = std::filesystem::path{ packagesRoot } / family;
+                std::vector<std::wstring> parts;
+                for (const wchar_t* name : { L"LocalState", L"RoamingState", L"LocalCache" })
+                {
+                    std::error_code ec;
+                    const std::filesystem::path dir = root / name;
+                    if (!std::filesystem::is_directory(dir, ec))
+                    {
+                        continue; // a part this package never created
+                    }
+                    bool hasFile = false;
+                    std::filesystem::recursive_directory_iterator it{ dir, ec };
+                    for (; !ec && it != std::filesystem::recursive_directory_iterator{}; it.increment(ec))
+                    {
+                        std::error_code typeEc;
+                        if (it->is_regular_file(typeEc))
+                        {
+                            hasFile = true;
+                            break;
+                        }
+                    }
+                    if (ec)
+                    {
+                        // A storage that cannot be listed cannot be proven empty: the package stays.
+                        error = L"its storage could not be listed (" + dir.wstring() + L")";
+                        return false;
+                    }
+                    if (hasFile)
+                    {
+                        parts.emplace_back(name);
+                    }
+                }
+                if (parts.empty())
+                {
+                    return true; // the normal case: nothing of the user's lives in the package
+                }
+                // A folder of its own, never an existing one: a second removal in the same second gets "-1", "-2", ….
+                SYSTEMTIME now{};
+                ::GetLocalTime(&now);
+                const std::filesystem::path base = std::filesystem::path{ profileDir } / L"package-data";
+                std::error_code ec;
+                std::filesystem::create_directories(base, ec);
+                std::filesystem::path dest;
+                for (unsigned attempt = 0; attempt < 100 && dest.empty(); ++attempt)
+                {
+                    const std::filesystem::path candidate = base / PackageDataFolderLeaf(family, now, attempt);
+                    std::error_code mk;
+                    if (std::filesystem::create_directory(candidate, mk) && !mk)
+                    {
+                        dest = candidate;
+                    }
+                }
+                if (dest.empty())
+                {
+                    error = L"no folder could be made for them under " + base.wstring();
+                    return false;
+                }
+                for (const auto& name : parts)
+                {
+                    std::error_code cp;
+                    std::filesystem::copy(root / name, dest / name, std::filesystem::copy_options::recursive, cp);
+                    if (cp)
+                    {
+                        error = L"copying " + (root / name).wstring() + L" failed (error " + std::to_wstring(cp.value()) + L")";
+                        return false;
+                    }
+                }
+                Profiles::SeedTerminalSettingsFromDir((root / L"LocalState").wstring(), profileDir);
+                keptTo = dest.wstring();
+                return true;
+            }
+            catch (...)
+            {
+                // Rule #18: the failure is reported through `error` and the install's log line; the package stays installed.
+                error = L"an exception while keeping the package's files";
+                return false;
+            }
+        }
+
         inline bool RemoveInstalledPackage(const std::wstring& fullName, const std::wstring& packagePath, std::wstring* err)
         {
+            // Agentmaster (PROFILES.md §2d): Remove-AppxPackage deletes the package's own storage too. Keep any file in it
+            // first, in the package's profile (KeepPackageDataIn); a profile that cannot be looked up or a copy that fails
+            // leaves the package installed — removing it is never worth losing what it holds.
+            {
+                const std::wstring family = PackageFamilyFromFullName(fullName);
+                const std::wstring localAppData = Profiles::detail::GetEnvVar(L"LOCALAPPDATA");
+                std::wstring profileDir, keptTo, keepError;
+                if (family.empty() || localAppData.empty())
+                {
+                    keepError = L"its storage could not be located";
+                }
+                else if (!PackageProfileDirFor(family, profileDir))
+                {
+                    keepError = L"the profile map " + Profiles::ChoiceFilePath() + L" could not be read";
+                }
+                else
+                {
+                    KeepPackageDataIn(localAppData + L"\\Packages", family, profileDir, keptTo, keepError);
+                }
+                if (!keepError.empty())
+                {
+                    LogInstall(L"package " + fullName + L" NOT removed: its own files could not be kept first (" + keepError + L")");
+                    if (err)
+                    {
+                        *err = L"its own files could not be kept first (" + keepError + L"), so it was left installed";
+                    }
+                    return false;
+                }
+                if (!keptTo.empty())
+                {
+                    LogInstall(L"kept the package's own files in " + keptTo + L" before removing " + fullName);
+                }
+            }
             // Stop the GUI under the package path ONLY (never its OpenConsole.exe hosts — a host killed
             // outright orphans its tab's pwsh + claude with a dead console; the hosts end themselves
             // once the GUI's pipe handles close), wait for the hosts to drain, then remove per-user.
@@ -4397,7 +4606,18 @@ namespace Agentmaster::PortableInstall
                     InstallOptions o;
                     o.sourceDir = exeDir;
                     o.destDir = pick.dir;
-                    o.profileDir = UserInstallProfileDir();
+                    // The install writes profile.path from this: a profile it cannot look up (a profile map that exists but
+                    // cannot be read) is never guessed — the Default profile would point the copy at an empty folder while
+                    // the user's data sits in the one the package chose (PROFILES.md §2d). Back to the question instead.
+                    if (!TryUserInstallProfileDir(o.profileDir))
+                    {
+                        LogInstall(L"install refused: the profile map " + Profiles::ChoiceFilePath() + L" could not be read");
+                        ShowError(nullptr,
+                                  L"Agentmaster could not read\n    " + Profiles::ChoiceFilePath() +
+                                      L"\nwhich says which folder holds your Agentmaster data. Nothing was installed or changed.\n\nClose any program that may hold that file open (a backup or sync tool, an editor) and try again.",
+                                  L"The install did not start");
+                        continue;
+                    }
                     o.aumid = aumidFor ? aumidFor(AppExeIn(pick.dir)) : std::wstring{};
                     o.takeOverPackage = pick.takeOverPackage;
                     o.packageFullName = ex.packageFullName;

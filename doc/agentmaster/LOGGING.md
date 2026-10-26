@@ -110,6 +110,11 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   <name>.could-not-read-<stamp> (<reason>)`), a replace refused (`<path> NOT replaced: …`, once per 30 s), and the
   startup snapshot when `sessions.json` could not be used (`… the workspace as it was is kept in <profile>\recovery\
   <stamp> …`). PERSISTENCE.md §15.
+- A profile map (`~\.agentmaster.profiles`) that exists but cannot be read at startup logs `[profile] <map> could not be
+  read (Windows error N): this run opens the default profile <dir>; no saved profile choice was changed` — written by
+  WindowEmperor from `Profiles::StartupProfileNote()`, since the bootstrap runs before the profile (the log's home) exists.
+  An MSIX removal that kept the package's own files logs `[install] kept the package's own files in …`, and one that could
+  not logs `package … NOT removed: its own files could not be kept first (…)`. PROFILES.md §2d.
 
 ## Exception forensics (Rule #18)
 

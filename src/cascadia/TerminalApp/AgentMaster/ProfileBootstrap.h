@@ -925,51 +925,176 @@ namespace Agentmaster::Profiles
         return base + (real ? L"\\.agentmaster.profiles" : L"\\Agentmaster.profiles");
     }
 
-    inline std::map<std::wstring, std::wstring> ReadChoiceFile(const std::wstring& path)
+    // How a read of the home map went (ReadChoiceFileChecked).
+    enum class ChoiceFileState
     {
-        std::map<std::wstring, std::wstring> out;
+        Missing, // no map (no install of this user ever saved a choice): "no saved choice" is the truth
+        Read, // the map was read whole (it may still hold no line for a given install)
+        Unreadable, // the map exists but could not be opened or read, even after the retries
+    };
+
+    // A normal read's retry budget for the home map: rides out another install's rename of the map (a reader that opens it
+    // in that instant gets "access denied") and an antivirus scan, without a noticeable stall.
+    inline constexpr unsigned kChoiceFileRetryBudgetMs = 1000;
+    // The startup read's budget (EnsureProfileResolvedAtStartup): which profile the whole run opens depends on it.
+    inline constexpr unsigned kChoiceFileStartupRetryBudgetMs = 3000;
+
+    // Parse the home map's bytes into `out` (key -> folder): one "<key>=<folder>" line each; '#' lines, blank lines and
+    // lines without a key or a folder are skipped; a UTF-8 BOM (an editor's, or PowerShell 5.1's "-Encoding UTF8") is
+    // dropped first — read as part of the first line it once turned the header comment into a junk entry.
+    //   bytes - the file's bytes.
+    //   out   - receives the entries (cleared first).
+    // Throws std::bad_alloc only.
+    inline void ParseChoiceBytes(std::string_view bytes, std::map<std::wstring, std::wstring>& out)
+    {
+        out.clear();
+        if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF)
+        {
+            bytes.remove_prefix(3);
+        }
+        size_t pos = 0;
+        while (pos <= bytes.size())
+        {
+            size_t nl = bytes.find('\n', pos);
+            if (nl == std::string_view::npos)
+            {
+                nl = bytes.size();
+            }
+            std::string line{ bytes.substr(pos, nl - pos) };
+            pos = nl + 1;
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            {
+                line.pop_back();
+            }
+            if (line.empty() || line.front() == '#')
+            {
+                continue;
+            }
+            const auto eq = line.find('=');
+            if (eq == std::string::npos || eq == 0)
+            {
+                continue;
+            }
+            const auto key = detail::Utf8ToWide(std::string_view{ line }.substr(0, eq));
+            const auto val = detail::Utf8ToWide(std::string_view{ line }.substr(eq + 1));
+            if (!key.empty() && !val.empty())
+            {
+                out[key] = val;
+            }
+        }
+    }
+
+    // Read the home map, telling "no map" from "a map that could not be read" (PERSISTENCE.md "Unreadable state files";
+    // PROFILES.md §2d). The plain ReadChoiceFile used to return an empty map for both, so a map that was locked for an
+    // instant read as "nothing saved": an installed copy then took its first launch's default profile and SAVED it over
+    // the user's choice (dropping every other install's line too), and an install pointed its copy at the Default
+    // profile instead of the package's — the app then opened an empty profile, the user's data sitting unused elsewhere.
+    // A sharing violation, a lock violation or access denied (a file being replaced reads as "delete pending" for an
+    // instant) is retried, 50 ms apart, within the budget; any other error is not.
+    //   path          - the map (ChoiceFilePath()).
+    //   out           - receives the entries; empty unless the state is Read.
+    //   retryBudgetMs - how long to keep retrying a transient error (0 = one attempt).
+    //   lastError     - optional: receives the Win32 error of an Unreadable read (0 otherwise, and for an exception).
+    //   returns       - Missing, Read or Unreadable.
+    // Never throws: an allocation failure reads as Unreadable (the caller then neither guesses nor writes).
+    inline ChoiceFileState ReadChoiceFileChecked(const std::wstring& path, std::map<std::wstring, std::wstring>& out, unsigned retryBudgetMs = kChoiceFileRetryBudgetMs, unsigned long* lastError = nullptr) noexcept
+    {
+        if (lastError)
+        {
+            *lastError = 0;
+        }
         try
         {
-            std::ifstream in{ std::filesystem::path{ path }, std::ios::binary };
-            if (!in)
+            out.clear();
+            const ULONGLONG deadline = ::GetTickCount64() + retryBudgetMs;
+            for (;;)
             {
-                return out;
-            }
-            const std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
-            size_t pos = 0;
-            while (pos <= bytes.size())
-            {
-                size_t nl = bytes.find('\n', pos);
-                if (nl == std::string::npos)
+                DWORD error = 0;
+                // FILE_SHARE_DELETE as well: a reader must never be why another install's atomic rename of the map fails.
+                const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h == INVALID_HANDLE_VALUE)
                 {
-                    nl = bytes.size();
+                    error = ::GetLastError();
+                    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                    {
+                        return ChoiceFileState::Missing;
+                    }
                 }
-                std::string line = bytes.substr(pos, nl - pos);
-                pos = nl + 1;
-                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                else
                 {
-                    line.pop_back();
+                    std::string bytes;
+                    bool readOk = true;
+                    LARGE_INTEGER size{};
+                    // The map is a few lines; anything over 1 MiB is not one, and is not read into memory.
+                    if (!::GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > (1 << 20))
+                    {
+                        readOk = false;
+                        error = ERROR_FILE_TOO_LARGE;
+                    }
+                    else
+                    {
+                        bytes.resize(static_cast<size_t>(size.QuadPart));
+                        size_t got = 0;
+                        while (got < bytes.size())
+                        {
+                            DWORD n = 0;
+                            if (!::ReadFile(h, bytes.data() + got, static_cast<DWORD>(bytes.size() - got), &n, nullptr))
+                            {
+                                readOk = false;
+                                error = ::GetLastError();
+                                break;
+                            }
+                            if (n == 0)
+                            {
+                                break; // shorter than its size said: what was read is what it holds
+                            }
+                            got += n;
+                        }
+                        bytes.resize(got);
+                    }
+                    ::CloseHandle(h);
+                    if (readOk)
+                    {
+                        ParseChoiceBytes(bytes, out);
+                        return ChoiceFileState::Read;
+                    }
                 }
-                if (line.empty() || line.front() == '#')
+                const bool transient = error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION || error == ERROR_ACCESS_DENIED;
+                if (!transient || ::GetTickCount64() + 50 > deadline)
                 {
-                    continue;
+                    out.clear();
+                    if (lastError)
+                    {
+                        *lastError = error;
+                    }
+                    return ChoiceFileState::Unreadable;
                 }
-                const auto eq = line.find('=');
-                if (eq == std::string::npos || eq == 0)
-                {
-                    continue;
-                }
-                const auto key = detail::Utf8ToWide(std::string_view{ line }.substr(0, eq));
-                const auto val = detail::Utf8ToWide(std::string_view{ line }.substr(eq + 1));
-                if (!key.empty() && !val.empty())
-                {
-                    out[key] = val;
-                }
+                ::Sleep(50);
             }
         }
         catch (...)
         {
+            // ⚠ DELIBERATELY BARE (Rule #18): this header compiles into the EXE, where no engine logger exists yet (the
+            // profile — the log's home — is what this read resolves). The Unreadable result IS the report: every caller
+            // refuses to guess or write on it, and the startup path records it for the [profile] line WindowEmperor logs.
+            out.clear();
+            return ChoiceFileState::Unreadable;
         }
+    }
+
+    // A lookup's retry budget (ReadChoiceFile): shorter than a write's, because the profile guard looks the map up once per
+    // guarded delete (KnownProfileFolders), and an install's thirty deletes must not each wait a second on a locked map.
+    inline constexpr unsigned kChoiceFileLookupRetryBudgetMs = 250;
+
+    // The home map's entries, or none: a missing AND an unreadable map both read as empty. For display and for lookups
+    // that only READ; a caller that WRITES the map, or persists a decision derived from it, uses ReadChoiceFileChecked.
+    //   path    - the map.
+    //   returns - key -> folder.
+    // Never throws (an allocation failure reads as an empty map).
+    inline std::map<std::wstring, std::wstring> ReadChoiceFile(const std::wstring& path)
+    {
+        std::map<std::wstring, std::wstring> out;
+        ReadChoiceFileChecked(path, out, kChoiceFileLookupRetryBudgetMs);
         return out;
     }
 
@@ -1174,13 +1299,40 @@ namespace Agentmaster::Profiles
         return false;
     }
 
-    // Persist the choice for THIS install (read-modify-write keeps the other installs' slots).
+    // Persist one install's choice in a home map at `path` — the read-modify-write that keeps every other install's line.
+    // A map that exists but cannot be read is NOT rewritten (PROFILES.md §2d): the rewrite would hold only this line, and
+    // every other install's profile choice would be gone (the next launch of each then opening its empty default).
+    //   path       - the map.
+    //   key        - the install's key (a package family name, or "Unpackaged").
+    //   profileDir - the chosen profile folder.
+    //   returns    - true when the map now holds the line; false when the map could not be read (nothing written) or
+    //                the write failed.
+    // Never throws (ReadChoiceFileChecked and WriteChoiceFile report failures as results).
+    inline bool SaveChoiceIn(const std::wstring& path, const std::wstring& key, const std::wstring& profileDir) noexcept
+    {
+        try
+        {
+            std::map<std::wstring, std::wstring> entries;
+            if (ReadChoiceFileChecked(path, entries) == ChoiceFileState::Unreadable)
+            {
+                return false;
+            }
+            entries[key] = profileDir;
+            return WriteChoiceFile(path, entries);
+        }
+        catch (...)
+        {
+            // ⚠ DELIBERATELY BARE (Rule #18): no logger in this header (see ReadChoiceFileChecked); only bad_alloc can
+            // land here, and false (nothing written) is the report the callers act on.
+            return false;
+        }
+    }
+
+    // Persist the choice for THIS install (read-modify-write keeps the other installs' slots; refused, false, when the
+    // map exists but cannot be read — SaveChoiceIn).
     inline bool SaveChoice(const std::wstring& profileDir)
     {
-        const auto path = ChoiceFilePath();
-        auto entries = ReadChoiceFile(path);
-        entries[PackageKey()] = profileDir;
-        return WriteChoiceFile(path, entries);
+        return SaveChoiceIn(ChoiceFilePath(), PackageKey(), profileDir);
     }
 
     // Persist a profile choice WHERE THIS INSTALL'S RESOLUTION READS IT BACK — the one rule that
@@ -1701,7 +1853,22 @@ namespace Agentmaster::Profiles
     //             included — detail::ProfileMutexVerdict) and the user chose not to continue: the
     //             caller exits; true otherwise (AGENTMASTER_PROFILE is then exported).
     //   throws  — std::bad_alloc only.
-    inline bool EnsureProfileResolvedAtStartup(bool allowUi, bool deferPortablePicker = false)
+    // A home map that exists but cannot be read (PROFILES.md §2d) is NOT a first launch: this install's choice is unknown,
+    // so the run opens the per-identity default and changes nothing, and StartupProfileNote() says so for the log.
+    inline bool EnsureProfileResolvedAtStartup(bool allowUi, bool deferPortablePicker = false);
+
+    // A line for the startup log about how the profile was resolved, or "" when there is nothing to say: this header has
+    // no logger (it runs before the profile — the log's home — exists), so WindowEmperor logs it through Startup::Note
+    // right after EnsureProfileResolvedAtStartup. Today it reports a home map that could not be read.
+    //   returns — the note, writable (module-local: one copy per binary, and the EXE both sets and reads it).
+    //   throws  — nothing (a function-local static of an empty string).
+    inline std::wstring& StartupProfileNote() noexcept
+    {
+        static std::wstring note;
+        return note;
+    }
+
+    inline bool EnsureProfileResolvedAtStartup(bool allowUi, bool deferPortablePicker)
     {
         std::wstring dir = detail::GetEnvVar(L"AGENTMASTER_PROFILE");
         if (dir.empty())
@@ -1758,11 +1925,30 @@ namespace Agentmaster::Profiles
                 SeedTerminalSettings(dir);
             }
         }
+        // The saved choice, read so that "no map" and "a map that could not be read" stay apart (PROFILES.md §2d): with a
+        // longer budget than a normal read, since the whole run's profile depends on it.
+        bool choiceMapUnreadable = false;
         if (dir.empty())
         {
-            dir = ReadSavedChoice();
+            std::map<std::wstring, std::wstring> entries;
+            unsigned long mapError = 0;
+            if (ReadChoiceFileChecked(ChoiceFilePath(), entries, kChoiceFileStartupRetryBudgetMs, &mapError) == ChoiceFileState::Unreadable)
+            {
+                choiceMapUnreadable = true;
+                // Which profile this install chose is unknown. The run must open SOME profile: the per-identity default,
+                // for THIS run only — no SaveChoice (the rewrite would hold this line alone and drop every other
+                // install's), no seeding. The log says so; the next launch reads the map again.
+                dir = DefaultProfileDir();
+                detail::EnsureDirExists(dir);
+                StartupProfileNote() = L"[profile] " + ChoiceFilePath() + L" could not be read (Windows error " + std::to_wstring(mapError) +
+                                       L"): this run opens the default profile " + dir + L"; no saved profile choice was changed";
+            }
+            else if (const auto it = entries.find(PackageKey()); it != entries.end())
+            {
+                dir = it->second;
+            }
         }
-        if (dir.empty())
+        if (dir.empty() && !choiceMapUnreadable)
         {
             // First launch of an INSTALLED copy: AUTO-SELECT the per-identity default profile and
             // remember it, WITHOUT prompting — the RELEASE install picks the Default profile

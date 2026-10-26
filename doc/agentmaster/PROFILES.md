@@ -793,6 +793,87 @@ compute the app's per-path formula; the app's own install stamps it); a shared u
 accounts is a stub for all of them once one decides (the decision is per folder); HKLM detection reads the
 64-bit view only (`Uninstall\AgentmasterAllUsers`, then `Uninstall\Agentmaster`).
 
+### §2d What every way of installing may delete (the 2026-10-26 audit)
+
+The owner's request: "look at all ways of installing, incl msi and others; verify that none removes user data that was
+created by another or the current version". User data here is everything a person would miss: every profile folder (the
+per-identity defaults, every folder `~\.agentmaster.profiles` names, a portable copy's `<exedir>\profile`), the exe-side
+`settings\` / `profile.path` / `install.path`, the home map itself, Windows Terminal's own settings, Claude Code's files, and
+anything the user keeps in an install folder.
+
+**There is no `.msi`.** The repo has no WiX project and the release ships none (`release.yml`: an `.msixbundle` + `.cer`,
+two portable zips, two symbols zips); the `.config/*.winget` files configure Visual Studio for developers. The "MSI-like"
+installs are the per-user and all-users installs (Apps & Features entries) that the zip's first launch and
+`Install-Agentmaster.ps1` make.
+
+**The current code (this tree):**
+
+| Way | What it may delete | Verdict |
+|---|---|---|
+| MSIX install / update (App Installer, `Add-AppxPackage`, the script's `-Scope Package`, the in-app package update) | nothing (an update keeps the package's storage; `UpdateWhileInUse` = defer) | safe |
+| MSIX removal: Settings ▸ Apps, the script's `-Uninstall`, the takeover box (zip first launch, per-user and all-users), the "blocking install" removal (script and in-app update), the dev swap's `-ReplaceInstalledPackage` | the package's own storage `%LOCALAPPDATA%\Packages\<family>\` — never the profile | **kept first since this audit** (below); Settings ▸ Apps is Windows' own, out of reach |
+| Zip first launch: Install just for you / a picked folder / for all users / for the signed-in user | only shipped names inside the install folder (`RemoveTreeGuarded`); a folder in the way is renamed aside; a profile holder refused | safe (5b292ab4a, e2e IS-100–IS-107) |
+| Zip first launch: Install here / keep portable / ask later / use the installed copy | nothing (in place copies nothing; the others write `install.path` only) | safe |
+| "Delete the downloaded copy?" | the zip's own folder, only when it holds nothing but the download (a non-empty `profile\` / `settings\` → not offered), to the Recycle Bin | safe |
+| `Install-Agentmaster.ps1` (`-Scope User / Machine`, upgrades, `-InstallDir`, `-ZipPath`) | shipped names only (`Remove-AmEntries` → `Remove-AmTreeGuarded`); `-InstallDir` with other files gets an `Agentmaster` subfolder | safe |
+| In-app update of a per-user / all-users / portable copy (`am-update.ps1 -Portable`, the elevated phase) | shipped names only; a failed update puts the previous version back | safe |
+| Uninstall (Apps & Features, `--uninstall-portable`, the cog, `-UninstallMachine`) | shipped names, a stale set-aside, `install.path`; the folder only when left empty, and never an empty `.agentmaster*` one | safe |
+| Active Setup (per-user icons of an all-users copy), the install hand-off, taskbar pins | shortcuts and registry entries only | safe |
+| The cog's "Change profile folder…" | nothing (`MigrateProfileData` copies, skip-existing; the old folder stays) | safe |
+| The first launch after any install | an unreadable state file used to be replaced by "nothing saved" | **fixed in c50fb6468** (PERSISTENCE.md §15) |
+| The profile choice at startup, and an install's `profile.path` | the home map read failed OPEN: a locked map read as "no choice" | **fixed since this audit** (below) |
+| `tools/install-qa` `Reset-AmQa` (QA only) | every package of every user, the all-users install, the QA accounts' profiles — nothing stopped it on a real PC | **guarded since this audit**: refuses unless the machine is a claude-desktops guest or carries the install lane's file |
+
+**What this audit added:**
+
+- **A package removal keeps the package's own files first.** Agentmaster's state lives in the profile, so the package's
+  storage is normally empty — measured: this PC's production package after months of heavy use and the dev package hold
+  no file in `LocalState`, `RoamingState` or `LocalCache`. Nothing guarantees it. **v0.1.0 / v0.1.1 used today's release
+  identity (`Agentmaster_56k4f06dsfp9r`) before the `<profile>\terminal\` redirect existed (v0.2.0)**, so their Windows
+  Terminal settings sit in that package's `LocalState`. A later packaged version seeds them into the profile at its first
+  launch (`SeedTerminalSettings`), but a v0.1.x package taken over by a zip install never ran one, and the removal deleted
+  them. And a process inside the package that creates a file under AppData has it redirected into `LocalCache`. Now every
+  removal copies such files into `<profile>\package-data\<family>-<yyyyMMdd-HHmmss>\<part>\` and seeds `<profile>\terminal\`
+  from `LocalState` (copy-if-absent). If the copy fails, or the profile cannot be looked up, the package stays installed.
+  The pieces: `detail::KeepPackageDataIn` inside `detail::RemoveInstalledPackage` (both takeover sites of PortableInstall.h),
+  the core's `Save-AmPackageData` inside `Remove-AmPackage` (every core removal: the takeover, `-Uninstall`, the in-app
+  update's blocking install) and in `Remove-BlockingInstall`, and `Save-PackageOwnFiles` in the dev swap.
+- **The home map fails closed** (`Profiles::ReadChoiceFileChecked`). It tells a missing map from one that could not be read,
+  and rides out a brief lock (1 s; 3 s at startup). Before, a map locked for an instant read as "no choice" (antivirus, or
+  another install renaming it). A startup then saved the default over the user's choice and dropped every other install's
+  line (`SaveChoice` rewrote the map with one line). An install pointed its copy at the Default profile while the data sat
+  in the folder the package had chosen. Both looked like a reset. Now:
+  - `SaveChoiceIn` does not rewrite a map it cannot read.
+  - A startup that cannot read it opens the default for that run only, saves nothing, and logs
+    `[profile] … could not be read …` through `StartupProfileNote` → `WindowEmperor`.
+  - The zip installer refuses to install (`TryUserInstallProfileDir`) rather than guess the profile.
+  - The PowerShell core already failed closed (`[IO.File]::ReadAllLines` throws on a locked map).
+
+**Old releases still on users' machines** — their code cannot change. What they can do, found by scanning every release's
+scripts for "list a folder, delete what is not on a keep-list":
+
+| Releases | Code | Deletes |
+|---|---|---|
+| v0.4.1 – v0.7.10 | `Install-Agentmaster.ps1` `Install-Portable` (a script copy kept on disk; the one-liner serves the current branch) | everything in its install folder except `settings`, `profile`, (`profile.path`, `install.path`), `.am-version` |
+| v0.7.5 – v0.7.10 | the embedded `am-update.ps1` `Invoke-PortableUpdate` (the in-app update of a portable copy) | the same, on every update |
+| v0.7.7 – v0.7.10 | the embedded `am-update.ps1` `Invoke-PortableUninstall` | everything but `settings`, `profile`, `profile.path` |
+| v0.8.0 | — | shipped names only |
+
+These wipe only what a user put into an install folder themselves, or a profile an old script was pointed at with
+`-InstallDir`. None of those releases' own installs puts the app into a folder that holds data: v0.7.7–v0.7.10's first
+launch installs into `.agentmaster\bin`, and gives a picked folder that holds files an `Agentmaster` subfolder.
+
+**Open:**
+
+- **An older version rewrites what a newer one wrote.** Two versions on one profile — a downgrade, or the package kept beside
+  a newer per-user copy (the takeover box unticked) — make the older one save `sessions.json`, `settings.json` and the window
+  records with only the fields it knows, so the newer version's fields (e.g. v0.8.x's per-session runner mode and interrupt
+  hold, PQR-K8) are gone after its next save. Nothing deletes a file. The fix is a forward-compatible save: keep a record's
+  unknown members and write them back. It must tell "unknown" from "known but omitted when empty", or a cleared field comes
+  back, and it only protects data from versions newer than the one carrying it. Not built: a decision for the owner.
+- Removing a package through Settings ▸ Apps runs no Agentmaster code, so its storage is not kept first (it is normally
+  empty; a v0.1.x package's `LocalState` is the known exception).
+
 ### First launch — installed auto-selects by identity (no prompt); portable asks
 
 `WindowEmperor::HandleCommandlineArgs` calls `EnsureProfileResolvedAtStartup(allowUi)` **after**

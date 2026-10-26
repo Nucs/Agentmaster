@@ -101,6 +101,7 @@ int wmain()
     TestCmdPathLimit();
     TestStartupGuard(); // the startup-deadlock fix (StartupGuard.h, tests_spawn_sched.cpp)
     TestPortableInstall();
+    TestInstallKeepsPackageDataAndMap(); // PROFILES.md 2d: package removal keeps its files; the profile map fails closed (tests_spawn_sched.cpp)
     TestCliDispatch(); // CLI.md §2a — `agentmaster <verb>` answered by the CLI whichever exe the name finds (tests_spawn_sched.cpp)
     TestDialogEcho(); // CLI.md §2b — every dialog we open is written to the caller's console (tests_spawn_sched.cpp)
     TestDialogEchoCoverage(); // CLI.md §2b — no direct dialog call left in src\cascadia (tests_spawn_sched.cpp)

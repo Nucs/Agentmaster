@@ -770,6 +770,23 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         // allocation. Degradation: the [path-guard] line is missing; the compaction already happened (or not) above.
     }
 
+    // Agentmaster (ProfileBootstrap.h StartupProfileNote; PROFILES.md §2d): the bootstrap ran before the profile — the
+    // log's home — existed, so what it has to say is logged here: today, a profile map (~\.agentmaster.profiles) that
+    // could not be read, which made this run open the default profile without changing any saved choice.
+    try
+    {
+        if (const auto& profileNote = ::Agentmaster::Profiles::StartupProfileNote(); !profileNote.empty())
+        {
+            ::Agentmaster::Startup::Note(profileNote);
+        }
+    }
+    catch (...)
+    {
+        // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only the log line's own copy (bad_alloc) can throw
+        // here, and the logger that would report it needs the same allocation. Degradation: the [profile] line is missing;
+        // the resolution itself already happened.
+    }
+
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the
     // exe prelude (single-instance handoff + profile resolution) since process creation; the dll-side
     // _OnFirstLayout lines (later, larger +Nms) continue the same timeline in the same hooks.log.

@@ -417,6 +417,54 @@ try {
         $env:AGENTMASTER_PROFILE = $savedEnvProfile
     }
 
+    # ---- a package removal keeps the package's own files (PROFILES.md 2d, 2026-10-26) ----------------------------
+    # Remove-AppxPackage deletes %LOCALAPPDATA%\Packages\<family>\: Save-AmPackageData (Remove-AmPackage runs it first)
+    # copies whatever that storage holds into the package's profile. Scratch LOCALAPPDATA / USERPROFILE folders stand for
+    # the PC's own; a plain object stands for Get-AppxPackage's.
+    $savedLocalAppData = $env:LOCALAPPDATA
+    $savedHome = $env:USERPROFILE
+    try {
+        $pkgRoot = Join-Path $root 'pkgdata'
+        $env:LOCALAPPDATA = Join-Path $pkgRoot 'local'
+        $env:USERPROFILE = Join-Path $pkgRoot 'home'
+        New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:USERPROFILE | Out-Null
+        $relPkg = [pscustomobject]@{ PackageFamilyName = 'Agentmaster_56k4f06dsfp9r'; PackageFullName = 'Agentmaster_0.7.0.0_x64__56k4f06dsfp9r'; InstallLocation = '' }
+        $storage = Join-Path $env:LOCALAPPDATA 'Packages\Agentmaster_56k4f06dsfp9r'
+        # The normal case (this PC's production package after months of use): folders, no file - nothing kept, nothing made.
+        New-Item -ItemType Directory -Force -Path (Join-Path $storage 'LocalState'), (Join-Path $storage 'LocalCache\Local\Microsoft') | Out-Null
+        Assert ((Save-AmPackageData -Package $relPkg) -eq '') 'package data: an empty storage keeps nothing'
+        Assert (-not (Test-Path (Join-Path $env:USERPROFILE '.agentmaster\package-data'))) 'package data: ... and makes no folder'
+        # v0.1.x kept Windows Terminal's settings in LocalState; a process inside the package wrote under AppData (LocalCache).
+        Write-TestFile (Join-Path $storage 'LocalState\settings.json') '{"profiles":"v0.1"}'
+        Write-TestFile (Join-Path $storage 'LocalState\state.json') '{"state":"v0.1"}'
+        Write-TestFile (Join-Path $storage 'LocalCache\Local\SomeTool\config.txt') 'made inside the package'
+        Write-TestFile (Join-Path $env:USERPROFILE '.agentmaster\terminal\state.json') '{"state":"the profile own"}'
+        $kept = Save-AmPackageData -Package $relPkg
+        Assert ($kept -and $kept.StartsWith((Join-Path $env:USERPROFILE '.agentmaster\package-data\Agentmaster_56k4f06dsfp9r-'))) "package data: kept in <profile>\package-data\<family>-<stamp> (got '$kept')"
+        Assert ((Test-Path (Join-Path $kept 'LocalState\settings.json')) -and (Test-Path (Join-Path $kept 'LocalCache\Local\SomeTool\config.txt'))) 'package data: every file is copied, nested ones included'
+        Assert (([IO.File]::ReadAllText((Join-Path $env:USERPROFILE '.agentmaster\terminal\settings.json'))) -eq '{"profiles":"v0.1"}') "package data: Windows Terminal's settings seed the profile's terminal folder"
+        Assert (([IO.File]::ReadAllText((Join-Path $env:USERPROFILE '.agentmaster\terminal\state.json'))) -eq '{"state":"the profile own"}') 'package data: ... never over a file the profile holds'
+        Assert (Test-Path (Join-Path $storage 'LocalState\settings.json')) "package data: the storage itself is left as it was (the removal is the caller's)"
+        $again = Save-AmPackageData -Package $relPkg
+        Assert ($again -and $again -ne $kept -and (Test-Path (Join-Path $kept 'LocalState\settings.json'))) 'package data: a second keep in the same second gets a folder of its own'
+        # The package's own profile choice decides where; the dev family's default is the Development profile.
+        $mapped = Join-Path $pkgRoot 'elsewhere\am'
+        [IO.File]::WriteAllText((Join-Path $env:USERPROFILE '.agentmaster.profiles'), "# map`nAgentmaster_56k4f06dsfp9r=$mapped`n")
+        Assert ((Get-AmPackageProfileDir -FamilyName 'Agentmaster_56k4f06dsfp9r') -eq $mapped) "package profile: the family's own line in the map"
+        Assert ((Get-AmPackageProfileDir -FamilyName 'AgentmasterDev_56k4f06dsfp9r') -eq (Join-Path $env:USERPROFILE '.agentmaster-dev')) 'package profile: the dev family defaults to the Development profile'
+        $keptMapped = Save-AmPackageData -Package $relPkg
+        Assert ($keptMapped -and $keptMapped.StartsWith((Join-Path $mapped 'package-data'))) 'package data: kept in the profile the map names'
+        # A map that cannot be read: nothing is guessed - it throws, so Remove-AmPackage removes nothing.
+        $mapLock = [IO.File]::Open((Join-Path $env:USERPROFILE '.agentmaster.profiles'), 'Open', 'Read', 'None')
+        $threwMap = $false
+        try { $null = Save-AmPackageData -Package $relPkg } catch { $threwMap = $true } finally { $mapLock.Dispose() }
+        Assert $threwMap 'package data: a profile map that cannot be read stops it (the package is then not removed)'
+        Assert (@($script:AmCoreFunctionNames) -contains 'Save-AmPackageData' -and @($script:AmCoreFunctionNames) -contains 'Get-AmPackageProfileDir') 'package data: both functions reach the phase scripts (the removal also runs as the signed-in user)'
+    } finally {
+        $env:LOCALAPPDATA = $savedLocalAppData
+        $env:USERPROFILE = $savedHome
+    }
+
     # ---- a failed upgrade puts the previous version back (2026-10-21) ----------------------------------------
     # Before, the old files were deleted before the copy, and a copy that failed half way left a folder with
     # neither version: the in-app update then had nothing to start. A source file held open with no sharing
