@@ -145,6 +145,12 @@ namespace Agentmaster::Msg
         return _upload(L"sendPhoto", "photo", "image/png", params, fileName, bytes, timeoutMs);
     }
 
+    TgResult TelegramApi::CallWithFile(std::wstring_view method, const json::Value& params, std::string_view field, std::string_view fileContentType, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept
+    {
+        // §21.42: the same multipart body as a photo or a document - the file's field is the attach name the parameters use.
+        return _upload(method, field, fileContentType, params, fileName, bytes, timeoutMs);
+    }
+
     TgResult TelegramApi::_upload(std::wstring_view method, std::string_view field, std::string_view fileContentType, const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs) noexcept
     {
         try

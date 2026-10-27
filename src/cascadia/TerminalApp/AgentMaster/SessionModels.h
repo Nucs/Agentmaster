@@ -3135,6 +3135,11 @@ namespace Agentmaster
         //    full / max): what a bare /allscreen draws, and the level the card's level picker marks with ⭐. Default "full",
         //    the user's rule of 2026-10-26; an empty or unknown word reads as full (Msg::AllScreenLevelSetting). Applied
         //    live (MessagingService::Apply): the next /allscreen and the next render of a picker use it.
+        //  - messagingCardScreenshots (§21.42): every session's sticky card carries the terminal's SCREEN as a picture, read
+        //    again at each card update (a changed screen is drawn and uploaded in the same call as the text, an unchanged one
+        //    reused). Default ON, the user's request of 2026-10-27. ⚠ The cost is upload bandwidth, not calls: a running card
+        //    updates every ~20 s, ~0.5 MB a new picture. Off = text-only cards (no screen reads, no uploads); a card keeps its
+        //    picture until its next edit. Applied live (MessagingService::Apply). Needs rich messages (messagingRichMessages).
         bool messagingEnabled{ false };
         std::wstring messagingTelegramOwnerId{};
         uint32_t messagingIdleGraceMinutes{ 10 };
@@ -3142,6 +3147,7 @@ namespace Agentmaster
         bool messagingVerbose{ false };
         bool messagingRichMessages{ true };
         std::wstring messagingAllScreenLevel{ L"full" };
+        bool messagingCardScreenshots{ true };
 
         // Agentmaster (MESSAGING.md §21.32.4 — the Telegram FILE LINKS; the cog's MESSAGING tab, FILE LINKS). Claude's
         // file:///K:/... links become links a phone downloads: <base>/station-<station>/<session key>/<path>, served by a

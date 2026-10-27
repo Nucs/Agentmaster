@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "Json.h"
+#include "MessagingCardPicture.h" // §21.42: the card's screenshot (CardPicture, its plan, its rich block and media list)
 #include "MessagingSessionControl.h" // §21.41: who gets the card's ⎋ Esc and 🌙 Deactivate (SessionTakesEsc, SessionIsDeactivatable)
 #include "ProcessInspect.h" // NormalizeRecapText (the one away_summary normalizer every recap reader shares)
 #include "SessionModels.h"
@@ -1852,6 +1853,18 @@ namespace Agentmaster::Msg
         /// </summary>
         bool cardLinked{ false };
         /// <summary>
+        /// §21.42: the SCREENSHOT the topic's card shows — Telegram's file_id of the photo (its largest size, CardPictureFromMessage),
+        /// the moment its screen was read (the caption's clock) and that screen's hash (CardPictureShotHash). A card update whose
+        /// screen is unchanged, a page flip, the slow form upgrade and a screen that cannot be read (a parked tab, no window) all
+        /// reuse it by file_id — no upload; a changed screen replaces it. Saved with the topic, so the first edit after a restart of
+        /// a tab restored dormant (whose screen cannot be read) keeps its last picture instead of dropping it. Empty = the card has
+        /// shown no picture yet. ⚠ Updated from the answer of a post or edit WITH a picture only: a text-only answer (a refused
+        /// picture, pictures off) leaves it, so the next card that can show a picture reuses the last good one.
+        /// </summary>
+        std::wstring cardPictureFileId;
+        int64_t cardPictureAtMs{ 0 }; // §21.42: when the shown picture's screen was read (Unix ms)
+        uint32_t cardPictureShotHash{ 0 }; // §21.42: that screen's CardPictureShotHash (0 = none recorded)
+        /// <summary>
         /// The HISTORY replay's last turn prompt (§21.17): the message id of the bot's "👤 You" line of the newest turn the replay
         /// has sent so far (0 = none yet). Each replayed turn's line replies to the one before it, and the first live turn after the
         /// replay replies to this one — the user's "should be a reply to previous user message. this way we can jump between user
@@ -2221,6 +2234,13 @@ namespace Agentmaster::Msg
             to.Set(L"cardTextHash", json::Value::MkNum(static_cast<double>(t.cardTextHash)));
             to.Set(L"cardRich", json::Value::MkBool(t.cardRich)); // §21.15: the card's form (a rich card with a title chip)
             to.Set(L"cardLinked", json::Value::MkBool(t.cardLinked)); // §21.17: the card's title links to its topic
+            if (!t.cardPictureFileId.empty())
+            {
+                // §21.42: the picture the card shows (omitted while it has shown none).
+                to.Set(L"cardPictureFileId", json::Value::MkStr(t.cardPictureFileId));
+                to.Set(L"cardPictureAtMs", json::Value::MkNum(static_cast<double>(t.cardPictureAtMs)));
+                to.Set(L"cardPictureShotHash", json::Value::MkNum(static_cast<double>(t.cardPictureShotHash)));
+            }
             if (t.historyPromptMessageId > 0)
             {
                 // §21.17: the history replay's last "👤 You" line (omitted while the replay has sent none).
@@ -2341,6 +2361,10 @@ namespace Agentmaster::Msg
                 t.cardRich = to.BoolAt(L"cardRich", false);
                 // §21.17 (absent in an older file: every card posted before the links — the slow form upgrade links it once).
                 t.cardLinked = to.BoolAt(L"cardLinked", false);
+                // §21.42 (absent in an older file: the card has shown no picture yet — its next update draws one).
+                t.cardPictureFileId = to.StrAt(L"cardPictureFileId");
+                t.cardPictureAtMs = t.cardPictureFileId.empty() ? 0 : to.I64At(L"cardPictureAtMs", 0);
+                t.cardPictureShotHash = t.cardPictureFileId.empty() ? 0u : static_cast<uint32_t>(to.I64At(L"cardPictureShotHash", 0));
                 t.historyPromptMessageId = (std::max)(int64_t{ 0 }, to.I64At(L"historyPromptMessageId", 0)); // (std::max): the <windows.h> macro
                 t.tabToken = to.StrAt(L"tabToken");
                 t.errorAnnounced = to.BoolAt(L"errorAnnounced", false);

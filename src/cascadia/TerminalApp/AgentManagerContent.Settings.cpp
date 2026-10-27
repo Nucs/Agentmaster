@@ -1272,6 +1272,11 @@ namespace winrt::TerminalApp::implementation
         _setMsgRich.Header(winrt::box_value(L"Send Claude's Markdown as rich messages (tables, headings)"));
         AgentSetTip(_setMsgRich, L"On (the default): Claude's replies, remarks and plans go as Telegram rich messages, which show its tables, headings, lists and code blocks as Claude wrote them. Off: the older HTML conversion, which shows a table as plain text \x2014 for a Telegram app too old to show rich messages. A rich message Telegram refuses goes as HTML anyway.");
         panel.Children().Append(_setMsgRich);
+        // §21.42: the card's screenshot. Under the rich switch because it needs it: the picture is a block of the rich card.
+        _setMsgCardScreens = ToggleSwitch{};
+        _setMsgCardScreens.Header(winrt::box_value(L"Show the screen in each session's card"));
+        AgentSetTip(_setMsgCardScreens, L"On (the default): every session's status card in Telegram carries a picture of its terminal, taken again at each card update \x2014 a running session's card updates about every 20 s. A screen that changed is uploaded with the card's own edit (no extra message); an unchanged one reuses the picture Telegram already has; a parked tab keeps its last picture. The cost is upload bandwidth: about half a megabyte per new picture. Needs rich messages (above). Off: text-only cards. Applies at once.");
+        panel.Children().Append(_setMsgCardScreens);
         // §21.39: 📜 All Screen's default level. One item per Msg::kAllScreenLevels entry, in its order, so an item's index is the
         // table's row on load and on Save; the built-in default (Full) says so, as the other boxes' placeholders do.
         _setMsgAllScreenLevel = ComboBox{};
@@ -3219,6 +3224,10 @@ namespace winrt::TerminalApp::implementation
             // §21.11: the topics' default mode, the rich switch, the secretary bot's token (masked placeholder only).
             _setMsgVerbose.IsOn(_appSettings.messagingVerbose);
             _setMsgRich.IsOn(_appSettings.messagingRichMessages);
+            if (_setMsgCardScreens)
+            {
+                _setMsgCardScreens.IsOn(_appSettings.messagingCardScreenshots); // §21.42
+            }
             if (_setMsgAllScreenLevel)
             {
                 // §21.39: the stored word's row (an empty or unknown word shows the built-in default, Full, as the service reads it).
@@ -4027,6 +4036,10 @@ namespace winrt::TerminalApp::implementation
             _appSettings.messagingSearchThinking = (idx >= 0 && idx < 6) ? words[idx] : L"high";
             _appSettings.messagingVerbose = _setMsgVerbose.IsOn(); // §21.11
             _appSettings.messagingRichMessages = _setMsgRich.IsOn();
+            if (_setMsgCardScreens)
+            {
+                _appSettings.messagingCardScreenshots = _setMsgCardScreens.IsOn(); // §21.42
+            }
             if (_setMsgAllScreenLevel)
             {
                 // §21.39: the picked row's word; no pick (an empty box) keeps the built-in default's word, never "".
