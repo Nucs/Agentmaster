@@ -636,7 +636,7 @@ namespace Agentmaster::Msg
         _enqueue(std::move(del));
     }
 
-    void MessagingService::_handleMessage(const json::Value& msg, bool edited)
+    void MessagingService::_handleMessage(const json::Value& msg, bool edited, bool fromVoiceLane)
     {
         // H3: the sender first, nothing else read before it.
         int64_t from = 0;
@@ -794,12 +794,20 @@ namespace Agentmaster::Msg
             }
             return;
         }
+        // §21.43 (VOICE.md §6): a VOICE NOTE (an audio file, a round video note) goes to the voice thread and its thread's lane,
+        // and any later message of a thread whose lane still holds something waits there behind it — so a note and a typed
+        // follow-up reach the session in the order the user sent them. The tick hands a held message back here with
+        // fromVoiceLane set, which skips this step (it must never be held twice).
+        if (!fromVoiceLane && _voiceTake(msg, sessionId, threadId, bindHandingOver, edited))
+        {
+            return;
+        }
         const std::wstring text = msg.StrAt(L"text");
         if (text.empty())
         {
-            if (msg.Find(L"photo") || msg.Find(L"document") || msg.Find(L"voice"))
+            if (msg.Find(L"photo") || msg.Find(L"document"))
             {
-                _reply(threadId, L"Files, photos and voice notes are not taken yet (a later build). Text only for now.", false, json::Value{}, msg.I64At(L"message_id", 0));
+                _reply(threadId, L"Files and photos are not taken yet (a later build). Text and voice notes only for now.", false, json::Value{}, msg.I64At(L"message_id", 0));
             }
             return;
         }
@@ -1013,7 +1021,9 @@ namespace Agentmaster::Msg
         {
             return;
         }
-        if (!held && IsBacklogUpdate(dateMs, WallMs()))
+        // §21.43: a VOICE NOTE's transcript carries "am_voice_live" when the note was no backlog when it ARRIVED (_voiceTake) —
+        // a slow transcription (a first worker start loading its model) must not turn a live note into a backlog question.
+        if (!held && !msg.BoolAt(L"am_voice_live") && IsBacklogUpdate(dateMs, WallMs()))
         {
             // D2: a message sent while Agentmaster was closed is asked about, never queued silently. §21.17: a message a new
             // thread's picker HELD was read live; however long the folder pick took, it is no backlog.

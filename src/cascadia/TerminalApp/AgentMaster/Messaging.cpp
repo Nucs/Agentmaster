@@ -945,6 +945,9 @@ namespace Agentmaster::Msg
             // §21.32.4: the FILE LINKS' settings, before any return below — so a later start of the bot finds them, and a
             // running bot's server follows a changed mode or port at once (Messaging.Files.cpp).
             _filesApply(settings);
+            // §21.43: the VOICE NOTES' settings, before any return below too — a later start configures its transcriber with
+            // them, and a running one takes a changed engine at its next note (Messaging.Voice.cpp).
+            _voiceApply(settings);
             if (!settings.messagingEnabled)
             {
                 if (_running.load())
@@ -1224,6 +1227,9 @@ namespace Agentmaster::Msg
             // §21.32.4: the FILE LINKS — the linked set read once per process, the secret and the server when they are on
             // (Messaging.Files.cpp). Before the threads, so the mirror's first pass already rewrites links; never throws.
             _filesStart();
+            // §21.43: the VOICE NOTES' transcriber (the factory's) and its thread — before the poll thread, so the first update can
+            // already hand a voice note over (Messaging.Voice.cpp); never throws.
+            _voiceStart();
             _running.store(true);
             _setStatus(L"Starting\x2026");
             _pollThread = std::thread([this]() noexcept { _pollLoop(); });
@@ -1265,6 +1271,9 @@ namespace Agentmaster::Msg
             {
                 _secretaryApi->Abort(); // the secretary's long poll too (§21.11)
             }
+            // §21.43: the voice thread goes before the other joins — its engine is killed first, so a transcription in flight
+            // fails fast instead of holding the stop (Messaging.Voice.cpp); it uses `_api`, which goes only at the very end.
+            _voiceStop();
             if (_registryObserver)
             {
                 _registry->RemoveObserver(_registryObserver);
@@ -2132,6 +2141,9 @@ namespace Agentmaster::Msg
                 // §21.32.4: the file links' housekeeping (the linked set saved and pruned, a server that could not start tried
                 // again, the summary line); quick unless one of those is due.
                 _filesTick(now);
+                // §21.43: the voice lanes — a transcribed note read as its text, the messages that waited behind it handed over
+                // in order (Messaging.Voice.cpp); quick when nothing is ready.
+                _voiceTick();
                 // Threaded Mode: topics need it; until it is on, getMe is re-asked every minute and the owner
                 // gets one note with the switch's location.
                 if (!_topicsEnabled.load())

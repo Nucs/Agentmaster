@@ -40,6 +40,7 @@ static constexpr std::wstring_view kSpecifyModelSentinel = L"" "specify-model";
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md — the cog's SESSION DATABASE status line
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the cog's MESSAGING tab: the token (Credential Manager), Check bot, the status line
 #include "AgentMaster/TelegramApi.h" // MaskToken — the token box's "stored: 7221…bZ8" placeholder
+#include "AgentMaster/VoiceHttp.h" // MESSAGING.md §21.43 — the VOICE NOTES endpoint's API key in Credential Manager (read, store, forget)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
@@ -1350,6 +1351,87 @@ namespace winrt::TerminalApp::implementation
         _setMsgFilesStatus = Text(L"", 11, false, 0.75);
         _setMsgFilesStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setMsgFilesStatus);
+        // §21.43 (VOICE.md §6): VOICE NOTES — a voice note in a session's topic is transcribed and read like the text it says. Every
+        // box is a plain setting except the endpoint's API key, which goes to Credential Manager on Save (Voice::StoreVoiceApiKey).
+        panel.Children().Append(SettingsSeparator(L"VOICE NOTES"));
+        {
+            auto intro = Text(L"Hold the mic in a session's topic and talk: the voice note is transcribed, its technical words corrected by the session's vocabulary \x2014 its folder's name and CLAUDE.md, a developer glossary and your dictionary below (\x201C" L"Con PTY\x201D becomes ConPTY) \x2014 then posted under the note (\U0001F3A4) and queued like a typed message (or taken as the answer to an open question). A message you send right after a note waits behind it, so the order is kept.", 11, false, 0.75);
+            intro.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(intro);
+        }
+        _setMsgVoiceEnabled = ToggleSwitch{};
+        _setMsgVoiceEnabled.Header(winrt::box_value(L"Read voice notes"));
+        AgentSetTip(_setMsgVoiceEnabled, L"On (the default): voice notes, audio files and round video notes in a session's topic are transcribed and read. Off: each one is answered \x201Cvoice notes are off\x201D and nothing is queued.");
+        panel.Children().Append(_setMsgVoiceEnabled);
+        _setMsgVoiceEngine = ComboBox{};
+        _setMsgVoiceEngine.Header(winrt::box_value(L"Speech engine"));
+        _setMsgVoiceEngine.Items().Append(winrt::box_value(L"A local voice worker (the audio stays on this PC)"));
+        _setMsgVoiceEngine.Items().Append(winrt::box_value(L"An OpenAI-compatible endpoint (the audio is sent to it)"));
+        _setMsgVoiceEngine.Items().Append(winrt::box_value(L"Off"));
+        AgentSetTip(_setMsgVoiceEngine, L"A local voice worker (the default): a program on this PC that speaks Agentmaster's voice protocol (VOICE.md section 6.2) \x2014 the bundled agentmaster-voice.exe when the install carries it, or the command below (the voice POC's Python worker runs Whisper on the GPU or Parakeet on the CPU). It starts with the first note and ends after the idle minutes below. An endpoint: one upload per note to an OpenAI-compatible /v1/audio/transcriptions URL \x2014 OpenAI, Groq, or a speech server of your own; a cloud endpoint receives your voice.");
+        panel.Children().Append(_setMsgVoiceEngine);
+        _setMsgVoiceCommand = TextBox{};
+        _setMsgVoiceCommand.Header(winrt::box_value(L"Voice worker command (local worker)"));
+        _setMsgVoiceCommand.PlaceholderText(L"empty = the bundled agentmaster-voice.exe; e.g. \"Q:\\agentmaster-voice\\venv\\Scripts\\python.exe\" \"K:\\source\\Agentmaster\\tools\\voice-poc\\voice_worker.py\" --engine whisper-large-v3+prompt");
+        AgentSetTip(_setMsgVoiceCommand, L"The whole command line of the voice worker, quoted as you would type it in a console. Agentmaster starts it hidden, in a job that ends with Agentmaster, and talks to it over its standard input and output; its error output goes to voice.log in the profile. A changed command takes effect at the next note.");
+        panel.Children().Append(_setMsgVoiceCommand);
+        _setMsgVoiceEndpoint = TextBox{};
+        _setMsgVoiceEndpoint.Header(winrt::box_value(L"Endpoint URL (endpoint engine)"));
+        _setMsgVoiceEndpoint.PlaceholderText(L"https://api.openai.com/v1/audio/transcriptions");
+        AgentSetTip(_setMsgVoiceEndpoint, L"The transcription URL. Empty = OpenAI's. Groq: https://api.groq.com/openai/v1/audio/transcriptions. A local server may use http://127.0.0.1:<port>/v1/audio/transcriptions.");
+        panel.Children().Append(_setMsgVoiceEndpoint);
+        _setMsgVoiceModel = TextBox{};
+        _setMsgVoiceModel.Header(winrt::box_value(L"Model (endpoint engine)"));
+        _setMsgVoiceModel.PlaceholderText(L"whisper-1");
+        AgentSetTip(_setMsgVoiceModel, L"The model field of the request: whisper-1 or gpt-4o-transcribe at OpenAI, whisper-large-v3-turbo at Groq. Empty = whisper-1.");
+        panel.Children().Append(_setMsgVoiceModel);
+        _setMsgVoiceKey = PasswordBox{};
+        _setMsgVoiceKey.Header(winrt::box_value(L"Endpoint API key"));
+        AgentSetTip(_setMsgVoiceKey, L"Stored in Windows Credential Manager on Save (per profile), never in settings.json or a log. Leave it empty to keep the stored key; a local server needs none.");
+        panel.Children().Append(_setMsgVoiceKey);
+        {
+            auto forget = Button{};
+            forget.Content(winrt::box_value(L"Forget API key"));
+            AgentSetTip(forget, L"Remove the stored endpoint API key from Credential Manager on Save.");
+            forget.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _msgForgetVoiceKey = true;
+                if (_setMsgVoiceKey)
+                {
+                    _setMsgVoiceKey.Password(L"");
+                    _setMsgVoiceKey.PlaceholderText(L"the stored key is removed on Save");
+                }
+            });
+            panel.Children().Append(forget);
+        }
+        _setMsgVoiceLanguage = TextBox{};
+        _setMsgVoiceLanguage.Header(winrt::box_value(L"Spoken language"));
+        _setMsgVoiceLanguage.PlaceholderText(L"en (empty = the engine detects it)");
+        AgentSetTip(_setMsgVoiceLanguage, L"A language code (en, he, de, \x2026) the engine is told; empty lets it detect the language per note. Technical English is recognized best with en: detection can mistake a short note's language.");
+        panel.Children().Append(_setMsgVoiceLanguage);
+        _setMsgVoiceContext = ToggleSwitch{};
+        _setMsgVoiceContext.Header(winrt::box_value(L"Use the session's folder as vocabulary"));
+        AgentSetTip(_setMsgVoiceContext, L"On (the default): the session's folder name and the hard names of its CLAUDE.md (ConPTY, DuckDB, MSIX \x2014 never everyday words) bias the engine and correct the transcript. Off: the built-in developer glossary and your dictionary only.");
+        panel.Children().Append(_setMsgVoiceContext);
+        _setMsgVoiceDictionary = TextBox{};
+        _setMsgVoiceDictionary.Header(winrt::box_value(L"Your dictionary (one entry per line)"));
+        _setMsgVoiceDictionary.PlaceholderText(L"FluidVoice\nfluid voice, fluid boys => FluidVoice\n# a line starting with # is a note");
+        _setMsgVoiceDictionary.AcceptsReturn(true);
+        _setMsgVoiceDictionary.TextWrapping(TextWrapping::Wrap);
+        _setMsgVoiceDictionary.MinHeight(64);
+        AgentSetTip(_setMsgVoiceDictionary, L"A line with a word boosts it (the engine leans toward that spelling, and a split or mis-cased form of it is corrected). \x201Cspoken form, other form => Word\x201D also rewrites exactly those forms into the word, everyday words included \x2014 use it for what the engine keeps getting wrong.");
+        panel.Children().Append(_setMsgVoiceDictionary);
+        _setMsgVoiceEcho = ToggleSwitch{};
+        _setMsgVoiceEcho.Header(winrt::box_value(L"Post the transcript under the voice note"));
+        AgentSetTip(_setMsgVoiceEcho, L"On (the default): the transcript is posted silently under the note (\U0001F3A4 \x2026) before it is queued, so you see what the session gets. Editing that line changes nothing: send a correction as text.");
+        panel.Children().Append(_setMsgVoiceEcho);
+        _setMsgVoiceIdle = TextBox{};
+        _setMsgVoiceIdle.Header(winrt::box_value(L"End the local worker after (idle minutes)"));
+        _setMsgVoiceIdle.PlaceholderText(L"10 (0\x2013" L"1440)");
+        AgentSetTip(_setMsgVoiceIdle, L"The worker keeps its model in memory while notes keep coming; after this many minutes without one it ends, and the next note starts it again (paying the model's load: seconds for Parakeet, longer for Whisper on a GPU). 0 ends it after every note; blank resets to 10.");
+        panel.Children().Append(_setMsgVoiceIdle);
+        _setMsgVoiceStatus = Text(L"", 11, false, 0.75);
+        _setMsgVoiceStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setMsgVoiceStatus);
         panel.Children().Append(SettingsSeparator(L"SECRETARY (OPTIONAL)"));
         {
             auto steps = Text(L"Your prompts typed at the PC \x2014 and your turns in a recreated topic's history \x2014 can appear in the topics as YOUR OWN messages, sent on your behalf. Telegram lets a bot connected to your account (Telegram \x2192 Settings \x2192 Chat Automation) send to your chats with OTHER bots, so this takes a SECOND bot: @BotFather \x2192 /newbot \x2192 paste its token below; in @BotFather, in that bot's Bot Settings, turn on Secretary Mode and Bot-to-Bot Communication. Save, then in Telegram \x2192 Settings \x2192 Chat Automation add the second bot, let it reply to messages, and let it reach your chat with the topics bot. Agentmaster checks with one message in the \U0001F50E Search topic; the status above says how it went. Without a second bot, connecting the topics bot itself there is tried the same way.", 11, false, 0.75);
@@ -3279,6 +3361,31 @@ namespace winrt::TerminalApp::implementation
             }
             _setMsgFilesStatus.Text(winrt::hstring{ status });
         }
+        if (_setMsgVoiceEnabled)
+        {
+            // §21.43: the VOICE NOTES boxes as stored; the API key box stays empty (the key is in Credential Manager), its
+            // placeholder saying whether one is stored; the status line is the service's.
+            _setMsgVoiceEnabled.IsOn(_appSettings.messagingVoiceEnabled);
+            _setMsgVoiceEngine.SelectedIndex(_appSettings.voiceEngine == L"openai" ? 1 : (_appSettings.voiceEngine == L"worker" ? 0 : 2));
+            _setMsgVoiceCommand.Text(winrt::hstring{ _appSettings.voiceWorkerCommand });
+            _setMsgVoiceEndpoint.Text(winrt::hstring{ _appSettings.voiceEndpoint });
+            _setMsgVoiceModel.Text(winrt::hstring{ _appSettings.voiceModel });
+            _msgForgetVoiceKey = false;
+            _setMsgVoiceKey.Password(L"");
+            _setMsgVoiceKey.PlaceholderText(::Agentmaster::Voice::ReadVoiceApiKey(::Agentmaster::AgentmasterStateDir()).empty() ? L"none stored" :
+                                                                                                                                   L"a key is stored (type to replace it)");
+            _setMsgVoiceLanguage.Text(winrt::hstring{ _appSettings.voiceLanguage });
+            _setMsgVoiceContext.IsOn(_appSettings.voiceUseSessionContext);
+            _setMsgVoiceDictionary.Text(winrt::hstring{ _appSettings.voiceDictionary });
+            _setMsgVoiceEcho.IsOn(_appSettings.voiceEchoTranscript);
+            _setMsgVoiceIdle.Text(winrt::hstring{ std::to_wstring(_appSettings.voiceWorkerIdleMinutes) });
+            std::wstring status;
+            if (const auto& svc = ::Agentmaster::SharedEngine().messaging)
+            {
+                status = svc->VoiceStatusLine();
+            }
+            _setMsgVoiceStatus.Text(winrt::hstring{ status });
+        }
         if (_setTaskbarUnreadBadge)
         {
             _setTaskbarUnreadBadge.IsOn(_appSettings.taskbarUnreadBadge);
@@ -4074,6 +4181,49 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             _appSettings.messagingFileLinksExclude = TrimFileLinkBox(excluded);
+        }
+        if (_setMsgVoiceEnabled)
+        {
+            // §21.43: the VOICE NOTES settings as typed (trimmed; the dictionary keeps its lines). The API key goes to Credential
+            // Manager only when typed (or removed by "Forget API key"): an empty box keeps the stored key.
+            const auto trim = [](std::wstring s) {
+                const size_t a = s.find_first_not_of(L" \t\r\n");
+                if (a == std::wstring::npos)
+                {
+                    return std::wstring{};
+                }
+                return s.substr(a, s.find_last_not_of(L" \t\r\n") - a + 1);
+            };
+            _appSettings.messagingVoiceEnabled = _setMsgVoiceEnabled.IsOn();
+            const int32_t engine = _setMsgVoiceEngine.SelectedIndex();
+            _appSettings.voiceEngine = engine == 1 ? L"openai" : (engine == 2 ? L"off" : L"worker");
+            _appSettings.voiceWorkerCommand = trim(std::wstring{ _setMsgVoiceCommand.Text() });
+            _appSettings.voiceEndpoint = trim(std::wstring{ _setMsgVoiceEndpoint.Text() });
+            _appSettings.voiceModel = trim(std::wstring{ _setMsgVoiceModel.Text() });
+            _appSettings.voiceLanguage = trim(std::wstring{ _setMsgVoiceLanguage.Text() });
+            _appSettings.voiceUseSessionContext = _setMsgVoiceContext.IsOn();
+            _appSettings.voiceDictionary = trim(std::wstring{ _setMsgVoiceDictionary.Text() });
+            _appSettings.voiceEchoTranscript = _setMsgVoiceEcho.IsOn();
+            {
+                const std::wstring idle = trim(std::wstring{ _setMsgVoiceIdle.Text() });
+                uint32_t minutes = 10; // blank or garbage: the default
+                if (!idle.empty() && std::all_of(idle.begin(), idle.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }) && idle.size() <= 6)
+                {
+                    minutes = static_cast<uint32_t>(std::stoul(idle));
+                }
+                _appSettings.voiceWorkerIdleMinutes = ::Agentmaster::ClampVoiceWorkerIdleMinutes(minutes);
+            }
+            const std::wstring typedKey{ _setMsgVoiceKey.Password() };
+            if (!typedKey.empty())
+            {
+                ::Agentmaster::Voice::StoreVoiceApiKey(::Agentmaster::AgentmasterStateDir(), typedKey);
+                _setMsgVoiceKey.Password(L"");
+            }
+            else if (_msgForgetVoiceKey)
+            {
+                ::Agentmaster::Voice::StoreVoiceApiKey(::Agentmaster::AgentmasterStateDir(), L"");
+            }
+            _msgForgetVoiceKey = false;
         }
         if (_setTaskbarUnreadBadge)
         {

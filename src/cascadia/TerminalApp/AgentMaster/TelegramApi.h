@@ -127,6 +127,19 @@ namespace Agentmaster::Msg
         TgResult CallWithFile(std::wstring_view method, const json::Value& params, std::string_view field, std::string_view fileContentType, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs = 60000) noexcept;
 
         /// <summary>
+        /// Downloads a file the bot received (MESSAGING.md §21.43, VOICE.md §6: a voice note): a GET of
+        /// https://api.telegram.org/file/bot&lt;token&gt;/&lt;filePath&gt;, the path getFile named. Blocks like Call; call it on a
+        /// worker thread only. Binary-safe: the bytes come back as they are.
+        /// </summary>
+        /// <param name="filePath">The `file_path` of getFile's answer ("voice/file_12.oga").</param>
+        /// <param name="maxBytes">The most bytes accepted (the Bot API serves files up to 20 MB); a larger body is a failure.</param>
+        /// <param name="out">Receives the bytes (cleared first).</param>
+        /// <param name="timeoutMs">The receive timeout.</param>
+        /// <returns>`ok` with httpStatus 200 on success (`result` stays Null); a failure says why. Never throws; the URL holds the
+        /// token, so no failure text ever contains the URL.</returns>
+        TgResult DownloadFile(std::wstring_view filePath, size_t maxBytes, std::string& out, uint32_t timeoutMs = 60000) noexcept;
+
+        /// <summary>
         /// Ends the request in flight, if any, from ANOTHER thread: the blocked call returns with a
         /// transport failure. The long poll (getUpdates with a 50 s timeout) is the one call that needs
         /// it: Stop() must not wait a minute. Safe to call with nothing in flight. Never throws.

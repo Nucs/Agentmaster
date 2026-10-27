@@ -6093,6 +6093,43 @@ and an older file, the switch's round trip and default, the refusal limit. The r
 6. A new message in the topic: the card re-posts below it WITH the picture (by file_id when the screen did not change).
 7. The census after 10 minutes: `pictures(drawn=…, … KB drawn)`, and no `refused` lines.
 
+### 21.43 🎤 Voice notes: a voice note in a session's topic is read as the prompt it says (2026-10-27; NOT BUILT — the next build must purge)
+
+The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOICE.md). Here, what the bot does.
+
+* **In a session's topic** a voice note (an audio file, a round video note) gets 👀, is downloaded (`getFile` + the file
+  server, 20 MB at most) and transcribed by the voice engine with the SESSION'S VOCABULARY (its folder's name, the hard
+  names of its CLAUDE.md, a developer glossary, the owner's dictionary; VOICE.md §5), which also respells split or
+  misheard names in the text ("Con PTY" → ConPTY). The transcript is posted silently under the note (`🎤 <i>…</i>`,
+  `voiceEchoTranscript`), then read by `_handleTopicMessage` like a typed message: a queued prompt whose reactions go on the
+  NOTE, or the answer of an open question card (§21.30), or the backlog question of D2 for a note sent while Agentmaster was
+  closed — judged when the note ARRIVED (`am_voice_live`), so a slow transcription never makes a live note backlog. A caption
+  typed under the recording follows the transcript.
+* **Order:** a message of the same thread that arrives while a note is being transcribed WAITS behind it in the thread's
+  lane (`_voiceLanes`; an edit replaces the held message) and is handed to `_handleMessage` again, in order, by the tick.
+* **Answered, never queued:** a note in a thread with no session (the main view, the 🔎 Search topic, a new thread's wizard),
+  in a thread whose new-thread bind is still handing over, with voice notes off, with no transcriber (the m5 harness), over
+  20 MB, or a failed transcription ("🎤 I could not transcribe this voice note: <why>").
+* **Engines** (VOICE.md §6): a local VOICE WORKER (`voiceEngine = worker`: `voiceWorkerCommand`, or the bundled worker once it
+  ships) spoken to in JSON lines; or an OpenAI-compatible endpoint (`openai`; the key in Credential Manager). One note at a
+  time across every topic (the voice thread, `Messaging.Voice.cpp`); the downloaded file is deleted after its transcription.
+* **Stop:** `_voiceStop` runs first and kills the engine (a note in flight fails fast); the notes and held messages still in
+  the lanes are logged and dropped (send them again).
+* **Logs:** `hooks.log` `[msg] <sid> voice note queued for transcription …` / `… transcribed (N chars, <engine>, … ms, N
+  vocabulary fix(es))` / `… not transcribed …`, `[nav] remote telegram voice …`; the engine's own lines in `voice.log`.
+
+**Check after the build** (dev, the dev bot; `voiceWorkerCommand` = the POC worker, VOICE.md §6.2):
+1. A voice note in a session's topic: 👀 at once; within seconds the 🎤 line under it, then ✍ on the NOTE and the prompt in
+   the queue (the session's Prompt Queue at the PC shows the transcript).
+2. The three evaluation sentences (VOICE.md §7.1) come out as the 🎤 lines with ConPTY, Agentmaster, Ogg Opus, PCM, JSONL
+   spelled right; `voice.log` names the respellings.
+3. A voice note, then at once a typed message: the session's queue holds the transcript FIRST.
+4. An open question card answered by a voice note: the card takes the transcript as its answer.
+5. A voice note in the 🔎 Search topic: the "read in a session's topic" answer, nothing queued.
+6. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
+7. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
+   ends after the idle minutes (`voice.log`: "idle for … min").
+
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 
 > The user's questions (2026-10-17, session 0b1f8635): "Lets discover how can we make forums/groups to: Can you make groups
