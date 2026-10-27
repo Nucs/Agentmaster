@@ -552,6 +552,12 @@ namespace Agentmaster
         {
             o.Set(L"remoteSource", json::Value::MkStr(p.remoteSource));
         }
+        // Agentmaster (MESSAGING.md §21.44): when a remote prompt went into the queue of a busy session; omitted at 0 (every
+        // prompt that did not wait, every prompt that is not remote), so a sessions.json without one is byte-unchanged.
+        if (p.remoteQueuedBusyUnixMs > 0)
+        {
+            o.Set(L"remoteQueuedBusyUnixMs", json::Value::MkNum(static_cast<double>(p.remoteQueuedBusyUnixMs)));
+        }
         return o;
     }
 
@@ -574,6 +580,9 @@ namespace Agentmaster
         p.sentAtUnixMs = v.I64At(L"sentAtUnixMs");
         p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Autorun"));
         p.remoteSource = v.StrAt(L"remoteSource"); // MESSAGING.md §7.1: absent => "" (not a remote prompt)
+        // MESSAGING.md §21.44: absent (an older file, or a prompt that never waited) => 0. A negative value (a hand-edited
+        // file) reads as 0 too: the mirror's test is "> 0", and a stray number must not post a "sent from the queue" line.
+        p.remoteQueuedBusyUnixMs = (std::max)(int64_t{ 0 }, v.I64At(L"remoteQueuedBusyUnixMs"));
         // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already happened in
         // a past run (or never will) — so mark it CONSUMED on load (DELIVERY.md RC3). Left false,
         // every restored Sent prompt read as an in-flight, un-acknowledged send: the Enter-retry

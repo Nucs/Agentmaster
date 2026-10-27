@@ -7816,6 +7816,12 @@ namespace Agentmaster::Msg
                 bool fromTopic = false;
                 bool fromQueue = false;
                 int64_t topicMessageId = 0; // a prompt sent from this topic: the user's own message (QueuedPrompt::remoteSource)
+                // §21.44: the matched entry is a topic message that WAITED in the queue (PromptWaitedInQueue), whether the queue
+                // had sent it when it was read, its queue id (the reaction sync's key) and when it went into the queue.
+                bool waitedInQueue = false;
+                bool matchedSent = false;
+                std::wstring matchedPromptId;
+                int64_t queuedBusyMs = 0;
                 const auto matchQueue = [&](const SessionInfo& from) {
                     size_t looked = 0;
                     for (auto q = from.queue.rbegin(); q != from.queue.rend() && looked < 60; ++q, ++looked)
@@ -7832,6 +7838,10 @@ namespace Agentmaster::Msg
                             {
                                 topicMessageId = static_cast<int64_t>(std::wcstoll(q->remoteSource.c_str() + 9, nullptr, 10));
                             }
+                            waitedInQueue = PromptWaitedInQueue(*q);
+                            matchedSent = q->status == PromptStatus::Sent;
+                            matchedPromptId = q->id;
+                            queuedBusyMs = q->remoteQueuedBusyUnixMs;
                             return true;
                         }
                     }
@@ -7851,6 +7861,26 @@ namespace Agentmaster::Msg
                         matchQueue(*fresher);
                     }
                 }
+                else if (waitedInQueue && !matchedSent)
+                {
+                    // §21.44: a message that waited, still Pending in the tick's snapshot: the queue may have sent it after the
+                    // snapshot was taken (mark-Sent comes before the words reach the transcript, Rule #4, so any read made after
+                    // this line was read shows it Sent). One fresh read tells "the queue sent it now" from the same words typed at
+                    // the PC while it still waits (then it stays Pending, and it gets its own line when it goes).
+                    if (!fresher)
+                    {
+                        fresher = _session(sessionId);
+                    }
+                    if (fresher)
+                    {
+                        matchQueue(*fresher);
+                    }
+                }
+                // §21.44: the queue sent a topic message that WAITED (a turn or a delivery was in flight when it came, or an earlier
+                // message was ahead of it: RemotePromptWait): the user's own message sits above what kept it waiting, so the bot posts
+                // the user's line HERE, where its turn starts — "📱 from the phone · 📤 sent from the queue" — and that line, not the
+                // message, is the turn's prompt (its status, the reply's quote, the next turn's).
+                const bool wentFromQueue = fromTopic && waitedInQueue && matchedSent;
                 // §21.17: the PREVIOUS turn's prompt, which this turn's line replies to (the user's "should be a reply to previous
                 // user message. this way we can jump between user turns"): the live mirror's last prompt — its id may still be in
                 // flight, the shared PromptRef resolves it when this line goes —, else the record's (after a restart), else the
@@ -7878,26 +7908,31 @@ namespace Agentmaster::Msg
                     topic.promptMessageId = 0;
                     topic.promptBotLine = false;
                     topic.promptTsMs = it.tsMs;
-                    topic.promptSource = static_cast<int>(fromTopic ? PromptSource::Phone : (fromQueue ? PromptSource::Runner : PromptSource::Pc));
+                    // §21.44: a message that waited is its own source (PhoneQueued): the status edits of its line keep "📤 sent
+                    // from the queue".
+                    topic.promptSource = static_cast<int>(wentFromQueue ? PromptSource::PhoneQueued
+                                                                        : (fromTopic ? PromptSource::Phone : (fromQueue ? PromptSource::Runner : PromptSource::Pc)));
                     topic.promptText = it.text.size() > kUserLineMaxChars ? it.text.substr(0, kUserLineMaxChars) : it.text;
                     topic.promptStatus = static_cast<int>(PromptTurnStatus::Running);
                     topic.promptInterrupted = false;
-                    if (fromTopic && topicMessageId > 0)
+                    if (fromTopic && !wentFromQueue && topicMessageId > 0)
                     {
                         // The user's own message from this topic: known at once; its status is a reaction (_syncReactions has
-                        // just shown 👨‍💻 for the pickup, the running status).
+                        // just shown 👨‍💻 for the pickup, the running status). §21.44: not for a message that waited — the bot's
+                        // line below is the turn's prompt, and its id comes with that line's send (lineSent).
                         ref->id.store(topicMessageId);
                         topic.promptMessageId = topicMessageId;
                     }
                     m.promptRef = ref;
                 }
-                if (fromTopic)
+                if (fromTopic && !wentFromQueue)
                 {
                     break;
                 }
                 // §21.12: "👤 You · 14:02 · typed at the PC · ⏳ running" over the prompt (a mid-turn message: no status). Sent at
                 // the FINAL priority, the reply's: queued in the same tick (a fast turn), the reply must not overtake its prompt.
-                const PromptSource source = fromQueue ? PromptSource::Runner : PromptSource::Pc;
+                // §21.44: "👤 You · 14:03 · 📱 from the phone · 📤 sent from the queue · ⏳ running" for a topic message that waited.
+                const PromptSource source = wentFromQueue ? PromptSource::PhoneQueued : (fromQueue ? PromptSource::Runner : PromptSource::Pc);
                 // §21.17: the session's title as the line's second row, a link to this topic (in the chat's "All" view it says
                 // whose turn this is; _showPromptStatus edits the line with the same row).
                 const std::wstring html = BuildPromptLineHtml(it.tsMs, source, it.text, it.midTurn ? PromptTurnStatus::None : PromptTurnStatus::Running, it.midTurn,
@@ -7919,7 +7954,21 @@ namespace Agentmaster::Msg
                     std::lock_guard lk{ _mtx };
                     businessMode = _state.businessMode;
                 }
-                if (businessMode == 1)
+                if (wentFromQueue)
+                {
+                    // §21.44: the user's own message was sent — 🫡, its last mark: the turn's status shows on the line queued just
+                    // below. Recorded as Sent, so the reaction sync neither shows 👨‍💻 for it (that reads "running" on a message whose
+                    // turn shows its status elsewhere) nor takes it back to ✍ while the echo that sets `echoed` is still on its way.
+                    _react(topicMessageId, kSentFromQueueReaction);
+                    {
+                        std::lock_guard lk{ _mtx };
+                        _reacted[matchedPromptId] = PromptStatus::Sent;
+                    }
+                    const int64_t wentAtMs = it.tsMs > 0 ? it.tsMs : WallMs();
+                    _log(L"[msg] " + ShortId(sessionId) + L" a topic message that waited in the queue went (message " + std::to_wstring(topicMessageId) + L", " +
+                         TgShortSpan(wentAtMs - queuedBusyMs) + L" in the queue" + (it.midTurn ? L", mid-turn" : L"") + L"): \"sent from the queue\" line posted");
+                }
+                if (businessMode == 1 && !wentFromQueue)
                 {
                     // SECRETARY MODE (§21.5): the prompt is the user's own bubble in the topic, sent on the user's
                     // behalf through the Telegram Business connection; a refused send falls back to the bot's line
@@ -7964,6 +8013,8 @@ namespace Agentmaster::Msg
                 else
                 {
                     // §21.17: a turn's line quotes the previous turn's prompt (a message typed mid-turn has no previousTurn).
+                    // §21.44: so does a "sent from the queue" line, in every mode — even with the secretary on it is the bot's line,
+                    // since its title row is what says the message went from the queue (a send as the user carries only the words).
                     _sendText(topic.threadId, html, true, SendPriority::Final, L"", json::Value{}, lineSent, 0, true, previousTurn);
                 }
                 break;
@@ -8253,7 +8304,8 @@ namespace Agentmaster::Msg
     void MessagingService::_syncReactions(const SessionInfo& s)
     {
         // A remote prompt's status as a reaction on the user's own Telegram message: ✍ queued (set when it
-        // was queued), 👨‍💻 sent and picked up, 👎 failed.
+        // was queued), 👨‍💻 sent and picked up, 👎 failed. §21.44: 🫡 instead of 👨‍💻 for a message that waited in the queue
+        // (the mirror sets it with its "sent from the queue" line; this sync only as the fallback).
         for (const auto& q : s.queue)
         {
             if (q.remoteSource.rfind(L"telegram:", 0) != 0)
@@ -8274,6 +8326,36 @@ namespace Agentmaster::Msg
             if (q.status == PromptStatus::Sent && !q.echoed)
             {
                 want = PromptStatus::Pending; // sent but not yet picked up: still ✍
+            }
+            // §21.44: a topic message that WAITED in the queue. Its pickup is the MIRROR's to show: it posts the "📤 sent from the
+            // queue" line and sets 🫡 here (recording Sent). So this sync never shows 👨‍💻 for one (its turn's status is on that
+            // line), never takes a shown 🫡 back to ✍ (the line can come before the echo that sets `echoed`), and sets 🫡 itself
+            // only when the line never came (SentFromQueueReactionOverdue: two minutes after the send). A failure still goes to
+            // the 👎 path below; a Pending one keeps ✍ through the plain path.
+            if (PromptWaitedInQueue(q) && want != PromptStatus::Failed && (want == PromptStatus::Sent || (known && shown == PromptStatus::Sent)))
+            {
+                if (!known)
+                {
+                    // Picked up before this run saw it queued (a restart): recorded, not reacted — the rule below, so a restart
+                    // never re-reacts on every old message. A line this run's mirror posts sets its 🫡 all the same.
+                    std::lock_guard lk{ _mtx };
+                    _reacted[q.id] = PromptStatus::Sent;
+                }
+                else if (shown != PromptStatus::Sent && SentFromQueueReactionOverdue(q, WallMs()))
+                {
+                    // The message's id as the mirror reads it (PromptWaitedInQueue guarantees the "telegram:" prefix): wcstoll
+                    // throws nothing, and garbage reads as 0, which _react ignores — the record is still marked, so a garbled
+                    // one is looked at once, not every tick.
+                    const int64_t overdueId = static_cast<int64_t>(std::wcstoll(q.remoteSource.c_str() + 9, nullptr, 10));
+                    _react(overdueId, kSentFromQueueReaction);
+                    {
+                        std::lock_guard lk{ _mtx };
+                        _reacted[q.id] = PromptStatus::Sent;
+                    }
+                    _log(L"[msg] " + ShortId(s.id) + L" a topic message that waited in the queue was sent " + TgShortSpan(WallMs() - q.sentAtUnixMs) +
+                         L" ago without its \"sent from the queue\" line (message " + std::to_wstring(overdueId) + L"): marked \U0001FAE1 by the reaction sync");
+                }
+                continue;
             }
             if (want == shown)
             {

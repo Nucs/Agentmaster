@@ -65,6 +65,7 @@
 #include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
 #include "MessagingSteer.h" // §21.33: /steer, the words sent NOW (the decision, the texts, the prompt, the watch's verdict)
 #include "MessagingSessionControl.h" // §21.41: the card's ⎋ Esc and 🌙 Deactivate (the window actions, its decisions, the answers' words and texts)
+#include "MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)

@@ -13,7 +13,7 @@
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
 > through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.37 (a Debug build
 > of dae998824 by the build server, since 2026-10-26) holds everything through §21.39, its level picker and File diffs
-> included (§21.40, §21.41 and §21.42 are in no build yet); §21.32–§21.32.3 and §21.36 are
+> included (§21.40 – §21.44 are in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -2027,7 +2027,9 @@ of telegram. The one used by debug should move to the release agentmaster … Th
   characters or 8 lines an expandable quote; cut at 3,000 — an edit cannot be split). The old `⌨ HH:MM · <first line>` and
   `⚙` lines are gone.
 - **Where the source comes from**: live, the session's queue (`QueuedPrompt::remoteSource` = a message of this topic, origin
-  Autorun = the runner); a prompt sent from this topic is still not mirrored (the user's own message is there). In the
+  Autorun = the runner); a prompt sent from this topic is still not mirrored (the user's own message is there) — except one
+  that WAITED in the queue behind a turn, which the bot posts again when the queue sends it, as "📤 sent from the queue"
+  (§21.44). In the
   history the same queue decides, so a phone prompt replays as "📱 from the phone".
 - A send AS THE USER (the secretary, §21.11) stays the user's own bubble with no header.
 
@@ -6129,6 +6131,113 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
 6. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
 7. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
    ends after the idle minutes (`voice.log`: "idle for … min").
+
+### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; NOT BUILT — the next build must purge)
+
+> The user's request (2026-10-27): "When user sends a message on telegram which gets queued as we are actively running then the
+> message will not be chronologically ordered which is fine since we queue up msgs. but if the queues msg gets dequeued and sent,
+> we need to write a message with title mentioning that this message sent from queue".
+
+**What it was.** A message typed in a session's topic is a queued prompt (D8, §7.1). While a turn is in flight it waits, and the
+turn's remarks, its reply or its question land in the topic BELOW it. When the queue finally sent it, nothing new appeared: the
+user's own message, above the previous turn's reply, became the turn's prompt — its reactions 👨‍💻 → 👌 carried the turn's status
+(§21.12.3) — and the turn's reply quoted it up there (§21.12.2). The turn read as if it had started where the message was typed.
+
+**Now** (the pure half: `AgentMaster/MessagingFromQueue.h`; the service: `_queueRemotePrompt` in `Messaging.Inbound.cpp`,
+`_applyItems` and `_syncReactions` in `Messaging.cpp`):
+- **When a message waits.** Every queued topic message goes through one funnel, `_queueRemotePrompt`: a typed message, a backlog
+  [Queue], a message that a question card held, `/takedraft`, a voice note's transcript (§21.43). It asks `RemotePromptWait`
+  INSIDE the registry update that inserts the message, so the state and the queue are those of that very moment. The message
+  waits when the session's turn is in flight (Running, Needs approval), when a delivery is in flight (a prompt sent and not
+  picked up yet), or when an earlier message of the topic waits ahead of it. Then the queue entry is stamped with the moment
+  (`QueuedPrompt::remoteQueuedBusyUnixMs`, kept in `sessions.json`, omitted at 0), and the log line says why. The scheduler
+  never reads the stamp: the message goes exactly when it went before.
+- **When the queue sends it**, its words reach the transcript, and the mirror matches that prompt to the stamped, Sent queue
+  entry (`PromptWentFromQueue`). The bot then posts the user's line where the turn really starts:
+
+  `👤 You · 14:03 · 📱 from the phone · 📤 sent from the queue · ⏳ running`, then the session's title row (§21.17.2), then the
+  words.
+
+  From then on that line is the TURN'S PROMPT, as a line typed at the PC is. Its status is an edit of it (⏳ running → ✅
+  answered …; `PromptSource::PhoneQueued` keeps the queue's words in every edit and after a restart). The turn's reply quotes it
+  (§21.12.2). It replies to the previous turn's prompt, and the next turn's line replies to it (§21.17.3). The clock is the
+  moment it was sent (the transcript's). A waited message that a running turn takes in mid-turn reads "· mid-turn", with no
+  status.
+- **The user's own message** gets 🫡 (`kSentFromQueueReaction`) where it used to get 👨‍💻 and the turn's status reactions: it was
+  sent, and its turn shows its status on the line below. Before that it shows ✍, like every queued message. The mirror sets 🫡
+  when it posts the line, which is this run's pickup (after a restart too). The reaction sync never takes 🫡 back to ✍, because
+  the line can come before the echo that marks the prompt picked up. It sets 🫡 itself only when the line never came, two
+  minutes after the send (`SentFromQueueReactionOverdue`; its log line names the message).
+- **A message that went at a ready moment** keeps the old form: the user's message is the prompt, and its status is a reaction.
+  An idle session sends it after the 5 s remote settle, and a dormant tab's start takes a few seconds, so nothing was posted
+  between the message and its turn. There is nothing to put right, and nothing is repeated.
+- **In every mode.** Conversation-only and verbose topics both show the user's posts. With the secretary on (§21.11.4) the line is
+  still the BOT'S, because its title row is what says the message went from the queue (a send as the user carries only the
+  words).
+- **A race it handles.** The tick takes its session snapshot before it reads the transcript, so a message the queue sent in
+  between still reads Pending there. For such a match the mirror reads the registry once more: mark-Sent comes before the words
+  reach the transcript (Rule #4), so any read made after the line was read shows it Sent. That read tells "the queue sent it
+  now" from the same words typed at the PC while the message still waits; such a message keeps waiting and gets its own line
+  when it goes.
+
+**Limits.**
+- A session in **Error** or **Done** holds the message too (neither state is ready, Rule #1), but no turn runs there, so the
+  message is not stamped. If a restart sends it later, it keeps the old form.
+- A turn typed **at the PC after** a message was queued at a ready moment is not foreseen at the queueing, so that message gets no
+  line.
+- A **/steer** is not stamped: it is sent at once, or put first in the queue when it cannot be (§21.33).
+- In a **history replay** (§21.9) the message is a "📱 from the phone" line in transcript order, as before: there it already sits
+  where its turn starts.
+- After a **downgrade** to a build before §21.44, the last prompt's status edits say "⚙ runner" until the next prompt (that build
+  clamps the new source number to its own last value).
+- **Cost:** one more message (a line at the Final priority, like a PC prompt's) and one reaction per message that waited.
+
+**Logs.**
+- `[msg] <sid8> queued from topic (message N, M chars; waits: the turn is in flight | a prompt just sent has not started its turn
+  | an earlier message waits ahead of it)`
+- `[msg] <sid8> a topic message that waited in the queue went (message N, 3m in the queue[, mid-turn]): "sent from the queue" line
+  posted`
+- The fallback: `[msg] <sid8> a topic message that waited in the queue was sent 2m ago without its "sent from the queue" line
+  (message N): marked 🫡 by the reaction sync`
+
+**Tests and checks.** The m5 suite's `TestMessaging` has a §21.44 block of 43 checks:
+- when a message waits: at rest, a running turn, a question, Error and Done, a delivery in flight, a picked-up or Typed record, an
+  earlier message ahead of or after the insert point, an index past the end, a legacy Held prompt, a Failed one, the order of
+  the reasons; and the log's words;
+- the mirror's test: Pending, Sent and Failed, a stamp on a prompt that is not the topic's, a source without the `telegram:`
+  prefix;
+- the fallback: its two minutes, a clock that stepped back, a prompt not picked up, no send time; 🫡 is none of the status
+  reactions, and neither ✍ nor 👎;
+- the line: its header, a status edit, mid-turn, the title row;
+- `PhoneQueued` through the state file, and an unknown larger number;
+- the stamp's round trip in `sessions.json`: written only for the prompt that waited, to the millisecond; absent and negative
+  read as 0.
+
+Every check ran on HEAD plus this change alone: until eb2ccadfb committed, another session's unfinished §21.43 hunks sat in six
+of the same files.
+- The m5 suite, on an isolated copy with its own profile: 10,379 checks before eb2ccadfb and 10,569 on top of it (its voice
+  tests included), each time with only the 3 known `TestTaskbarBadge` failures. One run also failed the scheduler's real-time
+  settle check ("the held prompt self-releases …"), the known flake under load; the exe run again passed it.
+- `cl /Zs` with the last Debug build's recorded lines over a shadow tree: all 111 TerminalAppLib units, the CLI's 17 at
+  `/W4 /WX`, and the four voice units the last build has not recorded yet (with `Messaging.cpp`'s line).
+- Negative controls, each as planned:
+  - the new member fails a `static_assert` with C2338, in the app and in the CLI;
+  - a correct use compiles, and so does a header that only the shadow holds;
+  - a wrong argument count fails with C2660;
+  - one bad line inside each new block (the mirror, the reaction sync, the queueing, the persistence) fails with C2039 at that
+    line.
+
+⚠ `SessionModels.h` (QueuedPrompt) and `MessagingModels.h` changed: the next build must purge (it must anyway: §21.40).
+
+**Check after the build** (dev, the bot):
+1. A running session: type a message in its topic. It shows ✍, and `messaging.log` says `waits: the turn is in flight`.
+2. The turn's reply lands below the message. A few seconds later the "👤 You · … · 📱 from the phone · 📤 sent from the queue ·
+   ⏳ running" line appears below the reply, quoting the previous turn's prompt, and the message turns 🫡.
+3. When that turn ends, the line turns "✅ answered", and the reply quotes the LINE (a tap on the quote jumps to it, not to the
+   message above).
+4. In an idle session a message gets no such line (👨‍💻 → 👌 on it, as before).
+5. Two messages typed while one turn runs: each gets its own line when it goes, in order.
+6. Restart Agentmaster while a message waits: after the restart it goes with its line.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

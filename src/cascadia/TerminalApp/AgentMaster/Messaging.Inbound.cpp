@@ -1087,6 +1087,7 @@ namespace Agentmaster::Msg
             }
         }
         size_t position = 0;
+        RemoteWait waits = RemoteWait::None; // §21.44: what the message waits behind, decided with the queue it goes into
         _registry->Update(sessionId, [&](SessionInfo& ss) {
             // D30: next in line — before the runner's own planned prompts, after earlier remote ones.
             auto at = ss.queue.end();
@@ -1098,7 +1099,17 @@ namespace Agentmaster::Msg
                     break;
                 }
             }
+            // §21.44: will it WAIT for a turn (a turn or a delivery in flight, an earlier message ahead)? Read in the update that
+            // inserts it, so the state and the queue are those of this very moment: a turn that ends a beat later cannot split
+            // the decision from the insertion. Such a message will sit in the topic above the turn that kept it waiting, so its
+            // send gets the "📤 sent from the queue" line (the mirror reads the stamp at its echo). Stamped on the queue's copy
+            // only; the scheduler never reads it, so the message goes exactly when it would have.
+            waits = RemotePromptWait(ss, static_cast<size_t>(std::distance(ss.queue.begin(), at)));
             at = ss.queue.insert(at, p);
+            if (waits != RemoteWait::None)
+            {
+                at->remoteQueuedBusyUnixMs = WallMs();
+            }
             position = static_cast<size_t>(std::distance(ss.queue.begin(), at));
         });
         {
@@ -1107,7 +1118,9 @@ namespace Agentmaster::Msg
         }
         _react(messageId, L"\x270D");
         LogNav(L"remote telegram queue " + ShortId(sessionId) + L" chars=" + std::to_wstring(text.size()) + (fromBacklog ? L" (from the backlog)" : L""));
-        _log(L"[msg] " + ShortId(sessionId) + L" queued from topic (message " + std::to_wstring(messageId) + L", " + std::to_wstring(text.size()) + L" chars)");
+        // §21.44: a message that waits says behind what (its send will post "📤 sent from the queue"; the log ties the two together).
+        _log(L"[msg] " + ShortId(sessionId) + L" queued from topic (message " + std::to_wstring(messageId) + L", " + std::to_wstring(text.size()) + L" chars" +
+             (waits != RemoteWait::None ? std::wstring{ L"; waits: " } + RemoteWaitWords(waits) : std::wstring{}) + L")");
         // A dormant tab (restored, revived, parked): start it so the queue can deliver (§7.1).
         if (!s->started && !s->external && _hooks.sessionAction)
         {

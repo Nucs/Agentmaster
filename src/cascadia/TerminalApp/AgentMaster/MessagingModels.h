@@ -914,13 +914,22 @@ namespace Agentmaster::Msg
 
     /// <summary>
     /// Where a prompt came from (§21.12): the user's line in a topic names it — typed at the PC, sent from the phone (a
-    /// message of this topic, QueuedPrompt::remoteSource), or sent by the Prompt Queue Runner (origin Autorun).
+    /// message of this topic, QueuedPrompt::remoteSource), or sent by the Prompt Queue Runner (origin Autorun). §21.44: a message
+    /// of this topic that WAITED in the queue (a turn or a delivery was in flight when it came, or an earlier message was ahead of
+    /// it: RemotePromptWait, MessagingFromQueue.h) is PhoneQueued — the one
+    /// phone prompt the bot posts a line for, at the moment the queue sends it, because the user's own message sits above the
+    /// turn that kept it waiting.
     /// </summary>
+    /// <remarks>
+    /// Persisted as its number (TopicRecord::promptSource): append new values, never renumber. A build older than §21.44 reads 3
+    /// as Runner (its clamp), so after a downgrade the last prompt's status edits say "⚙ runner" until the next prompt.
+    /// </remarks>
     enum class PromptSource : int
     {
         Pc = 0,
         Phone = 1,
         Runner = 2,
+        PhoneQueued = 3,
     };
 
     /// <summary>
@@ -938,13 +947,18 @@ namespace Agentmaster::Msg
         Interrupted = 6,
     };
 
-    /// <summary>The source's words in the user's line: "typed at the PC", "📱 from the phone", "⚙ runner".</summary>
+    /// <summary>
+    /// The source's words in the user's line: "typed at the PC", "📱 from the phone", "⚙ runner", and (§21.44) "📱 from the phone ·
+    /// 📤 sent from the queue" — the user's "title mentioning that this message sent from queue".
+    /// </summary>
     /// <param name="s">The source.</param>
     /// <returns>The words (a static string).</returns>
     inline const wchar_t* PromptSourceText(PromptSource s) noexcept
     {
         switch (s)
         {
+        case PromptSource::PhoneQueued:
+            return L"\U0001F4F1 from the phone \x00B7 \U0001F4E4 sent from the queue";
         case PromptSource::Phone:
             return L"\U0001F4F1 from the phone";
         case PromptSource::Runner:
@@ -1939,7 +1953,9 @@ namespace Agentmaster::Msg
         /// whose message the turn's final reply answers. `promptMessageId`: the bot's prompt line, or the user's own message
         /// (a prompt from the phone, or one sent as the user by the secretary bot); 0 = not known yet (the send has not
         /// answered). `promptBotLine`: true = our message, whose status is an EDIT of the line (BuildPromptLineHtml from
-        /// promptTsMs / promptSource / promptText); false = the user's message, whose status is a REACTION.
+        /// promptTsMs / promptSource / promptText); false = the user's message, whose status is a REACTION. §21.44: a phone
+        /// message that WAITED in the queue is a bot line too (promptSource PhoneQueued, "📤 sent from the queue"), posted when the
+        /// queue sent it; the user's own message then keeps 🫡 and never shows the turn's status.
         /// `promptStatus`: the PromptTurnStatus the message shows now (None = none). `promptInterrupted`: the turn ended
         /// on an interrupt. Set by the live mirror when a new turn's prompt arrives (the previous prompt's status is
         /// removed then); persisted, so a restart keeps updating it. Empty for a topic whose live mirror has seen no prompt.
@@ -2385,7 +2401,8 @@ namespace Agentmaster::Msg
                 t.promptMessageId = to.I64At(L"promptMessageId", 0);
                 t.promptBotLine = to.BoolAt(L"promptBotLine", false);
                 t.promptTsMs = to.I64At(L"promptTsMs", 0);
-                t.promptSource = std::clamp(static_cast<int>(to.I64At(L"promptSource", 0)), 0, static_cast<int>(PromptSource::Runner));
+                // §21.44: up to PhoneQueued (the last value; a newer number from a later build reads as the newest known source).
+                t.promptSource = std::clamp(static_cast<int>(to.I64At(L"promptSource", 0)), 0, static_cast<int>(PromptSource::PhoneQueued));
                 t.promptText = to.StrAt(L"promptText");
                 t.promptStatus = std::clamp(static_cast<int>(to.I64At(L"promptStatus", 0)), 0, static_cast<int>(PromptTurnStatus::Interrupted));
                 t.promptInterrupted = to.BoolAt(L"promptInterrupted", false);

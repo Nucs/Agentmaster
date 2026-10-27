@@ -13,6 +13,7 @@
 #include <deque> // the rename-budget model's call window
 #include <set> // §21.22: the state icons are distinct
 
+#include "../MessagingFromQueue.h" // §21.44: a topic message that waited in the queue (when it waits, the mirror's test, its 🫡)
 #include "../MessagingModels.h"
 #include "../MessagingNewThread.h" // §21.22: StripTopicNameDecoration reads an icon-form name (the user's rename of a thread)
 #include "../MessagingStartNote.h" // §21.18: the start note's marker, version word, kind, sound and text
@@ -2463,5 +2464,153 @@ void TestMessaging()
         SessionInfo plain = MakeSession(L"persist-2");
         const auto plainText = SerializeSessions({ plain });
         CHECK(plainText.find(L"pinned") == std::wstring::npos && plainText.find(L"remoteSource") == std::wstring::npos, "an unpinned record with no remote prompt writes neither key");
+    }
+
+    // ---- §21.44: a topic message that WAITED in the queue gets "📤 sent from the queue" when the queue sends it ----
+    {
+        constexpr auto npos = std::wstring::npos;
+        // When a message queued NOW will wait (RemotePromptWait): read with the queue it goes into, BEFORE the insertion.
+        SessionInfo s = MakeSession(L"wait-1", SessionState::WaitingForInput);
+        s.live = true;
+        s.started = true;
+        CHECK(RemotePromptWait(s, 0) == RemoteWait::None, "a session at rest with an empty queue: the message goes at the next ready moment");
+        s.state = SessionState::Running;
+        CHECK(RemotePromptWait(s, 0) == RemoteWait::TurnInFlight, "a running turn: it waits for the turn's end");
+        s.state = SessionState::NeedsApproval;
+        CHECK(RemotePromptWait(s, 0) == RemoteWait::TurnInFlight, "a turn stopped at a question or a permission prompt is still in flight");
+        s.state = SessionState::Error;
+        CHECK(RemotePromptWait(s, 0) == RemoteWait::None, "Error holds the message but no turn runs: not a wait the line is for (the documented limit)");
+        s.state = SessionState::Done;
+        CHECK(RemotePromptWait(s, 0) == RemoteWait::None, "nor Done (claude exited)");
+        s.state = SessionState::Idle;
+        QueuedPrompt sent;
+        sent.id = L"w-sent";
+        sent.text = L"planned";
+        sent.status = PromptStatus::Sent;
+        sent.origin = PromptOrigin::Autorun;
+        sent.echoed = false;
+        s.queue.push_back(sent);
+        CHECK(RemotePromptWait(s, 1) == RemoteWait::DeliveryInFlight, "a prompt just sent and not yet picked up: its turn starts first");
+        s.queue[0].echoed = true;
+        CHECK(RemotePromptWait(s, 1) == RemoteWait::None, "once picked up (the state still reading at rest) nothing is ahead");
+        s.queue[0].origin = PromptOrigin::Typed; // a Typed record is its own echo (echoed from birth)
+        CHECK(RemotePromptWait(s, 1) == RemoteWait::None, "a message typed at the PC is no delivery in flight");
+        QueuedPrompt earlier;
+        earlier.id = L"w-earlier";
+        earlier.text = L"first from the phone";
+        earlier.status = PromptStatus::Pending;
+        earlier.remoteSource = L"telegram:11";
+        s.queue.push_back(earlier);
+        CHECK(RemotePromptWait(s, 2) == RemoteWait::EarlierMessage, "an earlier message of the topic waits ahead: it goes, and its turn runs, first");
+        CHECK(RemotePromptWait(s, 1) == RemoteWait::None, "inserted BEFORE it, nothing waits ahead (only lower indices are ahead)");
+        CHECK(RemotePromptWait(s, 99) == RemoteWait::EarlierMessage, "an index past the end reads as the end");
+        s.queue[1].status = PromptStatus::Held;
+        CHECK(RemotePromptWait(s, 2) == RemoteWait::EarlierMessage, "a legacy Held prompt ahead is waiting work too (the scheduler makes it Pending again)");
+        s.queue[1].status = PromptStatus::Failed;
+        CHECK(RemotePromptWait(s, 2) == RemoteWait::None, "a Failed prompt ahead waits for nothing (it is never resent)");
+        s.queue[0].origin = PromptOrigin::Autorun;
+        s.queue[0].echoed = false;
+        s.queue[1].status = PromptStatus::Pending;
+        CHECK(RemotePromptWait(s, 2) == RemoteWait::DeliveryInFlight, "both: the delivery in flight is the reason the log gives");
+        CHECK(std::wstring{ RemoteWaitWords(RemoteWait::None) }.empty() && std::wstring{ RemoteWaitWords(RemoteWait::TurnInFlight) } == L"the turn is in flight" &&
+                  !std::wstring{ RemoteWaitWords(RemoteWait::DeliveryInFlight) }.empty() && !std::wstring{ RemoteWaitWords(RemoteWait::EarlierMessage) }.empty() &&
+                  std::wstring{ RemoteWaitWords(RemoteWait::DeliveryInFlight) } != RemoteWaitWords(RemoteWait::EarlierMessage),
+              "the log's words: none for None, one distinct reason for each wait");
+
+        // The mirror's test at the echo, and the reaction.
+        QueuedPrompt q;
+        q.id = L"w-q";
+        q.text = L"after the turn, please";
+        q.remoteSource = L"telegram:4242";
+        q.status = PromptStatus::Pending;
+        CHECK(IsTopicPrompt(q) && !PromptWaitedInQueue(q) && !PromptWentFromQueue(q), "a topic message queued at a ready moment never waited");
+        q.remoteQueuedBusyUnixMs = 5000;
+        CHECK(PromptWaitedInQueue(q) && !PromptWentFromQueue(q), "queued while busy: it waited, but a Pending match is not its send (the same words typed at the PC)");
+        q.status = PromptStatus::Sent;
+        CHECK(PromptWentFromQueue(q), "the queue sent it: the line is due");
+        q.status = PromptStatus::Failed;
+        CHECK(!PromptWentFromQueue(q), "a failed send gets no line (its thumbs-down path stays)");
+        q.status = PromptStatus::Sent;
+        QueuedPrompt pc = q;
+        pc.remoteSource.clear();
+        CHECK(!IsTopicPrompt(pc) && !PromptWaitedInQueue(pc) && !PromptWentFromQueue(pc), "a stamp on a prompt that is not the topic's counts for nothing");
+        QueuedPrompt odd = q;
+        odd.remoteSource = L"telegram"; // no colon: not a topic message id
+        CHECK(!IsTopicPrompt(odd) && !PromptWentFromQueue(odd), "a remoteSource without the \"telegram:\" prefix is not a topic message");
+        q.sentAtUnixMs = 100000;
+        q.echoed = true;
+        CHECK(!SentFromQueueReactionOverdue(q, 100000 + kSentFromQueueReactionFallbackMs - 1) && SentFromQueueReactionOverdue(q, 100000 + kSentFromQueueReactionFallbackMs),
+              "the reaction sync's fallback comes two minutes after the send, not before");
+        CHECK(!SentFromQueueReactionOverdue(q, 50000), "a clock that stepped back before the send: not due");
+        q.echoed = false;
+        CHECK(!SentFromQueueReactionOverdue(q, 100000 + 10 * kSentFromQueueReactionFallbackMs), "not picked up yet: no fallback (it still reads queued)");
+        q.echoed = true;
+        q.sentAtUnixMs = 0;
+        CHECK(!SentFromQueueReactionOverdue(q, 100000 + 10 * kSentFromQueueReactionFallbackMs), "no send time: no fallback");
+        CHECK(kSentFromQueueReaction == L"\U0001FAE1", "the mark is the saluting face (a Bot API reaction emoji, without a variation selector)");
+        bool distinct = kSentFromQueueReaction != L"\x270D" && kSentFromQueueReaction != L"\U0001F44E";
+        for (int st = static_cast<int>(PromptTurnStatus::None); st <= static_cast<int>(PromptTurnStatus::Interrupted); ++st)
+        {
+            distinct = distinct && kSentFromQueueReaction != PromptStatusReaction(static_cast<PromptTurnStatus>(st));
+        }
+        CHECK(distinct, "the mark is none of the turn-status reactions, nor queued's or failed's: it never reads as a turn's state");
+
+        // The line: "📱 from the phone · 📤 sent from the queue" in the header, the turn's status after it; mid-turn has none.
+        CHECK(std::wstring{ PromptSourceText(PromptSource::PhoneQueued) } == L"\U0001F4F1 from the phone \x00B7 \U0001F4E4 sent from the queue",
+              "the source's words name the phone and the queue");
+        CHECK(BuildPromptLineHtml(0, PromptSource::PhoneQueued, L"x <y>", PromptTurnStatus::Running, false) ==
+                  L"<b>\U0001F464 You</b> \x00B7 \U0001F4F1 from the phone \x00B7 \U0001F4E4 sent from the queue \x00B7 \x23F3 running\nx &lt;y&gt;",
+              "the line: bold You, the source with the queue, the turn's status, then the words (escaped)");
+        CHECK(BuildPromptLineHtml(0, PromptSource::PhoneQueued, L"x", PromptTurnStatus::Answered, false).find(L"\U0001F4E4 sent from the queue \x00B7 \x2705 answered\nx") != npos,
+              "a status edit keeps the queue's words (the record's PhoneQueued)");
+        CHECK(BuildPromptLineHtml(0, PromptSource::PhoneQueued, L"x", PromptTurnStatus::None, true).find(L"sent from the queue \x00B7 mid-turn\nx") != npos,
+              "a waited message that a running turn took in reads mid-turn, with no status");
+        const std::wstring row = UserLineTitleRow(L"Build", L"0123456789", L"\U0001F7E6", 77);
+        const std::wstring titled = BuildPromptLineHtml(0, PromptSource::PhoneQueued, L"x", PromptTurnStatus::Running, false, row);
+        CHECK(titled.find(L"sent from the queue \x00B7 \x23F3 running\n" + row + L"\nx") != npos, "the 21.17 title row sits between the header and the words");
+        CHECK(std::wstring{ PromptSourceText(PromptSource::Phone) } == L"\U0001F4F1 from the phone", "a phone message that did not wait keeps its words");
+
+        // The record keeps PhoneQueued (its status edits after a restart), and a later build's number reads as the newest known.
+        MessagingState st;
+        TopicRecord t;
+        t.sessionId = L"wq";
+        t.threadId = 9;
+        t.promptMessageId = 777;
+        t.promptBotLine = true;
+        t.promptTsMs = 1000;
+        t.promptSource = static_cast<int>(PromptSource::PhoneQueued);
+        t.promptText = L"after the turn, please";
+        t.promptStatus = static_cast<int>(PromptTurnStatus::Running);
+        st.topics[L"wq"] = t;
+        const auto back = StateFromJson(StateToJson(st));
+        CHECK(back && back->topics.count(L"wq") && back->topics.at(L"wq").promptSource == static_cast<int>(PromptSource::PhoneQueued) && back->topics.at(L"wq").promptBotLine,
+              "PhoneQueued round-trips (the clamp's upper end is the newest source)");
+        const auto later = StateFromJson(ParseLine(L"{\"topics\":[{\"sessionId\":\"l\",\"threadId\":5,\"promptMessageId\":8,\"promptSource\":9}]}"));
+        CHECK(later && later->topics.at(L"l").promptSource == static_cast<int>(PromptSource::PhoneQueued), "an unknown larger number reads as the newest known source");
+
+        // The prompt's stamp is persisted with the queue (absent = 0: an older file, or a prompt that never waited).
+        SessionInfo p = MakeSession(L"wait-persist");
+        QueuedPrompt stamped;
+        stamped.id = L"wp1";
+        stamped.text = L"queued while busy";
+        stamped.remoteSource = L"telegram:12";
+        stamped.remoteQueuedBusyUnixMs = 1761580800123;
+        p.queue.push_back(stamped);
+        QueuedPrompt unstamped;
+        unstamped.id = L"wp2";
+        unstamped.text = L"queued at rest";
+        unstamped.remoteSource = L"telegram:13";
+        p.queue.push_back(unstamped);
+        const auto savedText = SerializeSessions({ p });
+        CHECK(CountOf(savedText, L"\"remoteQueuedBusyUnixMs\":") == 1, "the stamp is written for the prompt that waited, and only for it");
+        const auto reread = DeserializeSessions(savedText);
+        CHECK(reread.size() == 1 && reread[0].queue.size() == 2 && reread[0].queue[0].remoteQueuedBusyUnixMs == 1761580800123 && reread[0].queue[1].remoteQueuedBusyUnixMs == 0,
+              "it reads back to the millisecond; the other reads 0");
+        const auto plainSaved = SerializeSessions({ MakeSession(L"wait-none") });
+        CHECK(plainSaved.find(L"remoteQueuedBusyUnixMs") == npos, "a record with no waited prompt writes no such key");
+        const QueuedPrompt negative = PromptFromJson(ParseLine(L"{\"id\":\"n\",\"text\":\"x\",\"remoteSource\":\"telegram:1\",\"remoteQueuedBusyUnixMs\":-5}"));
+        CHECK(negative.remoteQueuedBusyUnixMs == 0 && !PromptWaitedInQueue(negative), "a negative stamp (a hand-edited file) reads as 0: no line");
+        const QueuedPrompt olderPrompt = PromptFromJson(ParseLine(L"{\"id\":\"o\",\"text\":\"x\",\"remoteSource\":\"telegram:1\"}"));
+        CHECK(olderPrompt.remoteQueuedBusyUnixMs == 0, "an older file's prompt reads 0");
     }
 }

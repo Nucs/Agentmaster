@@ -516,6 +516,16 @@ namespace Agentmaster
         // consume, the pickup guard, the Enter-retry watch, the lost-send verdict) keys on
         // origin == Autorun, and a remote prompt needs all of them.
         std::wstring remoteSource;
+        // Agentmaster (MESSAGING.md §21.44 — a topic message that WAITED in the queue): the wall-clock ms at which a remote
+        // prompt (remoteSource) went into the queue while it had to wait for a turn — the session's turn in flight (Running,
+        // Needs approval), a delivery in flight, or an earlier prompt of the topic ahead of it (RemotePromptWillWait,
+        // MessagingFromQueue.h); 0 = it went in at a ready moment, or it is not a remote prompt. Set once, by the one funnel every
+        // queued topic message takes (MessagingService::_queueRemotePrompt), and never changed after. Why it exists: such a
+        // message sits in the topic ABOVE the turn that kept it waiting, so when the queue finally sends it the Telegram mirror
+        // posts "📤 sent from the queue" where its turn really starts, and that line — not the user's message — carries the turn's
+        // status. The scheduler never reads it (a waiting message goes exactly as before). PERSISTED (omitted when 0, absent = 0),
+        // so a restart between the queueing and the send still posts the line.
+        int64_t remoteQueuedBusyUnixMs{ 0 };
     };
 
     // Agentmaster (bounded queue history): the queue records EVERY message a session received
