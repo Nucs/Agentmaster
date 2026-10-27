@@ -110,6 +110,21 @@ namespace Agentmaster::Msg
         /// <param name="timeoutMs">The receive timeout.</param>
         /// <returns>The answer, as Call. Never throws.</returns>
         TgResult SendPhoto(const json::Value& params, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs = 60000) noexcept;
+        /// <summary>
+        /// Calls ANY method with one file attached (multipart/form-data): MESSAGING.md §21.42's card picture, a rich message
+        /// (sendRichMessage / editMessageText) whose `rich_message.media` names the file as "attach://&lt;field&gt;". Every
+        /// parameter goes as its own form field - objects and arrays (rich_message, reply_markup) as their JSON - and the file as
+        /// the part named `field`. Blocks like Call; the send timeout grows with the body (_request).
+        /// </summary>
+        /// <param name="method">The Bot API method ("sendRichMessage", "editMessageText").</param>
+        /// <param name="params">The other parameters, each a form field.</param>
+        /// <param name="field">The file part's name: the attach name the parameters refer to ("screen" for "attach://screen").</param>
+        /// <param name="fileContentType">The file part's Content-Type ("image/png").</param>
+        /// <param name="fileName">The file name in the form (UTF-8; keep it ASCII-safe).</param>
+        /// <param name="bytes">The file's bytes.</param>
+        /// <param name="timeoutMs">The receive timeout (Telegram processes a photo before it answers: ~1.3 s for 4 MB, measured).</param>
+        /// <returns>The answer, as Call. Never throws.</returns>
+        TgResult CallWithFile(std::wstring_view method, const json::Value& params, std::string_view field, std::string_view fileContentType, std::wstring_view fileName, const std::string& bytes, uint32_t timeoutMs = 60000) noexcept;
 
         /// <summary>
         /// Ends the request in flight, if any, from ANOTHER thread: the blocked call returns with a
@@ -127,11 +142,12 @@ namespace Agentmaster::Msg
     private:
         TgResult _request(std::wstring_view method, const std::string& body, const std::wstring& contentType, uint32_t timeoutMs) noexcept;
         /// <summary>
-        /// The one multipart upload behind SendDocument and SendPhoto (§21.24 split it out of SendDocument): every parameter as
-        /// its own text field, then the file as the part named `field` with `fileContentType`, under a boundary no file can hold.
+        /// The one multipart upload behind SendDocument, SendPhoto and CallWithFile (§21.24 split it out of SendDocument): every
+        /// parameter as its own text field, then the file as the part named `field` with `fileContentType`, under a boundary no
+        /// file can hold.
         /// </summary>
-        /// <param name="method">The Bot API method ("sendDocument", "sendPhoto").</param>
-        /// <param name="field">The file's form field ("document", "photo").</param>
+        /// <param name="method">The Bot API method ("sendDocument", "sendPhoto"; §21.42: "sendRichMessage", "editMessageText").</param>
+        /// <param name="field">The file's form field ("document", "photo"; §21.42: the attach name "screen").</param>
         /// <param name="fileContentType">The file part's Content-Type ("application/octet-stream", "image/png").</param>
         /// <param name="params">The other parameters (each a text field).</param>
         /// <param name="fileName">The file name in the form (quotes, backslashes and line breaks become '_').</param>

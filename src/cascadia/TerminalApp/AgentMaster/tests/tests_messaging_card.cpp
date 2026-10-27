@@ -14,6 +14,9 @@
 //   1c. §21.41's ⎋ Esc and 🌙 Deactivate (MessagingSessionControl.h, the user's request of 2026-10-27): Esc beside the cog on Main
 //      while a turn is in flight, the Esc / Deactivate row above Back on the Session page (each button only where it applies),
 //      the hosting window's two decisions, the answers' words, the texts and the Esc gap;
+//   1d. §21.42's screenshot in the card (MessagingCardPicture.h, the user's request of 2026-10-27): the screen's hash, the plan
+//      (upload / reuse / keep / none), the caption's clock, the rich figure block, the media list, the photo read back from
+//      Telegram's answer, the picture's record across a restart, and the cog's switch;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -32,6 +35,7 @@
 #include <cstring>
 
 #include "../MessagingModels.h"
+#include "../MessagingCardPicture.h" // 21.42: the card's screenshot (the plan, the rich block, the media list, the answer's photo)
 #include "../MessagingSessionControl.h" // 21.41: the card's Esc and Deactivate (the window's decisions, the answers' words and texts)
 #include "../MessagingTaps.h" // kTapToastMaxChars: every 21.41 text must fit a toast
 #include "../ScreenImage.h"
@@ -636,6 +640,108 @@ void TestMessagingCard()
         CHECK(!RemoteEscTooSoon(0, 5000) && RemoteEscTooSoon(5000, 5000) && RemoteEscTooSoon(5000, 7999) && !RemoteEscTooSoon(5000, 8000),
               "Esc gap: never pressed goes; within 3 s of the last is refused; 3 s after it goes again");
         CHECK(RemoteEscTooSoon(9000, 5000) && kRemoteEscGapMs == 3000, "Esc gap: a clock that went backwards refuses (the safe side), and the gap is 3 s");
+    }
+
+    // ===== 1d. MESSAGING.md 21.42 - the card's screenshot (MessagingCardPicture.h) =====
+    {
+        // The screen's identity: deterministic, never 0, and a changed screen reads as changed.
+        const std::wstring shotA = L"AMSS1 80 24 ffffff 000000 Cascadia Mono\nrow one";
+        const std::wstring shotB = L"AMSS1 80 24 ffffff 000000 Cascadia Mono\nrow two";
+        CHECK(CardPictureShotHash(shotA) == CardPictureShotHash(shotA) && CardPictureShotHash(shotA) != CardPictureShotHash(shotB) && CardPictureShotHash(L"") != 0,
+              "picture: a screen's hash is stable, tells two screens apart, and is never 0");
+
+        // The plan: a changed screen uploads, an unchanged one reuses (captioned now), an unreadable one keeps the last picture with
+        // its own moment, and nothing at all goes without.
+        const int64_t now = 1'800'000'000'000;
+        const uint32_t h = CardPictureShotHash(shotA);
+        const auto changed = PlanCardPicture(true, h, now, L"FILE1", h + 1, now - 60'000);
+        const auto first = PlanCardPicture(true, h, now, L"", 0, 0);
+        const auto same = PlanCardPicture(true, h, now, L"FILE1", h, now - 60'000);
+        const auto parked = PlanCardPicture(false, 0, now, L"FILE1", h, now - 60'000);
+        const auto nothing = PlanCardPicture(false, 0, now, L"", 0, 0);
+        const auto unknownHash = PlanCardPicture(true, h, now, L"FILE1", 0, now - 60'000);
+        CHECK(changed.source == CardPictureSource::Upload && changed.shotAtMs == now, "picture plan: a changed screen is drawn and uploaded, captioned now");
+        CHECK(first.source == CardPictureSource::Upload && first.shotAtMs == now, "picture plan: a card's first picture is drawn and uploaded");
+        CHECK(same.source == CardPictureSource::Reuse && same.shotAtMs == now, "picture plan: an unchanged screen reuses the held photo, captioned with the moment it was read again");
+        CHECK(parked.source == CardPictureSource::Reuse && parked.shotAtMs == now - 60'000, "picture plan: an unreadable screen keeps the last picture with ITS moment");
+        CHECK(nothing.source == CardPictureSource::None, "picture plan: no screen and no picture: the card goes as text");
+        CHECK(unknownHash.source == CardPictureSource::Upload, "picture plan: a held photo whose screen hash is unknown is never taken for the screen read now");
+
+        // The caption's clock: seconds on the same day, the date on another, "?" for no moment.
+        const std::wstring clock = CardPictureClockText(now, now);
+        CHECK(clock.size() == 8 && clock[2] == L':' && clock[5] == L':', "picture caption: HH:MM:SS on the same day");
+        const std::wstring older = CardPictureClockText(now - 3LL * 24 * 3600 * 1000, now);
+        CHECK(older.size() > 8 && older.find(L':') != std::wstring::npos && older.find(L' ') != std::wstring::npos, "picture caption: another day names the date before the clock");
+        CHECK(CardPictureClockText(0, now) == L"?" && CardPictureClockText(-5, now) == L"?", "picture caption: no moment reads as a question mark");
+
+        // The rich block: a figure of the photo named in the media list, its caption, nothing to escape.
+        const std::wstring figure = CardPictureFigureHtml(now, now);
+        CHECK(figure.rfind(L"<figure><img src=\"tg://photo?id=screen\"/><figcaption>", 0) == 0 && figure.size() > 20 &&
+                  figure.substr(figure.size() - 22) == L"</figcaption></figure>" && figure.find(L"the screen at " + clock) != std::wstring::npos,
+              "picture block: a figure of tg://photo?id=screen captioned with the screen's moment");
+        CHECK(kCardPictureMediaId == L"screen" && kCardPictureMediaId.size() <= 64, "picture: the media id is Telegram-valid (1-64 of A-Z a-z 0-9 _ -)");
+
+        // The media list: an upload names the attach part, a reuse names the held file_id.
+        CardPicture upload;
+        upload.png = "\x89PNG";
+        upload.fileId = L"IGNORED";
+        CardPicture reuse;
+        reuse.fileId = L"AgACAgQAAxUH";
+        const json::Value up = CardPictureMediaJson(upload);
+        const json::Value re = CardPictureMediaJson(reuse);
+        const auto mediaOf = [](const json::Value& list) -> std::wstring {
+            if (list.type != json::Value::Type::Arr || list.arr.size() != 1)
+            {
+                return L"<not one entry>";
+            }
+            const auto* media = list.arr[0].Find(L"media");
+            return list.arr[0].StrAt(L"id") + L"|" + (media ? media->StrAt(L"type") + L"|" + media->StrAt(L"media") : std::wstring{ L"<no media>" });
+        };
+        CHECK(mediaOf(up) == L"screen|photo|attach://screen", "picture media: a new picture is the attach part \"screen\", whatever fileId says");
+        CHECK(mediaOf(re) == L"screen|photo|AgACAgQAAxUH", "picture media: a held picture is reused by its file_id");
+
+        // Reading the photo back from Telegram's answer (the probe's shape): the LARGEST size of the first photo block.
+        const auto answer = json::Parse(
+            L"{\"message_id\":1381,\"rich_message\":{\"blocks\":[{\"type\":\"paragraph\"},{\"type\":\"photo\",\"photo\":["
+            L"{\"file_id\":\"small\",\"file_unique_id\":\"u1\",\"width\":90,\"height\":30},"
+            L"{\"file_id\":\"big\",\"file_unique_id\":\"u3\",\"width\":1600,\"height\":900},"
+            L"{\"file_id\":\"mid\",\"file_unique_id\":\"u2\",\"width\":800,\"height\":450}],\"caption\":{}}]}}");
+        const CardPictureShown shown = answer ? CardPictureFromMessage(*answer) : CardPictureShown{};
+        CHECK(shown.fileId == L"big" && shown.uniqueId == L"u3" && shown.width == 1600 && shown.height == 900, "picture answer: the largest size's file_id is the one reused");
+        const auto textOnly = json::Parse(L"{\"message_id\":1381,\"rich_message\":{\"blocks\":[{\"type\":\"paragraph\"}]}}");
+        const auto classic = json::Parse(L"{\"message_id\":7,\"text\":\"a classic card\"}");
+        CHECK(textOnly && CardPictureFromMessage(*textOnly).fileId.empty() && classic && CardPictureFromMessage(*classic).fileId.empty() &&
+                  CardPictureFromMessage(json::Value::MkArr()).fileId.empty(),
+              "picture answer: a text-only rich card, a classic card or anything else shows no photo");
+
+        // The topic record keeps the picture across a restart; an older file has none.
+        MessagingState st;
+        TopicRecord t;
+        t.sessionId = L"p";
+        t.threadId = 11;
+        t.cardPictureFileId = L"AgACAgQAAxUH";
+        t.cardPictureAtMs = now;
+        t.cardPictureShotHash = 0xFFFFFFF0u;
+        st.topics[L"p"] = t;
+        const auto back = StateFromJson(StateToJson(st));
+        CHECK(back && back->topics.count(L"p") && back->topics.at(L"p").cardPictureFileId == L"AgACAgQAAxUH" && back->topics.at(L"p").cardPictureAtMs == now &&
+                  back->topics.at(L"p").cardPictureShotHash == 0xFFFFFFF0u,
+              "picture record: the file_id, its moment and its screen hash round-trip (a 32-bit hash survives the JSON number)");
+        const auto olderFile = json::Parse(L"{\"topics\":[{\"sessionId\":\"o\",\"threadId\":5}]}");
+        const auto oldState = olderFile ? StateFromJson(*olderFile) : std::nullopt;
+        CHECK(oldState && oldState->topics.count(L"o") && oldState->topics.at(L"o").cardPictureFileId.empty() && oldState->topics.at(L"o").cardPictureShotHash == 0,
+              "picture record: an older file has no picture (the card's next update draws one)");
+
+        // The switch: on by default (the user's request), off round-trips, an older settings file reads as on.
+        const AppSettings defaults;
+        AppSettings off;
+        off.messagingCardScreenshots = false;
+        CHECK(defaults.messagingCardScreenshots && !AppSettingsFromJson(ToJson(off)).messagingCardScreenshots && AppSettingsFromJson(json::Value::MkObj()).messagingCardScreenshots,
+              "picture switch: on by default, off round-trips, absent reads as on");
+        CHECK(kCardPictureRefusalsToStop == 3, "picture: three refusals in a row stop the pictures for the run");
+        // The wait for a picture is bounded, and below a tapped button's hold limit: a tap that waits for its card change (Restart,
+        // a page flip that met a post) is still answered after the change lands, never by the limit alone.
+        CHECK(kCardPictureWaitMs > 0 && kCardPictureWaitMs + 2000 < kTapAnswerHoldMaxMs, "picture: a card waits at most 4 s for its picture, well inside the 9 s tap hold");
     }
 
     // ===== 2. the card's line for the state's action =====

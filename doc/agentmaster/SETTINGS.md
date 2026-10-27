@@ -179,6 +179,10 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
 - `messagingAllScreenLevel` (`full`): 📜 All Screen's default transcript level (`minimal` / `compact` / `default` / `full` /
   `max`): what a bare `/allscreen` draws and the level the card's level picker marks with ⭐; an empty or unknown word reads
   as `full`. Applied live (MESSAGING.md §21.39).
+- `messagingCardScreenshots` (true): every session's sticky card carries a screenshot of its terminal, read again at each card
+  update (a changed screen is uploaded with the card's own edit, an unchanged one reused by `file_id`, a parked tab keeps its
+  last picture); off = text-only cards. Needs rich messages. Costs upload bandwidth (~0.1–0.6 MB a new picture; a running card
+  updates every ~20 s). Applied live (MESSAGING.md §21.42).
 - File links: `messagingFileLinksMode` (`off` / home network / through `cc.sysd.cc`),
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
   `messagingFileLinkHostedBase` (empty = `https://cc.sysd.cc`), `messagingFileLinksExclude` (folders

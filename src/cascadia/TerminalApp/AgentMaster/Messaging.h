@@ -532,6 +532,13 @@ namespace Agentmaster::Msg
             /// </summary>
             bool photo{ false };
             /// <summary>
+            /// §21.42: non-empty = `method` goes as a MULTIPART call (TelegramApi::CallWithFile) with `fileBytes` attached as the part
+            /// of this name, which the parameters refer to as "attach://&lt;name&gt;": a rich card post or edit that uploads its new
+            /// screenshot ("screen", image/png). Every parameter then goes as a form field (rich_message and reply_markup as their
+            /// JSON). Empty = a JSON call (or `document`'s upload). The census counts the item under `method`.
+            /// </summary>
+            std::wstring uploadField;
+            /// <summary>
             /// Called on the send thread right before the call (may be empty): a final reply sets its reply_parameters here, from
             /// the turn's PromptRef — its prompt was queued before it and has answered with its id by the time this item goes
             /// (the send loop makes one call at a time, in order; §21.12).
@@ -631,13 +638,16 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="replyRef">§21.12: reply to the turn's prompt once its message id is known (the first chunk only;
         /// `replyToMessageId` wins when both are given). May be empty.</param>
+        /// <param name="picture">§21.42: the card's screenshot, shown as the rich message's last block (_sendTitledRich). Only the
+        /// rich form can carry it: a text that goes classic (rich off, past the rich limit, no title tokens) goes without it.
+        /// Null (the default) = no picture.</param>
         /// <remarks>
         /// §21.15: a text that names a session carries TITLE TOKENS (TgTitleToken). While title chips are wanted
         /// (_titleChipsWanted) and the rich form fits Telegram's rich limit, it goes as ONE rich message whose titles are chips
         /// (_sendTitledRich); otherwise — and as that message's fallback — its classic render (TgRenderTitleTokensClassic: the
         /// §21.13 squares) goes the HTML way described above. A text without tokens goes the HTML way exactly as before.
         /// </remarks>
-        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr);
+        void _sendText(int64_t threadId, const std::wstring& html, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId = 0, bool movesCard = true, std::shared_ptr<PromptRef> replyRef = nullptr, std::shared_ptr<const CardPicture> picture = nullptr);
         /// <summary>
         /// Whether a message that names a session goes as a RICH message whose titles are CHIPS (§21.15): the cog's rich switch
         /// (AppSettings::messagingRichMessages, the same switch as Claude's rich Markdown) is on, and this run has not found the
@@ -662,8 +672,12 @@ namespace Agentmaster::Msg
         /// <param name="onDone">Called with Telegram's answer to the message that went (rich, or its fallback's last chunk); may be empty.</param>
         /// <param name="replyToMessageId">The message it replies to (0 = none).</param>
         /// <param name="replyRef">§21.12: reply to the turn's prompt once its id is known; may be empty.</param>
+        /// <param name="picture">§21.42: the card's screenshot - its figure block appended to `richHtml` and the photo given in
+        /// rich_message.media: a new PNG goes in the same call as a multipart upload (OutItem::uploadField), a held one by its
+        /// file_id. A refusal of the message WITH the picture sends it once more WITHOUT it (still rich: the title chip stays) and
+        /// counts toward kCardPictureRefusalsToStop; only that send's refusal falls back to the classic render. Null = none.</param>
         /// <exception cref="std::bad_alloc">If an item cannot be allocated.</exception>
-        void _sendTitledRich(int64_t threadId, const std::wstring& richHtml, const std::wstring& classicHtml, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, std::shared_ptr<PromptRef> replyRef);
+        void _sendTitledRich(int64_t threadId, const std::wstring& richHtml, const std::wstring& classicHtml, bool silent, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone, int64_t replyToMessageId, std::shared_ptr<PromptRef> replyRef, std::shared_ptr<const CardPicture> picture = nullptr);
         /// <summary>
         /// Posts Claude's MARKDOWN into a topic as a RICH message (§21.11, Bot API 10.1: tables, headings, lists and code
         /// render the way Claude wrote them; the HTML conversion has no tables). The text is split into parts that fit
@@ -724,6 +738,9 @@ namespace Agentmaster::Msg
         /// <param name="onDone">Called with Telegram's answer to the edit that went (the rich one, or its classic fallback).</param>
         /// <param name="onForm">§21.15: called on the send thread with the FORM the message shows after an edit that took (or that
         /// Telegram found unchanged): true = rich, false = classic. Not called when the edit failed otherwise. May be empty.</param>
+        /// <param name="picture">§21.42: the card's screenshot for a RICH edit (as _sendTitledRich's): its figure appended and the
+        /// photo uploaded in the same call, or reused by file_id. A refused edit WITH it is made once more without it (rich), then
+        /// classic. Ignored for a classic edit. Null (the default) = no picture: a rich edit then drops one the message showed.</param>
         /// <remarks>
         /// §21.15: a text with title tokens is edited as a RICH message whose titles are chips while _titleChipsWanted and the rich
         /// form fits — editMessageText turns a classic message into a rich one and back (measured on the dev bot, thread 26785,
@@ -732,7 +749,7 @@ namespace Agentmaster::Msg
         /// meanwhile.
         /// </remarks>
         /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
-        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr, std::function<void(bool)> onForm = nullptr);
+        void _editText(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, json::Value replyMarkup, std::function<void(const TgResult&)> onDone = nullptr, std::function<void(bool)> onForm = nullptr, std::shared_ptr<const CardPicture> picture = nullptr);
         /// <summary>
         /// The CLASSIC editMessageText item of a text without title tokens (§21.15 split it out of _editText, which also builds
         /// the classic fallback of a refused rich edit with it): HTML parse mode, no link previews, the text cut at Telegram's
@@ -746,6 +763,42 @@ namespace Agentmaster::Msg
         /// <returns>The item, without onDone.</returns>
         /// <exception cref="std::bad_alloc">If the item cannot be allocated.</exception>
         OutItem _classicEditItem(int64_t messageId, const std::wstring& html, SendPriority prio, const std::wstring& key, const json::Value& replyMarkup) const;
+        /// <summary>
+        /// The sendRichMessage item of a titled message (§21.15; §21.42 split it out of _sendTitledRich so a card refused WITH its
+        /// picture can be sent again without it in the SAME outbox slot): rich_message.html, the buttons, the reply (a fixed id, or
+        /// the turn's PromptRef resolved when the item goes), silence - and with `picture` its figure block and media list, as a
+        /// multipart upload when the picture is new (OutItem::uploadField) or a JSON call reusing a held file_id.
+        /// </summary>
+        /// <param name="threadId">The topic (0 = the chat's General view).</param>
+        /// <param name="richHtml">The rich HTML WITHOUT the picture's block (it is appended here when `picture` is set).</param>
+        /// <param name="silent">No sound.</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key.</param>
+        /// <param name="replyMarkup">The inline keyboard (a non-object = none).</param>
+        /// <param name="replyToMessageId">The message it replies to (0 = none).</param>
+        /// <param name="replyRef">§21.12: the turn's prompt to reply to once known; may be empty.</param>
+        /// <param name="picture">§21.42: the card's screenshot; null = none.</param>
+        /// <param name="seq">The outbox sequence number (the message's place in the order).</param>
+        /// <param name="subSeq">The slot within it.</param>
+        /// <returns>The item, without onDone.</returns>
+        /// <exception cref="std::bad_alloc">If the item (or its copy of the picture's bytes) cannot be allocated.</exception>
+        OutItem _titledRichItem(int64_t threadId, const std::wstring& richHtml, bool silent, SendPriority prio, const std::wstring& key, const json::Value& replyMarkup, int64_t replyToMessageId, const std::shared_ptr<PromptRef>& replyRef, const CardPicture* picture, uint64_t seq, uint32_t subSeq) const;
+        /// <summary>
+        /// The rich editMessageText item of a titled text (§21.15; §21.42 split it out of _editText for the same reason as
+        /// _titledRichItem): rich_message.html and the buttons - and with `picture` its figure block and media list, uploaded in the
+        /// same call when new (Telegram replaces the photo in place, measured), else reused by file_id.
+        /// </summary>
+        /// <param name="messageId">The message to edit.</param>
+        /// <param name="richHtml">The rich HTML WITHOUT the picture's block.</param>
+        /// <param name="prio">The outbox priority.</param>
+        /// <param name="key">"" or the replacement key.</param>
+        /// <param name="replyMarkup">The inline keyboard (a non-object = none).</param>
+        /// <param name="picture">§21.42: the card's screenshot; null = none (an edit without it drops one the message showed).</param>
+        /// <param name="seq">The outbox sequence number.</param>
+        /// <param name="subSeq">The slot within it.</param>
+        /// <returns>The item, without onDone.</returns>
+        /// <exception cref="std::bad_alloc">If the item (or its copy of the picture's bytes) cannot be allocated.</exception>
+        OutItem _richEditItem(int64_t messageId, const std::wstring& richHtml, SendPriority prio, const std::wstring& key, const json::Value& replyMarkup, const CardPicture* picture, uint64_t seq, uint32_t subSeq) const;
         void _react(int64_t messageId, std::wstring_view emoji);
         void _sendDocument(int64_t threadId, std::wstring_view fileName, std::string bytes, const std::wstring& caption, SendPriority prio);
         json::Value _buttons(const std::vector<std::vector<std::pair<std::wstring, std::wstring>>>& rows) const;
@@ -772,8 +825,114 @@ namespace Agentmaster::Msg
         /// `prio` is the outbox priority of the old card's delete and the new card's send: the cards' own (CardEdit) by default;
         /// SendPriority::Final when a tapped button waits for this post (§21.28: a directory dot's re-post, a tap's change that met
         /// a missing card), so the user's wait is not spent behind the fleet's work logs and card edits.
+        /// §21.42: `picture` (may be null) is the card's screenshot, carried by the rich post (_sendText -> _sendTitledRich); the
+        /// answer records the photo Telegram shows (TopicRecord::cardPictureFileId and its moment and hash) for the next update to
+        /// reuse. The caller marks the card in flight (-1) BEFORE a picture is read, so no second post starts meanwhile; this
+        /// marks it again.
         /// </summary>
-        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash, SendPriority prio = SendPriority::CardEdit);
+        void _postCard(const std::wstring& sessionId, int64_t threadId, const std::wstring& text, json::Value markup, int64_t deleteFirst, bool ping, uint32_t textHash, SendPriority prio = SendPriority::CardEdit, std::shared_ptr<const CardPicture> picture = nullptr);
+        /// <summary>
+        /// §21.42: whether card posts and edits carry the terminal's screen: the cog's switch (AppSettings::messagingCardScreenshots)
+        /// is on, this run has not stopped them after kCardPictureRefusalsToStop refusals in a row, titled messages go rich
+        /// (_titleChipsWanted: the picture is a block of the rich card, which no classic message can hold) and a window can read
+        /// screens (ServiceHooks::sessionAction). Any thread (atomics and a hook set once at construction).
+        /// </summary>
+        /// <returns>True when cards carry pictures.</returns>
+        bool _cardPicturesWanted() const noexcept;
+        /// <summary>
+        /// One picture to draw on the worker (_queueCardPictureRender): a card update's screen that changed since the card's last
+        /// picture. `then` gets the drawn picture - or `fallback` when the drawing failed or a newer update of the card overtook this
+        /// one (its `seq`) - exactly once, on the worker thread, inside a TapScope of `taps`.
+        /// </summary>
+        struct CardPictureJob
+        {
+            std::wstring sessionId; // the card's session (the generation check and the log)
+            uint64_t seq{ 0 }; // CardState::pictureSeq when the update was decided: a stale job is not drawn
+            std::wstring snapshot; // the window's serialized screen (ScreenSnapshot.h)
+            uint32_t shotHash{ 0 }; // its CardPictureShotHash
+            int64_t shotAtMs{ 0 }; // when it was read
+            std::shared_ptr<const CardPicture> fallback; // what the card shows when nothing is drawn (the stored picture, or null)
+            std::function<void(std::shared_ptr<const CardPicture>)> then; // posts or edits the card with the picture
+            std::vector<TapHoldRef> taps; // §21.28: the tapped buttons that wait for this card change
+        };
+        /// <summary>
+        /// §21.42: settles the picture a card post or edit carries, then runs `then` with it - EXACTLY ONCE, with the picture or with
+        /// null (no picture), on the thread that settled it (the hosting window's UI thread, the picture worker, or the thread that
+        /// dropped the last copy of an unanswered request). The rules (PlanCardPicture): `readScreen` false (a change that is not a
+        /// status update: a page flip, the slow form upgrade) reuses the card's stored picture with no read; else the hosting window
+        /// reads the screen ("screen-snapshot"): a screen that changed is drawn on the worker and uploaded by `then`'s call, an
+        /// unchanged one reuses the stored file_id captioned with now, an unreadable one (a parked tab) or no answer at all keeps the
+        /// stored picture with its own moment, or none.
+        /// </summary>
+        /// <remarks>
+        /// ⚠ `then` must be callable from any thread and must not throw past its own catch (it runs in a window's dispatcher item,
+        /// a worker thread or a destructor). It runs inside a TapScope of the calling scope's taps (_holdTaps, taken here), so the
+        /// post or edit it queues holds a tapped button exactly as a direct call would (§21.28). The caller has stamped
+        /// CardState::pictureSeq for this update; `then` checks it to drop an edit a newer update overtook. Takes `_mtx` (call it
+        /// without holding it). Never throws (Rule #18 inside): a failure at any step still runs `then`, without a picture, so a card
+        /// change is never lost to its picture - a post would otherwise stay "in flight" until the next start.
+        /// </remarks>
+        /// <param name="sessionId">The card's session (its topic's stored picture; the window that hosts its tab reads the screen).</param>
+        /// <param name="readScreen">True for a status update (read the screen); false to keep the stored picture as it is.</param>
+        /// <param name="then">Sends the card with the picture (null = without one).</param>
+        void _withCardPicture(const std::wstring& sessionId, bool readScreen, std::function<void(std::shared_ptr<const CardPicture>)> then) noexcept;
+        /// <summary>
+        /// §21.42: a card post or edit that waits for its picture (_withCardPicture registers it before the screen read), with the
+        /// deadline after which it goes without a new one (kCardPictureWaitMs): a frozen window must not stop its cards from
+        /// changing. Type-erased because the card's one-shot send lives in Messaging.cpp.
+        /// </summary>
+        struct PendingCardPicture
+        {
+            int64_t deadlineTickMs{ 0 }; // GetTickCount64 past which the card goes with its fallback
+            std::wstring sessionId; // for the log line
+            std::function<bool()> settled; // true once the card's send ran (its picture settled, or a failure sent it)
+            std::function<void()> expire; // sends the card with its fallback, inside a scope of its taps (a no-op once settled)
+        };
+        /// <summary>
+        /// §21.42: sends every card whose picture is past its kCardPictureWaitMs with the picture it shows (or none), and forgets the
+        /// waits that settled. Called at the top of each send-loop pass (at least every 0.5 s); cheap when nothing waits. Takes only
+        /// `_pictureMtx` while it sorts; the sends run outside it. Never throws (Rule #18 inside).
+        /// </summary>
+        void _expireCardPictureWaits() noexcept;
+        /// <summary>
+        /// §21.42: hands one picture to the drawing worker - one thread, started when a job arrives and ending when the queue is
+        /// empty, so a burst of card updates draws one picture at a time (~90-185 ms each, never on a UI thread). Any thread; takes
+        /// only `_pictureMtx`. A job is never lost: if the worker cannot start, the job's `then` runs here with its fallback.
+        /// </summary>
+        /// <param name="job">The job (moved in).</param>
+        void _queueCardPictureRender(CardPictureJob job) noexcept;
+        /// <summary>
+        /// §21.42: the drawing worker's loop: takes the jobs one by one, skips a job a newer update of its card overtook (its `then`
+        /// gets the fallback at once, which drops the stale edit), draws the rest (ParseScreenSnapshot + RenderScreenSnapshotPng)
+        /// and calls each job's `then` inside a TapScope of its taps; ends when the queue is empty. Never throws (Rule #18 inside:
+        /// a failed drawing hands the fallback on).
+        /// </summary>
+        void _runCardPictureWorker() noexcept;
+        /// <summary>
+        /// §21.42: records what Telegram's answer to a card post or edit WITH a picture shows: the photo's file_id (CardPictureFromMessage)
+        /// with the picture's moment and screen hash on the topic whose card this is (found by thread and card message id, so a
+        /// Rekey or a newer post meanwhile is not overwritten), and resets the run's refusal count. An answer that shows no photo
+        /// changes nothing (TopicRecord::cardPictureFileId keeps the last good picture). Any thread; takes `_mtx`.
+        /// </summary>
+        /// <param name="threadId">The card's topic.</param>
+        /// <param name="cardMessageId">The card message (an edit's id; a post's id comes in the answer itself, so pass 0 for a post).</param>
+        /// <param name="picture">The picture the call carried (its moment and hash are recorded).</param>
+        /// <param name="r">Telegram's answer.</param>
+        void _noteCardPictureShown(int64_t threadId, int64_t cardMessageId, const CardPicture& picture, const TgResult& r) noexcept;
+        /// <summary>
+        /// §21.42: a card post or edit WITH a picture was refused (RichRefusalWantsFallback): logged with Telegram's words, counted,
+        /// and after kCardPictureRefusalsToStop in a row the pictures stop for the run (_cardPicturesStopped) with one log line. The
+        /// caller then sends the card once more without the picture. Any thread.
+        /// </summary>
+        /// <param name="r">Telegram's answer.</param>
+        void _noteCardPictureRefused(const TgResult& r) noexcept;
+        /// <summary>
+        /// §21.42: counts one card picture decision for the traffic census line (`pictures(uploaded=N x KB reused=N kept=N
+        /// none=N)`, logged every kTrafficLogMs with the call census): the bandwidth the pictures cost, measured. Any thread.
+        /// </summary>
+        /// <param name="kind">"uploaded", "reused", "kept", "none" or "skipped".</param>
+        /// <param name="bytes">The uploaded PNG's size (0 for any other kind).</param>
+        void _countCardPicture(const wchar_t* kind, size_t bytes) noexcept;
         /// <summary>
         /// Fills a NEW topic record from the session's transcript (§21.6): the transcript path, where the mirror
         /// starts (the end of the file for a session at rest — a topic shows the session from now on; the start of
@@ -1157,6 +1316,15 @@ namespace Agentmaster::Msg
             // post takes them (going at once, at an answer's priority) and holds them until Telegram answered it; a card dropped
             // with its topic lets them go, and the hold's limit answers a tap whose card never changes (kTapAnswerHoldMaxMs).
             std::vector<TapHoldRef> tapHolds;
+            // §21.42: the generation of this card's newest post or edit WITH a picture step (_withCardPicture). The step is
+            // asynchronous (a window reads the screen, the worker draws it), so an edit whose step a newer post or edit of this card
+            // overtook is dropped when its picture is settled: an older step finishing last must never put an older text back.
+            uint64_t pictureSeq{ 0 };
+            // §21.42: the classic text hash (CardTextHash of the classic render, buttons NOT included) of the card's last update. A
+            // post or edit whose text differs is a status update and reads the screen again; one whose text is the same (a page flip
+            // of the buttons, the slow form upgrade) keeps the current picture without a read, so a page flip stays instant. 0 =
+            // none yet (after a restart the first update reads the screen).
+            uint32_t pictureTextHash{ 0 };
         };
         void _followTranscript(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const SessionInfo& s);
         void _applyItems(const std::wstring& sessionId, TopicRecord& topic, Mirror& m, const std::vector<TopicItem>& items, const SessionInfo& s);
@@ -2410,6 +2578,25 @@ namespace Agentmaster::Msg
         // land within kRemoteEscGapMs - a quick double Esc on an empty box opens Claude Code's Rewind menu. An entry is taken back
         // when the window wrote nothing (_releaseEscPress); at most one per session ever escaped, like _screenImageTapMs.
         std::unordered_map<std::wstring, int64_t> _escPressMs;
+        // §21.42: the cards' screenshots - the cog's switch (AppSettings::messagingCardScreenshots, set by Apply), the refusals of a
+        // card WITH a picture in a row (a picture that goes through resets it), and the stop for the rest of the run after
+        // kCardPictureRefusalsToStop of them (_noteCardPictureRefused).
+        std::atomic<bool> _cardPictures{ true };
+        std::atomic<int> _cardPictureRefusals{ 0 };
+        std::atomic<bool> _cardPicturesStopped{ false };
+        // §21.42: the pictures waiting to be drawn (_queueCardPictureRender) and whether the one worker thread that draws them runs
+        // (it starts with the first job and ends when the queue is empty). Under `_pictureMtx`, a LEAF lock: never taken while
+        // `_mtx` is held, and nothing else is taken while it is held.
+        std::mutex _pictureMtx;
+        std::deque<CardPictureJob> _pictureJobs;
+        bool _pictureWorkerRunning{ false };
+        // §21.42, under `_pictureMtx`: the card posts and edits that wait for their picture, each with its deadline
+        // (_expireCardPictureWaits sends a late one without a new picture).
+        std::vector<PendingCardPicture> _pendingCardPictures;
+        // §21.42, under `_mtx`: the card picture decisions since the last traffic census line (uploaded / reused / kept / none /
+        // skipped) and the bytes uploaded - the bandwidth the pictures cost, logged with the call census (_countCardPicture).
+        std::map<std::wstring, uint32_t> _cardPicturesByKind;
+        uint64_t _cardPictureBytes{ 0 };
         // §21.39: the conversations being drawn right now (_startConversationImage's worker threads) - at most
         // kConversationImageMaxRenders at once. Its own count, not _screenImageRenders: one conversation takes seconds and hundreds of
         // MB, and it must not hold back the quick screen pictures and question previews that share that one.

@@ -992,6 +992,8 @@ namespace Agentmaster
         o.Set(L"messagingRichMessages", json::Value::MkBool(s.messagingRichMessages));
         // §21.39: 📜 All Screen's default level word, written as stored (the service reads an unknown word as full).
         o.Set(L"messagingAllScreenLevel", json::Value::MkStr(s.messagingAllScreenLevel));
+        // §21.42: whether the session cards carry the terminal's screen (on unless set).
+        o.Set(L"messagingCardScreenshots", json::Value::MkBool(s.messagingCardScreenshots));
         // §21.32.4: the file links (their secret is in Credential Manager, never here).
         o.Set(L"messagingFileLinksMode", json::Value::MkStr(s.messagingFileLinksMode));
         o.Set(L"messagingFileLinkStation", json::Value::MkStr(s.messagingFileLinkStation));
@@ -1319,6 +1321,7 @@ namespace Agentmaster
         s.messagingVerbose = v.BoolAt(L"messagingVerbose", false); // §21.11: absent => the conversation only
         s.messagingRichMessages = v.BoolAt(L"messagingRichMessages", true); // §21.11: absent => rich messages
         s.messagingAllScreenLevel = v.StrAt(L"messagingAllScreenLevel", L"full"); // §21.39: absent => Full (the user's rule)
+        s.messagingCardScreenshots = v.BoolAt(L"messagingCardScreenshots", true); // §21.42: absent => cards carry the screen (the user's request)
         // §21.32.4: absent => off, the install's default station and port, the first LAN address, https://cc.sysd.cc.
         s.messagingFileLinksMode = v.StrAt(L"messagingFileLinksMode", L"off");
         s.messagingFileLinkStation = v.StrAt(L"messagingFileLinkStation");

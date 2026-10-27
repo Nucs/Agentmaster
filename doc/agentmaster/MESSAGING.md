@@ -13,7 +13,7 @@
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
 > through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.37 (a Debug build
 > of dae998824 by the build server, since 2026-10-26) holds everything through §21.39, its level picker and File diffs
-> included (§21.40 and §21.41 are in no build yet); §21.32–§21.32.3 and §21.36 are
+> included (§21.40, §21.41 and §21.42 are in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5987,6 +5987,111 @@ builds none of the changed files. NOT BUILT; nothing tried live.
 7. A Codex topic: no ⎋ Esc anywhere, 🌙 Deactivate alone on its row; an adopted claude: ⎋ Esc, no 🌙 Deactivate; a parked tab:
    no row.
 8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
+
+### 21.42 The card carries the screen: a fresh screenshot at every card update (2026-10-27; NOT BUILT)
+
+> The user's request (2026-10-27): "the running since messgae, called also i think status message that is pinned to the
+> bottom - whenever it updates, have it produce a screenshot (if possible) and have it shown and so every update we produce a
+> screenshot to show in the status message".
+
+**What Telegram allows** (Bot API 10.2, July 2026: `InputRichMessage.media` + `InputRichMessageMedia`, photo blocks; read in
+the Bot API reference on 2026-10-27, then measured on the DEV bot with `card_picture_probe.py` in the session's scratchpad —
+silent messages in the chat's main view, copy_text buttons only, never `getUpdates`, both messages deleted after):
+
+| Probe | Result |
+|---|---|
+| `sendRichMessage`, a paragraph + `<figure><img src="tg://photo?id=screen"/><figcaption>…</figcaption></figure>`, the photo uploaded as `attach://screen` | ok, 441 ms (4 KB); blocks [paragraph, photo], caption and keyboard kept |
+| `editMessageText` with a NEW upload (a 4 MB PNG) | ok, 1,291 ms; the photo replaced in place, keyboard kept |
+| `editMessageText` reusing the photo's `file_id` (no upload) | ok, 274 ms; the same picture (same `file_unique_id`) |
+| a text-only rich edit, then the picture back by `file_id` as a bare `<img>` | ok both: the photo dropped, then back (no caption) |
+| the same edit again | "message is not modified" (already harmless: `TgResult::NotModified`) |
+| a new `sendRichMessage` by `file_id` | ok, 272 ms, no upload |
+
+**So the card stays what it is** — a rich message, its title a chip, its buttons below — and gets one more block, LAST (the
+card leads with its state, §21.26): the terminal's screen, captioned "🖥 the screen at 19:50:12" (seconds: a running card
+takes a new picture every ~20 s). Pure half: `AgentMaster/MessagingCardPicture.h`; the service: `Messaging.cpp`.
+
+**When a picture is taken** (`MessagingService::_refreshCard` → `_withCardPicture`, the plan `PlanCardPicture`):
+- **A card update** — any change of the card's TEXT (a state, the since-clock, a running turn's context size, the runner, the
+  queue, the draft, the recap): the hosting window reads the live screen (the 🖼 Screen Image snapshot, `screen-snapshot`, on
+  its UI thread: 0.3–0.6 ms optimized). A screen that changed since the card's last picture is drawn on a worker thread (the
+  §21.24 renderer, ~90–185 ms) and uploaded IN THE SAME CALL as the card's edit or post (a multipart `editMessageText` /
+  `sendRichMessage`, `OutItem::uploadField`, `TelegramApi::CallWithFile`): the picture costs no call of its own on the chat's
+  ~20-a-minute budget, and the number of card edits is exactly what it was. An unchanged screen reuses the photo Telegram
+  holds by its `file_id` (no upload), captioned with the moment it was read again.
+- **Not an update** — a page flip of the buttons (⚙️ Session / ◀ Back) or the slow form upgrade (§21.15): the card keeps its
+  picture with no read and no drawing, so a page flip stays instant (`CardState::pictureTextHash` — the classic text without
+  the buttons — tells the two apart).
+- **No screen** — a parked tab (its claude never started), a window that is not up, no window hosting the tab: the card keeps
+  its last picture, captioned with ITS moment; a card that never had one goes as text.
+- **Every post** (the first card, a re-post below newer messages, a ping with sound, a re-sort) reads the screen: each is a
+  moment the screen belongs on the card. The post marks the card in flight (-1) at once, so no second post starts while the
+  screen is read and drawn, and queues the old card's delete and the new card when the picture is settled.
+
+**Order and races.** The picture step is asynchronous, so each picture-carrying post or edit stamps a generation
+(`CardState::pictureSeq`); an EDIT whose step a newer post or edit of the same card overtook is dropped when its picture is
+settled — finishing last, it would put an older text back (its taps go; the newer change carries what they waited for). One
+consequence: a page flip within the few hundred ms of a status update's step drops that update's new screenshot (the card shows
+the newest text and buttons with its previous picture until its next update). The card's send runs exactly once whatever
+settles the picture (`CardPictureOnce`: the window's answer, the worker, the guard of a read no window answered —
+`CardPictureReadGuard` — or a failure), and a card change is never lost to its picture: every failure sends it without one.
+The drawing worker is ONE thread with a queue, started by the first job and ending when the queue is empty; a job a newer
+update overtook is not drawn. **A card never waits more than 4 s for its picture** (`kCardPictureWaitMs`; the send loop checks
+the deadlines every pass, `_expireCardPictureWaits`): before this change a card's edits did not depend on any window, and a
+FROZEN window (a UI stall) holds its copy of the screen read unanswered — without the bound its cards would not change for as
+long as the freeze lasts, which is when the phone is needed most. Past it the card goes with the picture it shows
+(`[msg] <sid8> card picture not ready within 4 s …`), and a late picture is dropped.
+
+**Refusals.** A post or edit WITH its picture that Telegram refuses (a 400 about the message) goes once more WITHOUT it in the
+next outbox slot of the same sequence number and with no key (the card's text and title chip still land; a fresh slot could
+land after a newer edit and put old text back — the classic fallback's own rule), and only that retry's refusal falls back to
+the classic render. Three refusals of a picture in a row stop the pictures for the run (`kCardPictureRefusalsToStop`, one log
+line); a picture that goes through resets the count. A classic card (rich messages off, or the Bot API without them) has no
+picture at all: no classic message can hold a picture block.
+
+**Kept across a restart.** The topic record keeps the photo's `file_id`, the moment its screen was read and that screen's hash
+(`TopicRecord::cardPictureFileId` / `cardPictureAtMs` / `cardPictureShotHash`, saved as progress), so a tab restored dormant
+— whose screen cannot be read — keeps its picture at its first edit after a restart. A card posted before this build gets its
+first picture at its next update.
+
+**The switch and the cost.** `AppSettings::messagingCardScreenshots` (on by default, the user's request; the cog's Messaging tab
+"Show the screen in each session's card", under the rich switch it needs; applied live). The cost is upload bandwidth, not
+calls: production edited its cards 66–126 times per 10 minutes on 2026-10-27 (the census lines of 18:54–19:44; nearly all from
+running cards, whose context size changes with every reply and edits them at the 20 s gap), and a new picture is ~0.1–0.6 MB
+— so several running sessions mean roughly 100–250 MB of uploads an hour, ~1 s per upload call (the outbox's 1.05 s pacing
+already spaces calls). The census line measures it: `[msg] traffic (10 min): … pictures(drawn=N kept=N none=N reused=N
+skipped=N, K KB drawn)`.
+
+**Logs.** Only exceptions are logged per picture: `[msg] <sid8> card picture: the screen's snapshot did not parse …`, `… could
+not be drawn: …`, `[msg] Telegram refused a card with its screen picture (400: …); it goes again without the picture`, `[msg] 3
+card pictures refused in a row: …`; the 10-minute census counts the rest.
+
+**Not changed, still open.**
+- The picture is NOT redacted (§9.6 is not built), like 🖼 Screen Image's: the terminal's text goes to Telegram as it shows.
+- The picture is the visible screen only (Claude Code's fullscreen UI keeps no scrollback; 📜 All Screen draws the whole
+  conversation).
+- A Debug build draws more slowly than the measures above (the dev install is Debug); a very wide terminal draws a wider
+  picture (the 8 px minimum cell), which Telegram scales down.
+- Not tried live in the app: only the API was probed. The m5 suite covers the pure half; the step itself needs a window and
+  Telegram.
+
+**Tests and checks.** m5 `TestMessagingCard` section 1d: the screen's hash, the plan (upload / reuse / keep / none, and a held
+photo with an unknown hash is never reused for a screen read now), the caption's clock, the figure block, the media list
+(attach vs file_id), the photo read back from an answer shaped like the probe's (the largest size), the record's round trip
+and an older file, the switch's round trip and default, the refusal limit. The run (an isolated copy of HEAD + this change):
+10,335 checks, only the 3 known `TestTaskbarBadge` failures. ⚠ `SessionModels.h` (AppSettings), `AgentManagerContent.h`,
+`Messaging.h` (MessagingService, OutItem, CardState) and `MessagingModels.h` (TopicRecord) changed: the next build must purge
+(it does anyway: §21.40).
+
+**Check after the build** (dev, the bot; watch messaging.log's census):
+1. A running session's card: the screenshot under its text, "🖥 the screen at …" advancing every ~20 s with the turn; the card's
+   text and buttons as before.
+2. The turn ends: the card turns "Waiting for you" and its picture shows the final screen (the reply, the input box).
+3. ⚙️ Session and ◀ Back flip at once and keep the picture (no new caption time).
+4. A parked tab's card keeps its last picture (its caption's time older than the card's state line).
+5. The cog's switch off: the next update of each card goes without the picture; on again: the next update brings one.
+6. A new message in the topic: the card re-posts below it WITH the picture (by file_id when the screen did not change).
+7. The census after 10 minutes: `pictures(drawn=…, … KB drawn)`, and no `refused` lines.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

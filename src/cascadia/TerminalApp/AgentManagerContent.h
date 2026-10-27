@@ -1422,6 +1422,9 @@ namespace winrt::TerminalApp::implementation
         // its token goes to Credential Manager on Save like the topics bot's; empty = keep the stored one.
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVerbose{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgRich{ nullptr };
+        // MESSAGING.md §21.42: whether every session's card carries the terminal's screen as a picture
+        // (AppSettings::messagingCardScreenshots, on by default): read again at each card update, uploaded when it changed.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgCardScreens{ nullptr };
         // MESSAGING.md §21.39: 📜 All Screen's default transcript level (AppSettings::messagingAllScreenLevel): what a bare /allscreen
         // draws and the level the card's picker marks with ★. Its items are Msg::kAllScreenLevels in order (index = row).
         winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgAllScreenLevel{ nullptr };
