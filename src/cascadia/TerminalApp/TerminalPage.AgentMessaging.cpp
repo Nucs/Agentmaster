@@ -7,7 +7,9 @@
 // Agentmaster — TerminalPage, the MESSAGING partial (MESSAGING.md §8.2): the window-hosted half of the
 // Telegram bot. The bot runs on engine threads; what needs a window — starting a dormant tab's claude,
 // reading its screen, the unread ring, a rename that pins the tab title, the tag badges, answering a local
-// command's dialog (§21.34: /add-dir's menu, pressed only after the screen shows it), and opening a
+// command's dialog (§21.34: /add-dir's menu, pressed only after the screen shows it), pressing ONE Esc into
+// its terminal and parking its tab (§21.41: the card's ⎋ Esc and 🌙 Deactivate, each judged again here and
+// answered with a word), and opening a
 // session as a background tab — arrives here through the two sinks TerminalPage.AgentEngine.cpp registers
 // (session actions fanned out to every window, launches aimed at the most recently activated one).
 
@@ -16,6 +18,7 @@
 
 #include "AgentCatchLog.h" // AgentLogCaughtException (Rule #18)
 #include "AgentMaster/ClaudeSpawn.h" // LogNav, ShortId
+#include "AgentMaster/MessagingSessionControl.h" // MESSAGING.md §21.41: the card's ⎋ Esc and 🌙 Deactivate (kPressEscAction / kDeactivateAction, DecideRemoteEsc / DecideRemotePark)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/TuiMenus.h" // MESSAGING.md §21.34: the menu actions (kMenuScreenAction / kMenuAnswerAction, DecideMenuAnswer)
 
@@ -108,6 +111,65 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[menu] " + ::Agentmaster::ShortId(sessionId) + L" a malformed menu answer was refused: nothing typed\n");
                 }
                 answer = std::wstring{ ::Agentmaster::Msg::MenuAnswerResultWord(result) };
+            }
+            else if (action == ::Agentmaster::Msg::kPressEscAction)
+            {
+                // MESSAGING.md §21.41 (the card's ⎋ Esc, a confirmed /interrupt): ONE Esc into the session's terminal, judged HERE, at
+                // the moment of the write, on the UI thread every keystroke of this tab goes through (DecideRemoteEsc): its claude
+                // must read keys (started or adopted, not exited; Claude - no injector is bound to Codex), and no delivery or draft
+                // swap may hold the box - the same box test as the menu press above. An Esc between a delivery's keystrokes, or right
+                // after its Enter, would put the prompt back into the box, and the Enter-retry watch would send the very prompt the
+                // user stopped. No argument; the answer is RemoteEscResultWord.
+                using ::Agentmaster::Msg::RemoteEscResult;
+                const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+                const bool boxHeld = _draftSwapsInFlight.count(sessionId) != 0 || (_sessionRegistry && _sessionRegistry->DeliveryGateHeld(sessionId));
+                RemoteEscResult result = info ? ::Agentmaster::Msg::DecideRemoteEsc(*info, boxHeld) : RemoteEscResult::NotRunning;
+                // `info` is set only with a registry, so a Pressed verdict always has one to write through. The write goes through the
+                // session's injector - its OWN connection, never "the active pane" of a split - like the menu press above; Claude Code
+                // reads a lone ESC as the Escape key (the fork stop watch's press, the interrupt probes).
+                if (result == RemoteEscResult::Pressed && !_sessionRegistry->Inject(sessionId, std::wstring(1, L'\x1b')))
+                {
+                    result = RemoteEscResult::Failed; // no injector bound any more: the tab closes or parks right now
+                }
+                answer = std::wstring{ ::Agentmaster::Msg::RemoteEscResultWord(result) };
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[esc] " + ::Agentmaster::ShortId(sessionId) + L" Telegram's Esc -> " + answer +
+                                                                (result == RemoteEscResult::Busy ? std::wstring{ L" (a delivery or a draft swap holds the input box: nothing typed)" } : std::wstring{}) + L"\n");
+            }
+            else if (action == ::Agentmaster::Msg::kDeactivateAction)
+            {
+                // MESSAGING.md §21.41 (the card's 🌙 Deactivate, /deactivate): park this tab exactly as the tab menu's "Deactivate ▸
+                // Deactivate Tab" does, judged here first (DecideRemotePark): an adopted shell tab is never parked (its ConPTY is the
+                // user's shell), a parked one is parked already, a held input box waits (the park would close the control that
+                // operation is verifying), and a turn in flight is cut off only when the argument is kDeactivateCutOffTurnArg - sent
+                // after the user's "Park now". Any other argument means "at rest only", so a turn that started between the tap and this
+                // moment is never cut off by a request made for a session at rest. The answer is RemoteParkResultWord.
+                using ::Agentmaster::Msg::RemoteParkResult;
+                const auto it = _claudeTabs.find(sessionId);
+                const auto tab = it != _claudeTabs.end() ? it->second.get() : nullptr;
+                const auto info = _sessionRegistry ? _sessionRegistry->GetWithoutQueue(sessionId) : std::nullopt;
+                const bool boxHeld = _draftSwapsInFlight.count(sessionId) != 0 || (_sessionRegistry && _sessionRegistry->DeliveryGateHeld(sessionId));
+                const bool cutOffTurn = arg == ::Agentmaster::Msg::kDeactivateCutOffTurnArg;
+                // A tab whose weak reference expired is closing: nothing is left to park.
+                RemoteParkResult result = info && tab ? ::Agentmaster::Msg::DecideRemotePark(*info, boxHeld, cutOffTurn) : RemoteParkResult::Closed;
+                if (result == RemoteParkResult::Parked)
+                {
+                    // The tab menu's own single-tab path (the AI search's deactivate tool runs it too): the focused-tab rule - a session
+                    // on screen here sends this window to its Agent Manager page first, so the fresh control is not laid out and its
+                    // claude restarted at once -, the park's own checks (no claude.exe, a preset that cannot launch: each logged as a
+                    // [deactivate] line) and the strip keeper. Its [nav] deactivate-begin / -done pair lands between this action's two
+                    // [nav] lines: the request's, at the top of this function, and the outcome's, below. A throw in it skips the reply
+                    // (the catch below), and the bot's guard then says that no window answered.
+                    _DeactivateTabsFromMenu(tab, implementation::Tab::kDeactivateScopeThisTab);
+                    // The park is synchronous, and started == false is its dormancy contract: the record says whether it went.
+                    const auto after = _sessionRegistry->GetWithoutQueue(sessionId);
+                    if (!after || after->started)
+                    {
+                        result = RemoteParkResult::Failed;
+                    }
+                }
+                answer = std::wstring{ ::Agentmaster::Msg::RemoteParkResultWord(result) };
+                ::Agentmaster::LogNav(L"remote session-action deactivate " + ::Agentmaster::ShortId(sessionId) + L" -> " + answer +
+                                      (cutOffTurn ? std::wstring{ L" (the user allowed cutting a turn off)" } : std::wstring{}));
             }
             else if (action == kDeactivateIdleSessionAction)
             {

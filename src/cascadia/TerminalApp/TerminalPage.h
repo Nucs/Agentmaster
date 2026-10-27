@@ -2268,7 +2268,9 @@ namespace winrt::TerminalApp::implementation
         // window-hosted actions. Runs `action` on the session's tab when THIS window hosts it ("start" = start a
         // dormant tab's claude in place; "screen" = answer the terminal's visible text through `reply`; "markunread";
         // "rename" = `arg` is the new title, through _RenameClaudeSession (Rule #11); "refresh-tags" /
-        // "refresh-favorite" = repaint after a remote store edit). Also two non-bot words from other windows: the session
+        // "refresh-favorite" = repaint after a remote store edit; MESSAGING.md §21.41's kPressEscAction = write ONE Esc and
+        // kDeactivateAction = park the tab, each judged again here - DecideRemoteEsc / DecideRemotePark - and answered with a
+        // RemoteEscResultWord / RemoteParkResultWord through `reply`). Also two non-bot words from other windows: the session
         // menu's (kSessionMenuDeactivateAction / kSessionMenuCloseAction, -> _RunSessionMenuScopeHere) and
         // kDeactivateIdleSessionAction ("Deactivate All Idle Tabs" answered "All windows", -> _DeactivateIdleSessionLocal).
         // Returns false, calling nothing, when this window does not host the session (the fan-out's other windows). UI

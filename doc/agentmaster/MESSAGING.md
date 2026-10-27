@@ -13,7 +13,7 @@
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
 > through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.37 (a Debug build
 > of dae998824 by the build server, since 2026-10-26) holds everything through §21.39, its level picker and File diffs
-> included (§21.40 is in no build yet); §21.32–§21.32.3 and §21.36 are
+> included (§21.40 and §21.41 are in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5876,6 +5876,117 @@ TerminalAppLib: the next build must PURGE (the build-install skill's §5.8).
 - The headless `/usage` is asked of the engine's claude.exe; a session started from another claude (an older install it
   resumed with) still reports the engine's account and usage — the same account in every case seen.
 - A Codex session's own status (its rollout records rate limits) is not read.
+
+### 21.41 ⎋ Esc and 🌙 Deactivate on the card: stop a turn, park a tab (2026-10-27; NOT BUILT)
+
+> The user's request (2026-10-27): "Telegram bot needs to be able to also per session: a. interrupt via sending esc onto the
+> screen via esc button b. deactivate tab (and by that also claude stops running)".
+
+Both existed only as typed commands, `/interrupt` (one Esc, asked first) and `/deactivate` (asked while Running), and both
+were fire-and-forget from the bot's thread: `/interrupt` wrote its Esc through the registry's injector without a look at the
+input box, and `/deactivate`'s line said "Parked" whatever the window did. They now share one path with two new card buttons
+(`AgentMaster/MessagingSessionControl.h`, the pure half; `MessagingModels.h` `BuildCardButtonRows`; `Messaging.Inbound.cpp`;
+`TerminalPage.AgentMessaging.cpp`).
+
+**Where the buttons are.**
+
+| Page | Change |
+|---|---|
+| **Main** | [⚙️ Session] [⎋ Esc] while a turn is in flight: Running, or Needs approval (a permission or question dialog). Error and Done keep [🔄 Restart Session] there and a parked tab [▶ Reactivate]; at rest the cog stays alone. |
+| **Session** | a new row right above ◀ Back: [⎋ Esc] [🌙 Deactivate] while the session's claude runs. ⎋ Esc only for a Claude session whose claude reads keys (not Codex, not an exited claude); 🌙 Deactivate only for a started tab Agentmaster launched (not an adopted shell tab, not a parked one). No row for a parked tab or a closed session. Every other button keeps its row. |
+
+The data: `c:esc:<id>` (42 bytes) and `c:deactivate:<id>` (49 bytes, with `c:newsession:`, `c:reactivate:` and `c:transcript:`
+the longest of the two pages). Like every card verb they act on the session's state when tapped.
+
+**⎋ Esc.** ONE Esc key, at once and with no question: the button is the key, and it does what the key does at the PC — the
+turn stops (Claude Code writes `[Request interrupted by user]` and waits), a permission or question dialog is turned down, an
+open menu closes, and at rest with an empty box nothing happens; the next message goes on from there. The interrupt hold
+(DELIVERY.md §14) parks an Auto runner as after an Esc at the PC.
+- **Judged again where it is written.** The window that hosts the tab decides on its UI thread, at the write
+  (`DecideRemoteEsc`): it refuses while a delivery holds the box (the delivery gate) or a draft swap / mail move does
+  (`_draftSwapsInFlight`). An Esc between a delivery's keystrokes, or right after its Enter, puts the prompt back into the box
+  (HOOKS.md "Interrupted turns": an Esc before any output writes no row), and the Enter-retry watch would then send the very
+  prompt the user stopped. The Esc goes through the session's own injector, never the active pane of a split.
+- **One Esc per session per 3 s** (`kRemoteEscGapMs`): two quick ones on an empty box open Claude Code's Rewind menu, and a
+  phone's double tap (or a tap right after a confirmed `/interrupt`) is exactly that. The stamp goes in before the request
+  leaves and is taken back when nothing was written, so a refused Esc never blocks its retry.
+- **Toasts:** Running "⎋ Esc pressed — the turn stops and the session waits for you. A message here goes on from where it
+  stopped."; Needs approval "⎋ Esc pressed — as at the PC, the permission or question it waited on is turned down, and the turn
+  stops."; at rest "⎋ Esc pressed. No turn was running, so it only closes a menu or dialog, if the screen shows one." Refusals
+  name their reason: a parked tab or an exited claude (nothing reads the key), Codex (Agentmaster types nothing into it), a held
+  box ("tap ⎋ Esc again in a few seconds"), the 3 s gap, no injector.
+
+**🌙 Deactivate.** The tab menu's "Deactivate ▸ Deactivate Tab": claude stops (a graceful CTRL_CLOSE), the tab keeps its place,
+title, color, tags, queue and runner mode, and a message in its topic or ▶ Reactivate resumes it.
+- **At rest** it parks at once. **While a turn is in flight** (Running or Needs approval) it parks nothing: `/deactivate`'s
+  question goes into the thread ("Park <title> while a turn is running? The turn is cut off." [Park now] [Cancel]) and the toast
+  points at it — 🔄 Restart Session's rule. "Park now" allows the cut-off; the cut-off turn reads Error on its resume (HOOKS.md
+  "Cut-off turns").
+- **Judged again by the hosting window** (`DecideRemotePark`): an adopted shell tab is never parked (its ConPTY is the user's
+  shell), a parked tab is parked already, a held box waits, and a turn that started between the tap and the park is not cut
+  off: the window answers `turn-running` and the bot asks the question instead. The cut-off is allowed only by the argument
+  `cut-off-turn`, sent after "Park now"; any other argument means "at rest only".
+- The park runs `_DeactivateTabsFromMenu(tab, this tab)`, the tab menu's and the AI search tool's path (its focused-tab rule: a
+  tab on the PC's screen sends its window to its Agent Manager page first), and the record read after it says whether it went
+  (`started == false`). Toast "🌙 Deactivated — its claude is stopped and the tab keeps its place. A message here or ▶ Reactivate
+  resumes it."; the button stays busy until the card shows the parked tab (§21.28).
+
+**The answers.** Two new session actions, `press-esc` and `deactivate`, go to every window; the one that hosts the tab acts and
+replies with a word (`pressed` / `not-running` / `not-claude` / `busy` / `failed`; `parked` / `already-parked` / `adopted` /
+`turn-running` / `busy` / `closed` / `failed`). The toast is that answer, set from the window's reply while the reply still
+holds the tap (§21.28) — so the card handler does not answer the tap itself then: an `answer("")` after the reply would race the
+window's UI thread and wipe its toast. An empty or unknown word (a window of an older build) reads as failed, never as success.
+When no window answers at all (every copy of the reply goes uncalled: no window hosts the tab), a guard
+(`SessionActionAnswer`, Messaging.Inbound.cpp) says "No window answered for its tab (it is closing, or the PC is busy) — …"
+instead of a button that just stops spinning.
+
+**The typed commands take the same paths.** `/interrupt`'s "Interrupt now" and `/deactivate` (at rest, and its "Park now") send
+the window actions, and their line in the thread is the window's answer — "Parked" is no longer claimed for a refused park, and
+the typed Esc is no longer written into a box a delivery holds. Both now ask while a turn waits on a permission or a question
+too ("… while it waits for your answer at the PC? The turn is cut off."); `/restartsession` keeps its Running-only rule.
+`/interrupt` in a Codex topic is refused at once instead of asking first. A host with no `sessionAction` (the m5 harness) keeps
+the old fire-and-forget paths. The topic's `/help` names both buttons.
+
+**Logs.** `[nav] remote telegram esc (card) <sid8> -> asked the hosting window`, then `… -> pressed` (or `busy`, `not-running`,
+`not-claude`, `failed`, `repeated`, `no-answer`); the window's `[nav] remote session-action press-esc <sid8>` and hooks.log
+`[esc] <sid8> Telegram's Esc -> pressed`. `[nav] remote telegram deactivate (card) <sid8> -> asked the hosting window`, the
+window's `[nav] remote session-action deactivate <sid8>`, the tab menu's `[nav] deactivate-begin` / `deactivate-done scope=this
+parked=1`, then `[nav] remote session-action deactivate <sid8> -> parked`. The typed commands log `(/interrupt)` and
+`(/deactivate)` in place of `(card)`.
+
+**Tests and checks.** m5 `TestMessagingCard` section 1c: who gets which button on Main and the Session page in every state
+(Running, Needs approval, Waiting, Idle, Error, Done, parked, Codex, a parked Codex tab, adopted, closed), the data sizes, the
+window's two decisions, the words' round trip and the failed reading of unknown words, the texts (non-empty, within 190 units,
+no HTML) and the 3 s gap; section 1's Session page now has 8 rows for a started session. The run (an isolated copy of HEAD plus
+this change, its own profile): 10,315 checks, only the 3 known `TestTaskbarBadge` failures. `cl /Zs` with the last Debug build's
+recorded lines (`/W3 /WX` + its `/we` list): `TerminalPage.AgentMessaging.cpp`, `TerminalPage.AgentEngine.cpp` and
+`AgentManagerContent.Settings.cpp` (PCH), `MessagingSearchBridge.cpp`, `Engine.cpp`, `Messaging.cpp`, `Messaging.Inbound.cpp`,
+`Messaging.Files.cpp`, `Messaging.Menus.cpp`, `Messaging.Questions.cpp` and `Messaging.Status.cpp` (borrowing
+`Messaging.Files.cpp`'s line) pass; five negative controls (an unknown member in each new branch, a call with a missing
+argument, two `static_assert`s on the new header's values) fail with exactly C2039 / C2660 / C2338 at their lines. The CLI
+builds none of the changed files. NOT BUILT; nothing tried live.
+⚠ `MessagingService` gained a data member (`_escPressMs`) and `CardButtonFacts` three: the next build purges anyway (§21.40).
+
+**Not changed, still open.**
+- ⎋ Esc reaches Claude Code only: Codex has no stdin injector (its TUI driving is C4).
+- An Esc is a key, not a verified action: the window confirms it WROTE the key, not that Claude Code stopped — the card's next
+  state shows that (the button stays busy until it does, up to §21.28's 9 s).
+- A turn the user stops this way and later restarts is asked about like any interrupted turn (HOOKS.md "Interrupted turns").
+
+**Check after the build** (dev, the bot):
+1. A session mid-turn: its card's Main page shows [⚙️ Session] [⎋ Esc]; ⎋ Esc → the toast "⎋ Esc pressed — the turn stops …",
+   the turn stops at the PC (`[Request interrupted by user]` in the transcript), the card turns to Waiting for you and its Esc
+   goes; hooks.log `[esc] <sid8> Telegram's Esc -> pressed`. With an Auto runner and a queued prompt: `[interrupt-hold]`.
+2. A double tap on ⎋ Esc: one Esc only, the second tap's toast "⎋ Esc went a moment ago …"; no Rewind menu at the PC.
+3. ⎋ Esc while a delivery types (queue a long prompt, tap as it goes): "A prompt is being typed …", nothing typed (`[esc] … busy`).
+4. A permission dialog (Needs approval): ⎋ Esc on Main turns it down at the PC, and the turn stops.
+5. ⚙️ Session on a waiting session: the row [⎋ Esc] [🌙 Deactivate] above ◀ Back; 🌙 Deactivate → "🌙 Deactivated …", the tab
+   parks at the PC (its dot half-hollow), the card shows ▶ Reactivate; a message in the topic resumes it.
+6. 🌙 Deactivate mid-turn: the question in the thread and the toast "A turn is running — deactivating would cut it off; confirm
+   below."; Park now → parked, and the turn reads Error when the tab resumes.
+7. A Codex topic: no ⎋ Esc anywhere, 🌙 Deactivate alone on its row; an adopted claude: ⎋ Esc, no 🌙 Deactivate; a parked tab:
+   no row.
+8. `/interrupt` and `/deactivate` typed: the same outcomes, as lines in the thread.
 
 ## 22. Folder groups — the topics grouped by working folder (2026-10-17; discovery, DESIGN ONLY, nothing built)
 

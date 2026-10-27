@@ -64,6 +64,7 @@
 #include "MessagingNewThreadWizard.h" // §21.25: the new-thread wizard (create a folder, a model, a window; records + persistence)
 #include "MessagingTaps.h" // §21.28: a tapped button's answer, held while its work runs (TapAnswer, TapHold, TapScope)
 #include "MessagingSteer.h" // §21.33: /steer, the words sent NOW (the decision, the texts, the prompt, the watch's verdict)
+#include "MessagingSessionControl.h" // §21.41: the card's ⎋ Esc and 🌙 Deactivate (the window actions, its decisions, the answers' words and texts)
 #include "TuiMenus.h" // §21.34: a local command's dialog answered from Telegram (/add-dir: the screen parser, the press, the card)
 #include "RemoteLaunch.h"
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
@@ -169,8 +170,11 @@ namespace Agentmaster::Msg
         // the tab's tag badges after a remote tag edit), "refresh-favorite", and §21.34's "menu-screen"
         // (the terminal's last rows, for the dialog a delivered /add-dir opened) and "menu-answer" (press
         // that dialog's option — only after the screen shows it: TuiMenus.h DecideMenuAnswer; its reply is
-        // MenuAnswerResultWord). `reply` is called by the hosting window with the action's text answer (may
-        // be empty); a window that does not host the session calls nothing.
+        // MenuAnswerResultWord), and §21.41's "press-esc" (ONE Esc into the terminal: DecideRemoteEsc, replied as a
+        // RemoteEscResultWord) and "deactivate" (park the tab: DecideRemotePark, its argument "cut-off-turn" only after
+        // the user's "Park now", replied as a RemoteParkResultWord — MessagingSessionControl.h). `reply` is called by
+        // the hosting window with the action's text answer (may be empty); a window that does not host the session
+        // calls nothing — so a request that needs an answer guards for none coming (SessionActionAnswer).
         std::function<void(const std::wstring& sessionId, const std::wstring& action, const std::wstring& arg, std::function<void(std::wstring)> reply)> sessionAction;
         // Open a session into a tab in the most recently active window (RemoteLaunch.h): true when a window took the request.
         // §21.23: a host that sets launchAnswered (below) may leave this empty — the service's constructor then builds it on top
@@ -1444,6 +1448,124 @@ namespace Agentmaster::Msg
         /// <exception cref="std::bad_alloc">If the toast, a reply or a hold cannot be allocated.</exception>
         std::wstring _restartFromCard(const std::wstring& sessionId, int64_t threadId);
         /// <summary>
+        /// The card's ⎋ Esc (§21.41): ONE Esc key into the session's terminal, at once - no question (the button is the key, and the
+        /// next message undoes what it did). What the service can refuse alone is answered here as the toast (a closed session, a
+        /// parked tab, an exited claude, a Codex session, a second Esc within kRemoteEscGapMs); everything else goes to the hosting
+        /// window (_pressEscRemote), which judges it again on its UI thread and presses, and whose answer becomes the toast.
+        /// </summary>
+        /// <remarks>
+        /// ⚠ An empty return means "the window's answer sets the toast": the caller must NOT answer the tap itself then - the
+        /// window's reply runs on its own UI thread, possibly before this returns, and an answer("") after it would wipe its toast.
+        /// §21.28: the button stays busy until the window answered, and - when a turn was in flight - until the card shows it
+        /// stopped (_awaitCardChange).
+        /// </remarks>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="threadId">The topic (unused by a card tap's outcome, which is a toast; kept for the shared path).</param>
+        /// <returns>The toast of a refusal decided here; "" when the request went to the window.</returns>
+        /// <exception cref="std::bad_alloc">If the record, the toast or the request cannot be allocated.</exception>
+        std::wstring _escFromCard(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>
+        /// The card's 🌙 Deactivate (§21.41): parks the tab (claude stops, the tab keeps its place) through the hosting window
+        /// (_deactivateRemote), whose answer becomes the toast. While a turn is in flight it parks nothing: /deactivate's question
+        /// goes into the thread (the turn would be cut off), and the toast points at it - as 🔄 Restart Session does. A closed
+        /// session, an adopted shell tab and a parked tab are answered here.
+        /// </summary>
+        /// <remarks>
+        /// ⚠ As for _escFromCard: an empty return means the window's answer sets the toast, and the caller must not answer the tap.
+        /// </remarks>
+        /// <param name="sessionId">The card's session.</param>
+        /// <param name="threadId">The topic (where the question goes while a turn is in flight).</param>
+        /// <returns>The toast decided here (a refusal, or the pointer at the question); "" when the request went to the window.</returns>
+        /// <exception cref="std::bad_alloc">If the record, the toast, the question or the request cannot be allocated.</exception>
+        std::wstring _deactivateFromCard(const std::wstring& sessionId, int64_t threadId);
+        /// <summary>
+        /// §21.41: claims the session's next Esc against kRemoteEscGapMs (RemoteEscTooSoon on the monotonic clock) and stamps it, so a
+        /// double tap - or a tap right after a confirmed /interrupt - cannot write the two quick Esc presses that open Claude Code's
+        /// Rewind menu. The stamp goes in BEFORE the request leaves (a second tap can arrive before the window's answer) and is
+        /// taken back when the window wrote nothing (_releaseEscPress), so a refused Esc never blocks the retry it invites.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <returns>True when the Esc may be asked for now; false inside the previous one's window (nothing stamped).</returns>
+        /// <exception cref="std::bad_alloc">If the stamp's entry cannot be allocated.</exception>
+        /// <exception cref="std::system_error">If the mutex cannot be locked.</exception>
+        bool _claimEscPress(const std::wstring& sessionId);
+        /// <summary>§21.41: takes a claimed Esc's stamp back (the window wrote nothing, or nobody answered). Never throws: a failure is logged and the stamp then expires by itself after kRemoteEscGapMs.</summary>
+        /// <param name="sessionId">The session.</param>
+        void _releaseEscPress(const std::wstring& sessionId) noexcept;
+        /// <summary>
+        /// §21.41: the shared Esc of the card's ⎋ Esc and a confirmed /interrupt - sends kPressEscAction to the windows; the one that
+        /// hosts the tab judges it (DecideRemoteEsc), writes ONE Esc and answers, and _onEscAnswered reports it: as the tapped
+        /// button's toast for the card, as a line in the topic for /interrupt. When no window answers at all (every window's copy of
+        /// the reply goes without a call: no window hosts the tab), the reply's guard reports kRemoteEscUnansweredText the same way.
+        /// The caller has claimed the press (_claimEscPress).
+        /// </summary>
+        /// <remarks>
+        /// §21.28: the reply and its guard carry the holds of the calling scope's taps (the card's ⎋ Esc, or /interrupt's "Interrupt
+        /// now"), so the tapped button stays busy until the outcome is in; a typed command has no tap.
+        /// </remarks>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic (the line of a typed /interrupt goes there).</param>
+        /// <param name="fromCard">True for the card's ⎋ Esc (the outcome is the toast), false for /interrupt (a line in the topic).</param>
+        /// <param name="stateAtTap">The session's state when the user asked (the outcome's wording, and whether the card is awaited).</param>
+        /// <exception cref="std::bad_alloc">If the request, its reply or its guard cannot be allocated.</exception>
+        void _pressEscRemote(const std::wstring& sessionId, int64_t threadId, bool fromCard, SessionState stateAtTap);
+        /// <summary>
+        /// §21.41: the window's answer to an Esc request, on THAT window's UI thread (inside a scope of the request's taps): the toast
+        /// or the line (RemoteEscOutcomeText), the stamp taken back when nothing was written, the card awaited when a turn was in
+        /// flight and the Esc went (§21.28), and the [nav] line. Never throws: a failure is logged (Rule #18), and the tap is then
+        /// answered with what was set so far.
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="fromCard">As _pressEscRemote's.</param>
+        /// <param name="stateAtTap">As _pressEscRemote's.</param>
+        /// <param name="result">What the window did (ParseRemoteEscResult of its word).</param>
+        /// <param name="taps">The request's tap holds (each tap's toast is set through them).</param>
+        void _onEscAnswered(const std::wstring& sessionId, int64_t threadId, bool fromCard, SessionState stateAtTap, RemoteEscResult result, const std::vector<TapHoldRef>& taps) noexcept;
+        /// <summary>
+        /// §21.41: the shared park of the card's 🌙 Deactivate and /deactivate (typed at rest, or its "Park now") - sends
+        /// kDeactivateAction to the windows (with kDeactivateCutOffTurnArg only when the user confirmed cutting a turn off); the one
+        /// that hosts the tab judges it (DecideRemotePark), parks through the tab menu's own path and answers, and _onParkAnswered
+        /// reports it as the toast (card) or a line (typed). No window answering is reported as kRemoteParkUnansweredText.
+        /// </summary>
+        /// <remarks>
+        /// Before §21.41, /deactivate parked through ServiceHooks::deactivateSession, which reports nothing, and its line said
+        /// "Parked" whatever the window did (an adopted tab and a held input box are refused there silently). It stays the fallback
+        /// for a host that sets no sessionAction.
+        /// </remarks>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="cutOffTurn">True after the user confirmed that a turn in flight may be cut off ("Park now").</param>
+        /// <param name="fromCard">True for the card's 🌙 Deactivate (the outcome is the toast), false for /deactivate (a line).</param>
+        /// <exception cref="std::bad_alloc">If the request, its reply or its guard cannot be allocated.</exception>
+        void _deactivateRemote(const std::wstring& sessionId, int64_t threadId, bool cutOffTurn, bool fromCard);
+        /// <summary>
+        /// §21.41: the window's answer to a park request, on that window's UI thread (inside a scope of the request's taps): the toast
+        /// or the line (RemoteParkOutcomeText), the card awaited after a park (§21.28: until it shows ▶ Reactivate), and - when a turn
+        /// started between the tap and the park (TurnRunning) - /deactivate's question in the thread instead. Never throws (Rule #18).
+        /// </summary>
+        /// <param name="sessionId">The session.</param>
+        /// <param name="threadId">The topic.</param>
+        /// <param name="fromCard">As _deactivateRemote's.</param>
+        /// <param name="result">What the window did (ParseRemoteParkResult of its word).</param>
+        /// <param name="taps">The request's tap holds.</param>
+        void _onParkAnswered(const std::wstring& sessionId, int64_t threadId, bool fromCard, RemoteParkResult result, const std::vector<TapHoldRef>& taps) noexcept;
+        /// <summary>
+        /// §21.41: tells the user what came of an action a window carried out for the bot (⎋ Esc, 🌙 Deactivate and their typed
+        /// commands): as the tapped button's TOAST for a card button - set on every tap of `taps`, whose holds keep those taps
+        /// unanswered until the caller lets them go, so the answer carries it - or as a silent LINE in the topic for a typed command.
+        /// </summary>
+        /// <remarks>
+        /// A card tap whose holds are empty (its hold's limit passed before the request left) gets no toast: its answer went already,
+        /// with kTapStillWorkingToast. Setting a toast from a continuation is safe: TapAnswer guards it with its own mutex.
+        /// </remarks>
+        /// <param name="threadId">The topic (a typed command's line goes there).</param>
+        /// <param name="fromCard">True for a card button (the toast), false for a typed command (the line).</param>
+        /// <param name="text">The outcome, plain text (escaped here for the line).</param>
+        /// <param name="taps">The request's tap holds.</param>
+        /// <exception cref="std::bad_alloc">If the toast or the line cannot be allocated.</exception>
+        void _tellRemoteOutcome(int64_t threadId, bool fromCard, const std::wstring& text, const std::vector<TapHoldRef>& taps);
+        /// <summary>
         /// HOOKS.md "Interrupted turns" — the restart question, asked IN THE TOPIC (the PC shows no dialog for a restart the
         /// phone asked for). When the session's active branch ends in a turn the USER interrupted and a rewind would let Claude
         /// Code continue it (PlanInterruptRewindForSession == Rewind), posts "Continue the interrupted turn?" with three
@@ -2284,6 +2406,10 @@ namespace Agentmaster::Msg
         // §21.24, under `_mtx`: when each session's screen picture was last asked for (WallMs). A second request within
         // kScreenImageTapGapMs asks nothing new: a double tap must not draw and send two pictures on the chat's call budget.
         std::unordered_map<std::wstring, int64_t> _screenImageTapMs;
+        // §21.41, under `_mtx`: when each session's last Esc was asked for (GetTickCount64, monotonic; _claimEscPress), so two never
+        // land within kRemoteEscGapMs - a quick double Esc on an empty box opens Claude Code's Rewind menu. An entry is taken back
+        // when the window wrote nothing (_releaseEscPress); at most one per session ever escaped, like _screenImageTapMs.
+        std::unordered_map<std::wstring, int64_t> _escPressMs;
         // §21.39: the conversations being drawn right now (_startConversationImage's worker threads) - at most
         // kConversationImageMaxRenders at once. Its own count, not _screenImageRenders: one conversation takes seconds and hundreds of
         // MB, and it must not hold back the quick screen pictures and question previews that share that one.

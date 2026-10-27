@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "Json.h"
+#include "MessagingSessionControl.h" // §21.41: who gets the card's ⎋ Esc and 🌙 Deactivate (SessionTakesEsc, SessionIsDeactivatable)
 #include "ProcessInspect.h" // NormalizeRecapText (the one away_summary normalizer every recap reader shares)
 #include "SessionModels.h"
 #include "TelegramFormat.h"
@@ -4750,11 +4751,13 @@ namespace Agentmaster::Msg
     /// itself. Nothing persists: after a restart every card is on Main again.
     /// §21.39: a third page, ALL SCREEN, is the level picker 📜 All Screen ▸ opens from the Session page (the user's request of
     /// 2026-10-26: "a second menu where we pick the transcript levels"); its ◀ Back returns to the Session page.
+    /// §21.41: ⎋ Esc and 🌙 Deactivate (the user's request of 2026-10-27): Main shows ⎋ Esc beside ⚙ Session while a turn is in
+    /// flight, and the Session page has a row of both above ◀ Back while the session's claude runs (MessagingSessionControl.h).
     /// </remarks>
     enum class CardPage
     {
-        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, or ▶ Reactivate for a parked tab)
-        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ◀ Back
+        Main, // ⚙ Session (+ 🔄 Restart Session in Error / after an exit, ▶ Reactivate for a parked tab, or ⎋ Esc while a turn is in flight)
+        Session, // ⑂ Fork · 🆕 New Session · 🔄 Restart Session (+ 🔧 Resume Session in Error) · the runner · Queue · Pin · Transcript · 🖥 Screen Text · 🖼 Screen Image · 📜 All Screen ▸ · ⎋ Esc · 🌙 Deactivate (while claude runs) · ◀ Back
         AllScreen, // §21.39: ⬜ File diffs (unchecked) · one button per transcript level (Minimal · Compact · Default · Full · Max; the default level wears ⭐) · ◀ Back (to Session); a picked level takes the card back to Main
         AllScreenDiffs, // §21.39: the same picker with ☑️ File diffs checked - its levels draw every file change as a diff, whatever the level
     };
@@ -4912,9 +4915,15 @@ namespace Agentmaster::Msg
         // §21.39: the default level (the cog's setting, not the session's): its button on the ALL SCREEN page wears ⭐. Not read
         // from the session - CardButtonFactsFor leaves the built-in default, and the service sets the setting's (_cardMarkupFor).
         TurnsLevel allScreenLevel{ kAllScreenDefaultLevel };
+        // §21.41 (the user's request of 2026-10-27): the card's ⎋ Esc and 🌙 Deactivate. Read from the session at render time like
+        // the rest, so a card shows them exactly while they can do something - and the card's hash covers its buttons, so a state
+        // change that adds or takes one away is the same one edit the state line costs anyway.
+        bool turnInFlight{ false }; // SessionTurnInFlight: Running or Needs approval - ⎋ Esc beside ⚙ Session on Main (with takesEsc)
+        bool takesEsc{ false }; // SessionTakesEsc: a Claude session whose claude reads keys - ⎋ Esc on the Session page
+        bool deactivatable{ false }; // SessionIsDeactivatable: a started tab Agentmaster launched - 🌙 Deactivate on the Session page
     };
 
-    /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, and whether its state has an action of its own (an error, an exit, a parked tab).</summary>
+    /// <summary>Reads the card's button facts from a session: its pin, its runner's mode, whether its state has an action of its own (an error, an exit, a parked tab), and whether ⎋ Esc and 🌙 Deactivate apply (§21.41).</summary>
     /// <param name="s">The session (a lean record is enough: no queue is read).</param>
     /// <returns>The facts.</returns>
     inline CardButtonFacts CardButtonFactsFor(const SessionInfo& s) noexcept
@@ -4925,6 +4934,9 @@ namespace Agentmaster::Msg
         f.error = s.live && s.state == SessionState::Error;
         f.done = s.live && s.state == SessionState::Done;
         f.reactivatable = SessionIsReactivatable(s);
+        f.turnInFlight = SessionTurnInFlight(s);
+        f.takesEsc = SessionTakesEsc(s);
+        f.deactivatable = SessionIsDeactivatable(s);
         return f;
     }
 
@@ -4947,6 +4959,24 @@ namespace Agentmaster::Msg
     inline constexpr std::wstring_view kCardVerbResume = L"resume";
     /// <summary>🖼 Screen Image: the topic's /screenimage (the terminal's screen as a picture).</summary>
     inline constexpr std::wstring_view kCardVerbScreenImage = L"screenimg";
+    /// <summary>
+    /// ⎋ Esc (§21.41; Main while a turn is in flight, the Session page while claude runs): ONE Esc key into the session's terminal,
+    /// pressed by the hosting window at once - no question, the button is the key (MessagingSessionControl.h). The tap's toast is
+    /// the window's answer. "c:esc:" with a 36-character id is 42 bytes of Telegram's 64.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Stable data like every card verb: a stale ⎋ Esc on a card the next edit has not reached yet acts on the session's CURRENT
+    /// state - at rest it is one harmless Esc (it closes a menu if one is open), and kRemoteEscGapMs keeps two taps from becoming
+    /// the double Esc that opens Claude Code's Rewind menu.
+    /// </remarks>
+    inline constexpr std::wstring_view kCardVerbEsc = L"esc";
+    /// <summary>
+    /// 🌙 Deactivate (§21.41; the Session page while claude runs in a tab Agentmaster launched): parks the tab as the tab menu's
+    /// "Deactivate ▸ Deactivate Tab" does - claude stops, the tab keeps its place. At rest it goes at once; while a turn is in flight
+    /// /deactivate's question goes into the thread first (the turn would be cut off). "c:deactivate:" with a 36-character id is 49
+    /// bytes - the longest card data of the Main and Session pages, with c:newsession:, c:reactivate: and c:transcript:.
+    /// </summary>
+    inline constexpr std::wstring_view kCardVerbDeactivate = L"deactivate";
     /// <summary>
     /// 📜 All Screen ▸ (§21.39, the Session page): opens the ALL SCREEN page, the level picker, on the message the button sits
     /// on - the WHOLE conversation is drawn from the transcript in Claude Code's look, as tall pictures, at the level picked
@@ -5041,12 +5071,19 @@ namespace Agentmaster::Msg
     /// then one button per level, least to most (kAllScreenLevels: its name and a hint of what it adds), the default level
     /// (facts.allScreenLevel) wearing ⭐ in place of 📜, then ◀ Back to the Session page. A picked level takes the card back to
     /// MAIN (the service's handler, not this page's buttons).
+    /// §21.41 (the user's request of 2026-10-27): MAIN shows ⎋ Esc beside ⚙ Session while a turn is in flight (Running, Needs
+    /// approval) - the one moment an interrupt is wanted, so it is one tap away; SESSION gets a row of ⎋ Esc and 🌙 Deactivate right
+    /// above ◀ Back while the session's claude runs (each button only where it applies: no Esc for Codex or an exited claude, no
+    /// Deactivate for an adopted shell tab; no row at all for a parked tab, whose ▶ Reactivate is on Main).
     /// </summary>
     /// <remarks>
     /// ▶ Reactivate restarts a session in Error or one whose claude exited, exactly as 🔄 Restart Session does there, so it is
     /// offered only for a parked tab, which it starts in place (and Restart, tapped on a parked tab, does the same since §21.24 —
     /// the window's own restart refuses a connection that never started). 🔧 Resume Session is Reactivate's name in Error, kept
     /// beside Restart because the user asked for both.
+    /// The §21.41 row sits LAST, above ◀ Back, so every button the Session page had keeps its row (the rule §21.39's All Screen
+    /// row followed), and the two stopping buttons are the farthest from the ones tapped most - a stray tap on the page's top rows
+    /// never parks a tab or stops a turn.
     /// </remarks>
     /// <param name="sessionId">The card's session (it goes into every button's data).</param>
     /// <param name="facts">The facts the labels and the conditional buttons depend on (CardButtonFactsFor).</param>
@@ -5072,6 +5109,13 @@ namespace Agentmaster::Msg
             else if (reactivateParked)
             {
                 row.push_back({ L"\x25B6 Reactivate", CardCallbackData(L"reactivate", sessionId) });
+            }
+            else if (facts.turnInFlight && facts.takesEsc)
+            {
+                // §21.41: while a turn runs (or waits on a permission / a question), stopping it is the state's own action - so
+                // ⎋ Esc sits where Restart and Reactivate sit in their states, right of the cog, which never moves. The three are
+                // exclusive: a turn in flight is never Error or Done, and a parked tab runs no turn.
+                row.push_back({ L"\x238B Esc", CardCallbackData(kCardVerbEsc, sessionId) });
             }
             rows.push_back(std::move(row));
             return rows;
@@ -5123,6 +5167,23 @@ namespace Agentmaster::Msg
         // §21.39: under the two screen buttons it extends (the visible screen -> the whole conversation), on a row of its own; the
         // ▸ says it opens a page (the level picker), as "More ▸" does.
         rows.push_back({ { L"\U0001F4DC All Screen \x25B8", CardCallbackData(kCardVerbAllScreen, sessionId) } });
+        // §21.41: the session's stopping buttons, on their own row above ◀ Back (the remarks say why there). Each is offered only
+        // where it can act; the row goes when neither can (a parked tab, a closed session), so a card never shows a button whose
+        // only answer would be "nothing to do".
+        std::vector<std::pair<std::wstring, std::wstring>> stopping;
+        if (facts.takesEsc)
+        {
+            stopping.push_back({ L"\x238B Esc", CardCallbackData(kCardVerbEsc, sessionId) });
+        }
+        if (facts.deactivatable)
+        {
+            // The moon: the bot's sign of a deactivated tab (SearchPickStateGlyph), the state this button leaves the tab in.
+            stopping.push_back({ L"\U0001F319 Deactivate", CardCallbackData(kCardVerbDeactivate, sessionId) });
+        }
+        if (!stopping.empty())
+        {
+            rows.push_back(std::move(stopping));
+        }
         rows.push_back({ { L"\x25C0 Back", CardCallbackData(kCardVerbMainPage, sessionId) } });
         return rows;
     }
