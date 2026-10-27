@@ -3204,6 +3204,13 @@ namespace Agentmaster
         //    starts it again, paying the load). Default 10; 0 = after every note; at most 1440.
         //  - voiceEchoTranscript: the transcript is posted under the voice note before it is read (default ON: the owner sees
         //    what the session will get; an edit of the echo does nothing — a corrected prompt is sent as text).
+        //  - voiceCorrectionModel: the CORRECTION layer's model (VoiceCorrect.h, VOICE.md §5.5): one hidden `claude -p` per note
+        //    fixes what the engines misheard, given the glossary and every engine's hearing. "claude-sonnet-5-5" (the default:
+        //    the owner's three recordings came out word for word, 3 runs of 3), "claude-haiku-5-5" (faster, cheaper, measured
+        //    2.8–4.2% WER), or "off" / "" (the dictionary's text goes as heard). ⚠ Each note is one model call on the PC's
+        //    Claude Code login (its plan or API key), and the TEXT (never the audio) reaches Anthropic — as the prompt it
+        //    becomes does anyway. A failure (no claude, a 60 s timeout, an answer that is no correction) keeps the engine's
+        //    text and the echo says why.
         bool messagingVoiceEnabled{ true };
         std::wstring voiceEngine{ L"worker" };
         std::wstring voiceWorkerCommand{};
@@ -3214,6 +3221,7 @@ namespace Agentmaster
         std::wstring voiceDictionary{};
         uint32_t voiceWorkerIdleMinutes{ 10 };
         bool voiceEchoTranscript{ true };
+        std::wstring voiceCorrectionModel{ L"claude-sonnet-5-5" };
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back

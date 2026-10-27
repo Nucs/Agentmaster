@@ -22,6 +22,13 @@ everyday words.
 - Default ON. Default ON. NOT this. NOT that. BEFORE the build; BEFORE the swap. USERPROFILE and USERPROFILE.
 - A VM and a VM; GB and GB (two-letter acronyms seen fewer than eight times).
 
+## Names nobody dictates (dropped: not speakable)
+
+- tabToken and tabToken; kStateSettleMs and kStateSettleMs (lowerCamelCase code identifiers).
+- WriteAllUtf8, WriteAllUtf8; AgentmasterStateDir, AgentmasterStateDir; SHGetKnownFolderPath, SHGetKnownFolderPath
+  (three or more word parts).
+- v9 and v9, m5 and m5, Xs and Xs (two-character tokens).
+
 ## Everyday compounds (dropped)
 
 - SessionState flips; SessionState again. TerminalPage hosts it; TerminalPage again. The Scheduler; the Scheduler.

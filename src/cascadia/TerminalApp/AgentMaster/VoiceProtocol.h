@@ -26,6 +26,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Json.h"
 
@@ -55,6 +56,9 @@ namespace Agentmaster::Voice
         int64_t decodeMs{ 0 }; // the transcription's wall time in the worker
         bool takesPrompt{ false }; // hello: the engine uses `prompt`
         bool takesHotwords{ false }; // hello: the engine uses `hotwords`
+        // transcribe: other engines' hearings of the same note (a worker run with a FUSION engine, VOICE.md §5.5); the app's
+        // correction layer resolves where they disagree. Empty for a single-engine worker.
+        std::vector<std::wstring> alternatives;
     };
 
     namespace detail
@@ -132,6 +136,17 @@ namespace Agentmaster::Voice
         a.decodeMs = doc->I64At(L"decode_ms", 0);
         a.takesPrompt = doc->BoolAt(L"prompt", false);
         a.takesHotwords = doc->BoolAt(L"hotwords", false);
+        if (const auto* alts = doc->Find(L"alternatives"); alts && alts->type == json::Value::Type::Arr)
+        {
+            for (const auto& alt : alts->arr)
+            {
+                // Only text hearings count; anything else in the array is ignored, never an error.
+                if (alt.type == json::Value::Type::Str && !alt.str.empty())
+                {
+                    a.alternatives.push_back(alt.str);
+                }
+            }
+        }
         if (!a.ok && a.error.empty())
         {
             a.error = L"the worker answered a failure without saying why";

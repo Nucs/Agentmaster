@@ -37,6 +37,10 @@ namespace Agentmaster::Voice
         std::wstring dictionary; // the owner's dictionary text (VoiceVocabulary.h ParseDictionary)
         uint32_t idleMinutes{ 10 }; // the worker process ends after this long without a note (0 = after each note)
         std::wstring profileDir; // the active profile (the API key's Credential Manager target, voice.log)
+        // The CORRECTION layer (VoiceCorrect.h): the model that fixes what the engines misheard, given the glossary and every
+        // engine's hearing ("" or "off" = no correction). Sonnet 5.5 is what transcribed the owner's recordings word for word.
+        std::wstring correctionModel{ L"claude-sonnet-5-5" };
+        std::wstring correctionEffort{ L"low" };
     };
 
     /// <summary>One voice note to transcribe, and the session it is for.</summary>
@@ -47,6 +51,7 @@ namespace Agentmaster::Voice
         std::wstring sessionId;
         std::wstring workdir; // the session's effective working folder (its CLAUDE.md and its name join the vocabulary)
         std::wstring title; // the session title (its hard words join the vocabulary)
+        std::wstring claudeExe; // the engine's claude.exe, resolved for THIS note (the correction runs it; "" = none found)
     };
 
     /// <summary>One respelling the dictionary pass made (VoiceVocabulary.h's VoiceReplacement, repeated so this header stays
@@ -70,6 +75,10 @@ namespace Agentmaster::Voice
         int64_t totalMs{ 0 }; // the bridge's whole time (worker start, vocabulary, engine, dictionary)
         std::vector<VoiceFix> fixes; // the dictionary pass's respellings
         size_t vocabularyTerms{ 0 }; // how many terms biased the engine (the log)
+        std::vector<std::wstring> alternatives; // other engines' hearings (a fusion worker), after their dictionary pass
+        bool corrected{ false }; // the correction layer's text replaced the engine's
+        int64_t correctionMs{ 0 }; // the correction's wall time (0 = none ran)
+        std::wstring correctionError; // why a correction that ran did not replace the text ("" = it did, or none ran)
     };
 
     /// <summary>

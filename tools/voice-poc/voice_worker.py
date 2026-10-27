@@ -24,9 +24,12 @@ Rules of the protocol (what Agentmaster relies on):
 * the worker transcribes; the app owns the vocabulary (it sends ``prompt`` and ``hotwords``) and the dictionary pass
   (it runs on the text the worker returns, VoiceVocabulary.h), so every engine gets the same correction layer.
 
-Usage (the value of ``voiceWorkerCommand``)::
+Usage (the value of ``voiceWorkerCommand``; the configuration that transcribed the owner's three recordings word for word,
+VOICE.md section 4.4 - Whisper on the GPU with Parakeet's second hearing for the app's correction layer)::
 
-    "Q:\\agentmaster-voice\\venv\\Scripts\\python.exe" "K:\\source\\Agentmaster\\tools\\voice-poc\\voice_worker.py" --engine whisper-large-v3+prompt
+    "Q:\\agentmaster-voice\\venv\\Scripts\\python.exe" "K:\\source\\Agentmaster\\tools\\voice-poc\\voice_worker.py" --engine whisper-large-v3-turbo+prompt --fuse parakeet-v2-beam+hotwords
+
+A ``transcribe`` answer then carries ``"alternatives": [<the second engine's text>]`` beside ``text``.
 """
 
 from __future__ import annotations
@@ -98,18 +101,21 @@ def _answer(out, payload: dict) -> None:
     out.flush()
 
 
-def serve(engine_spec: str, out, inp) -> int:
-    """The request loop: one engine, loaded on the first request that needs it.
+def serve(engine_spec: str, out, inp, fuse_spec: str = "") -> int:
+    """The request loop: one engine (and an optional FUSION engine), loaded on the first request that needs them.
 
     Args:
         engine_spec: The engine (``engines.ENGINE_SPECS``).
         out: The protocol output stream.
         inp: The protocol input stream.
+        fuse_spec: A second engine whose transcript of every note is returned as ``alternatives`` (VOICE.md section 5.5:
+            the app's correction layer resolves where two independent hearings disagree); "" = none.
 
     Returns:
         The exit code (0 after "quit" or the end of stdin).
     """
     engine = None
+    second = None
     for raw in inp:
         line = raw.strip()
         if not line:
@@ -126,9 +132,14 @@ def serve(engine_spec: str, out, inp) -> int:
                 t0 = time.perf_counter()
                 engine = build_engine(engine_spec)
                 print(f"[voice-worker] {engine.name} loaded in {time.perf_counter() - t0:.1f} s", file=sys.stderr)
+            if fuse_spec and second is None:
+                t0 = time.perf_counter()
+                second = build_engine(fuse_spec)
+                print(f"[voice-worker] fusion engine {second.name} loaded in {time.perf_counter() - t0:.1f} s", file=sys.stderr)
             if op == "hello":
-                _answer(out, {"id": req_id, "ok": True, "engine": engine.name, "languages": ["en"],
-                              "prompt": "+prompt" in engine.name, "hotwords": "+hotwords" in engine.name})
+                name = engine.name + (f" + {second.name}" if second else "")
+                _answer(out, {"id": req_id, "ok": True, "engine": name, "languages": ["en"],
+                              "prompt": "+prompt" in engine.name, "hotwords": "+hotwords" in name})
                 continue
             if op != "transcribe":
                 _answer(out, {"id": req_id, "ok": False, "error": f"unknown op {op!r}"})
@@ -136,8 +147,18 @@ def serve(engine_spec: str, out, inp) -> int:
             samples = decode_audio(req["path"])
             vocab = _GivenVocabulary(req.get("prompt", ""), req.get("hotwords", ""))
             result = engine.transcribe(samples, vocab)
-            _answer(out, {"id": req_id, "ok": True, "text": result.text, "engine": engine.name,
-                          "audio_ms": int(audio_duration_s(samples) * 1000), "decode_ms": int(result.seconds * 1000)})
+            answer = {"id": req_id, "ok": True, "text": result.text, "engine": engine.name,
+                      "audio_ms": int(audio_duration_s(samples) * 1000), "decode_ms": int(result.seconds * 1000)}
+            if second is not None:
+                # The fusion engine's hearing of the same note: a failure of it never fails the note (the primary stands).
+                try:
+                    other = second.transcribe(samples, vocab)
+                    answer["alternatives"] = [other.text]
+                    answer["decode_ms"] += int(other.seconds * 1000)
+                    answer["engine"] = f"{engine.name} + {second.name}"
+                except Exception:
+                    traceback.print_exc(file=sys.stderr)
+            _answer(out, answer)
         except Exception as exc:  # one failed note never ends the worker
             traceback.print_exc(file=sys.stderr)
             _answer(out, {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -154,13 +175,15 @@ def main(argv: list[str] | None = None) -> int:
         The exit code.
     """
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engine", default="whisper-large-v3+prompt", choices=ENGINE_SPECS)
+    ap.add_argument("--engine", default="whisper-large-v3-turbo+prompt", choices=ENGINE_SPECS)
+    ap.add_argument("--fuse", default="", choices=("",) + tuple(ENGINE_SPECS),
+                    help="a second engine whose hearing of every note is returned as 'alternatives'")
     args = ap.parse_args(argv)
     # The protocol owns the REAL stdout; anything a library prints goes to stderr instead of corrupting the stream.
     proto_out = open(sys.stdout.fileno(), "w", encoding="utf-8", newline="\n", closefd=False)
     proto_in = open(sys.stdin.fileno(), "r", encoding="utf-8", closefd=False)
     sys.stdout = sys.stderr
-    return serve(args.engine, proto_out, proto_in)
+    return serve(args.engine, proto_out, proto_in, args.fuse)
 
 
 if __name__ == "__main__":

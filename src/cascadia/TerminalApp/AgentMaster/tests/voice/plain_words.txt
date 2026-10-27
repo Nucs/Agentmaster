@@ -60,7 +60,6 @@ codec	1
 codex	1
 com	1
 con	1
-context	1
 cpp	0
 cpu	0
 css	0
@@ -80,7 +79,6 @@ embeddings	1
 english	0
 enum	0
 everyday	1
-extract	1
 f	1
 face	1
 flac	0
@@ -106,7 +104,6 @@ hub	1
 hugging	1
 hz	0
 ide	1
-it	1
 java	1
 jest	1
 js	0
@@ -136,6 +133,7 @@ msix	0
 mutex	1
 my	1
 named	1
+names	1
 namespace	1
 net	1
 node	1
@@ -208,7 +206,6 @@ tcp	0
 telegram	1
 tensor	1
 terminal	1
-terms	1
 the	1
 this	1
 tls	0

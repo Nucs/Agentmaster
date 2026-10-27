@@ -132,6 +132,9 @@ namespace Agentmaster::Msg
             cfg.dictionary = settings.voiceDictionary;
             cfg.idleMinutes = ClampVoiceWorkerIdleMinutes(settings.voiceWorkerIdleMinutes);
             cfg.profileDir = _profile;
+            // "off" or "" = no correction (VoiceTranscriber reads both); any other value is handed to claude's --model as is, so
+            // a model id typed into settings.json works too.
+            cfg.correctionModel = settings.voiceCorrectionModel;
             std::shared_ptr<Voice::VoiceBridge> voice;
             {
                 std::lock_guard lk{ _voiceMtx };
@@ -525,6 +528,9 @@ namespace Agentmaster::Msg
                 note.workdir = s->workingDir;
                 note.title = s->title;
             }
+            // The claude the correction runs, read for EACH note: a claude installed or re-pointed while the bot runs is used
+            // by the next note ("" = none found: the note keeps the dictionary's text and the echo says why).
+            note.claudeExe = _hooks.claudeExe ? _hooks.claudeExe() : std::wstring{};
             out = voice->Transcribe(note);
         }
         catch (...)
@@ -636,12 +642,24 @@ namespace Agentmaster::Msg
             }
             if (echo)
             {
-                // Silent, quoting the note: the owner sees what the session will get before it gets it.
+                // Silent, quoting the note: the owner sees what the session will get before it gets it. A correction that ran and
+                // failed says so under it: the text is the engine's, so a misheard word is more likely, and the reason tells
+                // the owner what to fix (Claude Code missing, a timeout).
                 const std::wstring shown = r.text.size() > kVoiceEchoMaxChars ? r.text.substr(0, kVoiceEchoMaxChars) + L"\x2026" : r.text;
-                _reply(threadId, L"\U0001F3A4 <i>" + TgEscapeHtml(shown) + L"</i>", false, json::Value{}, messageId);
+                std::wstring echoText = L"\U0001F3A4 <i>" + TgEscapeHtml(shown) + L"</i>";
+                if (!r.correctionError.empty())
+                {
+                    echoText += L"\n\x26A0\xFE0F not corrected: " + TgEscapeHtml(r.correctionError);
+                }
+                _reply(threadId, echoText, false, json::Value{}, messageId);
             }
+            const std::wstring correction = !r.correctionError.empty() ? L", correction failed: " + r.correctionError
+                                            : r.correctionMs > 0       ? (r.corrected ? L", corrected in " : L", correction kept it, ") +
+                                                                       std::to_wstring(r.correctionMs) + L" ms"
+                                                                       : std::wstring{};
             _log(L"[msg] " + ShortId(item.sessionId) + L" voice note transcribed (message " + std::to_wstring(messageId) + L", " + std::to_wstring(r.text.size()) +
-                 L" chars, " + r.engine + L", " + std::to_wstring(r.totalMs) + L" ms, " + std::to_wstring(r.fixes.size()) + L" vocabulary fix(es))");
+                 L" chars, " + r.engine + L", " + std::to_wstring(r.totalMs) + L" ms, " + std::to_wstring(r.fixes.size()) + L" vocabulary fix(es)" + correction +
+                 L")");
             // The note, read as the text it says: every rule of a typed message applies (a question card takes it as its answer,
             // a note sent while Agentmaster was closed is asked about, a queued prompt's reactions land on the note itself).
             json::Value said = item.msg;

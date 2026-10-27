@@ -1021,6 +1021,7 @@ namespace Agentmaster
         o.Set(L"voiceDictionary", json::Value::MkStr(s.voiceDictionary));
         o.Set(L"voiceWorkerIdleMinutes", json::Value::MkNum(ClampVoiceWorkerIdleMinutes(s.voiceWorkerIdleMinutes)));
         o.Set(L"voiceEchoTranscript", json::Value::MkBool(s.voiceEchoTranscript));
+        o.Set(L"voiceCorrectionModel", json::Value::MkStr(s.voiceCorrectionModel));
         return o;
     }
 
@@ -1364,6 +1365,8 @@ namespace Agentmaster
         s.voiceDictionary = v.StrAt(L"voiceDictionary");
         s.voiceWorkerIdleMinutes = ClampVoiceWorkerIdleMinutes(v.U32At(L"voiceWorkerIdleMinutes", 10));
         s.voiceEchoTranscript = v.BoolAt(L"voiceEchoTranscript", true);
+        // Absent => Sonnet 5.5 corrects each note; "off" is kept as written (the transcriber reads it as no correction).
+        s.voiceCorrectionModel = v.StrAt(L"voiceCorrectionModel", L"claude-sonnet-5-5");
         return s;
     }
 

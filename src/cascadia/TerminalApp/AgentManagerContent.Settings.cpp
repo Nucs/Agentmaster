@@ -1368,11 +1368,11 @@ namespace winrt::TerminalApp::implementation
         _setMsgVoiceEngine.Items().Append(winrt::box_value(L"A local voice worker (the audio stays on this PC)"));
         _setMsgVoiceEngine.Items().Append(winrt::box_value(L"An OpenAI-compatible endpoint (the audio is sent to it)"));
         _setMsgVoiceEngine.Items().Append(winrt::box_value(L"Off"));
-        AgentSetTip(_setMsgVoiceEngine, L"A local voice worker (the default): a program on this PC that speaks Agentmaster's voice protocol (VOICE.md section 6.2) \x2014 the bundled agentmaster-voice.exe when the install carries it, or the command below (the voice POC's Python worker runs Whisper on the GPU or Parakeet on the CPU). It starts with the first note and ends after the idle minutes below. An endpoint: one upload per note to an OpenAI-compatible /v1/audio/transcriptions URL \x2014 OpenAI, Groq, or a speech server of your own; a cloud endpoint receives your voice.");
+        AgentSetTip(_setMsgVoiceEngine, L"A local voice worker (the default): a program on this PC that speaks Agentmaster's voice protocol (VOICE.md section 6.2) \x2014 the bundled agentmaster-voice.exe when the install carries it, or the command below (the voice POC's Python worker runs Whisper on the GPU or Parakeet on the CPU, and with --fuse both, so the AI correction gets two hearings of each note). It starts with the first note and ends after the idle minutes below. An endpoint: one upload per note to an OpenAI-compatible /v1/audio/transcriptions URL \x2014 OpenAI, Groq, or a speech server of your own; a cloud endpoint receives your voice.");
         panel.Children().Append(_setMsgVoiceEngine);
         _setMsgVoiceCommand = TextBox{};
         _setMsgVoiceCommand.Header(winrt::box_value(L"Voice worker command (local worker)"));
-        _setMsgVoiceCommand.PlaceholderText(L"empty = the bundled agentmaster-voice.exe; e.g. \"Q:\\agentmaster-voice\\venv\\Scripts\\python.exe\" \"K:\\source\\Agentmaster\\tools\\voice-poc\\voice_worker.py\" --engine whisper-large-v3+prompt");
+        _setMsgVoiceCommand.PlaceholderText(L"empty = the bundled agentmaster-voice.exe; e.g. \"Q:\\agentmaster-voice\\venv\\Scripts\\python.exe\" \"K:\\source\\Agentmaster\\tools\\voice-poc\\voice_worker.py\" --engine whisper-large-v3-turbo+prompt --fuse parakeet-v2-beam+hotwords");
         AgentSetTip(_setMsgVoiceCommand, L"The whole command line of the voice worker, quoted as you would type it in a console. Agentmaster starts it hidden, in a job that ends with Agentmaster, and talks to it over its standard input and output; its error output goes to voice.log in the profile. A changed command takes effect at the next note.");
         panel.Children().Append(_setMsgVoiceCommand);
         _setMsgVoiceEndpoint = TextBox{};
@@ -1420,6 +1420,13 @@ namespace winrt::TerminalApp::implementation
         _setMsgVoiceDictionary.MinHeight(64);
         AgentSetTip(_setMsgVoiceDictionary, L"A line with a word boosts it (the engine leans toward that spelling, and a split or mis-cased form of it is corrected). \x201Cspoken form, other form => Word\x201D also rewrites exactly those forms into the word, everyday words included \x2014 use it for what the engine keeps getting wrong.");
         panel.Children().Append(_setMsgVoiceDictionary);
+        _setMsgVoiceCorrection = ComboBox{};
+        _setMsgVoiceCorrection.Header(winrt::box_value(L"AI correction"));
+        _setMsgVoiceCorrection.Items().Append(winrt::box_value(L"Claude Sonnet 5.5 (the most exact)"));
+        _setMsgVoiceCorrection.Items().Append(winrt::box_value(L"Claude Haiku 5.5 (faster, a little less exact)"));
+        _setMsgVoiceCorrection.Items().Append(winrt::box_value(L"Off (the engine\x2019s words, after your dictionary)"));
+        AgentSetTip(_setMsgVoiceCorrection, L"After the engine, one hidden Claude Code call fixes what it misheard: it gets the transcript, the vocabulary above and, from a worker that runs two engines, the second engine\x2019s hearing, and returns the same words corrected. Sonnet 5.5 (the default) transcribed the test recordings word for word; Haiku 5.5 is faster and a little less exact. Each note is one model call on this PC\x2019s Claude Code login, and its text (never the audio) goes to Anthropic, as the prompt it becomes does anyway. When the call fails (no Claude Code, no answer within 60 s), the engine\x2019s words go on and the posted transcript says why.");
+        panel.Children().Append(_setMsgVoiceCorrection);
         _setMsgVoiceEcho = ToggleSwitch{};
         _setMsgVoiceEcho.Header(winrt::box_value(L"Post the transcript under the voice note"));
         AgentSetTip(_setMsgVoiceEcho, L"On (the default): the transcript is posted silently under the note (\U0001F3A4 \x2026) before it is queued, so you see what the session gets. Editing that line changes nothing: send a correction as text.");
@@ -3379,6 +3386,34 @@ namespace winrt::TerminalApp::implementation
             _setMsgVoiceDictionary.Text(winrt::hstring{ _appSettings.voiceDictionary });
             _setMsgVoiceEcho.IsOn(_appSettings.voiceEchoTranscript);
             _setMsgVoiceIdle.Text(winrt::hstring{ std::to_wstring(_appSettings.voiceWorkerIdleMinutes) });
+            {
+                // The correction's model: a known id selects its item; another id (typed into settings.json) gets a fourth item
+                // of its own, so a Save keeps it. A fourth item an earlier load added goes first: the cog loads again on reopen.
+                while (_setMsgVoiceCorrection.Items().Size() > 3)
+                {
+                    _setMsgVoiceCorrection.Items().RemoveAtEnd();
+                }
+                _msgVoiceCorrectionCustom.clear();
+                const std::wstring& model = _appSettings.voiceCorrectionModel;
+                if (model == L"claude-sonnet-5-5")
+                {
+                    _setMsgVoiceCorrection.SelectedIndex(0);
+                }
+                else if (model == L"claude-haiku-5-5")
+                {
+                    _setMsgVoiceCorrection.SelectedIndex(1);
+                }
+                else if (model.empty() || model == L"off")
+                {
+                    _setMsgVoiceCorrection.SelectedIndex(2);
+                }
+                else
+                {
+                    _msgVoiceCorrectionCustom = model;
+                    _setMsgVoiceCorrection.Items().Append(winrt::box_value(winrt::hstring{ L"Another model: " + model }));
+                    _setMsgVoiceCorrection.SelectedIndex(3);
+                }
+            }
             std::wstring status;
             if (const auto& svc = ::Agentmaster::SharedEngine().messaging)
             {
@@ -4212,6 +4247,14 @@ namespace winrt::TerminalApp::implementation
                     minutes = static_cast<uint32_t>(std::stoul(idle));
                 }
                 _appSettings.voiceWorkerIdleMinutes = ::Agentmaster::ClampVoiceWorkerIdleMinutes(minutes);
+            }
+            {
+                // No selection (-1) reads as the default, like a missing field; the fourth item writes back the id it shows.
+                const int32_t correction = _setMsgVoiceCorrection.SelectedIndex();
+                _appSettings.voiceCorrectionModel = correction == 1                                         ? L"claude-haiku-5-5" :
+                                                    correction == 2                                         ? L"off" :
+                                                    (correction == 3 && !_msgVoiceCorrectionCustom.empty()) ? _msgVoiceCorrectionCustom :
+                                                                                                              L"claude-sonnet-5-5";
             }
             const std::wstring typedKey{ _setMsgVoiceKey.Password() };
             if (!typedKey.empty())

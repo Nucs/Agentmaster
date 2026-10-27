@@ -194,7 +194,10 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   Manager, `Agentmaster:voice:api-key:<profile leaf>`), `voiceLanguage` (`en`; empty = the engine detects it),
   `voiceUseSessionContext` (true: the folder's name and CLAUDE.md join the vocabulary), `voiceDictionary` (the owner's
   dictionary: `Word` or `spoken, forms => Word` per line), `voiceWorkerIdleMinutes` (10, 0–1440), `voiceEchoTranscript`
-  (true: the transcript is posted under the note first). Applied at the next note.
+  (true: the transcript is posted under the note first), `voiceCorrectionModel` (`claude-sonnet-5-5`: one hidden `claude -p`
+  per note corrects what the engines misheard, with the glossary and every engine's hearing, VOICE.md §5.5; the cog's AI
+  correction offers `claude-haiku-5-5` and `off`; another model id is passed to `--model` as is; each note is one model call
+  on the PC's Claude Code login, and its text reaches Anthropic). Applied at the next note.
 
 ## Tabs & Overlay
 

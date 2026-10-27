@@ -6102,8 +6102,11 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
 * **In a session's topic** a voice note (an audio file, a round video note) gets 👀, is downloaded (`getFile` + the file
   server, 20 MB at most) and transcribed by the voice engine with the SESSION'S VOCABULARY (its folder's name, the hard
   names of its CLAUDE.md, a developer glossary, the owner's dictionary; VOICE.md §5), which also respells split or
-  misheard names in the text ("Con PTY" → ConPTY). The transcript is posted silently under the note (`🎤 <i>…</i>`,
-  `voiceEchoTranscript`), then read by `_handleTopicMessage` like a typed message: a queued prompt whose reactions go on the
+  misheard names in the text ("Con PTY" → ConPTY), and then CORRECTED: one hidden `claude -p` (`voiceCorrectionModel`,
+  Sonnet 5.5 by default) gets the glossary and every engine's hearing of the note and fixes what was misheard (VOICE.md §5.5;
+  on the owner's recordings the result was word for word). The transcript is posted silently under the note (`🎤 <i>…</i>`,
+  `voiceEchoTranscript`; a correction that failed adds `⚠️ not corrected: <why>` and the engine's words go on), then read
+  by `_handleTopicMessage` like a typed message: a queued prompt whose reactions go on the
   NOTE, or the answer of an open question card (§21.30), or the backlog question of D2 for a note sent while Agentmaster was
   closed — judged when the note ARRIVED (`am_voice_live`), so a slow transcription never makes a live note backlog. A caption
   typed under the recording follows the transcript.
@@ -6113,23 +6116,31 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
   in a thread whose new-thread bind is still handing over, with voice notes off, with no transcriber (the m5 harness), over
   20 MB, or a failed transcription ("🎤 I could not transcribe this voice note: <why>").
 * **Engines** (VOICE.md §6): a local VOICE WORKER (`voiceEngine = worker`: `voiceWorkerCommand`, or the bundled worker once it
-  ships) spoken to in JSON lines; or an OpenAI-compatible endpoint (`openai`; the key in Credential Manager). One note at a
-  time across every topic (the voice thread, `Messaging.Voice.cpp`); the downloaded file is deleted after its transcription.
+  ships) spoken to in JSON lines, which may return a second engine's hearing (`alternatives`) for the correction's fusion; or
+  an OpenAI-compatible endpoint (`openai`; the key in Credential Manager). One note at a time across every topic (the voice
+  thread, `Messaging.Voice.cpp`); the downloaded file is deleted after its transcription. The correction's claude is the
+  engine's (`MessagingHooks::claudeExe`, read for each note); it waits at most 60 s, and the thread's next message waits
+  behind it.
 * **Stop:** `_voiceStop` runs first and kills the engine (a note in flight fails fast); the notes and held messages still in
   the lanes are logged and dropped (send them again).
 * **Logs:** `hooks.log` `[msg] <sid> voice note queued for transcription …` / `… transcribed (N chars, <engine>, … ms, N
-  vocabulary fix(es))` / `… not transcribed …`, `[nav] remote telegram voice …`; the engine's own lines in `voice.log`.
+  vocabulary fix(es)[, corrected in N ms | , correction kept it, N ms | , correction failed: <why>])` / `… not transcribed …`,
+  `[nav] remote telegram voice …`; the engine's and the correction's own lines in `voice.log`.
 
-**Check after the build** (dev, the dev bot; `voiceWorkerCommand` = the POC worker, VOICE.md §6.2):
+**Check after the build** (dev, the dev bot; `voiceWorkerCommand` = the POC worker WITH `--fuse`, VOICE.md §6.2):
 1. A voice note in a session's topic: 👀 at once; within seconds the 🎤 line under it, then ✍ on the NOTE and the prompt in
    the queue (the session's Prompt Queue at the PC shows the transcript).
-2. The three evaluation sentences (VOICE.md §7.1) come out as the 🎤 lines with ConPTY, Agentmaster, Ogg Opus, PCM, JSONL
-   spelled right; `voice.log` names the respellings.
-3. A voice note, then at once a typed message: the session's queue holds the transcript FIRST.
-4. An open question card answered by a voice note: the card takes the transcript as its answer.
-5. A voice note in the 🔎 Search topic: the "read in a session's topic" answer, nothing queued.
-6. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
-7. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
+2. The three evaluation sentences (VOICE.md §7.1) come out as the 🎤 lines word for word, with ConPTY, Agentmaster, Ogg
+   Opus, PCM, JSONL spelled right; `voice.log` names the respellings, the other hearing and `correction N ms (changed)`.
+3. The cog's AI correction set to Off: the same notes come out as the engine heard them (`voice.log` shows no correction);
+   back to Sonnet 5.5. A correction that cannot succeed (`voiceCorrectionModel` set to a model id that does not exist, in
+   settings.json; the cog then shows "Another model: …"): the 🎤 line carries `⚠️ not corrected: …` with claude's error, and
+   the note is still queued.
+4. A voice note, then at once a typed message: the session's queue holds the transcript FIRST.
+5. An open question card answered by a voice note: the card takes the transcript as its answer.
+6. A voice note in the 🔎 Search topic: the "read in a session's topic" answer, nothing queued.
+7. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
+8. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
    ends after the idle minutes (`voice.log`: "idle for … min").
 
 ### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; NOT BUILT — the next build must purge)

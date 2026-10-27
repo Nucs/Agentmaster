@@ -184,6 +184,7 @@ int wmain()
     TestRestoreWake(); // PERSISTENCE.md §14 — after a restart, the restored tabs that were busy wake once every window's focused tab launched (tests_restorewake.cpp)
     TestVoiceVocabulary(); // MESSAGING.md §21.43 / VOICE.md §5.5 — the voice notes' session vocabulary vs the POC's goldens (tests_voice.cpp)
     TestVoiceProtocol(); // VOICE.md §6.2 — the voice worker protocol's lines and its answer reader (tests_voice.cpp)
+    TestVoiceCorrection(); // VOICE.md §5.5 — the correction layer's prompts, guard, command line and output reader (tests_voice.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

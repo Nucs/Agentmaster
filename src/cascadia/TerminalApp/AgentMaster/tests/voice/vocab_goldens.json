@@ -501,217 +501,145 @@
   "builtin": {
    "terms": [
     [
-     "JSON",
+     "Claude",
      1.0,
      "builtin",
      true
     ],
     [
-     "JSONL",
+     "Claude Code",
      1.0,
      "builtin",
      true
     ],
     [
-     "YAML",
+     "Anthropic",
      1.0,
      "builtin",
      true
     ],
     [
-     "TOML",
+     "OpenAI",
      1.0,
      "builtin",
      true
     ],
     [
-     "XML",
+     "GPT",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSV",
+     "LLM",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTML",
+     "MCP",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSS",
+     "Whisper",
      1.0,
      "builtin",
      true
     ],
     [
-     "Markdown",
+     "Parakeet",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTP",
+     "ONNX",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTPS",
+     "PyTorch",
      1.0,
      "builtin",
      true
     ],
     [
-     "REST",
+     "TensorFlow",
      1.0,
      "builtin",
      true
     ],
     [
-     "gRPC",
+     "Hugging Face",
      1.0,
      "builtin",
      true
     ],
     [
-     "WebSocket",
+     "LoRA",
      1.0,
      "builtin",
      true
     ],
     [
-     "OAuth",
+     "RAG",
      1.0,
      "builtin",
      true
     ],
     [
-     "JWT",
+     "embeddings",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-8",
+     "tokenizer",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-16",
+     "Sonnet",
      1.0,
      "builtin",
      true
     ],
     [
-     "ASCII",
+     "Opus",
      1.0,
      "builtin",
      true
     ],
     [
-     "Base64",
+     "Haiku",
      1.0,
      "builtin",
      true
     ],
     [
-     "SHA-256",
+     "Codex",
      1.0,
      "builtin",
      true
     ],
     [
-     "TLS",
+     "Gemini",
      1.0,
      "builtin",
      true
     ],
     [
-     "SSH",
+     "Ollama",
      1.0,
      "builtin",
      true
     ],
     [
-     "DNS",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "TCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UDP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv4",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv6",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URL",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "regex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdin",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdout",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stderr",
+     "llama.cpp",
      1.0,
      "builtin",
      true
@@ -736,12 +664,6 @@
     ],
     [
      "AAC",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Opus",
      1.0,
      "builtin",
      true
@@ -970,6 +892,222 @@
     ],
     [
      "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
      1.0,
      "builtin",
      true
@@ -1257,144 +1395,6 @@
      true
     ],
     [
-     "Claude",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Claude Code",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Anthropic",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "OpenAI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GPT",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LLM",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "MCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Whisper",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Parakeet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "ONNX",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "PyTorch",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "TensorFlow",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Hugging Face",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LoRA",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "RAG",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "embeddings",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "tokenizer",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Sonnet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Haiku",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Codex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Gemini",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Ollama",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "llama.cpp",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
      "API",
      1.0,
      "builtin",
@@ -1539,10 +1539,10 @@
      true
     ]
    ],
-   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: Kubernetes, Docker, GitLab, GitHub, Git, WebAssembly, Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, XAML, CMake, MSBuild, vcpkg, NuGet, AppX, MSIX, WSL, PowerShell, ConPTY, WinRT, Win32, Windows, ARM64, x64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON.",
-   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON.",
-   "hotwords": "JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/x64 :2.0/ARM64 :2.0/Win32 :2.0/ConPTY :2.0/WSL :2.0/MSIX :2.0/vcpkg :2.0/MSBuild :2.0/XAML :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/k3s :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/DuckDB :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
-   "hotwords_10": "JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0",
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, XAML, CMake, MSBuild, vcpkg, NuGet, AppX, MSIX, WSL, PowerShell, ConPTY, WinRT, Win32, Windows, ARM64, x64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, AAC, MP3, WAV, PCM, llama.cpp, Ollama, Gemini, Codex, Haiku, Opus, Sonnet, tokenizer, embeddings, RAG, LoRA, Hugging Face, TensorFlow, PyTorch, ONNX, Parakeet, Whisper, MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: embeddings, RAG, LoRA, Hugging Face, TensorFlow, PyTorch, ONNX, Parakeet, Whisper, MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude.",
+   "hotwords": "GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/x64 :2.0/ARM64 :2.0/Win32 :2.0/ConPTY :2.0/WSL :2.0/MSIX :2.0/vcpkg :2.0/MSBuild :2.0/XAML :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/k3s :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/DuckDB :2.0/MongoDB :2.0/RabbitMQ :2.0/API :2.0/SDK :2.0/GUI :2.0/UI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/PCM :2.0/MP3 :2.0",
    "apply": [
     {
      "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
@@ -1738,217 +1738,145 @@
   "session": {
    "terms": [
     [
-     "JSON",
+     "Claude",
      1.0,
      "builtin",
      true
     ],
     [
-     "JSONL",
+     "Claude Code",
      1.0,
      "builtin",
      true
     ],
     [
-     "YAML",
+     "Anthropic",
      1.0,
      "builtin",
      true
     ],
     [
-     "TOML",
+     "OpenAI",
      1.0,
      "builtin",
      true
     ],
     [
-     "XML",
+     "GPT",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSV",
+     "LLM",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTML",
+     "MCP",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSS",
+     "Whisper",
      1.0,
      "builtin",
      true
     ],
     [
-     "Markdown",
+     "Parakeet",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTP",
+     "ONNX",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTPS",
+     "PyTorch",
      1.0,
      "builtin",
      true
     ],
     [
-     "REST",
+     "TensorFlow",
      1.0,
      "builtin",
      true
     ],
     [
-     "gRPC",
+     "Hugging Face",
      1.0,
      "builtin",
      true
     ],
     [
-     "WebSocket",
+     "LoRA",
      1.0,
      "builtin",
      true
     ],
     [
-     "OAuth",
+     "RAG",
      1.0,
      "builtin",
      true
     ],
     [
-     "JWT",
+     "embeddings",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-8",
+     "tokenizer",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-16",
+     "Sonnet",
      1.0,
      "builtin",
      true
     ],
     [
-     "ASCII",
+     "Opus",
      1.0,
      "builtin",
      true
     ],
     [
-     "Base64",
+     "Haiku",
      1.0,
      "builtin",
      true
     ],
     [
-     "SHA-256",
+     "Codex",
      1.0,
      "builtin",
      true
     ],
     [
-     "TLS",
+     "Gemini",
      1.0,
      "builtin",
      true
     ],
     [
-     "SSH",
+     "Ollama",
      1.0,
      "builtin",
      true
     ],
     [
-     "DNS",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "TCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UDP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv4",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv6",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URL",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "regex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdin",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdout",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stderr",
+     "llama.cpp",
      1.0,
      "builtin",
      true
@@ -1973,12 +1901,6 @@
     ],
     [
      "AAC",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Opus",
      1.0,
      "builtin",
      true
@@ -2207,6 +2129,222 @@
     ],
     [
      "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
      1.0,
      "builtin",
      true
@@ -2494,144 +2632,6 @@
      true
     ],
     [
-     "Claude",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Claude Code",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Anthropic",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "OpenAI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GPT",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LLM",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "MCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Whisper",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Parakeet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "ONNX",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "PyTorch",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "TensorFlow",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Hugging Face",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LoRA",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "RAG",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "embeddings",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "tokenizer",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Sonnet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Haiku",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Codex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Gemini",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Ollama",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "llama.cpp",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
      "API",
      1.0,
      "builtin",
@@ -2788,10 +2788,10 @@
      false
     ]
    ],
-   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: WebAssembly, Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
-   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
-   "hotwords": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
-   "hotwords_10": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/JSON :2.0",
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, AAC, MP3, WAV, PCM, llama.cpp, Ollama, Gemini, Codex, Haiku, Opus, Sonnet, tokenizer, embeddings, RAG, LoRA, Hugging Face, TensorFlow, PyTorch, ONNX, Parakeet, Whisper, MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: Parakeet, Whisper, MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
+   "hotwords": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/GPT :2.0",
    "apply": [
     {
      "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
@@ -3000,217 +3000,145 @@
   "session+dictionary": {
    "terms": [
     [
-     "JSON",
+     "Claude",
      1.0,
      "builtin",
      true
     ],
     [
-     "JSONL",
-     3.0,
-     "user",
-     true
-    ],
-    [
-     "YAML",
+     "Claude Code",
      1.0,
      "builtin",
      true
     ],
     [
-     "TOML",
+     "Anthropic",
      1.0,
      "builtin",
      true
     ],
     [
-     "XML",
+     "OpenAI",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSV",
+     "GPT",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTML",
+     "LLM",
      1.0,
      "builtin",
      true
     ],
     [
-     "CSS",
+     "MCP",
      1.0,
      "builtin",
      true
     ],
     [
-     "Markdown",
+     "Whisper",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTP",
+     "Parakeet",
      1.0,
      "builtin",
      true
     ],
     [
-     "HTTPS",
+     "ONNX",
      1.0,
      "builtin",
      true
     ],
     [
-     "REST",
+     "PyTorch",
      1.0,
      "builtin",
      true
     ],
     [
-     "gRPC",
+     "TensorFlow",
      1.0,
      "builtin",
      true
     ],
     [
-     "WebSocket",
+     "Hugging Face",
      1.0,
      "builtin",
      true
     ],
     [
-     "OAuth",
+     "LoRA",
      1.0,
      "builtin",
      true
     ],
     [
-     "JWT",
+     "RAG",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-8",
+     "embeddings",
      1.0,
      "builtin",
      true
     ],
     [
-     "UTF-16",
+     "tokenizer",
      1.0,
      "builtin",
      true
     ],
     [
-     "ASCII",
+     "Sonnet",
      1.0,
      "builtin",
      true
     ],
     [
-     "Base64",
+     "Opus",
      1.0,
      "builtin",
      true
     ],
     [
-     "SHA-256",
+     "Haiku",
      1.0,
      "builtin",
      true
     ],
     [
-     "TLS",
+     "Codex",
      1.0,
      "builtin",
      true
     ],
     [
-     "SSH",
+     "Gemini",
      1.0,
      "builtin",
      true
     ],
     [
-     "DNS",
+     "Ollama",
      1.0,
      "builtin",
      true
     ],
     [
-     "TCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UDP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv4",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "IPv6",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URL",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "URI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "UUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GUID",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "regex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdin",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stdout",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "stderr",
+     "llama.cpp",
      1.0,
      "builtin",
      true
@@ -3235,12 +3163,6 @@
     ],
     [
      "AAC",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Opus",
      1.0,
      "builtin",
      true
@@ -3469,6 +3391,222 @@
     ],
     [
      "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     3.0,
+     "user",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
      1.0,
      "builtin",
      true
@@ -3756,144 +3894,6 @@
      true
     ],
     [
-     "Claude",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Claude Code",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Anthropic",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "OpenAI",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "GPT",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LLM",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "MCP",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Whisper",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Parakeet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "ONNX",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "PyTorch",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "TensorFlow",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Hugging Face",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "LoRA",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "RAG",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "embeddings",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "tokenizer",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Sonnet",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Haiku",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Codex",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Gemini",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "Ollama",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
-     "llama.cpp",
-     1.0,
-     "builtin",
-     true
-    ],
-    [
      "API",
      1.0,
      "builtin",
@@ -4056,10 +4056,10 @@
      true
     ]
    ],
-   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSON, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
-   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSON, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
-   "hotwords": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/JSON :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
-   "hotwords_10": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/JSON :2.0",
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSON, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, AAC, MP3, WAV, PCM, llama.cpp, Ollama, Gemini, Codex, Haiku, Opus, Sonnet, tokenizer, embeddings, RAG, LoRA, Hugging Face, TensorFlow, PyTorch, ONNX, Parakeet, Whisper, MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: MCP, LLM, GPT, OpenAI, Anthropic, Claude Code, Claude, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
+   "hotwords": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/JSON :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/GPT :2.0",
    "apply": [
     {
      "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
@@ -4270,6 +4270,72 @@
     }
    ]
   }
+ },
+ "correction": {
+  "system_prompt": "You fix speech-recognition errors in a software developer's dictated message to an AI coding agent.\nThe message was spoken aloud and transcribed by speech models; the glossary lists the technical terms of the\ndeveloper's project and tools. The speaker may have an accent, so a word can come out as a similar-sounding word\n(for example \"dirty\" for \"thirty\", \"seat\" for \"sheet\", \"kube control\" for \"kubectl\").\n\nRules:\n- Keep the speaker's words, their order and their meaning. Never add content, answer, summarize or rephrase.\n- Fix only recognition errors: a word that SOUNDS like a glossary term becomes that term with the glossary's exact\n  spelling (for example \"duck DB\" -> \"DuckDB\", \"win RT\" -> \"WinRT\"); a word that makes no sense in a developer's prompt\n  becomes the similar-sounding word that does; identifiers and acronyms get their usual casing; a stray filler or\n  article the grammar rejects is dropped; numbers stay as the transcript writes them; punctuation is fixed.\n- When SEVERAL transcripts of the same recording are given, they are independent hearings by different engines: where\n  they agree, keep it; where they differ, choose for each disputed word the reading the audio most likely held - the\n  one that fits the sentence, a developer's prompt and the glossary. Output ONE message.\n- If nothing needs fixing, return the transcript unchanged.\n- Output ONLY the corrected message, with no quotes, labels or commentary.",
+  "glossary_160": "Agentmaster, x64, ConPTY, MSIX, XAML, k3s, DuckDB, UI, ConPTY-fix, Claude, Claude Code, Anthropic, OpenAI, GPT, LLM, MCP, Whisper, Parakeet, ONNX, PyTorch, TensorFlow, Hugging Face, LoRA, RAG, embeddings, tokenizer, Sonnet, Opus, Haiku, Codex, Gemini, Ollama, llama.cpp, PCM, WAV, MP3, AAC, Ogg, FLAC, FFmpeg, codec, kHz, VAD, CPU, GPU, RAM, SSD, NVMe, CUDA, cuDNN, RTX, NVIDIA, ARM64, Windows, Win32, WinRT, PowerShell, WSL, AppX, NuGet, vcpkg, MSBuild, CMake, COM, DLL, PDB, PID, TTY, PTY, VT100, ANSI, JSON, JSONL, YAML, TOML, XML, CSV, HTML, CSS, Markdown, HTTP, HTTPS, REST, gRPC, WebSocket, OAuth, JWT, UTF-8, UTF-16, ASCII, Base64, SHA-256, TLS, SSH, DNS, TCP, UDP, IPv4, IPv6, URL, URI, UUID, GUID, regex, stdin, stdout, stderr, C++, C#, .NET, Python, TypeScript, JavaScript, Node.js, Rust, Golang, Kotlin, SQL, Bash, WebAssembly, Git, GitHub, GitLab, Docker, Kubernetes, kubectl, Helm, npm, pnpm, Yarn, Vite, Webpack, pytest, Jest, VS Code, Visual Studio, WinDbg, Telegram, Slack, Discord, WhatsApp, Cloudflare, Traefik, Proxmox, PostgreSQL, Postgres, MySQL, SQLite, Redis, MongoDB, Kafka, RabbitMQ, API, SDK, CLI, GUI, UX, IDE, CI, PR",
+  "glossary_5": "Agentmaster, x64, ConPTY, MSIX, XAML",
+  "cases": [
+   {
+    "text": "Check why the ConPTY host drops.",
+    "alternatives": [],
+    "user_prompt": "Glossary: Agentmaster, x64, ConPTY, MSIX, XAML\n\nTranscript:\nCheck why the ConPTY host drops.\n"
+   },
+   {
+    "text": "Decode a note with a faulty lines.",
+    "alternatives": [
+     "Decode the note with a 40 lines."
+    ],
+    "user_prompt": "Glossary: Agentmaster, x64, ConPTY, MSIX, XAML\n\nTranscripts of the same recording by different speech engines:\nA: Decode a note with a faulty lines.\nB: Decode the note with a 40 lines.\n"
+   },
+   {
+    "text": "Same text twice.",
+    "alternatives": [
+     "Same text twice."
+    ],
+    "user_prompt": "Glossary: Agentmaster, x64, ConPTY, MSIX, XAML\n\nTranscript:\nSame text twice.\n"
+   },
+   {
+    "text": "Three hearings.",
+    "alternatives": [
+     "Second hearing.",
+     "Third hearing."
+    ],
+    "user_prompt": "Glossary: Agentmaster, x64, ConPTY, MSIX, XAML\n\nTranscripts of the same recording by different speech engines:\nA: Three hearings.\nB: Second hearing.\nC: Third hearing.\n"
+   }
+  ],
+  "accept": [
+   {
+    "before": "Decode a note with a faulty lines.",
+    "after": "Decode the note with 40 lines.",
+    "accepted": true
+   },
+   {
+    "before": "Decode a note with a faulty lines.",
+    "after": "",
+    "accepted": false
+   },
+   {
+    "before": "Decode a note with a faulty lines.",
+    "after": "   ",
+    "accepted": false
+   },
+   {
+    "before": "Short.",
+    "after": "Short, fixed.",
+    "accepted": true
+   },
+   {
+    "before": "Check why the ConPTY host drops the hook events.",
+    "after": "I can't help with that. Here is an explanation of what a ConPTY host is and why hook events could be dropped after a resume, in detail.",
+    "accepted": false
+   },
+   {
+    "before": "Check why the ConPTY host drops the hook events.",
+    "after": "Check.",
+    "accepted": false
+   }
+  ]
  },
  "dictionary_text": "# my words\nFluidVoice\nfluid voice, fluid boys => FluidVoice\n\njay son el => JSONL\nRunPod\n",
  "dictionary": [

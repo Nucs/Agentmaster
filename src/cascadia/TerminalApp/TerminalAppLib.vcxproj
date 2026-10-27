@@ -226,13 +226,15 @@
     <ClInclude Include="AgentMaster\MessagingSteer.h" />
     <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): VOICE NOTES - the session vocabulary and the dictionary pass
          (VoiceVocabulary.h, pure), the voice worker protocol (VoiceProtocol.h, pure), the transcriber seam (VoiceBridge.h),
-         the worker process, the endpoint client, the spell checker word test and the transcriber. -->
+         the worker process, the endpoint client, the spell checker word test, the correction layer (VoiceCorrect.h: its
+         prompt, arguments and guard, pure; the claude call is VoiceCorrect.cpp) and the transcriber. -->
     <ClInclude Include="AgentMaster\VoiceVocabulary.h" />
     <ClInclude Include="AgentMaster\VoiceProtocol.h" />
     <ClInclude Include="AgentMaster\VoiceBridge.h" />
     <ClInclude Include="AgentMaster\VoiceWorker.h" />
     <ClInclude Include="AgentMaster\VoiceHttp.h" />
     <ClInclude Include="AgentMaster\VoiceSpellWords.h" />
+    <ClInclude Include="AgentMaster\VoiceCorrect.h" />
     <ClInclude Include="AgentMaster\VoiceTranscriber.h" />
     <!-- Agentmaster (MESSAGING.md section 21.30): Claude's AskUserQuestion answered from Telegram - the question card's pure
          model, texts, buttons and decision lines (header-only). -->
@@ -590,12 +592,16 @@
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): the service's VOICE NOTES - the lanes, the voice thread, the download,
          the echo and the read (Messaging.Voice.cpp); the transcriber behind the VoiceBridge seam - the session vocabulary, the
-         engines (a local voice worker process, an OpenAI-compatible endpoint), the dictionary pass (VoiceTranscriber.cpp,
-         VoiceWorker.cpp, VoiceHttp.cpp). Plain C++ + Win32 + COM, no PCH; they link winhttp, advapi32 and ole32 by #pragma. -->
+         engines (a local voice worker process, an OpenAI-compatible endpoint), the dictionary pass, the correction's hidden
+         claude call (VoiceTranscriber.cpp, VoiceWorker.cpp, VoiceHttp.cpp, VoiceCorrect.cpp). Plain C++ + Win32 + COM, no PCH;
+         they link winhttp, advapi32 and ole32 by #pragma. -->
     <ClCompile Include="AgentMaster\Messaging.Voice.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\VoiceTranscriber.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\VoiceCorrect.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\VoiceWorker.cpp">

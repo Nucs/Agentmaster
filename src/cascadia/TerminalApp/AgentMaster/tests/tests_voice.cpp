@@ -26,7 +26,12 @@
 #include <vector>
 
 #include "../Json.h"
+#include <shellapi.h> // CommandLineToArgvW: the command-line quoting is checked against Windows' own reader
+
+#include "../VoiceCorrect.h"
 #include "../VoiceProtocol.h"
+
+#pragma comment(lib, "shell32.lib")
 #include "../VoiceVocabulary.h"
 
 using namespace Agentmaster;
@@ -242,6 +247,9 @@ void TestVoiceVocabulary()
         CHECK(!has(L"ON") && !has(L"NOT") && !has(L"BEFORE") && !has(L"USERPROFILE") && !has(L"English"), "shouted English, a long all-caps name and a proper noun are not");
         CHECK(!has(L"Get-AppxPackage") && !has(L"Debug-B") && !has(L"C2039") && !has(L"VM") && !has(L"Toolhelp"),
               "a cmdlet, a slot name, an error code, a rare two-letter acronym and a one-off mention are not");
+        CHECK(!has(L"tabToken") && !has(L"kStateSettleMs") && !has(L"WriteAllUtf8") && !has(L"AgentmasterStateDir") && !has(L"SHGetKnownFolderPath") &&
+                  !has(L"v9") && !has(L"m5") && !has(L"Xs"),
+              "a name nobody dictates is not (lowerCamelCase, three or more word parts, two characters): they crowded Whisper's prompt");
     }
 
     // ---- 3. the three vocabularies ----
@@ -423,6 +431,10 @@ void TestVoiceProtocol()
               "a transcript answer: id, text, timings, engine");
         a = ParseWorkerAnswer(L"{\"v\":1,\"id\":1,\"ok\":true,\"engine\":\"parakeet-v2-beam+hotwords\",\"prompt\":false,\"hotwords\":true}");
         CHECK(a && a->ok && !a->takesPrompt && a->takesHotwords, "a hello answer: what the engine takes");
+        CHECK(a && a->alternatives.empty(), "a single-engine answer has no alternatives");
+        a = ParseWorkerAnswer(L"{\"v\":1,\"id\":5,\"ok\":true,\"text\":\"with a faulty lines\",\"alternatives\":[\"with a 40 lines\",\"\",7,\"third\"]}");
+        CHECK(a && a->alternatives.size() == 2 && a->alternatives[0] == L"with a 40 lines" && a->alternatives[1] == L"third",
+              "a fusion worker's other hearings are read; an empty or non-text entry is skipped, never an error");
         a = ParseWorkerAnswer(L"{\"v\":1,\"id\":3,\"ok\":false,\"error\":\"FileNotFoundError: x.oga\"}");
         CHECK(a && !a->ok && a->error == L"FileNotFoundError: x.oga", "a failure keeps the worker's reason");
         a = ParseWorkerAnswer(L"{\"id\":4,\"ok\":false}");
@@ -443,4 +455,113 @@ void TestVoiceProtocol()
         CHECK(NormalizeTranscriptForPrompt(L"\x05D1\x05D3\x05D9\x05E7\x05D4 \x05D0\x05D7\x05EA") == L"\x05D1\x05D3\x05D9\x05E7\x05D4 \x05D0\x05D7\x05EA",
               "a Hebrew transcript passes through unchanged");
     }
+}
+
+void TestVoiceCorrection()
+{
+    wprintf(L"== TestVoiceCorrection (VOICE.md 5.5: the correction layer - prompts vs llm_fix.py's goldens, the plausibility guard, the command line, the output) ==\n");
+    const fs::path dir = VoiceHarnessDir() / L"voice";
+    const auto goldens = json::Parse(ReadVoiceUtf8(dir / L"vocab_goldens.json"));
+    FrozenWords frozen = LoadFrozenWords(ReadVoiceUtf8(dir / L"plain_words.txt"));
+    const json::Value* g = goldens ? goldens->Find(L"correction") : nullptr;
+    CHECK(g != nullptr, "the goldens carry the correction layer's cases");
+    if (!g)
+    {
+        return;
+    }
+
+    // ---- the prompts, byte for byte ----
+    CHECK(CorrectionSystemPrompt() == g->StrAt(L"system_prompt"), "the system prompt is llm_fix.py's SYSTEM_PROMPT verbatim");
+    const std::wstring sample = ReadVoiceUtf8(dir / L"context_sample.md");
+    const json::Value* args = goldens->Find(L"session_args") ? goldens->Find(L"session_args")->Find(L"session") : nullptr;
+    const VoiceVocabulary session = SessionVocabulary(frozen.Test(), args ? args->StrAt(L"workdir") : L"", args ? args->StrAt(L"title") : L"", sample);
+    CHECK(session.GlossaryLine(160) == g->StrAt(L"glossary_160") && session.GlossaryLine(5) == g->StrAt(L"glossary_5"),
+          "the glossary line (highest weight first, 160 and 5 terms) matches the reference");
+    if (const auto* cases = g->Find(L"cases"); cases && cases->type == json::Value::Type::Arr)
+    {
+        for (const auto& c : cases->arr)
+        {
+            std::vector<std::wstring> alts;
+            if (const auto* a = c.Find(L"alternatives"))
+            {
+                for (const auto& x : a->arr)
+                {
+                    alts.push_back(x.AsStr());
+                }
+            }
+            const std::wstring got = BuildCorrectionUserPrompt(c.StrAt(L"text"), session.GlossaryLine(5), alts);
+            if (got != c.StrAt(L"user_prompt"))
+            {
+                ReportVoiceDiff(L"user prompt", c.StrAt(L"user_prompt"), got);
+            }
+            CHECK(got == c.StrAt(L"user_prompt"), "the user prompt (one transcript, or every engine's hearing labeled A, B, ...) matches the reference");
+        }
+    }
+
+    // ---- the plausibility guard ----
+    if (const auto* acc = g->Find(L"accept"); acc && acc->type == json::Value::Type::Arr)
+    {
+        for (const auto& c : acc->arr)
+        {
+            CHECK(AcceptCorrection(c.StrAt(L"before"), c.StrAt(L"after")) == c.BoolAt(L"accepted"),
+                  "the guard takes a correction or keeps the transcript exactly as the reference does (blank, an answer, a cut)");
+        }
+    }
+
+    // ---- the command line: every argument read back by Windows' own parser ----
+    {
+        const std::vector<std::wstring> tricky{
+            L"plain", L"", L"two words", L"say \"hi\"", L"C:\\path with space\\", L"trailing\\\\", L"a\\\"b", L"line one\nline two",
+            L"{\"verbose\":false,\"env\":{\"X\":\"1\"}}", L"\\\\server\\share\\x y",
+        };
+        for (const auto& arg : tricky)
+        {
+            const std::wstring line = L"x.exe " + QuoteCommandLineArg(arg);
+            int argc = 0;
+            LPWSTR* argv = ::CommandLineToArgvW(line.c_str(), &argc);
+            const bool ok = argv && argc == 2 && std::wstring{ argv[1] } == arg;
+            if (argv)
+            {
+                ::LocalFree(argv);
+            }
+            if (!ok)
+            {
+                ReportVoiceDiff(L"quoted argument", arg, line);
+            }
+            CHECK(ok, "an argument quoted for the command line reads back exactly (quotes, backslashes, spaces, line breaks, empty)");
+        }
+        const std::wstring all = L"claude.exe " + BuildCorrectionArgs(L"claude-sonnet-5-5", L"low", L"C:\\Users\\me\\.agentmaster\\voice\\correct-system.txt",
+                                                                     L"Glossary: A, B\n\nTranscript:\nsay \"x\"\n");
+        int argc = 0;
+        LPWSTR* argv = ::CommandLineToArgvW(all.c_str(), &argc);
+        std::vector<std::wstring> parsed;
+        for (int i = 0; argv && i < argc; ++i)
+        {
+            parsed.emplace_back(argv[i]);
+        }
+        if (argv)
+        {
+            ::LocalFree(argv);
+        }
+        CHECK(parsed.size() == 21 && parsed[1] == L"-p" && parsed[3] == L"claude-sonnet-5-5" && parsed[10] == L"--system-prompt-file" &&
+                  parsed[12] == L"--tools" && parsed[13].empty() && parsed[17].empty() &&
+                  parsed[19] == L"{\"verbose\":false,\"env\":{\"CLAUDE_CODE_MAX_RETRIES\":\"2\",\"CLAUDE_CODE_RETRY_WATCHDOG\":\"0\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"low\"}}" &&
+                  parsed.back() == L"Glossary: A, B\n\nTranscript:\nsay \"x\"\n",
+              "the whole correction command line reads back as the clean recipe's arguments, the user prompt last and intact");
+    }
+
+    // ---- the output reader ----
+    {
+        auto o = ParseCorrectionOutput(L"{\"type\":\"result\",\"is_error\":false,\"result\":\"Decode the note.\"}");
+        CHECK(o.ok && o.text == L"Decode the note.", "a result object gives its text");
+        o = ParseCorrectionOutput(L"[{\"type\":\"system\"},{\"type\":\"result\",\"is_error\":false,\"result\":\"Last.\"}]");
+        CHECK(o.ok && o.text == L"Last.", "a verbose array gives its LAST object's text");
+        o = ParseCorrectionOutput(L"{\"is_error\":true,\"result\":\"API Error: 529\"}");
+        CHECK(!o.ok && o.error.find(L"API Error") != std::wstring::npos, "an error result is a failure with its reason");
+        o = ParseCorrectionOutput(L"not json");
+        CHECK(!o.ok && !o.error.empty(), "output that is not JSON is a failure");
+        o = ParseCorrectionOutput(L"[]");
+        CHECK(!o.ok, "an empty array is a failure");
+    }
+    CHECK(frozen.unknown.empty(), "the correction checks asked the word test about nothing the reference never asked");
 }
