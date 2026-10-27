@@ -11,6 +11,9 @@
 //   1b. §21.39's level picker (the ALL SCREEN page 📜 All Screen ▸ opens: the File diffs checkbox, five levels, the default one
 //      starred, Back to the Session page; its checked twin whose levels carry +d), the level words and verbs, /allscreen's
 //      arguments, and the default level's setting (Full unless the cog says another);
+//   1c. §21.41's ⎋ Esc and 🌙 Deactivate (MessagingSessionControl.h, the user's request of 2026-10-27): Esc beside the cog on Main
+//      while a turn is in flight, the Esc / Deactivate row above Back on the Session page (each button only where it applies),
+//      the hosting window's two decisions, the answers' words, the texts and the Esc gap;
 //   2. 🖼 Screen Image: the terminal's live screen drawn as a picture — the styled snapshot's format (ScreenSnapshot.h, shared
 //      with ControlCore.cpp) and the renderer (ScreenImage.h), which draws a REAL PNG here with Direct2D + DirectWrite + WIC; the
 //      test decodes it again and reads its pixels.
@@ -29,6 +32,8 @@
 #include <cstring>
 
 #include "../MessagingModels.h"
+#include "../MessagingSessionControl.h" // 21.41: the card's Esc and Deactivate (the window's decisions, the answers' words and texts)
+#include "../MessagingTaps.h" // kTapToastMaxChars: every 21.41 text must fit a toast
 #include "../ScreenImage.h"
 #include "../ScreenSnapshot.h"
 #include "../TelegramFormat.h"
@@ -197,7 +202,7 @@ namespace
 void TestMessagingCard()
 {
     // ASCII only, like the other groups' headers: the console's code page would garble a section sign.
-    std::wprintf(L"== TestMessagingCard (MESSAGING.md 21.24: the card's two pages, the Error line, the screen snapshot and its picture) ==\n");
+    std::wprintf(L"== TestMessagingCard (MESSAGING.md 21.24: the card's two pages, the Error line, the screen snapshot and its picture; 21.41: Esc and Deactivate) ==\n");
 
     // ===== 1. the card's two pages =====
     {
@@ -215,11 +220,11 @@ void TestMessagingCard()
         CHECK(!HasData(main, L"c:queue:" + kCardSid) && !HasData(main, L"c:screen:" + kCardSid), "Main: the session's own buttons are on the other page");
 
         const Rows page = BuildCardButtonRows(kCardSid, f, CardPage::Session);
-        CHECK(page.size() == 7, "Session: seven rows (21.39 added All Screen's own row)");
-        CHECK(page.size() == 7 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
+        CHECK(page.size() == 8, "Session: eight rows while claude runs (21.39 added All Screen's own row, 21.41 the Esc / Deactivate row)");
+        CHECK(page.size() == 8 && page[0].size() == 2 && page[0][0].second == L"c:fork:" + kCardSid && page[0][0].first.find(L"Fork") != std::wstring::npos &&
                   page[0][1].second == L"c:newsession:" + kCardSid && page[0][1].first.find(L"New Session") != std::wstring::npos,
               "Session: Fork and New Session first, side by side (right after the cog's tap)");
-        CHECK(page.size() == 7 && page[1].size() == 1 && page[1][0].second == L"c:restart:" + kCardSid && page[1][0].first.find(L"Restart Session") != std::wstring::npos,
+        CHECK(page.size() == 8 && page[1].size() == 1 && page[1][0].second == L"c:restart:" + kCardSid && page[1][0].first.find(L"Restart Session") != std::wstring::npos,
               "Session: Restart Session next, alone while the session is not in Error");
         CHECK(HasData(page, L"c:runner:" + kCardSid) && HasLabel(page, L"Pause runner"), "Session: the runner button (Auto -> Pause runner)");
         CHECK(HasData(page, L"c:queue:" + kCardSid), "Session: Queue");
@@ -227,12 +232,15 @@ void TestMessagingCard()
         CHECK(HasData(page, L"c:transcript:" + kCardSid), "Session: Transcript");
         CHECK(HasData(page, L"c:screen:" + kCardSid) && HasLabel(page, L"Screen Text"), "Session: Screen Text (the old Screen's verb)");
         CHECK(HasData(page, L"c:screenimg:" + kCardSid) && HasLabel(page, L"Screen Image"), "Session: Screen Image");
-        CHECK(page.size() == 7 && page[4].size() == 2 && page[4][0].second == L"c:screen:" + kCardSid && page[4][1].second == L"c:screenimg:" + kCardSid,
-              "Session: Screen Text and Screen Image keep their row (21.39 moved no existing button)");
-        CHECK(page.size() == 7 && page[5].size() == 1 && page[5][0].second == L"c:allscreen:" + kCardSid && page[5][0].first.find(L"All Screen") != std::wstring::npos &&
+        CHECK(page.size() == 8 && page[4].size() == 2 && page[4][0].second == L"c:screen:" + kCardSid && page[4][1].second == L"c:screenimg:" + kCardSid,
+              "Session: Screen Text and Screen Image keep their row (21.39 and 21.41 moved no existing button)");
+        CHECK(page.size() == 8 && page[5].size() == 1 && page[5][0].second == L"c:allscreen:" + kCardSid && page[5][0].first.find(L"All Screen") != std::wstring::npos &&
                   page[5][0].first.rfind(L"\U0001F4DC", 0) == 0,
               "Session: All Screen alone on its own row under the screen buttons, with the scroll emoji (21.39)");
-        CHECK(page.size() == 7 && page[6].size() == 1 && page[6][0].second == L"c:main:" + kCardSid && page[6][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
+        CHECK(page.size() == 8 && page[6].size() == 2 && page[6][0].second == L"c:esc:" + kCardSid && page[6][0].first == L"\x238B Esc" &&
+                  page[6][1].second == L"c:deactivate:" + kCardSid && page[6][1].first == L"\U0001F319 Deactivate",
+              "Session: the Esc and Deactivate row right above Back, Esc first (21.41)");
+        CHECK(page.size() == 8 && page[7].size() == 1 && page[7][0].second == L"c:main:" + kCardSid && page[7][0].first.find(L"Back") != std::wstring::npos, "Session: Back alone on the last row");
         CHECK(!HasData(main, L"c:allscreen:" + kCardSid), "Main: no All Screen (it is a Session-page button)");
         CHECK(!HasData(page, L"c:panel:" + kCardSid) && !HasData(page, L"c:resume:" + kCardSid) && !HasData(page, L"c:reactivate:" + kCardSid),
               "Session of a waiting session: no cog, no Resume, no Reactivate");
@@ -254,7 +262,7 @@ void TestMessagingCard()
               "Error, Main: the cog, then Restart Session");
         CHECK(!HasData(errMain, L"c:resume:" + kCardSid) && !HasData(errMain, L"c:reactivate:" + kCardSid), "Error, Main: no Resume Session (it is on the Session page), no Reactivate");
         const Rows errPage = BuildCardButtonRows(kCardSid, ef, CardPage::Session);
-        CHECK(errPage.size() == 7 && errPage[1].size() == 2 && errPage[1][0].second == L"c:restart:" + kCardSid && errPage[1][1].second == L"c:resume:" + kCardSid &&
+        CHECK(errPage.size() == 8 && errPage[1].size() == 2 && errPage[1][0].second == L"c:restart:" + kCardSid && errPage[1][1].second == L"c:resume:" + kCardSid &&
                   errPage[1][1].first.find(L"Resume Session") != std::wstring::npos,
               "Error, Session: Restart Session and Resume Session side by side");
         CHECK(!HasData(errPage, L"c:reactivate:" + kCardSid), "Error, Session: no Reactivate");
@@ -267,7 +275,7 @@ void TestMessagingCard()
         CHECK(doneMain.size() == 1 && doneMain[0].size() == 2 && doneMain[0][1].second == L"c:restart:" + kCardSid, "Done, Main: the cog, then Restart Session");
         CHECK(!HasData(doneMain, L"c:reactivate:" + kCardSid), "Done, Main: no Reactivate beside Restart (the same restart)");
         const Rows donePage = BuildCardButtonRows(kCardSid, df, CardPage::Session);
-        CHECK(donePage.size() == 7 && donePage[1].size() == 1 && donePage[1][0].second == L"c:restart:" + kCardSid, "Done, Session: Restart Session alone");
+        CHECK(donePage.size() == 8 && donePage[1].size() == 1 && donePage[1][0].second == L"c:restart:" + kCardSid, "Done, Session: Restart Session alone");
         CHECK(!HasData(donePage, L"c:resume:" + kCardSid) && !HasData(donePage, L"c:reactivate:" + kCardSid), "Done, Session: no Resume, no Reactivate");
 
         // A parked tab: Reactivate beside the cog on Main (the button it had before; the rule names only Restart); the Session page
@@ -371,7 +379,7 @@ void TestMessagingCard()
         // The Session page's button opens the picker: its label says so with the arrow.
         const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
         const Rows session = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::Session);
-        CHECK(session.size() == 7 && session[5].size() == 1 && session[5][0].second == L"c:allscreen:" + kCardSid && session[5][0].first.size() > 1 &&
+        CHECK(session.size() == 8 && session[5].size() == 1 && session[5][0].second == L"c:allscreen:" + kCardSid && session[5][0].first.size() > 1 &&
                   session[5][0].first.back() == L'\x25B8',
               "All Screen: the Session page's button opens the picker (its label ends with the page arrow)");
 
@@ -444,6 +452,190 @@ void TestMessagingCard()
         const AppSettings blank = AppSettingsFromJson(json::Value::MkObj());
         CHECK(defaults.messagingAllScreenLevel == L"full" && again.messagingAllScreenLevel == L"compact" && blank.messagingAllScreenLevel == L"full",
               "All Screen: the default level setting round-trips; absent, it is full");
+    }
+
+    // ===== 1c. MESSAGING.md 21.41 - the card's Esc and Deactivate (MessagingSessionControl.h) =====
+    {
+        const SessionInfo running = CardSession(SessionState::Running);
+        const SessionInfo asking = CardSession(SessionState::NeedsApproval);
+        const SessionInfo waiting = CardSession(SessionState::WaitingForInput);
+        const SessionInfo idle = CardSession(SessionState::Idle);
+        const SessionInfo error = CardSession(SessionState::Error);
+        const SessionInfo exited = CardSession(SessionState::Done);
+        const SessionInfo parked = CardSession(SessionState::WaitingForInput, false);
+        SessionInfo codex = CardSession(SessionState::Running);
+        codex.kind = AgentKind::Codex;
+        SessionInfo parkedCodex = codex;
+        parkedCodex.started = false;
+        // An adopted claude: its started flag stays false (meaningless for it, SessionInfo::started) while its claude runs.
+        SessionInfo adopted = CardSession(SessionState::Running, false);
+        adopted.external = true;
+        SessionInfo closed = running;
+        closed.live = false;
+
+        // Who gets which button.
+        CHECK(SessionTurnInFlight(running) && SessionTurnInFlight(asking) && !SessionTurnInFlight(waiting) && !SessionTurnInFlight(idle) &&
+                  !SessionTurnInFlight(error) && !SessionTurnInFlight(exited) && !SessionTurnInFlight(closed),
+              "a turn is in flight while Running or Needs approval, in an open tab only");
+        CHECK(SessionTakesEsc(running) && SessionTakesEsc(waiting) && SessionTakesEsc(error) && SessionTakesEsc(adopted) && !SessionTakesEsc(exited) &&
+                  !SessionTakesEsc(parked) && !SessionTakesEsc(codex) && !SessionTakesEsc(closed),
+              "Esc reaches a Claude session whose claude runs (an adopted one too), never an exited claude, a parked tab, Codex or a closed session");
+        CHECK(SessionIsDeactivatable(running) && SessionIsDeactivatable(waiting) && SessionIsDeactivatable(exited) && SessionIsDeactivatable(codex) &&
+                  !SessionIsDeactivatable(parked) && !SessionIsDeactivatable(adopted) && !SessionIsDeactivatable(closed),
+              "Deactivate parks a started tab Agentmaster launched (Codex and an exited claude too), never a parked, adopted or closed one");
+        const CardButtonFacts rf = CardButtonFactsFor(running);
+        CHECK(rf.turnInFlight && rf.takesEsc && rf.deactivatable && !rf.reactivatable && !rf.error && !rf.done, "facts of a running session: a turn in flight, Esc and Deactivate apply");
+
+        // Main: Esc beside the cog while a turn is in flight, nowhere else.
+        const Rows runMain = BuildCardButtonRows(kCardSid, rf, CardPage::Main);
+        CHECK(runMain.size() == 1 && runMain[0].size() == 2 && runMain[0][0].second == L"c:panel:" + kCardSid && runMain[0][1].second == L"c:esc:" + kCardSid &&
+                  runMain[0][1].first == L"\x238B Esc",
+              "Running, Main: the cog first, then Esc");
+        const Rows askMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(asking), CardPage::Main);
+        CHECK(askMain.size() == 1 && askMain[0].size() == 2 && askMain[0][1].second == L"c:esc:" + kCardSid, "Needs approval, Main: the cog, then Esc (it turns the dialog down)");
+        const Rows waitMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(waiting), CardPage::Main);
+        const Rows idleMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(idle), CardPage::Main);
+        CHECK(waitMain.size() == 1 && waitMain[0].size() == 1 && idleMain.size() == 1 && idleMain[0].size() == 1, "at rest (Waiting, Idle), Main: the cog alone, no Esc");
+        CHECK(!HasData(BuildCardButtonRows(kCardSid, CardButtonFactsFor(error), CardPage::Main), L"c:esc:" + kCardSid) &&
+                  !HasData(BuildCardButtonRows(kCardSid, CardButtonFactsFor(exited), CardPage::Main), L"c:esc:" + kCardSid),
+              "Error and Done, Main: no Esc (Restart Session is their action)");
+        const Rows codexMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(codex), CardPage::Main);
+        CHECK(codexMain.size() == 1 && codexMain[0].size() == 1, "a running Codex session, Main: the cog alone (nothing is typed into Codex)");
+        const Rows adoptedMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(adopted), CardPage::Main);
+        CHECK(adoptedMain.size() == 1 && adoptedMain[0].size() == 2 && adoptedMain[0][1].second == L"c:esc:" + kCardSid,
+              "an adopted running claude, Main: Esc (its injector writes into that very tab)");
+        const Rows closedMain = BuildCardButtonRows(kCardSid, CardButtonFactsFor(closed), CardPage::Main);
+        CHECK(closedMain.size() == 1 && closedMain[0].size() == 1, "a closed session, Main: the cog alone");
+
+        // The Session page: the stopping row right above Back, each button only where it applies, no row when neither does.
+        const Rows runPage = BuildCardButtonRows(kCardSid, rf, CardPage::Session);
+        CHECK(runPage.size() == 8 && runPage[6].size() == 2 && runPage[6][0].second == L"c:esc:" + kCardSid && runPage[6][1].second == L"c:deactivate:" + kCardSid &&
+                  runPage[7][0].second == L"c:main:" + kCardSid,
+              "Running, Session: Esc and Deactivate side by side, then Back");
+        const Rows errPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(error), CardPage::Session);
+        CHECK(errPage.size() == 8 && errPage[6].size() == 2 && errPage[6][0].second == L"c:esc:" + kCardSid && errPage[6][1].second == L"c:deactivate:" + kCardSid,
+              "Error, Session: Esc and Deactivate (its claude is up)");
+        const Rows donePage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(exited), CardPage::Session);
+        CHECK(donePage.size() == 8 && donePage[6].size() == 1 && donePage[6][0].second == L"c:deactivate:" + kCardSid && donePage[6][0].first == L"\U0001F319 Deactivate",
+              "Done, Session: Deactivate alone on the row (no Esc into an exited claude)");
+        const Rows parkedPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(parked), CardPage::Session);
+        CHECK(parkedPage.size() == 7 && !HasData(parkedPage, L"c:esc:" + kCardSid) && !HasData(parkedPage, L"c:deactivate:" + kCardSid) &&
+                  parkedPage[6][0].second == L"c:main:" + kCardSid,
+              "parked, Session: no Esc / Deactivate row (nothing runs, it is parked already); Back stays the last row");
+        const Rows codexPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(codex), CardPage::Session);
+        CHECK(codexPage.size() == 8 && codexPage[6].size() == 1 && codexPage[6][0].second == L"c:deactivate:" + kCardSid,
+              "a running Codex session, Session: Deactivate alone (the park handles Codex, Esc does not reach it)");
+        const Rows adoptedPage = BuildCardButtonRows(kCardSid, CardButtonFactsFor(adopted), CardPage::Session);
+        CHECK(adoptedPage.size() == 8 && adoptedPage[6].size() == 1 && adoptedPage[6][0].second == L"c:esc:" + kCardSid,
+              "an adopted claude, Session: Esc alone (Deactivate never parks the user's own shell)");
+        CHECK(BuildCardButtonRows(kCardSid, CardButtonFactsFor(closed), CardPage::Session).size() == 7, "a closed session, Session: no Esc / Deactivate row");
+        CHECK(!HasData(BuildCardButtonRows(kCardSid, rf, CardPage::AllScreen), L"c:esc:" + kCardSid) &&
+                  !HasData(BuildCardButtonRows(kCardSid, rf, CardPage::AllScreenDiffs), L"c:deactivate:" + kCardSid),
+              "the All Screen picker carries neither (it is a level picker)");
+
+        // Telegram's limits for the new buttons and every new layout.
+        CHECK(CardCallbackData(kCardVerbEsc, kCardSid).size() == 42 && CardCallbackData(kCardVerbDeactivate, kCardSid).size() == 49,
+              "the Esc and Deactivate data (c:esc: and c:deactivate: + a 36-character id) are 42 and 49 bytes of 64");
+        bool fits = true;
+        bool twoARow = true;
+        // A typed array: the list mixes const records and the adjusted (non-const) ones, which a braced list cannot deduce.
+        const SessionInfo* const layouts[] = { &running, &asking, &error, &exited, &codex, &adopted, &closed };
+        for (const SessionInfo* s : layouts)
+        {
+            for (const CardPage p : { CardPage::Main, CardPage::Session })
+            {
+                for (const auto& row : BuildCardButtonRows(kCardSid, CardButtonFactsFor(*s), p))
+                {
+                    twoARow = twoARow && !row.empty() && row.size() <= 2;
+                    for (const auto& [label, data] : row)
+                    {
+                        fits = fits && !label.empty() && Utf8Length(data) <= 64 && Utf8Length(data) == data.size();
+                    }
+                }
+            }
+        }
+        CHECK(fits && twoARow, "every 21.41 layout: ASCII data within 64 bytes, a label each, one or two buttons a row (never an empty row)");
+
+        // The window's Esc decision.
+        CHECK(DecideRemoteEsc(running, false) == RemoteEscResult::Pressed && DecideRemoteEsc(asking, false) == RemoteEscResult::Pressed,
+              "Esc: a running turn and a waiting dialog get the key");
+        CHECK(DecideRemoteEsc(waiting, false) == RemoteEscResult::Pressed && DecideRemoteEsc(error, false) == RemoteEscResult::Pressed,
+              "Esc: at rest it is written too (one harmless Esc that closes a menu if one is open)");
+        CHECK(DecideRemoteEsc(running, true) == RemoteEscResult::Busy, "Esc: never between a delivery's or a draft swap's keystrokes");
+        CHECK(DecideRemoteEsc(parked, false) == RemoteEscResult::NotRunning && DecideRemoteEsc(exited, false) == RemoteEscResult::NotRunning &&
+                  DecideRemoteEsc(closed, false) == RemoteEscResult::NotRunning && DecideRemoteEsc(parked, true) == RemoteEscResult::NotRunning,
+              "Esc: nothing reads the key in a parked tab, an exited claude or a closed session (whatever the box)");
+        CHECK(DecideRemoteEsc(codex, false) == RemoteEscResult::NotClaude && DecideRemoteEsc(parkedCodex, false) == RemoteEscResult::NotRunning,
+              "Esc: a running Codex session is refused as Codex, a parked one as parked first");
+        CHECK(DecideRemoteEsc(adopted, false) == RemoteEscResult::Pressed, "Esc: an adopted claude gets the key (its started flag is meaningless)");
+
+        // The window's park decision.
+        CHECK(DecideRemotePark(waiting, false, false) == RemoteParkResult::Parked && DecideRemotePark(idle, false, false) == RemoteParkResult::Parked &&
+                  DecideRemotePark(error, false, false) == RemoteParkResult::Parked && DecideRemotePark(exited, false, false) == RemoteParkResult::Parked,
+              "Deactivate: a tab at rest is parked (an errored or exited claude's too: it resumes on entry)");
+        CHECK(DecideRemotePark(running, false, false) == RemoteParkResult::TurnRunning && DecideRemotePark(asking, false, false) == RemoteParkResult::TurnRunning,
+              "Deactivate: a turn in flight is never cut off unasked");
+        CHECK(DecideRemotePark(running, false, true) == RemoteParkResult::Parked && DecideRemotePark(asking, false, true) == RemoteParkResult::Parked,
+              "Deactivate: after Park now a turn in flight is cut off");
+        CHECK(DecideRemotePark(running, true, false) == RemoteParkResult::TurnRunning, "Deactivate: the turn question comes before a held box (the user decides first)");
+        CHECK(DecideRemotePark(waiting, true, false) == RemoteParkResult::Busy && DecideRemotePark(running, true, true) == RemoteParkResult::Busy,
+              "Deactivate: never while a delivery or a draft swap holds the box");
+        CHECK(DecideRemotePark(parked, false, false) == RemoteParkResult::AlreadyParked, "Deactivate: a parked tab is parked already");
+        CHECK(DecideRemotePark(adopted, false, true) == RemoteParkResult::Adopted && DecideRemotePark(adopted, true, false) == RemoteParkResult::Adopted,
+              "Deactivate: an adopted claude's shell tab is never parked (adopted wins over its meaningless started flag)");
+        CHECK(DecideRemotePark(closed, false, true) == RemoteParkResult::Closed, "Deactivate: a closed session has nothing to park");
+        CHECK(DecideRemotePark(codex, false, true) == RemoteParkResult::Parked, "Deactivate: a Codex tab is parked like a Claude one");
+
+        // The answers' words round-trip; anything else reads as Failed, never as success.
+        bool escWords = true;
+        for (const RemoteEscResult r : { RemoteEscResult::Pressed, RemoteEscResult::NotRunning, RemoteEscResult::NotClaude, RemoteEscResult::Busy, RemoteEscResult::Failed })
+        {
+            escWords = escWords && ParseRemoteEscResult(RemoteEscResultWord(r)) == r;
+        }
+        bool parkWords = true;
+        for (const RemoteParkResult r : { RemoteParkResult::Parked, RemoteParkResult::AlreadyParked, RemoteParkResult::Adopted, RemoteParkResult::TurnRunning,
+                                          RemoteParkResult::Busy, RemoteParkResult::Closed, RemoteParkResult::Failed })
+        {
+            parkWords = parkWords && ParseRemoteParkResult(RemoteParkResultWord(r)) == r;
+        }
+        CHECK(escWords && parkWords, "every Esc and park result's word reads back as that result");
+        CHECK(ParseRemoteEscResult(L"") == RemoteEscResult::Failed && ParseRemoteEscResult(L"Pressed") == RemoteEscResult::Failed &&
+                  ParseRemoteParkResult(L"") == RemoteParkResult::Failed && ParseRemoteParkResult(L"parked ") == RemoteParkResult::Failed,
+              "an empty or unknown answer (an older window) reads as failed, never as pressed or parked");
+        CHECK(kPressEscAction == L"press-esc" && kDeactivateAction == L"deactivate" && kDeactivateCutOffTurnArg == L"cut-off-turn" && kPressEscAction != kDeactivateAction,
+              "the two window action words and the cut-off argument");
+
+        // The texts: one plain sentence each, within the toast limit, no HTML (the toast goes as is; a line escapes it).
+        std::vector<std::wstring> texts;
+        for (const RemoteEscResult r : { RemoteEscResult::Pressed, RemoteEscResult::NotRunning, RemoteEscResult::NotClaude, RemoteEscResult::Busy, RemoteEscResult::Failed })
+        {
+            for (const SessionState st : { SessionState::Running, SessionState::NeedsApproval, SessionState::WaitingForInput })
+            {
+                texts.push_back(RemoteEscOutcomeText(r, st));
+            }
+        }
+        for (const RemoteParkResult r : { RemoteParkResult::Parked, RemoteParkResult::AlreadyParked, RemoteParkResult::Adopted, RemoteParkResult::TurnRunning,
+                                          RemoteParkResult::Busy, RemoteParkResult::Closed, RemoteParkResult::Failed })
+        {
+            texts.push_back(RemoteParkOutcomeText(r));
+        }
+        texts.emplace_back(kRemoteEscRepeatedText);
+        texts.emplace_back(kRemoteEscUnansweredText);
+        texts.emplace_back(kRemoteParkUnansweredText);
+        bool textsFit = true;
+        for (const auto& t : texts)
+        {
+            textsFit = textsFit && !t.empty() && t.size() <= kTapToastMaxChars && t.find_first_of(L"<>&") == std::wstring::npos;
+        }
+        CHECK(textsFit, "every Esc and park text is non-empty, within the 190-unit toast limit, and free of HTML");
+        CHECK(RemoteEscOutcomeText(RemoteEscResult::Pressed, SessionState::Running) != RemoteEscOutcomeText(RemoteEscResult::Pressed, SessionState::NeedsApproval) &&
+                  RemoteEscOutcomeText(RemoteEscResult::Pressed, SessionState::Running) != RemoteEscOutcomeText(RemoteEscResult::Pressed, SessionState::WaitingForInput),
+              "a pressed Esc says what it did: a turn stopped, a dialog turned down, or nothing was running");
+
+        // The Esc gap: two Esc presses close together open Claude Code's Rewind menu.
+        CHECK(!RemoteEscTooSoon(0, 5000) && RemoteEscTooSoon(5000, 5000) && RemoteEscTooSoon(5000, 7999) && !RemoteEscTooSoon(5000, 8000),
+              "Esc gap: never pressed goes; within 3 s of the last is refused; 3 s after it goes again");
+        CHECK(RemoteEscTooSoon(9000, 5000) && kRemoteEscGapMs == 3000, "Esc gap: a clock that went backwards refuses (the safe side), and the gap is 3 s");
     }
 
     // ===== 2. the card's line for the state's action =====

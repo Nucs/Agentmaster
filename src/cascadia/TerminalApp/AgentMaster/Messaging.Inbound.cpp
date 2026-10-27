@@ -176,6 +176,66 @@ namespace Agentmaster::Msg
         // 2026-10-25 in a scratch process: a 95 MB transcript peaked at ~315 MB of commit and took ~5.3 s for 6 parts, mostly the
         // transcript's own parse - its Compact level peaked the same), so a second one waits for the first rather than doubling that.
         constexpr int kConversationImageMaxRenders = 1;
+
+        /// <summary>
+        /// §21.41: the ONE answer of a session action the service sent to every window (ServiceHooks::sessionAction) and whose
+        /// outcome it reports to the user - ⎋ Esc, 🌙 Deactivate and their typed commands. Shared by every window's copy of the
+        /// reply function (each window's sink copies it once): the hosting window's reply Claim()s it, and when the LAST copy goes
+        /// without any window having claimed it - no window hosts the tab (it closed meanwhile, a claude outside Agentmaster's tabs)
+        /// - the destructor runs `onUnanswered`, so a tap never just stops spinning and a typed command is never left unanswered.
+        /// </summary>
+        /// <remarks>
+        /// The destructor runs on whichever thread drops the last copy: a window's UI thread (its dispatcher item ran and missed),
+        /// or the poll thread when no window is registered at all (then before the request's call even returns). It is noexcept
+        /// like every destructor, so `onUnanswered` is contained here (Rule #18): a throw costs only the report, never the window's
+        /// dispatcher item. Unlike Engine.cpp's LaunchAnswer it carries no outcome: the outcome is the window's own reply.
+        /// </remarks>
+        class SessionActionAnswer
+        {
+        public:
+            /// <summary>Arms the guard; nothing runs until the last copy of the reply goes.</summary>
+            /// <param name="onUnanswered">Reports "no window answered" (it should not throw; a throw is logged and dropped).</param>
+            explicit SessionActionAnswer(std::function<void()> onUnanswered) noexcept :
+                _onUnanswered{ std::move(onUnanswered) }
+            {
+            }
+
+            /// <summary>Runs `onUnanswered` when no window claimed the answer; contains anything it throws.</summary>
+            ~SessionActionAnswer()
+            {
+                if (_claimed.exchange(true))
+                {
+                    return; // the hosting window answered: its reply told the user
+                }
+                try
+                {
+                    if (_onUnanswered)
+                    {
+                        _onUnanswered();
+                    }
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: the "no window answered" report is lost; a tapped button is still answered (its hold's limit
+                    // at worst, with kTapStillWorkingToast), and a typed command simply gets no line.
+                    LogSwallowedException(L"SessionActionAnswer (no window answered)");
+                }
+            }
+
+            SessionActionAnswer(const SessionActionAnswer&) = delete;
+            SessionActionAnswer& operator=(const SessionActionAnswer&) = delete;
+
+            /// <summary>Claims the one answer for the calling reply; the guard is then silent.</summary>
+            /// <returns>True for the first caller (it reports the outcome); false for any later one (it must report nothing).</returns>
+            bool Claim() noexcept
+            {
+                return !_claimed.exchange(true);
+            }
+
+        private:
+            std::atomic<bool> _claimed{ false }; // a window answered (or the destructor ran): exactly one report per request
+            std::function<void()> _onUnanswered; // the "no window answered" report
+        };
     }
 
     // ===== updates ===========================================================================
@@ -1814,16 +1874,30 @@ namespace Agentmaster::Msg
         if (name == L"restartsession" || name == L"deactivate" || name == L"interrupt")
         {
             const bool running = s->state == SessionState::Running;
+            // §21.41: for /deactivate and /interrupt a turn WAITING on a permission or a question (Needs approval) is in flight too -
+            // a park cuts it off (it reads Error on its resume) and an Esc turns its dialog down - so both ask there as well, as the
+            // card's 🌙 Deactivate does. /restartsession keeps its rule (Running only), as the card's 🔄 Restart Session does.
+            const bool turnInFlight = running || (name != L"restartsession" && SessionTurnInFlight(*s));
             const std::wstring verb = name == L"restartsession" ? L"Restart" : (name == L"deactivate" ? L"Park" : L"Interrupt");
-            if (running || name == L"interrupt")
+            if (name == L"interrupt" && s->kind != AgentKind::Claude)
             {
-                if (name == L"interrupt" && !running)
+                // §21.41: Agentmaster types nothing into a Codex session, so there is no Esc to confirm - before, the question was asked
+                // and its "Interrupt now" then answered that the session could not be reached.
+                _reply(threadId, TgEscapeHtml(RemoteEscOutcomeText(RemoteEscResult::NotClaude, s->state)), false);
+                done(L"refused:not-claude");
+                return;
+            }
+            if (turnInFlight || name == L"interrupt")
+            {
+                if (name == L"interrupt" && !turnInFlight)
                 {
                     _reply(threadId, L"Nothing is running.", false);
                     return;
                 }
                 const std::wstring token = _tokenFor(L"confirm-" + name, sessionId, L"", kTokenTtlMsFor(1));
-                _reply(threadId, verb + L" <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title, _threadOf(sessionId)) + L"</b> while a turn is running? The turn is cut off.", false,
+                // The question names what would be cut off: a running turn, or one that waits on the user's answer at the PC.
+                const wchar_t* const cutOff = running ? L"</b> while a turn is running? The turn is cut off." : L"</b> while it waits for your answer at the PC? The turn is cut off.";
+                _reply(threadId, verb + L" <b>" + TgTitleToken(TgTitleForm::Plain, _titleSquare(&*s), s->title, _threadOf(sessionId)) + cutOff, false,
                        _buttons({ { { verb + L" now", token }, { L"Cancel", _tokenFor(L"cancel", sessionId, L"", kTokenTtlMsFor(1)) } } }));
                 done(L"asked");
                 return;
@@ -1855,11 +1929,22 @@ namespace Agentmaster::Msg
             }
             else
             {
-                if (_hooks.deactivateSession)
+                if (_hooks.sessionAction)
                 {
-                    _hooks.deactivateSession(sessionId);
+                    // §21.41: through the hosting window, which parks with the tab menu's own path and ANSWERS what it did - an
+                    // adopted shell tab, a held input box and a parked tab are refused there, and the line in the thread now says so
+                    // (it used to say "Parked" whatever happened). The card's 🌙 Deactivate takes the very same path.
+                    _deactivateRemote(sessionId, threadId, /*cutOffTurn*/ false, /*fromCard*/ false);
                 }
-                _reply(threadId, L"Parked: the tab keeps its place; the next message starts it again.", false);
+                else
+                {
+                    // A host without the window round trip (the m5 harness): the fire-and-forget park, whose line cannot know the outcome.
+                    if (_hooks.deactivateSession)
+                    {
+                        _hooks.deactivateSession(sessionId);
+                    }
+                    _reply(threadId, L"Parked: the tab keeps its place; the next message starts it again.", false);
+                }
             }
             done(L"ok");
             return;
@@ -2719,6 +2804,27 @@ namespace Agentmaster::Msg
                 answer(_restartFromCard(sid, threadId));
                 return;
             }
+            else if (verb == kCardVerbEsc)
+            {
+                // §21.41: ⎋ Esc - ONE Esc into the session at once, pressed by the hosting window. A refusal decided here is the toast;
+                // otherwise the WINDOW's answer sets it, from its own UI thread and possibly before _escFromCard returns - so the tap
+                // is not answered here at all: an answer("") after that reply would wipe its toast.
+                if (const std::wstring toast = _escFromCard(sid, threadId); !toast.empty())
+                {
+                    answer(toast);
+                }
+                return;
+            }
+            else if (verb == kCardVerbDeactivate)
+            {
+                // §21.41: 🌙 Deactivate - at rest the hosting window parks the tab and its answer is the toast (so, as for ⎋ Esc, no
+                // answer here then); while a turn is in flight /deactivate's question goes into the thread and the toast points at it.
+                if (const std::wstring toast = _deactivateFromCard(sid, threadId); !toast.empty())
+                {
+                    answer(toast);
+                }
+                return;
+            }
             else if (verb == kCardVerbScreenImage)
             {
                 // §21.24: 🖼 Screen Image - the photo lands in the topic (or a line saying why it cannot). §21.28: no toast — the
@@ -2932,24 +3038,58 @@ namespace Agentmaster::Msg
             }
             else if (k == L"confirm-deactivate")
             {
-                if (_hooks.deactivateSession)
+                if (_hooks.sessionAction)
                 {
-                    _hooks.deactivateSession(tok.sessionId);
+                    // §21.41: "Park now" - the user allowed the cut-off, so the hosting window parks a turn in flight too
+                    // (kDeactivateCutOffTurnArg), and its answer is the line; §21.28: the button stays busy until it (and, after a
+                    // park, the card showing ▶ Reactivate) is in.
+                    _deactivateRemote(tok.sessionId, threadId, /*cutOffTurn*/ true, /*fromCard*/ false);
                 }
-                _reply(threadId, L"Parked.", false);
-                _awaitCardChange(tok.sessionId); // §21.28: until the card shows the parked tab (its ▶ Reactivate)
+                else
+                {
+                    // A host without the window round trip (the m5 harness): the fire-and-forget park.
+                    if (_hooks.deactivateSession)
+                    {
+                        _hooks.deactivateSession(tok.sessionId);
+                    }
+                    _reply(threadId, L"Parked.", false);
+                    _awaitCardChange(tok.sessionId); // §21.28: until the card shows the parked tab (its ▶ Reactivate)
+                }
                 LogNav(L"remote telegram /deactivate " + ShortId(tok.sessionId) + L" -> confirmed");
             }
             else if (k == L"confirm-interrupt")
             {
-                // One Esc into the session (the typed path; a linked session will use the link's abort).
-                const bool ok = _registry->Inject(tok.sessionId, L"\x1b");
-                _reply(threadId, ok ? L"\x25A0 Interrupt sent." : L"Could not reach the session (no input bound).", false);
-                if (ok)
+                if (_hooks.sessionAction)
                 {
-                    _awaitCardChange(tok.sessionId); // §21.28: until the card shows the stopped turn
+                    // §21.41: the card's ⎋ Esc path. The hosting window writes the Esc on the UI thread every keystroke of the tab
+                    // goes through, and refuses while a delivery or a draft swap owns the box (an Esc between a delivery's keystrokes
+                    // or right after its Enter would put the prompt back, and the Enter-retry watch would send it again); its answer
+                    // is the line. The press is claimed against kRemoteEscGapMs like a card tap: a ⎋ Esc tapped a moment before must
+                    // not make this the second Esc of Claude Code's Rewind double press.
+                    if (!_claimEscPress(tok.sessionId))
+                    {
+                        _reply(threadId, TgEscapeHtml(std::wstring{ kRemoteEscRepeatedText }), false);
+                        LogNav(L"remote telegram /interrupt " + ShortId(tok.sessionId) + L" -> repeated (within " + std::to_wstring(kRemoteEscGapMs / 1000) + L" s of the last Esc)");
+                    }
+                    else
+                    {
+                        // The question was asked while a turn ran; the state now only picks the line's wording (a turn the user
+                        // stopped at the PC meanwhile reads "No turn was running").
+                        const auto s = _registry->GetWithoutQueue(tok.sessionId);
+                        _pressEscRemote(tok.sessionId, threadId, /*fromCard*/ false, s ? s->state : SessionState::Running);
+                    }
                 }
-                LogNav(L"remote telegram /interrupt " + ShortId(tok.sessionId) + (ok ? L" -> sent" : L" -> refused:no-injector"));
+                else
+                {
+                    // A host without the window round trip (the m5 harness): one Esc through the registry's injector, from here.
+                    const bool ok = _registry->Inject(tok.sessionId, L"\x1b");
+                    _reply(threadId, ok ? L"\x25A0 Interrupt sent." : L"Could not reach the session (no input bound).", false);
+                    if (ok)
+                    {
+                        _awaitCardChange(tok.sessionId); // §21.28: until the card shows the stopped turn
+                    }
+                    LogNav(L"remote telegram /interrupt " + ShortId(tok.sessionId) + (ok ? L" -> sent" : L" -> refused:no-injector"));
+                }
             }
             else if (k == L"wake" || k == L"wake-pin")
             {
@@ -3217,6 +3357,242 @@ namespace Agentmaster::Msg
         // stays busy until the card changes.
         _awaitCardChange(sessionId);
         return L"\U0001F504 Restarting it \x2014 the same conversation resumes in its tab.";
+    }
+
+    // ===== §21.41: the card's ⎋ Esc and 🌙 Deactivate (and the typed /interrupt and /deactivate they share a path with) ======
+
+    std::wstring MessagingService::_escFromCard(const std::wstring& sessionId, int64_t threadId)
+    {
+        // The lean read: nothing here needs the queue.
+        const auto s = _registry->GetWithoutQueue(sessionId);
+        if (!s || !s->live)
+        {
+            LogNav(L"remote telegram esc (card) " + ShortId(sessionId) + L" -> closed");
+            return L"This session is closed. Resume it from the \U0001F50E Search topic.";
+        }
+        // The service's own reading first, with the box counted as free (only the hosting window can see it): a tap that can press
+        // nothing - a parked tab, an exited claude, a Codex session - is answered at once, with no round trip to a window.
+        if (const RemoteEscResult early = DecideRemoteEsc(*s, /*boxHeld*/ false); early != RemoteEscResult::Pressed)
+        {
+            LogNav(L"remote telegram esc (card) " + ShortId(sessionId) + L" -> " + std::wstring{ RemoteEscResultWord(early) });
+            return RemoteEscOutcomeText(early, s->state);
+        }
+        if (!_hooks.sessionAction)
+        {
+            return L"Not available here.";
+        }
+        // One Esc per kRemoteEscGapMs: a double tap must not become the double Esc that opens Claude Code's Rewind menu.
+        if (!_claimEscPress(sessionId))
+        {
+            LogNav(L"remote telegram esc (card) " + ShortId(sessionId) + L" -> repeated (within " + std::to_wstring(kRemoteEscGapMs / 1000) + L" s of the last Esc)");
+            return std::wstring{ kRemoteEscRepeatedText };
+        }
+        _pressEscRemote(sessionId, threadId, /*fromCard*/ true, s->state);
+        return {}; // the window's answer sets the toast (_onEscAnswered), and the caller must leave the tap alone
+    }
+
+    std::wstring MessagingService::_deactivateFromCard(const std::wstring& sessionId, int64_t threadId)
+    {
+        const auto s = _registry->GetWithoutQueue(sessionId);
+        if (!s || !s->live)
+        {
+            LogNav(L"remote telegram deactivate (card) " + ShortId(sessionId) + L" -> closed");
+            return RemoteParkOutcomeText(RemoteParkResult::Closed);
+        }
+        // The service's own reading, with the box counted as free (the window judges it): it settles everything but a park itself.
+        const RemoteParkResult early = DecideRemotePark(*s, /*boxHeld*/ false, /*cutOffTurn*/ false);
+        if (early == RemoteParkResult::TurnRunning)
+        {
+            // A turn would be cut off (and read Error on its resume): /deactivate's own question, with its single-use [Park now]
+            // [Cancel], goes into the thread, and the toast points at it - 🔄 Restart Session's rule for a running turn.
+            RemoteCommand cmd;
+            cmd.kind = RemoteKind::AgentmasterCommand;
+            cmd.name = L"deactivate";
+            _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
+            return RemoteParkOutcomeText(RemoteParkResult::TurnRunning);
+        }
+        if (early != RemoteParkResult::Parked)
+        {
+            LogNav(L"remote telegram deactivate (card) " + ShortId(sessionId) + L" -> " + std::wstring{ RemoteParkResultWord(early) });
+            return RemoteParkOutcomeText(early);
+        }
+        if (!_hooks.sessionAction)
+        {
+            return L"Not available here.";
+        }
+        _deactivateRemote(sessionId, threadId, /*cutOffTurn*/ false, /*fromCard*/ true);
+        return {}; // the window's answer sets the toast (_onParkAnswered), and the caller must leave the tap alone
+    }
+
+    bool MessagingService::_claimEscPress(const std::wstring& sessionId)
+    {
+        // The MONOTONIC clock: a wall-clock step (a time sync, a manual change) must neither block an Esc for minutes nor let two
+        // through at once.
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        std::lock_guard lk{ _mtx };
+        auto& last = _escPressMs[sessionId];
+        if (RemoteEscTooSoon(last, now))
+        {
+            return false;
+        }
+        last = now;
+        return true;
+    }
+
+    void MessagingService::_releaseEscPress(const std::wstring& sessionId) noexcept
+    {
+        try
+        {
+            std::lock_guard lk{ _mtx };
+            _escPressMs.erase(sessionId);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the stamp stays and expires by itself after kRemoteEscGapMs; a retry inside that window is
+            // answered with kRemoteEscRepeatedText, which says to tap again in a moment.
+            LogSwallowedException(L"MessagingService::_releaseEscPress");
+        }
+    }
+
+    void MessagingService::_tellRemoteOutcome(int64_t threadId, bool fromCard, const std::wstring& text, const std::vector<TapHoldRef>& taps)
+    {
+        if (fromCard)
+        {
+            // The tapped button's toast, set through the request's own holds: they keep the tap unanswered until the caller lets them
+            // go, so the answer the last hold triggers carries this text (TapAnswer::SetToast takes its own lock).
+            for (const auto& hold : taps)
+            {
+                if (hold && hold->Tap())
+                {
+                    hold->Tap()->SetToast(text);
+                }
+            }
+            return;
+        }
+        // A typed command: a silent line in the topic (inside the caller's tap scope, so a confirm button's tap waits for it).
+        _reply(threadId, TgEscapeHtml(text), false);
+    }
+
+    void MessagingService::_pressEscRemote(const std::wstring& sessionId, int64_t threadId, bool fromCard, SessionState stateAtTap)
+    {
+        const auto self = weak_from_this();
+        // §21.28: the tapped ⎋ Esc (or /interrupt's "Interrupt now") stays busy until the window answered: the reply and its guard
+        // carry the holds, which go with the last copy of the reply (every window's sink copies it once).
+        const std::vector<TapHoldRef> taps = _holdTaps();
+        const std::wstring via = fromCard ? L" (card) " : L" (/interrupt) ";
+        // The guard reports "no window answered" when every copy of the reply goes without a call (no window hosts the tab): the
+        // stamp is taken back (nothing confirmed a press), and the user is told rather than left with a button that just stops.
+        const auto once = std::make_shared<SessionActionAnswer>([self, sessionId, threadId, fromCard, taps, via]() {
+            if (const auto me = self.lock())
+            {
+                const TapScope tapScope{ taps }; // a line it posts holds a confirm button's tap until Telegram answered it
+                me->_releaseEscPress(sessionId);
+                me->_tellRemoteOutcome(threadId, fromCard, std::wstring{ kRemoteEscUnansweredText }, taps);
+                LogNav(L"remote telegram esc" + via + ShortId(sessionId) + L" -> no-answer (no window hosts its tab)");
+            }
+        });
+        LogNav(L"remote telegram esc" + via + ShortId(sessionId) + L" -> asked the hosting window");
+        _hooks.sessionAction(sessionId, std::wstring{ kPressEscAction }, std::wstring{}, [self, sessionId, threadId, fromCard, stateAtTap, taps, once](std::wstring word) {
+            // The hosting window's UI thread. The claim comes first, so the guard stays silent once a window has answered.
+            if (!once->Claim())
+            {
+                return;
+            }
+            if (const auto me = self.lock())
+            {
+                const TapScope tapScope{ taps }; // _awaitCardChange and a posted line hold the tap from this scope
+                me->_onEscAnswered(sessionId, threadId, fromCard, stateAtTap, ParseRemoteEscResult(word), taps);
+            }
+        });
+    }
+
+    void MessagingService::_onEscAnswered(const std::wstring& sessionId, int64_t threadId, bool fromCard, SessionState stateAtTap, RemoteEscResult result, const std::vector<TapHoldRef>& taps) noexcept
+    {
+        try
+        {
+            if (result != RemoteEscResult::Pressed)
+            {
+                _releaseEscPress(sessionId); // nothing was written: the retry the toast invites (a busy box) may go at once
+            }
+            _tellRemoteOutcome(threadId, fromCard, RemoteEscOutcomeText(result, stateAtTap), taps);
+            if (result == RemoteEscResult::Pressed && TurnInFlightState(stateAtTap))
+            {
+                // §21.28: the turn stops - the scanner reads Claude Code's interrupt row, and the card's state line changes (and its ⎋ Esc
+                // goes); the button stays busy until that edit is in, or until the hold's limit, which then carries the toast above.
+                _awaitCardChange(sessionId);
+            }
+            LogNav(L"remote telegram esc" + std::wstring{ fromCard ? L" (card) " : L" (/interrupt) " } + ShortId(sessionId) + L" -> " + std::wstring{ RemoteEscResultWord(result) });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the tap is answered with what was set so far (its hold's limit at worst), and an Esc the window
+            // wrote stands - nothing is retried.
+            LogSwallowedException(L"MessagingService::_onEscAnswered");
+        }
+    }
+
+    void MessagingService::_deactivateRemote(const std::wstring& sessionId, int64_t threadId, bool cutOffTurn, bool fromCard)
+    {
+        const auto self = weak_from_this();
+        // §21.28: as for the Esc - the reply and its guard carry the tapped button's holds.
+        const std::vector<TapHoldRef> taps = _holdTaps();
+        const std::wstring via = fromCard ? L" (card) " : (cutOffTurn ? L" (/deactivate, confirmed) " : L" (/deactivate) ");
+        const auto once = std::make_shared<SessionActionAnswer>([self, sessionId, threadId, fromCard, taps, via]() {
+            if (const auto me = self.lock())
+            {
+                const TapScope tapScope{ taps };
+                me->_tellRemoteOutcome(threadId, fromCard, std::wstring{ kRemoteParkUnansweredText }, taps);
+                LogNav(L"remote telegram deactivate" + via + ShortId(sessionId) + L" -> no-answer (no window hosts its tab)");
+            }
+        });
+        LogNav(L"remote telegram deactivate" + via + ShortId(sessionId) + L" -> asked the hosting window" + (cutOffTurn ? L" (a turn in flight may be cut off)" : L""));
+        // ⚠ kDeactivateCutOffTurnArg only after the user's "Park now": the window reads any other argument as "at rest only".
+        _hooks.sessionAction(sessionId, std::wstring{ kDeactivateAction }, cutOffTurn ? std::wstring{ kDeactivateCutOffTurnArg } : std::wstring{}, [self, sessionId, threadId, fromCard, taps, once](std::wstring word) {
+            if (!once->Claim())
+            {
+                return;
+            }
+            if (const auto me = self.lock())
+            {
+                const TapScope tapScope{ taps };
+                me->_onParkAnswered(sessionId, threadId, fromCard, ParseRemoteParkResult(word), taps);
+            }
+        });
+    }
+
+    void MessagingService::_onParkAnswered(const std::wstring& sessionId, int64_t threadId, bool fromCard, RemoteParkResult result, const std::vector<TapHoldRef>& taps) noexcept
+    {
+        try
+        {
+            if (result == RemoteParkResult::TurnRunning)
+            {
+                // A turn started between the tap and the park (the user typed at the PC, the runner sent a queued prompt): nothing was
+                // parked, and the user decides - /deactivate's question goes into the thread (it reads the state again, so a turn that
+                // ended meanwhile is parked by it instead), and a tapped button's toast points at the question.
+                RemoteCommand cmd;
+                cmd.kind = RemoteKind::AgentmasterCommand;
+                cmd.name = L"deactivate";
+                _runSessionCommand(sessionId, cmd, json::Value::MkObj(), threadId);
+                if (fromCard)
+                {
+                    _tellRemoteOutcome(threadId, true, RemoteParkOutcomeText(result), taps);
+                }
+            }
+            else
+            {
+                _tellRemoteOutcome(threadId, fromCard, RemoteParkOutcomeText(result), taps);
+                if (result == RemoteParkResult::Parked)
+                {
+                    _awaitCardChange(sessionId); // §21.28: until the card shows the parked tab (its ▶ Reactivate)
+                }
+            }
+            LogNav(L"remote telegram deactivate" + std::wstring{ fromCard ? L" (card) " : L" (/deactivate) " } + ShortId(sessionId) + L" -> " + std::wstring{ RemoteParkResultWord(result) });
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the tap is answered with what was set so far; a park the window made stands (the card shows it).
+            LogSwallowedException(L"MessagingService::_onParkAnswered");
+        }
     }
 
     bool MessagingService::_askUninterruptBeforeRestart(const std::wstring& sessionId, const SessionInfo& s, int64_t threadId)
@@ -5409,7 +5785,10 @@ namespace Agentmaster::Msg
                    L"/status \x2014 the card, then what Claude Code's /status shows: version, model, MCP servers, memory, account, plan usage\n"
                    // §21.39: the card's 📜 All Screen ▸ (a level picker with a File diffs box), typed with a level or bare (the cog's
                    // default level, Full), and "diffs" for every file change as a diff.
-                   L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
+                   L"/allscreen [level] [diffs] \x2014 the whole conversation as tall pictures, drawn like Claude Code draws it (bare: the default level, full unless set in the cog; diffs: every file change as a diff)\n/activate \x00B7 /restartsession \x00B7 /deactivate \x00B7 /interrupt\n"
+                   // §21.41: the card's two stopping buttons, the typed commands' twins (one path each, so they behave alike).
+                   L"The card has \x238B Esc (one Esc at once, as at the PC \x2014 beside \x2699\xFE0F Session while a turn runs) and \U0001F319 Deactivate (on \x2699\xFE0F Session's page: claude stops, the tab keeps its place)\n"
+                   L"/forksession [model] \x00B7 /newsession [model]\n/takedraft \x2014 queue the unsent draft at the PC\n/cc /x \x2014 force /x through to Claude Code\n/verbose on|off|default \x2014 this topic shows the work too, or the conversation only\n/recreate \x2014 make this topic (or all) again with its history, verbose or not\n"
                    // §21.19: <code> keeps "/search-tab" from becoming a "/search" link (see the Search help above).
                    L"/search_tab \x2014 jump to the \U0001F50E Search topic: it goes first in the thread list (typed, <code>/search-tab</code> works too)\n"
                    L"/search &lt;words&gt; \x2014 ask the \U0001F50E Search agent from here: the request and its answer go to the Search topic";
