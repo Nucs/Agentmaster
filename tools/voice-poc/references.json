@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "about": "The Telegram voice evaluation set (doc/agentmaster/VOICE.md section 7). The owner reads each sentence as ONE Telegram voice note in a session's topic; tools/voice-poc/fetch_tg_voice.py stores it as <id>.oga under Q:\\agentmaster-voice\\recordings. 'terms' are the technical words whose exact spelling must survive: a term with capitals must come through with that spelling, an all-lowercase term only as the same words. Numbers and units are scored by WER only (sixteen kilohertz == 16 kHz).",
+  "sentences": [
+    {
+      "id": "s1",
+      "text": "Check why the ConPTY host in Agentmaster drops the hook events from the named pipe after a session resumes.",
+      "terms": ["ConPTY", "Agentmaster", "hook events", "named pipe"]
+    },
+    {
+      "id": "s2",
+      "text": "Decode the Telegram voice note from Ogg Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU and post the transcript back to the topic.",
+      "terms": ["Telegram", "Ogg Opus", "PCM", "Parakeet", "GPU"]
+    },
+    {
+      "id": "s3",
+      "text": "Add a unit test that feeds the transcript scanner a JSONL file with forty lines and asserts the session state flips from Running to Waiting.",
+      "terms": ["unit test", "transcript scanner", "JSONL", "running", "waiting"]
+    }
+  ]
+}

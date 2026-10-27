@@ -70,6 +70,7 @@
 #include "WindowTabTools.h" // §21.25: WindowCensus (ServiceHooks::windowCensus)
 #include "SessionModels.h" // AppSettings, SessionInfo
 #include "TelegramApi.h" // TelegramApi + TgResult (the outbox's completion callbacks name TgResult)
+#include "VoiceBridge.h" // §21.43: the voice notes' transcriber seam (VoiceBridge, VoiceEngineConfig, VoiceTranscript)
 
 namespace Agentmaster
 {
@@ -302,6 +303,22 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="factory">The factory; an empty one removes the current factory.</param>
         void SetSearchFactory(SearchBridgeFactory factory) noexcept;
+
+        /// <summary>
+        /// §21.43 (VOICE.md §6): sets the factory of the VOICE NOTES' transcriber (the app's VoiceTranscriber: the session
+        /// vocabulary, the engine, the dictionary pass). Called once at engine init by the app layer, BEFORE the first Apply; the
+        /// harness sets a fake one or none — with none, a voice note in a topic is answered "voice notes are not available in
+        /// this build" and nothing is queued. The transcriber is made at the bot's start and lives until its stop.
+        /// </summary>
+        /// <param name="factory">The factory; an empty one removes the current factory (from the next start on).</param>
+        void SetVoiceFactory(Voice::VoiceBridgeFactory factory) noexcept;
+
+        /// <summary>
+        /// §21.43: the voice notes' status line for the cog (the engine, whether its worker runs, the last failure), or "Voice
+        /// notes: off" / "…: not available in this build". Any thread. Never throws.
+        /// </summary>
+        /// <returns>The line.</returns>
+        std::wstring VoiceStatusLine() const noexcept;
 
         /// <summary>
         /// §21.25: sets the source of the launch-model menu the new-thread wizard's model step lists (LaunchMenuSource). Called once
@@ -1368,9 +1385,11 @@ namespace Agentmaster::Msg
         /// </summary>
         /// <param name="msg">The Telegram Message object.</param>
         /// <param name="edited">True for an edited_message update.</param>
+        /// <param name="fromVoiceLane">§21.43: true when the TICK hands over a message a voice lane held (it waited behind a voice
+        /// note of its thread); it then skips the voice lanes, so it is never held a second time.</param>
         /// <exception cref="std::bad_alloc">If memory runs out (the registry, the held lists and the outbox copy what they
         /// keep); a handler it routes to may throw the same.</exception>
-        void _handleMessage(const json::Value& msg, bool edited);
+        void _handleMessage(const json::Value& msg, bool edited, bool fromVoiceLane = false);
         /// <summary>
         /// A tapped inline button (a callback_query update): a stateless Search button, a Search pick, a directory dot, a new
         /// thread's picker, a card verb ("c:&lt;verb&gt;:&lt;session&gt;") or a single-use token ("t:…"), each carried out on the
@@ -2130,6 +2149,50 @@ namespace Agentmaster::Msg
         uint64_t _filesNextOffer{ 1 };
         bool _filesDevInstall{ false }; // the AgentmasterDev package: the dev defaults (homepc-dev, port 32595)
 
+        // ----- §21.43: VOICE NOTES (Messaging.Voice.cpp; VOICE.md §6) -----
+        // `_voiceMtx` guards every _voice* member below and is a LEAF lock (no call out of this section is made while it is
+        // held). The transcriber is SHARED: the voice thread transcribes through its copy while Apply (any thread) configures it
+        // and Stop kills its engine, so neither waits for a note in flight.
+
+        /// <summary>One voice note waiting for (or in) the voice thread.</summary>
+        struct VoiceJob
+        {
+            uint64_t seq{ 0 }; // its lane item's number (the arrival order)
+            std::wstring sessionId; // the topic's session
+            int64_t threadId{ 0 };
+            int64_t messageId{ 0 }; // the voice note's message (the reply quotes it; the queued prompt's reactions land on it)
+            std::wstring fileId; // Telegram's file_id (getFile names the download)
+            int64_t durationSec{ 0 }; // Telegram's duration (sizes the engine's timeout)
+            int64_t fileSize{ 0 }; // Telegram's file_size (0 = unknown)
+            std::wstring kind; // "voice" | "audio" | "video_note"
+        };
+
+        /// <summary>One item of a thread's lane: a voice note (pending until its transcript is in) or a message held behind one.</summary>
+        struct VoiceLaneItem
+        {
+            uint64_t seq{ 0 };
+            bool isVoice{ false };
+            bool done{ false }; // a voice item's transcript (or failure) is in
+            bool edited{ false }; // a held message that arrived as an edit
+            bool liveAtArrival{ true }; // the voice note was no backlog when it ARRIVED (a slow transcription never makes it one)
+            std::wstring sessionId;
+            json::Value msg; // the update's message (a voice item's is read again with the transcript as its text)
+            Voice::VoiceTranscript result; // a done voice item's outcome
+        };
+
+        mutable std::mutex _voiceMtx;
+        std::condition_variable _voiceCv; // wakes the voice thread: a job queued, or the stop
+        std::thread _voiceThread;
+        Voice::VoiceBridgeFactory _voiceFactory; // set once by the app layer (SetVoiceFactory)
+        std::shared_ptr<Voice::VoiceBridge> _voice; // the transcriber between _voiceStart and _voiceStop
+        Voice::VoiceEngineConfig _voiceConfig; // the settings' engine configuration (Apply)
+        bool _voiceOn{ true }; // AppSettings::messagingVoiceEnabled
+        bool _voiceEcho{ true }; // AppSettings::voiceEchoTranscript: the transcript is posted under the note before it is read
+        bool _voiceStopping{ false }; // the voice thread's stop flag (separate from `_stop`: _voiceStop runs before the others)
+        std::deque<VoiceJob> _voiceJobs; // FIFO across every topic: one engine, one note at a time
+        std::map<int64_t, std::deque<VoiceLaneItem>> _voiceLanes; // thread → its lane (exists while it holds anything)
+        uint64_t _voiceSeq{ 0 }; // the last lane item number
+
         mutable std::mutex _mtx; // guards everything below not marked atomic; never held across a network call
         std::condition_variable _tickCv;
         std::condition_variable _sendCv;
@@ -2764,6 +2827,58 @@ namespace Agentmaster::Msg
             std::wstring logLine; // one hooks.log line ("" = none)
             std::wstring navLine; // one [nav] line for a decision the user made ("" = none)
         };
+
+        // ===== §21.43: VOICE NOTES (Messaging.Voice.cpp; VOICE.md §6) ======================================================
+        //
+        // A voice note (or an audio file, or a round video note) in a session's topic is DOWNLOADED and TRANSCRIBED on the voice
+        // thread, then read exactly like the text it says (_handleTopicMessage: a queued prompt, an answer to an open question
+        // card, a backlog question). Its thread's later messages wait behind it in a LANE, so the session gets them in the order
+        // the user wrote them; the tick hands a lane's items over as each becomes ready (a transcript arrived, or a plain message
+        // whose voice notes ahead of it are done). Lock order: `_voiceMtx` is a LEAF — nothing is called while it is held. The
+        // job and lane item types are declared with the members they shape (VoiceJob, VoiceLaneItem, below `_files*`).
+
+        /// <summary>
+        /// _handleMessage, for every message of the owner before it is read as text: takes a VOICE NOTE (or audio, video note) into
+        /// the voice thread's queue and its thread's lane, answers one that cannot be read (a thread with no session, voice notes
+        /// off, no transcriber), and HOLDS any other message whose thread's lane is not empty (an edit replaces the held message
+        /// it edits). Poll thread.
+        /// </summary>
+        /// <param name="msg">The Telegram message.</param>
+        /// <param name="sessionId">The session whose topic the thread is ("" = none).</param>
+        /// <param name="threadId">The message's thread.</param>
+        /// <param name="bindHandingOver">The thread's new-thread bind still hands its messages over (§21.17).</param>
+        /// <param name="edited">The update is an edit.</param>
+        /// <returns>True when the message was taken (queued, held or answered): the caller reads it no further.</returns>
+        /// <exception cref="std::bad_alloc">If the queue, the lane or a reply cannot be allocated.</exception>
+        bool _voiceTake(const json::Value& msg, const std::wstring& sessionId, int64_t threadId, bool bindHandingOver, bool edited);
+        /// <summary>
+        /// Apply: takes the voice settings (on/off, the echo, the engine's configuration) and hands them to a running transcriber.
+        /// Any thread (the cog's Save). Never throws.
+        /// </summary>
+        /// <param name="settings">The settings being applied.</param>
+        void _voiceApply(const AppSettings& settings) noexcept;
+        /// <summary>_start: makes the transcriber (the factory's) and starts the voice thread. Never throws.</summary>
+        void _voiceStart() noexcept;
+        /// <summary>
+        /// Stop, BEFORE the other threads are joined: kills the engine (a note in flight fails fast), joins the voice thread, drops
+        /// the queue and the lanes (logged: their notes and held messages are not read). Never throws.
+        /// </summary>
+        void _voiceStop() noexcept;
+        /// <summary>The voice thread: one job at a time, FIFO across every topic; the transcriber's idle tick between jobs.</summary>
+        void _voiceLoop() noexcept;
+        /// <summary>One job: getFile, the download into &lt;profile&gt;\messaging\telegram\voice\, the transcriber, the file deleted.</summary>
+        /// <param name="job">The job.</param>
+        /// <returns>The transcript or the failure; never throws.</returns>
+        Voice::VoiceTranscript _voiceRun(const VoiceJob& job) noexcept;
+        /// <summary>
+        /// The tick: hands over every lane's ready items in order (a done voice note: its echo, then its text read like a typed
+        /// message; a held message: _handleMessage again), and drops an empty lane. Tick thread. Never throws.
+        /// </summary>
+        void _voiceTick() noexcept;
+        /// <summary>One done voice item: the failure answered, or the transcript echoed and read like the message it says.</summary>
+        /// <param name="threadId">Its thread.</param>
+        /// <param name="item">The item.</param>
+        void _voiceDeliver(int64_t threadId, VoiceLaneItem& item) noexcept;
 
         // ===== §21.32.4: the Telegram FILE LINKS (Messaging.Files.cpp) =====================================================
 

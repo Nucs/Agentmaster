@@ -1,0 +1,4310 @@
+{
+ "version": 1,
+ "terms": [
+  {
+   "term": "ConPTY",
+   "squash": "conpty",
+   "aliases": [
+    "con p t y",
+    "con pty",
+    "conpty"
+   ],
+   "case_split": [
+    "Con",
+    "PTY"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "Agentmaster",
+   "squash": "agentmaster",
+   "aliases": [
+    "age ntmaster",
+    "agen tmaster",
+    "agent master",
+    "agentm aster",
+    "agentma ster",
+    "agentmas ter",
+    "agentmaster"
+   ],
+   "case_split": [
+    "Agentmaster"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "JSONL",
+   "squash": "jsonl",
+   "aliases": [
+    "j s o n l",
+    "jsonl"
+   ],
+   "case_split": [
+    "JSONL"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "JSON",
+   "squash": "json",
+   "aliases": [
+    "j s o n",
+    "json"
+   ],
+   "case_split": [
+    "JSON"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "PCM",
+   "squash": "pcm",
+   "aliases": [
+    "p c m",
+    "pcm"
+   ],
+   "case_split": [
+    "PCM"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "DuckDB",
+   "squash": "duckdb",
+   "aliases": [
+    "duck d b",
+    "duck db",
+    "duckdb"
+   ],
+   "case_split": [
+    "Duck",
+    "DB"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "WinRT",
+   "squash": "winrt",
+   "aliases": [
+    "win r t",
+    "win rt",
+    "winrt"
+   ],
+   "case_split": [
+    "Win",
+    "RT"
+   ],
+   "distinctive": true,
+   "hard": false
+  },
+  {
+   "term": "C++",
+   "squash": "c++",
+   "aliases": [
+    "c + +",
+    "c++"
+   ],
+   "case_split": [
+    "C"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "C#",
+   "squash": "c#",
+   "aliases": [
+    "c #",
+    "c#"
+   ],
+   "case_split": [
+    "C"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "UTF-8",
+   "squash": "utf8",
+   "aliases": [
+    "u t f 8",
+    "utf 8",
+    "utf-8"
+   ],
+   "case_split": [
+    "UTF",
+    "8"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "k3s",
+   "squash": "k3s",
+   "aliases": [
+    "k 3 s",
+    "k3s"
+   ],
+   "case_split": [
+    "k",
+    "3",
+    "s"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "Node.js",
+   "squash": "nodejs",
+   "aliases": [
+    "node js",
+    "node.js"
+   ],
+   "case_split": [
+    "Node",
+    "js"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "VS Code",
+   "squash": "vscode",
+   "aliases": [
+    "v s code",
+    "vs code"
+   ],
+   "case_split": [
+    "VS",
+    "Code"
+   ],
+   "distinctive": true,
+   "hard": false
+  },
+  {
+   "term": "Claude Code",
+   "squash": "claudecode",
+   "aliases": [
+    "claude code"
+   ],
+   "case_split": [
+    "Claude",
+    "Code"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "named pipe",
+   "squash": "namedpipe",
+   "aliases": [
+    "named pipe"
+   ],
+   "case_split": [
+    "named",
+    "pipe"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "Telegram",
+   "squash": "telegram",
+   "aliases": [
+    "tel egram",
+    "tele gram",
+    "teleg ram",
+    "telegram"
+   ],
+   "case_split": [
+    "Telegram"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "Parakeet",
+   "squash": "parakeet",
+   "aliases": [
+    "par akeet",
+    "para keet",
+    "parak eet",
+    "parakeet"
+   ],
+   "case_split": [
+    "Parakeet"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "SessionState",
+   "squash": "sessionstate",
+   "aliases": [
+    "session state",
+    "sessionstate"
+   ],
+   "case_split": [
+    "Session",
+    "State"
+   ],
+   "distinctive": true,
+   "hard": false
+  },
+  {
+   "term": "PDBs",
+   "squash": "pdbs",
+   "aliases": [
+    "p d bs",
+    "pd bs",
+    "pdbs"
+   ],
+   "case_split": [
+    "PD",
+    "Bs"
+   ],
+   "distinctive": true,
+   "hard": false
+  },
+  {
+   "term": "x64",
+   "squash": "x64",
+   "aliases": [
+    "x 64",
+    "x64"
+   ],
+   "case_split": [
+    "x",
+    "64"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "llama.cpp",
+   "squash": "llamacpp",
+   "aliases": [
+    "llama cpp",
+    "llama.cpp"
+   ],
+   "case_split": [
+    "llama",
+    "cpp"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "Hugging Face",
+   "squash": "huggingface",
+   "aliases": [
+    "hugging face"
+   ],
+   "case_split": [
+    "Hugging",
+    "Face"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "SHA-256",
+   "squash": "sha256",
+   "aliases": [
+    "s h a 256",
+    "sha 256",
+    "sha-256"
+   ],
+   "case_split": [
+    "SHA",
+    "256"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "MSIX",
+   "squash": "msix",
+   "aliases": [
+    "m s i x",
+    "msix"
+   ],
+   "case_split": [
+    "MSIX"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "XAML",
+   "squash": "xaml",
+   "aliases": [
+    "x a m l",
+    "xaml"
+   ],
+   "case_split": [
+    "XAML"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "kHz",
+   "squash": "khz",
+   "aliases": [
+    "k hz",
+    "khz"
+   ],
+   "case_split": [
+    "k",
+    "Hz"
+   ],
+   "distinctive": true,
+   "hard": false
+  },
+  {
+   "term": "regex",
+   "squash": "regex",
+   "aliases": [
+    "regex"
+   ],
+   "case_split": [
+    "regex"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "Ogg",
+   "squash": "ogg",
+   "aliases": [
+    "ogg"
+   ],
+   "case_split": [
+    "Ogg"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "Opus",
+   "squash": "opus",
+   "aliases": [
+    "opus"
+   ],
+   "case_split": [
+    "Opus"
+   ],
+   "distinctive": false,
+   "hard": false
+  },
+  {
+   "term": "NVMe",
+   "squash": "nvme",
+   "aliases": [
+    "n v me",
+    "nv me",
+    "nvme"
+   ],
+   "case_split": [
+    "NV",
+    "Me"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "cuDNN",
+   "squash": "cudnn",
+   "aliases": [
+    "cu d n n",
+    "cu dnn",
+    "cudnn"
+   ],
+   "case_split": [
+    "cu",
+    "DNN"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "Win32",
+   "squash": "win32",
+   "aliases": [
+    "win 32",
+    "win32"
+   ],
+   "case_split": [
+    "Win",
+    "32"
+   ],
+   "distinctive": true,
+   "hard": true
+  },
+  {
+   "term": "ARM64",
+   "squash": "arm64",
+   "aliases": [
+    "a r m 64",
+    "arm 64",
+    "arm64"
+   ],
+   "case_split": [
+    "ARM",
+    "64"
+   ],
+   "distinctive": true,
+   "hard": true
+  }
+ ],
+ "context": {
+  "file": "context_sample.md",
+  "terms": [
+   [
+    "UI",
+    10
+   ],
+   [
+    "ConPTY",
+    3
+   ],
+   [
+    "DuckDB",
+    2
+   ],
+   [
+    "MSIX",
+    2
+   ],
+   [
+    "XAML",
+    2
+   ],
+   [
+    "k3s",
+    2
+   ],
+   [
+    "x64",
+    2
+   ]
+  ]
+ },
+ "vocabularies": {
+  "builtin": {
+   "terms": [
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PCM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WAV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MP3",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "AAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Opus",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ogg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FLAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FFmpeg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "codec",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kHz",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VAD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVMe",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CUDA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "cuDNN",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RTX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVIDIA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "x64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ARM64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Windows",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Win32",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinRT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ConPTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PowerShell",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WSL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSIX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "AppX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NuGet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "vcpkg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSBuild",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CMake",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "COM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DLL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VT100",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C++",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C#",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     ".NET",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Python",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TypeScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JavaScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Node.js",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Rust",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Golang",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kotlin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Bash",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebAssembly",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Git",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitHub",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitLab",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Docker",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kubernetes",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kubectl",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "k3s",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Helm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "npm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pnpm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Yarn",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Vite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Webpack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pytest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Jest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VS Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Visual Studio",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinDbg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Telegram",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Slack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Discord",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WhatsApp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Cloudflare",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Traefik",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Proxmox",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PostgreSQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Postgres",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MySQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQLite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DuckDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Redis",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MongoDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kafka",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RabbitMQ",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Anthropic",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LLM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Whisper",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Parakeet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ONNX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PyTorch",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TensorFlow",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Hugging Face",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LoRA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAG",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "embeddings",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "tokenizer",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Sonnet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Haiku",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Codex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Gemini",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ollama",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "llama.cpp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "API",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SDK",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CLI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IDE",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PR",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "repo",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "async",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "await",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "mutex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "nullptr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "enum",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "struct",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "refactor",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "middleware",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "localhost",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "namespace",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "lambda",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "boolean",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON schema",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAPI",
+     1.0,
+     "builtin",
+     true
+    ]
+   ],
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: Kubernetes, Docker, GitLab, GitHub, Git, WebAssembly, Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, XAML, CMake, MSBuild, vcpkg, NuGet, AppX, MSIX, WSL, PowerShell, ConPTY, WinRT, Win32, Windows, ARM64, x64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON.",
+   "hotwords": "JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/x64 :2.0/ARM64 :2.0/Win32 :2.0/ConPTY :2.0/WSL :2.0/MSIX :2.0/vcpkg :2.0/MSBuild :2.0/XAML :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/k3s :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/DuckDB :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0",
+   "apply": [
+    {
+     "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
+     "out": "Check why the ConPTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
+     "made": [
+      [
+       "Con PTY",
+       "ConPTY"
+      ]
+     ]
+    },
+    {
+     "in": "Check why the ConPTY host in AgentMaster drops the hook events.",
+     "out": "Check why the ConPTY host in AgentMaster drops the hook events.",
+     "made": []
+    },
+    {
+     "in": "Decode the Telegram voice note from OG Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "out": "Decode the Telegram voice note from Ogg Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "made": [
+      [
+       "OG",
+       "Ogg"
+      ]
+     ]
+    },
+    {
+     "in": "Decode the Telegram voice note from Agopus to 16 kHz mono pcm.",
+     "out": "Decode the Telegram voice note from Agopus to 16 kHz mono PCM.",
+     "made": [
+      [
+       "pcm",
+       "PCM"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a JSON L file with forty lines.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file with forty lines.",
+     "made": [
+      [
+       "JSON L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a Jason L file and asserts the session state flips.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file and asserts the session state flips.",
+     "made": [
+      [
+       "Jason L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "the server rejects it and we go on, ON and AND stay as they are",
+     "out": "the server rejects it and we go on, ON and AND stay as they are",
+     "made": []
+    },
+    {
+     "in": "clawed said the gpu and pcm are fine; conpty, agentmaster.",
+     "out": "Claude said the GPU and PCM are fine; ConPTY, agentmaster.",
+     "made": [
+      [
+       "clawed",
+       "Claude"
+      ],
+      [
+       "gpu",
+       "GPU"
+      ],
+      [
+       "pcm",
+       "PCM"
+      ],
+      [
+       "conpty",
+       "ConPTY"
+      ]
+     ]
+    },
+    {
+     "in": "Ask Cloud Code to open (con pty) and [duck db], then \"win rt\".",
+     "out": "Ask Claude Code to open (ConPTY) and [DuckDB], then \"WinRT\".",
+     "made": [
+      [
+       "Cloud Code",
+       "Claude Code"
+      ],
+      [
+       "con pty",
+       "ConPTY"
+      ],
+      [
+       "duck db",
+       "DuckDB"
+      ],
+      [
+       "win rt",
+       "WinRT"
+      ]
+     ]
+    },
+    {
+     "in": "use c plus plus and c sharp with utf 8 on x 64",
+     "out": "use C++ and C# with UTF-8 on x64",
+     "made": [
+      [
+       "c plus plus",
+       "C++"
+      ],
+      [
+       "c sharp",
+       "C#"
+      ],
+      [
+       "utf 8",
+       "UTF-8"
+      ],
+      [
+       "x 64",
+       "x64"
+      ]
+     ]
+    },
+    {
+     "in": "run kube control get pods on k three s",
+     "out": "run kubectl get pods on k3s",
+     "made": [
+      [
+       "kube control",
+       "kubectl"
+      ],
+      [
+       "k three s",
+       "k3s"
+      ]
+     ]
+    },
+    {
+     "in": "the session state flips from running to waiting in the terminal page",
+     "out": "the session state flips from running to waiting in the terminal page",
+     "made": []
+    },
+    {
+     "in": "",
+     "out": "",
+     "made": []
+    },
+    {
+     "in": "   leading and trailing spaces   ",
+     "out": "   leading and trailing spaces   ",
+     "made": []
+    },
+    {
+     "in": "JSONL JSONL json l Jason l",
+     "out": "JSONL JSONL JSONL JSONL",
+     "made": [
+      [
+       "json l",
+       "JSONL"
+      ],
+      [
+       "Jason l",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "we go on and the server rejects it",
+     "out": "we go on and the server rejects it",
+     "made": []
+    },
+    {
+     "in": "(con PTY),",
+     "out": "(ConPTY),",
+     "made": [
+      [
+       "con PTY",
+       "ConPTY"
+      ]
+     ]
+    },
+    {
+     "in": "fluid boys said hi",
+     "out": "fluid boys said hi",
+     "made": []
+    }
+   ]
+  },
+  "session": {
+   "terms": [
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PCM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WAV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MP3",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "AAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Opus",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ogg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FLAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FFmpeg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "codec",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kHz",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VAD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVMe",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CUDA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "cuDNN",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RTX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVIDIA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "x64",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "ARM64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Windows",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Win32",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinRT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ConPTY",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "PowerShell",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WSL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSIX",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "AppX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NuGet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "vcpkg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSBuild",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CMake",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XAML",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "COM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DLL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VT100",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C++",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C#",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     ".NET",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Python",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TypeScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JavaScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Node.js",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Rust",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Golang",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kotlin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Bash",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebAssembly",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Git",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitHub",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitLab",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Docker",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kubernetes",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kubectl",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "k3s",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "Helm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "npm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pnpm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Yarn",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Vite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Webpack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pytest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Jest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VS Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Visual Studio",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinDbg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Telegram",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Slack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Discord",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WhatsApp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Cloudflare",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Traefik",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Proxmox",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PostgreSQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Postgres",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MySQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQLite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DuckDB",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "Redis",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MongoDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kafka",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RabbitMQ",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Anthropic",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LLM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Whisper",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Parakeet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ONNX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PyTorch",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TensorFlow",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Hugging Face",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LoRA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAG",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "embeddings",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "tokenizer",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Sonnet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Haiku",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Codex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Gemini",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ollama",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "llama.cpp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "API",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SDK",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CLI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UI",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "UX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IDE",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PR",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "repo",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "async",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "await",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "mutex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "nullptr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "enum",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "struct",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "refactor",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "middleware",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "localhost",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "namespace",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "lambda",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "boolean",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON schema",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAPI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Agentmaster",
+     3.0,
+     "context",
+     true
+    ],
+    [
+     "ConPTY-fix",
+     2.0,
+     "context",
+     false
+    ]
+   ],
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: WebAssembly, Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSONL, JSON, ConPTY-fix, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, Agentmaster.",
+   "hotwords": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/JSON :2.0/JSONL :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/ConPTY-fix :2.5/JSON :2.0",
+   "apply": [
+    {
+     "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
+     "out": "Check why the ConPTY host in Agentmaster drops the hook events from the named pipe after a session resumes.",
+     "made": [
+      [
+       "Con PTY",
+       "ConPTY"
+      ],
+      [
+       "Agent Master",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Check why the ConPTY host in AgentMaster drops the hook events.",
+     "out": "Check why the ConPTY host in Agentmaster drops the hook events.",
+     "made": [
+      [
+       "AgentMaster",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Decode the Telegram voice note from OG Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "out": "Decode the Telegram voice note from Ogg Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "made": [
+      [
+       "OG",
+       "Ogg"
+      ]
+     ]
+    },
+    {
+     "in": "Decode the Telegram voice note from Agopus to 16 kHz mono pcm.",
+     "out": "Decode the Telegram voice note from Agopus to 16 kHz mono PCM.",
+     "made": [
+      [
+       "pcm",
+       "PCM"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a JSON L file with forty lines.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file with forty lines.",
+     "made": [
+      [
+       "JSON L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a Jason L file and asserts the session state flips.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file and asserts the session state flips.",
+     "made": [
+      [
+       "Jason L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "the server rejects it and we go on, ON and AND stay as they are",
+     "out": "the server rejects it and we go on, ON and AND stay as they are",
+     "made": []
+    },
+    {
+     "in": "clawed said the gpu and pcm are fine; conpty, agentmaster.",
+     "out": "Claude said the GPU and PCM are fine; ConPTY, Agentmaster.",
+     "made": [
+      [
+       "clawed",
+       "Claude"
+      ],
+      [
+       "gpu",
+       "GPU"
+      ],
+      [
+       "pcm",
+       "PCM"
+      ],
+      [
+       "conpty",
+       "ConPTY"
+      ],
+      [
+       "agentmaster",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Ask Cloud Code to open (con pty) and [duck db], then \"win rt\".",
+     "out": "Ask Claude Code to open (ConPTY) and [DuckDB], then \"WinRT\".",
+     "made": [
+      [
+       "Cloud Code",
+       "Claude Code"
+      ],
+      [
+       "con pty",
+       "ConPTY"
+      ],
+      [
+       "duck db",
+       "DuckDB"
+      ],
+      [
+       "win rt",
+       "WinRT"
+      ]
+     ]
+    },
+    {
+     "in": "use c plus plus and c sharp with utf 8 on x 64",
+     "out": "use C++ and C# with UTF-8 on x64",
+     "made": [
+      [
+       "c plus plus",
+       "C++"
+      ],
+      [
+       "c sharp",
+       "C#"
+      ],
+      [
+       "utf 8",
+       "UTF-8"
+      ],
+      [
+       "x 64",
+       "x64"
+      ]
+     ]
+    },
+    {
+     "in": "run kube control get pods on k three s",
+     "out": "run kubectl get pods on k3s",
+     "made": [
+      [
+       "kube control",
+       "kubectl"
+      ],
+      [
+       "k three s",
+       "k3s"
+      ]
+     ]
+    },
+    {
+     "in": "the session state flips from running to waiting in the terminal page",
+     "out": "the session state flips from running to waiting in the terminal page",
+     "made": []
+    },
+    {
+     "in": "",
+     "out": "",
+     "made": []
+    },
+    {
+     "in": "   leading and trailing spaces   ",
+     "out": "   leading and trailing spaces   ",
+     "made": []
+    },
+    {
+     "in": "JSONL JSONL json l Jason l",
+     "out": "JSONL JSONL JSONL JSONL",
+     "made": [
+      [
+       "json l",
+       "JSONL"
+      ],
+      [
+       "Jason l",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "we go on and the server rejects it",
+     "out": "we go on and the server rejects it",
+     "made": []
+    },
+    {
+     "in": "(con PTY),",
+     "out": "(ConPTY),",
+     "made": [
+      [
+       "con PTY",
+       "ConPTY"
+      ]
+     ]
+    },
+    {
+     "in": "fluid boys said hi",
+     "out": "fluid boys said hi",
+     "made": []
+    }
+   ]
+  },
+  "session+dictionary": {
+   "terms": [
+    [
+     "JSON",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSONL",
+     3.0,
+     "user",
+     true
+    ],
+    [
+     "YAML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TOML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTML",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CSS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Markdown",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "HTTPS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "REST",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "gRPC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebSocket",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OAuth",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JWT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-8",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UTF-16",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ASCII",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Base64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SHA-256",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TLS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSH",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DNS",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UDP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv4",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IPv6",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "URI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "regex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stdout",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "stderr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PCM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WAV",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MP3",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "AAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Opus",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ogg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FLAC",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "FFmpeg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "codec",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kHz",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VAD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPU",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SSD",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVMe",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CUDA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "cuDNN",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RTX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NVIDIA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "x64",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "ARM64",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Windows",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Win32",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinRT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ConPTY",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "PowerShell",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WSL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSIX",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "AppX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "NuGet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "vcpkg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MSBuild",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CMake",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "XAML",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "COM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DLL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PID",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PTY",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VT100",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ANSI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C++",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "C#",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     ".NET",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Python",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TypeScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JavaScript",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Node.js",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Rust",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Golang",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kotlin",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Bash",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WebAssembly",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Git",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitHub",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GitLab",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Docker",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kubernetes",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "kubectl",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "k3s",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "Helm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "npm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pnpm",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Yarn",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Vite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Webpack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "pytest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Jest",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "VS Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Visual Studio",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WinDbg",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Telegram",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Slack",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Discord",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "WhatsApp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Cloudflare",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Traefik",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Proxmox",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PostgreSQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Postgres",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MySQL",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SQLite",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "DuckDB",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "Redis",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MongoDB",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Kafka",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RabbitMQ",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Claude Code",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Anthropic",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GPT",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LLM",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "MCP",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Whisper",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Parakeet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "ONNX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PyTorch",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "TensorFlow",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Hugging Face",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "LoRA",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "RAG",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "embeddings",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "tokenizer",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Sonnet",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Haiku",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Codex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Gemini",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Ollama",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "llama.cpp",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "API",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "SDK",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CLI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "GUI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "UI",
+     2.0,
+     "context",
+     true
+    ],
+    [
+     "UX",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "IDE",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "CI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "PR",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "repo",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "async",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "await",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "mutex",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "nullptr",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "enum",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "struct",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "refactor",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "middleware",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "localhost",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "namespace",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "lambda",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "boolean",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "JSON schema",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "OpenAPI",
+     1.0,
+     "builtin",
+     true
+    ],
+    [
+     "Agentmaster",
+     3.0,
+     "context",
+     true
+    ],
+    [
+     "FluidVoice",
+     3.0,
+     "user",
+     true
+    ],
+    [
+     "RunPod",
+     3.0,
+     "user",
+     true
+    ]
+   ],
+   "whisper_prompt": "A developer dictates a prompt to Claude Code. Glossary: Bash, SQL, Kotlin, Golang, Rust, Node.js, JavaScript, TypeScript, Python, .NET, C#, C++, ANSI, VT100, PTY, TTY, PID, PDB, DLL, COM, CMake, MSBuild, vcpkg, NuGet, AppX, WSL, PowerShell, WinRT, Win32, Windows, ARM64, NVIDIA, RTX, cuDNN, CUDA, NVMe, SSD, RAM, GPU, CPU, VAD, kHz, codec, FFmpeg, FLAC, Ogg, Opus, AAC, MP3, WAV, PCM, stderr, stdout, stdin, regex, GUID, UUID, URI, URL, IPv6, IPv4, UDP, TCP, DNS, SSH, TLS, SHA-256, Base64, ASCII, UTF-16, UTF-8, JWT, OAuth, WebSocket, gRPC, REST, HTTPS, HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSON, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
+   "whisper_prompt_200": "A developer dictates a prompt to Claude Code. Glossary: HTTP, Markdown, CSS, HTML, CSV, XML, TOML, YAML, JSON, UI, DuckDB, k3s, XAML, MSIX, ConPTY, x64, RunPod, FluidVoice, Agentmaster, JSONL.",
+   "hotwords": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/JSON :2.0/YAML :2.0/TOML :2.0/CSS :2.0/gRPC :2.0/JWT :2.0/UTF-8 :2.0/UTF-16 :2.0/Base64 :2.0/SHA-256 :2.0/TLS :2.0/SSH :2.0/DNS :2.0/TCP :2.0/UDP :2.0/IPv4 :2.0/IPv6 :2.0/URL :2.0/URI :2.0/UUID :2.0/GUID :2.0/stdout :2.0/PCM :2.0/MP3 :2.0/AAC :2.0/Ogg :2.0/FLAC :2.0/FFmpeg :2.0/VAD :2.0/CPU :2.0/GPU :2.0/SSD :2.0/NVMe :2.0/CUDA :2.0/cuDNN :2.0/RTX :2.0/NVIDIA :2.0/ARM64 :2.0/Win32 :2.0/WSL :2.0/vcpkg :2.0/MSBuild :2.0/DLL :2.0/PDB :2.0/PID :2.0/TTY :2.0/PTY :2.0/VT100 :2.0/ANSI :2.0/C++ :2.0/C# :2.0/Node.js :2.0/SQL :2.0/kubectl :2.0/npm :2.0/pnpm :2.0/Vite :2.0/pytest :2.0/WinDbg :2.0/WhatsApp :2.0/Traefik :2.0/Proxmox :2.0/PostgreSQL :2.0/MySQL :2.0/MongoDB :2.0/RabbitMQ :2.0/GPT :2.0/LLM :2.0/MCP :2.0/ONNX :2.0/PyTorch :2.0/LoRA :2.0/Ollama :2.0/llama.cpp :2.0/API :2.0/SDK :2.0/GUI :2.0/UX :2.0/nullptr :2.0/JSON schema :2.0/OpenAPI :2.0",
+   "hotwords_10": "JSONL :3.0/Agentmaster :3.0/x64 :2.5/ConPTY :2.5/MSIX :2.5/XAML :2.5/k3s :2.5/DuckDB :2.5/UI :2.5/JSON :2.0",
+   "apply": [
+    {
+     "in": "Check why the Con PTY host in Agent Master drops the hook events from the named pipe after a session resumes.",
+     "out": "Check why the ConPTY host in Agentmaster drops the hook events from the named pipe after a session resumes.",
+     "made": [
+      [
+       "Con PTY",
+       "ConPTY"
+      ],
+      [
+       "Agent Master",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Check why the ConPTY host in AgentMaster drops the hook events.",
+     "out": "Check why the ConPTY host in Agentmaster drops the hook events.",
+     "made": [
+      [
+       "AgentMaster",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Decode the Telegram voice note from OG Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "out": "Decode the Telegram voice note from Ogg Opus to sixteen kilohertz mono PCM, then run Parakeet on the GPU.",
+     "made": [
+      [
+       "OG",
+       "Ogg"
+      ]
+     ]
+    },
+    {
+     "in": "Decode the Telegram voice note from Agopus to 16 kHz mono pcm.",
+     "out": "Decode the Telegram voice note from Agopus to 16 kHz mono PCM.",
+     "made": [
+      [
+       "pcm",
+       "PCM"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a JSON L file with forty lines.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file with forty lines.",
+     "made": [
+      [
+       "JSON L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "Add a unit test that feeds the transcript scanner a Jason L file and asserts the session state flips.",
+     "out": "Add a unit test that feeds the transcript scanner a JSONL file and asserts the session state flips.",
+     "made": [
+      [
+       "Jason L",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "the server rejects it and we go on, ON and AND stay as they are",
+     "out": "the server rejects it and we go on, ON and AND stay as they are",
+     "made": []
+    },
+    {
+     "in": "clawed said the gpu and pcm are fine; conpty, agentmaster.",
+     "out": "Claude said the GPU and PCM are fine; ConPTY, Agentmaster.",
+     "made": [
+      [
+       "clawed",
+       "Claude"
+      ],
+      [
+       "gpu",
+       "GPU"
+      ],
+      [
+       "pcm",
+       "PCM"
+      ],
+      [
+       "conpty",
+       "ConPTY"
+      ],
+      [
+       "agentmaster",
+       "Agentmaster"
+      ]
+     ]
+    },
+    {
+     "in": "Ask Cloud Code to open (con pty) and [duck db], then \"win rt\".",
+     "out": "Ask Claude Code to open (ConPTY) and [DuckDB], then \"WinRT\".",
+     "made": [
+      [
+       "Cloud Code",
+       "Claude Code"
+      ],
+      [
+       "con pty",
+       "ConPTY"
+      ],
+      [
+       "duck db",
+       "DuckDB"
+      ],
+      [
+       "win rt",
+       "WinRT"
+      ]
+     ]
+    },
+    {
+     "in": "use c plus plus and c sharp with utf 8 on x 64",
+     "out": "use C++ and C# with UTF-8 on x64",
+     "made": [
+      [
+       "c plus plus",
+       "C++"
+      ],
+      [
+       "c sharp",
+       "C#"
+      ],
+      [
+       "utf 8",
+       "UTF-8"
+      ],
+      [
+       "x 64",
+       "x64"
+      ]
+     ]
+    },
+    {
+     "in": "run kube control get pods on k three s",
+     "out": "run kubectl get pods on k3s",
+     "made": [
+      [
+       "kube control",
+       "kubectl"
+      ],
+      [
+       "k three s",
+       "k3s"
+      ]
+     ]
+    },
+    {
+     "in": "the session state flips from running to waiting in the terminal page",
+     "out": "the session state flips from running to waiting in the terminal page",
+     "made": []
+    },
+    {
+     "in": "",
+     "out": "",
+     "made": []
+    },
+    {
+     "in": "   leading and trailing spaces   ",
+     "out": "   leading and trailing spaces   ",
+     "made": []
+    },
+    {
+     "in": "JSONL JSONL json l Jason l",
+     "out": "JSONL JSONL JSONL JSONL",
+     "made": [
+      [
+       "json l",
+       "JSONL"
+      ],
+      [
+       "Jason l",
+       "JSONL"
+      ]
+     ]
+    },
+    {
+     "in": "we go on and the server rejects it",
+     "out": "we go on and the server rejects it",
+     "made": []
+    },
+    {
+     "in": "(con PTY),",
+     "out": "(ConPTY),",
+     "made": [
+      [
+       "con PTY",
+       "ConPTY"
+      ]
+     ]
+    },
+    {
+     "in": "fluid boys said hi",
+     "out": "FluidVoice said hi",
+     "made": [
+      [
+       "fluid boys",
+       "FluidVoice"
+      ]
+     ]
+    }
+   ]
+  }
+ },
+ "dictionary_text": "# my words\nFluidVoice\nfluid voice, fluid boys => FluidVoice\n\njay son el => JSONL\nRunPod\n",
+ "dictionary": [
+  [
+   "FluidVoice",
+   []
+  ],
+  [
+   "FluidVoice",
+   [
+    "fluid voice",
+    "fluid boys"
+   ]
+  ],
+  [
+   "JSONL",
+   [
+    "jay son el"
+   ]
+  ],
+  [
+   "RunPod",
+   []
+  ]
+ ],
+ "session_args": {
+  "session": {
+   "workdir": "K:\\source\\Agentmaster",
+   "title": "fluidvoice telegram ConPTY-fix",
+   "dictionary": false
+  },
+  "session+dictionary": {
+   "workdir": "K:\\source\\Agentmaster",
+   "title": "",
+   "dictionary": true
+  }
+ }
+}

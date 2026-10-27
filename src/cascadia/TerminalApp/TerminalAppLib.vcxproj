@@ -224,6 +224,16 @@
     <ClInclude Include="AgentMaster\MessagingStartNote.h" />
     <ClInclude Include="AgentMaster\MessagingTaps.h" />
     <ClInclude Include="AgentMaster\MessagingSteer.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): VOICE NOTES - the session vocabulary and the dictionary pass
+         (VoiceVocabulary.h, pure), the voice worker protocol (VoiceProtocol.h, pure), the transcriber seam (VoiceBridge.h),
+         the worker process, the endpoint client, the spell checker word test and the transcriber. -->
+    <ClInclude Include="AgentMaster\VoiceVocabulary.h" />
+    <ClInclude Include="AgentMaster\VoiceProtocol.h" />
+    <ClInclude Include="AgentMaster\VoiceBridge.h" />
+    <ClInclude Include="AgentMaster\VoiceWorker.h" />
+    <ClInclude Include="AgentMaster\VoiceHttp.h" />
+    <ClInclude Include="AgentMaster\VoiceSpellWords.h" />
+    <ClInclude Include="AgentMaster\VoiceTranscriber.h" />
     <!-- Agentmaster (MESSAGING.md section 21.30): Claude's AskUserQuestion answered from Telegram - the question card's pure
          model, texts, buttons and decision lines (header-only). -->
     <ClInclude Include="AgentMaster\AskQuestion.h" />
@@ -576,6 +586,22 @@
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the service's FILE LINKS - the linked set, the session keys, the server's
          lifecycle and its authorizer, the rewrite of the mirror's and the history's items, /download. Plain C++, no PCH. -->
     <ClCompile Include="AgentMaster\Messaging.Files.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Agentmaster (MESSAGING.md section 21.43, VOICE.md): the service's VOICE NOTES - the lanes, the voice thread, the download,
+         the echo and the read (Messaging.Voice.cpp); the transcriber behind the VoiceBridge seam - the session vocabulary, the
+         engines (a local voice worker process, an OpenAI-compatible endpoint), the dictionary pass (VoiceTranscriber.cpp,
+         VoiceWorker.cpp, VoiceHttp.cpp). Plain C++ + Win32 + COM, no PCH; they link winhttp, advapi32 and ole32 by #pragma. -->
+    <ClCompile Include="AgentMaster\Messaging.Voice.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\VoiceTranscriber.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\VoiceWorker.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\VoiceHttp.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <!-- Agentmaster (MESSAGING.md section 21.32.4): the file links' HTTP server (Winsock), the session-key secret in

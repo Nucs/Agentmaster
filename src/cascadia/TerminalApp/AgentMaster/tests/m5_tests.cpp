@@ -182,6 +182,8 @@ int wmain()
     TestApiErrorRewind(); // HOOKS.md "API-error turns" — the rewind that lets a resumed session continue a turn an API error ended (tests_rewind.cpp)
     TestInterruptedTurns(); // HOOKS.md "Interrupted turns" — the restart question's rewind, the fork question's classifier and switch, the fork stop watch (tests_rewind.cpp)
     TestRestoreWake(); // PERSISTENCE.md §14 — after a restart, the restored tabs that were busy wake once every window's focused tab launched (tests_restorewake.cpp)
+    TestVoiceVocabulary(); // MESSAGING.md §21.43 / VOICE.md §5.5 — the voice notes' session vocabulary vs the POC's goldens (tests_voice.cpp)
+    TestVoiceProtocol(); // VOICE.md §6.2 — the voice worker protocol's lines and its answer reader (tests_voice.cpp)
 
     BenchPromptAnchor();
     BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)

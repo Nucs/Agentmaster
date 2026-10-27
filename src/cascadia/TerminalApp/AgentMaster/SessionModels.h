@@ -3172,11 +3172,54 @@ namespace Agentmaster
         std::wstring messagingFileLinkLanBase{};
         std::wstring messagingFileLinkHostedBase{};
         std::wstring messagingFileLinksExclude{};
+
+        // Agentmaster (MESSAGING.md §21.43, VOICE.md — VOICE NOTES; the cog's MESSAGING tab, VOICE NOTES). A voice note (an
+        // audio file, a round video note) in a session's Telegram topic is transcribed and read like the text it says: a
+        // queued prompt, an answer to an open question card. The words are corrected by the session's VOCABULARY (its
+        // folder's name and CLAUDE.md, a built-in developer glossary and the owner's dictionary) before the session sees them.
+        //  - messagingVoiceEnabled: voice notes are read at all (default ON; off = each one is answered "voice notes are off").
+        //  - voiceEngine: "worker" (the default: a LOCAL voice worker process — voiceWorkerCommand, or the bundled
+        //    agentmaster-voice.exe beside the app), "openai" (an OpenAI-compatible /v1/audio/transcriptions endpoint: OpenAI,
+        //    Groq, a local server — ⚠ the voice LEAVES the PC for a cloud endpoint) or "off". Any other word reads as off.
+        //  - voiceWorkerCommand: the worker's whole command line (VOICE.md §6.2's protocol over stdin/stdout); "" = the
+        //    bundled worker when the install carries one.
+        //  - voiceEndpoint / voiceModel: the "openai" engine's URL and model ("" = OpenAI's URL and whisper-1). Its API key
+        //    is NOT here: Windows Credential Manager (Voice::StoreVoiceApiKey; target Agentmaster:voice:api-key:<profile leaf>).
+        //  - voiceLanguage: the spoken language ("en" default; "" = the engine detects it — Whisper only; Parakeet v3 detects
+        //    its 25 European languages itself).
+        //  - voiceUseSessionContext: the session's folder name and CLAUDE.md join the vocabulary (default ON).
+        //  - voiceDictionary: the owner's dictionary, one entry per line: "Term" (boost it) or "spoken, forms => Term"
+        //    (FluidVoice's trigger → replacement); "#" lines are comments. "" = none.
+        //  - voiceWorkerIdleMinutes: the worker ends after this long without a note (its model leaves memory; the next note
+        //    starts it again, paying the load). Default 10; 0 = after every note; at most 1440.
+        //  - voiceEchoTranscript: the transcript is posted under the voice note before it is read (default ON: the owner sees
+        //    what the session will get; an edit of the echo does nothing — a corrected prompt is sent as text).
+        bool messagingVoiceEnabled{ true };
+        std::wstring voiceEngine{ L"worker" };
+        std::wstring voiceWorkerCommand{};
+        std::wstring voiceEndpoint{};
+        std::wstring voiceModel{};
+        std::wstring voiceLanguage{ L"en" };
+        bool voiceUseSessionContext{ true };
+        std::wstring voiceDictionary{};
+        uint32_t voiceWorkerIdleMinutes{ 10 };
+        bool voiceEchoTranscript{ true };
     };
 
     // Agentmaster (MESSAGING.md D25): clamp the idle grace into 0..1440 minutes (a day); garbage falls back
     // to the 10-minute default. Shared by the Persistence load and the cog Save.
     inline uint32_t ClampMessagingIdleGraceMinutes(uint32_t v) noexcept
+    {
+        return v > 1440 ? 1440 : v;
+    }
+
+    /// <summary>
+    /// Agentmaster (VOICE.md §6): clamps AppSettings::voiceWorkerIdleMinutes into 0..1440 (a day). Shared by the Persistence
+    /// load and the cog Save, so a hand-edited settings.json heals the same way.
+    /// </summary>
+    /// <param name="v">The stored or typed value.</param>
+    /// <returns>The clamped value.</returns>
+    inline uint32_t ClampVoiceWorkerIdleMinutes(uint32_t v) noexcept
     {
         return v > 1440 ? 1440 : v;
     }

@@ -187,6 +187,14 @@ open, the hovered control's tooltip renders in a fixed panel left of the card (`
   `messagingFileLinkStation`, `messagingFileLinkPort`, `messagingFileLinkLanBase`,
   `messagingFileLinkHostedBase` (empty = `https://cc.sysd.cc`), `messagingFileLinksExclude` (folders
   never linked; secret-looking files never are).
+- Voice notes (MESSAGING.md §21.43, [VOICE.md](VOICE.md) §9): `messagingVoiceEnabled` (true: a voice note in a session's
+  topic is transcribed and read like the text it says), `voiceEngine` (`worker` — a local voice worker process — or `openai`
+  — an OpenAI-compatible endpoint, which receives the audio — or `off`), `voiceWorkerCommand` (empty = the bundled worker
+  when the install carries one), `voiceEndpoint` / `voiceModel` (empty = OpenAI's URL / `whisper-1`; the key in Credential
+  Manager, `Agentmaster:voice:api-key:<profile leaf>`), `voiceLanguage` (`en`; empty = the engine detects it),
+  `voiceUseSessionContext` (true: the folder's name and CLAUDE.md join the vocabulary), `voiceDictionary` (the owner's
+  dictionary: `Word` or `spoken, forms => Word` per line), `voiceWorkerIdleMinutes` (10, 0–1440), `voiceEchoTranscript`
+  (true: the transcript is posted under the note first). Applied at the next note.
 
 ## Tabs & Overlay
 

@@ -1001,6 +1001,17 @@ namespace Agentmaster
         o.Set(L"messagingFileLinkLanBase", json::Value::MkStr(s.messagingFileLinkLanBase));
         o.Set(L"messagingFileLinkHostedBase", json::Value::MkStr(s.messagingFileLinkHostedBase));
         o.Set(L"messagingFileLinksExclude", json::Value::MkStr(s.messagingFileLinksExclude));
+        // §21.43 (VOICE.md §6): the voice notes (the endpoint's API key is in Credential Manager, never here).
+        o.Set(L"messagingVoiceEnabled", json::Value::MkBool(s.messagingVoiceEnabled));
+        o.Set(L"voiceEngine", json::Value::MkStr(s.voiceEngine));
+        o.Set(L"voiceWorkerCommand", json::Value::MkStr(s.voiceWorkerCommand));
+        o.Set(L"voiceEndpoint", json::Value::MkStr(s.voiceEndpoint));
+        o.Set(L"voiceModel", json::Value::MkStr(s.voiceModel));
+        o.Set(L"voiceLanguage", json::Value::MkStr(s.voiceLanguage));
+        o.Set(L"voiceUseSessionContext", json::Value::MkBool(s.voiceUseSessionContext));
+        o.Set(L"voiceDictionary", json::Value::MkStr(s.voiceDictionary));
+        o.Set(L"voiceWorkerIdleMinutes", json::Value::MkNum(ClampVoiceWorkerIdleMinutes(s.voiceWorkerIdleMinutes)));
+        o.Set(L"voiceEchoTranscript", json::Value::MkBool(s.voiceEchoTranscript));
         return o;
     }
 
@@ -1332,6 +1343,18 @@ namespace Agentmaster
         s.messagingFileLinkLanBase = v.StrAt(L"messagingFileLinkLanBase");
         s.messagingFileLinkHostedBase = v.StrAt(L"messagingFileLinkHostedBase");
         s.messagingFileLinksExclude = v.StrAt(L"messagingFileLinksExclude");
+        // §21.43 (VOICE.md §6): absent => voice notes read, by a local worker, in English, with the session's context, echoed,
+        // the worker ended after 10 idle minutes (each default reproduces a settings.json written before the feature).
+        s.messagingVoiceEnabled = v.BoolAt(L"messagingVoiceEnabled", true);
+        s.voiceEngine = v.StrAt(L"voiceEngine", L"worker");
+        s.voiceWorkerCommand = v.StrAt(L"voiceWorkerCommand");
+        s.voiceEndpoint = v.StrAt(L"voiceEndpoint");
+        s.voiceModel = v.StrAt(L"voiceModel");
+        s.voiceLanguage = v.StrAt(L"voiceLanguage", L"en");
+        s.voiceUseSessionContext = v.BoolAt(L"voiceUseSessionContext", true);
+        s.voiceDictionary = v.StrAt(L"voiceDictionary");
+        s.voiceWorkerIdleMinutes = ClampVoiceWorkerIdleMinutes(v.U32At(L"voiceWorkerIdleMinutes", 10));
+        s.voiceEchoTranscript = v.BoolAt(L"voiceEchoTranscript", true);
         return s;
     }
 

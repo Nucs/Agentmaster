@@ -379,4 +379,111 @@ namespace Agentmaster::Msg
             return f;
         }
     }
+
+    TgResult TelegramApi::DownloadFile(std::wstring_view filePath, size_t maxBytes, std::string& out, uint32_t timeoutMs) noexcept
+    {
+        // §21.43 (VOICE.md §6): a voice note's bytes. Its own small GET, not _request: the answer is binary (never JSON), may be
+        // larger than kMaxBodyBytes, and must not occupy the Abort slot the long poll relies on (a download runs on the voice
+        // thread while the poll waits).
+        TgResult r;
+        out.clear();
+        HINTERNET hSession = nullptr;
+        HINTERNET hConnect = nullptr;
+        HINTERNET hRequest = nullptr;
+        const auto closeAll = [&]() noexcept {
+            if (hRequest)
+            {
+                ::WinHttpCloseHandle(hRequest);
+            }
+            if (hConnect)
+            {
+                ::WinHttpCloseHandle(hConnect);
+            }
+            if (hSession)
+            {
+                ::WinHttpCloseHandle(hSession);
+            }
+            hRequest = hConnect = hSession = nullptr;
+        };
+        try
+        {
+            hSession = ::WinHttpOpen(L"Agentmaster-Messaging/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+            if (!hSession)
+            {
+                r.transportFailed = true;
+                r.description = L"WinHttpOpen failed (" + std::to_wstring(::GetLastError()) + L")";
+                return r;
+            }
+            ::WinHttpSetTimeouts(hSession, 15000, 15000, 30000, static_cast<int>(timeoutMs));
+            hConnect = ::WinHttpConnect(hSession, kHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
+            if (!hConnect)
+            {
+                r.transportFailed = true;
+                r.description = L"WinHttpConnect failed (" + std::to_wstring(::GetLastError()) + L")";
+                closeAll();
+                return r;
+            }
+            const std::wstring path = L"/file/bot" + _token + L"/" + std::wstring{ filePath };
+            hRequest = ::WinHttpOpenRequest(hConnect, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+            if (!hRequest || !::WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+                !::WinHttpReceiveResponse(hRequest, nullptr))
+            {
+                r.transportFailed = true;
+                r.description = L"the download failed (" + std::to_wstring(::GetLastError()) + L")";
+                Log(L"[tg] file download transport failure " + std::to_wstring(::GetLastError()));
+                closeAll();
+                return r;
+            }
+            DWORD status = 0, slen = sizeof(status);
+            ::WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &slen, WINHTTP_NO_HEADER_INDEX);
+            r.httpStatus = static_cast<int>(status);
+            for (;;)
+            {
+                DWORD avail = 0;
+                if (!::WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0)
+                {
+                    break;
+                }
+                if (out.size() + avail > maxBytes)
+                {
+                    r.description = L"the file is larger than " + std::to_wstring(maxBytes / (1024 * 1024)) + L" MB";
+                    out.clear();
+                    closeAll();
+                    return r;
+                }
+                const size_t at = out.size();
+                out.resize(at + avail);
+                DWORD read = 0;
+                if (!::WinHttpReadData(hRequest, out.data() + at, avail, &read))
+                {
+                    r.transportFailed = true;
+                    r.description = L"the download broke off (" + std::to_wstring(::GetLastError()) + L")";
+                    out.clear();
+                    closeAll();
+                    return r;
+                }
+                out.resize(at + read);
+            }
+            closeAll();
+            if (r.httpStatus != 200)
+            {
+                r.description = L"the file server answered HTTP " + std::to_wstring(r.httpStatus);
+                Log(L"[tg] file download HTTP " + std::to_wstring(r.httpStatus));
+                out.clear();
+                return r;
+            }
+            r.ok = true;
+            return r;
+        }
+        catch (...)
+        {
+            LogSwallowedException(L"TelegramApi::DownloadFile");
+            closeAll();
+            out.clear();
+            TgResult f;
+            f.transportFailed = true;
+            f.description = L"exception during the download";
+            return f;
+        }
+    }
 }

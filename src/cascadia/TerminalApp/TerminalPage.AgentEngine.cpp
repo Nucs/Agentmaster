@@ -48,6 +48,7 @@
 #include "AgentMaster/SessionDbRefresher.h" // SESSIONS_DB.md §7.6 — the cog Save re-applies the session database settings
 #include "AgentMaster/Messaging.h" // MESSAGING.md — the Telegram bot: the cog Save re-applies its settings; its Search factory + version word are set here
 #include "MessagingSearchBridge.h" // MESSAGING.md §5.4 — the Search topic's agent (a SessionSearchAgent of its own)
+#include "AgentMaster/VoiceTranscriber.h" // MESSAGING.md §21.43, VOICE.md §6 — the voice notes' transcriber (the bot's voice factory)
 #include "AgentMaster/LaunchPresetsOs.h" // MESSAGING.md §21.25 — LaunchMenuEntries / ShouldOfferAddPresets: the bot wizard's model step
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
 #include "AgentMaster/ProcessObserver.h" // UnpublishWindow (teardown; Rule #10)
@@ -1296,6 +1297,11 @@ namespace winrt::TerminalApp::implementation
                         engine.messaging->SetSearchFactory([](std::function<void(const ::Agentmaster::Msg::SearchBridgeEvent&)> sink, std::wstring thinkingWord) {
                             return ::Agentmaster::Msg::MakeTelegramSearchBridge(std::move(sink), std::move(thinkingWord));
                         });
+                        // MESSAGING.md §21.43 (VOICE.md §6): the VOICE NOTES' transcriber — the session vocabulary (Windows' spell
+                        // checker, the folder's CLAUDE.md), the engine (a local voice worker or an OpenAI-compatible endpoint), the
+                        // dictionary pass. Set here with the Search factory so Engine.cpp (and the test harness) never link it; the
+                        // service makes one at each bot start and drops it at the stop.
+                        engine.messaging->SetVoiceFactory([] { return ::Agentmaster::Voice::MakeVoiceTranscriber(); });
                         // MESSAGING.md §21.25: the new-thread wizard's MODEL step lists the right-click menu's own models and
                         // presets. Those live in LaunchPresetsOs.h (the presets file, Credential Manager), which only this
                         // layer links; LaunchMenuEntries and ShouldOfferAddPresets read a stamp-cached config under its own

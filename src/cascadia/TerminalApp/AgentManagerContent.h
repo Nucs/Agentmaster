@@ -1448,6 +1448,23 @@ namespace winrt::TerminalApp::implementation
         std::vector<::Agentmaster::Msg::FileLinkLanAddress> _msgFilesLanAddresses; // this PC's private IPv4 addresses, read when the cog opens
         std::wstring _msgFilesHostName; // this PC's DNS name, read when the cog opens (the dropdown's last choice)
         std::vector<std::wstring> _msgFilesLanUrls; // parallel to _setMsgFilesLanBase's items: "" = automatic (the first address)
+        // MESSAGING.md §21.43 / VOICE.md §6: the VOICE NOTES section — whether voice notes are read, by which engine (a local
+        // voice worker process, or an OpenAI-compatible endpoint whose API key goes to Credential Manager on Save), in which
+        // language, with the session's folder vocabulary, the owner's dictionary, the echo, and the worker's idle end. The
+        // status line is the service's VoiceStatusLine, read when the cog opens.
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVoiceEnabled{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgVoiceEngine{ nullptr }; // 0 local worker, 1 endpoint, 2 off
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceCommand{ nullptr }; // "" = the bundled worker
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceEndpoint{ nullptr }; // "" = OpenAI's URL
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceModel{ nullptr }; // "" = whisper-1
+        winrt::Windows::UI::Xaml::Controls::PasswordBox _setMsgVoiceKey{ nullptr }; // empty = keep the stored key
+        bool _msgForgetVoiceKey{ false }; // "Forget key" was clicked: Save removes the stored key
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceLanguage{ nullptr }; // "" = the engine detects it
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVoiceContext{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVoiceEcho{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceIdle{ nullptr }; // minutes; "" = 10
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceDictionary{ nullptr }; // one entry per line
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgVoiceStatus{ nullptr };
         /// <summary>
         /// Refills the "links point to" dropdown with this PC's LAN URLs on the port the box names (else the default), keeping
         /// the address of <paramref name="keepUrl"/> selected — a port change keeps the same address — or appending it, marked,

@@ -22,6 +22,10 @@ with a local-time `[HH:MM:SS.mmm]` stamp (only at a line boundary, so a partial 
   box-not-visible `[send-verify] … HELD`, `[interrupt-hold]` / `[interrupt-resume]`.
 - `forwarder-errors.log`: the hook forwarder's own drops (no session id, no pipe, a dead pipe's connect
   timeout) — lines that never reached the bridge.
+- **`voice.log`:** the Telegram voice notes' engine (MESSAGING.md §21.43, [VOICE.md](VOICE.md) §6.6) — `[voice]` the
+  worker's start, readiness, idle end and stop, and one line per transcription (the audio's length, the engine's and the
+  whole time, the vocabulary's size, every respelling); `[voice-worker]` the worker's own stderr line by line (a Python
+  traceback, a model download's progress). The service's side of each note is in hooks.log (`[msg] … voice note …`).
 
 ## hooks.log's three layers
 
