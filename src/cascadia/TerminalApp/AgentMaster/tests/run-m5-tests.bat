@@ -89,11 +89,12 @@ REM pipeline in ConversationImage.cpp). ConversationImage.cpp parses with Markdo
 REM it, tests\conversation_image_stub.cpp stands in (Messaging.Inbound.cpp calls RenderConversationImages, so something must
 REM define it) and the test's layout and end-to-end cases report a skip.
 REM tests_voice.cpp: MESSAGING.md 21.43 / VOICE.md 5.5 - the voice notes' session vocabulary (VoiceVocabulary.h, header-only and
-REM pure) against the POC's goldens in voice\ (written by voice\make_goldens.py from tools\voice-poc\vocab.py), and the voice
-REM worker protocol (VoiceProtocol.h, pure). Messaging.Voice.cpp joins as a LINK dependency of Messaging.cpp (the service's
-REM voice lanes and thread); the transcriber behind its seam (VoiceTranscriber.cpp, VoiceWorker.cpp, VoiceHttp.cpp) is
-REM TerminalApp-only, like the Search agent's bridge: with no factory set, the harness's service answers a voice note
-REM "not available in this build".
+REM pure) against the POC's goldens in voice\ (written by voice\make_goldens.py from tools\voice-poc\vocab.py and llm_fix.py),
+REM the voice worker protocol (VoiceProtocol.h, pure) and the correction layer's prompt, arguments, guard and answer parser
+REM (VoiceCorrect.h, pure; its claude call, VoiceCorrect.cpp, is not linked: no test runs a model). Messaging.Voice.cpp joins
+REM as a LINK dependency of Messaging.cpp (the service's voice lanes and thread); the transcriber behind its seam
+REM (VoiceTranscriber.cpp, VoiceWorker.cpp, VoiceHttp.cpp, VoiceCorrect.cpp) is TerminalApp-only, like the Search agent's
+REM bridge: with no factory set, the harness's service answers a voice note "not available in this build".
 set "AM_VCPKG=K:\source\Agentmaster\obj\x64\vcpkg\x64-windows-static"
 set "AM_MD_SRC=conversation_image_stub.cpp"
 set "AM_MD_FLAGS="

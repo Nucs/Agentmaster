@@ -126,6 +126,36 @@ def main() -> int:
             out, made = v.apply(text)
             entry["apply"].append({"in": text, "out": out, "made": [list(m) for m in made]})
         goldens["vocabularies"][name] = entry
+    # The correction layer's prompts (VoiceCorrect.h ports llm_fix.py): the system prompt verbatim, the glossary line of a
+    # session vocabulary, and the user prompt with and without other engines' hearings.
+    import llm_fix  # noqa: E402  (the reference's correction layer, beside vocab.py)
+
+    session = vocabularies["session"]
+    goldens["correction"] = {
+        "system_prompt": llm_fix.SYSTEM_PROMPT,
+        "glossary_160": session.glossary_line(160),
+        "glossary_5": session.glossary_line(5),
+        "cases": [
+            {"text": t, "alternatives": list(a), "user_prompt": llm_fix.build_user_prompt(t, session.glossary_line(5), tuple(a))}
+            for t, a in (
+                ("Check why the ConPTY host drops.", ()),
+                ("Decode a note with a faulty lines.", ("Decode the note with a 40 lines.",)),
+                ("Same text twice.", ("Same text twice.",)),
+                ("Three hearings.", ("Second hearing.", "Third hearing.")),
+            )
+        ],
+        "accept": [
+            {"before": b, "after": a, "accepted": llm_fix.accept_correction(b, a)}
+            for b, a in (
+                ("Decode a note with a faulty lines.", "Decode the note with 40 lines."),
+                ("Decode a note with a faulty lines.", ""),
+                ("Decode a note with a faulty lines.", "   "),
+                ("Short.", "Short, fixed."),
+                ("Check why the ConPTY host drops the hook events.", "I can't help with that. Here is an explanation of what a ConPTY host is and why hook events could be dropped after a resume, in detail."),
+                ("Check why the ConPTY host drops the hook events.", "Check."),
+            )
+        ],
+    }
     goldens["dictionary_text"] = DICTIONARY
     goldens["dictionary"] = [[t, trig] for t, trig in vocab.parse_dictionary(DICTIONARY)]
     goldens["session_args"] = {

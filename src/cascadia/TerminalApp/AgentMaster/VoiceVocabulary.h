@@ -281,22 +281,27 @@ namespace Agentmaster::Voice
 
     /// <summary>
     /// The built-in developer glossary: words a developer says that a general speech model writes wrong or in the wrong case.
-    /// ⚠ The same list, in the same order, as vocab.py's BUILTIN_GLOSSARY (the order is the prompt's and the hotwords' order
-    /// within a weight; the goldens catch a drift).
+    /// ⚠ The same list, in the same order, as vocab.py's BUILTIN_GLOSSARY (the goldens catch a drift). ORDER IS PRIORITY:
+    /// Whisper's prompt keeps ~100 terms and, when the session's own words take room, cuts the glossary from its END —
+    /// measured on the owner's recordings (2026-10-27), with formats first the AI / speech group never reached the prompt.
     /// </summary>
     inline const std::vector<std::wstring>& BuiltinGlossary()
     {
         static const std::vector<std::wstring> k{
-            // Data formats, encodings, protocols
-            L"JSON", L"JSONL", L"YAML", L"TOML", L"XML", L"CSV", L"HTML", L"CSS", L"Markdown", L"HTTP", L"HTTPS", L"REST", L"gRPC",
-            L"WebSocket", L"OAuth", L"JWT", L"UTF-8", L"UTF-16", L"ASCII", L"Base64", L"SHA-256", L"TLS", L"SSH", L"DNS", L"TCP", L"UDP",
-            L"IPv4", L"IPv6", L"URL", L"URI", L"UUID", L"GUID", L"regex", L"stdin", L"stdout", L"stderr",
+            // AI and speech
+            L"Claude", L"Claude Code", L"Anthropic", L"OpenAI", L"GPT", L"LLM", L"MCP", L"Whisper", L"Parakeet", L"ONNX", L"PyTorch",
+            L"TensorFlow", L"Hugging Face", L"LoRA", L"RAG", L"embeddings", L"tokenizer", L"Sonnet", L"Opus", L"Haiku", L"Codex",
+            L"Gemini", L"Ollama", L"llama.cpp",
             // Audio / media
             L"PCM", L"WAV", L"MP3", L"AAC", L"Opus", L"Ogg", L"FLAC", L"FFmpeg", L"codec", L"kHz", L"VAD",
             // Hardware and OS
             L"CPU", L"GPU", L"RAM", L"SSD", L"NVMe", L"CUDA", L"cuDNN", L"RTX", L"NVIDIA", L"x64", L"ARM64", L"Windows", L"Win32", L"WinRT",
             L"ConPTY", L"PowerShell", L"WSL", L"MSIX", L"AppX", L"NuGet", L"vcpkg", L"MSBuild", L"CMake", L"XAML", L"COM", L"DLL", L"PDB",
             L"PID", L"TTY", L"PTY", L"VT100", L"ANSI",
+            // Data formats, encodings, protocols
+            L"JSON", L"JSONL", L"YAML", L"TOML", L"XML", L"CSV", L"HTML", L"CSS", L"Markdown", L"HTTP", L"HTTPS", L"REST", L"gRPC",
+            L"WebSocket", L"OAuth", L"JWT", L"UTF-8", L"UTF-16", L"ASCII", L"Base64", L"SHA-256", L"TLS", L"SSH", L"DNS", L"TCP", L"UDP",
+            L"IPv4", L"IPv6", L"URL", L"URI", L"UUID", L"GUID", L"regex", L"stdin", L"stdout", L"stderr",
             // Languages and runtimes
             L"C++", L"C#", L".NET", L"Python", L"TypeScript", L"JavaScript", L"Node.js", L"Rust", L"Golang", L"Kotlin", L"SQL", L"Bash",
             L"WebAssembly",
@@ -306,10 +311,6 @@ namespace Agentmaster::Voice
             L"Cloudflare", L"Traefik", L"Proxmox",
             // Databases and queues
             L"PostgreSQL", L"Postgres", L"MySQL", L"SQLite", L"DuckDB", L"Redis", L"MongoDB", L"Kafka", L"RabbitMQ",
-            // AI and speech
-            L"Claude", L"Claude Code", L"Anthropic", L"OpenAI", L"GPT", L"LLM", L"MCP", L"Whisper", L"Parakeet", L"ONNX", L"PyTorch",
-            L"TensorFlow", L"Hugging Face", L"LoRA", L"RAG", L"embeddings", L"tokenizer", L"Sonnet", L"Opus", L"Haiku", L"Codex",
-            L"Gemini", L"Ollama", L"llama.cpp",
             // Generic engineering words a model splits or mis-cases
             L"API", L"SDK", L"CLI", L"GUI", L"UI", L"UX", L"IDE", L"CI", L"PR", L"repo", L"async", L"await", L"mutex", L"nullptr", L"enum",
             L"struct", L"refactor", L"middleware", L"localhost", L"namespace", L"lambda", L"boolean", L"JSON schema", L"OpenAPI",
@@ -806,6 +807,32 @@ namespace Agentmaster::Voice
         }
 
         /// <summary>
+        /// vocab.py's glossary_line: the glossary the CORRECTION layer gets (VoiceCorrect.h) — the terms, highest weight first,
+        /// comma-joined. Unlike Whisper's prompt there is room for every term a session has (a model reads 160 terms easily).
+        /// </summary>
+        /// <param name="maxTerms">The most terms sent.</param>
+        /// <returns>"Agentmaster, ConPTY, …" ("" for an empty vocabulary).</returns>
+        /// <exception cref="std::bad_alloc">If the text cannot be allocated.</exception>
+        std::wstring GlossaryLine(size_t maxTerms = 160) const
+        {
+            std::wstring out;
+            size_t n = 0;
+            for (const VoiceTerm* t : Ranked())
+            {
+                if (n == maxTerms)
+                {
+                    break;
+                }
+                if (n++)
+                {
+                    out += L", ";
+                }
+                out += t->text;
+            }
+            return out;
+        }
+
+        /// <summary>
         /// vocab.py's whisper_prompt: Whisper's initial prompt, a short glossary line. Whisper keeps only the LAST ~224 tokens
         /// of a prompt and weighs its end most, so the highest-weight terms go last and the line is cut from its start.
         /// </summary>
@@ -1254,6 +1281,30 @@ namespace Agentmaster::Voice
             if (PyIsUpper(word) && PyIsAlpha(word) && (word.size() > 6 || plain(word)))
             {
                 continue; // shouted English or a long all-caps name (ON, BEFORE, USERPROFILE)
+            }
+            // SPEAKABLE names only (measured on the owner's recordings: identifiers nobody dictates filled Whisper's prompt and
+            // pushed out the glossary words a note DID hold).
+            if (std::iswlower(static_cast<wint_t>(word[0])) && AnyUpper(std::wstring_view{ word }.substr(1)))
+            {
+                continue; // a lowerCamelCase code identifier (tabToken, kStateSettleMs, launchArgs)
+            }
+            {
+                size_t wordParts = 0;
+                for (const auto& p : CaseSplit(word))
+                {
+                    if (!std::all_of(p.begin(), p.end(), [](wchar_t c) { return std::iswdigit(static_cast<wint_t>(c)) != 0; }))
+                    {
+                        ++wordParts;
+                    }
+                }
+                if (wordParts > 2)
+                {
+                    continue; // three or more word parts (WriteAllUtf8, SHGetKnownFolderPath, AgentmasterStateDir)
+                }
+            }
+            if (word.size() == 2 && !PyIsUpper(word))
+            {
+                continue; // a two-character token (v9, m5, Xs)
             }
             if (!(AnyUpper(word) || AnyDigit(word)))
             {

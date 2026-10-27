@@ -40,16 +40,23 @@ from typing import Callable, Iterable, Optional
 # --------------------------------------------------------------------------------------------------------------------
 
 BUILTIN_GLOSSARY: tuple[str, ...] = (
-    # Data formats, encodings, protocols
-    "JSON", "JSONL", "YAML", "TOML", "XML", "CSV", "HTML", "CSS", "Markdown", "HTTP", "HTTPS", "REST", "gRPC",
-    "WebSocket", "OAuth", "JWT", "UTF-8", "UTF-16", "ASCII", "Base64", "SHA-256", "TLS", "SSH", "DNS", "TCP", "UDP",
-    "IPv4", "IPv6", "URL", "URI", "UUID", "GUID", "regex", "stdin", "stdout", "stderr",
+    # ORDER IS PRIORITY: Whisper's prompt keeps ~100 terms, and when the session's own words take room, the glossary is cut
+    # from its END. Measured on the owner's recordings (2026-10-27): with formats first, the AI / speech group never reached
+    # the prompt. A prompt to Claude Code names AI tools, models and speech/audio terms most, generic words least.
+    # AI and speech
+    "Claude", "Claude Code", "Anthropic", "OpenAI", "GPT", "LLM", "MCP", "Whisper", "Parakeet", "ONNX", "PyTorch",
+    "TensorFlow", "Hugging Face", "LoRA", "RAG", "embeddings", "tokenizer", "Sonnet", "Opus", "Haiku", "Codex",
+    "Gemini", "Ollama", "llama.cpp",
     # Audio / media
     "PCM", "WAV", "MP3", "AAC", "Opus", "Ogg", "FLAC", "FFmpeg", "codec", "kHz", "VAD",
     # Hardware and OS
     "CPU", "GPU", "RAM", "SSD", "NVMe", "CUDA", "cuDNN", "RTX", "NVIDIA", "x64", "ARM64", "Windows", "Win32", "WinRT",
     "ConPTY", "PowerShell", "WSL", "MSIX", "AppX", "NuGet", "vcpkg", "MSBuild", "CMake", "XAML", "COM", "DLL", "PDB",
     "PID", "TTY", "PTY", "VT100", "ANSI",
+    # Data formats, encodings, protocols
+    "JSON", "JSONL", "YAML", "TOML", "XML", "CSV", "HTML", "CSS", "Markdown", "HTTP", "HTTPS", "REST", "gRPC",
+    "WebSocket", "OAuth", "JWT", "UTF-8", "UTF-16", "ASCII", "Base64", "SHA-256", "TLS", "SSH", "DNS", "TCP", "UDP",
+    "IPv4", "IPv6", "URL", "URI", "UUID", "GUID", "regex", "stdin", "stdout", "stderr",
     # Languages and runtimes
     "C++", "C#", ".NET", "Python", "TypeScript", "JavaScript", "Node.js", "Rust", "Golang", "Kotlin", "SQL", "Bash",
     "WebAssembly",
@@ -59,10 +66,6 @@ BUILTIN_GLOSSARY: tuple[str, ...] = (
     "Cloudflare", "Traefik", "Proxmox",
     # Databases and queues
     "PostgreSQL", "Postgres", "MySQL", "SQLite", "DuckDB", "Redis", "MongoDB", "Kafka", "RabbitMQ",
-    # AI and speech
-    "Claude", "Claude Code", "Anthropic", "OpenAI", "GPT", "LLM", "MCP", "Whisper", "Parakeet", "ONNX", "PyTorch",
-    "TensorFlow", "Hugging Face", "LoRA", "RAG", "embeddings", "tokenizer", "Sonnet", "Opus", "Haiku", "Codex",
-    "Gemini", "Ollama", "llama.cpp",
     # Generic engineering words a model splits or mis-cases
     "API", "SDK", "CLI", "GUI", "UI", "UX", "IDE", "CI", "PR", "repo", "async", "await", "mutex", "nullptr", "enum",
     "struct", "refactor", "middleware", "localhost", "namespace", "lambda", "boolean", "JSON schema", "OpenAPI",
@@ -417,6 +420,18 @@ class Vocabulary:
         """
         return sorted(self.terms, key=lambda t: -t.weight)
 
+    def glossary_line(self, max_terms: int = 160) -> str:
+        """The glossary the CORRECTION layer gets (llm_fix.py; VoiceCorrect.h): the terms, highest weight first, comma-joined.
+        Unlike Whisper's prompt there is room for every term a session has (a model reads 160 terms easily).
+
+        Args:
+            max_terms: The most terms sent.
+
+        Returns:
+            "Agentmaster, ConPTY, …" ("" for an empty vocabulary).
+        """
+        return ", ".join(t.text for t in self.ranked()[:max_terms])
+
     def whisper_prompt(self, max_chars: int = 700) -> str:
         """Whisper's ``initial_prompt``: a short glossary line the decoder conditions on.
 
@@ -590,6 +605,14 @@ def extract_context_terms(text: str, limit: int = 60, min_count: int = 2) -> lis
             continue  # a compiler or HRESULT-like code (C2039)
         if word.isupper() and word.isalpha() and (len(word) > 6 or is_plain_english(word)):
             continue  # shouted English or a long all-caps name (ON, BEFORE, USERPROFILE)
+        # SPEAKABLE names only (measured on the owner's recordings: identifiers nobody dictates filled Whisper's ~700-character
+        # prompt and pushed out the glossary words a note DID hold):
+        if word[0].islower() and any(ch.isupper() for ch in word[1:]):
+            continue  # a lowerCamelCase code identifier (tabToken, kStateSettleMs, launchArgs)
+        if len([p for p in _CASE_SPLIT.findall(word) if not p.isdigit()]) > 2:
+            continue  # three or more word parts (WriteAllUtf8, SHGetKnownFolderPath, AgentmasterStateDir)
+        if len(word) == 2 and not word.isupper():
+            continue  # a two-character token (v9, m5, Xs)
         if not (any(ch.isupper() for ch in word) or any(ch.isdigit() for ch in word)):
             continue  # a lowercase word: not a name
         if not (is_distinctive(word) and is_hard(word)):

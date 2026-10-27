@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — VoiceTranscriber (see VoiceTranscriber.h): one voice note → the session vocabulary → the engine → the
-// dictionary pass → the prompt text.
+// dictionary pass → the correction (VoiceCorrect.h) → the prompt text.
 
 #include "VoiceTranscriber.h"
 
@@ -21,6 +21,7 @@
 
 #include "ClaudeSpawn.h" // AppendStateLog, LogSwallowedException
 #include "ProfileBootstrap.h" // Profiles::detail::Utf8ToWide
+#include "VoiceCorrect.h"
 #include "VoiceHttp.h"
 #include "VoiceProtocol.h"
 #include "VoiceSpellWords.h"
@@ -35,6 +36,13 @@ namespace Agentmaster::Voice
         constexpr size_t kMaxContextBytes = 2u << 20;
         /// <summary>The OpenAI transcription endpoint's own upload limit (25 MB): a larger note is refused before the upload.</summary>
         constexpr size_t kMaxEndpointBytes = 25u << 20;
+        /// <summary>
+        /// The correction's whole budget (claude's start, the model call, its retries): Sonnet 5.5 answered the owner's 9–14 s
+        /// notes in 3–11 s (the POC's runs of 2026-10-27); a call past this is ended and the note goes on with the dictionary's
+        /// text. The voice thread waits for it, so the session's next message waits too (Messaging.Voice.cpp's lanes) — this
+        /// caps that wait.
+        /// </summary>
+        constexpr uint32_t kCorrectionTimeoutMs = 60000;
 
         /// <summary>One line into the voice log.</summary>
         /// <param name="line">The line.</param>
@@ -203,6 +211,11 @@ namespace Agentmaster::Voice
                         out.engine = answer->engine;
                         out.audioMs = answer->audioMs;
                         out.engineMs = answer->decodeMs;
+                        // A fusion worker's other hearings: each gets the same dictionary pass, then they go to the correction.
+                        for (const auto& alt : answer->alternatives)
+                        {
+                            out.alternatives.push_back(vocab.Apply(alt));
+                        }
                     }
                     else
                     {
@@ -229,15 +242,37 @@ namespace Agentmaster::Voice
                         out.engine = L"openai:" + (cfg.model.empty() ? std::wstring{ L"whisper-1" } : cfg.model);
                         out.engineMs = r.ms;
                     }
-                    // 3. The dictionary pass, then one paragraph.
+                    // 3. The dictionary pass.
                     std::vector<VoiceReplacement> made;
-                    const std::wstring fixed = vocab.Apply(raw, &made);
+                    std::wstring fixed = vocab.Apply(raw, &made);
                     out.raw = raw;
-                    out.text = NormalizeTranscriptForPrompt(fixed);
                     for (const auto& m : made)
                     {
                         out.fixes.push_back({ m.from, m.to });
                     }
+                    // 4. The CORRECTION (VOICE.md §5.5): one hidden claude call with the glossary and every engine's hearing.
+                    //    A failure or an implausible answer keeps the dictionary's text — a note is never lost to it, only
+                    //    less polished (the reason goes to voice.log and the result). An empty hearing skips it: there is
+                    //    nothing to correct, and the model would only invent.
+                    bool correctionRan = false;
+                    if (!fixed.empty() && !cfg.correctionModel.empty() && cfg.correctionModel != L"off")
+                    {
+                        correctionRan = true;
+                        const CorrectionResult c = CorrectTranscript(note.claudeExe, cfg.profileDir, cfg.correctionModel, cfg.correctionEffort, fixed,
+                                                                     vocab.GlossaryLine(160), out.alternatives, kCorrectionTimeoutMs);
+                        out.correctionMs = c.ms;
+                        if (c.ok)
+                        {
+                            out.corrected = c.text != fixed;
+                            fixed = c.text;
+                        }
+                        else
+                        {
+                            out.correctionError = c.error;
+                        }
+                    }
+                    // 5. One paragraph.
+                    out.text = NormalizeTranscriptForPrompt(fixed);
                     out.ok = !out.text.empty();
                     if (!out.ok)
                     {
@@ -249,9 +284,18 @@ namespace Agentmaster::Voice
                     {
                         fixesText += L" [" + f.from + L" \x2192 " + f.to + L"]";
                     }
+                    // The correction's outcome, in the same line: what a slow or unpolished note cost, and why.
+                    std::wstring correctionText;
+                    if (correctionRan)
+                    {
+                        correctionText = out.correctionError.empty()
+                                             ? L", correction " + std::to_wstring(out.correctionMs) + L" ms" + (out.corrected ? L" (changed)" : L" (unchanged)")
+                                             : L", correction FAILED after " + std::to_wstring(out.correctionMs) + L" ms: " + out.correctionError;
+                    }
                     VoiceLog(L"[voice] " + note.sessionId.substr(0, 8) + L" " + out.engine + L": " + std::to_wstring(out.audioMs) + L" ms of audio, engine " +
                              std::to_wstring(out.engineMs) + L" ms, total " + std::to_wstring(out.totalMs) + L" ms, " + std::to_wstring(out.vocabularyTerms) +
-                             L" terms, " + std::to_wstring(out.fixes.size()) + L" fix(es)" + fixesText);
+                             L" terms, " + std::to_wstring(out.alternatives.size()) + L" other hearing(s), " + std::to_wstring(out.fixes.size()) + L" fix(es)" +
+                             fixesText + correctionText);
                     return out;
                 }
                 catch (...)

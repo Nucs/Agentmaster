@@ -1,11 +1,15 @@
 # Agentmaster — voice notes: a Telegram voice note becomes the session's prompt
 
 > **Status (2026-10-27): the POC and the integration are WRITTEN; NOT BUILT.** The POC (`tools/voice-poc/`, Python)
-> runs on this PC and measured the engines below. The app integration (MESSAGING.md §21.43) is in the tree: the
-> messaging service's voice path, the session vocabulary in C++ (pinned to the POC by goldens: 190 checks pass
-> standalone), the voice worker protocol, the endpoint engine, the settings and the cog's VOICE NOTES section. The
+> runs on this PC and measured the engines below. On the owner's three recordings the full pipeline — Whisper
+> large-v3-turbo with the session's glossary, a second engine's hearing (Parakeet, FUSION), the dictionary pass and the
+> CORRECTION by Claude Sonnet 5.5 — came out **word for word: 0.0 % WER, every term with its exact spelling, 3 runs of 3**
+> (§4.4). The app integration (MESSAGING.md §21.43) is in the tree: the messaging service's voice path, the session
+> vocabulary in C++ and the correction layer (pinned to the POC by goldens: 223 checks pass standalone), the voice worker
+> protocol (with the fusion's `alternatives`), the endpoint engine, the settings and the cog's VOICE NOTES section. The
 > next build must PURGE (SessionModels.h changed). The bundled native worker (`agentmaster-voice.exe`, §6.4) is designed,
-> not written: until it ships, the local engine is any worker command — the POC's Python worker on this PC.
+> not written: until it ships, the local engine is any worker command — the POC's Python worker on this PC (§6.2 gives the
+> measured command).
 >
 > The owner's recordings of the evaluation set: §7.1. Their results: §4.4.
 
@@ -19,10 +23,12 @@ integration in Agentmaster.
 **The answer in one paragraph.** A voice note in a session's topic is downloaded and handed to a speech engine together
 with the session's VOCABULARY — the names of its project (its folder, its CLAUDE.md), a developer glossary and the owner's
 own dictionary. The engine's text then goes through a DICTIONARY PASS that respells split or misheard names ("Con PTY",
-"Agent Master", "Jason L" → ConPTY, Agentmaster, JSONL) and never touches an everyday word. The result is posted under the
-note (🎤) and read exactly like a typed message: a queued prompt, or the answer to an open question card. This is
-FluidVoice's design — word boost + custom dictionary (+ optional AI enhancement) — with the vocabulary taken from where the
-prompt goes instead of a list the user maintains.
+"Agent Master", "Jason L" → ConPTY, Agentmaster, JSONL) and never touches an everyday word, and then through the
+CORRECTION: one hidden `claude -p` (Sonnet 5.5) gets the glossary and every engine's hearing of the note and returns the
+same words with what was misheard fixed ("Becode a" → "Decode the" where a second engine heard it right). The result is
+posted under the note (🎤) and read exactly like a typed message: a queued prompt, or the answer to an open question card.
+This is FluidVoice's design — word boost + custom dictionary + AI enhancement — with the vocabulary taken from where the
+prompt goes instead of a list the user maintains, and the enhancement given more than one hearing.
 
 ## 2. FluidVoice — what it is, and what this design took from it
 
@@ -35,7 +41,7 @@ FluidVoice ([altic-dev/FluidVoice](https://github.com/altic-dev/FluidVoice), GPL
 | Word boost | `ParakeetVocabularyStore`: up to 256 terms with aliases and weights (`parakeet_custom_vocabulary.json`: alpha 2.8, minCtcScore −2.2, minSimilarity 0.72, minCombinedConfidence 0.64, minTermLength 3) — FluidAudio's CTC keyword spotting | Whisper's `initial_prompt` (the glossary line), or sherpa-onnx per-stream **hotwords** (modified beam search + an Aho-Corasick context graph) |
 | Custom Dictionary | trigger spellings → replacement, after recognition; built-in entries `claud, clawed → Claude`, `post hoc → PostHog`, `hugging face → Hugging Face`, `fluid voice → FluidVoice`; replacement protection rules | The **dictionary pass** (§5.4): curated triggers (the same idea, `clawed → Claude` included) + spellings GENERATED from every vocabulary term, guarded by an everyday-English test |
 | Text formatting | filler-word removal, spoken punctuation ("comma", "new line"), dictation literals | Not taken: a prompt to Claude Code tolerates both; the engines punctuate |
-| AI Enhancement | optional post-processing by OpenAI / Groq / a custom provider, or the local ~3.5 GB "Fluid Intelligence" (not GPL) | Optional layer 3: one headless `claude -p` correction with the glossary (POC: `llm_fix.py`; app: §10, not built) |
+| AI Enhancement | optional post-processing by OpenAI / Groq / a custom provider, or the local ~3.5 GB "Fluid Intelligence" (not GPL) | The **correction** (§5.5), on by default: one hidden `claude -p` with the glossary and every engine's hearing (multi-hypothesis FUSION), on the PC's own Claude Code login (POC: `llm_fix.py`; app: `VoiceCorrect.h`) |
 | Where the words come from | the user's word list | **the session**: its folder name, the hard names of its CLAUDE.md, the developer glossary, the owner's dictionary (§5.1) |
 
 Nothing of FluidVoice's code is copied (GPLv3 vs this repository's AGPL is compatible, but no copy was needed): the
@@ -45,9 +51,12 @@ removal → custom dictionary → word-boost hit tracking), `Package.swift` (Flu
 ## 3. In Telegram
 
 1. The owner holds the mic in a session's topic and talks. The note gets 👀 (heard).
-2. The voice thread downloads it, transcribes it with the session's vocabulary, runs the dictionary pass.
+2. The voice thread downloads it, transcribes it with the session's vocabulary, runs the dictionary pass and the
+   correction (§5.5).
 3. The transcript is posted silently under the note: `🎤 Check why the ConPTY host in Agentmaster drops …` (italic; the
-   echo can be switched off, §9).
+   echo can be switched off, §9). A correction that ran and failed adds a line under it — `⚠️ not corrected: <why>`
+   (Claude Code not found, no answer within 60 s, an answer that was no correction) — and the note goes on with the
+   engine's words.
 4. The note is read as that text, through the same function as a typed message (`_handleTopicMessage`): queued as the next
    prompt with its reactions (✍ → 👨‍💻 → …) on the NOTE; or taken as the answer by an open question card (§21.30); or, for a
    note sent while Agentmaster was closed, asked about first (D2 — judged at the note's ARRIVAL, so a slow transcription
@@ -109,8 +118,48 @@ What the synthetic set taught the design (each one changed a rule, §5):
   terms become hotwords, with gentle scores; greedy + the dictionary pass is the safer Parakeet setting.
 * The spell checker knows "Pty" (as in "Pty Ltd"): an all-capital part is now judged by its lowercase spelling only.
 
-**The owner's recordings** (§7.1): pending — the topic got the sentences as message 14016 on 2026-10-27; this section gets
-the table when the notes are in.
+**The owner's recordings** (§7.1: three Telegram voice notes of 9, 14 and 14 s, 71 words, 14 terms, read by the owner on
+2026-10-27). Scored against what the owner SAID (`said.json`): every one of the eight engine configurations heard "then use
+Parakeet" where the sentence says "run" — a reading change, not a recognition error. The pipeline the app runs, layer by
+layer (runs `212550`, `212658`, `212744` in `Q:\agentmaster-voice\results\`):
+
+| Layer | WER | Terms | Cased |
+|---|---|---|---|
+| Whisper large-v3-turbo + the session glossary (Whisper's prompt) | 5.6 % | 100 % | 92.9 % |
+| + the dictionary pass | 5.6 % | 100 % | 100 % |
+| + the correction, Claude Sonnet 5.5, the transcript alone | 4.2–5.6 % | 100 % | 100 % |
+| + the correction, Claude Sonnet 5.5, with Parakeet's hearing too (FUSION) | **0.0 %, 3 runs of 3** | 100 % | 100 % |
+
+Every other configuration measured on the recordings:
+
+| Configuration | WER | Terms | Cased | Runs |
+|---|---|---|---|---|
+| Parakeet v2 greedy + dictionary + Sonnet 5.5 with the beam + hotwords hearing (fusion; CPU only) | 0.0 % | 100 % | 100 % | 1 |
+| Whisper turbo + glossary + dictionary + Haiku 5.5 (fusion) | 2.8 % | 100 % | 100 % | 1 |
+| Whisper turbo + glossary + dictionary + Haiku 5.5 (the transcript alone) | 2.8–4.2 % | 100 % | 100 % | 2 |
+| Parakeet v2 greedy + dictionary + a correction (Haiku or Sonnet, the transcript alone) | 2.8–4.2 % | 85.7–100 % | 78.6–100 % | 3 |
+| Parakeet v2 greedy + dictionary | 9.9 % | 78.6 % | 57.1 % | 3 |
+| Whisper large-v3 + glossary + dictionary | 11.3 % | 78.6 % | 78.6 % | 1 |
+| Parakeet v2 beam + hotwords + dictionary | 12.7 % | 71.4 % | 71.4 % | 1 |
+| The first matrix, before the speakable filter and against the intended sentence: Whisper turbo + glossary + dictionary (its best) | 8.5 % | 92.9 % | 92.9 % | 1 |
+| … the same matrix, engines alone: Whisper turbo · Parakeet v2 / v3 · Whisper large-v3 | 12.7 · 14.1 · 14.1 · 18.3 % | 64–79 % | 43–57 % | 1 |
+
+Time: the engines take 0.03–0.08 of the note's length; the correction adds 3–11 s with Sonnet 5.5 (2–5 s with Haiku 5.5),
+so in those runs a note was text 4–12 s after its file was on disk.
+
+What the recordings taught the design:
+* **Real speech ranks the engines differently.** The synthetic voice favored Whisper large-v3; the owner's voice favors
+  large-v3-turbo (5.6 % against 11.3 %, with the same glossary). The worker's default is turbo.
+* **Whisper's prompt was crowded with names nobody says.** The glossary held `lowerCamelCase` identifiers, three-part
+  compounds and two-letter versions (`v9`); the SPEAKABLE filter (§5.2) and a glossary in priority order (§5.1) took turbo
+  from 8.5 % to 5.6 % with every term right — before any model call.
+* **The correction needs a second hearing.** "Becode a Telegram voice note" (s2) is fixed only when Parakeet's "Decode the"
+  is in front of the model; given the transcript alone, Sonnet kept 4.2–5.6 %. Where two engines disagree, the audio was
+  unclear, and the model picks what fits the sentence and the glossary (§5.5).
+* **Sonnet, not Haiku.** Same prompt, same inputs: Haiku 5.5 moved between 2.8 % and 4.2 % from run to run; Sonnet 5.5 held
+  0.0 %. Sonnet is the default; Haiku stays a choice (faster, cheaper).
+* **The correction's prompt names no test term.** A first draft gave ConPTY and JSONL as examples; they were replaced with
+  terms that appear in no sentence, so the score is the method's and not the prompt's.
 
 ## 5. The session vocabulary
 
@@ -121,7 +170,7 @@ The reference is `tools/voice-poc/vocab.py`; `VoiceVocabulary.h` is its line-for
 
 | Source | Weight | Respell from everyday words? |
 |---|---|---|
-| The built-in developer glossary (`BUILTIN_GLOSSARY`: formats, protocols, audio, hardware, Windows, languages, tools, databases, AI models — ~170 terms) | 1 | yes (curated) |
+| The built-in developer glossary (`BUILTIN_GLOSSARY`, ~170 terms, in PRIORITY order: AI and speech, audio and media, hardware and OS, data formats, languages, tools, databases, generic words — every use that truncates cuts its END first, so Whisper's prompt keeps the AI and speech names a prompt to Claude Code says most) | 1 | yes (curated) |
 | The session's folder name (`Agentmaster`) | 3 | yes ("agent master" → Agentmaster) |
 | The hard names of the folder's CLAUDE.md (§5.2), at most 60, most frequent first | 2 | no ("session state" stays) |
 | The session title's hard words | 2 | no |
@@ -142,16 +191,21 @@ dictionary (an N edition without the language), every word reads as known: the s
 
 **Mining CLAUDE.md** keeps a hard, distinctive word seen at least twice, and drops code-only spellings nobody dictates (an
 underscore, `::`, a file name, a cmdlet like `Get-AppxPackage`, an error code like `C2039`), shouted English ("NOT",
-"BEFORE", a long all-caps name), two-letter acronyms seen fewer than 8 times, and compounds of everyday words. On this
-repository's CLAUDE.md (at `a935ca604`) that yields Agentmaster, Claude, XAML, ConPTY, MSIX, SDK, DuckDB, x64, … (60).
+"BEFORE", a long all-caps name), two-letter acronyms seen fewer than 8 times, and compounds of everyday words. It keeps
+only SPEAKABLE names, too: no `lowerCamelCase` identifier (`tabToken`, `kStateSettleMs`), nothing of three or more word
+parts (`WriteAllUtf8`, `SHGetKnownFolderPath`), no two-character token that is not an acronym (`v9`, `m5`). On the owner's
+recordings those identifiers had filled Whisper's prompt and pushed out the glossary words a note did hold (§4.4). On this
+repository's CLAUDE.md (at `a935ca604`) the mining yields Agentmaster, Claude, XAML, ConPTY, MSIX, SDK, DuckDB, x64, …
 
-### 5.3 The three uses
+### 5.3 The four uses
 
 1. **Whisper's prompt** — `A developer dictates a prompt to Claude Code. Glossary: <terms>.`, highest weight LAST (Whisper
    keeps the last ~224 tokens and weighs the end most), cut from the start at ~700 characters.
 2. **Parakeet's hotwords** — `Agentmaster :3.0/ConPTY :2.5/JSONL :2.0/…`: hard terms only, scores 2.0 / 2.5 / 3.0 by weight,
    at most 96.
 3. **The dictionary pass** (§5.4) on whatever text the engine wrote — every engine, the endpoint's included.
+4. **The correction's glossary** (§5.5) — `Agentmaster, ConPTY, …`: the terms highest weight first, at most 160
+   (`GlossaryLine`): a model reads far more than Whisper's prompt holds.
 
 ### 5.4 The dictionary pass
 
@@ -166,6 +220,60 @@ a window is kept; a canonical window is left alone (the pass is idempotent).
 The owner's dictionary (`voiceDictionary`): one entry per line — `Word` (boost it, respell its generated forms) or
 `spoken form, other form => Word` (FluidVoice's trigger → replacement, explicit); `#` starts a comment.
 
+### 5.5 The correction (fusion)
+
+The reference is `tools/voice-poc/llm_fix.py`; `VoiceCorrect.h` is its C++ port (the prompt text byte for byte, the user
+prompt, the guard — held to it by goldens, §7.5), `VoiceCorrect.cpp` runs the call.
+
+**What the model gets.** A system prompt (written to `<profile>\voice\correct-system.txt` when it changed, read by claude
+through `--system-prompt-file`) and one user message:
+
+```
+Glossary: Agentmaster, ConPTY, … (§5.3, at most 160 terms)
+
+Transcripts of the same recording by different speech engines:
+A: <the primary engine's text, after the dictionary pass>
+B: <the second engine's text, after the dictionary pass>
+```
+
+— or `Transcript:\n<text>` when there is one hearing (a worker without fusion, the endpoint engine, or a second hearing
+equal to the first: an empty or identical alternative is dropped). The system prompt's rules: keep the speaker's words,
+their order and their meaning — never add, answer, summarize or rephrase; fix only recognition errors: a word that SOUNDS
+like a glossary term becomes that term with the glossary's spelling ("duck DB" → DuckDB, "win RT" → WinRT), a word that
+makes no sense in a developer's prompt becomes the similar-sounding word that does (an accent turns "thirty" into
+"dirty", "sheet" into "seat", kubectl into "kube control"), identifiers and acronyms get their usual casing, a stray filler
+or article the grammar rejects goes, numbers stay as written, punctuation is fixed; several transcripts are independent
+hearings — keep what they agree on, and for each disputed word choose the reading that fits the sentence, a developer's
+prompt and the glossary; nothing to fix → the transcript unchanged; the corrected message only. Its examples name no term
+of the evaluation's sentences.
+
+**The call** — the clean headless recipe (`BuildCorrectionArgs`): `claude.exe -p --model <model> --no-session-persistence
+--output-format json --strict-mcp-config --mcp-config {"mcpServers":{}} --system-prompt-file <file> --tools ""
+--permission-mode dontAsk --setting-sources "" --settings {verbose:false, env: CLAUDE_CODE_MAX_RETRIES=2,
+CLAUDE_CODE_RETRY_WATCHDOG=0, CLAUDE_CODE_EFFORT_LEVEL=low} <user message>`, through ClaudeStatus.h's `RunClaudeCapture`
+(hidden, in a kill-on-close job, NUL stdin, Agentmaster's environment minus every variable of a parent Claude Code session
+or tab, plus `AM_HARNESS=claude-status` so the Fleet Observer and the CLI skip it and `DISABLE_AUTOUPDATER=1`; the working
+folder `<profile>\voice`). No tools, no MCP server, no settings, hooks or CLAUDE.md, no session saved: the model sees the
+glossary and the hearings, nothing of the session's repository. The claude is the engine's (`Engine::claudeExePath`),
+read for each note.
+
+**The guard** (`AcceptCorrection`): the answer replaces the text only when it is not blank and its length is within
+`0.6 × before − 10` … `1.5 × before + 20` characters: a model that ANSWERED the prompt instead of correcting it is caught
+by its length. A refusal is logged to `voice.log` with the answer's first 200 characters.
+
+**Failure keeps the note.** No claude, a start failure, 60 s without an answer (`kCorrectionTimeoutMs`), an error result or
+a refused answer: the note goes on with the dictionary pass's text, the echo says `⚠️ not corrected: <why>`, and voice.log
+and hooks.log say why. An empty hearing skips the call.
+
+**Fusion.** A worker that runs two engines returns the second one's text as `alternatives` (§6.2); the app gives each the
+dictionary pass and hands them to the model as B (C, …). The POC worker's `--fuse <engine>` does it; on this PC Whisper
+large-v3-turbo on the GPU + Parakeet v2 (beam search + the session's hotwords) on the CPU, which costs the second engine's
+~1 s. The measurement (§4.4): fusion is what turns the correction from 4.2–5.6 % into 0.0 %.
+
+**Cost and privacy.** One model call per note on the PC's own Claude Code login (its plan or API key); Sonnet 5.5 by
+default (`voiceCorrectionModel`), Haiku 5.5 or off in the cog. The TEXT reaches Anthropic — the same text then becomes the
+session's prompt, which reaches Anthropic anyway; the audio never does.
+
 ## 6. The integration
 
 ### 6.1 The seam
@@ -174,17 +282,22 @@ The owner's dictionary (`voiceDictionary`): one entry per line — `Word` (boost
 → the corrected transcript, `Configure(settings)`, `Tick()` (the idle end), `Shutdown()`, `Describe()`. The app layer sets the
 factory (`TerminalPage.AgentEngine.cpp`, beside the Search agent's): `Voice::MakeVoiceTranscriber()` (`VoiceTranscriber.cpp`)
 — for each note it builds the session vocabulary (cached while the session's folder, title, CLAUDE.md stamp and the
-dictionary are unchanged), runs the engine, runs the dictionary pass and folds the text into one paragraph. Engine.cpp never
-names it; the harness has no factory and answers "not available in this build".
+dictionary are unchanged), runs the engine, runs the dictionary pass on every hearing, runs the correction (§5.5, with the
+note's `claudeExe`, which the service reads from `MessagingHooks::claudeExe` for each note) and folds the text into one
+paragraph. The result carries the engine's own text (`raw`), the respellings, the other hearings, whether the correction
+changed the text, its time and its failure. Engine.cpp never names it; the harness has no factory and answers "not
+available in this build".
 
 ### 6.2 The voice worker protocol (v1)
 
 A VOICE WORKER is any program that speaks JSON lines on stdin / stdout (`VoiceProtocol.h`): `hello` (load the engine; say
 whether it takes a `prompt` and `hotwords`), `transcribe {path, language, prompt, hotwords}` → `{ok, text, audio_ms,
-decode_ms, engine}`, `quit`. Rules: stdout carries only protocol lines (anything else is logged and skipped); every request
-gets exactly one answer with its id; a failure is `{"ok":false,"error":…}`, never an exit. The app sends both `prompt` and
-`hotwords`: the worker uses what its engine takes. The vocabulary and the dictionary pass stay in the app, so every engine
-gets the same corrections.
+decode_ms, engine, alternatives?}`, `quit`. Rules: stdout carries only protocol lines (anything else is logged and skipped);
+every request gets exactly one answer with its id; a failure is `{"ok":false,"error":…}`, never an exit. The app sends both
+`prompt` and `hotwords`: the worker uses what its engine takes. `alternatives` (optional, v1-compatible: a reader that does
+not know it skips it) is a worker's OTHER engines' hearings of the same note, for the correction's fusion (§5.5); empty
+strings are dropped. The vocabulary, the dictionary pass and the correction stay in the app, so every engine gets the same
+corrections.
 
 `VoiceWorker.cpp` runs ONE worker per process: started hidden by the first note (`CREATE_SUSPENDED`, put into a kill-on-close
 job, then resumed — nothing it starts outlives Agentmaster), the three pipes passed by `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
@@ -194,11 +307,14 @@ worker (the next note starts a fresh one). It ends after `voiceWorkerIdleMinutes
 the engine KILLS the running worker from the UI thread without waiting (a note in flight then fails fast); its cleanup runs
 on the voice thread.
 
-`tools/voice-poc/voice_worker.py` is a worker for the POC's engines:
+`tools/voice-poc/voice_worker.py` is a worker for the POC's engines. The command measured best on the owner's recordings
+(§4.4) — Whisper large-v3-turbo on the GPU, with Parakeet v2 (beam + hotwords) on the CPU as the second hearing:
 
 ```
-"Q:\agentmaster-voice\venv\Scripts\python.exe" "K:\source\Agentmaster\tools\voice-poc\voice_worker.py" --engine whisper-large-v3+prompt
+"Q:\agentmaster-voice\venv\Scripts\python.exe" "K:\source\Agentmaster\tools\voice-poc\voice_worker.py" --engine whisper-large-v3-turbo+prompt --fuse parakeet-v2-beam+hotwords
 ```
+
+Without `--fuse` the worker returns one hearing and the correction works from it alone (4.2–5.6 % on the recordings).
 
 ### 6.3 The endpoint engine
 
@@ -243,17 +359,21 @@ A worker that ships with Agentmaster, so a fresh install reads voice notes with 
 | What | Where |
 |---|---|
 | A downloaded note | `<profile>\messaging\telegram\voice\<message id>.oga`, deleted right after its transcription |
-| The worker's stderr, its start / stop / idle end, each transcription's timings and respellings | `<profile>\voice.log` |
-| The service's lines | `hooks.log`: `[msg] <sid> voice note queued for transcription …`, `… transcribed (… chars, <engine>, … ms, N vocabulary fix(es))`, `… not transcribed …`; `[nav] remote telegram voice …` |
+| The correction's system prompt | `<profile>\voice\correct-system.txt`, rewritten when an update changes the prompt; `<profile>\voice\` is also the correction's working folder |
+| The worker's stderr, its start / stop / idle end, each transcription's timings, other hearings, respellings and correction (`, correction N ms (changed)` / `(unchanged)` / `FAILED after N ms: <why>`), a correction the guard refused | `<profile>\voice.log` |
+| The service's lines | `hooks.log`: `[msg] <sid> voice note queued for transcription …`, `… transcribed (… chars, <engine>, … ms, N vocabulary fix(es)[, corrected in N ms \| , correction kept it, N ms \| , correction failed: <why>])`, `… not transcribed …`; `[nav] remote telegram voice …` |
 
 ## 7. Evaluation and tests
 
 ### 7.1 The owner's recordings
 
-The three sentences of `tools/voice-poc/references.json` were posted in the topic (message 14016). The owner reads each as one
-voice note and sends "done"; `fetch_tg_voice.py fetch --after 14016 --before <done's id> --ids s1,s2,s3` recovers them
-through the bot without `getUpdates` (a silent forward gives the note's `file_id`, the forward is deleted at once, `getFile`
-+ the download) into `Q:\agentmaster-voice\recordings\` with a `manifest.json`. They stay on Q: (the repository is public).
+The three sentences of `tools/voice-poc/references.json` were posted in the topic (message 14016). The owner read each as one
+voice note (messages 14025, 14028, 14031: 9, 14 and 14 s) and sent "done"; `fetch_tg_voice.py fetch --after 14016 --before
+<done's id> --ids s1,s2,s3` recovered them through the bot without `getUpdates` (a silent forward gives the note's `file_id`,
+the forward is deleted at once, `getFile` + the download) into `Q:\agentmaster-voice\recordings\` with a `manifest.json`.
+They stay on Q: (the repository is public). `said.json` beside them records where the reading differs from the intended
+sentence (s2: "use Parakeet" for "run Parakeet" — all eight engine configurations heard "use"); the evaluation scores
+against it (`common.apply_said`).
 
 ### 7.2 Synthetic fixtures
 
@@ -263,13 +383,17 @@ it is never the evaluation.
 ### 7.3 The local test
 
 ```
-python eval_voice.py --engines whisper-large-v3+prompt --contexts session \
-    --expect "whisper-large-v3+prompt | ctx=session | dict" --max-wer 0.05 --min-cased 1.0
+python eval_voice.py --engines whisper-large-v3-turbo+prompt --contexts session --llm --llm-model claude-sonnet-5-5 \
+    --fuse parakeet-v2-beam+hotwords \
+    --expect "whisper-large-v3-turbo+prompt | ctx=session | dict+llm+fuse" --max-wer 0.05 --min-cased 1.0
 ```
 
 exits 1 when the configuration misses the bar (corpus WER ≤ 5 %, every term with its exact spelling), 2 when the recordings
-are missing. The session context is CLAUDE.md pinned at `a935ca604` (`--claude-md-rev`), the repository before this feature
-documented itself, so the test cannot grow easier as VOICE.md's words land in CLAUDE.md.
+are missing; it passed 3 runs of 3 at 0.0 % (§4.4). It is the app's pipeline: the same vocabulary, Whisper's prompt, the
+dictionary pass, the second hearing and the correction's prompt and guard (`llm_fix.py`, which `VoiceCorrect.h` matches by
+goldens). It calls Sonnet 5.5 three times (one per note) on this PC's Claude Code login. The session context is CLAUDE.md
+pinned at `a935ca604` (`--claude-md-rev`), the repository before this feature documented itself, so the test cannot grow
+easier as VOICE.md's words land in CLAUDE.md.
 
 ### 7.4 Generality
 
@@ -286,9 +410,18 @@ join `references.json` (`s4`…).
   dictionary text. The word test answers from `tests\voice\plain_words.txt`: the spell checker's answers the reference
   recorded, so the suite does not depend on the machine's dictionary; a word the port asks that the reference never did
   fails the suite (parity drift).
-* `TestVoiceProtocol` — the request lines (one line each, escaped), the answer reader, the prompt text.
+* `TestVoiceProtocol` — the request lines (one line each, escaped), the answer reader (`alternatives` included: strings
+  kept, empty ones dropped), the prompt text.
+* `TestVoiceCorrection` — `VoiceCorrect.h` against the goldens' `correction` section, which `make_goldens.py` writes from
+  `llm_fix.py`: the system prompt byte for byte, the glossary line at 160 and 5 terms, the user prompt with one hearing,
+  with two and three hearings and with a duplicate hearing; the guard's cases (a correction, a blank answer, an answer to
+  the prompt, a cut); the command line's quoting round-tripped through `CommandLineToArgvW` (quotes, backslashes, spaces,
+  line breaks, an empty argument) and the whole command (21 arguments, the JSON `--settings` intact, the user prompt last);
+  the JSON answer reader (an object, the last item of an array, `is_error`, not JSON, an empty array).
 
-Both pass standalone (190 checks; `cl` of `tests_voice.cpp` alone). The service's voice path needs Telegram: e2e.
+All three pass standalone (223 checks; `cl` of `tests_voice.cpp` alone) and in the whole isolated suite. No test calls a
+model (the correction's call, `VoiceCorrect.cpp`, is not linked into the harness): §7.3 is the test that does. The
+service's voice path needs Telegram: e2e.
 
 ### 7.6 E2E (later)
 
@@ -302,6 +435,9 @@ voice, a failing worker answered in the topic, a note with no session answered a
 
 * A local worker keeps the audio on this PC; the downloaded file is deleted after its transcription.
 * The endpoint engine sends the audio to its URL — off unless chosen; the cog's choice says so.
+* The correction (§5.5, on by default) sends the TEXT and the session's glossary to Anthropic through the PC's own Claude
+  Code login — the text that then becomes the session's prompt, which goes there anyway. It reads no file of the session;
+  its claude runs with no tools, no MCP server and no settings. `voiceCorrectionModel = off` stops it.
 * Keys (the endpoint's) live in Credential Manager per profile; never in settings.json, a log line or an error text.
 * The worker runs as the user, hidden, in a job that ends with Agentmaster; its command line is the owner's setting.
 * Only the paired owner's notes are read (the sender check comes first, H3).
@@ -319,14 +455,20 @@ voice, a failing worker answered in the topic, a note with no session answered a
 | `voiceDictionary` | "" | The owner's dictionary (§5.4). |
 | `voiceWorkerIdleMinutes` | 10 | 0–1440; the worker ends after this long without a note. |
 | `voiceEchoTranscript` | on | The transcript is posted under the note before it is read. |
+| `voiceCorrectionModel` | `claude-sonnet-5-5` | The correction's model (§5.5): `claude-sonnet-5-5` · `claude-haiku-5-5` · `off` (or ""); any other id typed into settings.json is passed to claude's `--model` as is (the cog shows it as "Another model" and keeps it). |
 
 ## 10. Open items
 
-1. **The owner's recordings** — fetch, run the matrix, fill §4.4, set the test's configuration and bar from them.
-2. **The bundled worker** (§6.4) — the native exe, the pinned runtime, the model download.
-3. **AI enhancement in the app** — a hidden `claude -p` correction (the `ClaudeStatusProbe` seam) behind a setting, if the
-   recordings show errors the dictionary pass cannot fix.
+1. **The bundled worker** (§6.4) — the native exe, the pinned runtime, the model download — with a SECOND HEARING for the
+   correction: Parakeet v2 greedy with a beam + hotwords pass of the same model as `alternatives` (one model, two decodings,
+   CPU only) reached 0.0 % with Sonnet 5.5 in its one run (§4.4); Whisper turbo when a GPU is there.
+2. **A new evaluation set** (§7.4) — three new sentences, unseen by the rules and the prompt, to confirm the 0.0 % is the
+   method's.
+3. **The correction's latency** — 3–11 s per note with Sonnet 5.5; a resident `claude` (stream-json, the agent harness's
+   process) would save claude's start on each call (not measured), if notes feel slow.
 4. **Voice in the 🔎 Search topic** — a spoken search request (today: "voice notes are read in a session's topic").
-5. **Hebrew** — Whisper large-v3 (or an ivrit.ai fine-tune) with `voiceLanguage = he`; Parakeet has no Hebrew.
+5. **Hebrew** — Whisper large-v3 (or an ivrit.ai fine-tune) with `voiceLanguage = he`; Parakeet has no Hebrew; the
+   correction's prompt is English-only.
 6. **Spoken commands** — "slash compact" → `/compact` (today a transcript is always prompt text).
-7. **E2E** (§7.6).
+7. **E2E** (§7.6) — with a fake worker that returns `alternatives`, and `voiceCorrectionModel = off` (no model in e2e) plus
+   one case with a fake claude for the correction's failure echo.

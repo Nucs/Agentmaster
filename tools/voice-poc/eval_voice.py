@@ -33,7 +33,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from common import (POC_SRC, RECORDINGS_DIR, RESULTS_DIR, SYNTHETIC_DIR, aggregate_wer, audio_duration_s,
+from common import (POC_SRC, RECORDINGS_DIR, RESULTS_DIR, SYNTHETIC_DIR, aggregate_wer, apply_said, audio_duration_s,
                     decode_audio, find_fixture, load_references, score_transcript)
 from engines import ENGINE_SPECS, build_engine
 from vocab import Vocabulary, session_vocabulary
@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-md-rev", default=DEFAULT_CLAUDE_MD_REV, help="commit whose CLAUDE.md is the context")
     ap.add_argument("--llm", action="store_true", help="also run the Claude correction layer")
     ap.add_argument("--llm-model", default="claude-haiku-5-5")
+    ap.add_argument("--fuse", default="", help="a SECOND engine spec: its dictionary-corrected text joins the Claude "
+                    "correction as another hearing of the same note (layer dict+llm+fuse; needs --llm)")
     ap.add_argument("--expect", default=None, help="the configuration a TEST run asserts")
     ap.add_argument("--max-wer", type=float, default=0.05)
     ap.add_argument("--min-cased", type=float, default=1.0)
@@ -115,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     folder = args.fixtures or (SYNTHETIC_DIR if args.synthetic else RECORDINGS_DIR)
-    refs = load_references()
+    # A recording is scored against what its reader SAID where that differs from the intended sentence (said.json).
+    refs = apply_said(folder, load_references())
     fixtures = [(r, find_fixture(folder, r.id)) for r in refs]
     missing = [r.id for r, f in fixtures if f is None]
     if missing:
@@ -127,6 +130,25 @@ def main(argv: list[str] | None = None) -> int:
     if contexts.get("session"):
         print(f"[eval] session vocabulary: {len(contexts['session'].terms)} terms "
               f"({sum(1 for t in contexts['session'].terms if t.source == 'context')} from the session)")
+
+    # The FUSION engine's own hearing of every note, per context (its dictionary pass applied), made once up front: the
+    # correction layer then gets it as an alternative transcript of the same recording.
+    fused: dict[str, dict[str, str]] = {}
+    if args.fuse and args.llm:
+        try:
+            second = build_engine(args.fuse)
+            for ctx_name, vocab in contexts.items():
+                if vocab is None:
+                    continue
+                fused[ctx_name] = {}
+                for ref, _f in fixtures:
+                    heard = second.transcribe(audio[ref.id], vocab).text
+                    fused[ctx_name][ref.id] = vocab.apply(heard)[0]
+            print(f"[eval] fusion engine {second.name} heard {len(fixtures)} notes per context")
+            del second
+        except Exception as exc:  # the fusion engine is optional: the run goes on without that layer
+            print(f"[eval] fusion engine {args.fuse}: cannot load ({exc})", file=sys.stderr)
+            fused = {}
 
     rows: list[dict] = []
     for spec in [s.strip() for s in args.engines.split(",") if s.strip()]:
@@ -140,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         for ctx_name, vocab in contexts.items():
             if biased and vocab is None:
                 continue  # a biasing engine without a vocabulary is the same as its unbiased twin
-            layers: dict[str, list[dict]] = {"raw": [], "dict": [], "dict+llm": []}
+            layers: dict[str, list[dict]] = {"raw": [], "dict": [], "dict+llm": [], "dict+llm+fuse": []}
             for ref, _f in fixtures:
                 samples = audio[ref.id]
                 if biased or ref.id not in unbiased_cache:
@@ -166,6 +188,15 @@ def main(argv: list[str] | None = None) -> int:
                             corrected, llm_secs = fixed, 0.0
                         layers["dict+llm"].append({"id": ref.id, "text": corrected, "seconds": secs + llm_secs,
                                                    "duration": dur, "llm_seconds": llm_secs})
+                        other = fused.get(ctx_name, {}).get(ref.id)
+                        if other is not None:
+                            try:
+                                merged, fuse_secs = llm_fix(fixed, vocab, model=args.llm_model, alternatives=(other,))
+                            except Exception as exc:  # as above: the dictionary text stands
+                                print(f"[eval] llm+fuse: {exc}", file=sys.stderr)
+                                merged, fuse_secs = fixed, 0.0
+                            layers["dict+llm+fuse"].append({"id": ref.id, "text": merged, "seconds": secs + fuse_secs,
+                                                            "duration": dur, "llm_seconds": fuse_secs, "fused_with": other})
             for layer, items in layers.items():
                 if not items:
                     continue

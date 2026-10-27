@@ -27,16 +27,22 @@ from vocab import Vocabulary
 #: The real claude.exe, never the Agentmaster PATH shim (which adds its hook settings to every call).
 CLAUDE_EXE = Path(os.environ.get("AMV_CLAUDE_EXE", str(Path.home() / ".local" / "bin" / "claude.exe")))
 
+# ⚠ The examples name NO word of the evaluation sentences (references.json): a correction prompt that quotes the test's own
+# terms would score itself. Keep it that way when editing.
 SYSTEM_PROMPT = """You fix speech-recognition errors in a software developer's dictated message to an AI coding agent.
-The message was spoken aloud and transcribed by a speech model; the glossary lists the technical terms of the
-developer's project and tools.
+The message was spoken aloud and transcribed by speech models; the glossary lists the technical terms of the
+developer's project and tools. The speaker may have an accent, so a word can come out as a similar-sounding word
+(for example "dirty" for "thirty", "seat" for "sheet", "kube control" for "kubectl").
 
 Rules:
-- Keep the speaker's words, their order and their meaning. Never add, drop, answer, summarize or rephrase anything.
+- Keep the speaker's words, their order and their meaning. Never add content, answer, summarize or rephrase.
 - Fix only recognition errors: a word that SOUNDS like a glossary term becomes that term with the glossary's exact
-  spelling (for example "con PTY" -> "ConPTY", "Jason L" -> "JSONL"); identifiers and acronyms get their usual casing;
-  quantities become digits only if the transcript already uses digits elsewhere, otherwise keep them as spoken;
-  punctuation is fixed.
+  spelling (for example "duck DB" -> "DuckDB", "win RT" -> "WinRT"); a word that makes no sense in a developer's prompt
+  becomes the similar-sounding word that does; identifiers and acronyms get their usual casing; a stray filler or
+  article the grammar rejects is dropped; numbers stay as the transcript writes them; punctuation is fixed.
+- When SEVERAL transcripts of the same recording are given, they are independent hearings by different engines: where
+  they agree, keep it; where they differ, choose for each disputed word the reading the audio most likely held - the
+  one that fits the sentence, a developer's prompt and the glossary. Output ONE message.
 - If nothing needs fixing, return the transcript unchanged.
 - Output ONLY the corrected message, with no quotes, labels or commentary."""
 
@@ -67,8 +73,46 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def accept_correction(before: str, after: str) -> bool:
+    """Whether a correction is plausible enough to replace the transcript: not empty, and within 0.6x-1.5x of its length
+    (plus slack for a short note). A correction never adds or drops content, so a much longer or shorter answer means the
+    model ANSWERED the prompt instead of fixing it - the transcript then stands. VoiceCorrect.h's AcceptCorrection is the
+    C++ twin (the goldens pin both).
+
+    Args:
+        before: The transcript the model was given (the primary engine's, after the dictionary pass).
+        after: The model's text.
+
+    Returns:
+        True to use the correction.
+    """
+    a = after.strip()
+    if not a:
+        return False
+    return 0.6 * len(before) - 10 <= len(a) <= 1.5 * len(before) + 20
+
+
+def build_user_prompt(text: str, glossary: str, alternatives: tuple[str, ...] = ()) -> str:
+    """The user message of one correction: the glossary, then the transcript - or, with alternatives, every engine's
+    transcript of the same recording labeled A, B, ... (the first is the primary engine's).
+
+    Args:
+        text: The primary transcript.
+        glossary: The glossary line.
+        alternatives: Other engines' transcripts of the same recording (identical ones are dropped).
+
+    Returns:
+        The prompt text.
+    """
+    others = [a for a in alternatives if a and a != text]
+    if not others:
+        return f"Glossary: {glossary}\n\nTranscript:\n{text}\n"
+    lines = [f"{chr(ord('A') + i)}: {t}" for i, t in enumerate([text] + others)]
+    return f"Glossary: {glossary}\n\nTranscripts of the same recording by different speech engines:\n" + "\n".join(lines) + "\n"
+
+
 @lru_cache(maxsize=256)
-def _fix_cached(text: str, glossary: str, model: str, effort: str) -> tuple[str, float]:
+def _fix_cached(text: str, glossary: str, model: str, effort: str, alternatives: tuple[str, ...] = ()) -> tuple[str, float]:
     """One correction call (cached: the evaluation sends the same transcript from several configurations).
 
     Args:
@@ -76,6 +120,7 @@ def _fix_cached(text: str, glossary: str, model: str, effort: str) -> tuple[str,
         glossary: The glossary line.
         model: The model id ("claude-haiku-5-5").
         effort: The effort level ("low").
+        alternatives: Other engines' transcripts of the same recording (multi-hypothesis fusion).
 
     Returns:
         (the corrected text, the wall seconds).
@@ -87,7 +132,7 @@ def _fix_cached(text: str, glossary: str, model: str, effort: str) -> tuple[str,
         sp = Path(tmp) / "system.txt"
         sp.write_text(SYSTEM_PROMPT, encoding="utf-8")
         prompt = Path(tmp) / "prompt.txt"
-        prompt.write_text(f"Glossary: {glossary}\n\nTranscript:\n{text}\n", encoding="utf-8")
+        prompt.write_text(build_user_prompt(text, glossary, alternatives), encoding="utf-8")
         settings = json.dumps({
             "verbose": False,
             "env": {"CLAUDE_CODE_MAX_RETRIES": "2", "CLAUDE_CODE_RETRY_WATCHDOG": "0", "CLAUDE_CODE_EFFORT_LEVEL": effort},
@@ -113,8 +158,10 @@ def _fix_cached(text: str, glossary: str, model: str, effort: str) -> tuple[str,
 
 
 def llm_fix(text: str, vocab: Vocabulary | None, model: str = "claude-haiku-5-5", effort: str = "low",
-            max_terms: int = 160) -> tuple[str, float]:
-    """Corrects a transcript with a headless Claude Code call, given the session glossary.
+            max_terms: int = 160, alternatives: tuple[str, ...] = ()) -> tuple[str, float]:
+    """Corrects a transcript with a headless Claude Code call, given the session glossary - and, for multi-hypothesis
+    FUSION, other engines' transcripts of the same recording (where engines disagree, the audio was unclear: the model
+    picks per disputed word, VOICE.md section 5.5).
 
     Args:
         text: The transcript (after or before the dictionary pass).
@@ -122,6 +169,7 @@ def llm_fix(text: str, vocab: Vocabulary | None, model: str = "claude-haiku-5-5"
         model: The model id.
         effort: The effort level.
         max_terms: The most glossary terms sent (highest weight first).
+        alternatives: Other engines' transcripts (after their own dictionary pass); empty = a single-engine correction.
 
     Returns:
         (the corrected text, the wall seconds of the call; 0.0 when the result came from the cache).
@@ -129,8 +177,11 @@ def llm_fix(text: str, vocab: Vocabulary | None, model: str = "claude-haiku-5-5"
     Raises:
         RuntimeError: The call failed (the caller keeps the uncorrected text).
     """
-    glossary = ", ".join(t.text for t in (vocab.ranked()[:max_terms] if vocab else []))
+    glossary = vocab.glossary_line(max_terms) if vocab else ""
     hits_before = _fix_cached.cache_info().hits
-    fixed, seconds = _fix_cached(text, glossary, model, effort)
+    fixed, seconds = _fix_cached(text, glossary, model, effort, tuple(alternatives))
     from_cache = _fix_cached.cache_info().hits > hits_before
+    if not accept_correction(text, fixed):
+        # The model answered instead of correcting (or said nothing): the transcript stands, as in the app.
+        fixed = text
     return fixed, (0.0 if from_cache else seconds)

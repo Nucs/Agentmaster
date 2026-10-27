@@ -1464,6 +1464,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setMsgVoiceEcho{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceIdle{ nullptr }; // minutes; "" = 10
         winrt::Windows::UI::Xaml::Controls::TextBox _setMsgVoiceDictionary{ nullptr }; // one entry per line
+        // The CORRECTION's model (AppSettings::voiceCorrectionModel, VoiceCorrect.h): 0 Sonnet 5.5 (the default), 1 Haiku 5.5,
+        // 2 off, 3 the model id settings.json named that has no item of its own (added at load only then, so a Save keeps it
+        // instead of quietly replacing it with the default).
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setMsgVoiceCorrection{ nullptr };
+        std::wstring _msgVoiceCorrectionCustom; // that model id ("" = none: the combo has its three items only)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setMsgVoiceStatus{ nullptr };
         /// <summary>
         /// Refills the "links point to" dropdown with this PC's LAN URLs on the port the box names (else the default), keeping

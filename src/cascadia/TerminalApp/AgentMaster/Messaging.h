@@ -208,8 +208,9 @@ namespace Agentmaster::Msg
         std::function<std::vector<WindowCensus>(uint32_t timeoutMs)> windowCensus;
         // §21.40: the native claude.exe the engine launches sessions with (Engine::claudeExePath; "" = Claude Code not found), for
         // /status's account and plan usage, which Claude Code prints itself (ClaudeStatusProbe). Called on the poll thread when a
-        // report starts (_startClaudeStatusReport hands the path to the report's worker). Empty = /status reports no account and
-        // no usage ("Claude Code was not found on this PC").
+        // report starts (_startClaudeStatusReport hands the path to the report's worker), and (§21.43) on the voice thread for
+        // each voice note, whose correction runs it (VoiceCorrect.h). Empty = /status reports no account and no usage ("Claude
+        // Code was not found on this PC"), and voice notes go uncorrected.
         std::function<std::wstring()> claudeExe;
     };
 

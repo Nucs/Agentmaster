@@ -153,6 +153,27 @@ def load_references(path: Path | None = None) -> list[Reference]:
     return [Reference(id=s["id"], text=s["text"], terms=list(s.get("terms", []))) for s in doc["sentences"]]
 
 
+def apply_said(folder: Path, refs: list[Reference]) -> list[Reference]:
+    """The references to score a fixture folder against: a recording where the speaker SAID something else than the intended
+    sentence ("use" for "run") is scored against what was said, read from ``<folder>/said.json`` ({"said": {id: text}}).
+
+    A correct transcript of the audio must not count as an error because the reader changed a word; the intended sentence
+    stays in references.json. Only a change every engine agrees on belongs in said.json (the file says how it was decided).
+
+    Args:
+        folder: The fixture folder.
+        refs: The intended references.
+
+    Returns:
+        New references (the same terms; the text replaced where said.json names the id).
+    """
+    said_file = Path(folder) / "said.json"
+    if not said_file.is_file():
+        return refs
+    said = json.loads(said_file.read_text(encoding="utf-8")).get("said", {})
+    return [Reference(id=r.id, text=said.get(r.id, r.text), terms=list(r.terms)) for r in refs]
+
+
 def find_fixture(folder: Path, ref_id: str) -> Path | None:
     """Finds the audio file of one sentence in a fixture folder: ``<id>.<any audio extension>``.
 
