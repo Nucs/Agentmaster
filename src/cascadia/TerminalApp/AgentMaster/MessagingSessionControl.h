@@ -10,9 +10,9 @@
 //                  stops (Claude Code writes "[Request interrupted by user]" and waits; the runner's interrupt hold parks an Auto
 //                  queue until the user's next message, DELIVERY.md §14), a permission or question dialog is turned down, an open
 //                  menu closes, and at rest with an empty box nothing happens. It asks nothing first: the button IS the key, and
-//                  what it does is undone by the next message ("go on"). The card's Main page shows it beside ⚙ Session while a
-//                  turn is in flight (Running, Needs approval: the moment it is wanted, one tap away); the Session page shows it
-//                  whenever the session's claude reads keys.
+//                  what it does is undone by the next message ("go on"). Only the card's Session page shows it (⚙ Session, the
+//                  row above ◀ Back), whenever the session's claude reads keys — the user's rule of 2026-10-28, "The ESC button
+//                  should be only inside Sessions menu": it no longer sits beside ⚙ Session on Main while a turn runs.
 //   🌙 Deactivate   the tab menu's "Deactivate ▸ Deactivate Tab": claude stops (its ConPTY closes with a graceful CTRL_CLOSE), the
 //                  tab keeps its place, title, color, tags, queue and runner mode, and the conversation resumes when the tab is
 //                  entered or activated, or when a message arrives in its topic. At rest it goes at once; while a turn is in
@@ -100,8 +100,9 @@ namespace Agentmaster::Msg
     }
 
     /// <summary>
-    /// Whether a session has a turn in flight in an open tab: what puts ⎋ Esc beside ⚙ Session on the card's Main page, and what
-    /// makes 🌙 Deactivate and /deactivate ask before they park (the turn would be cut off).
+    /// Whether a session has a turn in flight in an open tab: what makes 🌙 Deactivate and /deactivate ask before they park (the
+    /// turn would be cut off), and what /interrupt's question reads. (It no longer places ⎋ Esc on the card's Main page: the user's
+    /// rule of 2026-10-28 keeps Esc on the Session page only.)
     /// </summary>
     /// <param name="s">The session (a lean record is enough).</param>
     /// <returns>True for a live session in Running or NeedsApproval.</returns>

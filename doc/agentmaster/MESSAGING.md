@@ -12,7 +12,8 @@
 > **Where each part runs** (checked 2026-10-28 against git and the commit each installed `TerminalApp.dll` bakes):
 > PRODUCTION 0.8.0.0 (the installed MSIX of release v0.8.0, built from 7ee5fadcc, since 2026-10-22) holds everything
 > through §21.35, §21.32.4 included (its file links stay Off until switched on in the cog); DEV 0.0.1.38 (a Debug build
-> of 1e0076bc6 by the build server, since 2026-10-28) holds everything through §21.44; §21.32–§21.32.3 and §21.36 are
+> of 1e0076bc6 by the build server, since 2026-10-28) holds everything through §21.44 (but not §21.41's move of ⎋ Esc to the
+> Session page alone, 2026-10-28, which is in no build yet); §21.32–§21.32.3 and §21.36 are
 > research and design — §21.32.4's route home (Cloudflare, the tunnel, the fastrun relay) is LIVE —, §22 design only. A
 > heading or note below that still says NOT BUILT for §21.13.6 or §21.17.4 – §21.25 is older than these builds. **Known bugs, not fixed: §21.21.** One bot per install since 2026-10-17: the DEV
 > install polls `@ClaudeSessionsDebugGateBot`, the RELEASE install `@ClaudeSessionsGateBot` (the dev bot from 2026-10-16
@@ -5891,9 +5892,14 @@ input box, and `/deactivate`'s line said "Parked" whatever the window did. They 
 
 **Where the buttons are.**
 
+> The user's rule (2026-10-28, after dev 0.0.1.38): "The ESC button should be only inside Sessions menu". 0.0.1.38 also showed
+> [⚙️ Session] [⎋ Esc] on Main while a turn was in flight, where a tap meant for ⚙️ Session could stop the turn. Since then ⎋ Esc
+> is on the Session page only, in every state (`BuildCardButtonRows`; NOT BUILT yet). `CardButtonFacts::turnInFlight` stays
+> (no button reads it now), so the struct keeps its layout and the change needs no purged build.
+
 | Page | Change |
 |---|---|
-| **Main** | [⚙️ Session] [⎋ Esc] while a turn is in flight: Running, or Needs approval (a permission or question dialog). Error and Done keep [🔄 Restart Session] there and a parked tab [▶ Reactivate]; at rest the cog stays alone. |
+| **Main** | No ⎋ Esc, a turn in flight included (the rule above). Error and Done keep [🔄 Restart Session] there and a parked tab [▶ Reactivate]; otherwise the cog stays alone. |
 | **Session** | a new row right above ◀ Back: [⎋ Esc] [🌙 Deactivate] while the session's claude runs. ⎋ Esc only for a Claude session whose claude reads keys (not Codex, not an exited claude); 🌙 Deactivate only for a started tab Agentmaster launched (not an adopted shell tab, not a parked one). No row for a parked tab or a closed session. Every other button keeps its row. |
 
 The data: `c:esc:<id>` (42 bytes) and `c:deactivate:<id>` (49 bytes, with `c:newsession:`, `c:reactivate:` and `c:transcript:`
@@ -5966,6 +5972,12 @@ recorded lines (`/W3 /WX` + its `/we` list): `TerminalPage.AgentMessaging.cpp`, 
 `Messaging.Files.cpp`'s line) pass; five negative controls (an unknown member in each new branch, a call with a missing
 argument, two `static_assert`s on the new header's values) fail with exactly C2039 / C2660 / C2338 at their lines. The CLI
 builds none of the changed files. In dev since 0.0.1.38; nothing tried live yet.
+The rule of 2026-10-28 (Esc on the Session page only) changed or added four checks in section 1c:
+- Main is the cog alone for Running, Needs approval and an adopted claude;
+- no state of the ten puts Esc on Main;
+- a turn in flight keeps Esc on its Session page.
+The run (HEAD plus that change): 10,604 checks, only the 3 known failures. With the old `MessagingModels.h` exactly those four
+fail. `cl /Zs` of all 111 TerminalAppLib units over a shadow tree passes. No data member changed, so no purge is needed for it.
 ⚠ `MessagingService` gained a data member (`_escPressMs`) and `CardButtonFacts` three: the next build purges anyway (§21.40).
 
 **Not changed, still open.**
@@ -5975,12 +5987,13 @@ builds none of the changed files. In dev since 0.0.1.38; nothing tried live yet.
 - A turn the user stops this way and later restarts is asked about like any interrupted turn (HOOKS.md "Interrupted turns").
 
 **Check after the build** (dev, the bot):
-1. A session mid-turn: its card's Main page shows [⚙️ Session] [⎋ Esc]; ⎋ Esc → the toast "⎋ Esc pressed — the turn stops …",
+1. A session mid-turn: its card's Main page shows [⚙️ Session] alone (since the rule of 2026-10-28); ⚙️ Session → [⎋ Esc]
+   [🌙 Deactivate] above ◀ Back; ⎋ Esc → the toast "⎋ Esc pressed — the turn stops …",
    the turn stops at the PC (`[Request interrupted by user]` in the transcript), the card turns to Waiting for you and its Esc
    goes; hooks.log `[esc] <sid8> Telegram's Esc -> pressed`. With an Auto runner and a queued prompt: `[interrupt-hold]`.
 2. A double tap on ⎋ Esc: one Esc only, the second tap's toast "⎋ Esc went a moment ago …"; no Rewind menu at the PC.
 3. ⎋ Esc while a delivery types (queue a long prompt, tap as it goes): "A prompt is being typed …", nothing typed (`[esc] … busy`).
-4. A permission dialog (Needs approval): ⎋ Esc on Main turns it down at the PC, and the turn stops.
+4. A permission dialog (Needs approval): ⎋ Esc on the Session page turns it down at the PC, and the turn stops.
 5. ⚙️ Session on a waiting session: the row [⎋ Esc] [🌙 Deactivate] above ◀ Back; 🌙 Deactivate → "🌙 Deactivated …", the tab
    parks at the PC (its dot half-hollow), the card shows ▶ Reactivate; a message in the topic resumes it.
 6. 🌙 Deactivate mid-turn: the question in the thread and the toast "A turn is running — deactivating would cut it off; confirm
