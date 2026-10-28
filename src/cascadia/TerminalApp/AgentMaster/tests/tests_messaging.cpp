@@ -2720,4 +2720,82 @@ void TestMessagingStateFileLoad()
     ResetStateFileGuardForTests();
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+
+    // PERSISTENCE.md §17: the bot's state.json across versions. A save keeps what a newer build wrote into a topic, and the load
+    // repairs a state.json an OLDER build saved without it — from the shadow, volatile members excepted.
+    {
+        const std::wstring profile = std::wstring{ tmp } + L"am-msgcompat-" + NewSessionId();
+        const std::wstring stateFile = profile + L"\\messaging\\telegram\\state.json";
+        std::filesystem::create_directories(std::filesystem::path{ stateFile }.parent_path());
+        ResetStateFileGuardForTests();
+        ResetStateDocumentsForTests();
+        SetStateRepairSnapshotsInBackground(false);
+        MessagingState st;
+        st.botUsername = L"bot";
+        TopicRecord topic;
+        topic.sessionId = L"aaaaaaaa-0000-4000-8000-0000000000e1";
+        topic.threadId = 77;
+        topic.changeLineHeld = true; // a change line held for the history replay: VOLATILE (the bot clears it once posted)
+        topic.changeLineFromTitle = L"old title";
+        st.topics[topic.sessionId] = topic;
+        // A newer build's state.json: a member it added to the topic.
+        json::Value newer = StateToJson(st);
+        for (auto& [k, v] : newer.members)
+        {
+            if (k == L"topics")
+            {
+                v.arr[0].Set(L"futureTopicMember", json::Value::MkStr(L"F"));
+            }
+        }
+        writeBytes(stateFile, Profiles::detail::WideToUtf8(json::Dump(newer)));
+        // This build saves (the service's _saveStateIfDirty does exactly this): the newer member is kept, the file stamped,
+        // the shadow written.
+        auto prepared = PrepareStateDocument(stateFile, StateToJson(st), &MessagingStateRoundTrip);
+        CHECK(prepared.has_value(), "bot state compat: (setup) the save prepares");
+        if (prepared)
+        {
+            writeBytes(stateFile, Profiles::detail::WideToUtf8(prepared->text));
+            NoteStateDocumentWrittenIn(profile, stateFile, *prepared);
+        }
+        const auto saved = json::Parse(Profiles::detail::Utf8ToWide(readBytes(stateFile)));
+        const auto* topics = saved ? saved->Find(L"topics") : nullptr;
+        CHECK(topics && topics->arr.size() == 1 && topics->arr[0].StrAt(L"futureTopicMember") == L"F", "bot state compat: a save keeps the newer build's topic member");
+        const std::wstring shadow = profile + L"\\shadow\\messaging\\telegram\\state.json";
+        CHECK(std::filesystem::exists(std::filesystem::path{ shadow }), "bot state compat: ...and writes the shadow");
+        CHECK(topics && topics->arr.size() == 1 && topics->arr[0].BoolAt(L"changeLineHeld"), "bot state compat: (setup) the shadow holds the held change line");
+        // An OLDER build saves state.json: no stamp, no futureTopicMember, and the held line posted and cleared.
+        MessagingState olderState = st;
+        olderState.topics[topic.sessionId].changeLineHeld = false;
+        olderState.topics[topic.sessionId].changeLineFromTitle.clear();
+        writeBytes(stateFile, Profiles::detail::WideToUtf8(json::Dump(StateToJson(olderState))));
+        {
+            // The shadow is older than that save.
+            FILETIME now{};
+            ::GetSystemTimeAsFileTime(&now);
+            ULARGE_INTEGER t{};
+            t.LowPart = now.dwLowDateTime;
+            t.HighPart = now.dwHighDateTime;
+            t.QuadPart -= 3600ull * 10'000'000ull;
+            FILETIME back{ t.LowPart, t.HighPart };
+            const HANDLE h = ::CreateFileW(shadow.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+            CHECK(h != INVALID_HANDLE_VALUE && ::SetFileTime(h, nullptr, nullptr, &back), "bot state compat: (setup) the shadow is older than the older build's save");
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                ::CloseHandle(h);
+            }
+        }
+        ResetStateDocumentsForTests(); // the bot's next start
+        const auto load = LoadMessagingStateFileIn(profile, stateFile);
+        const auto repaired = json::Parse(Profiles::detail::Utf8ToWide(readBytes(stateFile)));
+        const auto* rtopics = repaired ? repaired->Find(L"topics") : nullptr;
+        CHECK(load.fromFile && load.state.topics.size() == 1, "bot state compat: the load still reads its topic map");
+        CHECK(rtopics && rtopics->arr.size() == 1 && rtopics->arr[0].StrAt(L"futureTopicMember") == L"F",
+              "bot state compat: the member the older build dropped is back from the shadow");
+        CHECK(rtopics && rtopics->arr.size() == 1 && !rtopics->arr[0].BoolAt(L"changeLineHeld"),
+              "bot state compat: a VOLATILE member (a held change line the older build cleared) is not brought back");
+        SetStateRepairSnapshotsInBackground(true);
+        ResetStateDocumentsForTests();
+        ResetStateFileGuardForTests();
+        std::filesystem::remove_all(std::filesystem::path{ profile }, ec);
+    }
 }

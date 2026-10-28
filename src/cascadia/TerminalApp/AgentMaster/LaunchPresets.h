@@ -2313,11 +2313,12 @@ namespace Agentmaster
 
     // ===== launch-presets.json ===============================================================
 
-    // Serialize the config (compact JSON). Empty sparse maps and default flags are left out. The "seededTemplates"
-    // list of release 0.6.8.18 is never written: a file without it is never pruned (DropUntouchedAutoAddedPresets).
+    // The config as the launch-presets.json DOCUMENT (what LaunchPresetsConfigToJson dumps; PERSISTENCE.md §17's save keeps
+    // what the file holds beyond it). Empty sparse maps and default flags are left out. The "seededTemplates" list of release
+    // 0.6.8.18 is never written: a file without it is never pruned (DropUntouchedAutoAddedPresets).
     //   cfg - the config.
-    // Returns the file text.
-    inline std::wstring LaunchPresetsConfigToJson(const LaunchPresetsConfig& cfg)
+    // Returns the document. Throws std::bad_alloc only.
+    inline json::Value LaunchPresetsConfigToDocument(const LaunchPresetsConfig& cfg)
     {
         json::Value root = json::Value::MkObj();
         root.Set(L"version", json::Value::MkNum(1));
@@ -2371,26 +2372,37 @@ namespace Agentmaster
             presets.Push(std::move(o));
         }
         root.Set(L"presets", std::move(presets));
-        return json::Dump(root);
+        return root;
     }
 
-    // Parse the config. Tolerant by design: a missing or unreadable file reads as an EMPTY config (no preset: the
-    // menus then offer "Add presets…"), a malformed entry is skipped, and duplicate ids keep the first. A file
-    // written by release 0.6.8.18 also loses the template presets that build added by itself and the user never
-    // changed (DropUntouchedAutoAddedPresets, run on its "seededTemplates" list).
-    //   text            - the file text.
+    // Serialize the config (compact JSON): LaunchPresetsConfigToDocument, dumped.
+    //   cfg - the config.
+    // Returns the file text. Throws std::bad_alloc only.
+    inline std::wstring LaunchPresetsConfigToJson(const LaunchPresetsConfig& cfg)
+    {
+        return json::Dump(LaunchPresetsConfigToDocument(cfg));
+    }
+
+    // Parse the config from the parsed launch-presets.json document. Tolerant by design: a document that is not an object
+    // reads as an EMPTY config (no preset: the menus then offer "Add presets…"), a malformed entry is skipped, and
+    // duplicate ids keep the first. A file written by release 0.6.8.18 also loses the template presets that build added
+    // by itself and the user never changed (DropUntouchedAutoAddedPresets, run on its "seededTemplates" list) — which is
+    // why PERSISTENCE.md §17's save drops the elements this loader drops (keepDropped false) and why the list, read here,
+    // counts as understood and is never written back.
+    //   doc              - the parsed document (read in place: the save's lookup evidence is recorded on it).
     //   droppedAutoAdded - when not null, receives the ids of the presets that cleanup left out (the OS loader logs
     //                      them once per file stamp); cleared first.
-    // Returns the config (never throws on bad input).
-    inline LaunchPresetsConfig LaunchPresetsConfigFromJson(std::wstring_view text, std::vector<std::wstring>* droppedAutoAdded = nullptr)
+    // Returns the config (never throws on bad input; std::bad_alloc only).
+    inline LaunchPresetsConfig LaunchPresetsConfigFromDocument(const json::Value& doc, std::vector<std::wstring>* droppedAutoAdded = nullptr)
     {
         if (droppedAutoAdded)
         {
             droppedAutoAdded->clear();
         }
         LaunchPresetsConfig cfg;
-        const auto parsed = json::Parse(text);
-        if (!parsed || parsed->type != json::Value::Type::Obj)
+        // Read through a pointer named as before, so the body below is the one the text overload always ran.
+        const json::Value* const parsed = &doc;
+        if (parsed->type != json::Value::Type::Obj)
         {
             return cfg;
         }
@@ -2463,5 +2475,24 @@ namespace Agentmaster
             *droppedAutoAdded = std::move(dropped);
         }
         return cfg;
+    }
+
+    // Parse the config from the file's text: LaunchPresetsConfigFromDocument over the parsed text; text that is not JSON
+    // reads as an EMPTY config.
+    //   text             - the file text.
+    //   droppedAutoAdded - as LaunchPresetsConfigFromDocument.
+    // Returns the config (never throws on bad input; std::bad_alloc only).
+    inline LaunchPresetsConfig LaunchPresetsConfigFromJson(std::wstring_view text, std::vector<std::wstring>* droppedAutoAdded = nullptr)
+    {
+        if (droppedAutoAdded)
+        {
+            droppedAutoAdded->clear();
+        }
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return LaunchPresetsConfig{};
+        }
+        return LaunchPresetsConfigFromDocument(*parsed, droppedAutoAdded);
     }
 }

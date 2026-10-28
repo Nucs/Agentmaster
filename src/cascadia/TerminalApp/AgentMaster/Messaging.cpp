@@ -1491,8 +1491,30 @@ namespace Agentmaster::Msg
 
     // ===== the state file ====================================================================
 
+    json::Value MessagingStateRoundTrip(const json::Value& disk)
+    {
+        auto state = StateFromJson(disk);
+        return state ? StateToJson(*state) : json::Value::MkObj();
+    }
+
     MessagingStateFileLoad LoadMessagingStateFile(const std::wstring& stateFile)
     {
+        return LoadMessagingStateFileIn(AgentmasterStateDir(), stateFile);
+    }
+
+    MessagingStateFileLoad LoadMessagingStateFileIn(const std::wstring& profileDir, const std::wstring& stateFile)
+    {
+        // PERSISTENCE.md §17, before anything of this bot start writes the file: a state.json an OLDER Agentmaster saved since a
+        // build that keeps unknown fields wrote it (no writer stamp, newer than its shadow) gets back the members that build
+        // did not know. The volatile ones — a change line held for the history replay, the replay's last prompt line — are
+        // cleared by the bot once it acted, so they are never brought back.
+        static const std::set<std::wstring, std::less<>> kVolatile = {
+            L"topics[].changeLineHeld",
+            L"topics[].changeLineFromTitle",
+            L"topics[].changeLineFromSquare",
+            L"topics[].historyPromptMessageId",
+        };
+        RepairStateFileWrittenByOlderBuild(profileDir, stateFile, L"messaging\\telegram\\state.json", &MessagingStateRoundTrip, true, &kVolatile);
         MessagingStateFileLoad out;
         // The startup budget: the topic map is read once per bot start, and every topic the bot keeps depends on it.
         const StateFileRead read = ReadStateFileUtf8(stateFile, kStartupStateReadRetryBudgetMs);
@@ -1623,7 +1645,15 @@ namespace Agentmaster::Msg
             _stateProgressDirty = false;
             _lastStateSaveMs = now;
         }
-        std::string bytes = Profiles::detail::WideToUtf8(json::Dump(doc));
+        // PERSISTENCE.md §17: what state.json holds that this build does not understand (a newer build's members, topics it
+        // cannot read) is put back into the document, and the writer stamp leads it. A file of a NEWER format is not written
+        // at all (logged once): the newer build finds its topic map as it left it.
+        auto prepared = PrepareStateDocument(_stateFile, std::move(doc), &MessagingStateRoundTrip);
+        if (!prepared)
+        {
+            return;
+        }
+        std::string bytes = Profiles::detail::WideToUtf8(prepared->text);
         // A save of the bytes the file already holds writes nothing — no copy, no write, no flush. Several paths mark the state
         // dirty with values that did not change (a stamp written again, a flag set again); this gate makes them cost a
         // serialization at most, never a disk write.
@@ -1667,6 +1697,8 @@ namespace Agentmaster::Msg
         // The file holds what this service just wrote: stamp it, so the guard's next check of it is one stat until someone
         // else changes it (and a keep mark from the load is spent: the copy was made before this write).
         MarkStateFileSafeToReplace(_stateFile);
+        // PERSISTENCE.md §17: the residue the text carries becomes the file's, and the shadow follows (throttled).
+        NoteStateDocumentWritten(_stateFile, *prepared);
     }
 
     // ===== the threads =======================================================================

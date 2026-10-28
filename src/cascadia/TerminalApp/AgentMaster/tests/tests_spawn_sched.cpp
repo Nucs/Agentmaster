@@ -22,6 +22,7 @@
 #include "m5_tests.h"
 
 #include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
+#include <sddl.h> // PERSISTENCE.md §17: an ACL that denies reading settings.json (TestUpdaterVersionLogic)
 #include "../PortableInstall.h" // the portable first-launch INSTALL question - the pure pieces (TestPortableInstall)
 #include "../CmdPathLimit.h" // the PATH-length guard behind the Ctrl+G fix - pure rule + Win32 probe (TestCmdPathLimit)
 #include "../StartupGuard.h" // the startup-deadlock fix - known-folder pre-warm + startup-hang watchdog (TestStartupGuard)
@@ -3573,6 +3574,54 @@ void TestUpdaterVersionLogic()
             CHECK(!DeserializeAppSettings(U::detail::ReadFileWide(sj)).allowUpdateNightly, "prefs: engine default for a present-but-false nightly key is OFF");
             CHECK(U::ReadPrefs(dir).allowPrerelease && !U::ReadPrefs(dir).allowNightly,
                   "prefs: prerelease ON never implies nightly (orthogonal opt-ins)");
+        }
+
+        // PERSISTENCE.md §17: a settings.json that EXISTS but cannot be read (another program holds it) is refused — the old
+        // read answered "" for it as for a missing file, and the read-modify-write wrote an update-keys-only skeleton over
+        // every other setting. The holder below denies READERS but not a rename over the file (FILE_SHARE_DELETE): the one
+        // shape of lock under which that skeleton could land. A holder that denies everything would also stop the write's
+        // rename, and the check would pass with the old read too (it did, in the negative control).
+        {
+            const std::wstring before = U::detail::ReadFileWide(sj);
+            const HANDLE lock = ::CreateFileW(sj.c_str(), GENERIC_READ, FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            CHECK(lock != INVALID_HANDLE_VALUE, "locked: (setup) settings.json is held, denying readers but not a rename over it");
+            bool unreadable = false;
+            CHECK(U::detail::ReadFileWideForUpdate(sj, unreadable).empty() && unreadable, "locked: the update read reports the file unreadable, not missing");
+            CHECK(!U::WriteSkip(dir, L"v9.9.9"), "locked: the skip is refused - nothing is written over the settings");
+            ::CloseHandle(lock);
+            CHECK(U::detail::ReadFileWide(sj) == before && !before.empty(), "locked: ...and settings.json still holds every setting, byte for byte");
+            bool missingUnreadable = true;
+            CHECK(U::detail::ReadFileWideForUpdate(dir + L"\\no-such-file.json", missingUnreadable).empty() && !missingUnreadable,
+                  "locked: a MISSING file is not unreadable (a first run still writes)");
+        }
+        // The case the old read actually lost data in: a read that fails while a REPLACE of the file still works. Any open
+        // handle also stops the write's rename (a file's name stays while a handle is open), so the old skeleton could land
+        // only when the holder let go between the read and the write - or when the read fails for a reason that does not
+        // stop a rename at all: here, an ACL that denies reading the file's data and allows everything else. The old read
+        // answered "" for it and the rename put the skeleton in place of every setting.
+        {
+            const std::wstring before = U::detail::ReadFileWide(sj);
+            PSECURITY_DESCRIPTOR denyRead = nullptr;
+            PSECURITY_DESCRIPTOR allowAll = nullptr;
+            // D:P = a protected DACL (nothing inherited): deny FILE_READ_DATA (0x1) to Everyone, allow every right to Everyone.
+            const bool built = ::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;0x1;;;WD)(A;;FA;;;WD)", SDDL_REVISION_1, &denyRead, nullptr) &&
+                               ::ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;FA;;;WD)", SDDL_REVISION_1, &allowAll, nullptr);
+            const bool applied = built && ::SetFileSecurityW(sj.c_str(), DACL_SECURITY_INFORMATION, denyRead);
+            CHECK(applied && U::detail::ReadFileWide(sj).empty(), "unreadable: (setup) settings.json's data can no longer be read, though the file can still be replaced");
+            CHECK(!U::WriteSkip(dir, L"v8.8.8"), "unreadable: the skip is refused - nothing is written over the settings");
+            if (built)
+            {
+                ::SetFileSecurityW(sj.c_str(), DACL_SECURITY_INFORMATION, allowAll); // readable again (and removable at the end)
+            }
+            CHECK(U::detail::ReadFileWide(sj) == before && !before.empty(), "unreadable: ...and settings.json still holds every setting, byte for byte");
+            if (denyRead)
+            {
+                ::LocalFree(denyRead);
+            }
+            if (allowAll)
+            {
+                ::LocalFree(allowAll);
+            }
         }
 
         // SetMember must REPLACE, not append: a second skip leaves exactly ONE (nested) key.

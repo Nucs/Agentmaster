@@ -5,11 +5,15 @@
 #include "Persistence.h"
 
 #include "ClaudeSpawn.h" // AgentmasterStateDir, NewSessionId
+#include "LaunchPresets.h" // PERSISTENCE.md §17: launch-presets.json's round trip (LaunchPresetsConfigFromJson / ...ToJson; pure, Json.h only)
 #include "ProcessInspect.h" // ReadGitBranchForDir — the configured DeriveSessionTitle's Branch* techniques
+#include "StateBackups.h" // PERSISTENCE.md §17: the writer identity, the shadow paths, the repair's state snapshot
+#include "StateCompat.h" // PERSISTENCE.md §17: the residue (unknown fields kept) and the older-writer repair
 
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic> // PERSISTENCE.md §17: the repair snapshot's background switch (a test seam)
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -1622,101 +1626,179 @@ namespace Agentmaster
     }
 
     // ---- whole document ----
+    //
+    // Agentmaster (PERSISTENCE.md §17): each document type is a pair — <Type>Document builds the document a saver writes,
+    // <Type>FromDocument reads a parsed one — and Serialize / Deserialize are those two around Dump / Parse. The pair is
+    // also the type's ROUND TRIP (StateRoundTrip: Document(FromDocument(disk))), which tells the save what a file holds
+    // that this build would lose; keeping the saver, the loader and the round trip on the same two functions is what keeps
+    // that judgment true when either side changes.
+
+    namespace
+    {
+        // The sessions.json document: {"version":1,"sessions":[...]}.
+        //   sessions - the fleet.
+        //   returns  - the document.
+        // Throws std::bad_alloc only.
+        json::Value SessionsDocument(const std::vector<SessionInfo>& sessions)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& s : sessions)
+            {
+                arr.Push(ToJson(s));
+            }
+            root.Set(L"sessions", std::move(arr));
+            return root;
+        }
+
+        // The fleet a parsed sessions.json holds (a document without a "sessions" array holds none).
+        //   doc     - the parsed document.
+        //   returns - the sessions, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<SessionInfo> SessionsFromDocument(const json::Value& doc)
+        {
+            std::vector<SessionInfo> out;
+            if (const auto* arr = doc.Find(L"sessions"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& sv : arr->arr)
+                {
+                    out.push_back(SessionFromJson(sv));
+                }
+            }
+            return out;
+        }
+
+        // The templates.json document: {"version":1,"templates":[...]}.
+        //   templates - the plan templates.
+        //   returns   - the document.
+        // Throws std::bad_alloc only.
+        json::Value TemplatesDocument(const std::vector<PlanTemplate>& templates)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& t : templates)
+            {
+                arr.Push(ToJson(t));
+            }
+            root.Set(L"templates", std::move(arr));
+            return root;
+        }
+
+        // The templates a parsed templates.json holds.
+        //   doc     - the parsed document.
+        //   returns - the templates, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<PlanTemplate> TemplatesFromDocument(const json::Value& doc)
+        {
+            std::vector<PlanTemplate> out;
+            if (const auto* arr = doc.Find(L"templates"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& tv : arr->arr)
+                {
+                    out.push_back(TemplateFromJson(tv));
+                }
+            }
+            return out;
+        }
+
+        // The recent-dirs.json document: {"version":1,"dirs":[...]}.
+        //   dirs    - the folders, most recent first.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value RecentDirsDocument(const std::vector<std::wstring>& dirs)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& d : dirs)
+            {
+                arr.Push(json::Value::MkStr(d));
+            }
+            root.Set(L"dirs", std::move(arr));
+            return root;
+        }
+
+        // The folders a parsed recent-dirs.json holds (non-strings skipped).
+        //   doc     - the parsed document.
+        //   returns - the folders, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<std::wstring> RecentDirsFromDocument(const json::Value& doc)
+        {
+            std::vector<std::wstring> out;
+            if (const auto* arr = doc.Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& dv : arr->arr)
+                {
+                    if (dv.type == json::Value::Type::Str)
+                    {
+                        out.push_back(dv.AsStr());
+                    }
+                }
+            }
+            return out;
+        }
+    }
 
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& s : sessions)
-        {
-            arr.Push(ToJson(s));
-        }
-        root.Set(L"sessions", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(SessionsDocument(sessions));
     }
 
     std::vector<SessionInfo> DeserializeSessions(std::wstring_view text)
     {
-        std::vector<SessionInfo> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"sessions"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& sv : arr->arr)
-            {
-                out.push_back(SessionFromJson(sv));
-            }
-        }
-        return out;
+        return SessionsFromDocument(*parsed);
     }
 
     std::wstring SerializeTemplates(const std::vector<PlanTemplate>& templates)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& t : templates)
-        {
-            arr.Push(ToJson(t));
-        }
-        root.Set(L"templates", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(TemplatesDocument(templates));
     }
 
     std::vector<PlanTemplate> DeserializeTemplates(std::wstring_view text)
     {
-        std::vector<PlanTemplate> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"templates"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& tv : arr->arr)
-            {
-                out.push_back(TemplateFromJson(tv));
-            }
-        }
-        return out;
+        return TemplatesFromDocument(*parsed);
     }
 
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& d : dirs)
-        {
-            arr.Push(json::Value::MkStr(d));
-        }
-        root.Set(L"dirs", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(RecentDirsDocument(dirs));
     }
 
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text)
     {
-        std::vector<std::wstring> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& dv : arr->arr)
-            {
-                if (dv.type == json::Value::Type::Str)
-                {
-                    out.push_back(dv.AsStr());
-                }
-            }
-        }
-        return out;
+        return RecentDirsFromDocument(*parsed);
+    }
+
+    json::Value SessionsRoundTrip(const json::Value& disk)
+    {
+        return SessionsDocument(SessionsFromDocument(disk));
+    }
+
+    json::Value TemplatesRoundTrip(const json::Value& disk)
+    {
+        return TemplatesDocument(TemplatesFromDocument(disk));
+    }
+
+    json::Value RecentDirsRoundTrip(const json::Value& disk)
+    {
+        return RecentDirsDocument(RecentDirsFromDocument(disk));
     }
 
     namespace
@@ -1748,24 +1830,64 @@ namespace Agentmaster
         {
             return AgentmasterStateDir() + L"\\model-list.json";
         }
+
+        // The model-list.json document: {"version":1,"models":[...],"last":"..."} ("last" only when set).
+        //   models        - the ids, in drop-down order.
+        //   lastSpecified - the model the prompt opens with ("" = none committed yet).
+        //   returns       - the document.
+        // Throws std::bad_alloc only.
+        json::Value ModelListDocument(const std::vector<std::wstring>& models, std::wstring_view lastSpecified)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& m : models)
+            {
+                arr.Push(json::Value::MkStr(m));
+            }
+            root.Set(L"models", std::move(arr));
+            // Optional, so a profile that never committed a model keeps the exact pre-"last" document.
+            if (!lastSpecified.empty())
+            {
+                root.Set(L"last", json::Value::MkStr(std::wstring{ lastSpecified }));
+            }
+            return root;
+        }
+
+        // The remembered model of a parsed model-list.json, trimmed ("" when missing, blank or not a string).
+        //   doc     - the parsed document.
+        //   returns - the id.
+        // Throws std::bad_alloc only.
+        std::wstring LastSpecifiedModelFromDocument(const json::Value& doc)
+        {
+            // StrAt yields "" for a missing or non-string key; the trim turns a blank one into "" too.
+            return TrimModelId(doc.StrAt(L"last"));
+        }
+
+        // The ids of a parsed model-list.json (empty and non-string entries skipped).
+        //   doc     - the parsed document.
+        //   returns - the ids, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<std::wstring> ModelListFromDocument(const json::Value& doc)
+        {
+            std::vector<std::wstring> out;
+            if (const auto* arr = doc.Find(L"models"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& mv : arr->arr)
+                {
+                    if (mv.type == json::Value::Type::Str && !mv.AsStr().empty())
+                    {
+                        out.push_back(mv.AsStr());
+                    }
+                }
+            }
+            return out;
+        }
     }
 
     std::wstring SerializeModelList(const std::vector<std::wstring>& models, std::wstring_view lastSpecified)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& m : models)
-        {
-            arr.Push(json::Value::MkStr(m));
-        }
-        root.Set(L"models", std::move(arr));
-        // Optional, so a profile that never committed a model keeps the exact pre-"last" document.
-        if (!lastSpecified.empty())
-        {
-            root.Set(L"last", json::Value::MkStr(std::wstring{ lastSpecified }));
-        }
-        return json::Dump(root);
+        return json::Dump(ModelListDocument(models, lastSpecified));
     }
 
     std::wstring DeserializeLastSpecifiedModel(std::wstring_view text)
@@ -1775,29 +1897,22 @@ namespace Agentmaster
         {
             return {};
         }
-        // StrAt yields "" for a missing or non-string key; the trim turns a blank one into "" too.
-        return TrimModelId(parsed->StrAt(L"last"));
+        return LastSpecifiedModelFromDocument(*parsed);
     }
 
     std::vector<std::wstring> DeserializeModelList(std::wstring_view text)
     {
-        std::vector<std::wstring> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"models"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& mv : arr->arr)
-            {
-                if (mv.type == json::Value::Type::Str && !mv.AsStr().empty())
-                {
-                    out.push_back(mv.AsStr());
-                }
-            }
-        }
-        return out;
+        return ModelListFromDocument(*parsed);
+    }
+
+    json::Value ModelListRoundTrip(const json::Value& disk)
+    {
+        return ModelListDocument(ModelListFromDocument(disk), LastSpecifiedModelFromDocument(disk));
     }
 
     std::vector<std::wstring> PushModelListEntry(std::vector<std::wstring> models, std::wstring_view id, size_t cap)
@@ -1837,111 +1952,206 @@ namespace Agentmaster
         return models;
     }
 
+    namespace
+    {
+        // The open-windows.json document: {"version":1,"open":[...]}.
+        //   windowIds - the windows open at exit.
+        //   returns   - the document.
+        // Throws std::bad_alloc only.
+        json::Value OpenWindowsDocument(const std::vector<std::wstring>& windowIds)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& id : windowIds)
+            {
+                arr.Push(json::Value::MkStr(id));
+            }
+            root.Set(L"open", std::move(arr));
+            return root;
+        }
+
+        // The window ids of a parsed open-windows.json (non-strings skipped).
+        //   doc     - the parsed document.
+        //   returns - the ids, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<std::wstring> OpenWindowsFromDocument(const json::Value& doc)
+        {
+            std::vector<std::wstring> out;
+            if (const auto* arr = doc.Find(L"open"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& dv : arr->arr)
+                {
+                    if (dv.type == json::Value::Type::Str)
+                    {
+                        out.push_back(dv.AsStr());
+                    }
+                }
+            }
+            return out;
+        }
+
+        // The layout.json document: {"version":1,"boardFraction":…,"treeFraction":…}.
+        //   layout  - the Manager page's split fractions.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value LayoutDocument(const ManagerLayout& layout)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            root.Set(L"boardFraction", json::Value::MkNum(layout.boardFraction));
+            root.Set(L"treeFraction", json::Value::MkNum(layout.treeFraction));
+            return root;
+        }
+
+        // The layout a parsed layout.json holds, each fraction band-checked (out of band = the default).
+        //   doc     - the parsed document.
+        //   returns - the layout.
+        // Never throws in practice (no allocation).
+        ManagerLayout LayoutFromDocument(const json::Value& doc)
+        {
+            ManagerLayout layout; // defaults stand in for a missing/corrupt field
+            // Keep each fraction inside a sane band so a hand-edited/corrupt file can never
+            // collapse a pane to nothing. The out-of-band test also rejects NaN.
+            auto sane = [](double v, double fallback) {
+                return (v > 0.05 && v < 0.95) ? v : fallback;
+            };
+            layout.boardFraction = sane(doc.NumAt(L"boardFraction", layout.boardFraction), layout.boardFraction);
+            layout.treeFraction = sane(doc.NumAt(L"treeFraction", layout.treeFraction), layout.treeFraction);
+            return layout;
+        }
+
+        // The settings.json document: {"version":1,"settings":{...}}.
+        //   settings - the settings.
+        //   returns  - the document.
+        // Throws std::bad_alloc only.
+        json::Value AppSettingsDocument(const AppSettings& settings)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            root.Set(L"settings", ToJson(settings));
+            return root;
+        }
+
+        // The settings a parsed settings.json holds (defaults for a missing "settings" object or field).
+        //   doc     - the parsed document.
+        //   returns - the settings.
+        // Throws std::bad_alloc only.
+        AppSettings AppSettingsFromDocument(const json::Value& doc)
+        {
+            AppSettings s; // defaults stand in for a missing/corrupt file or field
+            if (const auto* o = doc.Find(L"settings"); o && o->type == json::Value::Type::Obj)
+            {
+                s = AppSettingsFromJson(*o);
+            }
+            return s;
+        }
+
+        // A windows\<id>.json document: {"version":1,"window":{...}}.
+        //   record  - the window record.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value WindowRecordDocument(const WindowRecord& record)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            root.Set(L"window", ToJson(record));
+            return root;
+        }
+
+        // The window record a parsed windows\<id>.json holds (an empty record without a "window" object).
+        //   doc     - the parsed document.
+        //   returns - the record.
+        // Throws std::bad_alloc only.
+        WindowRecord WindowRecordFromDocument(const json::Value& doc)
+        {
+            WindowRecord w;
+            if (const auto* o = doc.Find(L"window"); o && o->type == json::Value::Type::Obj)
+            {
+                w = WindowRecordFromJson(*o);
+            }
+            return w;
+        }
+    }
+
     std::wstring SerializeOpenWindows(const std::vector<std::wstring>& windowIds)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& id : windowIds)
-        {
-            arr.Push(json::Value::MkStr(id));
-        }
-        root.Set(L"open", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(OpenWindowsDocument(windowIds));
     }
 
     std::vector<std::wstring> DeserializeOpenWindows(std::wstring_view text)
     {
-        std::vector<std::wstring> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"open"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& dv : arr->arr)
-            {
-                if (dv.type == json::Value::Type::Str)
-                {
-                    out.push_back(dv.AsStr());
-                }
-            }
-        }
-        return out;
+        return OpenWindowsFromDocument(*parsed);
     }
 
     std::wstring SerializeLayout(const ManagerLayout& layout)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        root.Set(L"boardFraction", json::Value::MkNum(layout.boardFraction));
-        root.Set(L"treeFraction", json::Value::MkNum(layout.treeFraction));
-        return json::Dump(root);
+        return json::Dump(LayoutDocument(layout));
     }
 
     ManagerLayout DeserializeLayout(std::wstring_view text)
     {
-        ManagerLayout layout; // defaults stand in for a missing/corrupt field
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return layout;
+            return ManagerLayout{}; // defaults stand in for a missing/corrupt file
         }
-        // Keep each fraction inside a sane band so a hand-edited/corrupt file can never
-        // collapse a pane to nothing. The out-of-band test also rejects NaN.
-        auto sane = [](double v, double fallback) {
-            return (v > 0.05 && v < 0.95) ? v : fallback;
-        };
-        layout.boardFraction = sane(parsed->NumAt(L"boardFraction", layout.boardFraction), layout.boardFraction);
-        layout.treeFraction = sane(parsed->NumAt(L"treeFraction", layout.treeFraction), layout.treeFraction);
-        return layout;
+        return LayoutFromDocument(*parsed);
     }
 
     std::wstring SerializeAppSettings(const AppSettings& settings)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        root.Set(L"settings", ToJson(settings));
-        return json::Dump(root);
+        return json::Dump(AppSettingsDocument(settings));
     }
 
     AppSettings DeserializeAppSettings(std::wstring_view text)
     {
-        AppSettings s; // defaults stand in for a missing/corrupt file or field
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return s;
+            return AppSettings{}; // defaults stand in for a missing/corrupt file
         }
-        if (const auto* o = parsed->Find(L"settings"); o && o->type == json::Value::Type::Obj)
-        {
-            s = AppSettingsFromJson(*o);
-        }
-        return s;
+        return AppSettingsFromDocument(*parsed);
     }
 
     std::wstring SerializeWindowRecord(const WindowRecord& record)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        root.Set(L"window", ToJson(record));
-        return json::Dump(root);
+        return json::Dump(WindowRecordDocument(record));
     }
 
     WindowRecord DeserializeWindowRecord(std::wstring_view text)
     {
-        WindowRecord w;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return w;
+            return WindowRecord{};
         }
-        if (const auto* o = parsed->Find(L"window"); o && o->type == json::Value::Type::Obj)
-        {
-            w = WindowRecordFromJson(*o);
-        }
-        return w;
+        return WindowRecordFromDocument(*parsed);
+    }
+
+    json::Value OpenWindowsRoundTrip(const json::Value& disk)
+    {
+        return OpenWindowsDocument(OpenWindowsFromDocument(disk));
+    }
+
+    json::Value LayoutRoundTrip(const json::Value& disk)
+    {
+        return LayoutDocument(LayoutFromDocument(disk));
+    }
+
+    json::Value AppSettingsRoundTrip(const json::Value& disk)
+    {
+        return AppSettingsDocument(AppSettingsFromDocument(disk));
+    }
+
+    json::Value WindowRecordRoundTrip(const json::Value& disk)
+    {
+        return WindowRecordDocument(WindowRecordFromDocument(disk));
     }
 
     // ---- the state-file guard (StateFileGuard.h; PERSISTENCE.md "Unreadable state files") ----
@@ -2401,11 +2611,835 @@ namespace Agentmaster
         }
     }
 
+    // ---- version compatibility of the state documents (PERSISTENCE.md §17; StateCompat.h + StateBackups.h) ----
+
+    namespace
+    {
+        // How often a state file's shadow is refreshed after the run's first write of it: once a minute, every 5 minutes
+        // for a document over 256 K characters (a long-lived sessions.json is ~10 MB). The shadow only feeds the
+        // older-writer repair, so a few minutes behind costs at most that much of a member an older build drops; the
+        // last window's close brings every pending one up to date (FlushStateShadows).
+        constexpr uint64_t kShadowIntervalMs = 60'000;
+        constexpr uint64_t kShadowIntervalLargeMs = 300'000;
+        constexpr size_t kShadowLargeChars = 256 * 1024;
+
+        // What the compatibility layer knows about one state file. Keyed by StateGuardKey(path).
+        struct StateDocEntry
+        {
+            // The residue judgment: what this build would lose by saving over the file, valid while the file's size and
+            // time are still (size, mtime) — after our own write, the residue that write carried.
+            bool judged{ false };
+            uint64_t size{ 0 };
+            int64_t mtime{ 0 };
+            bool newerFormat{ false }; // its root "version" is newer than the one this build writes: never written
+            double diskVersion{ 0 }; // that version, for the log line
+            bool newerFormatLogged{ false }; // the "NOT written" line was logged (once per file per process)
+            std::shared_ptr<const StateCompat::ResidueNode> residue; // null = nothing this build would lose
+            // The shadow (StateBackups.h ShadowPathFor), set at the file's first write in this process.
+            bool shadowResolved{ false };
+            std::wstring mainPath; // the file, as its saver names it (FlushStateShadows copies from it)
+            std::wstring shadowPath; // "" = none (a file outside the profile)
+            uint64_t shadowTick{ 0 }; // GetTickCount64 of the last shadow write attempt (0 = none this run)
+            bool shadowPending{ false }; // a write since that attempt is not in the shadow yet
+            uint64_t writtenSize{ 0 }; // the file's size and time right after our last write: FlushStateShadows copies
+            int64_t writtenMtime{ 0 }; // the file only while it still holds exactly that write
+            bool shadowFailLogged{ false }; // the "[persist-shadow] could not write" line was logged (once per file per process)
+        };
+        // Guards the maps and the set below. Held only for map access — never across file I/O, a parse or AppendStateLog.
+        std::mutex g_stateDocMtx;
+        // The profiles whose repair snapshot this process took (RepairOneStateFile): one snapshot per run and profile, shared
+        // by the engine's repair and the Telegram bot's (RepairStateFileWrittenByOlderBuild).
+        std::set<std::wstring> g_repairSnapshotProfiles;
+        // Whether a repair snapshot copies the session store in the background (StateBackups.h SnapshotProfileState): true in
+        // the app; the harness turns it off (SetStateRepairSnapshotsInBackground) so a snapshot is complete when it returns.
+        std::atomic<bool> g_repairSnapshotInBackground{ true };
+        std::unordered_map<std::wstring, StateDocEntry> g_stateDocs;
+        // One save of a file at a time (WriteStateDocumentIn): the residue applied by one save must be the one its write
+        // replaced. shared_ptr, so a lock handed out stays valid while the map grows.
+        std::unordered_map<std::wstring, std::shared_ptr<std::mutex>> g_stateDocWriteLocks;
+
+        // The lock that serializes the saves of one state file.
+        //   key     - StateGuardKey of the file.
+        //   returns - the file's lock (created on first use).
+        // Throws std::bad_alloc only.
+        std::shared_ptr<std::mutex> StateDocWriteLock(const std::wstring& key)
+        {
+            std::lock_guard lk{ g_stateDocMtx };
+            auto& slot = g_stateDocWriteLocks[key];
+            if (!slot)
+            {
+                slot = std::make_shared<std::mutex>();
+            }
+            return slot;
+        }
+
+        // This build's writer stamp (StateCompat.h WriterStamp), built once per process: the package identity it reads
+        // cannot change while the process runs.
+        //   returns - the stamp object.
+        // Throws std::bad_alloc only (the next call tries again).
+        const json::Value& OwnWriterStamp()
+        {
+            static const json::Value stamp = [] {
+                const auto w = StateBackups::CurrentWriter();
+                return StateCompat::WriterStamp(w.version.empty() ? std::wstring{ L"0.0.0.0" } : w.version, w.install.empty() ? std::wstring{ L"unknown" } : w.install);
+            }();
+            return stamp;
+        }
+
+        // How a state file reads to this build right now: the residue its round trip loses, and whether its format is newer.
+        struct StateDocJudgment
+        {
+            bool cacheable{ false }; // the judgment describes the file's current bytes (false: unreadable — judge again next time)
+            bool newerFormat{ false };
+            double diskVersion{ 0 };
+            std::shared_ptr<const StateCompat::ResidueNode> residue;
+        };
+
+        // Judge a state file: read and parse it, run the type's round trip over it with the loader's lookups observed
+        // (StateCompat.h LookedKeys), and extract what the round trip loses.
+        //   path        - the state file.
+        //   fresh       - the document about to be written (only its root "version" is read: the format guard).
+        //   roundTrip   - the file type's round trip.
+        //   keepDropped - see PrepareStateDocument.
+        //   returns     - the judgment. A file that is missing, not JSON, or not a JSON object holds nothing to keep (text
+        //                 that is not JSON is kept aside by the state-file guard; valid JSON that is not an object is marked
+        //                 for it here, since no Agentmaster build writes one); an unreadable one is not cacheable.
+        // Throws std::bad_alloc only.
+        StateDocJudgment JudgeStateFile(const std::wstring& path, const json::Value& fresh, StateRoundTrip roundTrip, bool keepDropped)
+        {
+            StateDocJudgment j;
+            const StateFileRead read = ReadStateFileUtf8(path);
+            if (read.status == StateFileStatus::Missing)
+            {
+                j.cacheable = true;
+                return j;
+            }
+            if (read.status != StateFileStatus::Read)
+            {
+                return j; // the guard refuses to replace it while it stays unreadable, and keeps a copy once it reads
+            }
+            j.cacheable = true;
+            const auto disk = json::Parse(read.text);
+            if (!disk)
+            {
+                return j;
+            }
+            if (disk->type != json::Value::Type::Obj)
+            {
+                // Valid JSON, but no document of ours (an array, a number): the guard only checks that the text parses, so
+                // without this mark it would replace whatever this is without a copy.
+                MarkStateFileKeepBeforeReplace(path);
+                return j;
+            }
+            j.newerFormat = StateCompat::FormatIsNewer(*disk, fresh);
+            j.diskVersion = disk->NumAt(StateCompat::kVersionKey);
+            StateCompat::LookedKeys looked;
+            json::Value rt;
+            {
+                // Exactly the loader's run over THIS parsed document: the evidence is keyed by its objects' addresses.
+                StateCompat::ObserveLookups observe{ looked };
+                rt = roundTrip(*disk);
+            }
+            // Incomplete evidence (an allocation failed while recording) would drop a member the loader never asked for:
+            // keep every unwritten member instead, as if nothing had been observed.
+            auto residue = StateCompat::ExtractResidue(*disk, rt, keepDropped, looked.Complete() ? &looked : nullptr);
+            if (!residue.empty())
+            {
+                j.residue = std::make_shared<const StateCompat::ResidueNode>(std::move(residue));
+            }
+            return j;
+        }
+
+        // Write a shadow whole: its folder is created, then a temp sibling is written and renamed over it, so a reader sees
+        // the old shadow or the new one, never a torn one. Shadows are OUR copies, outside the state-file guard.
+        //   shadowPath - the shadow file.
+        //   text       - the document text (written as UTF-8).
+        //   returns    - 0 on success, else the Win32 error.
+        // Never throws.
+        DWORD WriteShadowFile(const std::wstring& shadowPath, std::wstring_view text) noexcept
+        {
+            try
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(std::filesystem::path{ shadowPath }.parent_path(), ec);
+                const auto bytes = Utf16ToUtf8(text);
+                const std::wstring tmp = shadowPath + L".tmp." + std::to_wstring(::GetCurrentThreadId());
+                const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h == INVALID_HANDLE_VALUE)
+                {
+                    return ::GetLastError();
+                }
+                DWORD wrote = 0;
+                const BOOL ok = bytes.empty() ? TRUE : ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr);
+                const DWORD writeError = ok ? 0 : ::GetLastError();
+                ::CloseHandle(h);
+                if (!ok || wrote != bytes.size())
+                {
+                    ::DeleteFileW(tmp.c_str());
+                    return writeError ? writeError : ERROR_WRITE_FAULT;
+                }
+                if (!::MoveFileExW(tmp.c_str(), shadowPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+                {
+                    const DWORD moveError = ::GetLastError();
+                    ::DeleteFileW(tmp.c_str());
+                    return moveError;
+                }
+                return 0;
+            }
+            catch (...)
+            {
+                Agentmaster::LogSwallowedException(L"WriteShadowFile"); // Rule #18. Recovery: "not written" — the caller retries later
+                return ERROR_OUTOFMEMORY;
+            }
+        }
+
+        // The first characters of a state file, for the writer-stamp check (StateCompat.h TextStartsWithWriterStamp): the
+        // repair looks at every file that has a shadow at every start, and a stamped 10 MB sessions.json must not cost a
+        // whole read for it.
+        //   path    - the file.
+        //   bytes   - how many bytes to read at most.
+        //   returns - the head as UTF-16 ("" when the file cannot be opened or read); a character cut at the end decodes
+        //             as U+FFFD, which the check never reaches.
+        // Never throws.
+        std::wstring ReadStateFileHead(const std::wstring& path, DWORD bytes) noexcept
+        {
+            try
+            {
+                const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                               FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h == INVALID_HANDLE_VALUE)
+                {
+                    return {};
+                }
+                std::string head(bytes, '\0');
+                DWORD got = 0;
+                if (!::ReadFile(h, head.data(), bytes, &got, nullptr))
+                {
+                    got = 0;
+                }
+                ::CloseHandle(h);
+                head.resize(got);
+                return Utf8ToUtf16(head);
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: "" — the caller reads the whole file instead, which only costs time.
+                Agentmaster::LogSwallowedException(L"ReadStateFileHead");
+                return {};
+            }
+        }
+
+        // Copy a state file over its shadow (FlushStateShadows): to a temp sibling first, then renamed over it.
+        //   mainPath   - the state file.
+        //   shadowPath - its shadow.
+        //   returns    - 0 on success, else the Win32 error.
+        // Never throws.
+        DWORD CopyFileToShadow(const std::wstring& mainPath, const std::wstring& shadowPath) noexcept
+        {
+            try
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(std::filesystem::path{ shadowPath }.parent_path(), ec);
+                const std::wstring tmp = shadowPath + L".tmp." + std::to_wstring(::GetCurrentThreadId());
+                if (!::CopyFileW(mainPath.c_str(), tmp.c_str(), FALSE))
+                {
+                    return ::GetLastError();
+                }
+                if (!::MoveFileExW(tmp.c_str(), shadowPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+                {
+                    const DWORD moveError = ::GetLastError();
+                    ::DeleteFileW(tmp.c_str());
+                    return moveError;
+                }
+                return 0;
+            }
+            catch (...)
+            {
+                Agentmaster::LogSwallowedException(L"CopyFileToShadow"); // Rule #18. Recovery: the shadow stays as it was
+                return ERROR_OUTOFMEMORY;
+            }
+        }
+    }
+
+    std::optional<PreparedStateDocument> PrepareStateDocument(const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements)
+    {
+        uint64_t size = 0;
+        int64_t mtime = 0;
+        bool exists = false;
+        DWORD statError = 0;
+        const bool statOk = StatStateFile(path, size, mtime, exists, statError);
+        const std::wstring key = StateGuardKey(path);
+        std::shared_ptr<const StateCompat::ResidueNode> residue;
+        bool newerFormat = false;
+        double diskVersion = 0;
+        bool known = false;
+        if (statOk && !exists)
+        {
+            known = true; // a first write: nothing on disk to keep
+        }
+        else if (statOk)
+        {
+            std::lock_guard lk{ g_stateDocMtx };
+            if (const auto it = g_stateDocs.find(key); it != g_stateDocs.end() && it->second.judged && it->second.size == size && it->second.mtime == mtime)
+            {
+                // The steady state: the file is still what this process last wrote or judged.
+                residue = it->second.residue;
+                newerFormat = it->second.newerFormat;
+                diskVersion = it->second.diskVersion;
+                known = true;
+            }
+        }
+        if (!known && statOk)
+        {
+            const StateDocJudgment j = JudgeStateFile(path, fresh, roundTrip, keepDroppedElements);
+            residue = j.residue;
+            newerFormat = j.newerFormat;
+            diskVersion = j.diskVersion;
+            if (j.cacheable)
+            {
+                // Recorded under the stamp seen BEFORE the read: a write that landed in between moved the stamp again, so
+                // the next save judges again — never a stale judgment under a fresh stamp.
+                std::lock_guard lk{ g_stateDocMtx };
+                auto& e = g_stateDocs[key];
+                e.judged = true;
+                e.size = size;
+                e.mtime = mtime;
+                e.residue = residue;
+                e.newerFormat = newerFormat;
+                e.diskVersion = diskVersion;
+            }
+        }
+        // statOk false: nothing can look at the file, and the state-file guard refuses the write for the same reason; the
+        // document is prepared without a residue, which that refusal makes moot.
+        if (newerFormat)
+        {
+            bool log = false;
+            {
+                std::lock_guard lk{ g_stateDocMtx };
+                auto& e = g_stateDocs[key];
+                if (!e.newerFormatLogged)
+                {
+                    e.newerFormatLogged = true;
+                    log = true;
+                }
+            }
+            if (log)
+            {
+                AppendStateLog(L"hooks.log", L"[persist-guard] " + path + L" NOT written: its format (version " + std::to_wstring(static_cast<long long>(diskVersion)) +
+                                                 L") is newer than the one this build writes (version " +
+                                                 std::to_wstring(static_cast<long long>(fresh.NumAt(StateCompat::kVersionKey))) +
+                                                 L"), so a newer Agentmaster wrote it; this build's changes to it are not saved, and the newer build finds the file as it left it\n");
+            }
+            return std::nullopt;
+        }
+        PreparedStateDocument out;
+        if (residue)
+        {
+            auto carried = StateCompat::ApplyResidue(fresh, *residue);
+            if (!carried.empty())
+            {
+                out.carried = std::make_shared<const StateCompat::ResidueNode>(std::move(carried));
+            }
+        }
+        StateCompat::SetWriterStamp(fresh, OwnWriterStamp());
+        out.text = json::Dump(fresh);
+        return out;
+    }
+
+    void PrimeStateDocument(const std::wstring& path, StateRoundTrip roundTrip, bool keepDroppedElements) noexcept
+    {
+        try
+        {
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            bool exists = false;
+            DWORD statError = 0;
+            if (!roundTrip || !StatStateFile(path, size, mtime, exists, statError) || !exists)
+            {
+                return; // nothing to judge (a missing file costs a save nothing either)
+            }
+            const std::wstring key = StateGuardKey(path);
+            {
+                std::lock_guard lk{ g_stateDocMtx };
+                if (const auto it = g_stateDocs.find(key); it != g_stateDocs.end() && it->second.judged && it->second.size == size && it->second.mtime == mtime)
+                {
+                    return; // a save judged it already
+                }
+            }
+            // The format guard compares with the version this build writes: its template's (the round trip of an empty object).
+            const StateDocJudgment j = JudgeStateFile(path, roundTrip(json::Value::MkObj()), roundTrip, keepDroppedElements);
+            if (!j.cacheable)
+            {
+                return;
+            }
+            std::lock_guard lk{ g_stateDocMtx };
+            auto& e = g_stateDocs[key];
+            if (e.judged && e.size == size && e.mtime == mtime)
+            {
+                return; // a save got there meanwhile (its judgment, or the residue its write carried, is at least as current)
+            }
+            // Recorded under the stamp seen BEFORE the read, as PrepareStateDocument records its own: never a judgment under a
+            // stamp it was not made from. Should a save have written the file meanwhile, this replaces that save's entry with an
+            // older stamp, and the next save, finding the file's stamp different, judges it again — a cost, never a wrong residue.
+            e.judged = true;
+            e.size = size;
+            e.mtime = mtime;
+            e.residue = j.residue;
+            e.newerFormat = j.newerFormat;
+            e.diskVersion = j.diskVersion;
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"PrimeStateDocument"); // Rule #18. Recovery: the first save judges the file itself
+        }
+    }
+
+    void NoteStateDocumentWritten(const std::wstring& path, const PreparedStateDocument& written) noexcept
+    {
+        try
+        {
+            NoteStateDocumentWrittenIn(AgentmasterStateDir(), path, written);
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: nothing recorded — the next save judges the file again, and the shadow waits for it.
+            Agentmaster::LogSwallowedException(L"NoteStateDocumentWritten");
+        }
+    }
+
+    void NoteStateDocumentWrittenIn(const std::wstring& profileDir, const std::wstring& path, const PreparedStateDocument& written) noexcept
+    {
+        try
+        {
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            bool exists = false;
+            DWORD statError = 0;
+            const bool statOk = StatStateFile(path, size, mtime, exists, statError) && exists;
+            const std::wstring key = StateGuardKey(path);
+            const uint64_t now = ::GetTickCount64();
+            std::wstring shadowPath;
+            bool writeShadow = false;
+            {
+                std::lock_guard lk{ g_stateDocMtx };
+                auto& e = g_stateDocs[key];
+                if (statOk)
+                {
+                    // The file now holds `written`: its residue is what the text carries, under the stamp of this write.
+                    e.judged = true;
+                    e.size = size;
+                    e.mtime = mtime;
+                    e.residue = written.carried;
+                    e.newerFormat = false;
+                }
+                else
+                {
+                    e.judged = false; // nothing to stamp: the next save judges the file again
+                }
+                if (!e.shadowResolved)
+                {
+                    e.shadowResolved = true;
+                    e.mainPath = path;
+                    e.shadowPath = StateBackups::ShadowPathFor(profileDir, path);
+                }
+                if (!e.shadowPath.empty() && statOk)
+                {
+                    const uint64_t interval = written.text.size() > kShadowLargeChars ? kShadowIntervalLargeMs : kShadowIntervalMs;
+                    if (e.shadowTick == 0 || now - e.shadowTick >= interval)
+                    {
+                        writeShadow = true;
+                        e.shadowTick = now;
+                        e.shadowPending = false;
+                        shadowPath = e.shadowPath;
+                    }
+                    else
+                    {
+                        e.shadowPending = true;
+                        e.writtenSize = size;
+                        e.writtenMtime = mtime;
+                    }
+                }
+            }
+            if (!writeShadow)
+            {
+                return;
+            }
+            if (const DWORD error = WriteShadowFile(shadowPath, written.text); error != 0)
+            {
+                bool log = false;
+                {
+                    // Pending again: FlushStateShadows or a save after the throttle tries once more.
+                    std::lock_guard lk{ g_stateDocMtx };
+                    auto& e = g_stateDocs[key];
+                    e.shadowPending = true;
+                    e.writtenSize = size;
+                    e.writtenMtime = mtime;
+                    if (!e.shadowFailLogged)
+                    {
+                        e.shadowFailLogged = true;
+                        log = true;
+                    }
+                }
+                if (log)
+                {
+                    AppendStateLog(L"hooks.log", L"[persist-shadow] could not write " + shadowPath + L" (error " + DescribeStateFileError(error) +
+                                                     L"): an older Agentmaster's save of " + path +
+                                                     L" could not be repaired from it; tried again after the next save's throttle\n");
+                }
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the cache keeps its previous judgment, whose stamp no longer matches the file, so the next
+            // save judges the file again; the shadow waits for a later save.
+            Agentmaster::LogSwallowedException(L"NoteStateDocumentWrittenIn");
+        }
+    }
+
+    bool WriteStateDocument(const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements)
+    {
+        return WriteStateDocumentIn(AgentmasterStateDir(), path, std::move(fresh), roundTrip, keepDroppedElements);
+    }
+
+    bool WriteStateDocumentIn(const std::wstring& profileDir, const std::wstring& path, json::Value fresh, StateRoundTrip roundTrip, bool keepDroppedElements)
+    {
+        // One save of the file at a time: the residue a save applies must be the one its write replaces, and the residue it
+        // records must be the one the file then holds. Two threads saving one file used to race only on which rename won.
+        const auto lock = StateDocWriteLock(StateGuardKey(path));
+        std::lock_guard serialize{ *lock };
+        auto prepared = PrepareStateDocument(path, std::move(fresh), roundTrip, keepDroppedElements);
+        if (!prepared)
+        {
+            return false; // the format guard refused (logged once per file)
+        }
+        if (!WriteAllUtf8(path, prepared->text))
+        {
+            return false; // the state-file guard refused, or the write failed (logged there); the file keeps its bytes
+        }
+        NoteStateDocumentWrittenIn(profileDir, path, *prepared);
+        return true;
+    }
+
+    void FlushStateShadows() noexcept
+    {
+        try
+        {
+            struct Pending
+            {
+                std::wstring key;
+                std::wstring mainPath;
+                std::wstring shadowPath;
+                uint64_t size;
+                int64_t mtime;
+            };
+            std::vector<Pending> pending;
+            {
+                std::lock_guard lk{ g_stateDocMtx };
+                for (const auto& [key, e] : g_stateDocs)
+                {
+                    if (e.shadowPending && !e.shadowPath.empty())
+                    {
+                        pending.push_back(Pending{ key, e.mainPath, e.shadowPath, e.writtenSize, e.writtenMtime });
+                    }
+                }
+            }
+            for (const auto& p : pending)
+            {
+                uint64_t size = 0;
+                int64_t mtime = 0;
+                bool exists = false;
+                DWORD statError = 0;
+                if (!StatStateFile(p.mainPath, size, mtime, exists, statError) || !exists || size != p.size || mtime != p.mtime)
+                {
+                    continue; // changed since our write (another process, or our own later save): not this write to shadow
+                }
+                if (CopyFileToShadow(p.mainPath, p.shadowPath) != 0)
+                {
+                    continue; // stays pending; the shadow keeps the previous throttled write
+                }
+                std::lock_guard lk{ g_stateDocMtx };
+                if (const auto it = g_stateDocs.find(p.key); it != g_stateDocs.end() && it->second.writtenSize == p.size && it->second.writtenMtime == p.mtime)
+                {
+                    // Only the write we copied is settled: a save that landed meanwhile stays pending.
+                    it->second.shadowPending = false;
+                    it->second.shadowTick = ::GetTickCount64();
+                }
+            }
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"FlushStateShadows"); // Rule #18. Recovery: the shadows stay at their throttled writes
+        }
+    }
+
+    void ForgetStateDocument(const std::wstring& path) noexcept
+    {
+        try
+        {
+            const std::wstring key = StateGuardKey(path);
+            std::lock_guard lk{ g_stateDocMtx };
+            if (const auto it = g_stateDocs.find(key); it != g_stateDocs.end())
+            {
+                // The judgment only: the shadow bookkeeping stays (a pending shadow is still owed for our last write).
+                it->second.judged = false;
+                it->second.residue.reset();
+            }
+        }
+        catch (...)
+        {
+            // Rule #18. Recovery: the judgment stays — its stamp no longer matches a rewritten file, so it is judged anyway.
+            Agentmaster::LogSwallowedException(L"ForgetStateDocument");
+        }
+    }
+
+    void SetStateRepairSnapshotsInBackground(bool inBackground) noexcept
+    {
+        g_repairSnapshotInBackground.store(inBackground);
+    }
+
+    void ResetStateDocumentsForTests() noexcept
+    {
+        try
+        {
+            std::lock_guard lk{ g_stateDocMtx };
+            g_stateDocs.clear();
+            g_stateDocWriteLocks.clear();
+            g_repairSnapshotProfiles.clear();
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"ResetStateDocumentsForTests"); // Rule #18 (a test seam; the lock cannot really fail)
+        }
+    }
+
+    namespace
+    {
+        // One state document the older-writer repair looks at.
+        struct RepairTarget
+        {
+            std::wstring path; // the file
+            std::wstring rel; // its path relative to the profile, for the log
+            StateRoundTrip roundTrip; // its type's round trip (its template is the round trip of an empty object)
+            bool keepDropped; // see PrepareStateDocument
+            const std::set<std::wstring, std::less<>>* neverRestore; // volatile members (StateCompat.h), or nullptr
+        };
+
+        // Take this run's repair snapshot of a profile, once (before its first repaired write): the files as the older build
+        // left them, so even the repair can be undone by copying them back.
+        //   profileDir - the profile folder.
+        // Throws std::bad_alloc only (a failed snapshot is logged; the repair goes on — the shadows are copies too).
+        void EnsureRepairSnapshot(const std::wstring& profileDir)
+        {
+            {
+                std::lock_guard lk{ g_stateDocMtx };
+                if (!g_repairSnapshotProfiles.insert(StateGuardKey(profileDir)).second)
+                {
+                    return;
+                }
+            }
+            std::wstring summary;
+            const std::wstring folder = StateBackups::SnapshotProfileState(
+                profileDir,
+                L"An older Agentmaster had saved state files without members it does not know. Before they were put back from the shadows (" + std::wstring{ StateBackups::kShadowFolder } +
+                    L"\\), the files were copied here as that build left them.",
+                L"before repair by " + StateBackups::WriterText(StateBackups::CurrentWriter()),
+                summary,
+                g_repairSnapshotInBackground.load());
+            AppendStateLog(L"hooks.log", L"[migrate] " + (folder.empty() ? (L"the state snapshot before the repair FAILED: " + summary) : (L"state files copied into " + folder + L" before the repair (" + summary + L")")) + L"\n");
+        }
+
+        // Repair one state document (see RepairStateFilesWrittenByOlderBuilds).
+        //   profileDir - the profile folder.
+        //   target     - the document.
+        //   returns    - the number of members restored and written.
+        // Throws std::bad_alloc only (a file that cannot be read, parsed or written is left as it is).
+        size_t RepairOneStateFile(const std::wstring& profileDir, const RepairTarget& target)
+        {
+            const std::wstring shadowPath = StateBackups::ShadowPathFor(profileDir, target.path);
+            if (shadowPath.empty())
+            {
+                return 0;
+            }
+            uint64_t shadowSize = 0, mainSize = 0;
+            int64_t shadowTime = 0, mainTime = 0;
+            bool shadowExists = false, mainExists = false;
+            DWORD statError = 0;
+            if (!StatStateFile(shadowPath, shadowSize, shadowTime, shadowExists, statError) || !shadowExists)
+            {
+                return 0; // no shadow: no build that keeps unknown fields wrote this file yet
+            }
+            if (!StatStateFile(target.path, mainSize, mainTime, mainExists, statError) || !mainExists)
+            {
+                return 0; // no file: a deleted state file is not the repair's to bring back
+            }
+            if (mainTime <= shadowTime)
+            {
+                // Not written since the shadow: either untouched, or put back by hand from a backup (a copy keeps the old
+                // time) — the user's restore stands.
+                return 0;
+            }
+            if (StateCompat::TextStartsWithWriterStamp(ReadStateFileHead(target.path, 256)))
+            {
+                return 0; // written by a build that keeps unknown fields (the common case: one small read, not the whole file)
+            }
+            const StateFileRead mainRead = ReadStateFileUtf8(target.path);
+            if (mainRead.status != StateFileStatus::Read || StateCompat::TextStartsWithWriterStamp(mainRead.text))
+            {
+                return 0; // unreadable (the guard has it), or written by a build that keeps unknown fields
+            }
+            auto main = json::Parse(mainRead.text);
+            if (!main || main->type != json::Value::Type::Obj || StateCompat::HasWriterStamp(*main))
+            {
+                return 0;
+            }
+            const StateFileRead shadowRead = ReadStateFileUtf8(shadowPath);
+            if (shadowRead.status != StateFileStatus::Read)
+            {
+                return 0;
+            }
+            const auto shadow = json::Parse(shadowRead.text);
+            if (!shadow || !StateCompat::HasWriterStamp(*shadow))
+            {
+                return 0; // a shadow we did not write as one
+            }
+            const json::Value templ = target.roundTrip(json::Value::MkObj());
+            std::vector<std::wstring> restoredPaths;
+            const size_t restored = StateCompat::RestoreKeysDroppedByOlderWriter(*main, *shadow, templ, target.neverRestore, restoredPaths);
+            if (restored == 0)
+            {
+                return 0; // nothing it dropped that we can prove; its first save in this run stamps it
+            }
+            EnsureRepairSnapshot(profileDir);
+            if (!WriteStateDocumentIn(profileDir, target.path, std::move(*main), target.roundTrip, target.keepDropped))
+            {
+                AppendStateLog(L"hooks.log", L"[migrate] " + target.rel + L": an older Agentmaster dropped " + std::to_wstring(restored) +
+                                                 L" member(s) this build can put back, but the repaired file could not be written (see the line above); it stays as it is\n");
+                ForgetStateDocument(target.path);
+                return 0;
+            }
+            // What was written is the repaired document, not this build's own serialization: judge the file again at its next
+            // save instead of trusting the residue the write carried (StateCompat.h ApplyResidue).
+            ForgetStateDocument(target.path);
+            // One entry per path, with its count: a member restored on every session would otherwise fill the line.
+            std::map<std::wstring, size_t> counts;
+            for (const auto& p : restoredPaths)
+            {
+                ++counts[p];
+            }
+            std::wstring list;
+            size_t shown = 0;
+            for (const auto& [p, n] : counts)
+            {
+                if (shown++ == 12)
+                {
+                    list += L", …";
+                    break;
+                }
+                list += (list.empty() ? L"" : L", ") + p + (n > 1 ? (L" \x00D7" + std::to_wstring(n)) : std::wstring{});
+            }
+            AppendStateLog(L"hooks.log", L"[migrate] " + target.rel + L": an older Agentmaster saved it without " + std::to_wstring(restored) +
+                                             L" member(s) it does not know; put back from " + shadowPath + L" (" + list + L")\n");
+            return restored;
+        }
+    }
+
+    size_t RepairStateFilesWrittenByOlderBuilds(const std::wstring& profileDir) noexcept
+    {
+        size_t total = 0;
+        try
+        {
+            if (profileDir.empty())
+            {
+                return 0;
+            }
+            // Volatile members of sessions.json (StateCompat.h RestoreKeysDroppedByOlderWriter): the unsent draft (a stale
+            // one would be typed back into the box), the question guard, the "Fork interrupted" stop, the never-messaged
+            // fork's source — each cleared by the app once it acted, so "absent on every record" cannot prove ignorance.
+            static const std::set<std::wstring, std::less<>> kSessionsVolatile = {
+                L"sessions[].pendingInput",       L"sessions[].pendingInputUnixMs", L"sessions[].pendingPasteRefs",
+                L"sessions[].lastMessageWasQuestion", L"sessions[].stopForkedTurn", L"sessions[].forkParentId",
+            };
+            std::vector<RepairTarget> targets = {
+                { profileDir + L"\\sessions.json", L"sessions.json", &SessionsRoundTrip, true, &kSessionsVolatile },
+                { profileDir + L"\\settings.json", L"settings.json", &AppSettingsRoundTrip, true, nullptr },
+                { profileDir + L"\\layout.json", L"layout.json", &LayoutRoundTrip, true, nullptr },
+                { profileDir + L"\\open-windows.json", L"open-windows.json", &OpenWindowsRoundTrip, true, nullptr },
+                { profileDir + L"\\templates.json", L"templates.json", &TemplatesRoundTrip, true, nullptr },
+                { profileDir + L"\\recent-dirs.json", L"recent-dirs.json", &RecentDirsRoundTrip, true, nullptr },
+                { profileDir + L"\\model-list.json", L"model-list.json", &ModelListRoundTrip, true, nullptr },
+                { profileDir + L"\\dir-colors.json", L"dir-colors.json", &DirColorsRoundTrip, true, nullptr },
+                { profileDir + L"\\dir-env.json", L"dir-env.json", &DirEnvRoundTrip, true, nullptr },
+                { profileDir + L"\\launch-presets.json", L"launch-presets.json", &LaunchPresetsRoundTrip, false, nullptr },
+            };
+            // Every window record (the windows the older build saved; a record it deleted stays deleted).
+            WIN32_FIND_DATAW fd{};
+            const HANDLE find = ::FindFirstFileExW((profileDir + L"\\windows\\*.json").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+            if (find != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                    {
+                        targets.push_back({ profileDir + L"\\windows\\" + fd.cFileName, std::wstring{ L"windows\\" } + fd.cFileName, &WindowRecordRoundTrip, true, nullptr });
+                    }
+                } while (::FindNextFileW(find, &fd));
+                ::FindClose(find);
+            }
+            for (const auto& target : targets)
+            {
+                try
+                {
+                    total += RepairOneStateFile(profileDir, target);
+                }
+                catch (...)
+                {
+                    // Rule #18. Recovery: this file stays as the older build left it; the others are still looked at.
+                    Agentmaster::LogSwallowedException(L"RepairStateFilesWrittenByOlderBuilds (one file)");
+                }
+            }
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"RepairStateFilesWrittenByOlderBuilds"); // Rule #18. Recovery: the files stay as they are
+        }
+        return total;
+    }
+
+    size_t RepairStateFileWrittenByOlderBuild(const std::wstring& profileDir, const std::wstring& path, const std::wstring& rel, StateRoundTrip roundTrip, bool keepDropped,
+                                             const std::set<std::wstring, std::less<>>* neverRestore) noexcept
+    {
+        try
+        {
+            if (profileDir.empty() || path.empty() || !roundTrip)
+            {
+                return 0;
+            }
+            return RepairOneStateFile(profileDir, RepairTarget{ path, rel, roundTrip, keepDropped, neverRestore });
+        }
+        catch (...)
+        {
+            Agentmaster::LogSwallowedException(L"RepairStateFileWrittenByOlderBuild"); // Rule #18. Recovery: the file stays as it is
+            return 0;
+        }
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
     {
-        const std::wstring content = SerializeSessions(sessions);
+        const std::wstring path = AgentmasterStateDir() + L"\\sessions.json";
+        // Agentmaster (PERSISTENCE.md §17): the save goes through the compatibility layer like every state document — the
+        // members a newer build wrote are kept, and the text carries this build's writer stamp — but by hand rather than
+        // through WriteStateDocument, because the dedup below must compare the text that would actually be written. One
+        // save of the file at a time (the same lock WriteStateDocument takes).
+        const auto writeLock = StateDocWriteLock(StateGuardKey(path));
+        std::lock_guard serialize{ *writeLock };
+        auto prepared = PrepareStateDocument(path, SessionsDocument(sessions), &SessionsRoundTrip);
+        if (!prepared)
+        {
+            return; // a newer build's format: not written (logged once by the format guard)
+        }
+        const std::wstring& content = prepared->text;
         // Agentmaster: skip the write when the serialized fleet is byte-identical to the last SUCCESSFUL
         // save. The registry autosave observer (Engine.cpp) fires on EVERY _notify — including notifies
         // that changed only a TRANSIENT, non-persisted field (a pending-input draft appear/clear, a
@@ -2416,6 +3450,8 @@ namespace Agentmaster
         // is always safe (Rule #16: the on-disk file already holds exactly this content). `s_last` is
         // updated only after a SUCCESSFUL write, so a failed save ([persist-fail]) is retried next notify
         // rather than silently latched off. Thread-safe: SaveSessions fires from several engine threads.
+        // (The compared text includes the kept residue and the stamp, both stable while nobody else writes
+        // the file, so an unchanged fleet still compares equal.)
         static std::mutex s_lastMtx;
         static std::wstring s_last;
         {
@@ -2425,8 +3461,9 @@ namespace Agentmaster
                 return; // nothing PERSISTED changed since the last save -> no forced disk write
             }
         }
-        if (WriteAllUtf8(AgentmasterStateDir() + L"\\sessions.json", content))
+        if (WriteAllUtf8(path, content))
         {
+            NoteStateDocumentWritten(path, *prepared);
             std::lock_guard lk{ s_lastMtx };
             s_last = content;
         }
@@ -2607,7 +3644,8 @@ namespace Agentmaster
     }
     void SaveTemplates(const std::vector<PlanTemplate>& templates)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\templates.json", SerializeTemplates(templates));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\templates.json", TemplatesDocument(templates), &TemplatesRoundTrip);
     }
     std::vector<PlanTemplate> LoadTemplates()
     {
@@ -2615,7 +3653,8 @@ namespace Agentmaster
     }
     void SaveRecentDirs(const std::vector<std::wstring>& dirs)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json", SerializeRecentDirs(dirs));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\recent-dirs.json", RecentDirsDocument(dirs), &RecentDirsRoundTrip);
     }
     std::vector<std::wstring> LoadRecentDirs()
     {
@@ -2627,7 +3666,14 @@ namespace Agentmaster
         // Carry the remembered model across the rewrite: this call replaces the LIST only, and the
         // freshest file is the only place the "last" key lives.
         const std::wstring path = ModelListPath();
-        WriteAllUtf8(path, SerializeModelList(models, DeserializeLastSpecifiedModel(ReadAllUtf8(path))));
+        // Agentmaster (PERSISTENCE.md §15/§17): a read-modify-write of a file that could not be read would carry "no
+        // remembered model" over the real one — write nothing then (the read logged it; the guard would refuse anyway).
+        const StateFileRead current = ReadStateFileUtf8(path);
+        if (current.status == StateFileStatus::Unreadable)
+        {
+            return;
+        }
+        WriteStateDocument(path, ModelListDocument(models, DeserializeLastSpecifiedModel(current.text)), &ModelListRoundTrip);
     }
     std::vector<std::wstring> LoadModelList()
     {
@@ -2650,7 +3696,14 @@ namespace Agentmaster
         // model at any time, and this list is small enough that the read is free. The list entry and
         // the "last" key are written together, so they always name the same id in the same spelling.
         const std::wstring path = ModelListPath();
-        WriteAllUtf8(path, SerializeModelList(PushModelListEntry(DeserializeModelList(ReadAllUtf8(path)), trimmed), trimmed));
+        // Agentmaster (PERSISTENCE.md §15/§17): an unreadable list is not "an empty list" — pushing onto nothing and saving
+        // would replace every model the user added with this one. Write nothing then (the read logged it).
+        const StateFileRead current = ReadStateFileUtf8(path);
+        if (current.status == StateFileStatus::Unreadable)
+        {
+            return;
+        }
+        WriteStateDocument(path, ModelListDocument(PushModelListEntry(DeserializeModelList(current.text), trimmed), trimmed), &ModelListRoundTrip);
     }
     void ResetModelList(const std::vector<std::wstring>& ids)
     {
@@ -2678,11 +3731,26 @@ namespace Agentmaster
     {
         // WriteAllUtf8 is the atomic temp+rename writer every profile file uses; it logs a failed
         // write as [persist-fail] itself, so a refused write is visible without a second log here.
-        return WriteAllUtf8(LaunchPresetsPath(), text);
+        // Agentmaster (PERSISTENCE.md §17): the text (LaunchPresetsConfigToJson's, the one caller) goes through the
+        // compatibility layer as its document — a newer build's members are kept, and the elements this build's loader
+        // drops on purpose (0.6.8.18's untouched template presets) stay dropped (keepDropped false). Text that is not a
+        // JSON document cannot carry a residue: it is written as given, through the same guarded writer.
+        auto doc = json::Parse(text);
+        if (!doc || doc->type != json::Value::Type::Obj)
+        {
+            return WriteAllUtf8(LaunchPresetsPath(), text);
+        }
+        return WriteStateDocument(LaunchPresetsPath(), std::move(*doc), &LaunchPresetsRoundTrip, false);
+    }
+
+    json::Value LaunchPresetsRoundTrip(const json::Value& disk)
+    {
+        return LaunchPresetsConfigToDocument(LaunchPresetsConfigFromDocument(disk));
     }
     void SaveOpenWindows(const std::vector<std::wstring>& windowIds)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\open-windows.json", SerializeOpenWindows(windowIds));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\open-windows.json", OpenWindowsDocument(windowIds), &OpenWindowsRoundTrip);
     }
     std::vector<std::wstring> LoadOpenWindows()
     {
@@ -3473,50 +4541,76 @@ namespace Agentmaster
         SaveDirColors(DeCollideDirColors(DeserializeDirColors(text), g_colorSeed)); // rewrites at v2
     }
 
+    namespace
+    {
+        // The dir-colors.json document: {"version":2,"colors":[{"dir":…,"color":…},...]}.
+        //   colors  - the folder → color map, in file order.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value DirColorsDocument(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
+        {
+            auto root = json::Value::MkObj();
+            // v2: the PERMANENT folder<->color map — both auto-assigned and user-picked colors, persisted
+            // so a folder keeps its color across restarts. v1 was the same shape but its auto colors could
+            // collide; the one-time MigrateDirColorsToV2IfNeeded de-collides on first run.
+            root.Set(L"version", json::Value::MkNum(2));
+            auto arr = json::Value::MkArr();
+            for (const auto& [dir, color] : colors)
+            {
+                auto o = json::Value::MkObj();
+                o.Set(L"dir", json::Value::MkStr(dir));
+                o.Set(L"color", json::Value::MkStr(color));
+                arr.Push(std::move(o));
+            }
+            root.Set(L"colors", std::move(arr));
+            return root;
+        }
+
+        // The folder → color pairs of a parsed dir-colors.json (an entry without both a folder and a color is skipped).
+        //   doc     - the parsed document.
+        //   returns - the pairs, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<std::pair<std::wstring, std::wstring>> DirColorsFromDocument(const json::Value& doc)
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> out;
+            if (const auto* arr = doc.Find(L"colors"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& el : arr->arr)
+                {
+                    if (el.type != json::Value::Type::Obj)
+                    {
+                        continue;
+                    }
+                    const auto dir = el.StrAt(L"dir");
+                    const auto color = el.StrAt(L"color");
+                    if (!dir.empty() && !color.empty())
+                    {
+                        out.emplace_back(dir, color);
+                    }
+                }
+            }
+            return out;
+        }
+    }
+
     std::wstring SerializeDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
     {
-        auto root = json::Value::MkObj();
-        // v2: the PERMANENT folder<->color map — both auto-assigned and user-picked colors, persisted
-        // so a folder keeps its color across restarts. v1 was the same shape but its auto colors could
-        // collide; the one-time MigrateDirColorsToV2IfNeeded de-collides on first run.
-        root.Set(L"version", json::Value::MkNum(2));
-        auto arr = json::Value::MkArr();
-        for (const auto& [dir, color] : colors)
-        {
-            auto o = json::Value::MkObj();
-            o.Set(L"dir", json::Value::MkStr(dir));
-            o.Set(L"color", json::Value::MkStr(color));
-            arr.Push(std::move(o));
-        }
-        root.Set(L"colors", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(DirColorsDocument(colors));
     }
 
     std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirColors(std::wstring_view text)
     {
-        std::vector<std::pair<std::wstring, std::wstring>> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"colors"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& el : arr->arr)
-            {
-                if (el.type != json::Value::Type::Obj)
-                {
-                    continue;
-                }
-                const auto dir = el.StrAt(L"dir");
-                const auto color = el.StrAt(L"color");
-                if (!dir.empty() && !color.empty())
-                {
-                    out.emplace_back(dir, color);
-                }
-            }
-        }
-        return out;
+        return DirColorsFromDocument(*parsed);
+    }
+
+    json::Value DirColorsRoundTrip(const json::Value& disk)
+    {
+        return DirColorsDocument(DirColorsFromDocument(disk));
     }
 
     namespace
@@ -3566,7 +4660,8 @@ namespace Agentmaster
 
     void SaveDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\dir-colors.json", SerializeDirColors(colors));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\dir-colors.json", DirColorsDocument(colors), &DirColorsRoundTrip);
         // Invalidate rather than store: the next LoadDirColors re-stats + re-reads, so the cache can
         // never diverge from what actually landed on disk (a failed/partial write included).
         std::lock_guard cacheGuard{ g_dirColorsCacheMtx };
@@ -3669,63 +4764,90 @@ namespace Agentmaster
     // Same shape + lifecycle as dir-colors.json: a NormDirKey -> env-text map, where env-text is the
     // multi-line NAME=VALUE block the Settings cog's Per-directory tab edits. Merged OVER the global
     // AppSettings.env at spawn time (MergeSessionEnv / ResolveSessionEnv). The cog is the only writer.
+    namespace
+    {
+        // The dir-env.json document: {"version":1,"dirs":[{"dir":…,"env":…},...]}.
+        //   entries - the folder → env-text map, in file order.
+        //   returns - the document.
+        // Throws std::bad_alloc only.
+        json::Value DirEnvDocument(const std::vector<std::pair<std::wstring, std::wstring>>& entries)
+        {
+            auto root = json::Value::MkObj();
+            root.Set(L"version", json::Value::MkNum(1));
+            auto arr = json::Value::MkArr();
+            for (const auto& [dir, env] : entries)
+            {
+                auto o = json::Value::MkObj();
+                o.Set(L"dir", json::Value::MkStr(dir));
+                o.Set(L"env", json::Value::MkStr(env));
+                arr.Push(std::move(o));
+            }
+            root.Set(L"dirs", std::move(arr));
+            return root;
+        }
+
+        // The folder → env-text pairs of a parsed dir-env.json (a folderless or blank entry is skipped).
+        //   doc     - the parsed document.
+        //   returns - the pairs, in file order.
+        // Throws std::bad_alloc only.
+        std::vector<std::pair<std::wstring, std::wstring>> DirEnvFromDocument(const json::Value& doc)
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> out;
+            if (const auto* arr = doc.Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
+            {
+                for (const auto& el : arr->arr)
+                {
+                    if (el.type != json::Value::Type::Obj)
+                    {
+                        continue;
+                    }
+                    const auto dir = el.StrAt(L"dir");
+                    const auto env = el.StrAt(L"env");
+                    // A blank (empty OR whitespace-only) env carries no overrides — drop it (a cleared editor
+                    // removes the dir; matches SetDirEnv's blank check).
+                    bool blank = true;
+                    for (const wchar_t c : env)
+                    {
+                        if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+                        {
+                            blank = false;
+                            break;
+                        }
+                    }
+                    if (!dir.empty() && !blank)
+                    {
+                        out.emplace_back(dir, env);
+                    }
+                }
+            }
+            return out;
+        }
+    }
+
     std::wstring SerializeDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries)
     {
-        auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
-        auto arr = json::Value::MkArr();
-        for (const auto& [dir, env] : entries)
-        {
-            auto o = json::Value::MkObj();
-            o.Set(L"dir", json::Value::MkStr(dir));
-            o.Set(L"env", json::Value::MkStr(env));
-            arr.Push(std::move(o));
-        }
-        root.Set(L"dirs", std::move(arr));
-        return json::Dump(root);
+        return json::Dump(DirEnvDocument(entries));
     }
 
     std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirEnv(std::wstring_view text)
     {
-        std::vector<std::pair<std::wstring, std::wstring>> out;
         const auto parsed = json::Parse(text);
         if (!parsed)
         {
-            return out;
+            return {};
         }
-        if (const auto* arr = parsed->Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
-        {
-            for (const auto& el : arr->arr)
-            {
-                if (el.type != json::Value::Type::Obj)
-                {
-                    continue;
-                }
-                const auto dir = el.StrAt(L"dir");
-                const auto env = el.StrAt(L"env");
-                // A blank (empty OR whitespace-only) env carries no overrides — drop it (a cleared editor
-                // removes the dir; matches SetDirEnv's blank check).
-                bool blank = true;
-                for (const wchar_t c : env)
-                {
-                    if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
-                    {
-                        blank = false;
-                        break;
-                    }
-                }
-                if (!dir.empty() && !blank)
-                {
-                    out.emplace_back(dir, env);
-                }
-            }
-        }
-        return out;
+        return DirEnvFromDocument(*parsed);
+    }
+
+    json::Value DirEnvRoundTrip(const json::Value& disk)
+    {
+        return DirEnvDocument(DirEnvFromDocument(disk));
     }
 
     void SaveDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\dir-env.json", SerializeDirEnv(entries));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\dir-env.json", DirEnvDocument(entries), &DirEnvRoundTrip);
     }
 
     std::vector<std::pair<std::wstring, std::wstring>> LoadDirEnv()
@@ -3991,7 +5113,8 @@ namespace Agentmaster
 
     void SaveLayout(const ManagerLayout& layout)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\layout.json", SerializeLayout(layout));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(AgentmasterStateDir() + L"\\layout.json", LayoutDocument(layout), &LayoutRoundTrip);
     }
     ManagerLayout LoadLayout()
     {
@@ -3999,7 +5122,9 @@ namespace Agentmaster
     }
     void SaveAppSettings(const AppSettings& settings)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\settings.json", SerializeAppSettings(settings));
+        // PERSISTENCE.md §17: through the compatibility layer — a setting a newer build added is kept, and a value this
+        // build cannot represent (a newer choice word) stays while this build does not change it; the writer stamp.
+        WriteStateDocument(AgentmasterStateDir() + L"\\settings.json", AppSettingsDocument(settings), &AppSettingsRoundTrip);
     }
     AppSettings LoadAppSettings()
     {
@@ -4025,7 +5150,8 @@ namespace Agentmaster
             // geometry/lens/tab-refs are silently not persisted (Rule #16 "never lose a window").
             LogSwallowedException(L"SaveWindowRecord (create windows dir)");
         }
-        WriteAllUtf8(dir + L"\\" + record.windowId + L".json", SerializeWindowRecord(record));
+        // PERSISTENCE.md §17: through the compatibility layer (a newer build's members are kept; the writer stamp).
+        WriteStateDocument(dir + L"\\" + record.windowId + L".json", WindowRecordDocument(record), &WindowRecordRoundTrip);
     }
 
     std::vector<WindowRecord> LoadWindowRecords()
@@ -4108,7 +5234,15 @@ namespace Agentmaster
         }
         try
         {
-            std::filesystem::remove(std::filesystem::path{ AgentmasterStateDir() + L"\\windows\\" + windowId + L".json" });
+            const std::wstring path = AgentmasterStateDir() + L"\\windows\\" + windowId + L".json";
+            std::filesystem::remove(std::filesystem::path{ path });
+            // PERSISTENCE.md §17: the record's shadow goes with it (a shadow without its file is never used, but would pile
+            // up), and the compatibility layer forgets the file.
+            if (const std::wstring shadow = StateBackups::ShadowPathFor(AgentmasterStateDir(), path); !shadow.empty())
+            {
+                ::DeleteFileW(shadow.c_str());
+            }
+            ForgetStateDocument(path);
         }
         catch (...)
         {

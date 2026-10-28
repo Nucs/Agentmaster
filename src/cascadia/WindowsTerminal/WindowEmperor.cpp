@@ -48,6 +48,9 @@
 // Agentmaster (doc/agentmaster/STARTUP_GUARD.md): the known-folder pre-warm that prevents the NVIDIA-driver startup
 // deadlock + the startup-hang watchdog around App{} + ReloadSettings. Header-only + pure Win32.
 #include "../TerminalApp/AgentMaster/StartupGuard.h"
+// Agentmaster (PERSISTENCE.md §17): the version-change snapshot of the profile's state files, before this run writes any.
+// Header-only + pure Win32 (StateBackups.h).
+#include "../TerminalApp/AgentMaster/StateBackups.h"
 // Agentmaster: the launch SPLASH — a lightweight Win32 loading window on its OWN thread, so it keeps
 // animating while the UI thread is blocked in session/window restore. Header-only + pure Win32.
 #include "../TerminalApp/AgentMaster/Splash.h"
@@ -785,6 +788,29 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): only the log line's own copy (bad_alloc) can throw
         // here, and the logger that would report it needs the same allocation. Degradation: the [profile] line is missing;
         // the resolution itself already happened.
+    }
+
+    // Agentmaster (StateBackups.h; PERSISTENCE.md §17): THE VERSION-CHANGE SNAPSHOT. With the profile resolved and BEFORE
+    // anything of this run writes a state file — the update prompt's postpone (settings.json), Windows Terminal's settings
+    // load inside App{} (terminal\), the engine's seeders and repair, the first window's restore — a run of a DIFFERENT build
+    // than the one that ran last (<profile>\last-run.json; none recorded counts as different) copies every state file into
+    // <profile>\backups\<stamp> <from> to <to>\ with a README, so whatever this build's migrations do to the files can be
+    // undone by copying them back. The session store is copied by a background thread (thousands of small files); the rest
+    // takes milliseconds. Outside the startup watchdog's window below, so a slow disk can never turn it into a kill.
+    try
+    {
+        const ULONGLONG snapshotStart = ::GetTickCount64();
+        if (const auto snapshotLine = ::Agentmaster::StateBackups::SnapshotOnVersionChange(::Agentmaster::Profiles::ResolveProfileDir()); !snapshotLine.empty())
+        {
+            ::Agentmaster::Startup::Note(snapshotLine);
+            ::Agentmaster::Startup::Phase(L"version-change state snapshot", ::GetTickCount64() - snapshotStart);
+        }
+    }
+    catch (...)
+    {
+        // ⚠ DELIBERATELY BARE (Rule #18's logging-path exemption): SnapshotOnVersionChange never throws, so only the log
+        // line's own copy (bad_alloc) can land here, and the logger that would report it needs the same allocation.
+        // Degradation: the [migrate] line is missing; the snapshot (or its failure) already happened.
     }
 
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the

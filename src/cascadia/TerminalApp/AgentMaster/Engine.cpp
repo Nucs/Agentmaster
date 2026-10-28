@@ -222,6 +222,31 @@ namespace Agentmaster
             auto* e = new Engine{};
             e->registry = std::make_shared<SessionRegistry>();
 
+            // Agentmaster (PERSISTENCE.md §17): the OLDER-WRITER REPAIR, before anything of this run writes a state file — the
+            // seeders and the dir-colors migration below write settings.json and dir-colors.json, and the first window's
+            // restore writes the rest. A state file an older Agentmaster saved since a build that keeps unknown fields wrote it
+            // (no writer stamp, newer than its shadow) gets back from <profile>\shadow\ the members that build did not know;
+            // the files are snapshotted into <profile>\backups\ first. A profile no older build touched costs one stat per file.
+            {
+                Startup::ScopedPhase _t{ L"  repair state files an older build saved" };
+                RepairStateFilesWrittenByOlderBuilds(AgentmasterStateDir());
+            }
+            // PERSISTENCE.md §17: judge sessions.json (a long-lived fleet is ~10 MB) for its first save on a background thread,
+            // so that save — often the UI thread's, at a bind seam — does not read, parse and round-trip the whole file first.
+            // Detached: a quit (TerminateProcess) may end it at any point, and a save that comes first simply judges itself.
+            try
+            {
+                std::thread{ []() noexcept {
+                    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                    PrimeStateDocument(AgentmasterStateDir() + L"\\sessions.json", &SessionsRoundTrip);
+                } }.detach();
+            }
+            catch (...)
+            {
+                // Rule #18. Recovery: no prime — the first save of sessions.json judges the file itself.
+                LogSwallowedException(L"SharedEngine (prime sessions.json)");
+            }
+
             // Per-startup tab-color randomization + one-time dir-colors migration (Agentmaster). A
             // fresh random seed each launch re-rolls the auto palette assignment (so the fleet looks
             // different every run, and two open dirs never share a color — collision-avoided in
@@ -1495,6 +1520,15 @@ namespace Agentmaster
             // (StartNoteRunClosedCleanly). Under the window mutex like the manifest write above: NoteAppClosing takes none of
             // the engine's locks and never throws.
             e.messaging->NoteAppClosing();
+        }
+        // Agentmaster (PERSISTENCE.md §17): the LAST window just closed — the app is quitting, and TerminateProcess follows.
+        // Bring every state file's shadow up to this run's last save of it (the shadows are throttled to one write a minute,
+        // five for a large file), so an older build's next save is repaired from what this run wrote last. Copies only files
+        // that still hold exactly this process's write. A window set that is empty only for a moment (the last tab torn out
+        // into a new window) flushes too, harmlessly.
+        if (e.liveWindowIds.empty())
+        {
+            FlushStateShadows();
         }
         // Agentmaster (discard Manager-only windows): a mid-session-closed window whose record has NO
         // tab refs held nothing but the Manager tab — reopening it would reconstruct exactly what

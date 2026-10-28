@@ -459,6 +459,81 @@ namespace Agentmaster::Updater
             }
         }
 
+        // Agentmaster (PERSISTENCE.md §15 / §17): read a file for a READ-MODIFY-WRITE, telling a missing file from one that
+        // exists but cannot be read. ReadFileWide answers "" for both — an ifstream cannot open a file another program holds
+        // (an antivirus scan, a sync client, a backup) — and a read-modify-write that takes that "" for "no settings yet"
+        // writes an update-keys-only skeleton over the user's whole settings.json. A transient error (a sharing or lock
+        // violation, access denied while a file is being replaced) is retried for ~400 ms first, like the engine's state
+        // reader; FILE_SHARE_DELETE, so this read is never why a writer's atomic rename fails.
+        //   path       - the file.
+        //   unreadable - receives true when the file exists but could not be read (or is over 64 MB, no settings file).
+        //   returns    - the text ("" when the file is missing or unreadable; `unreadable` tells which).
+        // Never throws (an allocation failure reads as unreadable, so the caller writes nothing).
+        inline std::wstring ReadFileWideForUpdate(const std::wstring& path, bool& unreadable) noexcept
+        {
+            unreadable = false;
+            try
+            {
+                const ULONGLONG deadline = ::GetTickCount64() + 400;
+                for (;;)
+                {
+                    const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (h == INVALID_HANDLE_VALUE)
+                    {
+                        const DWORD error = ::GetLastError();
+                        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                        {
+                            return {}; // missing: the normal first-run case
+                        }
+                        const bool transient = error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION || error == ERROR_ACCESS_DENIED;
+                        if (!transient || ::GetTickCount64() + 50 > deadline)
+                        {
+                            unreadable = true;
+                            return {};
+                        }
+                        ::Sleep(50);
+                        continue;
+                    }
+                    LARGE_INTEGER size{};
+                    std::string bytes;
+                    bool ok = ::GetFileSizeEx(h, &size) && size.QuadPart >= 0 && size.QuadPart <= (64ll << 20);
+                    if (ok)
+                    {
+                        bytes.resize(static_cast<size_t>(size.QuadPart));
+                        size_t off = 0;
+                        while (off < bytes.size())
+                        {
+                            DWORD got = 0;
+                            if (!::ReadFile(h, bytes.data() + off, static_cast<DWORD>(bytes.size() - off), &got, nullptr))
+                            {
+                                ok = false;
+                                break;
+                            }
+                            if (got == 0)
+                            {
+                                break; // the file shrank while it was read: what was read is what it holds now
+                            }
+                            off += got;
+                        }
+                        bytes.resize(off);
+                    }
+                    ::CloseHandle(h);
+                    if (!ok)
+                    {
+                        unreadable = true;
+                        return {};
+                    }
+                    return Utf8ToWide(bytes); // a UTF-8 BOM arrives as U+FEFF, which json::Parse skips
+                }
+            }
+            catch (...)
+            {
+                unreadable = true; // no evidence of what the file holds: the caller must not write over it
+                return {};
+            }
+        }
+
         // Read an embedded RT_RCDATA resource (UTF-8 bytes) into a wide string. The installer payload
         // (am-update.ps1) is baked into the app exe as the AM_UPDATE_PS1 resource — the REAL
         // .ps1 file, compiled in, so it is read from the binary at runtime and never shipped/opened as
@@ -1272,12 +1347,19 @@ namespace Agentmaster::Updater
     // from disk so a form Save never regresses them. A non-empty file that doesn't parse is NOT
     // ours to rebuild — bail (the choice stays unpersisted) rather than clobber the user's whole
     // settings with an update-keys-only skeleton; the engine's writes are atomic, so that is a
-    // foreign/corrupt file, never a torn mid-write read.
+    // foreign/corrupt file, never a torn mid-write read. A file that EXISTS but cannot be read (a lock) is refused the
+    // same way (PERSISTENCE.md §17): read as "", it used to be rebuilt as that skeleton — every other setting lost.
     inline bool WriteUpdateState(const std::wstring& stateDir, const std::wstring* skipTag, const long long* postponeMs)
     {
         try
         {
-            const std::wstring raw = detail::ReadFileWide(SettingsPath(stateDir));
+            bool unreadable = false;
+            const std::wstring raw = detail::ReadFileWideForUpdate(SettingsPath(stateDir), unreadable);
+            if (unreadable)
+            {
+                LogUpdate(stateDir, L"settings-write REFUSED (settings.json exists but could not be read \x2014 choice not persisted; the file keeps every setting)");
+                return false;
+            }
             const auto parsed = json::Parse(raw);
             const bool haveObj = parsed && parsed->type == json::Value::Type::Obj;
             if (!raw.empty() && !haveObj)
