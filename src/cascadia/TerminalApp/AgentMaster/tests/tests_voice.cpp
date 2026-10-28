@@ -28,6 +28,7 @@
 #include "../Json.h"
 #include <shellapi.h> // CommandLineToArgvW: the command-line quoting is checked against Windows' own reader
 
+#include "../MessagingVoice.h" // §21.43: where a voice note goes (TestVoiceNoteRoute)
 #include "../VoiceCorrect.h"
 #include "../VoiceProtocol.h"
 
@@ -564,4 +565,67 @@ void TestVoiceCorrection()
         CHECK(!o.ok, "an empty array is a failure");
     }
     CHECK(frozen.unknown.empty(), "the correction checks asked the word test about nothing the reference never asked");
+}
+
+// MESSAGING.md §21.43 / VOICE.md §3 — where a voice note goes (MessagingVoice.h): where a TYPED message of its thread goes. The
+// owner's report of 2026-10-28: a voice note sent in the chat's "All" view (which opens a new thread with it) was answered
+// "this thread has no session", while a typed message there starts the session and becomes its first prompt.
+void TestVoiceNoteRoute()
+{
+    std::wprintf(L"\n== TestVoiceNoteRoute (MESSAGING.md 21.43: a voice note goes where a typed message of its thread goes - a new thread holds it for its session) ==\n");
+    using Msg::DecideVoiceNoteRoute;
+    using Msg::VoiceNoteRoute;
+    constexpr int64_t kSearch = 5;
+    constexpr int64_t kNewThread = 37860; // the thread Telegram opened for the owner's note on 2026-10-28
+
+    // ---- the route: the order _handleMessage reads a typed message in ----
+    CHECK(DecideVoiceNoteRoute(false, false, kNewThread, kSearch, false) == VoiceNoteRoute::HoldForNewThread,
+          "a note in a thread no session owns (one 'All' opened) is HELD by its new-thread wizard, like a typed first message");
+    CHECK(DecideVoiceNoteRoute(false, false, kNewThread, 0, false) == VoiceNoteRoute::HoldForNewThread,
+          "with no Search topic yet, a new thread still holds its note");
+    CHECK(DecideVoiceNoteRoute(true, false, kNewThread, kSearch, false) == VoiceNoteRoute::Transcribe, "a session's topic transcribes the note now");
+    CHECK(DecideVoiceNoteRoute(true, true, kNewThread, kSearch, false) == VoiceNoteRoute::HoldInBind,
+          "a topic whose new-thread bind still hands over holds the note in the bind, behind what it holds (no 'send it again')");
+    CHECK(DecideVoiceNoteRoute(false, false, 0, kSearch, false) == VoiceNoteRoute::RefuseMainView &&
+              DecideVoiceNoteRoute(false, false, 0, 0, false) == VoiceNoteRoute::RefuseMainView,
+          "the chat's main view (thread 0) refuses, with or without a Search topic");
+    CHECK(DecideVoiceNoteRoute(false, false, kSearch, kSearch, false) == VoiceNoteRoute::RefuseSearchTopic, "the Search topic refuses (a search is typed)");
+    CHECK(DecideVoiceNoteRoute(false, false, kNewThread, kSearch, true) == VoiceNoteRoute::RefuseOrphanTopic,
+          "a recreated topic's old thread refuses, pointing at the new topic");
+
+    // ---- the refusals say where a note IS read; a route that takes the note answers nothing ----
+    for (const VoiceNoteRoute r : { VoiceNoteRoute::Transcribe, VoiceNoteRoute::HoldForNewThread, VoiceNoteRoute::HoldInBind })
+    {
+        CHECK(Msg::VoiceNoteRouteRefusalText(r).empty(), "a route that takes the note posts no refusal");
+    }
+    for (const VoiceNoteRoute r : { VoiceNoteRoute::RefuseMainView, VoiceNoteRoute::RefuseSearchTopic, VoiceNoteRoute::RefuseOrphanTopic })
+    {
+        const std::wstring t = Msg::VoiceNoteRouteRefusalText(r);
+        CHECK(!t.empty() && t.find_first_of(L"<>&") == std::wstring::npos, "a refusal is posted, and holds nothing the HTML reply would read as markup");
+        CHECK(t.find(L"no session") == std::wstring::npos, "no refusal blames a missing session any more (a new thread starts one)");
+    }
+    CHECK(Msg::VoiceNoteRouteRefusalText(VoiceNoteRoute::RefuseMainView).find(L"new thread") != std::wstring::npos,
+          "the main view's answer says a new thread takes a note");
+
+    // ---- why a note cannot be read at all: asked at arrival, in this order ----
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, false, true, 300000).empty(), "voice on, a transcriber, a file under the cap: readable");
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, false, true, 0).empty(), "an unknown size (0) is readable: the download is capped anyway");
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, false, true, static_cast<int64_t>(Msg::kVoiceMaxBytes)).empty(), "a file of exactly 20 MB is readable");
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, false, true, static_cast<int64_t>(Msg::kVoiceMaxBytes) + 1).find(L"20 MB") != std::wstring::npos,
+          "a file over 20 MB is refused at arrival, never after a folder pick");
+    CHECK(Msg::VoiceNoteUnreadableText(false, false, true, false, 1 << 30).find(L"off") != std::wstring::npos, "voice notes off is said first");
+    CHECK(Msg::VoiceNoteUnreadableText(true, false, true, false, 0).find(L"not available") != std::wstring::npos,
+          "no transcriber (the m5 harness) is said before the rest");
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, true, false, 0).find(L"stopping") != std::wstring::npos, "a stopping bot is said before a missing file");
+    CHECK(Msg::VoiceNoteUnreadableText(true, true, false, false, 0).find(L"no file") != std::wstring::npos, "a note with no file_id is refused");
+
+    // ---- which messages are voice notes ----
+    const auto parse = [](const wchar_t* text) { return json::Parse(text).value_or(json::Value{}); };
+    std::wstring kind;
+    CHECK(Msg::VoiceNoteMedia(parse(L"{\"message_id\":1,\"voice\":{\"file_id\":\"a\",\"duration\":8}}"), kind) && kind == L"voice", "a voice note is one");
+    CHECK(Msg::VoiceNoteMedia(parse(L"{\"audio\":{\"file_id\":\"b\"}}"), kind) && kind == L"audio", "an audio file is one");
+    CHECK(Msg::VoiceNoteMedia(parse(L"{\"video_note\":{\"file_id\":\"c\"}}"), kind) && kind == L"video_note", "a round video note is one");
+    CHECK(!Msg::IsVoiceNoteMessage(parse(L"{\"text\":\"run the tests\"}")) && !Msg::IsVoiceNoteMessage(parse(L"{\"photo\":[{\"file_id\":\"d\"}]}")),
+          "a typed message and a photo are not");
+    CHECK(!Msg::IsVoiceNoteMessage(parse(L"{\"voice\":\"not an object\"}")), "a malformed voice field is not one");
 }

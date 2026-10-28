@@ -4856,7 +4856,13 @@ namespace Agentmaster::Msg
                     _handleTickFlood(L"setMessageReaction", r); // a 429 paces the next direct calls; the message goes either way
                 }
                 _react(msgId, L""); // the queued removal (above); a no-op without an id
-                _handleTopicMessage(s.id, msg, b.threadId, true);
+                // §21.43: a held VOICE NOTE (writing one in "All" opens the thread with it) is transcribed now that the session —
+                // and so its folder's vocabulary — exists: it goes to the voice lane, and a held message behind it waits there,
+                // in order, still read as held (_voiceTake's heldByNewThread). Any other message goes to the topic as before.
+                if (!_voiceTake(msg, s.id, b.threadId, false, false, true))
+                {
+                    _handleTopicMessage(s.id, msg, b.threadId, true);
+                }
             };
             for (;;)
             {

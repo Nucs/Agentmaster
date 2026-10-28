@@ -236,6 +236,9 @@
     <ClInclude Include="AgentMaster\VoiceSpellWords.h" />
     <ClInclude Include="AgentMaster\VoiceCorrect.h" />
     <ClInclude Include="AgentMaster\VoiceTranscriber.h" />
+    <!-- Agentmaster (MESSAGING.md section 21.43): where a voice note goes - a session's topic, a new thread's wizard, a binding
+         topic's bind, or a refusal - and why one cannot be read (MessagingVoice.h, header-only and pure). -->
+    <ClInclude Include="AgentMaster\MessagingVoice.h" />
     <!-- Agentmaster (MESSAGING.md section 21.30): Claude's AskUserQuestion answered from Telegram - the question card's pure
          model, texts, buttons and decision lines (header-only). -->
     <ClInclude Include="AgentMaster\AskQuestion.h" />

@@ -6111,9 +6111,18 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
   typed under the recording follows the transcript.
 * **Order:** a message of the same thread that arrives while a note is being transcribed WAITS behind it in the thread's
   lane (`_voiceLanes`; an edit replaces the held message) and is handed to `_handleMessage` again, in order, by the tick.
-* **Answered, never queued:** a note in a thread with no session (the main view, the 🔎 Search topic, a new thread's wizard),
-  in a thread whose new-thread bind is still handing over, with voice notes off, with no transcriber (the m5 harness), over
-  20 MB, or a failed transcription ("🎤 I could not transcribe this voice note: <why>").
+* **In a NEW thread** (§21.17 / §21.25; 2026-10-28, NOT BUILT — dev 0.0.1.38 still answers "this thread has no session"): a
+  note goes where a typed message of its thread goes (`DecideVoiceNoteRoute`, `MessagingVoice.h`). Writing in "All" opens a
+  thread with that very note: the thread's wizard HOLDS it (👀; the folder picker goes up with it), untranscribed until the
+  pick has launched the session; the hand-over (`_adoptBoundThreads`) then sends it to the voice thread WITH that session —
+  so the new session's folder and CLAUDE.md are its vocabulary — and its transcript is echoed and queued as the session's
+  first prompt, read as a held message (no backlog question however long the pick took). A typed message held after it
+  follows it in order (it waits in the lane, still read as held). A note sent while the thread's bind hands over waits in
+  the bind the same way (before: "send the voice note again in a moment").
+* **Answered, never queued:** a note in the chat's main view, in the 🔎 Search topic or in a recreated topic's old thread
+  (each answer says where a note IS read), with voice notes off, with no transcriber (the m5 harness), with no file, over
+  20 MB — all of these at the note's ARRIVAL, a held note too, so it never waits through a folder pick to fail — or a failed
+  transcription ("🎤 I could not transcribe this voice note: <why>").
 * **Engines** (VOICE.md §6): a local VOICE WORKER (`voiceEngine = worker`: `voiceWorkerCommand`, or the bundled worker once it
   ships) spoken to in JSON lines, which may return a second engine's hearing (`alternatives`) for the correction's fusion; or
   an OpenAI-compatible endpoint (`openai`; the key in Credential Manager). One note at a time across every topic (the voice
@@ -6137,10 +6146,16 @@ The design, the FluidVoice study, the POC and its measurements: [`VOICE.md`](VOI
    the note is still queued.
 4. A voice note, then at once a typed message: the session's queue holds the transcript FIRST.
 5. An open question card answered by a voice note: the card takes the transcript as its answer.
-6. A voice note in the 🔎 Search topic: the "read in a session's topic" answer, nothing queued.
+6. A voice note in the 🔎 Search topic: the "reads typed searches only" answer, nothing queued.
 7. The worker command broken (a wrong path): "I could not transcribe this voice note: the voice worker could not start …".
 8. The cog's VOICE NOTES status line: the engine, "running" after a note, the last failure when there was one; the worker
    ends after the idle minutes (`voice.log`: "idle for … min").
+9. A voice note sent in "All" (it opens a new thread): 👀 on it and the folder picker with "Your message waits here and
+   becomes the session's first prompt"; then at once a typed message in the same thread (held too). Pick the folder (and the
+   model and window steps): once the topic is the session's, the 🎤 line comes under the note, and the session's queue holds
+   the transcript FIRST, the typed message after it, neither asked about as backlog; `hooks.log`: `new thread N holds a voice
+   note for its new session …`, then `voice note queued for transcription (…, held by its new thread …)`; `voice.log` names
+   the new session's folder vocabulary (its terms count).
 
 ### 21.44 A message that waited in the queue is posted where its turn starts: "📤 sent from the queue" (2026-10-27; in dev since 0.0.1.38, not in production, a clean build)
 

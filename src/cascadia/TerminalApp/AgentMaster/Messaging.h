@@ -2177,6 +2177,10 @@ namespace Agentmaster::Msg
             bool done{ false }; // a voice item's transcript (or failure) is in
             bool edited{ false }; // a held message that arrived as an edit
             bool liveAtArrival{ true }; // the voice note was no backlog when it ARRIVED (a slow transcription never makes it one)
+            // §21.17: a new thread HELD it until its session came up (the hand-over put it here): it is read as a held message —
+            // _handleTopicMessage(…, held = true): live however long the folder pick took, never a question card's — and a held
+            // plain message goes straight to the topic, never through _handleMessage again.
+            bool held{ false };
             std::wstring sessionId;
             json::Value msg; // the update's message (a voice item's is read again with the transcript as its text)
             Voice::VoiceTranscript result; // a done voice item's outcome
@@ -2840,19 +2844,27 @@ namespace Agentmaster::Msg
         // job and lane item types are declared with the members they shape (VoiceJob, VoiceLaneItem, below `_files*`).
 
         /// <summary>
-        /// _handleMessage, for every message of the owner before it is read as text: takes a VOICE NOTE (or audio, video note) into
-        /// the voice thread's queue and its thread's lane, answers one that cannot be read (a thread with no session, voice notes
-        /// off, no transcriber), and HOLDS any other message whose thread's lane is not empty (an edit replaces the held message
-        /// it edits). Poll thread.
+        /// _handleMessage, for every message of the owner before it is read as text: takes a VOICE NOTE (or audio, video note) where
+        /// a typed message of its thread would go (MessagingVoice.h, DecideVoiceNoteRoute) — a session's topic: the voice thread's
+        /// queue and the thread's lane; a thread no session owns yet (one the user opened, e.g. by writing in "All"): HELD by its
+        /// new-thread wizard (_holdForNewThread), untranscribed until the session is up so ITS vocabulary reads it; a topic whose
+        /// bind still hands over: held by the bind. It answers a note that cannot be read (the main view, the Search topic, a
+        /// recreated topic's old thread, voice notes off, no transcriber, too large) — a held note is asked that at ARRIVAL too, so
+        /// it never waits through a folder pick to fail — and HOLDS any other message whose thread's lane is not empty (an edit
+        /// replaces the held message it edits). Poll thread; also the tick thread, for the hand-over (`heldByNewThread`).
         /// </summary>
         /// <param name="msg">The Telegram message.</param>
         /// <param name="sessionId">The session whose topic the thread is ("" = none).</param>
         /// <param name="threadId">The message's thread.</param>
         /// <param name="bindHandingOver">The thread's new-thread bind still hands its messages over (§21.17).</param>
-        /// <param name="edited">The update is an edit.</param>
-        /// <returns>True when the message was taken (queued, held or answered): the caller reads it no further.</returns>
+        /// <param name="edited">The update is an edit (an edited note is never read again; a held copy takes the edit).</param>
+        /// <param name="heldByNewThread">§21.17: the hand-over (_adoptBoundThreads) gives back a message the new thread HELD — a
+        /// note is then transcribed with the new session's vocabulary and read as a held message (VoiceLaneItem::held), and a
+        /// plain message that must wait behind such a note keeps that reading in the lane. False for a message as it arrives.</param>
+        /// <returns>True when the message was taken (queued, held or answered): the caller reads it no further. False only for a
+        /// plain message no lane holds.</returns>
         /// <exception cref="std::bad_alloc">If the queue, the lane or a reply cannot be allocated.</exception>
-        bool _voiceTake(const json::Value& msg, const std::wstring& sessionId, int64_t threadId, bool bindHandingOver, bool edited);
+        bool _voiceTake(const json::Value& msg, const std::wstring& sessionId, int64_t threadId, bool bindHandingOver, bool edited, bool heldByNewThread = false);
         /// <summary>
         /// Apply: takes the voice settings (on/off, the echo, the engine's configuration) and hands them to a running transcriber.
         /// Any thread (the cog's Save). Never throws.
@@ -2874,7 +2886,8 @@ namespace Agentmaster::Msg
         Voice::VoiceTranscript _voiceRun(const VoiceJob& job) noexcept;
         /// <summary>
         /// The tick: hands over every lane's ready items in order (a done voice note: its echo, then its text read like a typed
-        /// message; a held message: _handleMessage again), and drops an empty lane. Tick thread. Never throws.
+        /// message; a held message: _handleMessage again — or, one a new thread held, straight to its topic as a held message),
+        /// and drops an empty lane. Tick thread. Never throws.
         /// </summary>
         void _voiceTick() noexcept;
         /// <summary>One done voice item: the failure answered, or the transcript echoed and read like the message it says.</summary>

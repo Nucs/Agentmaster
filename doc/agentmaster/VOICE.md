@@ -5,13 +5,16 @@
 > large-v3-turbo with the session's glossary, a second engine's hearing (Parakeet, FUSION), the dictionary pass and the
 > CORRECTION by Claude Sonnet 5.5 — came out **word for word: 0.0 % WER, every term with its exact spelling, 3 runs of 3**
 > (§4.4). The app integration (MESSAGING.md §21.43) is in the tree: the messaging service's voice path, the session
-> vocabulary in C++ and the correction layer (pinned to the POC by goldens: 223 checks pass standalone), the voice worker
+> vocabulary in C++ and the correction layer (pinned to the POC by goldens: 253 checks pass standalone), the voice worker
 > protocol (with the fusion's `alternatives`), the endpoint engine, the settings and the cog's VOICE NOTES section. A
 > build over older intermediates must PURGE (SessionModels.h changed; dev 0.0.1.38's was a clean build). The bundled native worker (`agentmaster-voice.exe`, §6.4) is designed,
 > not written: until it ships, the local engine is any worker command — the POC's Python worker on this PC (§6.2 gives the
 > measured command).
 >
 > The owner's recordings of the evaluation set: §7.1. Their results: §4.4.
+>
+> **2026-10-28, NOT BUILT:** a note in a NEW thread (writing in "All" opens one) starts its session like a typed message
+> there and becomes its first prompt (§3). Dev 0.0.1.38 still answers such a note "this thread has no session".
 
 ## 1. The ask and the shape of the answer
 
@@ -64,8 +67,21 @@ removal → custom dictionary → word-boost hit tracking), `Package.swift` (Flu
 5. A message the owner sends right after the note WAITS behind it (the thread's lane, §6.5), so "voice, then a typed
    follow-up" reaches the session in that order.
 
-A note that cannot be read is answered and queued nowhere: no session in the thread, voice notes off, no engine set, a file
-over 20 MB (the Bot API's getFile limit), a failed transcription ("🎤 I could not transcribe this voice note: <why>").
+**A note in a NEW thread starts the session, like a typed message there** (MESSAGING.md §21.17 / §21.25). Writing in the
+chat's "All" view opens a new thread with that very message; a thread whose session closed while the thread stayed is one
+too. The note gets 👀 and is HELD by the thread's new-thread wizard — the folder picker goes up with it ("Your message waits
+here and becomes the session's first prompt") — untranscribed: the session it is for does not exist yet, and ITS folder and
+CLAUDE.md are the vocabulary the note needs. When the pick has launched the session and the thread becomes its topic, the
+hand-over (`_adoptBoundThreads`) sends the held note to the voice thread with that session: it is transcribed, echoed (🎤) and
+queued as the session's first prompt, read as a held message (no backlog question however long the pick took, no question
+card's). Messages typed after it in the thread were held behind it and follow it in order (they wait in the lane behind
+the note). A note sent while the thread's session is being bound waits in the bind the same way. The routing is one pure
+rule, `DecideVoiceNoteRoute` (`MessagingVoice.h`): a note goes where a typed message of its thread goes.
+
+A note that cannot be read is answered and queued nowhere: the chat's main view (a typed message gets the help line there),
+the 🔎 Search topic (a search is typed), a recreated topic's old thread, voice notes off, no engine set, a file over 20 MB
+(the Bot API's getFile limit) — each of these at the note's ARRIVAL, a held one too, so it never waits through a folder
+pick to fail — and a failed transcription ("🎤 I could not transcribe this voice note: <why>").
 
 ## 4. The POC (`tools/voice-poc/`)
 
@@ -341,16 +357,22 @@ A worker that ships with Agentmaster, so a fresh install reads voice notes with 
 
 ### 6.5 Threads and order
 
-* **Poll thread** — `_voiceTake`: a note becomes a job (FIFO across every topic: one engine, one note at a time) and a
-  pending item at the end of its thread's LANE; any other message of a thread whose lane holds something joins the lane
-  (an edit replaces the held message it edits).
+* **Poll thread** — `_voiceTake`: a note goes where a typed message of its thread goes (`DecideVoiceNoteRoute`). In a
+  session's topic it becomes a job (FIFO across every topic: one engine, one note at a time) and a pending item at the end of
+  its thread's LANE; any other message of a thread whose lane holds something joins the lane (an edit replaces the held
+  message it edits). In a thread no session owns yet, or a topic whose bind still hands over, it is held there
+  (`_holdForNewThread`), after the checks that would refuse it anyway (voice off, no transcriber, no file, over 20 MB).
+* **Tick thread, the hand-over** — `_adoptBoundThreads`: each held message goes through `_voiceTake(…, heldByNewThread)` first:
+  a held note becomes a job with the new session (its lane item marked `held`), and a held message behind it joins the lane
+  marked `held` too; a held message no lane holds goes straight to the topic as before.
 * **Voice thread** — `_voiceLoop` (COM multithreaded apartment, for the spell checker): `getFile` (paced by the chat's call
   slot), the download (`TelegramApi::DownloadFile`, 20 MB cap) into `<profile>\messaging\telegram\voice\<message id>.oga`,
   the transcriber, the file DELETED, the lane item marked done, the tick woken; between jobs the transcriber's idle end.
 * **Tick thread** — `_voiceTick`: takes each lane's ready items in order (a done note → `_voiceDeliver`: the echo, then
-  `_handleTopicMessage` with the text; a held message → `_handleMessage(…, fromVoiceLane=true)`), one at a time under the
-  leaf lock `_voiceMtx`, delivered outside it. A lane leaves the map only when found empty, so a message read meanwhile
-  joins it BEHIND what is being delivered.
+  `_handleTopicMessage` with the text — `held = true` for a note a new thread held; a held message → `_handleMessage(…,
+  fromVoiceLane=true)`, or, one a new thread held, `_handleTopicMessage(…, held = true)` like the hand-over's own), one at a
+  time under the leaf lock `_voiceMtx`, delivered outside it. A lane leaves the map only when found empty, so a message read
+  meanwhile joins it BEHIND what is being delivered.
 * **Stop** — `_voiceStop` runs first: it kills the engine (a note in flight fails fast), joins the voice thread, and drops
   the queue and the lanes (logged). ⚠ Their notes and held messages are not read: the owner sends them again.
 
@@ -418,8 +440,12 @@ join `references.json` (`s4`…).
   the prompt, a cut); the command line's quoting round-tripped through `CommandLineToArgvW` (quotes, backslashes, spaces,
   line breaks, an empty argument) and the whole command (21 arguments, the JSON `--settings` intact, the user prompt last);
   the JSON answer reader (an object, the last item of an array, `is_error`, not JSON, an empty array).
+* `TestVoiceNoteRoute` — `MessagingVoice.h`: a note goes where a typed message of its thread goes (a new thread's wizard
+  holds it — the owner's note in "All" of 2026-10-28 —, a binding topic's bind holds it, a session's topic transcribes it,
+  the main view / the Search topic / a recreated topic's old thread refuse), the refusal texts (each says where a note IS
+  read; nothing HTML would read as markup), why a note cannot be read and in which order, and which messages are notes.
 
-All three pass standalone (223 checks; `cl` of `tests_voice.cpp` alone) and in the whole isolated suite. No test calls a
+All four pass standalone (253 checks; `cl` of `tests_voice.cpp` alone) and in the whole isolated suite. No test calls a
 model (the correction's call, `VoiceCorrect.cpp`, is not linked into the harness): §7.3 is the test that does. The
 service's voice path needs Telegram: e2e.
 
@@ -429,7 +455,9 @@ A fake Bot API in the e2e host (`getUpdates` serving one `message` with a `voice
 serving the fixture, `sendMessage` / `setMessageReaction` recorded) and a fake worker (`voice_worker.py` with a canned
 engine, or the real one on the guest's CPU with Parakeet) drive: the echo's text, the queued prompt's text and its
 `remoteSource` (the note's id), a typed message sent after the note queued AFTER it, an open question card answered by
-voice, a failing worker answered in the topic, a note with no session answered and nothing queued.
+voice, a failing worker answered in the topic, a note in the main view or the Search topic answered and nothing queued, and
+a note that OPENS a new thread: held with the folder picker, then transcribed and queued as the new session's first prompt
+once the pick launched it, a typed message sent after the note queued after it.
 
 ## 8. Privacy and security
 
